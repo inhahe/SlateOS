@@ -3456,6 +3456,7 @@ const COMMANDS: &[&str] = &[
     "usbpolicy", "usbpol", "applaunch", "alaunch", "sysprofiler", "sprof", "clipsync", "clsync",
     "netusage", "nusage", "touchscreen", "tscreen", "diskquota", "dquota", "appdefaults", "adef",
     "policyengine", "pengine", "fontpreview", "fprev", "wifiscan", "wifi", "splitview", "split",
+    "iotdevice", "iot", "prochistory", "phist", "notiffilter", "nfilter", "colorblind", "cvd",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4956,6 +4957,10 @@ fn dispatch(line: &str) {
         "fontpreview" | "fprev" => cmd_fontpreview(args),
         "wifiscan" | "wifi" => cmd_wifiscan(args),
         "splitview" | "split" => cmd_splitview(args),
+        "iotdevice" | "iot" => cmd_iotdevice(args),
+        "prochistory" | "phist" => cmd_prochistory(args),
+        "notiffilter" | "nfilter" => cmd_notiffilter(args),
+        "colorblind" | "cvd" => cmd_colorblind(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -43668,6 +43673,509 @@ fn cmd_splitview(args: &str) {
     }
 }
 
+/// `iotdevice` / `iot` — IoT/smart home device management.
+fn cmd_iotdevice(args: &str) {
+    use crate::fs::iotdevice;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "discover" | "add" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: iotdevice discover <name> <type> <protocol> <room>");
+                return;
+            }
+            let dtype = parse_iot_device_type(parts[2]);
+            let proto = parse_iot_protocol(parts[3]);
+            let room = parts[4..].join(" ");
+            match iotdevice::discover(parts[1], dtype, proto, &room) {
+                Ok(id) => shell_println!("Device #{}: {} [{}] via {} in {}", id, parts[1], dtype.label(), proto.label(), room),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match iotdevice::remove_device(id) {
+                        Ok(()) => shell_println!("Removed device #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid device ID"); }
+            } else { shell_println!("Usage: iotdevice remove <id>"); }
+        }
+        "set" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: iotdevice set <id> <state>");
+                return;
+            }
+            let id = parts[1].parse::<u32>().unwrap_or(0);
+            let value = parts[2..].join(" ");
+            match iotdevice::set_state(id, &value) {
+                Ok(()) => shell_println!("Device #{} → {}", id, value),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "online" | "offline" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    let online = sub == "online";
+                    match iotdevice::set_online(id, online) {
+                        Ok(()) => shell_println!("Device #{}: {}", id, if online { "ONLINE" } else { "OFFLINE" }),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid device ID"); }
+            } else { shell_println!("Usage: iotdevice online|offline <id>"); }
+        }
+        "group" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: iotdevice group <name> <id1,id2,...>");
+                return;
+            }
+            let ids: Vec<u32> = parts[2].split(',').filter_map(|s| s.parse::<u32>().ok()).collect();
+            match iotdevice::create_group(parts[1], ids) {
+                Ok(id) => shell_println!("Group #{}: {}", id, parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "gcmd" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: iotdevice gcmd <group_id> <state>");
+                return;
+            }
+            let gid = parts[1].parse::<u32>().unwrap_or(0);
+            let value = parts[2..].join(" ");
+            match iotdevice::group_command(gid, &value) {
+                Ok(count) => shell_println!("Set {} devices to '{}'", count, value),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "room" => {
+            if let Some(room) = parts.get(1) {
+                let devs = iotdevice::by_room(&parts[1..].join(" "));
+                if devs.is_empty() {
+                    shell_println!("No devices in '{}'", room);
+                } else {
+                    for d in &devs {
+                        let status = if d.online { "●" } else { "○" };
+                        shell_println!("  {} #{}: {} [{}] = {}", status, d.id, d.name, d.device_type.label(), d.state_value);
+                    }
+                }
+            } else { shell_println!("Usage: iotdevice room <name>"); }
+        }
+        "list" => {
+            let devs = iotdevice::list_devices();
+            if devs.is_empty() {
+                shell_println!("No IoT devices");
+            } else {
+                for d in &devs {
+                    let status = if d.online { "●" } else { "○" };
+                    shell_println!("  {} #{}: {} [{}] via {} in {} = {} (cmds={})", status, d.id, d.name, d.device_type.label(), d.protocol.label(), d.room, d.state_value, d.command_count);
+                }
+            }
+        }
+        "groups" => {
+            let groups = iotdevice::list_groups();
+            if groups.is_empty() {
+                shell_println!("No groups");
+            } else {
+                for g in &groups {
+                    shell_println!("  #{}: {} ({} devices: {:?})", g.id, g.name, g.device_ids.len(), g.device_ids);
+                }
+            }
+        }
+        "stats" => {
+            let (devices, groups, online, commands, discoveries, ops) = iotdevice::stats();
+            shell_println!("IoT: {} devices ({} online), {} groups", devices, online, groups);
+            shell_println!("  Commands: {} | Discoveries: {} | Ops: {}", commands, discoveries, ops);
+        }
+        "test" => { iotdevice::self_test(); shell_println!("iotdevice self-test complete"); }
+        "init" => { iotdevice::init_defaults(); shell_println!("iotdevice initialised"); }
+        _ => {
+            shell_println!("iotdevice — IoT/smart home device management");
+            shell_println!("  discover <name> <type> <proto> <room>  Add device");
+            shell_println!("  remove <id>                            Remove device");
+            shell_println!("  set <id> <state>                       Set state");
+            shell_println!("  online|offline <id>                    Set connectivity");
+            shell_println!("  group <name> <id1,id2>                 Create group");
+            shell_println!("  gcmd <group_id> <state>                Group command");
+            shell_println!("  room <name>                            Devices by room");
+            shell_println!("  list / groups                          List all");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_iot_device_type(s: &str) -> crate::fs::iotdevice::DeviceType {
+    use crate::fs::iotdevice::DeviceType;
+    match s.to_lowercase().as_str() {
+        "light" | "lamp" | "bulb" => DeviceType::Light,
+        "switch" => DeviceType::Switch,
+        "thermostat" | "thermo" => DeviceType::Thermostat,
+        "camera" | "cam" => DeviceType::Camera,
+        "lock" => DeviceType::Lock,
+        "speaker" | "spk" => DeviceType::Speaker,
+        "sensor" => DeviceType::Sensor,
+        "plug" | "outlet" => DeviceType::Plug,
+        "fan" => DeviceType::Fan,
+        _ => DeviceType::Other,
+    }
+}
+
+fn parse_iot_protocol(s: &str) -> crate::fs::iotdevice::Protocol {
+    use crate::fs::iotdevice::Protocol;
+    match s.to_lowercase().as_str() {
+        "wifi" | "wlan" => Protocol::Wifi,
+        "bluetooth" | "bt" | "ble" => Protocol::Bluetooth,
+        "zigbee" | "zb" => Protocol::Zigbee,
+        "zwave" | "zw" => Protocol::Zwave,
+        "thread" => Protocol::Thread,
+        "matter" => Protocol::Matter,
+        _ => Protocol::Wifi,
+    }
+}
+
+/// `prochistory` / `phist` — process execution history.
+fn cmd_prochistory(args: &str) {
+    use crate::fs::prochistory;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "start" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: prochistory start <name> <pid> [args]");
+                return;
+            }
+            let name = parts[1];
+            let pid = parts[2].parse::<u32>().unwrap_or(0);
+            let pargs = if parts.len() > 3 { parts[3..].join(" ") } else { alloc::string::String::new() };
+            match prochistory::record_start(name, pid, &pargs) {
+                Ok(id) => shell_println!("Started #{}: {} (pid={})", id, name, pid),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "exit" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: prochistory exit <pid> <exit_code> [reason] [mem_kb]");
+                return;
+            }
+            let pid = parts[1].parse::<u32>().unwrap_or(0);
+            let code = parts[2].parse::<i32>().unwrap_or(0);
+            let reason = parts.get(3).map(|s| parse_exit_reason(s)).unwrap_or(prochistory::ExitReason::Normal);
+            let mem = parts.get(4).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            match prochistory::record_exit(pid, code, reason, mem) {
+                Ok(()) => shell_println!("Exited pid={} code={} ({})", pid, code, reason.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "recent" => {
+            let max = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            let hist = prochistory::recent(max);
+            if hist.is_empty() {
+                shell_println!("No process history");
+            } else {
+                for e in &hist {
+                    let status = if e.is_running() {
+                        alloc::string::String::from("RUNNING")
+                    } else {
+                        let reason = e.exit_reason.map_or("?", |r| r.label());
+                        let dur = e.duration_ms().unwrap_or(0);
+                        format!("exit={} {} {}ms", e.exit_code.unwrap_or(0), reason, dur)
+                    };
+                    shell_println!("  #{}: {} (pid={}) — {}", e.entry_id, e.name, e.pid, status);
+                }
+            }
+        }
+        "running" => {
+            let r = prochistory::running();
+            if r.is_empty() {
+                shell_println!("No running processes in history");
+            } else {
+                for e in &r {
+                    shell_println!("  #{}: {} (pid={})", e.entry_id, e.name, e.pid);
+                }
+            }
+        }
+        "crashed" => {
+            let max = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(10);
+            let crashes = prochistory::crashed(max);
+            if crashes.is_empty() {
+                shell_println!("No crashes recorded");
+            } else {
+                for e in &crashes {
+                    let reason = e.exit_reason.map_or("?", |r| r.label());
+                    shell_println!("  #{}: {} (pid={}) — {} (exit={} mem={}KB)", e.entry_id, e.name, e.pid, reason, e.exit_code.unwrap_or(-1), e.peak_memory_kb);
+                }
+            }
+        }
+        "search" => {
+            if let Some(q) = parts.get(1) {
+                let results = prochistory::search(q);
+                if results.is_empty() {
+                    shell_println!("No processes matching '{}'", q);
+                } else {
+                    for e in &results {
+                        let status = if e.is_running() { "RUNNING" } else { "exited" };
+                        shell_println!("  #{}: {} (pid={}) — {}", e.entry_id, e.name, e.pid, status);
+                    }
+                }
+            } else { shell_println!("Usage: prochistory search <query>"); }
+        }
+        "stats" => {
+            let (size, started, exited, crashed, ops) = prochistory::stats();
+            shell_println!("Process History: {} entries", size);
+            shell_println!("  Started: {} | Exited: {} | Crashed: {} | Ops: {}", started, exited, crashed, ops);
+        }
+        "test" => { prochistory::self_test(); shell_println!("prochistory self-test complete"); }
+        "init" => { prochistory::init_defaults(); shell_println!("prochistory initialised"); }
+        _ => {
+            shell_println!("prochistory — process execution history");
+            shell_println!("  start <name> <pid> [args]          Record start");
+            shell_println!("  exit <pid> <code> [reason] [mem]   Record exit");
+            shell_println!("  recent [n]                         Recent history");
+            shell_println!("  running                            Running processes");
+            shell_println!("  crashed [n]                        Crash history");
+            shell_println!("  search <query>                     Search by name");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_exit_reason(s: &str) -> crate::fs::prochistory::ExitReason {
+    use crate::fs::prochistory::ExitReason;
+    match s.to_lowercase().as_str() {
+        "normal" | "ok" => ExitReason::Normal,
+        "crashed" | "crash" => ExitReason::Crashed,
+        "killed" | "kill" => ExitReason::Killed,
+        "timeout" => ExitReason::Timeout,
+        "oom" | "outofmemory" => ExitReason::OutOfMemory,
+        _ => ExitReason::Unknown,
+    }
+}
+
+/// `notiffilter` / `nfilter` — notification filtering rules.
+fn cmd_notiffilter(args: &str) {
+    use crate::fs::notiffilter;
+    use alloc::format;
+    use alloc::string::String;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "add" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: notiffilter add <name> <field> <pattern> <action>");
+                return;
+            }
+            let field = parse_match_field(parts[2]);
+            let pattern = parts[3];
+            let action = parts.get(4).map(|s| parse_filter_action(s)).unwrap_or(notiffilter::FilterAction::Block);
+            match notiffilter::add_rule(parts[1], field, pattern, action) {
+                Ok(id) => shell_println!("Rule #{}: {} on {} matching '{}' → {}", id, parts[1], field.label(), pattern, action.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match notiffilter::remove_rule(id) {
+                        Ok(()) => shell_println!("Removed rule #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid rule ID"); }
+            } else { shell_println!("Usage: notiffilter remove <id>"); }
+        }
+        "enable" | "disable" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    let on = sub == "enable";
+                    match notiffilter::set_enabled(id, on) {
+                        Ok(()) => shell_println!("Rule #{}: {}", id, if on { "ENABLED" } else { "DISABLED" }),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid rule ID"); }
+            } else { shell_println!("Usage: notiffilter enable|disable <id>"); }
+        }
+        "eval" | "test-eval" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: notiffilter eval <app> <category> <title> <body>");
+                return;
+            }
+            let notif = notiffilter::NotifData {
+                app_name: String::from(parts[1]),
+                category: String::from(parts[2]),
+                title: String::from(parts[3]),
+                body: if parts.len() > 4 { parts[4..].join(" ") } else { String::new() },
+                priority: String::from("normal"),
+            };
+            match notiffilter::evaluate(&notif) {
+                Ok(action) => shell_println!("Result: {}", action.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" => {
+            let rules = notiffilter::list_rules();
+            if rules.is_empty() {
+                shell_println!("No filter rules");
+            } else {
+                for r in &rules {
+                    let en = if r.enabled { "ON" } else { "OFF" };
+                    shell_println!("  #{}: {} [{}] {} contains '{}' → {} (hits={})", r.id, r.name, en, r.field.label(), r.pattern, r.action.label(), r.hit_count);
+                }
+            }
+        }
+        "stats" => {
+            let (rules, evaluated, allowed, blocked, silenced, ops) = notiffilter::stats();
+            shell_println!("Notification Filter: {} rules", rules);
+            shell_println!("  Evaluated: {} | Allowed: {} | Blocked: {} | Silenced: {} | Ops: {}", evaluated, allowed, blocked, silenced, ops);
+        }
+        "test" => { notiffilter::self_test(); shell_println!("notiffilter self-test complete"); }
+        "init" => { notiffilter::init_defaults(); shell_println!("notiffilter initialised"); }
+        _ => {
+            shell_println!("notiffilter — notification filtering rules");
+            shell_println!("  add <name> <field> <pattern> <action>  Add rule");
+            shell_println!("  remove <id>                            Remove rule");
+            shell_println!("  enable|disable <id>                    Toggle rule");
+            shell_println!("  eval <app> <cat> <title> <body>        Test evaluation");
+            shell_println!("  list                                   List rules");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_match_field(s: &str) -> crate::fs::notiffilter::MatchField {
+    use crate::fs::notiffilter::MatchField;
+    match s.to_lowercase().as_str() {
+        "app" | "appname" => MatchField::AppName,
+        "category" | "cat" => MatchField::Category,
+        "title" => MatchField::Title,
+        "body" => MatchField::Body,
+        "priority" | "pri" => MatchField::Priority,
+        _ => MatchField::Title,
+    }
+}
+
+fn parse_filter_action(s: &str) -> crate::fs::notiffilter::FilterAction {
+    use crate::fs::notiffilter::FilterAction;
+    match s.to_lowercase().as_str() {
+        "allow" => FilterAction::Allow,
+        "silence" | "mute" => FilterAction::Silence,
+        "block" | "deny" => FilterAction::Block,
+        "redirect" => FilterAction::Redirect,
+        "defer" => FilterAction::Defer,
+        _ => FilterAction::Block,
+    }
+}
+
+/// `colorblind` / `cvd` — color blindness accessibility filters.
+fn cmd_colorblind(args: &str) {
+    use crate::fs::colorblind;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "enable" | "on" => {
+            match colorblind::set_enabled(true) {
+                Ok(()) => shell_println!("Color blindness filter enabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "disable" | "off" => {
+            match colorblind::set_enabled(false) {
+                Ok(()) => shell_println!("Color blindness filter disabled"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "type" | "set" => {
+            if let Some(t) = parts.get(1) {
+                let cvd = parse_cvd_type(t);
+                match colorblind::set_type(cvd) {
+                    Ok(()) => shell_println!("Filter type: {}", cvd.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: colorblind type <protan|deutan|tritan|...>");
+            }
+        }
+        "intensity" => {
+            if let Some(v) = parts.get(1) {
+                if let Ok(val) = v.parse::<u32>() {
+                    match colorblind::set_intensity(val) {
+                        Ok(()) => shell_println!("Intensity: {}%", val),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid value (0-100)"); }
+            } else {
+                let (_, _, intensity, _) = colorblind::current();
+                shell_println!("Intensity: {}%", intensity);
+            }
+        }
+        "simulate" => {
+            if let Some(v) = parts.get(1) {
+                let on = *v == "on" || *v == "true";
+                match colorblind::set_simulate(on) {
+                    Ok(()) => shell_println!("Simulation mode: {}", if on { "ON" } else { "OFF" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else { shell_println!("Usage: colorblind simulate <on|off>"); }
+        }
+        "preset" => {
+            if let Some(id_s) = parts.get(1) {
+                if let Ok(id) = id_s.parse::<u32>() {
+                    match colorblind::apply_preset(id) {
+                        Ok(()) => shell_println!("Applied preset #{}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid preset ID"); }
+            } else { shell_println!("Usage: colorblind preset <id>"); }
+        }
+        "presets" => {
+            let presets = colorblind::list_presets();
+            for p in &presets {
+                shell_println!("  #{}: {} [{}] intensity={} — {}", p.id, p.name, p.cvd_type.short_label(), p.intensity, p.description);
+            }
+        }
+        "status" => {
+            let (en, cvd, intensity, sim) = colorblind::current();
+            shell_println!("Color blindness filter: {}", if en { "ENABLED" } else { "DISABLED" });
+            shell_println!("  Type: {} | Intensity: {}% | Simulate: {}", cvd.label(), intensity, if sim { "ON" } else { "OFF" });
+        }
+        "stats" => {
+            let (presets, activations, changes, ops) = colorblind::stats();
+            shell_println!("Color Blindness: {} presets", presets);
+            shell_println!("  Activations: {} | Changes: {} | Ops: {}", activations, changes, ops);
+        }
+        "test" => { colorblind::self_test(); shell_println!("colorblind self-test complete"); }
+        "init" => { colorblind::init_defaults(); shell_println!("colorblind initialised"); }
+        _ => {
+            shell_println!("colorblind — color blindness accessibility filters");
+            shell_println!("  enable / disable             Toggle filter");
+            shell_println!("  type <cvd_type>              Set filter type");
+            shell_println!("  intensity [0-100]            Set/show intensity");
+            shell_println!("  simulate <on|off>            Toggle simulation");
+            shell_println!("  preset <id>                  Apply preset");
+            shell_println!("  presets                      List presets");
+            shell_println!("  status                       Show current state");
+            shell_println!("  stats / test / init");
+        }
+    }
+}
+
+fn parse_cvd_type(s: &str) -> crate::fs::colorblind::CvdType {
+    use crate::fs::colorblind::CvdType;
+    match s.to_lowercase().as_str() {
+        "none" | "off" => CvdType::None,
+        "protan" | "protanopia" => CvdType::Protanopia,
+        "deutan" | "deuteranopia" => CvdType::Deuteranopia,
+        "tritan" | "tritanopia" => CvdType::Tritanopia,
+        "protanomaly" => CvdType::Protanomaly,
+        "deuteranomaly" => CvdType::Deuteranomaly,
+        "tritanomaly" => CvdType::Tritanomaly,
+        "achromat" | "achromatopsia" | "grayscale" => CvdType::Achromatopsia,
+        "custom" => CvdType::Custom,
+        _ => CvdType::None,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -52264,7 +52772,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

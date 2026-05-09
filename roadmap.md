@@ -875,6 +875,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Font Preview (fs::fontpreview): font browsing/comparison with 8 styles, 6 categories, search, preview with custom sample text, side-by-side comparison, font metadata; `fontpreview`/`fprev` kshell command; /proc/fontpreview; 8 self-tests
   - [x] Wi-Fi Scanner (fs::wifiscan): wireless network scanning with 7 security types, 3 bands, signal-sorted listing, connect/disconnect, saved network profiles, auto-connect; `wifiscan`/`wifi` kshell command; /proc/wifiscan; 8 self-tests
   - [x] Split View (fs::splitview): multi-pane window management with horizontal/vertical splits, dynamic pane addition/removal, ratio-based resizing, focus tracking, window assignment; `splitview`/`split` kshell command; /proc/splitview; 8 self-tests
+  - [x] IoT Device (fs::iotdevice): smart home device management with 10 device types, 6 protocols, room-based organization, device groups with group commands, online/offline tracking; `iotdevice`/`iot` kshell command; /proc/iotdevice; 8 self-tests
+  - [x] Process History (fs::prochistory): process execution history with start/exit tracking, exit reason classification, duration calculation, crash history, name search, 1000-entry buffer; `prochistory`/`phist` kshell command; /proc/prochistory; 8 self-tests
+  - [x] Notification Filter (fs::notiffilter): notification filtering rules with 5 match fields, 5 filter actions, pattern-based matching, enable/disable per-rule, hit counting; `notiffilter`/`nfilter` kshell command; /proc/notiffilter; 8 self-tests
+  - [x] Color Blindness (fs::colorblind): accessibility color filters for 8 CVD types, adjustable intensity, simulation mode, 4 default presets, custom presets; `colorblind`/`cvd` kshell command; /proc/colorblind; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

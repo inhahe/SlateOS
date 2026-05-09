@@ -349,6 +349,10 @@ const ROOT_FILES: &[&str] = &[
     "fontpreview",
     "wifiscan",
     "splitview",
+    "iotdevice",
+    "prochistory",
+    "notiffilter",
+    "colorblind",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7090,6 +7094,68 @@ fn gen_splitview() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_iotdevice() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (device_count, group_count, online_count, total_commands, total_discoveries, ops) = super::iotdevice::stats();
+    out.push_str("subsystem: iotdevice\n");
+    out.push_str(&format!("device_count: {}\n", device_count));
+    out.push_str(&format!("group_count: {}\n", group_count));
+    out.push_str(&format!("online_count: {}\n", online_count));
+    out.push_str(&format!("total_commands: {}\n", total_commands));
+    out.push_str(&format!("total_discoveries: {}\n", total_discoveries));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_prochistory() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (history_size, total_started, total_exited, total_crashed, ops) = super::prochistory::stats();
+    out.push_str("subsystem: prochistory\n");
+    out.push_str(&format!("history_size: {}\n", history_size));
+    out.push_str(&format!("total_started: {}\n", total_started));
+    out.push_str(&format!("total_exited: {}\n", total_exited));
+    out.push_str(&format!("total_crashed: {}\n", total_crashed));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_notiffilter() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (rule_count, total_evaluated, total_allowed, total_blocked, total_silenced, ops) = super::notiffilter::stats();
+    out.push_str("subsystem: notiffilter\n");
+    out.push_str(&format!("rule_count: {}\n", rule_count));
+    out.push_str(&format!("total_evaluated: {}\n", total_evaluated));
+    out.push_str(&format!("total_allowed: {}\n", total_allowed));
+    out.push_str(&format!("total_blocked: {}\n", total_blocked));
+    out.push_str(&format!("total_silenced: {}\n", total_silenced));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_colorblind() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (preset_count, total_activations, total_changes, ops) = super::colorblind::stats();
+    let (enabled, cvd_type, intensity, simulate) = super::colorblind::current();
+    out.push_str("subsystem: colorblind\n");
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("active_type: {}\n", cvd_type.short_label()));
+    out.push_str(&format!("intensity: {}\n", intensity));
+    out.push_str(&format!("simulate_mode: {}\n", simulate));
+    out.push_str(&format!("preset_count: {}\n", preset_count));
+    out.push_str(&format!("total_activations: {}\n", total_activations));
+    out.push_str(&format!("total_changes: {}\n", total_changes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7604,6 +7670,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "fontpreview" => Ok(gen_fontpreview()),
         "wifiscan" => Ok(gen_wifiscan()),
         "splitview" => Ok(gen_splitview()),
+        "iotdevice" => Ok(gen_iotdevice()),
+        "prochistory" => Ok(gen_prochistory()),
+        "notiffilter" => Ok(gen_notiffilter()),
+        "colorblind" => Ok(gen_colorblind()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -353,6 +353,10 @@ const ROOT_FILES: &[&str] = &[
     "prochistory",
     "notiffilter",
     "colorblind",
+    "clipaction",
+    "energysaver",
+    "filerules",
+    "secureboot",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7156,6 +7160,57 @@ fn gen_colorblind() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_clipaction() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Clipboard Actions ===\n");
+    let (action_count, total_detections, total_executions, ops) = crate::fs::clipaction::stats();
+    out.push_str(&format!("action_count: {}\n", action_count));
+    out.push_str(&format!("total_detections: {}\n", total_detections));
+    out.push_str(&format!("total_executions: {}\n", total_executions));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_energysaver() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Energy Saver ===\n");
+    let (throttled_count, mode_changes, total_throttles, estimated_min, ops) = crate::fs::energysaver::stats();
+    out.push_str(&format!("throttled_count: {}\n", throttled_count));
+    out.push_str(&format!("mode_changes: {}\n", mode_changes));
+    out.push_str(&format!("total_throttles: {}\n", total_throttles));
+    out.push_str(&format!("estimated_minutes: {}\n", estimated_min));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_filerules() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== File Rules ===\n");
+    let (rule_count, total_evaluations, total_matches, total_applied, ops) = crate::fs::filerules::stats();
+    out.push_str(&format!("rule_count: {}\n", rule_count));
+    out.push_str(&format!("total_evaluations: {}\n", total_evaluations));
+    out.push_str(&format!("total_matches: {}\n", total_matches));
+    out.push_str(&format!("total_applied: {}\n", total_applied));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_secureboot() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Secure Boot ===\n");
+    let (key_count, record_count, total_verified, total_rejected, ops) = crate::fs::secureboot::stats();
+    out.push_str(&format!("key_count: {}\n", key_count));
+    out.push_str(&format!("record_count: {}\n", record_count));
+    out.push_str(&format!("total_verified: {}\n", total_verified));
+    out.push_str(&format!("total_rejected: {}\n", total_rejected));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7674,6 +7729,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "prochistory" => Ok(gen_prochistory()),
         "notiffilter" => Ok(gen_notiffilter()),
         "colorblind" => Ok(gen_colorblind()),
+        "clipaction" => Ok(gen_clipaction()),
+        "energysaver" => Ok(gen_energysaver()),
+        "filerules" => Ok(gen_filerules()),
+        "secureboot" => Ok(gen_secureboot()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -879,6 +879,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Process History (fs::prochistory): process execution history with start/exit tracking, exit reason classification, duration calculation, crash history, name search, 1000-entry buffer; `prochistory`/`phist` kshell command; /proc/prochistory; 8 self-tests
   - [x] Notification Filter (fs::notiffilter): notification filtering rules with 5 match fields, 5 filter actions, pattern-based matching, enable/disable per-rule, hit counting; `notiffilter`/`nfilter` kshell command; /proc/notiffilter; 8 self-tests
   - [x] Color Blindness (fs::colorblind): accessibility color filters for 8 CVD types, adjustable intensity, simulation mode, 4 default presets, custom presets; `colorblind`/`cvd` kshell command; /proc/colorblind; 8 self-tests
+  - [x] Clipboard Actions (fs::clipaction): clipboard quick actions with 10 content types, heuristic content detection (URL/email/phone/path/color/JSON/number), 6 default actions, custom action support; `clipaction`/`caction` kshell command; /proc/clipaction; 8 self-tests
+  - [x] Energy Saver (fs::energysaver): power optimization with 5 energy modes, per-mode profiles (brightness/CPU/WiFi/BT/animations), app throttling with CPU limits, auto-switch on battery threshold, battery estimation; `energysaver`/`esaver` kshell command; /proc/energysaver; 8 self-tests
+  - [x] File Rules (fs::filerules): automatic file organization with 7 match conditions (extension/name/size/directory), 8 rule actions (move/copy/rename/tag/compress/delete/notify), 3 default rules, enable/disable per-rule; `filerules`/`frules` kshell command; /proc/filerules; 8 self-tests
+  - [x] Secure Boot (fs::secureboot): secure boot verification with 4 boot states, 5 key types (PK/KEK/db/dbx/MOK), key enrollment/removal, image verification against enrolled keys, verification records; `secureboot`/`sboot` kshell command; /proc/secureboot; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -3457,6 +3457,7 @@ const COMMANDS: &[&str] = &[
     "netusage", "nusage", "touchscreen", "tscreen", "diskquota", "dquota", "appdefaults", "adef",
     "policyengine", "pengine", "fontpreview", "fprev", "wifiscan", "wifi", "splitview", "split",
     "iotdevice", "iot", "prochistory", "phist", "notiffilter", "nfilter", "colorblind", "cvd",
+    "clipaction", "caction", "energysaver", "esaver", "filerules", "frules", "secureboot", "sboot",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4961,6 +4962,10 @@ fn dispatch(line: &str) {
         "prochistory" | "phist" => cmd_prochistory(args),
         "notiffilter" | "nfilter" => cmd_notiffilter(args),
         "colorblind" | "cvd" => cmd_colorblind(args),
+        "clipaction" | "caction" => cmd_clipaction(args),
+        "energysaver" | "esaver" => cmd_energysaver(args),
+        "filerules" | "frules" => cmd_filerules(args),
+        "secureboot" | "sboot" => cmd_secureboot(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -44176,6 +44181,480 @@ fn parse_cvd_type(s: &str) -> crate::fs::colorblind::CvdType {
     }
 }
 
+/// `clipaction` / `caction` — clipboard quick actions.
+fn cmd_clipaction(args: &str) {
+    use crate::fs::clipaction;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "detect" => {
+            let text = if parts.len() > 1 { parts[1..].join(" ") } else { shell_println!("Usage: clipaction detect <text>"); return; };
+            let ct = clipaction::detect_type(&text);
+            shell_println!("Detected: {} → {}", text, ct.label());
+        }
+        "actions" => {
+            let ct = if let Some(t) = parts.get(1) {
+                parse_clip_content_type(t)
+            } else { shell_println!("Usage: clipaction actions <type>"); return; };
+            let actions = clipaction::get_actions(ct);
+            if actions.is_empty() {
+                shell_println!("No actions for type '{}'", ct.label());
+            } else {
+                shell_println!("Actions for {}:", ct.label());
+                for a in &actions {
+                    shell_println!("  [{}] {} → {}", a.id, a.name, a.command);
+                }
+            }
+        }
+        "exec" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: clipaction exec <id>"); return; }
+            };
+            match clipaction::execute_action(id) {
+                Ok(cmd) => shell_println!("Executed action {} → command: {}", id, cmd),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "add" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: clipaction add <name> <type> <command>");
+                return;
+            }
+            let name = parts[1];
+            let ct = parse_clip_content_type(parts[2]);
+            let command = parts[3..].join(" ");
+            match clipaction::add_action(name, ct, &command) {
+                Ok(id) => shell_println!("Added action {} (id={})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: clipaction remove <id>"); return; }
+            };
+            match clipaction::remove_action(id) {
+                Ok(()) => shell_println!("Removed action {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "list" => {
+            let actions = clipaction::list_actions();
+            if actions.is_empty() {
+                shell_println!("No actions registered");
+            } else {
+                shell_println!("{} action(s):", actions.len());
+                for a in &actions {
+                    let status = if a.enabled { "on" } else { "off" };
+                    shell_println!("  [{}] {} ({}) → {} [{}] uses={}", a.id, a.name, a.content_type.label(), a.command, status, a.use_count);
+                }
+            }
+        }
+        "stats" => {
+            let (action_count, detections, executions, ops) = clipaction::stats();
+            shell_println!("Clipboard Actions: actions={} detections={} executions={} ops={}", action_count, detections, executions, ops);
+        }
+        "init" => { clipaction::init_defaults(); shell_println!("Clipboard actions initialized"); }
+        "test" => clipaction::self_test(),
+        _ => {
+            shell_println!("Usage: clipaction <detect|actions|exec|add|remove|list|stats|init|test>");
+            shell_println!("Aliases: caction");
+        }
+    }
+}
+
+fn parse_clip_content_type(s: &str) -> crate::fs::clipaction::ContentType {
+    use crate::fs::clipaction::ContentType;
+    match s.to_lowercase().as_str() {
+        "url" => ContentType::Url,
+        "email" => ContentType::Email,
+        "phone" => ContentType::PhoneNumber,
+        "path" | "filepath" => ContentType::FilePath,
+        "color" => ContentType::Color,
+        "code" => ContentType::Code,
+        "json" => ContentType::Json,
+        "text" | "plain" => ContentType::PlainText,
+        "number" | "num" => ContentType::Number,
+        "date" => ContentType::Date,
+        _ => ContentType::PlainText,
+    }
+}
+
+/// `energysaver` / `esaver` — system power optimization.
+fn cmd_energysaver(args: &str) {
+    use crate::fs::energysaver;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "mode" => {
+            if let Some(m) = parts.get(1) {
+                let mode = parse_energy_mode(m);
+                match energysaver::set_mode(mode) {
+                    Ok(()) => shell_println!("Energy mode set to {}", mode.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                let mode = energysaver::get_mode();
+                shell_println!("Current mode: {}", mode.label());
+            }
+        }
+        "profile" => {
+            match energysaver::get_profile() {
+                Some(p) => {
+                    shell_println!("Energy Profile ({}):", p.mode.label());
+                    shell_println!("  Brightness: {}%", p.display_brightness_pct);
+                    shell_println!("  Display timeout: {}s", p.display_timeout_sec);
+                    shell_println!("  CPU max freq: {}%", p.cpu_max_freq_pct);
+                    shell_println!("  WiFi power save: {}", p.wifi_power_save);
+                    shell_println!("  Bluetooth off: {}", p.bluetooth_off);
+                    shell_println!("  Reduce animations: {}", p.reduce_animations);
+                    shell_println!("  Background app limit: {}", p.background_app_limit);
+                }
+                None => shell_println!("Energy saver not initialized"),
+            }
+        }
+        "brightness" => {
+            let pct: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: energysaver brightness <0-100>"); return; }
+            };
+            match energysaver::set_brightness(pct) {
+                Ok(()) => shell_println!("Brightness set to {}%", pct.min(100)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "cpulimit" => {
+            let pct: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: energysaver cpulimit <0-100>"); return; }
+            };
+            match energysaver::set_cpu_limit(pct) {
+                Ok(()) => shell_println!("CPU limit set to {}%", pct.min(100)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "throttle" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: energysaver throttle <app> <cpu_limit_pct>");
+                return;
+            }
+            let name = parts[1];
+            let limit: u32 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid CPU limit"); return; }
+            };
+            match energysaver::throttle_app(name, limit) {
+                Ok(()) => shell_println!("Throttled '{}' to {}% CPU", name, limit),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "unthrottle" => {
+            let name = match parts.get(1) {
+                Some(n) => *n,
+                None => { shell_println!("Usage: energysaver unthrottle <app>"); return; }
+            };
+            match energysaver::unthrottle_app(name) {
+                Ok(()) => shell_println!("Unthrottled '{}'", name),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "throttled" => {
+            let apps = energysaver::list_throttled();
+            if apps.is_empty() {
+                shell_println!("No throttled apps");
+            } else {
+                shell_println!("{} throttled app(s):", apps.len());
+                for a in &apps {
+                    shell_println!("  {} — CPU {}%, net={}, bg={}", a.name, a.cpu_limit_pct, a.network_allowed, a.background_allowed);
+                }
+            }
+        }
+        "estimate" => {
+            if let Some(min) = parts.get(1).and_then(|s| s.parse::<u64>().ok()) {
+                match energysaver::set_estimate(min) {
+                    Ok(()) => shell_println!("Battery estimate set to {} min", min),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                let (_, _, _, est, _) = energysaver::stats();
+                shell_println!("Estimated battery: {} min", est);
+            }
+        }
+        "autoswitch" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: energysaver autoswitch <on|off> <threshold_%>");
+                return;
+            }
+            let enabled = parts[1] == "on";
+            let thresh: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+            match energysaver::set_auto_switch(enabled, thresh) {
+                Ok(()) => shell_println!("Auto-switch: {} at {}%", if enabled { "on" } else { "off" }, thresh),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (throttled, mode_changes, total_throttles, est, ops) = energysaver::stats();
+            shell_println!("Energy Saver: throttled={} mode_changes={} throttles={} est_min={} ops={}", throttled, mode_changes, total_throttles, est, ops);
+        }
+        "init" => { energysaver::init_defaults(); shell_println!("Energy saver initialized"); }
+        "test" => energysaver::self_test(),
+        _ => {
+            shell_println!("Usage: energysaver <mode|profile|brightness|cpulimit|throttle|unthrottle|throttled|estimate|autoswitch|stats|init|test>");
+            shell_println!("Aliases: esaver");
+        }
+    }
+}
+
+fn parse_energy_mode(s: &str) -> crate::fs::energysaver::EnergyMode {
+    use crate::fs::energysaver::EnergyMode;
+    match s.to_lowercase().as_str() {
+        "performance" | "perf" => EnergyMode::Performance,
+        "balanced" | "bal" => EnergyMode::Balanced,
+        "powersaver" | "saver" => EnergyMode::PowerSaver,
+        "ultrasaver" | "ultra" => EnergyMode::UltraSaver,
+        "custom" => EnergyMode::Custom,
+        _ => EnergyMode::Balanced,
+    }
+}
+
+/// `filerules` / `frules` — automatic file organization rules.
+fn cmd_filerules(args: &str) {
+    use crate::fs::filerules;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            let rules = filerules::list_rules();
+            if rules.is_empty() {
+                shell_println!("No file rules");
+            } else {
+                shell_println!("{} rule(s):", rules.len());
+                for r in &rules {
+                    let status = if r.enabled { "on" } else { "off" };
+                    shell_println!("  [{}] {} — {} '{}' → {} '{}' [{}] hits={}", r.id, r.name, r.condition.label(), r.pattern, r.action.label(), r.action_param, status, r.hit_count);
+                }
+            }
+        }
+        "add" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: filerules add <name> <condition> <pattern> <action> [param]");
+                return;
+            }
+            let name = parts[1];
+            let cond = parse_filerule_condition(parts[2]);
+            let pattern = parts[3];
+            let action = parse_filerule_action(parts[4]);
+            let param = if parts.len() > 5 { parts[5..].join(" ") } else { alloc::string::String::new() };
+            match filerules::add_rule(name, cond, pattern, action, &param) {
+                Ok(id) => shell_println!("Added rule '{}' (id={})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: filerules remove <id>"); return; }
+            };
+            match filerules::remove_rule(id) {
+                Ok(()) => shell_println!("Removed rule {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" | "disable" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: filerules {} <id>", sub); return; }
+            };
+            let enabled = sub == "enable";
+            match filerules::set_enabled(id, enabled) {
+                Ok(()) => shell_println!("Rule {} {}", id, if enabled { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "eval" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: filerules eval <filename> <ext> <size> <dir>");
+                return;
+            }
+            let filename = parts[1];
+            let ext = parts[2];
+            let size: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let dir = parts.get(4).copied().unwrap_or("/");
+            match filerules::evaluate(filename, ext, size, dir) {
+                Ok(matches) => {
+                    if matches.is_empty() {
+                        shell_println!("No rules matched");
+                    } else {
+                        shell_println!("{} rule(s) matched:", matches.len());
+                        for (id, action, param) in &matches {
+                            shell_println!("  Rule {} → {} '{}'", id, action.label(), param);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (rules, evals, matches, applied, ops) = filerules::stats();
+            shell_println!("File Rules: rules={} evals={} matches={} applied={} ops={}", rules, evals, matches, applied, ops);
+        }
+        "init" => { filerules::init_defaults(); shell_println!("File rules initialized"); }
+        "test" => filerules::self_test(),
+        _ => {
+            shell_println!("Usage: filerules <list|add|remove|enable|disable|eval|stats|init|test>");
+            shell_println!("Aliases: frules");
+        }
+    }
+}
+
+fn parse_filerule_condition(s: &str) -> crate::fs::filerules::MatchCondition {
+    use crate::fs::filerules::MatchCondition;
+    match s.to_lowercase().as_str() {
+        "ext" | "extension" => MatchCondition::ExtensionIs,
+        "contains" | "namecontains" => MatchCondition::NameContains,
+        "startswith" | "namestarts" => MatchCondition::NameStartsWith,
+        "sizegt" | "sizegreater" => MatchCondition::SizeGreaterThan,
+        "sizelt" | "sizeless" => MatchCondition::SizeLessThan,
+        "indir" | "indirectory" => MatchCondition::InDirectory,
+        "any" | "anyfile" => MatchCondition::AnyFile,
+        _ => MatchCondition::AnyFile,
+    }
+}
+
+fn parse_filerule_action(s: &str) -> crate::fs::filerules::RuleAction {
+    use crate::fs::filerules::RuleAction;
+    match s.to_lowercase().as_str() {
+        "move" | "moveto" => RuleAction::MoveTo,
+        "copy" | "copyto" => RuleAction::CopyTo,
+        "rename" => RuleAction::Rename,
+        "tag" | "addtag" => RuleAction::AddTag,
+        "perm" | "permission" => RuleAction::SetPermission,
+        "compress" | "zip" => RuleAction::Compress,
+        "delete" | "del" => RuleAction::Delete,
+        "notify" => RuleAction::Notify,
+        _ => RuleAction::Notify,
+    }
+}
+
+/// `secureboot` / `sboot` — secure boot verification and key management.
+fn cmd_secureboot(args: &str) {
+    use crate::fs::secureboot;
+    use crate::fs::secureboot::BootState;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "status" => {
+            let state = secureboot::get_state();
+            shell_println!("Secure Boot: {}", state.label());
+            let keys = secureboot::list_keys();
+            shell_println!("Enrolled keys: {}", keys.len());
+            for k in &keys {
+                shell_println!("  [{}] {} ({}) — {}", k.id, k.subject, k.key_type.label(), k.fingerprint);
+            }
+        }
+        "set" => {
+            let state = match parts.get(1).map(|s| s.to_lowercase()).as_deref() {
+                Some("disabled" | "off") => BootState::Disabled,
+                Some("setup") => BootState::SetupMode,
+                Some("enabled" | "on") => BootState::Enabled,
+                Some("strict") => BootState::EnforcingStrict,
+                _ => { shell_println!("Usage: secureboot set <disabled|setup|enabled|strict>"); return; }
+            };
+            match secureboot::set_state(state) {
+                Ok(()) => shell_println!("Secure boot state set to {}", state.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enroll" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: secureboot enroll <type> <subject> <fingerprint>");
+                return;
+            }
+            let kt = parse_sboot_key_type(parts[1]);
+            let subject = parts[2];
+            let fp = parts[3];
+            match secureboot::enroll_key(kt, subject, fp) {
+                Ok(id) => shell_println!("Enrolled key '{}' (id={})", subject, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: secureboot remove <id>"); return; }
+            };
+            match secureboot::remove_key(id) {
+                Ok(()) => shell_println!("Removed key {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "verify" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: secureboot verify <image_name> <hash>");
+                return;
+            }
+            let image = parts[1];
+            let hash = parts[2];
+            match secureboot::verify_image(image, hash) {
+                Ok(true) => shell_println!("Image '{}' verified OK", image),
+                Ok(false) => shell_println!("Image '{}' REJECTED", image),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "keys" => {
+            let keys = secureboot::list_keys();
+            if keys.is_empty() {
+                shell_println!("No enrolled keys");
+            } else {
+                shell_println!("{} key(s):", keys.len());
+                for k in &keys {
+                    shell_println!("  [{}] {} ({}) — {}", k.id, k.subject, k.key_type.label(), k.fingerprint);
+                }
+            }
+        }
+        "records" => {
+            let max: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(10);
+            let records = secureboot::get_records(max);
+            if records.is_empty() {
+                shell_println!("No verification records");
+            } else {
+                shell_println!("{} record(s):", records.len());
+                for r in &records {
+                    let status = if r.verified { "OK" } else { "REJECTED" };
+                    shell_println!("  {} [{}] hash={} key={:?}", r.image_name, status, r.hash, r.key_id);
+                }
+            }
+        }
+        "stats" => {
+            let (keys, records, verified, rejected, ops) = secureboot::stats();
+            shell_println!("Secure Boot: keys={} records={} verified={} rejected={} ops={}", keys, records, verified, rejected, ops);
+        }
+        "init" => { secureboot::init_defaults(); shell_println!("Secure boot initialized"); }
+        "test" => secureboot::self_test(),
+        _ => {
+            shell_println!("Usage: secureboot <status|set|enroll|remove|verify|keys|records|stats|init|test>");
+            shell_println!("Aliases: sboot");
+        }
+    }
+}
+
+fn parse_sboot_key_type(s: &str) -> crate::fs::secureboot::KeyType {
+    use crate::fs::secureboot::KeyType;
+    match s.to_lowercase().as_str() {
+        "pk" | "platform" => KeyType::PlatformKey,
+        "kek" | "exchange" => KeyType::KeyExchangeKey,
+        "db" | "signature" => KeyType::SignatureDatabase,
+        "dbx" | "forbidden" => KeyType::ForbiddenSignature,
+        "mok" | "owner" => KeyType::MachineOwnerKey,
+        _ => KeyType::MachineOwnerKey,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -52772,7 +53251,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

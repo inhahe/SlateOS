@@ -410,6 +410,108 @@ pub extern "C" fn getegid() -> GidT {
     0
 }
 
+/// Set the user ID of the calling process.
+///
+/// Stub: succeeds silently (single-user OS, always root).
+#[unsafe(no_mangle)]
+pub extern "C" fn setuid(_uid: UidT) -> i32 {
+    0
+}
+
+/// Set the effective user ID of the calling process.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn seteuid(_uid: UidT) -> i32 {
+    0
+}
+
+/// Set the group ID of the calling process.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn setgid(_gid: GidT) -> i32 {
+    0
+}
+
+/// Set the effective group ID of the calling process.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn setegid(_gid: GidT) -> i32 {
+    0
+}
+
+/// Set the real and effective user IDs.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn setreuid(_ruid: UidT, _euid: UidT) -> i32 {
+    0
+}
+
+/// Set the real and effective group IDs.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn setregid(_rgid: GidT, _egid: GidT) -> i32 {
+    0
+}
+
+/// Get the supplementary group IDs.
+///
+/// Returns 0 (no supplementary groups — only group 0).
+#[unsafe(no_mangle)]
+pub extern "C" fn getgroups(_size: i32, _list: *mut GidT) -> i32 {
+    0
+}
+
+/// Get the hostname.
+///
+/// Returns "localhost" (our OS doesn't have a hostname yet).
+#[unsafe(no_mangle)]
+pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    let hostname = b"localhost";
+    let needed = hostname.len().wrapping_add(1); // +null
+    if len < needed {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    }
+
+    let mut idx: usize = 0;
+    while idx < hostname.len() {
+        if let Some(&byte) = hostname.get(idx) {
+            unsafe { *name.add(idx) = byte; }
+        }
+        idx = idx.wrapping_add(1);
+    }
+    unsafe { *name.add(idx) = 0; }
+    0
+}
+
+/// Set an alarm timer.
+///
+/// Stub: returns 0 (no alarm support — signals not implemented).
+#[unsafe(no_mangle)]
+pub extern "C" fn alarm(_seconds: u32) -> u32 {
+    0
+}
+
+/// Suspend until a signal is delivered.
+///
+/// Stub: sleeps for 1 second then returns -1/EINTR (no signals).
+#[unsafe(no_mangle)]
+pub extern "C" fn pause() -> i32 {
+    let _ = syscall1(SYS_SLEEP, 1_000_000_000_u64);
+    errno::set_errno(errno::EINTR);
+    -1
+}
+
 /// Get configurable system variables.
 ///
 /// Returns the value of the named system variable, or -1 on error.

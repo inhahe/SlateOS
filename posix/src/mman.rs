@@ -176,3 +176,26 @@ pub extern "C" fn msync(_addr: *mut core::ffi::c_void, _length: SizeT, _flags: i
 pub extern "C" fn madvise(_addr: *mut core::ffi::c_void, _length: SizeT, _advice: i32) -> i32 {
     0
 }
+
+// ---------------------------------------------------------------------------
+// POSIX shared memory objects — stubs
+// ---------------------------------------------------------------------------
+
+/// Open a POSIX shared memory object.
+///
+/// Stub: returns -1 with ENOSYS.  Shared memory between processes
+/// requires kernel support for named memory regions.
+#[unsafe(no_mangle)]
+pub extern "C" fn shm_open(_name: *const u8, _oflag: i32, _mode: ModeT) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Remove a POSIX shared memory object.
+///
+/// Stub: returns -1 with ENOSYS.
+#[unsafe(no_mangle)]
+pub extern "C" fn shm_unlink(_name: *const u8) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}

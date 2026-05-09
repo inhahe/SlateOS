@@ -864,6 +864,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] time: gmtime/localtime/mktime (epoch↔broken-down conversion), asctime/ctime (formatted string), strftime (%Y%m%d%H%M%S%A%a%B%b%c%p%j%n%t%%), difftime; all UTC (no timezone)
   - [x] dlfcn: dlopen/dlsym/dlclose/dlerror stubs (dynamic linking not supported, returns descriptive errors)
   - [x] semaphore: unnamed sem_init/sem_wait/sem_trywait/sem_post/sem_getvalue/sem_destroy (atomic CAS + spin-yield); named sem_open/sem_close/sem_unlink stubs (ENOSYS)
+  - [x] uid/gid: setuid/seteuid/setgid/setegid/setreuid/setregid (stubs — single-user OS), getgroups
+  - [x] unistd additions: gethostname ("localhost"), alarm (stub), pause (sleep 1s + EINTR)
+  - [x] shm: shm_open/shm_unlink stubs (ENOSYS)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

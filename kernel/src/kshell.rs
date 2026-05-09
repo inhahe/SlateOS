@@ -3441,7 +3441,7 @@ fn read_line(buf: &mut String, history: &mut History) {
 /// All built-in command names, sorted alphabetically.
 const COMMANDS: &[&str] = &[
     "alias", "ansi", "append", "appregistry", "appreg", "archive", "assoc", "atime", "audio", "awk", "backtrace", "basename", "blkdev", "blkinfo", "blkread", "bt", "cal", "cat",
-    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag",
+    "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
@@ -4857,6 +4857,10 @@ fn dispatch(line: &str) {
         "screentime" | "stime" => cmd_screentime(args),
         "disksmart" | "smart" => cmd_disksmart(args),
         "magnifier" | "mag" => cmd_magnifier(args),
+        "cloudsync" | "csync" => cmd_cloudsync(args),
+        "gestures" | "gesture" => cmd_gestures(args),
+        "soundevents" | "sevents" => cmd_soundevents(args),
+        "usbmgr" | "usb" => cmd_usbmgr(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -31648,6 +31652,356 @@ fn cmd_magnifier(args: &str) {
     }
 }
 
+/// `cloudsync` / `csync` — cloud storage synchronization.
+fn cmd_cloudsync(args: &str) {
+    use crate::fs::cloudsync;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (accounts, syncs, conflicts, active, _) = cloudsync::stats();
+            shell_println!("Cloud Sync");
+            shell_println!("  Accounts: {} ({} active)", accounts, active);
+            shell_println!("  Syncs:    {}", syncs);
+            shell_println!("  Conflicts:{}", conflicts);
+        }
+        "list" => {
+            let accts = cloudsync::list_accounts();
+            if accts.is_empty() {
+                shell_println!("No cloud sync accounts.");
+            } else {
+                shell_println!("{:<4} {:<12} {:<24} {:<20} {}",
+                    "ID", "Provider", "Account", "Local Path", "Enabled");
+                for a in &accts {
+                    shell_println!("{:<4} {:<12} {:<24} {:<20} {}",
+                        a.id, a.provider.label(), a.account_name, a.local_path,
+                        if a.enabled { "yes" } else { "no" });
+                }
+            }
+        }
+        "add" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: csync add <provider> <account> <local-path> <remote-path>");
+                shell_println!("  Providers: webdav, nextcloud, dropbox, gdrive, onedrive, s3");
+                return;
+            }
+            let provider = match parts[1] {
+                "webdav" => cloudsync::CloudProvider::GenericWebDav,
+                "nextcloud" | "nc" => cloudsync::CloudProvider::NextCloud,
+                "dropbox" | "dbx" => cloudsync::CloudProvider::Dropbox,
+                "gdrive" | "google" => cloudsync::CloudProvider::GoogleDrive,
+                "onedrive" | "od" => cloudsync::CloudProvider::OneDrive,
+                "s3" => cloudsync::CloudProvider::S3Compatible,
+                _ => { shell_println!("Unknown provider: {}", parts[1]); return; }
+            };
+            match cloudsync::add_account(provider, parts[2], parts[3], parts[4]) {
+                Ok(id) => shell_println!("Added account #{} ({}).", id, provider.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: csync remove <id>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid ID."); return; }
+            };
+            match cloudsync::remove_account(id) {
+                Ok(()) => shell_println!("Removed account #{}.", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "conflicts" => {
+            let conflicts = cloudsync::list_conflicts();
+            if conflicts.is_empty() {
+                shell_println!("No sync conflicts.");
+            } else {
+                for c in &conflicts {
+                    shell_println!("  [acct #{}] {} (local: {} B, remote: {} B)",
+                        c.account_id, c.path, c.local_size, c.remote_size);
+                }
+            }
+        }
+        "excludes" => {
+            let excludes = cloudsync::list_excludes();
+            shell_println!("Excluded patterns ({}):", excludes.len());
+            for p in &excludes {
+                shell_println!("  {}", p);
+            }
+        }
+        "stats" => {
+            let (accounts, syncs, conflicts, active, ops) = cloudsync::stats();
+            shell_println!("Accounts: {}  Active: {}  Syncs: {}  Conflicts: {}  Ops: {}",
+                accounts, active, syncs, conflicts, ops);
+        }
+        "test" => { cloudsync::self_test(); shell_println!("Cloud sync self-test complete."); }
+        "init" => { cloudsync::init_defaults(); shell_println!("Cloud sync initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("cloudsync (csync) — cloud storage sync");
+            shell_println!("  show               Overview");
+            shell_println!("  list               List accounts");
+            shell_println!("  add <args>          Add sync account");
+            shell_println!("  remove <id>         Remove account");
+            shell_println!("  conflicts           Show conflicts");
+            shell_println!("  excludes            Show exclude patterns");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'csync help' for usage."); }
+    }
+}
+
+/// `gestures` / `gesture` — touchpad/touchscreen gesture management.
+fn cmd_gestures(args: &str) {
+    use crate::fs::gestures;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (mappings, total, enabled, natural, _) = gestures::stats();
+            shell_println!("Gestures: {}", if enabled { "enabled" } else { "disabled" });
+            shell_println!("  Mappings:       {}", mappings);
+            shell_println!("  Total gestures: {}", total);
+            shell_println!("  Natural scroll: {}", if natural { "on" } else { "off" });
+        }
+        "list" => {
+            let mappings = gestures::list_mappings();
+            shell_println!("{:<28} {:<20} {}", "Gesture", "Action", "Enabled");
+            for m in &mappings {
+                shell_println!("{:<28} {:<20} {}",
+                    m.gesture.label(), m.action.label(),
+                    if m.enabled { "yes" } else { "no" });
+            }
+        }
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            match gestures::set_enabled(on) {
+                Ok(()) => shell_println!("Gestures {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "natural" => {
+            if parts.len() < 2 {
+                let cfg = gestures::get_config();
+                match cfg {
+                    Ok(c) => shell_println!("Natural scroll: {}", if c.natural_scroll { "on" } else { "off" }),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+                return;
+            }
+            let on = parts[1] == "on" || parts[1] == "true" || parts[1] == "yes";
+            match gestures::set_natural_scroll(on) {
+                Ok(()) => shell_println!("Natural scroll {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (mappings, total, enabled, natural, ops) = gestures::stats();
+            shell_println!("Mappings: {}  Total: {}  Enabled: {}  Natural: {}  Ops: {}",
+                mappings, total, enabled, natural, ops);
+        }
+        "test" => { gestures::self_test(); shell_println!("Gestures self-test complete."); }
+        "init" => { gestures::init_defaults(); shell_println!("Gestures initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("gestures (gesture) — touch gesture management");
+            shell_println!("  show               Overview");
+            shell_println!("  list               List gesture mappings");
+            shell_println!("  enable/disable     Toggle gestures");
+            shell_println!("  natural [on|off]   Natural scrolling");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'gesture help' for usage."); }
+    }
+}
+
+/// `soundevents` / `sevents` — system notification sounds.
+fn cmd_soundevents(args: &str) {
+    use crate::fs::soundevents;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (schemes, mappings, played, enabled, muted, _) = soundevents::stats();
+            shell_println!("Sound Events: {}{}", if enabled { "enabled" } else { "disabled" },
+                if muted { " (muted)" } else { "" });
+            shell_println!("  Scheme:   {}", soundevents::active_scheme());
+            shell_println!("  Schemes:  {}", schemes);
+            shell_println!("  Mappings: {}", mappings);
+            shell_println!("  Played:   {}", played);
+        }
+        "list" => {
+            let mappings = soundevents::list_mappings();
+            if mappings.is_empty() {
+                shell_println!("No sound mappings in active scheme.");
+            } else {
+                shell_println!("{:<24} {:<6} {}", "Event", "Vol", "Sound");
+                for m in &mappings {
+                    shell_println!("{:<24} {:<6} {}",
+                        m.event.label(),
+                        if m.enabled { format!("{}%", m.volume) } else { String::from("off") },
+                        m.sound_path);
+                }
+            }
+        }
+        "schemes" => {
+            let schemes = soundevents::list_schemes();
+            shell_println!("Available schemes:");
+            for (name, desc) in &schemes {
+                let active = if *name == soundevents::active_scheme() { " *" } else { "" };
+                shell_println!("  {}{} — {}", name, active, desc);
+            }
+        }
+        "scheme" => {
+            if parts.len() < 2 {
+                shell_println!("Active scheme: {}", soundevents::active_scheme());
+                return;
+            }
+            match soundevents::set_scheme(parts[1]) {
+                Ok(()) => shell_println!("Scheme set to {}.", parts[1]),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" | "disable" => {
+            let on = sub == "enable";
+            match soundevents::set_enabled(on) {
+                Ok(()) => shell_println!("Sound events {}.", if on { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "mute" | "unmute" => {
+            let m = sub == "mute";
+            match soundevents::set_muted(m) {
+                Ok(()) => shell_println!("Sound events {}.", if m { "muted" } else { "unmuted" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "volume" | "vol" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: sevents volume <0-100>");
+                return;
+            }
+            let vol: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid volume."); return; }
+            };
+            match soundevents::set_volume(vol) {
+                Ok(()) => shell_println!("Volume set to {}%.", vol.min(100)),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "stats" => {
+            let (schemes, mappings, played, enabled, muted, ops) = soundevents::stats();
+            shell_println!("Schemes: {}  Mappings: {}  Played: {}  Enabled: {}  Muted: {}  Ops: {}",
+                schemes, mappings, played, enabled, muted, ops);
+        }
+        "test" => { soundevents::self_test(); shell_println!("Sound events self-test complete."); }
+        "init" => { soundevents::init_defaults(); shell_println!("Sound events initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("soundevents (sevents) — system notification sounds");
+            shell_println!("  show               Overview");
+            shell_println!("  list               List event→sound mappings");
+            shell_println!("  schemes            List sound schemes");
+            shell_println!("  scheme <name>       Set active scheme");
+            shell_println!("  enable/disable     Toggle sounds");
+            shell_println!("  mute/unmute        Mute/unmute");
+            shell_println!("  volume <0-100>     Set volume");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'sevents help' for usage."); }
+    }
+}
+
+/// `usbmgr` / `usb` — USB device management.
+fn cmd_usbmgr(args: &str) {
+    use crate::fs::usbmgr;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let (count, connects, disconnects, safe_removes, power, _) = usbmgr::stats();
+            shell_println!("USB Devices");
+            shell_println!("  Connected:    {}", count);
+            shell_println!("  Connects:     {}", connects);
+            shell_println!("  Disconnects:  {}", disconnects);
+            shell_println!("  Safe removes: {}", safe_removes);
+            shell_println!("  Power draw:   {} mA", power);
+        }
+        "list" => {
+            let devs = usbmgr::list_devices();
+            if devs.is_empty() {
+                shell_println!("No USB devices connected.");
+            } else {
+                shell_println!("{:<6} {:<24} {:<14} {:<18} {}",
+                    "Bus:P", "Product", "Class", "Speed", "mA");
+                for d in &devs {
+                    shell_println!("{:<6} {:<24} {:<14} {:<18} {}",
+                        format!("{}:{}", d.bus, d.port), d.product, d.class.label(),
+                        d.speed.label(), d.power_ma);
+                }
+            }
+        }
+        "info" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: usb info <bus> <port>");
+                return;
+            }
+            let bus: u8 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid bus."); return; } };
+            let port: u8 = match parts[2].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid port."); return; } };
+            match usbmgr::get_device(bus, port) {
+                Ok(d) => {
+                    shell_println!("USB Device {}:{}", d.bus, d.port);
+                    shell_println!("  Product:      {} ({})", d.product, d.manufacturer);
+                    shell_println!("  Vendor/PID:   {:04x}:{:04x}", d.vendor_id, d.product_id);
+                    if !d.serial.is_empty() { shell_println!("  Serial:       {}", d.serial); }
+                    shell_println!("  Class:        {}", d.class.label());
+                    shell_println!("  Speed:        {}", d.speed.label());
+                    shell_println!("  Power:        {} mA", d.power_ma);
+                    if !d.driver.is_empty() { shell_println!("  Driver:       {}", d.driver); }
+                    shell_println!("  Removable:    {}", if d.removable { "yes" } else { "no" });
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "eject" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: usb eject <bus> <port>");
+                return;
+            }
+            let bus: u8 = match parts[1].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid bus."); return; } };
+            let port: u8 = match parts[2].parse() { Ok(v) => v, Err(_) => { shell_println!("Invalid port."); return; } };
+            match usbmgr::safe_remove(bus, port) {
+                Ok(()) => shell_println!("Device {}:{} safely removed.", bus, port),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "power" => {
+            shell_println!("Total USB power draw: {} mA", usbmgr::total_power_draw());
+        }
+        "stats" => {
+            let (count, connects, disconnects, safe_removes, power, ops) = usbmgr::stats();
+            shell_println!("Devices: {}  Connects: {}  Disconnects: {}  SafeRemove: {}  Power: {} mA  Ops: {}",
+                count, connects, disconnects, safe_removes, power, ops);
+        }
+        "test" => { usbmgr::self_test(); shell_println!("USB manager self-test complete."); }
+        "init" => { usbmgr::init_defaults(); shell_println!("USB manager initialized."); }
+        "help" | _ if sub == "help" => {
+            shell_println!("usbmgr (usb) — USB device management");
+            shell_println!("  show               Overview");
+            shell_println!("  list               List connected devices");
+            shell_println!("  info <bus> <port>   Device details");
+            shell_println!("  eject <bus> <port>  Safely remove device");
+            shell_println!("  power              Total power draw");
+            shell_println!("  stats / test / init");
+        }
+        _ => { shell_println!("Unknown subcommand: {}", sub); shell_println!("Use 'usb help' for usage."); }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -40244,7 +40598,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

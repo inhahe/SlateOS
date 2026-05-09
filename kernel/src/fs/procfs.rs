@@ -253,6 +253,10 @@ const ROOT_FILES: &[&str] = &[
     "screentime",
     "disksmart",
     "magnifier",
+    "cloudsync",
+    "gestures",
+    "soundevents",
+    "usbmgr",
     "columnview",
     "pathbar",
     "viewstate",
@@ -5626,6 +5630,64 @@ fn gen_magnifier() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_cloudsync() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (accounts, syncs, conflicts, active, ops) = super::cloudsync::stats();
+    out.push_str(&format!("accounts: {}\n", accounts));
+    out.push_str(&format!("active: {}\n", active));
+    out.push_str(&format!("total_syncs: {}\n", syncs));
+    out.push_str(&format!("conflicts: {}\n", conflicts));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_gestures() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (mappings, total, enabled, natural, ops) = super::gestures::stats();
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("mappings: {}\n", mappings));
+    out.push_str(&format!("total_gestures: {}\n", total));
+    out.push_str(&format!("natural_scroll: {}\n", natural));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_soundevents() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (schemes, mappings, played, enabled, muted, ops) = super::soundevents::stats();
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("muted: {}\n", muted));
+    out.push_str(&format!("schemes: {}\n", schemes));
+    out.push_str(&format!("mappings: {}\n", mappings));
+    out.push_str(&format!("total_played: {}\n", played));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
+fn gen_usbmgr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+
+    let (count, connects, disconnects, safe_removes, power, ops) = super::usbmgr::stats();
+    out.push_str(&format!("devices: {}\n", count));
+    out.push_str(&format!("total_connects: {}\n", connects));
+    out.push_str(&format!("total_disconnects: {}\n", disconnects));
+    out.push_str(&format!("safe_removes: {}\n", safe_removes));
+    out.push_str(&format!("power_draw_ma: {}\n", power));
+    out.push_str(&format!("ops: {}\n", ops));
+
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -6044,6 +6106,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "screentime" => Ok(gen_screentime()),
         "disksmart" => Ok(gen_disksmart()),
         "magnifier" => Ok(gen_magnifier()),
+        "cloudsync" => Ok(gen_cloudsync()),
+        "gestures" => Ok(gen_gestures()),
+        "soundevents" => Ok(gen_soundevents()),
+        "usbmgr" => Ok(gen_usbmgr()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

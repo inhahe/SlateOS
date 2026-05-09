@@ -3464,6 +3464,7 @@ const COMMANDS: &[&str] = &[
     "userprofile", "uprof", "diskclean", "dclean",
     "cas",
     "logrotate", "lrot", "powerwake", "pwake", "diskio", "dio", "sysuptime", "suptime",
+    "netspeed", "nspeed", "cfreq", "therm", "swapmon", "smon",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4990,6 +4991,10 @@ fn dispatch(line: &str) {
         "powerwake" | "pwake" => cmd_powerwake(args),
         "diskio" | "dio" => cmd_diskio(args),
         "sysuptime" | "suptime" => cmd_sysuptime(args),
+        "netspeed" | "nspeed" => cmd_netspeed(args),
+        "cfreq" => cmd_cfreq(args),
+        "therm" => cmd_therm(args),
+        "swapmon" | "smon" => cmd_swapmon(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -46653,6 +46658,281 @@ fn cmd_sysuptime(args: &str) {
     }
 }
 
+/// `netspeed` / `nspeed` — network speed testing and bandwidth.
+fn cmd_netspeed(args: &str) {
+    use crate::fs::netspeed;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "stats" | "" => {
+            let (results, ifaces, total_tests, ops) = netspeed::stats();
+            shell_println!("=== Network Speed ===");
+            shell_println!("  Test results:   {}", results);
+            shell_println!("  Interfaces:     {}", ifaces);
+            shell_println!("  Total tests:    {}", total_tests);
+            shell_println!("  Ops:            {}", ops);
+        }
+        "test" => {
+            let iface = parts.get(1).copied().unwrap_or("eth0");
+            netspeed::init_defaults();
+            match netspeed::run_test(iface) {
+                Ok(r) => {
+                    shell_println!("=== Speed Test: {} ===", r.interface);
+                    shell_println!("  Download: {}", netspeed::format_speed(r.download_bps));
+                    shell_println!("  Upload:   {}", netspeed::format_speed(r.upload_bps));
+                    shell_println!("  Latency:  {} ms", r.latency_ms);
+                    shell_println!("  Jitter:   {} ms", r.jitter_ms);
+                    shell_println!("  Server:   {}", r.server);
+                }
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "bandwidth" => {
+            netspeed::init_defaults();
+            let snaps = netspeed::bandwidth_snapshots();
+            if snaps.is_empty() {
+                shell_println!("No bandwidth data.");
+            } else {
+                shell_println!("{:<12} {:>12} {:>12} {:>10} {:>10}",
+                    "Interface", "RX Bytes", "TX Bytes", "RX Pkts", "TX Pkts");
+                for s in &snaps {
+                    shell_println!("{:<12} {:>12} {:>12} {:>10} {:>10}",
+                        s.interface, s.rx_bytes, s.tx_bytes, s.rx_packets, s.tx_packets);
+                }
+            }
+        }
+        "history" => {
+            let hist = netspeed::test_history();
+            if hist.is_empty() {
+                shell_println!("No test history.");
+            } else {
+                for r in hist.iter().rev().take(10) {
+                    shell_println!("  #{}: {} — ↓{} ↑{} ({}ms)",
+                        r.id, r.interface,
+                        netspeed::format_speed(r.download_bps),
+                        netspeed::format_speed(r.upload_bps),
+                        r.latency_ms);
+                }
+            }
+        }
+        _ => {
+            shell_println!("Usage: netspeed [stats|test|bandwidth|history]");
+        }
+    }
+}
+
+/// `cfreq` — CPU frequency scaling management (fs::cpufreq).
+fn cmd_cfreq(args: &str) {
+    use crate::fs::cpufreq;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "list" => {
+            cpufreq::init_defaults();
+            let cpus = cpufreq::list_cpus();
+            if cpus.is_empty() {
+                shell_println!("No CPUs found.");
+            } else {
+                shell_println!("{:<6} {:>12} {:>12} {:>12} {:<12}",
+                    "CPU", "Current", "Min", "Max", "Governor");
+                for c in &cpus {
+                    shell_println!("{:<6} {:>12} {:>12} {:>12} {:<12}",
+                        c.cpu_id,
+                        cpufreq::format_freq(c.current_khz),
+                        cpufreq::format_freq(c.scaling_min_khz),
+                        cpufreq::format_freq(c.scaling_max_khz),
+                        c.governor.label());
+                }
+                shell_println!("Boost: {}", if cpufreq::boost_enabled() { "enabled" } else { "disabled" });
+            }
+        }
+        "governor" => {
+            if let Some(gov_str) = parts.get(1) {
+                cpufreq::init_defaults();
+                let gov = parse_cpufreq_governor(gov_str);
+                match cpufreq::set_governor(gov) {
+                    Ok(()) => shell_println!("Governor set to {}", gov.label()),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                if let Some(gov) = cpufreq::get_governor() {
+                    shell_println!("Current governor: {}", gov.label());
+                } else {
+                    shell_println!("Not initialized");
+                }
+            }
+        }
+        "boost" => {
+            match parts.get(1).copied() {
+                Some("on") | Some("enable") => {
+                    cpufreq::init_defaults();
+                    cpufreq::set_boost(true).expect("boost");
+                    shell_println!("Boost enabled");
+                }
+                Some("off") | Some("disable") => {
+                    cpufreq::init_defaults();
+                    cpufreq::set_boost(false).expect("boost");
+                    shell_println!("Boost disabled");
+                }
+                _ => {
+                    shell_println!("Boost: {}", if cpufreq::boost_enabled() { "enabled" } else { "disabled" });
+                }
+            }
+        }
+        "stats" => {
+            let (cpu_count, transitions, gov_changes, boost, ops) = cpufreq::stats();
+            shell_println!("=== CPU Frequency Stats ===");
+            shell_println!("  CPUs:             {}", cpu_count);
+            shell_println!("  Transitions:      {}", transitions);
+            shell_println!("  Governor changes: {}", gov_changes);
+            shell_println!("  Boost:            {}", boost);
+            shell_println!("  Ops:              {}", ops);
+        }
+        _ => {
+            shell_println!("Usage: cpufreq [list|governor|boost|stats]");
+        }
+    }
+}
+
+fn parse_cpufreq_governor(s: &str) -> crate::fs::cpufreq::Governor {
+    use crate::fs::cpufreq::Governor;
+    match s {
+        "performance" | "perf" => Governor::Performance,
+        "powersave" | "power" => Governor::Powersave,
+        "ondemand" | "od" => Governor::OnDemand,
+        "conservative" | "cons" => Governor::Conservative,
+        "schedutil" | "su" => Governor::Schedutil,
+        "userspace" | "user" => Governor::Userspace,
+        _ => Governor::Schedutil,
+    }
+}
+
+/// `therm` — system thermal monitoring (fs::thermal).
+fn cmd_therm(args: &str) {
+    use crate::fs::thermal;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "zones" => {
+            thermal::init_defaults();
+            let zones = thermal::list_zones();
+            if zones.is_empty() {
+                shell_println!("No thermal zones.");
+            } else {
+                shell_println!("{:<4} {:<20} {:<8} {:>10} {:>10} {:>10} {}",
+                    "ID", "Name", "Type", "Current", "Passive", "Critical", "Throttled");
+                for z in &zones {
+                    shell_println!("{:<4} {:<20} {:<8} {:>10} {:>10} {:>10} {}",
+                        z.id, z.name, z.zone_type.label(),
+                        thermal::format_temp(z.temp_mc),
+                        thermal::format_temp(z.passive_trip_mc),
+                        thermal::format_temp(z.critical_trip_mc),
+                        if z.throttled { "YES" } else { "no" });
+                }
+            }
+        }
+        "fans" => {
+            thermal::init_defaults();
+            let fans = thermal::list_fans();
+            if fans.is_empty() {
+                shell_println!("No fans detected.");
+            } else {
+                shell_println!("{:<4} {:<20} {:>8} {:>8} {:>6} {:<10}",
+                    "ID", "Name", "RPM", "Max RPM", "Duty%", "Mode");
+                for f in &fans {
+                    shell_println!("{:<4} {:<20} {:>8} {:>8} {:>5}% {:<10}",
+                        f.id, f.name, f.rpm, f.max_rpm, f.duty_pct, f.mode.label());
+                }
+            }
+        }
+        "fan" => {
+            if let (Some(id_str), Some(duty_str)) = (parts.get(1), parts.get(2)) {
+                if let (Ok(id), Ok(duty)) = (id_str.parse::<u32>(), duty_str.parse::<u8>()) {
+                    thermal::init_defaults();
+                    match thermal::set_fan_duty(id, duty) {
+                        Ok(()) => shell_println!("Fan {} set to {}%", id, duty),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else { shell_println!("Invalid arguments"); }
+            } else { shell_println!("Usage: thermal fan <id> <duty%>"); }
+        }
+        "stats" => {
+            let (zones, fans, readings, throttles, ops) = thermal::stats();
+            shell_println!("=== Thermal Stats ===");
+            shell_println!("  Zones:           {}", zones);
+            shell_println!("  Fans:            {}", fans);
+            shell_println!("  Total readings:  {}", readings);
+            shell_println!("  Throttle events: {}", throttles);
+            shell_println!("  Ops:             {}", ops);
+        }
+        _ => {
+            shell_println!("Usage: thermal [zones|fans|fan|stats]");
+        }
+    }
+}
+
+/// `swapmon` / `smon` — swap usage monitoring.
+fn cmd_swapmon(args: &str) {
+    use crate::fs::swapmon;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            swapmon::init_defaults();
+            let (total, used) = swapmon::total_usage();
+            let pct = if total > 0 { used * 100 / total } else { 0 };
+            shell_println!("=== Swap Usage ===");
+            shell_println!("  Total: {} bytes", total);
+            shell_println!("  Used:  {} bytes ({}%)", used, pct);
+            shell_println!("  Free:  {} bytes", total.saturating_sub(used));
+        }
+        "devices" => {
+            swapmon::init_defaults();
+            let devs = swapmon::list_devices();
+            if devs.is_empty() {
+                shell_println!("No swap devices.");
+            } else {
+                shell_println!("{:<4} {:<20} {:<10} {:>12} {:>12} {:>5} {}",
+                    "ID", "Path", "Type", "Total", "Used", "Use%", "Enabled");
+                for d in &devs {
+                    shell_println!("{:<4} {:<20} {:<10} {:>12} {:>12} {:>4}% {}",
+                        d.id, d.path, d.swap_type.label(),
+                        d.total_bytes, d.used_bytes, d.usage_pct(),
+                        if d.enabled { "yes" } else { "no" });
+                }
+            }
+        }
+        "processes" => {
+            swapmon::init_defaults();
+            let procs = swapmon::list_processes();
+            if procs.is_empty() {
+                shell_println!("No processes using swap.");
+            } else {
+                shell_println!("{:<8} {:<20} {:>12}", "PID", "Name", "Swap Bytes");
+                for p in procs.iter().take(20) {
+                    shell_println!("{:<8} {:<20} {:>12}", p.pid, p.name, p.swap_bytes);
+                }
+            }
+        }
+        "stats" => {
+            let (devs, procs, swap_in, swap_out, in_bytes, out_bytes, ops) = swapmon::stats();
+            shell_println!("=== Swap Statistics ===");
+            shell_println!("  Devices:        {}", devs);
+            shell_println!("  Swapped procs:  {}", procs);
+            shell_println!("  Total swap-in:  {} ({} bytes)", swap_in, in_bytes);
+            shell_println!("  Total swap-out: {} ({} bytes)", swap_out, out_bytes);
+            shell_println!("  Ops:            {}", ops);
+        }
+        _ => {
+            shell_println!("Usage: swapmon [show|devices|processes|stats]");
+        }
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -55249,7 +55529,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "netspeed" | "nspeed" | "cfreq" | "therm" | "swapmon" | "smon" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

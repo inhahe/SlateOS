@@ -902,6 +902,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Power Wake (fs::powerwake): Wake-on-LAN and scheduled wake with 7 wake sources, wake timers, WoL targets, wake history; `powerwake`/`pwake` kshell command; /proc/powerwake; 8 self-tests
   - [x] Disk I/O (fs::diskio): per-device I/O statistics with read/write tracking, latency, throughput, error counting; `diskio`/`dio` kshell command; /proc/diskio; 8 self-tests
   - [x] System Uptime (fs::sysuptime): uptime tracking with session history, shutdown reasons, longest uptime, duration formatting; `sysuptime`/`suptime` kshell command; /proc/sysuptime; 8 self-tests
+  - [x] Network Speed (fs::netspeed): bandwidth measurement with speed testing, per-interface monitoring, test history, speed formatting; `netspeed`/`nspeed` kshell command; /proc/netspeed; 8 self-tests
+  - [x] CPU Frequency (fs::cpufreq): frequency scaling with 6 governors, per-CPU settings, boost control, frequency transitions; `cfreq` kshell command; /proc/cpufreq; 8 self-tests
+  - [x] Thermal Monitor (fs::thermal): thermal zones with CPU/GPU/chipset, trip points, fan control with 4 modes, throttle detection; `therm` kshell command; /proc/thermal; 8 self-tests
+  - [x] Swap Monitor (fs::swapmon): swap usage with 4 device types, per-process tracking, swap in/out rates, usage snapshots; `swapmon`/`smon` kshell command; /proc/swapmon; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

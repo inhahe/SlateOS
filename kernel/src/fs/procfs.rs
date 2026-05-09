@@ -376,6 +376,10 @@ const ROOT_FILES: &[&str] = &[
     "powerwake",
     "diskio",
     "sysuptime",
+    "netspeed",
+    "cpufreq",
+    "thermal",
+    "swapmon",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7481,6 +7485,68 @@ fn gen_sysuptime() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_netspeed() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Network Speed ===\n");
+    let (results, ifaces, total_tests, ops) = crate::fs::netspeed::stats();
+    out.push_str(&format!("test_results: {}\n", results));
+    out.push_str(&format!("interfaces: {}\n", ifaces));
+    out.push_str(&format!("total_tests: {}\n", total_tests));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_cpufreq() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== CPU Frequency ===\n");
+    let (cpu_count, transitions, gov_changes, boost, ops) = crate::fs::cpufreq::stats();
+    out.push_str(&format!("cpu_count: {}\n", cpu_count));
+    out.push_str(&format!("total_transitions: {}\n", transitions));
+    out.push_str(&format!("governor_changes: {}\n", gov_changes));
+    out.push_str(&format!("boost_enabled: {}\n", boost));
+    out.push_str(&format!("ops: {}\n", ops));
+    if let Some(gov) = crate::fs::cpufreq::get_governor() {
+        out.push_str(&format!("governor: {}\n", gov.label()));
+    }
+    out.into_bytes()
+}
+
+fn gen_thermal() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Thermal ===\n");
+    let (zones, fans, readings, throttles, ops) = crate::fs::thermal::stats();
+    out.push_str(&format!("zone_count: {}\n", zones));
+    out.push_str(&format!("fan_count: {}\n", fans));
+    out.push_str(&format!("total_readings: {}\n", readings));
+    out.push_str(&format!("throttle_events: {}\n", throttles));
+    out.push_str(&format!("ops: {}\n", ops));
+    for zone in crate::fs::thermal::list_zones() {
+        out.push_str(&format!("{}: {}\n", zone.name, crate::fs::thermal::format_temp(zone.temp_mc)));
+    }
+    out.into_bytes()
+}
+
+fn gen_swapmon() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Swap Monitor ===\n");
+    let (dev_count, proc_count, swap_in, swap_out, in_bytes, out_bytes, ops) = crate::fs::swapmon::stats();
+    let (total, used) = crate::fs::swapmon::total_usage();
+    out.push_str(&format!("device_count: {}\n", dev_count));
+    out.push_str(&format!("total_bytes: {}\n", total));
+    out.push_str(&format!("used_bytes: {}\n", used));
+    out.push_str(&format!("processes_swapped: {}\n", proc_count));
+    out.push_str(&format!("total_swap_in: {}\n", swap_in));
+    out.push_str(&format!("total_swap_out: {}\n", swap_out));
+    out.push_str(&format!("swap_in_bytes: {}\n", in_bytes));
+    out.push_str(&format!("swap_out_bytes: {}\n", out_bytes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8022,6 +8088,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "powerwake" => Ok(gen_powerwake()),
         "diskio" => Ok(gen_diskio()),
         "sysuptime" => Ok(gen_sysuptime()),
+        "netspeed" => Ok(gen_netspeed()),
+        "cpufreq" => Ok(gen_cpufreq()),
+        "thermal" => Ok(gen_thermal()),
+        "swapmon" => Ok(gen_swapmon()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

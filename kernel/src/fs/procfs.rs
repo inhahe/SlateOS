@@ -365,6 +365,9 @@ const ROOT_FILES: &[&str] = &[
     "dnssettings",
     "backupsched",
     "displaycal",
+    "vpnprofile",
+    "diskhealth",
+    "recoverypart",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7326,6 +7329,45 @@ fn gen_displaycal() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_vpnprofile() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== VPN Profiles ===\n");
+    let (profile_count, total_connects, total_disconnects, total_errors, ops) = crate::fs::vpnprofile::stats();
+    out.push_str(&format!("profile_count: {}\n", profile_count));
+    out.push_str(&format!("total_connects: {}\n", total_connects));
+    out.push_str(&format!("total_disconnects: {}\n", total_disconnects));
+    out.push_str(&format!("total_errors: {}\n", total_errors));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_diskhealth() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Disk Health ===\n");
+    let (disk_count, total_checks, total_warnings, total_failures, ops) = crate::fs::diskhealth::stats();
+    out.push_str(&format!("disk_count: {}\n", disk_count));
+    out.push_str(&format!("total_checks: {}\n", total_checks));
+    out.push_str(&format!("total_warnings: {}\n", total_warnings));
+    out.push_str(&format!("total_failures_predicted: {}\n", total_failures));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_recoverypart() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Recovery Partition ===\n");
+    let (tool_count, total_repairs, total_verifications, total_boots, ops) = crate::fs::recoverypart::stats();
+    out.push_str(&format!("tool_count: {}\n", tool_count));
+    out.push_str(&format!("total_repairs: {}\n", total_repairs));
+    out.push_str(&format!("total_verifications: {}\n", total_verifications));
+    out.push_str(&format!("total_boots: {}\n", total_boots));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7856,6 +7898,9 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "dnssettings" => Ok(gen_dnssettings()),
         "backupsched" => Ok(gen_backupsched()),
         "displaycal" => Ok(gen_displaycal()),
+        "vpnprofile" => Ok(gen_vpnprofile()),
+        "diskhealth" => Ok(gen_diskhealth()),
+        "recoverypart" => Ok(gen_recoverypart()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

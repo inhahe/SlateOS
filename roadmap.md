@@ -891,6 +891,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] DNS Settings (fs::dnssettings): DNS resolver configuration with 4 protocols (DNS/DoH/DoT/DNSCrypt), server management, search domains, simulated resolution with 500-entry cache, priority-based server selection; `dnssettings`/`dns` kshell command; /proc/dnssettings; 8 self-tests
   - [x] Backup Scheduler (fs::backupsched): automated backup scheduling with 4 backup types, 5 frequencies, retention policies, run history tracking, enable/disable per-schedule; `backupsched`/`bsched` kshell command; /proc/backupsched; 8 self-tests
   - [x] Display Calibration (fs::displaycal): monitor color calibration with 5 ICC profile types, per-channel gamma, white point temperature, brightness targets, calibration status tracking; `displaycal`/`dcal` kshell command; /proc/displaycal; 8 self-tests
+  - [x] VPN Profile (fs::vpnprofile): VPN connection management with 6 protocols (OpenVPN/WireGuard/IPSec/L2TP/SSTP/PPTP), connect/disconnect, auto-connect, kill switch, DNS override, traffic stats; `vpnprofile`/`vpnp` kshell command; /proc/vpnprofile; 8 self-tests
+  - [x] Disk Health (fs::diskhealth): storage health monitoring with 6 health grades, 5 disk types, SMART-style attributes (temp/power-on/errors/realloc/life), failure prediction; `diskhealth`/`dhealth` kshell command; /proc/diskhealth; 8 self-tests
+  - [x] Recovery Partition (fs::recoverypart): recovery environment with 8 tool types, space management, integrity verification, repair simulation, boot-to-recovery; `recoverypart`/`rpart` kshell command; /proc/recoverypart; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

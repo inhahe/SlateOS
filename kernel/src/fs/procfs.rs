@@ -388,6 +388,10 @@ const ROOT_FILES: &[&str] = &[
     "kernlog",
     "coredump",
     "fwupdate",
+    "timesync",
+    "kmod",
+    "entropy",
+    "iosched",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7661,6 +7665,74 @@ fn gen_fwupdate() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_timesync() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Time Sync ===\n");
+    let (servers, syncs, errors, last_sync, ops) = crate::fs::timesync::stats();
+    let status = crate::fs::timesync::get_status();
+    out.push_str(&format!("status: {}\n", status.label()));
+    out.push_str(&format!("servers: {}\n", servers));
+    out.push_str(&format!("total_syncs: {}\n", syncs));
+    out.push_str(&format!("total_errors: {}\n", errors));
+    out.push_str(&format!("last_sync_ns: {}\n", last_sync));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_kmod() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Kernel Modules ===\n");
+    let (live, loads, unloads, errors, ops) = crate::fs::kmod::stats();
+    out.push_str(&format!("live_modules: {}\n", live));
+    out.push_str(&format!("total_loads: {}\n", loads));
+    out.push_str(&format!("total_unloads: {}\n", unloads));
+    out.push_str(&format!("total_errors: {}\n", errors));
+    out.push_str(&format!("ops: {}\n", ops));
+    for m in crate::fs::kmod::list_modules() {
+        out.push_str(&format!("  {} {} [{}] {} {}B refs={}\n",
+            m.name, m.version, m.state.label(), m.mod_type.label(),
+            m.size_bytes, m.ref_count));
+    }
+    out.into_bytes()
+}
+
+fn gen_entropy() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Entropy Pool ===\n");
+    let (avail, added, drained, events, reseeds, ops) = crate::fs::entropy::stats();
+    let quality = crate::fs::entropy::quality();
+    out.push_str(&format!("available_bits: {}\n", avail));
+    out.push_str(&format!("quality: {}\n", quality.label()));
+    out.push_str(&format!("total_added: {}\n", added));
+    out.push_str(&format!("total_drained: {}\n", drained));
+    out.push_str(&format!("total_events: {}\n", events));
+    out.push_str(&format!("reseed_count: {}\n", reseeds));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_iosched() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== I/O Scheduler ===\n");
+    let (devs, dispatched, merged, requeued, ops) = crate::fs::iosched::stats();
+    let default = crate::fs::iosched::get_default();
+    out.push_str(&format!("default_algorithm: {}\n", default.label()));
+    out.push_str(&format!("devices: {}\n", devs));
+    out.push_str(&format!("total_dispatched: {}\n", dispatched));
+    out.push_str(&format!("total_merged: {}\n", merged));
+    out.push_str(&format!("total_requeued: {}\n", requeued));
+    out.push_str(&format!("ops: {}\n", ops));
+    for d in crate::fs::iosched::list_devices() {
+        out.push_str(&format!("  {} algo={} depth={} merge={}\n",
+            d.device_name, d.algorithm.label(), d.queue_depth, d.merge_enabled));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8214,6 +8286,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "kernlog" => Ok(gen_kernlog()),
         "coredump" => Ok(gen_coredump()),
         "fwupdate" => Ok(gen_fwupdate()),
+        "timesync" => Ok(gen_timesync()),
+        "kmod" => Ok(gen_kmod()),
+        "entropy" => Ok(gen_entropy()),
+        "iosched" => Ok(gen_iosched()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

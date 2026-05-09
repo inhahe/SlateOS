@@ -887,6 +887,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] System Image (fs::systemimage): full system snapshot management with 5 image types (full/incremental/differential/boot/userdata), 6 status states, create/restore/verify/delete, integrity checking, base image chaining; `systemimage`/`simg` kshell command; /proc/systemimage; 8 self-tests
   - [x] RAID Manager (fs::raidmgr): software RAID array management with 6 RAID levels (0/1/5/6/10/JBOD), disk add/remove/fail, spare disk management, rebuild with progress, usable capacity calculation; `raidmgr`/`raid` kshell command; /proc/raidmgr; 8 self-tests
   - [x] Network Bridge (fs::networkbridge): virtual network bridge management with 4 bridge modes (transparent/NAT/routed/isolated), 5 interface types, IP/MTU/STP configuration, interface attach/detach; `networkbridge`/`nbridge` kshell command; /proc/networkbridge; 8 self-tests
+  - [x] Secure Erase (fs::secureerase): secure data deletion with 6 erasure methods (zero/random/DoD3/DoD7/Gutmann/custom), job management with progress tracking, pass counting, cancel support; `secureerase`/`serase` kshell command; /proc/secureerase; 8 self-tests
+  - [x] DNS Settings (fs::dnssettings): DNS resolver configuration with 4 protocols (DNS/DoH/DoT/DNSCrypt), server management, search domains, simulated resolution with 500-entry cache, priority-based server selection; `dnssettings`/`dns` kshell command; /proc/dnssettings; 8 self-tests
+  - [x] Backup Scheduler (fs::backupsched): automated backup scheduling with 4 backup types, 5 frequencies, retention policies, run history tracking, enable/disable per-schedule; `backupsched`/`bsched` kshell command; /proc/backupsched; 8 self-tests
+  - [x] Display Calibration (fs::displaycal): monitor color calibration with 5 ICC profile types, per-channel gamma, white point temperature, brightness targets, calibration status tracking; `displaycal`/`dcal` kshell command; /proc/displaycal; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -361,6 +361,10 @@ const ROOT_FILES: &[&str] = &[
     "systemimage",
     "raidmgr",
     "networkbridge",
+    "secureerase",
+    "dnssettings",
+    "backupsched",
+    "displaycal",
     "columnview",
     "pathbar",
     "viewstate",
@@ -7268,6 +7272,60 @@ fn gen_networkbridge() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_secureerase() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Secure Erase ===\n");
+    let (job_count, total_started, total_completed, total_bytes, ops) = crate::fs::secureerase::stats();
+    out.push_str(&format!("job_count: {}\n", job_count));
+    out.push_str(&format!("total_started: {}\n", total_started));
+    out.push_str(&format!("total_completed: {}\n", total_completed));
+    out.push_str(&format!("total_bytes_erased: {}\n", total_bytes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_dnssettings() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== DNS Settings ===\n");
+    let (server_count, cache_size, total_queries, cache_hits, failures, ops) = crate::fs::dnssettings::stats();
+    out.push_str(&format!("server_count: {}\n", server_count));
+    out.push_str(&format!("cache_size: {}\n", cache_size));
+    out.push_str(&format!("total_queries: {}\n", total_queries));
+    out.push_str(&format!("cache_hits: {}\n", cache_hits));
+    out.push_str(&format!("total_failures: {}\n", failures));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_backupsched() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Backup Scheduler ===\n");
+    let (sched_count, hist_size, total_runs, successful, failed, bytes, ops) = crate::fs::backupsched::stats();
+    out.push_str(&format!("schedule_count: {}\n", sched_count));
+    out.push_str(&format!("history_size: {}\n", hist_size));
+    out.push_str(&format!("total_runs: {}\n", total_runs));
+    out.push_str(&format!("total_successful: {}\n", successful));
+    out.push_str(&format!("total_failed: {}\n", failed));
+    out.push_str(&format!("total_bytes_backed: {}\n", bytes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_displaycal() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    out.push_str("=== Display Calibration ===\n");
+    let (monitor_count, calibrations, profile_changes, ops) = crate::fs::displaycal::stats();
+    out.push_str(&format!("monitor_count: {}\n", monitor_count));
+    out.push_str(&format!("total_calibrations: {}\n", calibrations));
+    out.push_str(&format!("total_profile_changes: {}\n", profile_changes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -7794,6 +7852,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),
+        "secureerase" => Ok(gen_secureerase()),
+        "dnssettings" => Ok(gen_dnssettings()),
+        "backupsched" => Ok(gen_backupsched()),
+        "displaycal" => Ok(gen_displaycal()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

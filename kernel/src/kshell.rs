@@ -3459,6 +3459,7 @@ const COMMANDS: &[&str] = &[
     "iotdevice", "iot", "prochistory", "phist", "notiffilter", "nfilter", "colorblind", "cvd",
     "clipaction", "caction", "energysaver", "esaver", "filerules", "frules", "secureboot", "sboot",
     "eventlog", "elog", "systemimage", "simg", "raidmgr", "raid", "networkbridge", "nbridge",
+    "secureerase", "serase", "dnssettings", "dns", "backupsched", "bsched", "displaycal", "dcal",
     "fcomment", "fflags",
     "rmdir", "run", "rundialog", "sa", "sb", "schedstat", "scrollback", "seal", "sed", "select", "seq", "set", "setfacl", "sha256", "sidebar", "sl", "slimit", "sleep", "sockact", "sort", "source", "statusbar",
     "sparse", "splice", "strings", "tac", "tr",
@@ -4971,6 +4972,10 @@ fn dispatch(line: &str) {
         "systemimage" | "simg" => cmd_systemimage(args),
         "raidmgr" | "raid" => cmd_raidmgr(args),
         "networkbridge" | "nbridge" => cmd_networkbridge(args),
+        "secureerase" | "serase" => cmd_secureerase(args),
+        "dnssettings" | "dns" => cmd_dnssettings(args),
+        "backupsched" | "bsched" => cmd_backupsched(args),
+        "displaycal" | "dcal" => cmd_displaycal(args),
         "fflags" => cmd_fflags(args),
         "preview" => cmd_preview(args),
         "template" => cmd_template(args),
@@ -45220,6 +45225,452 @@ fn parse_iface_type(s: &str) -> crate::fs::networkbridge::IfaceType {
     }
 }
 
+/// `secureerase` / `serase` — secure data deletion.
+fn cmd_secureerase(args: &str) {
+    use crate::fs::secureerase;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "start" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: secureerase start <target> <method> [size] [passes]");
+                return;
+            }
+            let target = parts[1];
+            let method = parse_erase_method(parts[2]);
+            let size: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(1_000_000);
+            let passes: Option<u32> = parts.get(4).and_then(|s| s.parse().ok());
+            match secureerase::start_erase(target, method, size, passes) {
+                Ok(id) => shell_println!("Started erase job {} on '{}' ({})", id, target, method.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "complete" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: secureerase complete <id>"); return; }
+            };
+            match secureerase::complete_erase(id) {
+                Ok(()) => shell_println!("Job {} completed", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "cancel" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: secureerase cancel <id>"); return; }
+            };
+            match secureerase::cancel_erase(id) {
+                Ok(()) => shell_println!("Job {} cancelled", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "status" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: secureerase status <id>"); return; }
+            };
+            match secureerase::get_job(id) {
+                Some(job) => {
+                    shell_println!("Job #{}: {} ({})", job.id, job.target, job.method.label());
+                    shell_println!("  Status: {} — {}%", job.status.label(), job.progress_pct());
+                    shell_println!("  Pass: {}/{}", job.current_pass, job.total_passes);
+                    shell_println!("  Erased: {}/{}B", job.erased_bytes, job.total_bytes);
+                }
+                None => shell_println!("Job {} not found", id),
+            }
+        }
+        "list" => {
+            let jobs = secureerase::list_jobs();
+            if jobs.is_empty() {
+                shell_println!("No erase jobs");
+            } else {
+                shell_println!("{} job(s):", jobs.len());
+                for j in &jobs {
+                    shell_println!("  [{}] {} ({}) [{}] {}%", j.id, j.target, j.method.label(), j.status.label(), j.progress_pct());
+                }
+            }
+        }
+        "stats" => {
+            let (count, started, completed, bytes, ops) = secureerase::stats();
+            shell_println!("Secure Erase: jobs={} started={} completed={} bytes_erased={} ops={}", count, started, completed, bytes, ops);
+        }
+        "init" => { secureerase::init_defaults(); shell_println!("Secure erase initialized"); }
+        "test" => secureerase::self_test(),
+        _ => {
+            shell_println!("Usage: secureerase <start|complete|cancel|status|list|stats|init|test>");
+            shell_println!("Aliases: serase");
+        }
+    }
+}
+
+fn parse_erase_method(s: &str) -> crate::fs::secureerase::EraseMethod {
+    use crate::fs::secureerase::EraseMethod;
+    match s.to_lowercase().as_str() {
+        "zero" | "zerofill" => EraseMethod::ZeroFill,
+        "random" | "randomfill" => EraseMethod::RandomFill,
+        "dod3" | "dod" => EraseMethod::DoD3Pass,
+        "dod7" => EraseMethod::DoD7Pass,
+        "gutmann" => EraseMethod::Gutmann,
+        "custom" => EraseMethod::CustomPasses,
+        _ => EraseMethod::ZeroFill,
+    }
+}
+
+/// `dnssettings` / `dns` — DNS resolver configuration.
+fn cmd_dnssettings(args: &str) {
+    use crate::fs::dnssettings;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "servers" => {
+            let servers = dnssettings::list_servers();
+            if servers.is_empty() {
+                shell_println!("No DNS servers");
+            } else {
+                shell_println!("{} server(s):", servers.len());
+                for s in &servers {
+                    let status = if s.is_active { "active" } else { "inactive" };
+                    shell_println!("  {} ({}) pri={} [{}] queries={} fail={}", s.address, s.protocol.label(), s.priority, status, s.queries_sent, s.failures);
+                }
+            }
+        }
+        "add" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: dnssettings add <address> [protocol] [priority]");
+                return;
+            }
+            let addr = parts[1];
+            let proto = parts.get(2).map_or(crate::fs::dnssettings::DnsProtocol::Plain, |p| parse_dns_protocol(p));
+            let pri: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(10);
+            match dnssettings::add_server(addr, proto, pri) {
+                Ok(()) => shell_println!("Added DNS server {} ({})", addr, proto.label()),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            let addr = match parts.get(1) {
+                Some(a) => *a,
+                None => { shell_println!("Usage: dnssettings remove <address>"); return; }
+            };
+            match dnssettings::remove_server(addr) {
+                Ok(()) => shell_println!("Removed {}", addr),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "resolve" => {
+            let name = match parts.get(1) {
+                Some(n) => *n,
+                None => { shell_println!("Usage: dnssettings resolve <hostname>"); return; }
+            };
+            match dnssettings::resolve(name) {
+                Ok(ip) => shell_println!("{} → {}", name, ip),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "flush" => {
+            match dnssettings::flush_cache() {
+                Ok(n) => shell_println!("Flushed {} cached records", n),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "search" => {
+            if let Some(domain) = parts.get(1) {
+                match dnssettings::add_search_domain(domain) {
+                    Ok(()) => shell_println!("Added search domain '{}'", domain),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                let domains = dnssettings::list_search_domains();
+                shell_println!("Search domains: {}", if domains.is_empty() { String::from("(none)") } else { domains.join(", ") });
+            }
+        }
+        "stats" => {
+            let (servers, cache, queries, hits, failures, ops) = dnssettings::stats();
+            shell_println!("DNS: servers={} cache={} queries={} hits={} failures={} ops={}", servers, cache, queries, hits, failures, ops);
+        }
+        "init" => { dnssettings::init_defaults(); shell_println!("DNS settings initialized"); }
+        "test" => dnssettings::self_test(),
+        _ => {
+            shell_println!("Usage: dnssettings <servers|add|remove|resolve|flush|search|stats|init|test>");
+            shell_println!("Aliases: dns");
+        }
+    }
+}
+
+fn parse_dns_protocol(s: &str) -> crate::fs::dnssettings::DnsProtocol {
+    use crate::fs::dnssettings::DnsProtocol;
+    match s.to_lowercase().as_str() {
+        "plain" | "udp" => DnsProtocol::Plain,
+        "doh" | "https" => DnsProtocol::Doh,
+        "dot" | "tls" => DnsProtocol::Dot,
+        "dnscrypt" | "crypt" => DnsProtocol::Dnscrypt,
+        _ => DnsProtocol::Plain,
+    }
+}
+
+/// `backupsched` / `bsched` — automated backup scheduling.
+fn cmd_backupsched(args: &str) {
+    use crate::fs::backupsched;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            let scheds = backupsched::list_schedules();
+            if scheds.is_empty() {
+                shell_println!("No backup schedules");
+            } else {
+                shell_println!("{} schedule(s):", scheds.len());
+                for s in &scheds {
+                    let status = if s.enabled { "on" } else { "off" };
+                    shell_println!("  [{}] {} ({} {}) {} → {} [{}] runs={}", s.id, s.name, s.backup_type.label(), s.frequency.label(), s.source_path, s.destination, status, s.run_count);
+                }
+            }
+        }
+        "create" => {
+            if parts.len() < 4 {
+                shell_println!("Usage: backupsched create <name> <source> <dest> [type] [freq] [retention]");
+                return;
+            }
+            let name = parts[1];
+            let source = parts[2];
+            let dest = parts[3];
+            let btype = parts.get(4).map_or(crate::fs::backupsched::BackupType::Incremental, |t| parse_backup_type(t));
+            let freq = parts.get(5).map_or(crate::fs::backupsched::BackupFrequency::Daily, |f| parse_backup_freq(f));
+            let retention: u32 = parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(30);
+            match backupsched::create_schedule(name, source, dest, btype, freq, retention) {
+                Ok(id) => shell_println!("Created schedule '{}' (id={})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "delete" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: backupsched delete <id>"); return; }
+            };
+            match backupsched::delete_schedule(id) {
+                Ok(()) => shell_println!("Deleted schedule {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "enable" | "disable" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: backupsched {} <id>", sub); return; }
+            };
+            let enabled = sub == "enable";
+            match backupsched::set_enabled(id, enabled) {
+                Ok(()) => shell_println!("Schedule {} {}", id, if enabled { "enabled" } else { "disabled" }),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "run" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: backupsched run <id>"); return; }
+            };
+            match backupsched::run_now(id, crate::fs::backupsched::RunResult::Success, 100_000_000, 500) {
+                Ok(()) => shell_println!("Backup run completed for schedule {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "history" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: backupsched history <id>"); return; }
+            };
+            let max: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
+            let hist = backupsched::get_history(id, max);
+            if hist.is_empty() {
+                shell_println!("No history for schedule {}", id);
+            } else {
+                shell_println!("{} run(s):", hist.len());
+                for r in &hist {
+                    shell_println!("  [{}] {}B, {} files, {}ms", r.result.label(), r.bytes_backed, r.files_count, r.duration_ms);
+                }
+            }
+        }
+        "stats" => {
+            let (scheds, hist, runs, success, failed, bytes, ops) = backupsched::stats();
+            shell_println!("Backup: schedules={} history={} runs={} success={} failed={} bytes={} ops={}", scheds, hist, runs, success, failed, bytes, ops);
+        }
+        "init" => { backupsched::init_defaults(); shell_println!("Backup scheduler initialized"); }
+        "test" => backupsched::self_test(),
+        _ => {
+            shell_println!("Usage: backupsched <list|create|delete|enable|disable|run|history|stats|init|test>");
+            shell_println!("Aliases: bsched");
+        }
+    }
+}
+
+fn parse_backup_type(s: &str) -> crate::fs::backupsched::BackupType {
+    use crate::fs::backupsched::BackupType;
+    match s.to_lowercase().as_str() {
+        "full" => BackupType::Full,
+        "incremental" | "inc" => BackupType::Incremental,
+        "differential" | "diff" => BackupType::Differential,
+        "mirror" => BackupType::Mirror,
+        _ => BackupType::Incremental,
+    }
+}
+
+fn parse_backup_freq(s: &str) -> crate::fs::backupsched::BackupFrequency {
+    use crate::fs::backupsched::BackupFrequency;
+    match s.to_lowercase().as_str() {
+        "hourly" => BackupFrequency::Hourly,
+        "daily" => BackupFrequency::Daily,
+        "weekly" => BackupFrequency::Weekly,
+        "monthly" => BackupFrequency::Monthly,
+        "manual" => BackupFrequency::Manual,
+        _ => BackupFrequency::Daily,
+    }
+}
+
+/// `displaycal` / `dcal` — display color calibration.
+fn cmd_displaycal(args: &str) {
+    use crate::fs::displaycal;
+    use alloc::format;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "list" => {
+            let monitors = displaycal::list_monitors();
+            if monitors.is_empty() {
+                shell_println!("No monitors");
+            } else {
+                shell_println!("{} monitor(s):", monitors.len());
+                for m in &monitors {
+                    shell_println!("  [{}] {} ({}) [{}] gamma={}/{}/{} wp={}K bright={}cd/m²",
+                        m.id, m.monitor_name, m.profile_type.label(), m.status.label(),
+                        m.gamma_r, m.gamma_g, m.gamma_b, m.white_point_k, m.brightness_target);
+                }
+            }
+        }
+        "add" => {
+            let name = match parts.get(1) {
+                Some(n) => *n,
+                None => { shell_println!("Usage: displaycal add <name>"); return; }
+            };
+            match displaycal::add_monitor(name) {
+                Ok(id) => shell_println!("Added monitor '{}' (id={})", name, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "remove" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: displaycal remove <id>"); return; }
+            };
+            match displaycal::remove_monitor(id) {
+                Ok(()) => shell_println!("Removed monitor {}", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "profile" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: displaycal profile <id> <type>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid monitor ID"); return; }
+            };
+            let ptype = parse_profile_type(parts[2]);
+            match displaycal::set_profile(id, ptype) {
+                Ok(()) => shell_println!("Profile set to {} for monitor {}", ptype.label(), id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "gamma" => {
+            if parts.len() < 5 {
+                shell_println!("Usage: displaycal gamma <id> <r> <g> <b> (values * 100, e.g., 220 = 2.20)");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid monitor ID"); return; }
+            };
+            let r: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(220);
+            let g: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(220);
+            let b: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(220);
+            match displaycal::set_gamma(id, r, g, b) {
+                Ok(()) => shell_println!("Gamma set to {}/{}/{} for monitor {}", r, g, b, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "whitepoint" | "wp" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: displaycal whitepoint <id> <kelvin>");
+                return;
+            }
+            let id: u32 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid monitor ID"); return; }
+            };
+            let k: u32 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => { shell_println!("Invalid temperature"); return; }
+            };
+            match displaycal::set_white_point(id, k) {
+                Ok(()) => shell_println!("White point set to {}K for monitor {}", k, id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "calibrate" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: displaycal calibrate <id>"); return; }
+            };
+            match displaycal::calibrate(id) {
+                Ok(()) => shell_println!("Monitor {} calibrated", id),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "info" => {
+            let id: u32 = match parts.get(1).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => { shell_println!("Usage: displaycal info <id>"); return; }
+            };
+            match displaycal::get_monitor(id) {
+                Some(m) => {
+                    shell_println!("Monitor #{}: {}", m.id, m.monitor_name);
+                    shell_println!("  Profile: {}", m.profile_type.label());
+                    shell_println!("  Status: {}", m.status.label());
+                    shell_println!("  Gamma: R={} G={} B={}", m.gamma_r, m.gamma_g, m.gamma_b);
+                    shell_println!("  White point: {}K", m.white_point_k);
+                    shell_println!("  Brightness target: {} cd/m²", m.brightness_target);
+                }
+                None => shell_println!("Monitor {} not found", id),
+            }
+        }
+        "stats" => {
+            let (count, calibrations, profile_changes, ops) = displaycal::stats();
+            shell_println!("Display Cal: monitors={} calibrations={} profile_changes={} ops={}", count, calibrations, profile_changes, ops);
+        }
+        "init" => { displaycal::init_defaults(); shell_println!("Display calibration initialized"); }
+        "test" => displaycal::self_test(),
+        _ => {
+            shell_println!("Usage: displaycal <list|add|remove|profile|gamma|whitepoint|calibrate|info|stats|init|test>");
+            shell_println!("Aliases: dcal");
+        }
+    }
+}
+
+fn parse_profile_type(s: &str) -> crate::fs::displaycal::ProfileType {
+    use crate::fs::displaycal::ProfileType;
+    match s.to_lowercase().as_str() {
+        "srgb" => ProfileType::Srgb,
+        "adobergb" | "adobe" => ProfileType::AdobeRgb,
+        "dcip3" | "p3" => ProfileType::DciP3,
+        "rec2020" | "2020" => ProfileType::Rec2020,
+        "custom" => ProfileType::Custom,
+        _ => ProfileType::Srgb,
+    }
+}
+
 /// `filepicker` / `fpick` — file open/save dialog backend.
 fn cmd_filepicker(args: &str) {
     use crate::fs::filepicker;
@@ -53816,7 +54267,7 @@ fn is_builtin(name: &str) -> bool {
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"
-        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
+        | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
         | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"

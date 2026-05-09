@@ -36,7 +36,8 @@
 //!   `posix_memalign`/`aligned_alloc`/`valloc`/`memalign`/`reallocarray`,
 //!   `setjmp`/`longjmp`/`sigsetjmp`/`siglongjmp`, `qsort`, `bsearch`,
 //!   `atoi`/`strtol`,
-//!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification
+//!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification,
+//!   `__ctype_b_loc`/`__ctype_tolower_loc`/`__ctype_toupper_loc`
 //! - **Formatted Output**: `printf`, `fprintf`, `sprintf`, `snprintf`
 //!   (via assembly trampoline for C variadic capture)
 //! - **Formatted Input**: `sscanf` (string scanning with `%d`/`%u`/`%x`/

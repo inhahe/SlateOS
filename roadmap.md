@@ -980,6 +980,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pseudo-terminal stubs: posix_openpt (ENOSYS), grantpt/unlockpt (succeed), ptsname/ptsname_r (null/ENOSYS)
   - [x] dladdr: symbol lookup stub (returns 0=failure), DlInfo struct
   - [x] mqueue: POSIX message queue stubs (mq_open/close/unlink/send/receive/getattr/setattr — all ENOSYS)
+  - [x] getpagesize: returns 16384 (16 KiB pages), _SC_PAGE_SIZE alias
+  - [x] strchrnul: GNU extension — strchr that returns null-terminator instead of null
+  - [x] clearenv: clear all environment variables; secure_getenv (identical to getenv — no privilege escalation)
+  - [x] __ctype_b_loc/__ctype_tolower_loc/__ctype_toupper_loc: glibc ctype lookup tables (384-entry compile-time arrays)
+  - [x] program_invocation_name/program_invocation_short_name/__progname/__progname_full: program name globals
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

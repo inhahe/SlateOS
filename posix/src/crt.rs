@@ -249,3 +249,34 @@ pub extern "C" fn __stack_chk_fail() -> ! {
 /// For a static binary, it just needs to exist (value doesn't matter).
 #[unsafe(no_mangle)]
 pub static __dso_handle: u8 = 0;
+
+// ---------------------------------------------------------------------------
+// Program name globals
+// ---------------------------------------------------------------------------
+
+/// Default program name when argv[0] is not available.
+static UNKNOWN_PROG: [u8; 8] = *b"unknown\0";
+
+/// GNU extension: full path of the program (from argv[0]).
+///
+/// Set during `__libc_start_main`.  Programs that read this symbol
+/// expect it to point to argv[0].
+#[unsafe(no_mangle)]
+pub static mut program_invocation_name: *const u8 = UNKNOWN_PROG.as_ptr();
+
+/// GNU extension: basename of the program.
+///
+/// Set during `__libc_start_main`.  Points into the same string as
+/// `program_invocation_name` but after the last '/'.
+#[unsafe(no_mangle)]
+pub static mut program_invocation_short_name: *const u8 = UNKNOWN_PROG.as_ptr();
+
+/// BSD/common: short program name.
+///
+/// Alias for `program_invocation_short_name`.
+#[unsafe(no_mangle)]
+pub static mut __progname: *const u8 = UNKNOWN_PROG.as_ptr();
+
+/// Full program name (BSD alias).
+#[unsafe(no_mangle)]
+pub static mut __progname_full: *const u8 = UNKNOWN_PROG.as_ptr();

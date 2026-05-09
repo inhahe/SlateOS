@@ -37,8 +37,10 @@ pub const STDERR_FILENO: Fd = 2;
 // sysconf names
 // ---------------------------------------------------------------------------
 
-/// Page size.
+/// Page size (sysconf name).
 pub const _SC_PAGESIZE: i32 = 30;
+/// Page size (alias).
+pub const _SC_PAGE_SIZE: i32 = _SC_PAGESIZE;
 /// Number of configured processors.
 pub const _SC_NPROCESSORS_CONF: i32 = 83;
 /// Number of online processors.
@@ -529,6 +531,15 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
             -1
         }
     }
+}
+
+/// Get the page size of the system.
+///
+/// Our OS uses 16 KiB pages.  This is equivalent to
+/// `sysconf(_SC_PAGESIZE)` but more convenient.
+#[unsafe(no_mangle)]
+pub extern "C" fn getpagesize() -> i32 {
+    16384
 }
 
 // ---------------------------------------------------------------------------

@@ -268,6 +268,45 @@ pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// clearenv
+// ---------------------------------------------------------------------------
+
+/// Clear the entire environment.
+///
+/// Removes all environment variables.  Returns 0 on success.
+#[unsafe(no_mangle)]
+pub extern "C" fn clearenv() -> i32 {
+    // SAFETY: Single-threaded access.
+    let store = unsafe { core::ptr::addr_of_mut!(ENV_STORE).as_mut() };
+    if let Some(store) = store {
+        for entry in store.iter_mut() {
+            entry[0] = 0;
+        }
+        rebuild_environ_ptrs();
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// secure_getenv
+// ---------------------------------------------------------------------------
+
+/// Get an environment variable (security-aware).
+///
+/// In a real libc, `secure_getenv` returns null if the process is
+/// running with elevated privileges (setuid/setgid).  Since our OS
+/// doesn't have privilege escalation, this is identical to `getenv`.
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn secure_getenv(name: *const u8) -> *const u8 {
+    // No privilege escalation in our OS — just delegate.
+    unsafe { getenv(name) }
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 

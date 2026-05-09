@@ -281,6 +281,28 @@ pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *const u8 {
     }
 }
 
+/// Like `strchr`, but returns a pointer to the null terminator if
+/// `c` is not found (instead of null).
+///
+/// GNU extension — commonly used by glibc-based programs.
+///
+/// # Safety
+///
+/// `s` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strchrnul(s: *const u8, c: i32) -> *const u8 {
+    let val = c as u8;
+    let mut i: usize = 0;
+    loop {
+        // SAFETY: s is a valid null-terminated string.
+        let ch = unsafe { *s.add(i) };
+        if ch == val || ch == 0 {
+            return unsafe { s.add(i) };
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
 /// Find the last occurrence of `c` in string `s`.
 ///
 /// # Safety

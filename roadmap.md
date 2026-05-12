@@ -988,6 +988,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] UDP TX checksums: compute_transport_checksum() in ipv4.rs; send() computes proper RFC 768 checksum over pseudo-header + segment (was disabled with checksum=0)
   - [x] DNS retry with backoff: 3 attempts with increasing timeouts (1s/2s/4s); definitive answers (NXDOMAIN, parse errors) not retried — only network timeouts trigger retransmission
   - [x] ICMP Redirect (Type 5) and Parameter Problem (Type 12): logged with code-specific human-readable reasons; Parameter Problem notifies transport layer
+  - [x] TCP Nagle buffer: small writes buffered internally (nagle_buf) instead of returning WouldBlock; flushed when ACK acknowledges all outstanding data or buffer fills MSS
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)
@@ -1172,6 +1173,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] UDP connect: stores default peer in SocketMeta (userspace only); send()/sendto(NULL) use stored peer; recv() works on connected UDP sockets
   - [x] Socket option tracking: SO_RCVBUF, SO_SNDBUF, SO_BROADCAST, SO_LINGER stored in SocketMeta and returned by getsockopt (was hardcoded defaults)
   - [x] mkostemp: flags (O_CLOEXEC, O_APPEND) now ORed into open() call (was silently ignored)
+  - [x] Terminal fd validation: tcsendbreak/tcdrain/tcflow/tcflush validate fd is a terminal (EBADF/ENOTTY) and validate argument ranges (EINVAL)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

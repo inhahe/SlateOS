@@ -4,9 +4,11 @@
 //! handling of ICMP error messages:
 //!
 //! - **Type 0**: Echo Reply — matched to outstanding pings
-//! - **Type 3**: Destination Unreachable — logged with code-specific reason
+//! - **Type 3**: Destination Unreachable — logged, notifies TCP
+//! - **Type 5**: Redirect — logged with suggested gateway
 //! - **Type 8**: Echo Request — generates Echo Reply
-//! - **Type 11**: Time Exceeded — logged (useful for traceroute)
+//! - **Type 11**: Time Exceeded — logged, notifies TCP
+//! - **Type 12**: Parameter Problem — logged, notifies TCP
 //!
 //! ## Echo Request/Reply format
 //!
@@ -47,8 +49,12 @@ const ICMP_ECHO_REPLY: u8 = 0;
 const ICMP_DEST_UNREACHABLE: u8 = 3;
 /// Echo Request.
 const ICMP_ECHO_REQUEST: u8 = 8;
+/// Redirect.
+const ICMP_REDIRECT: u8 = 5;
 /// Time Exceeded.
 const ICMP_TIME_EXCEEDED: u8 = 11;
+/// Parameter Problem.
+const ICMP_PARAM_PROBLEM: u8 = 12;
 
 /// ICMP header size (type + code + checksum + id/seq or unused).
 const ICMP_HEADER_SIZE: usize = 8;
@@ -263,6 +269,17 @@ fn dest_unreachable_reason(code: u8) -> &'static str {
     }
 }
 
+/// Human-readable Redirect code.
+fn redirect_reason(code: u8) -> &'static str {
+    match code {
+        0 => "redirect for network",
+        1 => "redirect for host",
+        2 => "redirect for TOS and network",
+        3 => "redirect for TOS and host",
+        _ => "unknown",
+    }
+}
+
 /// Human-readable Time Exceeded code.
 fn time_exceeded_reason(code: u8) -> &'static str {
     match code {
@@ -318,6 +335,20 @@ pub fn process_icmp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
             // of the triggering packet (enough for TCP/UDP port info).
             notify_transport_error(data, icmp_type, code);
         }
+        ICMP_REDIRECT => {
+            // Type 5: a router tells us to use a different gateway for
+            // a given destination.  The better gateway IP is in bytes
+            // 4-7 of the ICMP header (the "gateway address" field).
+            if data.len() >= 8 {
+                let gw = Ipv4Addr::new(data[4], data[5], data[6], data[7]);
+                crate::serial_println!(
+                    "[icmp] Redirect from {}: use gateway {} (code {}={})",
+                    ip_packet.src, gw, code, redirect_reason(code)
+                );
+                // Note: we don't update routing tables because we only
+                // have a single default gateway.  Log for diagnostics.
+            }
+        }
         ICMP_TIME_EXCEEDED => {
             crate::serial_println!(
                 "[icmp] Time exceeded from {}: {} (code {})",
@@ -327,6 +358,17 @@ pub fn process_icmp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
             );
             // Also notify transport for TTL exceeded — a SYN_SENT
             // connection to an unreachable-by-TTL host should abort.
+            notify_transport_error(data, icmp_type, code);
+        }
+        ICMP_PARAM_PROBLEM => {
+            // Type 12: the packet we sent has a header problem.
+            // Byte 4 of the ICMP message is the pointer to the
+            // offending byte in the original header.
+            let pointer = if data.len() >= 5 { data[4] } else { 0 };
+            crate::serial_println!(
+                "[icmp] Parameter problem from {}: pointer={} (code {})",
+                ip_packet.src, pointer, code
+            );
             notify_transport_error(data, icmp_type, code);
         }
         _ => {

@@ -6,6 +6,11 @@ popen/pclose → needs fd inheritance in spawn (kernel-process zone)
 Per-namespace ARP → blocked on veth pairs
 Wire process→container→net_ns → cross-zone (kernel-process + kernel-ipc)
 
+Net improvements (not blocked, could still do):
+TCP keepalive probes (detect dead connections)
+TCP receive window tracking from peer (currently fixed 16 KiB)
+(DONE) ICMP destination unreachable / time exceeded handling — commit 56d3997
+
 ## Completed
 - Per-CPU scheduler lock refactor: DONE (commit 449e218).  Split global
   SCHED lock into per-CPU spinlocks inside PerCpuScheduler + separate

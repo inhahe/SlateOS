@@ -1,6 +1,7 @@
 //! Packet filtering firewall.
 //!
-//! A simple stateful firewall for inbound and outbound traffic.
+//! A simple stateful firewall for inbound and outbound traffic, with
+//! per-namespace isolation for container support.
 //!
 //! ## Design
 //!
@@ -28,21 +29,28 @@
 //! rules.  Entries expire after 60 seconds of inactivity (but connections
 //! refresh their entry on each packet).
 //!
+//! ## Per-namespace firewall
+//!
+//! Each network namespace can have its own independent firewall state:
+//! rules, connection tracking, default policy, and enabled flag.  This
+//! provides container-level network isolation — a container's firewall
+//! rules don't affect the host or other containers.
+//!
+//! - **Root namespace (ID 0)**: Uses the global firewall state (the
+//!   `ENABLED`, `RULES`, `CONNTRACK`, `DEFAULT_POLICY` statics).
+//! - **Child namespaces (ID > 0)**: Use per-namespace state in
+//!   `NS_FIREWALLS`.  If a namespace hasn't initialized its firewall
+//!   (inactive state), all traffic passes through.
+//!
+//! The `check_outbound_ns()` and `check_inbound_ns()` functions select
+//! the appropriate firewall state based on namespace ID.
+//!
 //! ## Limitations
 //!
-//! - Maximum 32 rules and 64 tracked connections.
+//! - Maximum 32 rules and 64 tracked connections for the global firewall.
+//! - Maximum 16 rules and 32 tracked connections per namespace.
 //! - No NAT or port forwarding.
-//! - No per-process filtering (applies globally).
-//!
-//! ## Namespace note
-//!
-//! Firewall rules are currently global — they apply to all network
-//! namespaces equally.  Per-namespace firewall state (independent rule
-//! tables and connection tracking per namespace) is planned for the
-//! future, as documented in `netns.rs`.  The `ipv4::send_ns()` function
-//! already runs the global firewall check before sending; when
-//! per-namespace firewall is implemented, it will check the namespace's
-//! rule table instead.
+//! - No per-process filtering (per-namespace only).
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
@@ -64,6 +72,17 @@ const MAX_CONNTRACK: usize = 64;
 
 /// Connection tracking expiry in nanoseconds (60 seconds).
 const CONNTRACK_EXPIRY_NS: u64 = 60_000_000_000;
+
+/// Maximum number of network namespaces with firewall state.
+///
+/// Must match `netns::MAX_NAMESPACES`.
+const MAX_NS_FIREWALL: usize = 64;
+
+/// Maximum firewall rules per namespace (smaller than global to save memory).
+const MAX_NS_RULES: usize = 16;
+
+/// Maximum tracked connections per namespace.
+const MAX_NS_CONNTRACK: usize = 32;
 
 // ---------------------------------------------------------------------------
 // Firewall rule types
@@ -208,7 +227,60 @@ static PACKETS_ALLOWED: AtomicU64 = AtomicU64::new(0);
 static PACKETS_DENIED: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
-// Public API
+// Per-namespace firewall state
+// ---------------------------------------------------------------------------
+
+/// Firewall state for a single network namespace.
+///
+/// Each non-root namespace can optionally have its own independent
+/// firewall with rules, connection tracking, and default policy.
+/// When `active` is `false`, no filtering is performed for that
+/// namespace (all traffic passes through).
+struct NsFirewallState {
+    /// Whether this namespace has firewall state initialized.
+    active: bool,
+    /// Whether the firewall is enabled for this namespace.
+    enabled: bool,
+    /// Default policy when no rule matches.
+    policy: DefaultPolicy,
+    /// Rule table.
+    rules: [Rule; MAX_NS_RULES],
+    /// Connection tracking table.
+    conntrack: [ConntrackEntry; MAX_NS_CONNTRACK],
+    /// Packets allowed counter.
+    allowed: u64,
+    /// Packets denied counter.
+    denied: u64,
+}
+
+impl NsFirewallState {
+    const fn empty() -> Self {
+        const EMPTY_RULE: Rule = Rule::empty();
+        const EMPTY_CT: ConntrackEntry = ConntrackEntry::empty();
+        Self {
+            active: false,
+            enabled: false,
+            policy: DefaultPolicy::Accept,
+            rules: [EMPTY_RULE; MAX_NS_RULES],
+            conntrack: [EMPTY_CT; MAX_NS_CONNTRACK],
+            allowed: 0,
+            denied: 0,
+        }
+    }
+}
+
+/// Per-namespace firewall state table.
+///
+/// Index 0 (root namespace) is unused — the root namespace uses the
+/// global `ENABLED`, `RULES`, `CONNTRACK`, and `DEFAULT_POLICY` statics
+/// for backward compatibility.
+static NS_FIREWALLS: Mutex<[NsFirewallState; MAX_NS_FIREWALL]> = Mutex::new({
+    const EMPTY: NsFirewallState = NsFirewallState::empty();
+    [EMPTY; MAX_NS_FIREWALL]
+});
+
+// ---------------------------------------------------------------------------
+// Public API — global (root namespace) firewall
 // ---------------------------------------------------------------------------
 
 /// Enable the firewall.
@@ -488,6 +560,451 @@ pub fn check_outbound(protocol: u8, dst_ip: Ipv4Addr, payload: &[u8]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Public API — per-namespace firewall
+// ---------------------------------------------------------------------------
+
+/// Initialize firewall state for a network namespace.
+///
+/// Must be called before any other `ns_*` firewall function for that
+/// namespace.  Starts with the firewall disabled and an Accept default
+/// policy.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if `ns_id` is out of range.
+pub fn ns_init(ns_id: u32) -> KernelResult<()> {
+    let idx = ns_id as usize;
+    if idx == 0 || idx >= MAX_NS_FIREWALL {
+        // Root namespace uses the global firewall; out-of-range rejected.
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let mut table = NS_FIREWALLS.lock();
+    table[idx] = NsFirewallState::empty();
+    table[idx].active = true;
+    serial_println!("[firewall] NS {} firewall initialized", ns_id);
+    Ok(())
+}
+
+/// Tear down firewall state for a network namespace.
+///
+/// Clears all rules, connection tracking, and counters.
+pub fn ns_destroy(ns_id: u32) {
+    let idx = ns_id as usize;
+    if idx == 0 || idx >= MAX_NS_FIREWALL {
+        return;
+    }
+    let mut table = NS_FIREWALLS.lock();
+    table[idx] = NsFirewallState::empty();
+}
+
+/// Enable the firewall for a namespace.
+pub fn ns_enable(ns_id: u32) {
+    let idx = ns_id as usize;
+    if idx == 0 || idx >= MAX_NS_FIREWALL {
+        return;
+    }
+    let mut table = NS_FIREWALLS.lock();
+    if table[idx].active {
+        table[idx].enabled = true;
+        serial_println!("[firewall] NS {} enabled", ns_id);
+    }
+}
+
+/// Disable the firewall for a namespace.
+pub fn ns_disable(ns_id: u32) {
+    let idx = ns_id as usize;
+    if idx == 0 || idx >= MAX_NS_FIREWALL {
+        return;
+    }
+    let mut table = NS_FIREWALLS.lock();
+    if table[idx].active {
+        table[idx].enabled = false;
+        serial_println!("[firewall] NS {} disabled", ns_id);
+    }
+}
+
+/// Check if a namespace's firewall is enabled.
+pub fn ns_is_enabled(ns_id: u32) -> bool {
+    let idx = ns_id as usize;
+    if idx == 0 {
+        return is_enabled();
+    }
+    if idx >= MAX_NS_FIREWALL {
+        return false;
+    }
+    let table = NS_FIREWALLS.lock();
+    table[idx].active && table[idx].enabled
+}
+
+/// Set the default policy for a namespace.
+pub fn ns_set_default_policy(ns_id: u32, policy: DefaultPolicy) {
+    let idx = ns_id as usize;
+    if idx == 0 {
+        set_default_policy(policy);
+        return;
+    }
+    if idx >= MAX_NS_FIREWALL {
+        return;
+    }
+    let mut table = NS_FIREWALLS.lock();
+    if table[idx].active {
+        table[idx].policy = policy;
+        serial_println!("[firewall] NS {} default policy: {:?}", ns_id, policy);
+    }
+}
+
+/// Add a firewall rule to a namespace.
+///
+/// Returns the rule slot index within the namespace's rule table.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if the namespace is invalid.
+/// - [`KernelError::OutOfMemory`] if the namespace's rule table is full.
+pub fn ns_add_rule(ns_id: u32, rule: Rule) -> KernelResult<usize> {
+    let idx = ns_id as usize;
+    if idx == 0 {
+        return add_rule(rule);
+    }
+    if idx >= MAX_NS_FIREWALL {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let mut table = NS_FIREWALLS.lock();
+    if !table[idx].active {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let slot = table[idx].rules.iter().position(|r| !r.active)
+        .ok_or(KernelError::OutOfMemory)?;
+
+    let mut new_rule = rule;
+    new_rule.active = true;
+    table[idx].rules[slot] = new_rule;
+
+    serial_println!(
+        "[firewall] NS {} rule added: {:?} {:?} {:?} port={} prio={}",
+        ns_id, rule.direction, rule.action, rule.protocol,
+        rule.dst_port, rule.priority
+    );
+    Ok(slot)
+}
+
+/// Remove a firewall rule from a namespace by index.
+pub fn ns_remove_rule(ns_id: u32, rule_idx: usize) -> KernelResult<()> {
+    let idx = ns_id as usize;
+    if idx == 0 {
+        return remove_rule(rule_idx);
+    }
+    if idx >= MAX_NS_FIREWALL {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let mut table = NS_FIREWALLS.lock();
+    if !table[idx].active {
+        return Err(KernelError::InvalidArgument);
+    }
+    let rule = table[idx].rules.get_mut(rule_idx)
+        .ok_or(KernelError::InvalidArgument)?;
+    if !rule.active {
+        return Err(KernelError::InvalidArgument);
+    }
+    rule.active = false;
+    Ok(())
+}
+
+/// Clear all rules for a namespace.
+pub fn ns_clear_rules(ns_id: u32) {
+    let idx = ns_id as usize;
+    if idx == 0 {
+        clear_rules();
+        return;
+    }
+    if idx >= MAX_NS_FIREWALL {
+        return;
+    }
+    let mut table = NS_FIREWALLS.lock();
+    if table[idx].active {
+        for rule in &mut table[idx].rules {
+            rule.active = false;
+        }
+    }
+}
+
+/// Clear all connection tracking entries for a namespace.
+pub fn ns_clear_conntrack(ns_id: u32) {
+    let idx = ns_id as usize;
+    if idx == 0 {
+        clear_conntrack();
+        return;
+    }
+    if idx >= MAX_NS_FIREWALL {
+        return;
+    }
+    let mut table = NS_FIREWALLS.lock();
+    if table[idx].active {
+        for entry in &mut table[idx].conntrack {
+            entry.active = false;
+        }
+    }
+}
+
+/// Get the number of active rules for a namespace.
+pub fn ns_rule_count(ns_id: u32) -> usize {
+    let idx = ns_id as usize;
+    if idx == 0 {
+        return rule_count();
+    }
+    if idx >= MAX_NS_FIREWALL {
+        return 0;
+    }
+    let table = NS_FIREWALLS.lock();
+    if !table[idx].active {
+        return 0;
+    }
+    table[idx].rules.iter().filter(|r| r.active).count()
+}
+
+/// Get firewall statistics for a namespace (allowed, denied).
+pub fn ns_stats(ns_id: u32) -> (u64, u64) {
+    let idx = ns_id as usize;
+    if idx == 0 {
+        return stats();
+    }
+    if idx >= MAX_NS_FIREWALL {
+        return (0, 0);
+    }
+    let table = NS_FIREWALLS.lock();
+    if !table[idx].active {
+        return (0, 0);
+    }
+    (table[idx].allowed, table[idx].denied)
+}
+
+/// Reset statistics for a namespace.
+pub fn ns_reset_stats(ns_id: u32) {
+    let idx = ns_id as usize;
+    if idx == 0 {
+        reset_stats();
+        return;
+    }
+    if idx >= MAX_NS_FIREWALL {
+        return;
+    }
+    let mut table = NS_FIREWALLS.lock();
+    if table[idx].active {
+        table[idx].allowed = 0;
+        table[idx].denied = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Namespace-aware packet filtering
+// ---------------------------------------------------------------------------
+
+/// Check whether an outbound packet should be allowed, using the
+/// firewall state for the specified network namespace.
+///
+/// - For the root namespace (ID 0), delegates to `check_outbound()`.
+/// - For child namespaces, checks the namespace's own rules and
+///   connection tracking.
+/// - If a namespace has no active firewall state, all traffic passes.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn check_outbound_ns(
+    ns_id: u32,
+    protocol: u8,
+    dst_ip: Ipv4Addr,
+    payload: &[u8],
+) -> bool {
+    let idx = ns_id as usize;
+
+    // Root namespace uses the global firewall.
+    if idx == 0 {
+        return check_outbound(protocol, dst_ip, payload);
+    }
+
+    // Out of range — allow by default.
+    if idx >= MAX_NS_FIREWALL {
+        return true;
+    }
+
+    let mut table = NS_FIREWALLS.lock();
+
+    // No active firewall for this namespace — pass through.
+    if !table[idx].active || !table[idx].enabled {
+        return true;
+    }
+
+    let (src_port, dst_port) = extract_ports(protocol, payload);
+
+    // Check rules.
+    let action = match_rules_in_table(&table[idx].rules, Direction::Out, protocol, dst_ip, dst_port);
+
+    let allowed = match action {
+        Some(Action::Allow) => true,
+        Some(Action::Deny) => false,
+        None => table[idx].policy == DefaultPolicy::Accept,
+    };
+
+    if allowed {
+        table[idx].allowed = table[idx].allowed.wrapping_add(1);
+        // Track the connection for stateful reply filtering.
+        if (protocol == PROTO_TCP || protocol == PROTO_UDP) && src_port != 0 {
+            ns_track_connection(&mut table[idx].conntrack, protocol, src_port, dst_ip, dst_port);
+        }
+    } else {
+        table[idx].denied = table[idx].denied.wrapping_add(1);
+    }
+
+    allowed
+}
+
+/// Check whether an inbound packet should be allowed, using the
+/// firewall state for the specified network namespace.
+///
+/// - For the root namespace (ID 0), delegates to `check_inbound()`.
+/// - For child namespaces, checks the namespace's own rules and
+///   connection tracking.
+/// - If a namespace has no active firewall state, all traffic passes.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn check_inbound_ns(
+    ns_id: u32,
+    protocol: u8,
+    src_ip: Ipv4Addr,
+    payload: &[u8],
+) -> bool {
+    let idx = ns_id as usize;
+
+    if idx == 0 {
+        return check_inbound(protocol, src_ip, payload);
+    }
+
+    if idx >= MAX_NS_FIREWALL {
+        return true;
+    }
+
+    let mut table = NS_FIREWALLS.lock();
+
+    if !table[idx].active || !table[idx].enabled {
+        return true;
+    }
+
+    let (src_port, dst_port) = extract_ports(protocol, payload);
+
+    // Check connection tracking first — tracked replies always pass.
+    if protocol == PROTO_TCP || protocol == PROTO_UDP {
+        if ns_is_tracked_reply(&mut table[idx].conntrack, protocol, src_ip, src_port, dst_port) {
+            table[idx].allowed = table[idx].allowed.wrapping_add(1);
+            return true;
+        }
+    }
+
+    // Check rules.
+    let action = match_rules_in_table(&table[idx].rules, Direction::In, protocol, src_ip, dst_port);
+
+    match action {
+        Some(Action::Allow) => {
+            table[idx].allowed = table[idx].allowed.wrapping_add(1);
+            true
+        }
+        Some(Action::Deny) => {
+            table[idx].denied = table[idx].denied.wrapping_add(1);
+            false
+        }
+        None => {
+            if table[idx].policy == DefaultPolicy::Accept {
+                table[idx].allowed = table[idx].allowed.wrapping_add(1);
+                true
+            } else {
+                table[idx].denied = table[idx].denied.wrapping_add(1);
+                false
+            }
+        }
+    }
+}
+
+/// Track a connection in a namespace's connection tracking table.
+fn ns_track_connection(
+    conntrack: &mut [ConntrackEntry; MAX_NS_CONNTRACK],
+    protocol: u8,
+    local_port: u16,
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+) {
+    let now = crate::hrtimer::now_ns();
+
+    // Check if already tracked — refresh timestamp.
+    for entry in conntrack.iter_mut() {
+        if entry.active
+            && entry.protocol == protocol
+            && entry.local_port == local_port
+            && entry.remote_ip == remote_ip
+            && entry.remote_port == remote_port
+        {
+            entry.last_seen_ns = now;
+            return;
+        }
+    }
+
+    // Find a free slot (or expire the oldest).
+    let slot = conntrack.iter().position(|e| !e.active)
+        .or_else(|| {
+            conntrack.iter()
+                .enumerate()
+                .filter(|(_, e)| e.active)
+                .min_by_key(|(_, e)| e.last_seen_ns)
+                .map(|(i, _)| i)
+        });
+
+    if let Some(i) = slot {
+        conntrack[i] = ConntrackEntry {
+            active: true,
+            protocol,
+            local_port,
+            remote_ip,
+            remote_port,
+            last_seen_ns: now,
+        };
+    }
+}
+
+/// Check if an inbound packet matches a tracked connection in a
+/// namespace's connection tracking table.
+fn ns_is_tracked_reply(
+    conntrack: &mut [ConntrackEntry; MAX_NS_CONNTRACK],
+    protocol: u8,
+    src_ip: Ipv4Addr,
+    src_port: u16,
+    dst_port: u16,
+) -> bool {
+    let now = crate::hrtimer::now_ns();
+
+    for entry in conntrack.iter_mut() {
+        if !entry.active {
+            continue;
+        }
+
+        // Expire old entries.
+        if now.saturating_sub(entry.last_seen_ns) > CONNTRACK_EXPIRY_NS {
+            entry.active = false;
+            continue;
+        }
+
+        if entry.protocol == protocol
+            && entry.remote_ip == src_ip
+            && entry.remote_port == src_port
+            && entry.local_port == dst_port
+        {
+            entry.last_seen_ns = now;
+            return true;
+        }
+    }
+
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -504,12 +1021,25 @@ fn extract_ports(protocol: u8, payload: &[u8]) -> (u16, u16) {
     }
 }
 
-/// Match a packet against the rule table.
+/// Match a packet against the global rule table.
 ///
 /// Returns `Some(action)` if a rule matches, `None` if no rule matches.
 fn match_rules(direction: Direction, protocol: u8, ip: Ipv4Addr, port: u16) -> Option<Action> {
     let rules = RULES.lock();
+    match_rules_in_table(&*rules, direction, protocol, ip, port)
+}
 
+/// Match a packet against a given rule table.
+///
+/// Shared logic for both the global firewall and per-namespace firewalls.
+/// Returns `Some(action)` if a rule matches, `None` if no rule matches.
+fn match_rules_in_table(
+    rules: &[Rule],
+    direction: Direction,
+    protocol: u8,
+    ip: Ipv4Addr,
+    port: u16,
+) -> Option<Action> {
     // Find the highest-priority (lowest number) matching rule.
     let mut best: Option<(u16, Action)> = None;
 
@@ -594,8 +1124,11 @@ pub fn self_test() -> KernelResult<()> {
     test_rule_matching()?;
     test_ip_prefix_match()?;
     test_conntrack()?;
+    test_ns_firewall_isolation()?;
+    test_ns_firewall_conntrack()?;
+    test_ns_firewall_lifecycle()?;
 
-    serial_println!("[firewall] Firewall self-test PASSED");
+    serial_println!("[firewall] Firewall self-test PASSED (8 tests)");
     Ok(())
 }
 
@@ -779,5 +1312,224 @@ fn test_conntrack() -> KernelResult<()> {
     set_default_policy(DefaultPolicy::Accept);
     disable();
     serial_println!("[firewall]   Connection tracking: OK");
+    Ok(())
+}
+
+/// Test 6: Per-namespace firewall isolation.
+///
+/// Rules in one namespace don't affect another.
+fn test_ns_firewall_isolation() -> KernelResult<()> {
+    // Use namespace IDs 1 and 2 (not root).
+    let ns1: u32 = 1;
+    let ns2: u32 = 2;
+
+    // Initialize both.
+    ns_init(ns1)?;
+    ns_init(ns2)?;
+
+    // Enable both with DROP policy.
+    ns_enable(ns1);
+    ns_enable(ns2);
+    ns_set_default_policy(ns1, DefaultPolicy::Drop);
+    ns_set_default_policy(ns2, DefaultPolicy::Drop);
+
+    // Add allow rule for port 80 in ns1 only.
+    let rule = Rule {
+        active: true,
+        direction: Direction::In,
+        action: Action::Allow,
+        protocol: Protocol::Tcp,
+        src_ip: Ipv4Addr::UNSPECIFIED,
+        src_prefix: 0,
+        dst_port: 80,
+        priority: 10,
+    };
+    ns_add_rule(ns1, rule)?;
+
+    // TCP to port 80: allowed in ns1, denied in ns2.
+    let tcp_80 = [48u8, 57, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let allowed_ns1 = check_inbound_ns(ns1, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp_80);
+    let allowed_ns2 = check_inbound_ns(ns2, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp_80);
+
+    if !allowed_ns1 {
+        serial_println!("[firewall]   FAIL: ns1 port 80 should be allowed");
+        ns_destroy(ns1);
+        ns_destroy(ns2);
+        return Err(KernelError::InternalError);
+    }
+    if allowed_ns2 {
+        serial_println!("[firewall]   FAIL: ns2 port 80 should be denied");
+        ns_destroy(ns1);
+        ns_destroy(ns2);
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify stats are per-namespace.
+    let (a1, _) = ns_stats(ns1);
+    let (_, d2) = ns_stats(ns2);
+    if a1 == 0 {
+        serial_println!("[firewall]   FAIL: ns1 allowed counter should be > 0");
+        ns_destroy(ns1);
+        ns_destroy(ns2);
+        return Err(KernelError::InternalError);
+    }
+    if d2 == 0 {
+        serial_println!("[firewall]   FAIL: ns2 denied counter should be > 0");
+        ns_destroy(ns1);
+        ns_destroy(ns2);
+        return Err(KernelError::InternalError);
+    }
+
+    ns_destroy(ns1);
+    ns_destroy(ns2);
+    serial_println!("[firewall]   Per-namespace isolation: OK");
+    Ok(())
+}
+
+/// Test 7: Per-namespace connection tracking.
+///
+/// Outbound from a namespace creates a conntrack entry; reply passes.
+fn test_ns_firewall_conntrack() -> KernelResult<()> {
+    let ns: u32 = 3;
+    ns_init(ns)?;
+    ns_enable(ns);
+    ns_set_default_policy(ns, DefaultPolicy::Drop);
+
+    // Allow all outbound.
+    let rule = Rule {
+        active: true,
+        direction: Direction::Out,
+        action: Action::Allow,
+        protocol: Protocol::Any,
+        src_ip: Ipv4Addr::UNSPECIFIED,
+        src_prefix: 0,
+        dst_port: 0,
+        priority: 1,
+    };
+    ns_add_rule(ns, rule)?;
+
+    // Outbound TCP from port 50000 to 93.184.216.34:443.
+    let tcp_out = [0xC3u8, 0x50, 0x01, 0xBB, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let allowed = check_outbound_ns(ns, PROTO_TCP, Ipv4Addr([93, 184, 216, 34]), &tcp_out);
+    if !allowed {
+        serial_println!("[firewall]   FAIL: ns outbound should be allowed");
+        ns_destroy(ns);
+        return Err(KernelError::InternalError);
+    }
+
+    // Inbound reply from 93.184.216.34:443 to our port 50000.
+    let tcp_reply = [0x01u8, 0xBB, 0xC3, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let allowed = check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([93, 184, 216, 34]), &tcp_reply);
+    if !allowed {
+        serial_println!("[firewall]   FAIL: ns reply should be allowed via conntrack");
+        ns_destroy(ns);
+        return Err(KernelError::InternalError);
+    }
+
+    // Inbound from a different IP should be denied.
+    let tcp_other = [0x01u8, 0xBB, 0xC3, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let allowed = check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([1, 2, 3, 4]), &tcp_other);
+    if allowed {
+        serial_println!("[firewall]   FAIL: ns untracked IP should be denied");
+        ns_destroy(ns);
+        return Err(KernelError::InternalError);
+    }
+
+    ns_destroy(ns);
+    serial_println!("[firewall]   Per-namespace conntrack: OK");
+    Ok(())
+}
+
+/// Test 8: Per-namespace firewall lifecycle.
+///
+/// Tests init, rule management, and destroy.
+fn test_ns_firewall_lifecycle() -> KernelResult<()> {
+    let ns: u32 = 4;
+
+    // Before init, ns check passes through (no active state).
+    let tcp = [0u8, 80, 0, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let allowed = check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp);
+    if !allowed {
+        serial_println!("[firewall]   FAIL: uninit ns should pass through");
+        return Err(KernelError::InternalError);
+    }
+
+    // Init and enable.
+    ns_init(ns)?;
+    ns_enable(ns);
+
+    // With Accept policy, everything passes.
+    let allowed = check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp);
+    if !allowed {
+        serial_println!("[firewall]   FAIL: Accept policy should allow");
+        ns_destroy(ns);
+        return Err(KernelError::InternalError);
+    }
+
+    // Add a deny rule for port 22.
+    let rule = Rule {
+        active: true,
+        direction: Direction::In,
+        action: Action::Deny,
+        protocol: Protocol::Tcp,
+        src_ip: Ipv4Addr::UNSPECIFIED,
+        src_prefix: 0,
+        dst_port: 22,
+        priority: 5,
+    };
+    let idx = ns_add_rule(ns, rule)?;
+
+    // Port 22 denied, port 80 still allowed (Accept policy).
+    let tcp_22 = [0u8, 80, 0, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let tcp_80 = [0u8, 80, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    if check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp_22) {
+        serial_println!("[firewall]   FAIL: port 22 should be denied");
+        ns_destroy(ns);
+        return Err(KernelError::InternalError);
+    }
+    if !check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp_80) {
+        serial_println!("[firewall]   FAIL: port 80 should be allowed");
+        ns_destroy(ns);
+        return Err(KernelError::InternalError);
+    }
+
+    // Remove the rule — port 22 should be allowed again.
+    ns_remove_rule(ns, idx)?;
+    if !check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp_22) {
+        serial_println!("[firewall]   FAIL: port 22 should be allowed after rule removal");
+        ns_destroy(ns);
+        return Err(KernelError::InternalError);
+    }
+
+    // Rule count should be 0.
+    if ns_rule_count(ns) != 0 {
+        serial_println!("[firewall]   FAIL: rule count should be 0");
+        ns_destroy(ns);
+        return Err(KernelError::InternalError);
+    }
+
+    // Disable — all passes through again regardless of policy.
+    ns_set_default_policy(ns, DefaultPolicy::Drop);
+    ns_disable(ns);
+    if !check_inbound_ns(ns, PROTO_TCP, Ipv4Addr([10, 0, 0, 1]), &tcp_22) {
+        serial_println!("[firewall]   FAIL: disabled ns should pass through");
+        ns_destroy(ns);
+        return Err(KernelError::InternalError);
+    }
+
+    // Destroy clears state.
+    ns_destroy(ns);
+    if ns_is_enabled(ns) {
+        serial_println!("[firewall]   FAIL: destroyed ns should not be enabled");
+        return Err(KernelError::InternalError);
+    }
+
+    // Cannot init root namespace (ID 0).
+    if ns_init(0).is_ok() {
+        serial_println!("[firewall]   FAIL: should not init root ns");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[firewall]   Per-namespace lifecycle: OK");
     Ok(())
 }

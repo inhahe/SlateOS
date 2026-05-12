@@ -6,9 +6,10 @@
 //! ## Namespace integration
 //!
 //! `send_ns()` sends packets within a specific network namespace,
-//! using the namespace's IP address as source and its routing table
-//! for next-hop determination.  `send()` is a convenience wrapper
-//! that sends via the root namespace (the physical NIC).
+//! using the namespace's IP address as source, its routing table
+//! for next-hop determination, and its per-namespace firewall for
+//! outbound filtering.  `send()` is a convenience wrapper that
+//! sends via the root namespace (the physical NIC).
 //!
 //! Incoming packets (`process_ipv4`) always arrive on the physical
 //! NIC and are dispatched to the root namespace.  Per-namespace
@@ -256,9 +257,12 @@ pub fn send(dst: Ipv4Addr, protocol: u8, payload: &[u8]) -> KernelResult<()> {
 /// Send an IPv4 packet within a specific network namespace.
 ///
 /// Uses the namespace's IP address as the source address and its
-/// routing table for next-hop gateway determination.  The physical
-/// NIC's MAC address and ARP cache are shared across all namespaces
-/// (since virtual ethernet pairs are not yet implemented).
+/// routing table for next-hop gateway determination.  Checks the
+/// namespace's firewall before sending (root uses the global firewall;
+/// child namespaces use per-namespace firewall state).
+///
+/// The physical NIC's MAC address and ARP cache are shared across all
+/// namespaces (since virtual ethernet pairs are not yet implemented).
 ///
 /// # Parameters
 ///
@@ -279,9 +283,10 @@ pub fn send_ns(
     protocol: u8,
     payload: &[u8],
 ) -> KernelResult<()> {
-    // Firewall outbound check — global for now (per-namespace firewall
-    // is future work; netns.rs documents this as "future").
-    if !super::firewall::check_outbound(protocol, dst, payload) {
+    // Namespace-aware firewall outbound check.
+    // Root namespace (0) uses the global firewall; child namespaces use
+    // their own per-namespace firewall state.
+    if !super::firewall::check_outbound_ns(ns_id, protocol, dst, payload) {
         return Err(KernelError::PermissionDenied);
     }
 

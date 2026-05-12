@@ -17,6 +17,10 @@
 //! a single physical NIC (so the same MAC↔IP mappings apply to all).
 //! When virtual ethernet (veth) pairs are implemented, each namespace
 //! will need its own ARP cache for its virtual interface's LAN segment.
+//!
+//! Note: per-namespace firewall rules are already implemented in
+//! `net::firewall` (see `ns_*` functions).  Per-namespace ARP is the
+//! remaining piece for full network namespace isolation.
 
 use spin::Mutex;
 

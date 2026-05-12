@@ -5,8 +5,10 @@
 //!
 //! - **Interface configuration**: independent IP, subnet, gateway, DNS
 //! - **Routing table**: per-namespace routing entries
-//! - **Firewall state**: per-namespace firewall rules (future)
-//! - **ARP cache**: per-namespace MAC resolution (future)
+//! - **Firewall state**: per-namespace firewall rules and connection
+//!   tracking (see `net::firewall::ns_*` functions)
+//! - **ARP cache**: per-namespace MAC resolution (future — requires
+//!   virtual ethernet pairs)
 //!
 //! ## Design
 //!

@@ -1,7 +1,8 @@
 //! IPv4 packet parsing and construction.
 //!
-//! Handles basic IPv4 packets (RFC 791).  No fragmentation support —
-//! all packets must fit in a single Ethernet frame.
+//! Handles IPv4 packets (RFC 791) with fragmentation reassembly.
+//! Outgoing packets set the Don't Fragment (DF) bit; incoming
+//! fragmented packets are reassembled via the `frag` module.
 //!
 //! ## Namespace integration
 //!
@@ -69,6 +70,13 @@ pub struct Ipv4Packet<'a> {
     pub ihl: u8,
     /// Total length of the packet (header + payload).
     pub total_length: u16,
+    /// Identification field — used to group fragments of the same datagram.
+    pub identification: u16,
+    /// Raw flags + fragment offset word (network byte order, 16 bits).
+    ///
+    /// Layout: `[0][DF][MF][Fragment Offset (13 bits)]`.
+    /// Fragment offset is in 8-byte units.
+    flags_frag: u16,
     /// Time to live.
     pub ttl: u8,
     /// Protocol number (6=TCP, 17=UDP, 1=ICMP).
@@ -85,6 +93,25 @@ pub struct Ipv4Packet<'a> {
     /// header + first 8 bytes of the triggering packet.  Storing a
     /// reference to the raw header avoids reconstructing it later.
     pub raw_header: &'a [u8],
+}
+
+impl Ipv4Packet<'_> {
+    /// More Fragments flag — `true` if this is not the last fragment.
+    pub fn more_fragments(&self) -> bool {
+        (self.flags_frag >> 13) & 1 != 0
+    }
+
+    /// Fragment offset in 8-byte units (13-bit field).
+    pub fn fragment_offset(&self) -> u16 {
+        self.flags_frag & 0x1FFF
+    }
+
+    /// Whether this packet is a fragment (MF set or offset non-zero).
+    ///
+    /// A non-fragmented packet has MF = 0 and offset = 0.
+    pub fn is_fragment(&self) -> bool {
+        self.more_fragments() || self.fragment_offset() != 0
+    }
 }
 
 impl<'a> Ipv4Packet<'a> {
@@ -116,6 +143,8 @@ impl<'a> Ipv4Packet<'a> {
         }
 
         let total_length = u16::from_be_bytes([data[2], data[3]]);
+        let identification = u16::from_be_bytes([data[4], data[5]]);
+        let flags_frag = u16::from_be_bytes([data[6], data[7]]);
         let ttl = data[8];
         let protocol = data[9];
 
@@ -135,6 +164,8 @@ impl<'a> Ipv4Packet<'a> {
             version,
             ihl,
             total_length,
+            identification,
+            flags_frag,
             ttl,
             protocol,
             src: Ipv4Addr(src),
@@ -400,8 +431,33 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
     }
 
     // Firewall inbound check — drop packet if denied.
+    // Note: for fragmented packets, the firewall checks each fragment
+    // individually.  The first fragment (offset 0) contains the transport
+    // header and is filtered normally.  Subsequent fragments lack the
+    // transport header, so port-based rules won't match — they pass
+    // through.  The reassembled datagram is not re-checked (the first
+    // fragment's check is the authoritative decision).
     if !super::firewall::check_inbound(packet.protocol, packet.src, packet.payload) {
         return Ok(()); // Silently dropped by firewall.
+    }
+
+    // Handle fragmented packets: route to the reassembly module.
+    if packet.is_fragment() {
+        if let Some(reassembled) = super::frag::add_fragment(
+            packet.src,
+            packet.dst,
+            packet.identification,
+            packet.protocol,
+            packet.fragment_offset(),
+            packet.more_fragments(),
+            packet.payload,
+        ) {
+            // Reassembly complete — dispatch the full datagram.
+            // Build a temporary Ipv4Packet-like struct to pass to
+            // protocol handlers.
+            return dispatch_reassembled(&reassembled);
+        }
+        return Ok(()); // Waiting for more fragments.
     }
 
     match packet.protocol {
@@ -412,6 +468,49 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
             // Unknown protocol — drop.
             Ok(())
         }
+    }
+}
+
+/// Dispatch a reassembled datagram to the appropriate transport handler.
+///
+/// After fragment reassembly completes, we have the complete transport
+/// payload but no longer have the original IP header bytes.  We create
+/// a synthetic `Ipv4Packet` with a minimal header for protocol handlers
+/// that need IP-level metadata (e.g., `process_tcp` uses `src`/`dst`).
+fn dispatch_reassembled(
+    pkt: &super::frag::ReassembledPacket,
+) -> KernelResult<()> {
+    // Build a minimal fake raw header for handlers that reference it
+    // (e.g., ICMP error generation).  20 bytes, all zeros except
+    // version/IHL, total length, protocol, and addresses.
+    let total_len = (20u16).saturating_add(pkt.payload.len() as u16);
+    let mut fake_hdr = [0u8; 20];
+    fake_hdr[0] = 0x45; // version=4, IHL=5
+    fake_hdr[2] = (total_len >> 8) as u8;
+    fake_hdr[3] = total_len as u8;
+    fake_hdr[9] = pkt.protocol;
+    fake_hdr[12..16].copy_from_slice(&pkt.src.0);
+    fake_hdr[16..20].copy_from_slice(&pkt.dst.0);
+
+    let ip_pkt = Ipv4Packet {
+        version: 4,
+        ihl: 5,
+        total_length: total_len,
+        identification: 0,
+        flags_frag: 0,
+        ttl: 0,
+        protocol: pkt.protocol,
+        src: pkt.src,
+        dst: pkt.dst,
+        payload: &pkt.payload,
+        raw_header: &fake_hdr,
+    };
+
+    match pkt.protocol {
+        PROTO_TCP => super::tcp::process_tcp(&ip_pkt),
+        PROTO_UDP => super::udp::process_udp(&ip_pkt),
+        PROTO_ICMP => super::icmp::process_icmp(&ip_pkt),
+        _ => Ok(()),
     }
 }
 

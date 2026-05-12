@@ -3,7 +3,7 @@
 //! Provides basic network protocol support:
 //! - Ethernet frame parsing/building
 //! - ARP (address resolution: IP → MAC)
-//! - IPv4 (basic packet parsing/building, no fragmentation)
+//! - IPv4 (packet parsing/building with fragmentation reassembly)
 //! - UDP (connectionless datagrams)
 //! - DHCP client (automatic IP configuration)
 //!
@@ -20,6 +20,7 @@ pub mod dhcp;
 pub mod dns;
 pub mod ethernet;
 pub mod firewall;
+pub mod frag;
 pub mod icmp;
 pub mod interface;
 pub mod ipv4;
@@ -76,6 +77,7 @@ pub fn poll() {
         tcp::tick_retransmit();
         tcp::tick_persist();
         dhcp::tick_renewal();
+        frag::tick_expire();
     }
 }
 

@@ -94,6 +94,14 @@ pub const SO_KEEPALIVE: i32 = 9;
 pub const SO_TYPE: i32 = 3;
 /// Socket error.
 pub const SO_ERROR: i32 = 4;
+/// Receive buffer size.
+pub const SO_RCVBUF: i32 = 8;
+/// Send buffer size.
+pub const SO_SNDBUF: i32 = 7;
+
+// TCP-level socket options (SOL_TCP).
+/// Disable Nagle's algorithm.
+pub const TCP_NODELAY: i32 = 1;
 
 // MSG flags for send/recv.
 /// Peek at incoming data without consuming.
@@ -169,6 +177,12 @@ struct SocketMeta {
     peer_port: u16,
     /// Local IP address (network byte order).  Set on `bind()`.
     local_addr: u32,
+    /// SO_KEEPALIVE setting (stored; kernel applies when syscall exists).
+    keepalive: bool,
+    /// TCP_NODELAY setting (stored; kernel applies when syscall exists).
+    nodelay: bool,
+    /// SO_REUSEADDR setting.
+    reuseaddr: bool,
 }
 
 /// Per-fd socket metadata table.
@@ -658,6 +672,9 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
         peer_addr: 0,
         peer_port: 0,
         local_addr: 0,
+        keepalive: false,
+        nodelay: false,
+        reuseaddr: false,
     });
 
     fd
@@ -744,6 +761,9 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 peer_addr: sin.sin_addr.s_addr,
                 peer_port: sin.sin_port,
                 local_addr: meta.local_addr,
+                keepalive: meta.keepalive,
+                nodelay: meta.nodelay,
+                reuseaddr: meta.reuseaddr,
             });
 
             0
@@ -958,6 +978,9 @@ pub unsafe extern "C" fn accept(
         peer_addr: 0,
         peer_port: 0,
         local_addr: listener_meta.map_or(0, |m| m.local_addr),
+        keepalive: false,
+        nodelay: false,
+        reuseaddr: false,
     });
 
     // Fill in the peer address if requested.
@@ -1289,17 +1312,21 @@ pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
 
 /// Set a socket option.
 ///
-/// Stub: accepts common options silently (programs often set
-/// `SO_REUSEADDR` before bind).
+/// Supports `SO_REUSEADDR`, `SO_KEEPALIVE` (SOL_SOCKET level) and
+/// `TCP_NODELAY` (SOL_TCP level).  Values are stored in the socket
+/// metadata table so `getsockopt` returns consistent results.
 ///
-/// Returns 0 on success (always succeeds).
+/// When the kernel adds syscalls for per-connection options, the stored
+/// values will be forwarded to the kernel.
+///
+/// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn setsockopt(
     fd: i32,
-    _level: i32,
-    _optname: i32,
-    _optval: *const u8,
-    _optlen: SocklenT,
+    level: i32,
+    optname: i32,
+    optval: *const u8,
+    optlen: SocklenT,
 ) -> i32 {
     // Validate the fd is a socket.
     let Some(entry) = fdtable::get_fd(fd) else {
@@ -1308,26 +1335,51 @@ pub extern "C" fn setsockopt(
     };
 
     match entry.kind {
-        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
-            // Accept silently — our kernel doesn't have per-socket options.
-            0
-        }
+        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {}
         _ => {
             errno::set_errno(errno::ENOTSOCK);
-            -1
+            return -1;
         }
     }
+
+    // Read the integer option value.
+    let val = if !optval.is_null() && optlen as usize >= 4 {
+        // SAFETY: optval points to at least 4 readable bytes.
+        i32::from_ne_bytes(unsafe {
+            [*optval, *optval.add(1), *optval.add(2), *optval.add(3)]
+        })
+    } else {
+        0
+    };
+
+    if let Some(mut meta) = get_meta(fd) {
+        match (level, optname) {
+            (SOL_SOCKET, SO_REUSEADDR) => { meta.reuseaddr = val != 0; }
+            (SOL_SOCKET, SO_KEEPALIVE) => { meta.keepalive = val != 0; }
+            (SOL_SOCKET, SO_RCVBUF | SO_SNDBUF) => { /* Accept silently. */ }
+            (SOL_TCP, TCP_NODELAY) => { meta.nodelay = val != 0; }
+            _ => {
+                // Accept unknown options silently — many programs set
+                // options we don't implement and don't check the result.
+            }
+        }
+        set_meta(fd, meta);
+    }
+
+    0
 }
 
 /// Get a socket option.
 ///
-/// Stub: returns default values for common options.
+/// Returns the current value of socket options stored in the metadata
+/// table.  Supports `SO_TYPE`, `SO_ERROR`, `SO_REUSEADDR`, `SO_KEEPALIVE`
+/// (SOL_SOCKET) and `TCP_NODELAY` (SOL_TCP).
 ///
 /// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn getsockopt(
     fd: i32,
-    _level: i32,
+    level: i32,
     optname: i32,
     optval: *mut u8,
     optlen: *mut SocklenT,
@@ -1358,10 +1410,17 @@ pub unsafe extern "C" fn getsockopt(
             return -1;
         }
 
-        // Return a reasonable default based on the option.
-        let val: i32 = match optname {
-            SO_TYPE => get_meta(fd).map_or(0, |m| m.sock_type),
-            SO_ERROR | SO_REUSEADDR | SO_KEEPALIVE => 0, // no pending error / options disabled
+        let meta = get_meta(fd);
+
+        // Return the stored value based on level + option.
+        let val: i32 = match (level, optname) {
+            (SOL_SOCKET, SO_TYPE) => meta.map_or(0, |m| m.sock_type),
+            (SOL_SOCKET, SO_ERROR) => 0, // No pending error.
+            (SOL_SOCKET, SO_REUSEADDR) => meta.map_or(0, |m| i32::from(m.reuseaddr)),
+            (SOL_SOCKET, SO_KEEPALIVE) => meta.map_or(0, |m| i32::from(m.keepalive)),
+            (SOL_SOCKET, SO_RCVBUF) => 65536, // Default buffer size.
+            (SOL_SOCKET, SO_SNDBUF) => 65536,
+            (SOL_TCP, TCP_NODELAY) => meta.map_or(0, |m| i32::from(m.nodelay)),
             _ => {
                 errno::set_errno(errno::ENOPROTOOPT);
                 return -1;

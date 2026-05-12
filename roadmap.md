@@ -979,6 +979,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ICMP Port Unreachable (RFC 1122 §3.2.2.1): UDP sends ICMP type 3 code 3 for datagrams arriving at unbound ports (unicast only); Ipv4Packet raw_header field for ICMP error payload
   - [x] Ethernet multicast MAC acceptance: accept frames with multicast bit set (bit 0 of first octet), enabling IPv4 multicast delivery via 01:00:5e MAC prefix
   - [x] TCP duplicate ACK counting + fast recovery (RFC 5681 §3.2): 3 dup ACKs → ssthresh=flight/2, cwnd=ssthresh+3*MSS; additional dup ACKs inflate cwnd by MSS; congestion response without retransmit buffer
+  - [x] TCP CloseWait send: allow send() in CloseWait state (remote sent FIN but we can still transmit)
+  - [x] DNS cache flush on DHCP lease: flush_cache() wired into DHCP ACK handler (was dead code)
+  - [x] IPv4 subnet-directed broadcast: accept and send subnet broadcasts (e.g., 192.168.1.255 for /24); is_subnet_broadcast() helper using interface mask
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)

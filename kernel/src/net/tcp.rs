@@ -35,7 +35,10 @@
 //!
 //! ## Limitations
 //!
-//! - No window scaling (RFC 7323) — max window is 64 KiB.
+//! - **Window scaling** (RFC 7323): negotiated during the 3-way handshake
+//!   so that peers with large receive windows (Linux default scale 7) are
+//!   interpreted correctly.  Our advertised scale is 0 (64 KiB rx buffer
+//!   fits in 16 bits).
 //! - No selective acknowledgment (SACK).
 //! - No fast retransmit / fast recovery (triple duplicate ACK).
 //! - Maximum 32 concurrent connections.
@@ -183,10 +186,10 @@ struct TcpConnection {
     snd_nxt: u32,   // Next sequence to send.
     snd_iss: u32,   // Initial send sequence number.
     /// Peer's advertised receive window (how much data we may have in
-    /// flight).  Updated on every incoming segment.  Initialised to
-    /// `DEFAULT_WINDOW` during the handshake and refined when the
-    /// SYN-ACK (client) or first ACK (server) arrives.
-    snd_wnd: u16,
+    /// flight), *after* applying window scaling.  Updated on every
+    /// incoming segment.  Stored as u32 because scaled windows can
+    /// exceed 64 KiB (up to 1 GiB with scale factor 14).
+    snd_wnd: u32,
     /// Receive sequence variables.
     rcv_nxt: u32,   // Next expected receive sequence.
     rcv_irs: u32,   // Initial receive sequence number.
@@ -230,6 +233,22 @@ struct TcpConnection {
     /// Slow-start threshold in bytes.
     ssthresh: u32,
 
+    // -- Window scaling (RFC 7323) --
+
+    /// Whether window scaling was negotiated during the handshake.
+    /// Both sides must include the WScale option in their SYN for
+    /// scaling to be active.
+    wscale_ok: bool,
+    /// Shift count to apply to the peer's advertised window field.
+    /// The received window header field is left-shifted by this amount
+    /// to get the true send window.  Per RFC 7323 §2.2 this is NOT
+    /// applied to the window field in SYN segments themselves.
+    snd_wnd_scale: u8,
+    /// Shift count we advertise to the peer (right-shift our advertised
+    /// window by this amount to fit in the 16-bit header field).
+    /// We use 0 because our rx buffer is 64 KiB (fits in 16 bits).
+    rcv_wnd_scale: u8,
+
     // -- Keepalive state (RFC 1122 §4.2.3.6) --
 
     /// Whether keepalive probes are enabled on this connection.
@@ -257,7 +276,7 @@ impl TcpConnection {
             snd_una: 0,
             snd_nxt: 0,
             snd_iss: 0,
-            snd_wnd: DEFAULT_WINDOW,
+            snd_wnd: DEFAULT_WINDOW as u32,
             rcv_nxt: 0,
             rcv_irs: 0,
             rx_buffer: Vec::new(),
@@ -272,6 +291,9 @@ impl TcpConnection {
             nagle_enabled: NAGLE_DEFAULT,
             cwnd: INITIAL_CWND_SEGS.saturating_mul(MSS as u32),
             ssthresh: u32::MAX, // Start in slow-start.
+            wscale_ok: false,
+            snd_wnd_scale: 0,
+            rcv_wnd_scale: 0,
             keepalive_enabled: false,
             keepalive_idle_ns: KEEPALIVE_IDLE_DEFAULT_NS,
             keepalive_interval_ns: KEEPALIVE_INTERVAL_DEFAULT_NS,
@@ -443,6 +465,139 @@ fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
 }
 
 // ---------------------------------------------------------------------------
+// TCP options parsing (RFC 7323, RFC 2018, RFC 793)
+// ---------------------------------------------------------------------------
+
+/// TCP option kinds.
+const TCP_OPT_END: u8 = 0;     // End of option list.
+const TCP_OPT_NOP: u8 = 1;     // No-operation (padding).
+const TCP_OPT_MSS: u8 = 2;     // Maximum segment size.
+const TCP_OPT_WSCALE: u8 = 3;  // Window scale (RFC 7323).
+
+/// Our advertised window scale shift count.
+///
+/// 0 = no scaling needed — our 64 KiB rx buffer fits in 16 bits.
+/// We still *send* the option so the peer knows we understand
+/// scaling and will apply its shift to their advertised window.
+const OUR_WSCALE: u8 = 0;
+
+/// Parsed TCP options from an incoming segment.
+struct TcpOptions {
+    /// MSS value from the peer (0 if not present).
+    mss: u16,
+    /// Window scale shift count (None if option not present).
+    wscale: Option<u8>,
+}
+
+/// Parse TCP options from the option bytes (header bytes 20..data_offset).
+///
+/// Returns the parsed `TcpOptions`.  Unknown options are skipped.
+/// Malformed options (truncated length, etc.) terminate parsing early.
+fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
+    let mut opts = TcpOptions { mss: 0, wscale: None };
+    let mut i = 0;
+    while i < option_bytes.len() {
+        let kind = option_bytes[i];
+        match kind {
+            TCP_OPT_END => break,
+            TCP_OPT_NOP => {
+                i = i.wrapping_add(1);
+                continue;
+            }
+            _ => {
+                // All other options have a length byte.
+                if i.wrapping_add(1) >= option_bytes.len() {
+                    break; // Truncated.
+                }
+                let len = option_bytes[i.wrapping_add(1)] as usize;
+                if len < 2 || i.wrapping_add(len) > option_bytes.len() {
+                    break; // Malformed.
+                }
+                match kind {
+                    TCP_OPT_MSS if len == 4 => {
+                        opts.mss = u16::from_be_bytes([
+                            option_bytes[i.wrapping_add(2)],
+                            option_bytes[i.wrapping_add(3)],
+                        ]);
+                    }
+                    TCP_OPT_WSCALE if len == 3 => {
+                        // RFC 7323 §2.3: shift count MUST be ≤ 14.
+                        let shift = option_bytes[i.wrapping_add(2)];
+                        opts.wscale = Some(if shift > 14 { 14 } else { shift });
+                    }
+                    _ => {} // Unknown option — skip.
+                }
+                i = i.wrapping_add(len);
+            }
+        }
+    }
+    opts
+}
+
+/// Build a TCP segment with SYN options (MSS + window scale).
+///
+/// SYN and SYN-ACK segments carry options to negotiate parameters.
+/// Layout: MSS(kind=2, len=4, value) + NOP(kind=1) + WScale(kind=3, len=3, shift) + NOP padding.
+/// Total: 4 + 1 + 3 = 8 bytes → header is 28 bytes (7 words).
+#[allow(clippy::arithmetic_side_effects)]
+fn build_segment_with_syn_options(
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    payload: &[u8],
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+    wscale: u8,
+) -> Vec<u8> {
+    // Options: MSS(4) + NOP(1) + WScale(3) = 8 bytes → 28-byte header.
+    let options_len = 8;
+    let header_words: u8 = 7; // (20 + 8) / 4 = 7 words.
+    let header_len = (header_words as usize) * 4;
+    let total_len = header_len + payload.len();
+    let mut seg = Vec::with_capacity(total_len);
+
+    // Standard TCP header fields (first 20 bytes).
+    seg.extend_from_slice(&src_port.to_be_bytes());
+    seg.extend_from_slice(&dst_port.to_be_bytes());
+    seg.extend_from_slice(&seq.to_be_bytes());
+    seg.extend_from_slice(&ack.to_be_bytes());
+    seg.push(header_words << 4); // Data offset.
+    seg.push(flags);
+    seg.extend_from_slice(&window.to_be_bytes());
+    let checksum_offset = seg.len();
+    seg.extend_from_slice(&0u16.to_be_bytes()); // Checksum placeholder.
+    seg.extend_from_slice(&0u16.to_be_bytes()); // Urgent pointer.
+
+    // Options: MSS.
+    seg.push(TCP_OPT_MSS);
+    seg.push(4); // Option length.
+    seg.extend_from_slice(&(MSS as u16).to_be_bytes());
+
+    // Options: NOP (alignment).
+    seg.push(TCP_OPT_NOP);
+
+    // Options: Window Scale.
+    seg.push(TCP_OPT_WSCALE);
+    seg.push(3); // Option length.
+    seg.push(wscale);
+
+    debug_assert_eq!(seg.len(), header_len, "SYN options size mismatch");
+
+    // Payload (usually empty for SYN/SYN-ACK).
+    seg.extend_from_slice(payload);
+
+    // Compute TCP checksum.
+    let checksum = tcp_checksum(&seg, src_ip, dst_ip);
+    seg[checksum_offset] = (checksum >> 8) as u8;
+    seg[checksum_offset + 1] = checksum as u8;
+
+    seg
+}
+
+// ---------------------------------------------------------------------------
 // TCP segment sending
 // ---------------------------------------------------------------------------
 
@@ -488,6 +643,32 @@ fn send_segment(
     )
 }
 
+/// Send a SYN (or SYN-ACK) segment with TCP options (MSS + WScale).
+///
+/// Used during the 3-way handshake to negotiate window scaling.
+fn send_syn_segment(
+    local_port: u16,
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    wscale: u8,
+) -> KernelResult<()> {
+    let local_ip = interface::ip();
+    let seg = build_segment_with_syn_options(
+        local_port, remote_port,
+        seq, ack, flags,
+        window,
+        &[],
+        local_ip, remote_ip,
+        wscale,
+    );
+
+    ipv4::send(remote_ip, PROTO_TCP, &seg)
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -516,7 +697,7 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.snd_iss = isn;
         conn.snd_una = isn;
         conn.snd_nxt = isn.wrapping_add(1); // SYN consumes 1 sequence.
-        conn.snd_wnd = DEFAULT_WINDOW; // Refined on SYN-ACK.
+        conn.snd_wnd = DEFAULT_WINDOW as u32; // Refined on SYN-ACK.
         conn.rcv_nxt = 0;
         conn.rcv_irs = 0;
         conn.rx_buffer.clear();
@@ -531,17 +712,24 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.nagle_enabled = NAGLE_DEFAULT;
         conn.cwnd = INITIAL_CWND_SEGS.saturating_mul(MSS as u32);
         conn.ssthresh = u32::MAX;
+        conn.wscale_ok = false; // Set on SYN-ACK if peer supports it.
+        conn.snd_wnd_scale = 0;
+        conn.rcv_wnd_scale = OUR_WSCALE;
         conn.keepalive_enabled = false;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
         slot
     };
 
-    // Send SYN.
-    send_segment(local_port, remote_ip, remote_port, isn, 0, TCP_SYN, &[])?;
+    // Send SYN with MSS + WScale options (RFC 7323).
+    // The window field in the SYN itself is NOT scaled (RFC 7323 §2.2).
+    send_syn_segment(
+        local_port, remote_ip, remote_port,
+        isn, 0, TCP_SYN, DEFAULT_WINDOW, OUR_WSCALE,
+    )?;
     crate::serial_println!(
-        "[tcp] SYN sent to {}:{} (seq={})",
-        remote_ip, remote_port, isn
+        "[tcp] SYN sent to {}:{} (seq={}, wscale={})",
+        remote_ip, remote_port, isn, OUR_WSCALE
     );
 
     // Wait for SYN-ACK (blocking poll, up to ~5 seconds).
@@ -571,14 +759,19 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
 
 /// Compute the dynamic receive window to advertise to the peer.
 ///
-/// Reflects how much buffer space we actually have available for new
-/// data.  Clamped to `DEFAULT_WINDOW` as the upper bound (we don't
-/// support window scaling).
+/// Returns the value to put in the TCP header's 16-bit window field.
+/// If window scaling is active, the true window is right-shifted by
+/// `rcv_wnd_scale` before being placed in the header (the peer
+/// left-shifts it back).
+#[allow(clippy::arithmetic_side_effects)]
 fn advertised_window(conn: &TcpConnection) -> u16 {
     let free = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
-    // Clamp to u16 range (max 65535, but we cap at DEFAULT_WINDOW to
-    // stay consistent with the initial window we advertise in handshakes).
-    (free.min(DEFAULT_WINDOW as usize)) as u16
+    // True window — up to 64 KiB for our buffer size.
+    let true_wnd = free.min(u16::MAX as usize);
+    // Apply receive-side scaling: divide by 2^rcv_wnd_scale for the
+    // header field.  With OUR_WSCALE=0 this is a no-op.
+    let scaled = true_wnd >> (conn.rcv_wnd_scale as usize);
+    scaled.min(u16::MAX as usize) as u16
 }
 
 /// Update RTT estimate from a new measurement (Jacobson/Karels, RFC 6298).
@@ -666,6 +859,8 @@ fn start_rtt_timing(conn: &mut TcpConnection, seq: u32) {
 /// Effective send window: min(congestion window, peer's receive window).
 ///
 /// This is the maximum amount of data we may have in flight at once.
+/// `snd_wnd` is already scaled (i.e. the true window after applying
+/// the peer's window scale factor).
 fn effective_window(conn: &TcpConnection) -> usize {
     let peer = conn.snd_wnd as usize;
     let cong = conn.cwnd as usize;
@@ -1104,6 +1299,9 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
 /// `SynReceived` state, send SYN-ACK.  When the ACK arrives, the
 /// connection transitions to `Established` and is queued to the
 /// listener's backlog for `accept()`.
+///
+/// `option_bytes` contains the TCP options from the SYN segment (bytes
+/// 20..data_offset of the TCP header).  Used to parse window scale.
 #[allow(clippy::arithmetic_side_effects)]
 fn handle_incoming_syn(
     remote_ip: Ipv4Addr,
@@ -1111,6 +1309,7 @@ fn handle_incoming_syn(
     local_port: u16,
     remote_seq: u32,
     remote_window: u16,
+    option_bytes: &[u8],
 ) -> KernelResult<()> {
     // Check if we have a listener for this port.
     let listener_exists = {
@@ -1128,6 +1327,9 @@ fn handle_incoming_syn(
         return Ok(());
     }
 
+    // Parse TCP options from the SYN.
+    let syn_opts = parse_tcp_options(option_bytes);
+
     // Allocate a connection slot for this incoming connection.
     let isn = generate_isn();
     let handle = {
@@ -1144,7 +1346,9 @@ fn handle_incoming_syn(
         conn.snd_iss = isn;
         conn.snd_una = isn;
         conn.snd_nxt = isn.wrapping_add(1); // SYN-ACK consumes 1 seq.
-        conn.snd_wnd = remote_window; // Peer's window from their SYN.
+        // RFC 7323 §2.2: The window field in a SYN is never scaled.
+        // Store unscaled for now; scaling applies after Established.
+        conn.snd_wnd = remote_window as u32;
         conn.rcv_irs = remote_seq;
         conn.rcv_nxt = remote_seq.wrapping_add(1); // Client's SYN consumes 1.
         conn.rx_buffer.clear();
@@ -1159,22 +1363,45 @@ fn handle_incoming_syn(
         conn.nagle_enabled = NAGLE_DEFAULT;
         conn.cwnd = INITIAL_CWND_SEGS.saturating_mul(MSS as u32);
         conn.ssthresh = u32::MAX;
+
+        // Window scaling (RFC 7323): both sides must include WScale in
+        // their SYN for scaling to be active.
+        if let Some(peer_shift) = syn_opts.wscale {
+            conn.wscale_ok = true;
+            conn.snd_wnd_scale = peer_shift;
+            conn.rcv_wnd_scale = OUR_WSCALE;
+        } else {
+            conn.wscale_ok = false;
+            conn.snd_wnd_scale = 0;
+            conn.rcv_wnd_scale = 0;
+        }
+
         conn.keepalive_enabled = false;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
         slot
     };
 
-    // Send SYN-ACK.
+    // Send SYN-ACK with WScale option (only if the client sent one).
     let rcv_nxt = remote_seq.wrapping_add(1);
-    send_segment(
-        local_port, remote_ip, remote_port,
-        isn, rcv_nxt, TCP_SYN | TCP_ACK, &[],
-    )?;
+    if syn_opts.wscale.is_some() {
+        send_syn_segment(
+            local_port, remote_ip, remote_port,
+            isn, rcv_nxt, TCP_SYN | TCP_ACK,
+            DEFAULT_WINDOW, OUR_WSCALE,
+        )?;
+    } else {
+        // Client doesn't support window scaling — plain SYN-ACK.
+        send_segment(
+            local_port, remote_ip, remote_port,
+            isn, rcv_nxt, TCP_SYN | TCP_ACK, &[],
+        )?;
+    }
 
     crate::serial_println!(
-        "[tcp] SYN-ACK sent to {}:{} (handle={}, isn={})",
-        remote_ip, remote_port, handle, isn
+        "[tcp] SYN-ACK sent to {}:{} (handle={}, isn={}, wscale={})",
+        remote_ip, remote_port, handle, isn,
+        if syn_opts.wscale.is_some() { OUR_WSCALE } else { 0 }
     );
 
     Ok(())
@@ -1234,6 +1461,13 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     let flags = data[13];
     let window = u16::from_be_bytes([data[14], data[15]]);
 
+    // TCP options sit between the fixed header and the payload.
+    let option_bytes = if data_offset > TCP_HEADER_SIZE && data_offset <= data.len() {
+        &data[TCP_HEADER_SIZE..data_offset]
+    } else {
+        &[]
+    };
+
     let payload = if data_offset < data.len() {
         &data[data_offset..]
     } else {
@@ -1254,7 +1488,10 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         // (passive open / server-side handshake).
         if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 && flags & TCP_RST == 0 {
             drop(conns);
-            return handle_incoming_syn(ip_packet.src, src_port, dst_port, seq, window);
+            return handle_incoming_syn(
+                ip_packet.src, src_port, dst_port, seq, window,
+                option_bytes,
+            );
         }
         // No matching connection and not a SYN for a listener.
         // Send RST if this isn't itself a RST.
@@ -1273,7 +1510,19 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     let conn = &mut conns[idx];
 
     // Update peer's advertised receive window on every segment.
-    conn.snd_wnd = window;
+    // RFC 7323 §2.2: The window field in a SYN segment is never scaled.
+    // Scaling applies only after the handshake, once both sides have
+    // exchanged and agreed on window scale factors.
+    if flags & TCP_SYN != 0 {
+        // SYN or SYN-ACK — store unscaled.
+        conn.snd_wnd = window as u32;
+    } else if conn.wscale_ok {
+        // Post-handshake with negotiated scaling: apply peer's shift.
+        conn.snd_wnd = (window as u32) << (conn.snd_wnd_scale as u32);
+    } else {
+        // No scaling negotiated — use raw 16-bit value.
+        conn.snd_wnd = window as u32;
+    }
 
     // Any incoming segment counts as activity for keepalive purposes.
     conn.last_activity_ns = crate::hrtimer::now_ns();
@@ -1294,6 +1543,25 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 conn.rcv_irs = seq;
                 conn.rcv_nxt = seq.wrapping_add(1);
                 conn.snd_una = ack;
+
+                // Parse SYN-ACK options for window scaling (RFC 7323).
+                // Both sides must have sent WScale for scaling to be active.
+                let synack_opts = parse_tcp_options(option_bytes);
+                if let Some(peer_shift) = synack_opts.wscale {
+                    conn.wscale_ok = true;
+                    conn.snd_wnd_scale = peer_shift;
+                    // rcv_wnd_scale already set to OUR_WSCALE in connect().
+                    crate::serial_println!(
+                        "[tcp] Window scaling negotiated: snd_shift={}, rcv_shift={}",
+                        peer_shift, conn.rcv_wnd_scale
+                    );
+                } else {
+                    // Peer doesn't support window scaling — disable it.
+                    conn.wscale_ok = false;
+                    conn.snd_wnd_scale = 0;
+                    conn.rcv_wnd_scale = 0;
+                }
+
                 conn.state = TcpState::Established;
 
                 // Take initial RTT sample from SYN → SYN-ACK.
@@ -1618,6 +1886,7 @@ pub fn self_test() -> KernelResult<()> {
     test_bind_close()?;
     test_bind_duplicate_rejected()?;
     test_try_accept_empty()?;
+    test_parse_tcp_options()?;
 
     crate::serial_println!("[tcp] TCP self-test PASSED");
     Ok(())
@@ -1695,5 +1964,59 @@ fn test_try_accept_empty() -> KernelResult<()> {
 
     close_listener(handle)?;
     crate::serial_println!("[tcp]   try_accept empty → WouldBlock: OK");
+    Ok(())
+}
+
+/// Test 4: TCP option parsing (MSS, WScale, NOP, END).
+fn test_parse_tcp_options() -> KernelResult<()> {
+    // Empty options.
+    let opts = parse_tcp_options(&[]);
+    if opts.mss != 0 || opts.wscale.is_some() {
+        crate::serial_println!("[tcp]   FAIL: empty options not zeroed");
+        return Err(KernelError::InternalError);
+    }
+
+    // MSS only: kind=2, len=4, MSS=1460 (0x05B4).
+    let mss_opt = [2, 4, 0x05, 0xB4];
+    let opts = parse_tcp_options(&mss_opt);
+    if opts.mss != 1460 {
+        crate::serial_println!("[tcp]   FAIL: MSS parse expected 1460, got {}", opts.mss);
+        return Err(KernelError::InternalError);
+    }
+    if opts.wscale.is_some() {
+        crate::serial_println!("[tcp]   FAIL: wscale should be None for MSS-only");
+        return Err(KernelError::InternalError);
+    }
+
+    // WScale only: kind=3, len=3, shift=7.
+    let wscale_opt = [3, 3, 7];
+    let opts = parse_tcp_options(&wscale_opt);
+    if opts.wscale != Some(7) {
+        crate::serial_println!("[tcp]   FAIL: wscale expected Some(7), got {:?}", opts.wscale);
+        return Err(KernelError::InternalError);
+    }
+
+    // Combined options like a real Linux SYN: MSS + NOP + WScale + END.
+    // MSS(2,4,05,B4) + NOP(1) + WScale(3,3,7) + END(0)
+    let combined = [2, 4, 0x05, 0xB4, 1, 3, 3, 7, 0];
+    let opts = parse_tcp_options(&combined);
+    if opts.mss != 1460 {
+        crate::serial_println!("[tcp]   FAIL: combined MSS expected 1460, got {}", opts.mss);
+        return Err(KernelError::InternalError);
+    }
+    if opts.wscale != Some(7) {
+        crate::serial_println!("[tcp]   FAIL: combined wscale expected Some(7), got {:?}", opts.wscale);
+        return Err(KernelError::InternalError);
+    }
+
+    // WScale clamped to 14 per RFC 7323 §2.3.
+    let big_wscale = [3, 3, 15];
+    let opts = parse_tcp_options(&big_wscale);
+    if opts.wscale != Some(14) {
+        crate::serial_println!("[tcp]   FAIL: wscale clamp expected Some(14), got {:?}", opts.wscale);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[tcp]   TCP option parsing: OK");
     Ok(())
 }

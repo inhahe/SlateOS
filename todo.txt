@@ -19,9 +19,14 @@ Net improvements (not blocked, could still do):
   NTP server, NAK handling.
 
 Remaining net improvements (diminishing returns):
-TCP window scaling (RFC 7323) — lifts 64 KiB cap, needs options parsing
+(DONE) TCP window scaling (RFC 7323) — negotiated in SYN/SYN-ACK, peer's
+  shift applied to window updates.  Our scale = 0 (64 KiB rx fits in 16 bits).
+  Options parsing (MSS, WScale) implemented.  Commit 3a82fe8.
 TCP SACK — selective acknowledgment for better loss recovery
-UDP multicast — group join/leave for service discovery
+(DONE) UDP multicast — group join/leave for service discovery.
+  Per-socket group list (8 max), global refcounted membership table,
+  fan-out delivery to all joined sockets, IPv4 multicast acceptance,
+  IP_ADD_MEMBERSHIP / IP_DROP_MEMBERSHIP setsockopt.  Commit ce96efa.
 
 ## Completed
 - Per-CPU scheduler lock refactor: DONE (commit 449e218).  Split global

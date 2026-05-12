@@ -994,6 +994,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TCP ECN (Explicit Congestion Notification, RFC 3168): full handshake negotiation (client SYN ECE+CWR, server SYN-ACK ECE); CE detection → ECE echo in ACKs; sender cwnd reduction on ECE + CWR in data segments; IP header ECT(0) marking for ECN-negotiated connections; ipv4::send_ecn()/send_ns_ecn() infrastructure
   - [x] TCP peer MSS honoring (RFC 793 §3.1): store peer's advertised MSS from SYN/SYN-ACK; effective_mss() returns min(our MSS, peer MSS); all outgoing data chunking, Nagle thresholds, retransmit sizes, and congestion control calculations use effective MSS
   - [x] Path MTU Discovery (RFC 1191): ICMP "Fragmentation Needed" (type 3, code 4) carries next-hop MTU; icmp_error() reduces peer_mss to MTU-40; future segments automatically use reduced MSS via effective_mss()
+  - [x] TCP timestamps (RFC 7323 §3-4): negotiated in SYN/SYN-ACK; every segment carries TSval (ms clock) + TSecr (echo); per-ACK RTT measurement via try_rtt_sample_ts(); PAWS drops old-duplicate segments with stale timestamps (24-day aging); when TS+SACK both active, SACK limited to 3 blocks (40-byte option space)
+  - [x] Firewall periodic conntrack cleanup: tick_conntrack_cleanup() proactively expires stale entries in global and per-namespace tables; called from net::poll() 5-second tick
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)

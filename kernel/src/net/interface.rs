@@ -2,7 +2,19 @@
 //!
 //! Manages the kernel's view of network interfaces: MAC address,
 //! IP address, gateway, subnet mask.  Currently supports a single
-//! interface backed by the virtio-net device.
+//! physical interface backed by the virtio-net (or e1000/rtl8139) device.
+//!
+//! ## Namespace integration
+//!
+//! The global `IFACE` state represents the physical NIC and serves as
+//! the root network namespace (netns ID 0).  Non-root namespaces have
+//! independent interface configuration stored in the `netns` module.
+//!
+//! Callers that need namespace-aware behavior should use `ns_ip()`,
+//! `ns_info()`, and `ns_is_up()` instead of the bare `ip()`, `info()`,
+//! `is_up()`.  The `ns_*` functions return the physical NIC config for
+//! the root namespace and delegate to `netns::interface_config()` for
+//! child namespaces.
 
 use core::fmt;
 
@@ -166,14 +178,109 @@ pub fn ip() -> Ipv4Addr {
 }
 
 /// Configure the interface with DHCP results.
+///
+/// Also syncs the configuration to the root network namespace (netns
+/// ID 0) so that namespace-aware code sees the same state.  If the
+/// netns subsystem has not been initialized yet (it initializes after
+/// the network stack at boot), the sync is skipped — the `ns_*`
+/// accessors fall back to the global `IFACE` for the root namespace
+/// anyway.
 pub fn configure(ip: Ipv4Addr, mask: Ipv4Addr, gateway: Ipv4Addr, dns: Ipv4Addr) {
-    let mut iface = IFACE.lock();
-    iface.ip = ip;
-    iface.subnet_mask = mask;
-    iface.gateway = gateway;
-    iface.dns = dns;
+    {
+        let mut iface = IFACE.lock();
+        iface.ip = ip;
+        iface.subnet_mask = mask;
+        iface.gateway = gateway;
+        iface.dns = dns;
+    }
     crate::serial_println!(
         "[net] Configured: IP {} mask {} gw {} dns {}",
         ip, mask, gateway, dns
     );
+
+    // Sync to the root network namespace so that per-namespace queries
+    // return consistent results.  No-op if netns is not yet initialized
+    // (boot ordering: net::init runs before netns::init).
+    if crate::netns::is_initialized() {
+        let _ = crate::netns::configure_interface(
+            crate::netns::ROOT_NS,
+            to_netns_ip(ip),
+            to_netns_ip(mask),
+            to_netns_ip(gateway),
+            to_netns_ip(dns),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Namespace-aware accessors
+// ---------------------------------------------------------------------------
+
+/// Convert a `netns::Ipv4Addr` to our `Ipv4Addr`.
+///
+/// Both types are `[u8; 4]` wrappers — netns uses its own copy to
+/// avoid a circular dependency on this module.
+fn from_netns_ip(ip: crate::netns::Ipv4Addr) -> Ipv4Addr {
+    Ipv4Addr(ip.0)
+}
+
+/// Convert our `Ipv4Addr` to a `netns::Ipv4Addr`.
+fn to_netns_ip(ip: Ipv4Addr) -> crate::netns::Ipv4Addr {
+    crate::netns::Ipv4Addr(ip.0)
+}
+
+/// Get the IPv4 address for a specific network namespace.
+///
+/// For the root namespace (ID 0), returns the physical NIC's IP from
+/// the global `IFACE`.  For child namespaces, queries the per-namespace
+/// configuration in the `netns` module.
+///
+/// Returns `0.0.0.0` if the namespace does not exist.
+pub fn ns_ip(ns_id: crate::netns::NetNsId) -> Ipv4Addr {
+    if ns_id == crate::netns::ROOT_NS {
+        return ip();
+    }
+    match crate::netns::interface_config(ns_id) {
+        Some(cfg) => from_netns_ip(cfg.ip),
+        None => Ipv4Addr::UNSPECIFIED,
+    }
+}
+
+/// Check if the interface is up for a specific network namespace.
+///
+/// For the root namespace, checks the physical NIC.  For child
+/// namespaces, checks the per-namespace interface state.
+pub fn ns_is_up(ns_id: crate::netns::NetNsId) -> bool {
+    if ns_id == crate::netns::ROOT_NS {
+        return is_up();
+    }
+    crate::netns::interface_config(ns_id)
+        .is_some_and(|cfg| cfg.up)
+}
+
+/// Get a snapshot of the interface configuration for a specific
+/// network namespace.
+///
+/// For the root namespace, returns the physical NIC's config.  For
+/// child namespaces, returns the virtual interface config with the
+/// physical NIC's MAC address (since all namespaces share the same
+/// physical NIC until virtual ethernet pairs are implemented).
+///
+/// Returns a default (all-zeros, down) config if the namespace does
+/// not exist.
+pub fn ns_info(ns_id: crate::netns::NetNsId) -> InterfaceInfo {
+    if ns_id == crate::netns::ROOT_NS {
+        return info();
+    }
+    match crate::netns::interface_config(ns_id) {
+        Some(cfg) => InterfaceInfo {
+            up: cfg.up,
+            mac: mac(), // Physical NIC MAC — no veth pairs yet.
+            ip: from_netns_ip(cfg.ip),
+            subnet_mask: from_netns_ip(cfg.subnet_mask),
+            gateway: from_netns_ip(cfg.gateway),
+            dns: from_netns_ip(cfg.dns),
+        },
+        None => InterfaceInfo::default(),
+    }
 }

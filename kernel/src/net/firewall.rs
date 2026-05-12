@@ -33,6 +33,16 @@
 //! - Maximum 32 rules and 64 tracked connections.
 //! - No NAT or port forwarding.
 //! - No per-process filtering (applies globally).
+//!
+//! ## Namespace note
+//!
+//! Firewall rules are currently global — they apply to all network
+//! namespaces equally.  Per-namespace firewall state (independent rule
+//! tables and connection tracking per namespace) is planned for the
+//! future, as documented in `netns.rs`.  The `ipv4::send_ns()` function
+//! already runs the global firewall check before sending; when
+//! per-namespace firewall is implemented, it will check the namespace's
+//! rule table instead.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;

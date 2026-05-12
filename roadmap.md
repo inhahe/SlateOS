@@ -1425,7 +1425,15 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] Process attach/detach tracking
     - [x] kshell `netns` command: list/create/delete/ifconfig/route/stats/up/down/test
     - [x] 18 self-tests: lifecycle, routing, isolation, metric, table full
-    - [ ] Integration with net/ module globals (ARP, firewall, sockets) — net zone task
+    - [x] Integration with net/ module (namespace-aware interface accessors + routing)
+      - [x] interface.rs: ns_ip(), ns_info(), ns_is_up() query netns for non-root NS
+      - [x] interface.rs: configure() syncs DHCP config to netns root namespace
+      - [x] ipv4.rs: send_ns() with per-namespace source IP + route_lookup()
+      - [x] netns.rs: is_initialized() for boot-order safety
+      - [x] ARP/firewall doc notes (global/shared, per-namespace is future)
+      - [ ] Per-namespace ARP cache (requires veth pairs)
+      - [ ] Per-namespace firewall rules
+      - [ ] Wire process→container→net_ns into socket layer callers
   - [x] Mount namespace: separate mount point trees (implemented as fs::mount_ns)
   - [x] User namespace: UID/GID remapping for rootless containers
     - [x] IdMapping ranges (up to 16 per namespace) translate inner ↔ outer IDs

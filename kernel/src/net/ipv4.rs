@@ -3,6 +3,17 @@
 //! Handles basic IPv4 packets (RFC 791).  No fragmentation support —
 //! all packets must fit in a single Ethernet frame.
 //!
+//! ## Namespace integration
+//!
+//! `send_ns()` sends packets within a specific network namespace,
+//! using the namespace's IP address as source and its routing table
+//! for next-hop determination.  `send()` is a convenience wrapper
+//! that sends via the root namespace (the physical NIC).
+//!
+//! Incoming packets (`process_ipv4`) always arrive on the physical
+//! NIC and are dispatched to the root namespace.  Per-namespace
+//! inbound routing will require virtual ethernet pairs (future work).
+//!
 //! ## Header format (20 bytes minimum)
 //!
 //! ```text
@@ -231,37 +242,63 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
     }
 }
 
-/// Send an IPv4 packet.
+/// Send an IPv4 packet via the root network namespace.
+///
+/// Convenience wrapper around `send_ns()` that uses the root
+/// namespace (the physical NIC's IP and routing configuration).
 ///
 /// Resolves the next-hop MAC via ARP (or uses broadcast for broadcast
 /// addresses), wraps in an Ethernet frame, and sends via the NIC.
 pub fn send(dst: Ipv4Addr, protocol: u8, payload: &[u8]) -> KernelResult<()> {
-    // Firewall outbound check — block packet if denied.
+    send_ns(crate::netns::ROOT_NS, dst, protocol, payload)
+}
+
+/// Send an IPv4 packet within a specific network namespace.
+///
+/// Uses the namespace's IP address as the source address and its
+/// routing table for next-hop gateway determination.  The physical
+/// NIC's MAC address and ARP cache are shared across all namespaces
+/// (since virtual ethernet pairs are not yet implemented).
+///
+/// # Parameters
+///
+/// - `ns_id`: Network namespace ID.  Use `ROOT_NS` (0) for the
+///   physical NIC's namespace.
+/// - `dst`: Destination IPv4 address.
+/// - `protocol`: IP protocol number (e.g., `PROTO_TCP`, `PROTO_UDP`).
+/// - `payload`: Protocol payload (e.g., TCP/UDP segment).
+///
+/// # Errors
+///
+/// - [`KernelError::PermissionDenied`] if the firewall blocks the packet.
+/// - [`KernelError::TimedOut`] if ARP resolution fails.
+/// - [`KernelError::NoSuchDevice`] if no NIC is available.
+pub fn send_ns(
+    ns_id: crate::netns::NetNsId,
+    dst: Ipv4Addr,
+    protocol: u8,
+    payload: &[u8],
+) -> KernelResult<()> {
+    // Firewall outbound check — global for now (per-namespace firewall
+    // is future work; netns.rs documents this as "future").
     if !super::firewall::check_outbound(protocol, dst, payload) {
         return Err(KernelError::PermissionDenied);
     }
 
+    // MAC always comes from the physical NIC (shared across namespaces).
     let our_mac = interface::mac();
-    let our_ip = interface::ip();
 
-    // Build the IP packet.
+    // Source IP comes from the namespace's interface configuration.
+    let our_ip = interface::ns_ip(ns_id);
+
+    // Build the IP packet with the namespace's source address.
     let ip_packet = build_packet(our_ip, dst, protocol, payload);
 
     // Determine the next-hop MAC address.
     let dst_mac = if dst.is_broadcast() {
         ethernet::BROADCAST_MAC
     } else {
-        // Check if on the same subnet; if not, route via gateway.
-        let info = interface::info();
-        let next_hop = if !our_ip.is_unspecified()
-            && !info.gateway.is_unspecified()
-            && !our_ip.same_subnet(dst, info.subnet_mask)
-        {
-            info.gateway
-        } else {
-            dst
-        };
-
+        let next_hop = resolve_next_hop(ns_id, our_ip, dst);
         super::arp::resolve(next_hop)?
     };
 
@@ -271,4 +308,51 @@ pub fn send(dst: Ipv4Addr, protocol: u8, payload: &[u8]) -> KernelResult<()> {
     super::send_frame(&frame)?;
 
     Ok(())
+}
+
+/// Determine the next-hop IP for a destination within a namespace.
+///
+/// For the root namespace, uses the global interface configuration
+/// (same-subnet → direct, cross-subnet → gateway).  For child
+/// namespaces, consults the namespace's routing table via
+/// `netns::route_lookup()` and falls back to the namespace's default
+/// gateway.
+fn resolve_next_hop(
+    ns_id: crate::netns::NetNsId,
+    our_ip: Ipv4Addr,
+    dst: Ipv4Addr,
+) -> Ipv4Addr {
+    if ns_id != crate::netns::ROOT_NS {
+        // Non-root namespace: use the per-namespace routing table.
+        if let Some(gw) = crate::netns::route_lookup(
+            ns_id,
+            crate::netns::Ipv4Addr(dst.0),
+        ) {
+            return if gw == crate::netns::Ipv4Addr::UNSPECIFIED {
+                dst // Direct delivery (connected route).
+            } else {
+                Ipv4Addr(gw.0) // Route via gateway.
+            };
+        }
+
+        // No matching route — try the namespace's configured gateway.
+        let ns = interface::ns_info(ns_id);
+        if !ns.gateway.is_unspecified() {
+            return ns.gateway;
+        }
+
+        // No gateway either — attempt direct delivery.
+        return dst;
+    }
+
+    // Root namespace: use the global interface configuration.
+    let info = interface::info();
+    if !our_ip.is_unspecified()
+        && !info.gateway.is_unspecified()
+        && !our_ip.same_subnet(dst, info.subnet_mask)
+    {
+        info.gateway
+    } else {
+        dst
+    }
 }

@@ -1,3 +1,8 @@
+osb: "The ipv4.rs clippy issues are pre-existing (in build_packet and ip_checksum). Only the interface.rs:257 issue is mine. Let me fix it:"
+^^ clippy issues we have to fix?
+
+add event logger like windows' (but more intuitive to use) to roadmap-detailed.md?
+
 add to roadmap-detailed.md to support 3d acceleration under vmware
 
 make sure latest WINE plan and automatic code change plan are in roadmap
@@ -117,14 +122,17 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   on free is handled by the per-frame cgroup tracking in frame.rs — the
   frame allocator calls uncharge_cgroup_free() on every free_frame() call.)
 
-- net zone: Integrate netns module with net/ globals.  Currently the net/
-  module uses a single global IFACE static in interface.rs, a global ARP_CACHE
-  in arp.rs, and global firewall state in firewall.rs.  These need to become
-  per-namespace lookups keyed by the current process's NetNsId.  The netns.rs
-  module already provides per-namespace interface config, routing tables, and
-  process tracking — the net zone just needs to query netns::interface_config()
-  and netns::route_lookup() instead of accessing its own globals directly.
-  Files to change: net/interface.rs, net/arp.rs, net/firewall.rs, net/ipv4.rs.
+- (DONE) net zone: Integrate netns module with net/ globals.
+  Added namespace-aware accessors to interface.rs (ns_ip, ns_info, ns_is_up)
+  that query netns::interface_config() for non-root namespaces and fall back
+  to the global IFACE for root NS (0).  configure() now syncs to netns root NS
+  when netns is initialized.  Added send_ns() to ipv4.rs which uses the
+  namespace's IP as source and netns::route_lookup() for next-hop routing.
+  send() delegates to send_ns(ROOT_NS, ...).  ARP cache and firewall remain
+  global (documented as shared / future per-namespace).  Added is_initialized()
+  to netns.rs for boot-order safety (net::init runs before netns::init).
+  Remaining work: per-namespace ARP cache, per-namespace firewall rules,
+  and wiring process→container→net_ns lookup into socket-layer callers.
 
 ## POSIX Layer Notes
 

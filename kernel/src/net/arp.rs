@@ -9,6 +9,14 @@
 //! When we need to send to an IP we don't have a MAC for, we broadcast
 //! an ARP request.  The target replies with its MAC.  We also respond
 //! to ARP requests for our own IP.
+//!
+//! ## Namespace note
+//!
+//! The ARP cache is global — shared across all network namespaces.
+//! This is correct for the current design where all namespaces share
+//! a single physical NIC (so the same MAC↔IP mappings apply to all).
+//! When virtual ethernet (veth) pairs are implemented, each namespace
+//! will need its own ARP cache for its virtual interface's LAN segment.
 
 use spin::Mutex;
 

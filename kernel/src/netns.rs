@@ -228,6 +228,16 @@ impl NetNsTable {
 
 static TABLE: Mutex<Option<NetNsTable>> = Mutex::new(None);
 
+/// Check if the network namespace subsystem has been initialized.
+///
+/// The `net` module calls this before syncing interface configuration
+/// to the root namespace, because `net::init()` runs before `netns::init()`
+/// at boot time.
+#[must_use]
+pub fn is_initialized() -> bool {
+    TABLE.lock().is_some()
+}
+
 /// Initialize the network namespace subsystem.
 pub fn init() {
     let mut table = TABLE.lock();

@@ -2,6 +2,8 @@
 //!
 //! Handles ARP request/reply for IPv4-over-Ethernet (RFC 826).
 //! Maintains a simple ARP cache mapping IP addresses to MAC addresses.
+//! Cache entries expire after 5 minutes (matching Linux defaults) to
+//! handle MAC address changes from device replacement or DHCP renewal.
 //!
 //! ## Protocol overview
 //!
@@ -49,6 +51,14 @@ const ARP_PACKET_SIZE: usize = 28;
 /// Maximum ARP cache entries.
 const ARP_CACHE_SIZE: usize = 32;
 
+/// ARP cache entry lifetime in nanoseconds (5 minutes).
+///
+/// After this duration, entries are treated as stale and evicted on
+/// the next lookup or insert.  A fresh ARP request is sent to
+/// re-resolve the address.  5 minutes matches the typical default
+/// on Linux and most other OS implementations.
+const ARP_ENTRY_LIFETIME_NS: u64 = 300_000_000_000; // 5 min
+
 // ---------------------------------------------------------------------------
 // ARP cache
 // ---------------------------------------------------------------------------
@@ -59,6 +69,16 @@ struct ArpEntry {
     ip: Ipv4Addr,
     mac: MacAddress,
     valid: bool,
+    /// Timestamp (monotonic ns) when this entry was last updated.
+    /// Entries older than [`ARP_ENTRY_LIFETIME_NS`] are considered stale.
+    updated_ns: u64,
+}
+
+impl ArpEntry {
+    /// Check if this entry is still fresh (not expired).
+    fn is_fresh(&self, now_ns: u64) -> bool {
+        self.valid && now_ns.wrapping_sub(self.updated_ns) < ARP_ENTRY_LIFETIME_NS
+    }
 }
 
 /// The ARP cache.
@@ -67,14 +87,18 @@ static ARP_CACHE: Mutex<[ArpEntry; ARP_CACHE_SIZE]> = Mutex::new(
         ip: Ipv4Addr::UNSPECIFIED,
         mac: MacAddress([0; 6]),
         valid: false,
+        updated_ns: 0,
     }; ARP_CACHE_SIZE]
 );
 
 /// Look up a MAC address in the ARP cache.
+///
+/// Returns `None` if the entry doesn't exist or has expired.
 pub fn lookup(ip: Ipv4Addr) -> Option<MacAddress> {
+    let now = crate::hrtimer::now_ns();
     let cache = ARP_CACHE.lock();
     for entry in cache.iter() {
-        if entry.valid && entry.ip == ip {
+        if entry.ip == ip && entry.is_fresh(now) {
             return Some(entry.mac);
         }
     }
@@ -83,26 +107,38 @@ pub fn lookup(ip: Ipv4Addr) -> Option<MacAddress> {
 
 /// Insert or update an ARP cache entry.
 fn cache_insert(ip: Ipv4Addr, mac: MacAddress) {
+    let now = crate::hrtimer::now_ns();
     let mut cache = ARP_CACHE.lock();
 
     // Check if already present — update.
     for entry in cache.iter_mut() {
         if entry.valid && entry.ip == ip {
             entry.mac = mac;
+            entry.updated_ns = now;
             return;
         }
     }
 
-    // Find an empty slot.
+    // Find an empty or expired slot.
     for entry in cache.iter_mut() {
-        if !entry.valid {
-            *entry = ArpEntry { ip, mac, valid: true };
+        if !entry.is_fresh(now) {
+            *entry = ArpEntry { ip, mac, valid: true, updated_ns: now };
             return;
         }
     }
 
-    // Cache full — evict the first entry (simple strategy).
-    cache[0] = ArpEntry { ip, mac, valid: true };
+    // Cache full with all fresh entries — evict the oldest.
+    let mut oldest_idx = 0;
+    let mut oldest_time = u64::MAX;
+    for (i, entry) in cache.iter().enumerate() {
+        if entry.updated_ns < oldest_time {
+            oldest_time = entry.updated_ns;
+            oldest_idx = i;
+        }
+    }
+    if let Some(slot) = cache.get_mut(oldest_idx) {
+        *slot = ArpEntry { ip, mac, valid: true, updated_ns: now };
+    }
 }
 
 // ---------------------------------------------------------------------------

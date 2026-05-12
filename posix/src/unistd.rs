@@ -468,6 +468,18 @@ pub extern "C" fn getgroups(_size: i32, _list: *mut GidT) -> i32 {
     0
 }
 
+/// Set the supplementary group IDs.
+///
+/// Stub: succeeds silently (single-user OS, no group enforcement).
+/// Programs that drop privileges by calling `setgroups(0, NULL)` will
+/// succeed without error.
+///
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn setgroups(_size: usize, _list: *const GidT) -> i32 {
+    0
+}
+
 /// Get the hostname.
 ///
 /// Returns "localhost" (our OS doesn't have a hostname yet).

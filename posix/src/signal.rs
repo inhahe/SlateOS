@@ -281,6 +281,87 @@ pub unsafe extern "C" fn sigismember(set: *const u64, signum: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// sigaltstack — alternate signal stack
+// ---------------------------------------------------------------------------
+
+/// Minimum alternate signal stack size (POSIX `MINSIGSTKSZ`).
+pub const MINSIGSTKSZ: usize = 2048;
+/// Default alternate signal stack size (POSIX `SIGSTKSZ`).
+pub const SIGSTKSZ: usize = 8192;
+
+/// Flags for `stack_t`.
+pub const SS_ONSTACK: i32 = 1;
+/// Alternate stack is disabled.
+pub const SS_DISABLE: i32 = 2;
+
+/// Alternate signal stack descriptor.
+///
+/// Layout matches Linux x86_64 for binary compatibility.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StackT {
+    /// Base address of the alternate stack.
+    pub ss_sp: *mut u8,
+    /// Flags (`SS_ONSTACK`, `SS_DISABLE`).
+    pub ss_flags: i32,
+    /// Size of the alternate stack in bytes.
+    pub ss_size: usize,
+}
+
+/// Set and/or get the alternate signal stack.
+///
+/// Stub: our OS doesn't deliver Unix signals, so there is no signal
+/// stack to configure.  If `oss` is non-null, we report SS_DISABLE.
+/// If `ss` is non-null, we accept the configuration silently.
+///
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
+    // Return old stack state if requested.
+    if !oss.is_null() {
+        // SAFETY: oss is valid (caller contract).
+        unsafe {
+            (*oss).ss_sp = core::ptr::null_mut();
+            (*oss).ss_flags = SS_DISABLE;
+            (*oss).ss_size = 0;
+        }
+    }
+
+    // Validate new stack if provided.
+    if !ss.is_null() {
+        let new_ss = unsafe { &*ss };
+        // POSIX: if ss_flags contains anything other than SS_DISABLE,
+        // and the stack size is below MINSIGSTKSZ, return ENOMEM.
+        if new_ss.ss_flags & SS_DISABLE == 0 && new_ss.ss_size < MINSIGSTKSZ {
+            errno::set_errno(errno::ENOMEM);
+            return -1;
+        }
+        // Accept silently — we don't actually use the alternate stack.
+    }
+
+    0
+}
+
+// ---------------------------------------------------------------------------
+// siginterrupt — allow signals to interrupt system calls
+// ---------------------------------------------------------------------------
+
+/// Control whether a signal interrupts system calls.
+///
+/// If `flag` is nonzero, system calls interrupted by `sig` will return
+/// -1 with `EINTR`.  If zero, system calls are automatically restarted.
+///
+/// Stub: always returns 0.  Since our OS doesn't deliver signals,
+/// there is no SA_RESTART behavior to toggle.  Programs that call
+/// `siginterrupt(SIGALRM, 1)` (common in timeout implementations)
+/// will succeed.
+#[unsafe(no_mangle)]
+pub extern "C" fn siginterrupt(_sig: i32, _flag: i32) -> i32 {
+    // No signal delivery — nothing to configure.
+    0
+}
+
+// ---------------------------------------------------------------------------
 // strsignal / psignal
 // ---------------------------------------------------------------------------
 

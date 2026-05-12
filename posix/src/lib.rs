@@ -30,7 +30,7 @@
 //! - **Memory**: `mmap`, `munmap`, `mprotect`
 //! - **Pipes**: `pipe`, `pipe2`
 //! - **Signals**: Stub constants and handlers (partial), `sigwait`,
-//!   `sigtimedwait`, `sigqueue`
+//!   `sigtimedwait`, `sigqueue`, `sigaltstack`, `siginterrupt`
 //! - **Threads**: `pthread` stubs, working mutex ops
 //! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,
 //!   `posix_memalign`/`aligned_alloc`/`valloc`/`memalign`/`reallocarray`,
@@ -70,6 +70,7 @@
 //!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`,
 //!   `basename`, `dirname`, `getopt`/`getopt_long`/`getopt_long_only`,
 //!   `pathconf`, `confstr`, `strlcpy`, `strlcat`, `mkdtemp`, `flock`,
+//!   `setgroups`, `sigaltstack`, `siginterrupt`,
 //!   `daemon`, `getloadavg`, `sync`, `syncfs`, `sethostname`, `chroot`,
 //!   `flockfile`/`funlockfile`/`ftrylockfile`, `if_nametoindex`,
 //!   `if_indextoname`, `ppoll`, `putenv`, `strcasestr`,

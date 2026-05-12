@@ -1014,6 +1014,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [ ] epoll (deferred — needs kernel event notification support)
   - [ ] signal handling shim (POSIX signals → native IPC)
   - [x] socket API shim: BSD socket API (socket/connect/bind/listen/accept/send/recv/sendto/recvfrom/shutdown/setsockopt/getsockopt/getpeername/getsockname), byte-order (htons/htonl/ntohs/ntohl), inet_addr/inet_ntoa, gethostbyname (DNS via SYS_DNS_RESOLVE), per-fd socket metadata side table, network error translation; supports AF_INET + SOCK_STREAM (TCP) + SOCK_DGRAM (UDP)
+    - [x] getpeername/getsockname: return connected peer and local binding address from per-fd SocketMeta (peer_addr/peer_port/local_addr fields)
+    - [x] if_nametoindex/if_indextoname: "eth0" at index 1, replaces ENOSYS stubs
   - [x] printf/fprintf/sprintf/snprintf: full C printf via assembly trampoline (captures register varargs into stack array), supports %d/%i/%u/%x/%X/%o/%s/%c/%p/%n/%%, width, precision, flags (-, 0, +, space, #), length modifiers
   - [x] pread/pwrite: positional read/write via seek-read-seekback
   - [x] readv/writev: scatter/gather I/O via iovec loops

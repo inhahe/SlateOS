@@ -1,6 +1,10 @@
-add to roadmap-detailed.md to support 3d acceleration under vmware
-
-make sure latest WINE plan and automatic code change plan are in roadmap
+Posix/net zone work — all remaining items are blocked:
+epoll → needs kernel event notification (kernel-ipc zone)
+signal handling shim → needs kernel-side signal delivery (kernel-ipc zone)
+/proc, /sys equivalents → needs kernel support
+popen/pclose → needs fd inheritance in spawn (kernel-process zone)
+Per-namespace ARP → blocked on veth pairs
+Wire process→container→net_ns → cross-zone (kernel-process + kernel-ipc)
 
 ## Completed
 - Per-CPU scheduler lock refactor: DONE (commit 449e218).  Split global

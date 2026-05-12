@@ -98,12 +98,34 @@ Every performance-critical subsystem has a measured baseline and a concrete targ
 - [x] Write CLAUDE.md / coding standards
 - [x] Set up benchmark infrastructure (`criterion`, `bench/` directory, `bench/baselines.toml`)
 - [ ] Integrate fastpy compiler into build system
-- [ ] Porting automation tool: rule-based source code transformer for large-scale ports (Chromium, Firefox, Mesa, etc.)
-  - [ ] Build on clang LibTooling (understands C/C++ semantics, AST-level rewrites) for C/C++ code
-  - [ ] Transformation rule library: Win32 API → native API, POSIX → native syscalls, threading primitives, handle types, platform headers, ifdef resolution
-  - [ ] Dry-run mode: report what would change, how many call sites, what's unhandled
+- [ ] Porting automation toolkit: rule-based source code transformers for large-scale ports
+  - [ ] **Coccinelle** (semantic patching for C): preferred tool for pure-C codebases
+    - Understands C semantics (types, control flow, macros) — not just text substitution
+    - Write SmPL (Semantic Patch Language) rules: concise, composable, auditable
+    - Dry-run mode built-in: `--dry-run` shows what would change without modifying files
+    - Recommended for: **ext4 port** (POSIX VFS → native VFS calls, Linux kernel API → our kernel API), **Linux driver ports** (driver model translation, DMA/interrupt API remapping), **coreutils/busybox** (POSIX libc → our libc shim), **curl/OpenSSH** (socket API + TLS calls), **audio stack** (PulseAudio/PipeWire C components)
+  - [ ] **clang LibTooling** (AST-level rewrites for C/C++): preferred for C++ codebases and mixed C/C++
+    - Full Clang AST — handles templates, overloads, namespaces, RAII patterns
+    - Can do rewrites impossible in Coccinelle: rename classes, change inheritance hierarchies, rewrite template instantiations
+    - Recommended for: **WINE** (Win32 → native API translation across C and C++ code, COM interface remapping, PE loader adjustments), **Chromium/Firefox** (massive C++ codebases, platform abstraction layers), **Mesa** (Gallium driver interface → our GPU abstraction, C++ frontend code), **Qt/GTK** (widget toolkit platform backends)
+  - [ ] **comby** (lightweight structural search/replace): for simpler mechanical changes
+    - Language-agnostic, syntax-aware (respects string/comment boundaries)
+    - No AST — faster to write rules, but less precise than Coccinelle/LibTooling
+    - Good for: quick header remapping (`#include <linux/...>` → `#include <our/...>`), ifdef resolution (strip `#ifdef __linux__` blocks, keep our platform), simple function renames across any language
+  - [ ] Transformation rule library (shared across all tools):
+    - Win32 API → native API (windows.h types, HANDLE → capability handle, CreateFile → our VFS)
+    - POSIX → native syscalls (open/read/write/close, mmap, pthread → our threading, signals → IPC messages)
+    - Linux kernel API → our kernel API (for driver/filesystem ports: kmalloc → our heap, spinlock_t → our Mutex, struct file_operations → our VFS trait)
+    - Threading primitives (pthread → our thread API, Windows threads → our thread API)
+    - Platform headers and ifdef resolution
+  - [ ] Dry-run mode across all tools: report what would change, how many call sites, what's unhandled
   - [ ] Handles the mechanical 90% (API translation, type substitution, header remapping); leaves genuinely tricky parts (architectural differences, custom platform assumptions) flagged for human review
   - [ ] Rules are additive — each port adds rules that benefit future ports
+  - [ ] Per-port tool selection guide:
+    - ext4, Linux drivers, coreutils, curl, OpenSSH → **Coccinelle** (pure C, kernel/POSIX API translation)
+    - WINE, Chromium, Firefox, Mesa, Qt → **LibTooling** (C++, complex AST transformations)
+    - Header remapping, ifdef cleanup, simple renames → **comby** (quick, language-agnostic)
+    - Large ports often use all three: comby for bulk header/ifdef cleanup first, then Coccinelle or LibTooling for semantic API translation
 
 _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boot (installer adds menu entry) + minimal custom EFI stub for standalone UEFI boot with Secure Boot._
 

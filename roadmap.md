@@ -978,7 +978,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ICMP error → TCP notification (RFC 5461): ICMP Destination Unreachable and Time Exceeded parsed to extract original IP+TCP header; SYN_SENT/SYN_RECEIVED connections aborted (hard error); Established connections log soft error only
   - [x] ICMP Port Unreachable (RFC 1122 §3.2.2.1): UDP sends ICMP type 3 code 3 for datagrams arriving at unbound ports (unicast only); Ipv4Packet raw_header field for ICMP error payload
   - [x] Ethernet multicast MAC acceptance: accept frames with multicast bit set (bit 0 of first octet), enabling IPv4 multicast delivery via 01:00:5e MAC prefix
-  - [x] TCP duplicate ACK counting + fast recovery (RFC 5681 §3.2): 3 dup ACKs → ssthresh=flight/2, cwnd=ssthresh+3*MSS; additional dup ACKs inflate cwnd by MSS; congestion response without retransmit buffer
+  - [x] TCP duplicate ACK counting + fast recovery (RFC 5681 §3.2): 3 dup ACKs → ssthresh=flight/2, cwnd=ssthresh+3*MSS; additional dup ACKs inflate cwnd by MSS
+  - [x] TCP retransmit buffer (64 KiB per connection): stores sent data for retransmission; fast retransmit on 3 dup ACKs sends from buffer; RTO timeout retransmit with exponential backoff (RFC 6298)
+  - [x] TCP out-of-order receive buffer: stores OOO segment payloads indexed by sequence offset; when gap fills, delivers contiguous data from ooo_buf to rx_buffer via SACK block scan; completes the SACK receive path
   - [x] TCP CloseWait send: allow send() in CloseWait state (remote sent FIN but we can still transmit)
   - [x] DNS cache flush on DHCP lease: flush_cache() wired into DHCP ACK handler (was dead code)
   - [x] IPv4 subnet-directed broadcast: accept and send subnet broadcasts (e.g., 192.168.1.255 for /24); is_subnet_broadcast() helper using interface mask
@@ -1119,7 +1121,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] putenv: insert "NAME=VALUE" string into environment (copies into static store)
   - [x] ppoll: poll with timespec timeout (converts to ms, delegates to poll), sigmask ignored
   - [x] if_nametoindex/if_indextoname: network interface stubs (no named interfaces), IF_NAMESIZE constant
-  - [x] inttypes: strtoimax/strtoumax (delegate to strtoll/strtoull), imaxabs, imaxdiv, wcstoimax/wcstoumax stubs
+  - [x] inttypes: strtoimax/strtoumax (delegate to strtoll/strtoull), imaxabs, imaxdiv, wcstoimax/wcstoumax (full wide-char integer parsing)
   - [x] getrandom/getentropy: pseudo-random bytes via RDRAND + LCG fallback (not cryptographic)
   - [x] dup3: dup2 with flags (O_CLOEXEC accepted but not enforced), EINVAL when oldfd==newfd
   - [x] fdatasync/syncfs: stubs (writes are synchronous), sendfile (userspace read+write loop)
@@ -1160,6 +1162,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] wctype/iswctype: generic character class dispatch by name (12 POSIX classes); wctrans/towctrans: generic transformation dispatch ("tolower"/"toupper"); used by regex engines, grep, sed
   - [x] dprintf: formatted output to raw fd (assembly trampoline + Rust impl); used for error logging and protocol output to non-stdio fds
   - [x] tmpfile: fixed to return FILE* via fdopen() (was incorrectly returning raw fd cast to pointer)
+  - [x] wcstoimax/wcstoumax: full wide-char integer parsing (was stub returning 0); whitespace skip, sign, base auto-detect, 0x prefix, endptr
+  - [x] wcstol/wcstoul/wcstoll/wcstoull/wcstod/wcstof: wide string → number conversion in wchar.rs; shared helpers (wc_space, wc_digit, wc_skip_ws, wc_detect_base)
+  - [x] scanf %[...] scanset: character class matching with negation (%[^...]), ranges (%[a-z]), leading-] inclusion; 256-bit bitmap for O(1) membership testing
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

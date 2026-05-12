@@ -42,9 +42,17 @@
 //! (NXDOMAIN, parse errors) are not retried — only network-level
 //! timeouts trigger retransmission.
 //!
+//! ## Reverse DNS (PTR records)
+//!
+//! The [`reverse_resolve`] function queries PTR records for an IPv4
+//! address.  It converts the address to the `in-addr.arpa` domain
+//! (e.g., `192.168.1.1` → `1.1.168.192.in-addr.arpa`) and returns
+//! the associated hostname.  PTR results are not cached (reverse
+//! lookups are comparatively rare).
+//!
 //! ## Limitations
 //!
-//! - Only supports A records (IPv4 addresses).
+//! - Forward resolution only supports A records (IPv4 addresses).
 //! - CNAME chasing limited to 8 hops.
 //! - No EDNS0 or DNSSEC.
 
@@ -68,6 +76,9 @@ const DNS_PORT: u16 = 53;
 const TYPE_A: u16 = 1;
 /// DNS record type: CNAME (canonical name alias).
 const TYPE_CNAME: u16 = 5;
+/// DNS record type: PTR (pointer / reverse DNS).
+#[allow(dead_code)] // Used by reverse_resolve() — public API.
+const TYPE_PTR: u16 = 12;
 /// DNS record class: IN (Internet).
 const CLASS_IN: u16 = 1;
 
@@ -316,6 +327,39 @@ fn build_query(name: &str, query_id: u16) -> Vec<u8> {
     pkt
 }
 
+/// Build a DNS query packet for a PTR record (reverse DNS).
+///
+/// Converts the IP address to the `in-addr.arpa` domain format
+/// (e.g., `192.168.1.1` → `1.1.168.192.in-addr.arpa`) and queries
+/// for a PTR record.
+#[allow(clippy::arithmetic_side_effects)]
+fn build_ptr_query(ip: Ipv4Addr, query_id: u16) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(64);
+
+    // Header (12 bytes).
+    pkt.extend_from_slice(&query_id.to_be_bytes());
+    pkt.extend_from_slice(&FLAGS_QUERY_RD.to_be_bytes());
+    pkt.extend_from_slice(&1u16.to_be_bytes());           // QDCOUNT = 1.
+    pkt.extend_from_slice(&0u16.to_be_bytes());           // ANCOUNT = 0.
+    pkt.extend_from_slice(&0u16.to_be_bytes());           // NSCOUNT = 0.
+    pkt.extend_from_slice(&0u16.to_be_bytes());           // ARCOUNT = 0.
+
+    // Build reverse name: octets in reverse order + "in-addr.arpa".
+    // E.g., 192.168.1.1 → "1.1.168.192.in-addr.arpa"
+    let arpa_name = alloc::format!(
+        "{}.{}.{}.{}.in-addr.arpa",
+        ip.0[3], ip.0[2], ip.0[1], ip.0[0]
+    );
+    encode_name(&mut pkt, &arpa_name);
+
+    // Type: PTR.
+    pkt.extend_from_slice(&TYPE_PTR.to_be_bytes());
+    // Class: IN.
+    pkt.extend_from_slice(&CLASS_IN.to_be_bytes());
+
+    pkt
+}
+
 /// Encode a domain name as DNS wire-format labels.
 ///
 /// E.g., `"example.com"` → `\x07example\x03com\x00`.
@@ -478,6 +522,82 @@ fn parse_response_inner(
         // Store the CNAME target for the caller to re-query.
         *LAST_CNAME.lock() = cname_target;
         return Err(KernelError::NotFound);
+    }
+
+    Err(KernelError::NotFound)
+}
+
+/// Parse a DNS PTR response and extract the hostname.
+///
+/// `expected_id` is the transaction ID from the query.
+/// Returns the PTR name (e.g., "router.local") on success.
+#[allow(clippy::arithmetic_side_effects)]
+fn parse_ptr_response(data: &[u8], expected_id: u16) -> KernelResult<String> {
+    if data.len() < 12 {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let id = u16::from_be_bytes([data[0], data[1]]);
+    if id != expected_id {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let flags = u16::from_be_bytes([data[2], data[3]]);
+    if flags & 0x8000 == 0 {
+        return Err(KernelError::InvalidArgument); // Not a response.
+    }
+    let rcode = flags & 0x000F;
+    if rcode != 0 {
+        return Err(KernelError::NotFound); // Server returned an error.
+    }
+
+    let qdcount = u16::from_be_bytes([data[4], data[5]]);
+    let ancount = u16::from_be_bytes([data[6], data[7]]);
+
+    if ancount == 0 {
+        return Err(KernelError::NotFound);
+    }
+
+    // Skip the question section.
+    let mut offset = 12;
+    for _ in 0..qdcount {
+        offset = skip_name(data, offset)?;
+        offset += 4; // QTYPE + QCLASS.
+    }
+
+    // Scan answer section for PTR records.
+    for _ in 0..ancount {
+        if offset >= data.len() {
+            break;
+        }
+
+        let (_rr_name, new_offset) = decode_name(data, offset)?;
+        offset = new_offset;
+
+        if offset + 10 > data.len() {
+            break;
+        }
+
+        let rtype = u16::from_be_bytes([data[offset], data[offset + 1]]);
+        let rclass = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
+        let _ttl = u32::from_be_bytes([
+            data[offset + 4], data[offset + 5],
+            data[offset + 6], data[offset + 7],
+        ]);
+        let rdlength = u16::from_be_bytes([data[offset + 8], data[offset + 9]]);
+        offset += 10;
+
+        let rd_end = offset + rdlength as usize;
+        if rd_end > data.len() {
+            break;
+        }
+
+        if rclass == CLASS_IN && rtype == TYPE_PTR {
+            let (ptr_name, _) = decode_name(data, offset)?;
+            return Ok(ptr_name);
+        }
+
+        offset = rd_end;
     }
 
     Err(KernelError::NotFound)
@@ -826,4 +946,97 @@ pub fn flush_cache() {
 pub fn resolve_str(name: &str) -> KernelResult<String> {
     let ip = resolve(name)?;
     Ok(alloc::format!("{}", ip))
+}
+
+#[allow(dead_code)] // Public API — used by kshell and diagnostics.
+/// Reverse-resolve an IPv4 address to a hostname (PTR record).
+///
+/// Sends a PTR query to the configured DNS server for the `in-addr.arpa`
+/// domain corresponding to the IP address.  For example, `192.168.1.1`
+/// queries for `1.1.168.192.in-addr.arpa`.
+///
+/// Returns the hostname string on success (e.g., "router.local"),
+/// or `Err(NotFound)` if no PTR record exists.
+///
+/// Results are not cached (PTR records change less frequently and
+/// reverse lookups are comparatively rare).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn reverse_resolve(ip: Ipv4Addr) -> KernelResult<String> {
+    let dns_server = interface::info().dns;
+    if dns_server.is_unspecified() {
+        crate::serial_println!("[dns] No DNS server configured");
+        return Err(KernelError::NotSupported);
+    }
+
+    crate::serial_println!("[dns] Reverse resolving {}...", ip);
+
+    let query_id = next_query_id();
+    let local_port = next_dns_port();
+    let query = build_ptr_query(ip, query_id);
+
+    // Bind a UDP socket to receive the reply.
+    let sock = super::udp::bind(local_port)?;
+
+    // Retry loop with increasing timeouts (same as forward resolution).
+    for attempt in 0..MAX_DNS_ATTEMPTS {
+        if let Err(e) = super::udp::send(local_port, dns_server, DNS_PORT, &query) {
+            super::udp::close(sock);
+            return Err(e);
+        }
+
+        if attempt > 0 {
+            crate::serial_println!(
+                "[dns] PTR retry {} for {} (timeout {}ms)",
+                attempt, ip,
+                DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000)
+            );
+        }
+
+        let polls = DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000);
+
+        for _ in 0..polls {
+            super::poll();
+
+            if let Some(dgram) = super::udp::recv(sock) {
+                // Validate source: must be from our DNS server on port 53.
+                if dgram.src_ip != dns_server || dgram.src_port != DNS_PORT {
+                    continue;
+                }
+                super::udp::close(sock);
+                match parse_ptr_response(&dgram.data, query_id) {
+                    Ok(name) => {
+                        crate::serial_println!(
+                            "[dns] Reverse resolved {} → '{}'",
+                            ip, name
+                        );
+                        return Ok(name);
+                    }
+                    Err(KernelError::NotFound) => {
+                        // Definitive answer — no PTR record.
+                        crate::serial_println!(
+                            "[dns] No PTR record for {}",
+                            ip
+                        );
+                        return Err(KernelError::NotFound);
+                    }
+                    Err(e) => {
+                        crate::serial_println!("[dns] PTR parse error: {:?}", e);
+                        return Err(e);
+                    }
+                }
+            }
+
+            // Brief spin delay (~1ms per iteration).
+            for _ in 0..10_000 {
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    super::udp::close(sock);
+    crate::serial_println!(
+        "[dns] PTR resolution timed out for {} after {} attempts",
+        ip, MAX_DNS_ATTEMPTS
+    );
+    Err(KernelError::TimedOut)
 }

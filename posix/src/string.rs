@@ -977,17 +977,127 @@ pub unsafe extern "C" fn strsep(stringp: *mut *mut u8, delim: *const u8) -> *mut
     }
 }
 
-/// Compare memory regions ignoring case (non-standard but common).
+/// Version-aware string comparison (GNU extension, `<string.h>`).
+///
+/// Like `strcmp`, but when both strings contain a run of digits at the
+/// same position, the digit runs are compared *numerically* rather than
+/// lexicographically.  This gives the intuitive result for version
+/// strings: `"file9" < "file10"`, `"1.2.3" < "1.10.0"`.
+///
+/// Leading-zero handling follows the glibc convention: a digit run with
+/// a leading zero is compared as a fractional part (lexicographic, so
+/// longer run with same prefix is greater), while runs without leading
+/// zeros are compared by numeric value (shorter run with same digits is
+/// smaller).
+///
+/// Based on glibc `strverscmp` (`string/strverscmp.c`).
 ///
 /// # Safety
 ///
-/// Both pointers must be valid for at least `n` bytes.
+/// Both pointers must be valid null-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn strverscmp(s1: *const u8, s2: *const u8) -> i32 {
-    // Simple lexicographic compare — true version comparison
-    // would handle embedded numbers, but this matches the common
-    // usage pattern as a strcmp variant.
-    unsafe { strcmp(s1, s2) }
+    let mut i: usize = 0;
+
+    // Scan forward while characters are equal.
+    loop {
+        let a = unsafe { *s1.add(i) };
+        let b = unsafe { *s2.add(i) };
+
+        if a != b || a == 0 {
+            // Found the first difference (or end of both strings).
+            // If neither byte is a digit, fall through to plain compare.
+            // If at least one is a digit, we need version comparison.
+            let a_dig = a.is_ascii_digit();
+            let b_dig = b.is_ascii_digit();
+
+            if !a_dig && !b_dig {
+                // Neither is a digit — normal lexicographic result.
+                return (a as i32) - (b as i32);
+            }
+
+            // At least one is a digit.  Walk back to find the start of
+            // the digit run that includes position `i`.
+            let mut start = i;
+            while start > 0 && unsafe { *s1.add(start.wrapping_sub(1)) }.is_ascii_digit() {
+                start = start.wrapping_sub(1);
+            }
+
+            // Check for leading zeros in the shared digit run.
+            let has_leading_zero =
+                unsafe { *s1.add(start) } == b'0' || unsafe { *s2.add(start) } == b'0';
+
+            if has_leading_zero {
+                // Fractional comparison: compare digit-by-digit (lexicographic).
+                // A digit beats a non-digit (non-digit means the run ended),
+                // but a shorter fractional part with the same prefix is less.
+                return strverscmp_frac(s1, s2, start);
+            }
+
+            // Integer comparison: longer digit run = larger number.
+            return strverscmp_int(s1, s2, start);
+        }
+
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Fractional-style digit run comparison (leading-zero case).
+///
+/// Compare digit-by-digit from `start`.  When one run ends (non-digit or NUL)
+/// and the other continues, the continuing run is "greater."
+fn strverscmp_frac(s1: *const u8, s2: *const u8, start: usize) -> i32 {
+    let mut j = start;
+    loop {
+        let a = unsafe { *s1.add(j) };
+        let b = unsafe { *s2.add(j) };
+        let a_dig = a.is_ascii_digit();
+        let b_dig = b.is_ascii_digit();
+
+        if !a_dig && !b_dig {
+            return 0; // Same digit run, same length.
+        }
+        if !a_dig {
+            return -1; // s1 run ended first → s1 < s2.
+        }
+        if !b_dig {
+            return 1; // s2 run ended first → s1 > s2.
+        }
+        if a != b {
+            return (a as i32) - (b as i32);
+        }
+        j = j.wrapping_add(1);
+    }
+}
+
+/// Integer-style digit run comparison (no leading-zero case).
+///
+/// The longer digit run represents a larger number.  If runs are the
+/// same length, the first differing digit decides.
+fn strverscmp_int(s1: *const u8, s2: *const u8, start: usize) -> i32 {
+    let mut j = start;
+    let mut first_diff: i32 = 0;
+    loop {
+        let a = unsafe { *s1.add(j) };
+        let b = unsafe { *s2.add(j) };
+        let a_dig = a.is_ascii_digit();
+        let b_dig = b.is_ascii_digit();
+
+        if !a_dig && !b_dig {
+            // Same length — use first differing digit.
+            return first_diff;
+        }
+        if !a_dig {
+            return -1; // s1 run shorter → smaller number.
+        }
+        if !b_dig {
+            return 1; // s2 run shorter → larger number.
+        }
+        if a != b && first_diff == 0 {
+            first_diff = (a as i32) - (b as i32);
+        }
+        j = j.wrapping_add(1);
+    }
 }
 
 /// Reentrant string tokenizer.
@@ -1432,4 +1542,80 @@ pub unsafe extern "C" fn rawmemchr(s: *const u8, c: i32) -> *const u8 {
         p = unsafe { p.add(1) };
     }
     p
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper: call strverscmp on two byte-string literals.
+    fn ver(a: &[u8], b: &[u8]) -> i32 {
+        unsafe { strverscmp(a.as_ptr(), b.as_ptr()) }
+    }
+
+    #[test]
+    fn test_strverscmp_equal() {
+        assert_eq!(ver(b"foo\0", b"foo\0"), 0);
+        assert_eq!(ver(b"\0", b"\0"), 0);
+        assert_eq!(ver(b"1.2.3\0", b"1.2.3\0"), 0);
+    }
+
+    #[test]
+    fn test_strverscmp_pure_text() {
+        // No digits — should behave like strcmp.
+        assert!(ver(b"abc\0", b"abd\0") < 0);
+        assert!(ver(b"abd\0", b"abc\0") > 0);
+        assert!(ver(b"abc\0", b"abcd\0") < 0);
+    }
+
+    #[test]
+    fn test_strverscmp_numeric_ordering() {
+        // The primary use case: "file9" < "file10".
+        assert!(ver(b"file9\0", b"file10\0") < 0);
+        assert!(ver(b"file10\0", b"file9\0") > 0);
+    }
+
+    #[test]
+    fn test_strverscmp_version_strings() {
+        assert!(ver(b"1.2.3\0", b"1.10.0\0") < 0);
+        assert!(ver(b"1.10.0\0", b"1.2.3\0") > 0);
+        assert!(ver(b"2.0\0", b"1.999\0") > 0);
+    }
+
+    #[test]
+    fn test_strverscmp_leading_zeros() {
+        // Leading zeros trigger fractional comparison:
+        // "1.01" vs "1.1" — 01 vs 1: '0' < '1' lexicographically, but
+        // runs are: s1="01" vs s2="1". In the fractional path, s1 has a
+        // leading zero: "01" < "1" because '0' < '1' digit-by-digit.
+        // Actually per glibc: "1.01" < "1.1" because "01" sorts before "1"
+        // (the leading zero makes it fractional, so 0.01 < 0.1).
+        assert!(ver(b"1.01\0", b"1.1\0") < 0);
+        assert!(ver(b"1.001\0", b"1.01\0") < 0);
+    }
+
+    #[test]
+    fn test_strverscmp_same_length_different_digits() {
+        // Same number of digits, different values.
+        assert!(ver(b"foo123\0", b"foo456\0") < 0);
+        assert!(ver(b"bar99\0", b"bar42\0") > 0);
+    }
+
+    #[test]
+    fn test_strverscmp_digit_vs_nondigit() {
+        // One string has a digit where the other has a letter.
+        // Digit characters ('0'=0x30..'9'=0x39) are less than letters
+        // ('A'=0x41, 'a'=0x61) in ASCII.
+        assert!(ver(b"a1\0", b"ab\0") < 0);
+    }
+
+    #[test]
+    fn test_strverscmp_multiple_numeric_segments() {
+        // "1.2.30" vs "1.2.4" — comparison triggers at the third segment.
+        assert!(ver(b"1.2.30\0", b"1.2.4\0") > 0);
+    }
 }

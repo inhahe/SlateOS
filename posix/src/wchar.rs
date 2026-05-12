@@ -12,7 +12,9 @@
 //! - `wcwidth`, `wcswidth` — character/string display width (Unicode)
 //! - `btowc`, `wctob` — byte ↔ wide character
 //! - `mbsinit` — check initial shift state
-//! - `iswctype`, `towlower`, `towupper` — wide character classification
+//! - `wctype`, `iswctype` — generic character class dispatch
+//! - `wctrans`, `towctrans` — generic character transformation dispatch
+//! - `towlower`, `towupper` — wide character case conversion
 //! - `iswalpha`, `iswdigit`, `iswalnum`, `iswspace`, `iswprint`,
 //!   `iswupper`, `iswlower`, `iswpunct`, `iswcntrl`, `iswgraph`,
 //!   `iswxdigit`, `iswblank` — wide ctype
@@ -770,6 +772,145 @@ pub extern "C" fn towupper(wc: WcharT) -> WcharT {
 }
 
 // ---------------------------------------------------------------------------
+// wctype / iswctype — generic classification dispatch (<wctype.h>)
+// ---------------------------------------------------------------------------
+
+/// Opaque handle for a character class (returned by `wctype()`).
+///
+/// POSIX defines `wctype_t` as a scalar.  We encode each class as
+/// a small nonzero integer so `0` means "invalid."
+pub type WctypeT = u32;
+
+// Class IDs — keep in sync with wctype() and iswctype().
+const WC_ALNUM:  WctypeT = 1;
+const WC_ALPHA:  WctypeT = 2;
+const WC_BLANK:  WctypeT = 3;
+const WC_CNTRL:  WctypeT = 4;
+const WC_DIGIT:  WctypeT = 5;
+const WC_GRAPH:  WctypeT = 6;
+const WC_LOWER:  WctypeT = 7;
+const WC_PRINT:  WctypeT = 8;
+const WC_PUNCT:  WctypeT = 9;
+const WC_SPACE:  WctypeT = 10;
+const WC_UPPER:  WctypeT = 11;
+const WC_XDIGIT: WctypeT = 12;
+
+/// Look up a character class by name.
+///
+/// Returns a nonzero `wctype_t` handle for the twelve standard POSIX
+/// classes, or `0` for unrecognized names.
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wctype(name: *const u8) -> WctypeT {
+    if name.is_null() {
+        return 0;
+    }
+
+    // Read the name into a bounded buffer to avoid walking arbitrary memory.
+    let mut buf = [0u8; 16];
+    let mut i: usize = 0;
+    while i < 15 {
+        let c = unsafe { *name.add(i) };
+        if c == 0 { break; }
+        buf[i] = c;
+        i = i.wrapping_add(1);
+    }
+    let len = i;
+
+    match &buf[..len] {
+        b"alnum"  => WC_ALNUM,
+        b"alpha"  => WC_ALPHA,
+        b"blank"  => WC_BLANK,
+        b"cntrl"  => WC_CNTRL,
+        b"digit"  => WC_DIGIT,
+        b"graph"  => WC_GRAPH,
+        b"lower"  => WC_LOWER,
+        b"print"  => WC_PRINT,
+        b"punct"  => WC_PUNCT,
+        b"space"  => WC_SPACE,
+        b"upper"  => WC_UPPER,
+        b"xdigit" => WC_XDIGIT,
+        _         => 0,
+    }
+}
+
+/// Test a wide character against a class obtained from `wctype()`.
+///
+/// Returns nonzero if `wc` belongs to the class identified by `ct`.
+#[unsafe(no_mangle)]
+pub extern "C" fn iswctype(wc: WcharT, ct: WctypeT) -> i32 {
+    match ct {
+        WC_ALNUM  => iswalnum(wc),
+        WC_ALPHA  => iswalpha(wc),
+        WC_BLANK  => iswblank(wc),
+        WC_CNTRL  => iswcntrl(wc),
+        WC_DIGIT  => iswdigit(wc),
+        WC_GRAPH  => iswgraph(wc),
+        WC_LOWER  => iswlower(wc),
+        WC_PRINT  => iswprint(wc),
+        WC_PUNCT  => iswpunct(wc),
+        WC_SPACE  => iswspace(wc),
+        WC_UPPER  => iswupper(wc),
+        WC_XDIGIT => iswxdigit(wc),
+        _ => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wctrans / towctrans — generic transformation dispatch (<wctype.h>)
+// ---------------------------------------------------------------------------
+
+/// Opaque handle for a character transformation (returned by `wctrans()`).
+pub type WctransT = u32;
+
+const WT_TOLOWER: WctransT = 1;
+const WT_TOUPPER: WctransT = 2;
+
+/// Look up a character transformation by name.
+///
+/// POSIX requires `"tolower"` and `"toupper"`.  Returns `0` for
+/// unrecognized names.
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wctrans(name: *const u8) -> WctransT {
+    if name.is_null() {
+        return 0;
+    }
+
+    let mut buf = [0u8; 16];
+    let mut i: usize = 0;
+    while i < 15 {
+        let c = unsafe { *name.add(i) };
+        if c == 0 { break; }
+        buf[i] = c;
+        i = i.wrapping_add(1);
+    }
+    let len = i;
+
+    match &buf[..len] {
+        b"tolower" => WT_TOLOWER,
+        b"toupper" => WT_TOUPPER,
+        _          => 0,
+    }
+}
+
+/// Apply a transformation obtained from `wctrans()` to a wide character.
+#[unsafe(no_mangle)]
+pub extern "C" fn towctrans(wc: WcharT, tr: WctransT) -> WcharT {
+    match tr {
+        WT_TOLOWER => towlower(wc),
+        WT_TOUPPER => towupper(wc),
+        _ => wc,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Wide string operations
 // ---------------------------------------------------------------------------
 
@@ -1364,5 +1505,89 @@ mod tests {
         assert_eq!(&bytes[..3], &[0xE2, 0x82, 0xAC]);
         st.reset();
         assert!(st.is_initial());
+    }
+
+    // -- wctype / iswctype --
+
+    #[test]
+    fn test_wctype_known_classes() {
+        let names: &[(&[u8], WctypeT)] = &[
+            (b"alnum\0",  WC_ALNUM),
+            (b"alpha\0",  WC_ALPHA),
+            (b"blank\0",  WC_BLANK),
+            (b"cntrl\0",  WC_CNTRL),
+            (b"digit\0",  WC_DIGIT),
+            (b"graph\0",  WC_GRAPH),
+            (b"lower\0",  WC_LOWER),
+            (b"print\0",  WC_PRINT),
+            (b"punct\0",  WC_PUNCT),
+            (b"space\0",  WC_SPACE),
+            (b"upper\0",  WC_UPPER),
+            (b"xdigit\0", WC_XDIGIT),
+        ];
+        for &(name, expected) in names {
+            let ct = unsafe { wctype(name.as_ptr()) };
+            assert_eq!(ct, expected, "wctype({:?}) failed", core::str::from_utf8(&name[..name.len()-1]).unwrap_or("?"));
+        }
+    }
+
+    #[test]
+    fn test_wctype_unknown() {
+        assert_eq!(unsafe { wctype(b"bogus\0".as_ptr()) }, 0);
+        assert_eq!(unsafe { wctype(b"\0".as_ptr()) }, 0);
+        assert_eq!(unsafe { wctype(core::ptr::null()) }, 0);
+    }
+
+    #[test]
+    fn test_iswctype_dispatch() {
+        let digit_ct = unsafe { wctype(b"digit\0".as_ptr()) };
+        assert_ne!(iswctype(b'5' as WcharT, digit_ct), 0);
+        assert_eq!(iswctype(b'A' as WcharT, digit_ct), 0);
+
+        let upper_ct = unsafe { wctype(b"upper\0".as_ptr()) };
+        assert_ne!(iswctype(b'Z' as WcharT, upper_ct), 0);
+        assert_eq!(iswctype(b'z' as WcharT, upper_ct), 0);
+
+        let space_ct = unsafe { wctype(b"space\0".as_ptr()) };
+        assert_ne!(iswctype(b' ' as WcharT, space_ct), 0);
+        assert_eq!(iswctype(b'x' as WcharT, space_ct), 0);
+    }
+
+    #[test]
+    fn test_iswctype_invalid_class() {
+        // Class 0 (invalid) should always return 0.
+        assert_eq!(iswctype(b'A' as WcharT, 0), 0);
+        assert_eq!(iswctype(b'0' as WcharT, 99), 0);
+    }
+
+    // -- wctrans / towctrans --
+
+    #[test]
+    fn test_wctrans_known() {
+        assert_eq!(unsafe { wctrans(b"tolower\0".as_ptr()) }, WT_TOLOWER);
+        assert_eq!(unsafe { wctrans(b"toupper\0".as_ptr()) }, WT_TOUPPER);
+    }
+
+    #[test]
+    fn test_wctrans_unknown() {
+        assert_eq!(unsafe { wctrans(b"tostuff\0".as_ptr()) }, 0);
+        assert_eq!(unsafe { wctrans(core::ptr::null()) }, 0);
+    }
+
+    #[test]
+    fn test_towctrans_dispatch() {
+        let to_lower = unsafe { wctrans(b"tolower\0".as_ptr()) };
+        assert_eq!(towctrans(b'A' as WcharT, to_lower), b'a' as WcharT);
+        assert_eq!(towctrans(b'z' as WcharT, to_lower), b'z' as WcharT);
+
+        let to_upper = unsafe { wctrans(b"toupper\0".as_ptr()) };
+        assert_eq!(towctrans(b'a' as WcharT, to_upper), b'A' as WcharT);
+        assert_eq!(towctrans(b'Z' as WcharT, to_upper), b'Z' as WcharT);
+    }
+
+    #[test]
+    fn test_towctrans_invalid() {
+        // Invalid transform → return character unchanged.
+        assert_eq!(towctrans(b'A' as WcharT, 0), b'A' as WcharT);
     }
 }

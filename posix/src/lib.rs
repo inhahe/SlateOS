@@ -60,11 +60,13 @@
 //!   `sin`, `cos`, `tan`, `atan2`, `frexp`, `ldexp`, `modf`,
 //!   `isnan`, `isinf`, `isfinite`, `copysign`, `fmin`, `fmax`
 //!   (and `f32` variants)
-//! - **Wide Characters**: `mblen`, `mbtowc`, `wctomb`, `mbstowcs`,
-//!   `wcstombs`, `btowc`, `wctob`, `mbsinit`, `mbrtowc`, `wcrtomb`,
-//!   `wcwidth`, `wcswidth`, `iswalnum`..`iswxdigit`, `towlower`,
-//!   `towupper`, `wcscpy`, `wcslen`, `wcscmp`, `wcscat`, `wcschr`,
-//!   `wcsrchr`, `wmemcpy`, `wmemset`, `wmemcmp`, `nl_langinfo`
+//! - **Wide Characters** (full UTF-8): `mblen`, `mbtowc`, `wctomb`,
+//!   `mbstowcs`, `wcstombs`, `btowc`, `wctob`, `mbsinit`, `mbrtowc`,
+//!   `wcrtomb`, `mbrlen`, `wcwidth`, `wcswidth`, `iswalnum`..`iswxdigit`,
+//!   `towlower`, `towupper`, `wcscpy`, `wcsncpy`, `wcslen`, `wcscmp`,
+//!   `wcsncmp`, `wcscat`, `wcsncat`, `wcschr`, `wcsrchr`, `wcsstr`,
+//!   `wmemcpy`, `wmemset`, `wmemcmp`, `wmemchr`, `wmemmove`,
+//!   `nl_langinfo`
 //! - **File Tree Walk**: `ftw`, `nftw` (recursive directory traversal)
 //! - **BSD Error Functions**: `err`, `errx`, `warn`, `warnx` (and `v*`
 //!   variants)
@@ -83,14 +85,14 @@
 //!
 //! POSIX functions return -1 on error and set `errno`.  Our native
 //! syscalls return negative error codes.  The translation layer converts
-//! native error codes to POSIX errno values (70+ constants matching
+//! native error codes to POSIX errno values (80+ constants matching
 //! Linux x86_64).
 //!
-//! ## What This Is NOT
+//! ## Encoding
 //!
-//! This is not a complete C runtime (no `printf` — needs C variadic
-//! support, deferred to musl port).  Higher-level facilities like
-//! buffered FILE* I/O and locale support will come from porting musl.
+//! All multibyte ↔ wide character functions use UTF-8 (not ASCII stubs).
+//! Full 4-byte UTF-8 decoding/encoding for the entire Unicode range
+//! (U+0000..U+10FFFF), with overlong and surrogate rejection.
 //!
 //! ## References
 //!

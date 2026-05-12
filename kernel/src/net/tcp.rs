@@ -1749,6 +1749,124 @@ pub fn get_nodelay(handle: usize) -> KernelResult<bool> {
     Ok(!conn.nagle_enabled)
 }
 
+// ---------------------------------------------------------------------------
+// Connection information / diagnostics
+// ---------------------------------------------------------------------------
+
+/// Snapshot of a TCP connection's current state, for diagnostics.
+///
+/// Returned by [`connection_info`] and [`all_connections`].  All fields
+/// are copies — no locks are held after the function returns.
+#[derive(Debug, Clone)]
+pub struct TcpConnectionInfo {
+    /// Connection table index.
+    pub handle: usize,
+    /// Current TCP state.
+    pub state: TcpState,
+    /// Local port.
+    pub local_port: u16,
+    /// Remote IP address.
+    pub remote_ip: Ipv4Addr,
+    /// Remote port.
+    pub remote_port: u16,
+    /// Smoothed RTT in nanoseconds (0 if not yet measured).
+    pub srtt_ns: u64,
+    /// Current retransmission timeout in nanoseconds.
+    pub rto_ns: u64,
+    /// Congestion window in bytes.
+    pub cwnd: u32,
+    /// Slow-start threshold in bytes.
+    pub ssthresh: u32,
+    /// Peer's advertised receive window (scaled).
+    pub snd_wnd: u32,
+    /// Effective MSS for outgoing data.
+    pub eff_mss: u16,
+    /// Peer's raw MSS from SYN/SYN-ACK (0 if not advertised).
+    pub peer_mss: u16,
+    /// Bytes in the receive buffer (data ready to read).
+    pub rx_buffered: usize,
+    /// Bytes in the retransmit buffer (unacknowledged in-flight data).
+    pub tx_buffered: usize,
+    /// Whether ECN was negotiated.
+    pub ecn_ok: bool,
+    /// Whether SACK was negotiated.
+    pub sack_ok: bool,
+    /// Whether window scaling was negotiated.
+    pub wscale_ok: bool,
+    /// Whether keepalive probes are enabled.
+    pub keepalive: bool,
+    /// Whether Nagle's algorithm is enabled.
+    pub nagle: bool,
+}
+
+/// Query detailed information about a single TCP connection.
+///
+/// Returns `None` if the handle is invalid or the slot is inactive.
+#[allow(dead_code)] // Diagnostic API.
+pub fn connection_info(handle: usize) -> Option<TcpConnectionInfo> {
+    let conns = CONNECTIONS.lock();
+    let conn = conns.get(handle)?;
+    if !conn.active {
+        return None;
+    }
+    Some(TcpConnectionInfo {
+        handle,
+        state: conn.state,
+        local_port: conn.local_port,
+        remote_ip: conn.remote_ip,
+        remote_port: conn.remote_port,
+        srtt_ns: conn.srtt_ns_x8 >> SRTT_ALPHA_SHIFT,
+        rto_ns: conn.rto_ns,
+        cwnd: conn.cwnd,
+        ssthresh: conn.ssthresh,
+        snd_wnd: conn.snd_wnd,
+        eff_mss: effective_mss(conn) as u16,
+        peer_mss: conn.peer_mss,
+        rx_buffered: conn.rx_buffer.len(),
+        tx_buffered: conn.tx_buffer.len(),
+        ecn_ok: conn.ecn_ok,
+        sack_ok: conn.sack_ok,
+        wscale_ok: conn.wscale_ok,
+        keepalive: conn.keepalive_enabled,
+        nagle: conn.nagle_enabled,
+    })
+}
+
+/// Return information about all active TCP connections.
+///
+/// Useful for kshell diagnostic commands and network monitoring.
+#[allow(dead_code)] // Diagnostic API.
+pub fn all_connections() -> Vec<TcpConnectionInfo> {
+    let conns = CONNECTIONS.lock();
+    let mut result = Vec::new();
+    for (idx, conn) in conns.iter().enumerate() {
+        if conn.active {
+            result.push(TcpConnectionInfo {
+                handle: idx,
+                state: conn.state,
+                local_port: conn.local_port,
+                remote_ip: conn.remote_ip,
+                remote_port: conn.remote_port,
+                srtt_ns: conn.srtt_ns_x8 >> SRTT_ALPHA_SHIFT,
+                rto_ns: conn.rto_ns,
+                cwnd: conn.cwnd,
+                ssthresh: conn.ssthresh,
+                snd_wnd: conn.snd_wnd,
+                eff_mss: effective_mss(conn) as u16,
+                peer_mss: conn.peer_mss,
+                rx_buffered: conn.rx_buffer.len(),
+                tx_buffered: conn.tx_buffer.len(),
+                ecn_ok: conn.ecn_ok,
+                sack_ok: conn.sack_ok,
+                wscale_ok: conn.wscale_ok,
+                keepalive: conn.keepalive_enabled,
+                nagle: conn.nagle_enabled,
+            });
+        }
+    }
+    result
+}
+
 /// Query the current smoothed RTT for a connection (nanoseconds).
 ///
 /// Returns 0 if no RTT samples have been collected yet.

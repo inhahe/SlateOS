@@ -410,12 +410,89 @@ pub extern "C" fn stdio_rename(old: *const u8, new: *const u8) -> i32 {
     crate::file::rename(old, new)
 }
 
+/// Maximum length of a `tmpnam`-generated filename (including null).
+pub const L_TMPNAM: usize = 20;
+
 /// Create a temporary filename (not thread-safe).
 ///
-/// Stub: returns null (not implemented).
+/// Generates a unique filename in `/tmp`.  If `s` is non-null, the
+/// result is written there (must be at least `L_TMPNAM` bytes); if
+/// null, a static buffer is used (not thread-safe).
+///
+/// Uses a monotonically increasing counter to ensure uniqueness
+/// within a single process.  The name has the form `/tmp/tmp_NNNNNN`.
+///
+/// Note: `tmpnam` is considered insecure (TOCTOU race between name
+/// generation and file creation).  Prefer `mkstemp`.
 #[unsafe(no_mangle)]
-pub extern "C" fn tmpnam(_s: *mut u8) -> *mut u8 {
-    core::ptr::null_mut()
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn tmpnam(s: *mut u8) -> *mut u8 {
+    static mut COUNTER: u32 = 0;
+    static mut STATIC_BUF: [u8; L_TMPNAM] = [0u8; L_TMPNAM];
+
+    // Increment counter (single-threaded fine; multi-threaded worst
+    // case is duplicate names — caller should use mkstemp anyway).
+    // SAFETY: Static mutable access. Best-effort uniqueness.
+    let count = unsafe {
+        COUNTER = COUNTER.wrapping_add(1);
+        COUNTER
+    };
+
+    // Build name: "/tmp/tmp_NNNNNN\0"
+    let prefix = b"/tmp/tmp_";
+    let mut buf_local = [0u8; L_TMPNAM];
+    let mut pos: usize = 0;
+
+    for &byte in prefix {
+        if let Some(slot) = buf_local.get_mut(pos) {
+            *slot = byte;
+        }
+        pos = pos.wrapping_add(1);
+    }
+
+    // Write counter as 6-digit decimal.
+    let digits = [
+        b'0'.wrapping_add(((count / 100_000) % 10) as u8),
+        b'0'.wrapping_add(((count / 10_000) % 10) as u8),
+        b'0'.wrapping_add(((count / 1_000) % 10) as u8),
+        b'0'.wrapping_add(((count / 100) % 10) as u8),
+        b'0'.wrapping_add(((count / 10) % 10) as u8),
+        b'0'.wrapping_add((count % 10) as u8),
+    ];
+    for &d in &digits {
+        if let Some(slot) = buf_local.get_mut(pos) {
+            *slot = d;
+        }
+        pos = pos.wrapping_add(1);
+    }
+
+    // Null-terminate.
+    if let Some(slot) = buf_local.get_mut(pos) {
+        *slot = 0;
+    }
+
+    if s.is_null() {
+        // SAFETY: Writing to static buffer. Not thread-safe (matches POSIX).
+        unsafe {
+            let ptr = &raw mut STATIC_BUF;
+            core::ptr::copy_nonoverlapping(
+                buf_local.as_ptr(),
+                (*ptr).as_mut_ptr(),
+                pos.wrapping_add(1),
+            );
+            (*ptr).as_mut_ptr()
+        }
+    } else {
+        // SAFETY: Caller guarantees s has at least L_TMPNAM bytes.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buf_local.as_ptr(),
+                s,
+                pos.wrapping_add(1), // Include null terminator.
+            );
+        }
+        s
+    }
 }
 
 // ---------------------------------------------------------------------------

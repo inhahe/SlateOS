@@ -876,12 +876,13 @@ pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
 
 /// Execute a command using the system shell.
 ///
-/// If `command` is NULL, returns whether a shell is available (1 = yes).
-/// Otherwise, attempts to execute the command via `posix_spawn` and
-/// waits for completion.
+/// If `command` is NULL, returns whether a shell is available (1 = yes,
+/// 0 = no).  Otherwise, spawns `/bin/sh -c "command"` via `posix_spawnp`
+/// and waits for completion, returning the child's wait status.
 ///
-/// Note: returns -1 (ENOSYS) since we don't have a shell path
-/// configured yet.
+/// Returns -1 on spawn failure (errno set), 127 if the shell could not
+/// be executed (matches POSIX convention), or the child's wait status
+/// on success.
 ///
 /// # Safety
 ///
@@ -889,14 +890,44 @@ pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn system(command: *const u8) -> i32 {
     if command.is_null() {
-        // Check if a shell is available.  We don't have /bin/sh yet.
-        return 0; // 0 = no shell available.
+        // POSIX: return non-zero if a command processor is available.
+        // Try to stat /bin/sh to check.
+        let mut st = crate::stat::Stat::zeroed();
+        let sh = b"/bin/sh\0";
+        let ret = crate::file::stat(sh.as_ptr(), &raw mut st);
+        return i32::from(ret == 0);
     }
 
-    // We'd need to fork+exec /bin/sh -c "command" here.
-    // Since our shell infrastructure isn't ready, return -1.
-    crate::errno::set_errno(crate::errno::ENOSYS);
-    -1
+    // Build argv: ["sh", "-c", command, NULL].
+    let sh_path: *const u8 = c"sh".as_ptr().cast::<u8>();
+    let dash_c: *const u8 = c"-c".as_ptr().cast::<u8>();
+    let argv: [*const u8; 4] = [sh_path, dash_c, command, core::ptr::null()];
+
+    let mut pid: crate::types::PidT = 0;
+
+    let ret = crate::spawn::posix_spawnp(
+        &raw mut pid,
+        sh_path,
+        core::ptr::null(),  // file_actions
+        core::ptr::null(),  // attrp
+        argv.as_ptr(),
+        core::ptr::null(),  // envp (inherit)
+    );
+
+    if ret != 0 {
+        // posix_spawnp failed (errno already set by spawnp).
+        // POSIX says return as if the shell exited with status 127.
+        return 127_i32.wrapping_shl(8); // Encode as wait status: exit 127.
+    }
+
+    // Wait for the child.
+    let mut status: i32 = 0;
+    let waited = crate::process::waitpid(pid, &raw mut status, 0);
+    if waited < 0 {
+        return -1;
+    }
+
+    status
 }
 
 // ---------------------------------------------------------------------------

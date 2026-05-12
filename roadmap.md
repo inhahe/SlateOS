@@ -961,6 +961,17 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] DNS resolution cache (32-entry fixed-size, TTL-based expiration, case-insensitive matching, flush on DHCP renewal, negative caching for NXDOMAIN with 60s TTL)
   - [x] DNS CNAME chasing (follow CNAME chains within responses + follow-up queries, up to 8 hops, cache under original name)
   - [x] DNS query hardening: unique transaction IDs (AtomicU16 counter, prevents spoofed responses), unique ephemeral source ports (49152-65535, prevents port collisions)
+  - [x] TCP keepalive probes (RFC 1122 §4.2.3.6): 75s idle, 10s interval, 9 max probes; set_keepalive/set_keepalive_params API; tick from net::poll every 5s
+  - [x] TCP receive window tracking: snd_wnd from peer, dynamic advertised_window() based on rx_buffer; send() respects min(cwnd, snd_wnd)
+  - [x] TCP RTT estimation (Jacobson/Karels, RFC 6298): SRTT + 4×RTTVAR → dynamic RTO [200ms, 60s]; Karn's algorithm (skip retransmitted)
+  - [x] TCP Nagle algorithm (RFC 896): coalesce small segments when unacked data in flight; TCP_NODELAY via set_nodelay()
+  - [x] TCP congestion control (simplified AIMD, RFC 5681): slow start → congestion avoidance; cwnd/ssthresh; multiplicative decrease on loss
+  - [x] ICMP destination unreachable (13 codes) and time exceeded (2 codes) error handling with human-readable reasons
+  - [x] Gratuitous ARP on interface configure (detects IP conflicts, updates neighbor caches)
+  - [x] DHCP extended options: lease time, T1/T2 renewal, domain name, NTP server, NAK handling
+  - [x] IPv4/TCP/UDP checksum verification on all incoming packets
+  - [x] DNS response source validation (IP + port) against spoofed replies
+  - [x] DHCP transaction ID randomization (CSPRNG) against LAN spoofing
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)
@@ -1108,7 +1119,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] INET_ADDRSTRLEN/INET6_ADDRSTRLEN/INADDR_BROADCAST/INADDR_NONE constants
   - [x] sched_getaffinity/sched_setaffinity: CPU affinity stubs (single-CPU mask), CpuSetT struct
   - [x] mkostemp: mkstemp with additional open flags (flags accepted, not enforced)
-  - [x] posix_spawn_file_actions: init/destroy/addclose/adddup2/addopen stubs; posix_spawnattr: init/destroy/setflags/getflags stubs
+  - [x] posix_spawn_file_actions: init/destroy/addclose/adddup2/addopen with storage (16 actions max, paths stored inline); posix_spawnattr: init/destroy/setflags/getflags/setpgroup/getpgroup with storage (actions recorded but not yet applied — blocked on kernel fd inheritance)
+  - [x] scandir: filter + sort, malloc'd array of malloc'd Dirent*, insertion sort, full OOM rollback
+  - [x] setsockopt/getsockopt: SO_REUSEADDR, SO_KEEPALIVE, TCP_NODELAY, SO_RCVBUF/SO_SNDBUF stored per-socket; values returned consistently by getsockopt
   - [x] pseudo-terminal stubs: posix_openpt (ENOSYS), grantpt/unlockpt (succeed), ptsname/ptsname_r (null/ENOSYS)
   - [x] dladdr: symbol lookup stub (returns 0=failure), DlInfo struct
   - [x] mqueue: POSIX message queue stubs (mq_open/close/unlink/send/receive/getattr/setattr — all ENOSYS)

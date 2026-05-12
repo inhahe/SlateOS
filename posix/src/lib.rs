@@ -43,7 +43,7 @@
 //! - **Formatted Output**: `printf`, `fprintf`, `dprintf`, `sprintf`,
 //!   `snprintf` (via assembly trampoline for C variadic capture)
 //! - **Formatted Input**: `sscanf` (string scanning with `%d`/`%u`/`%x`/
-//!   `%o`/`%s`/`%c`/`%f`/`%n`, width limits, assignment suppression)
+//!   `%o`/`%s`/`%c`/`%f`/`%n`/`%[...]`, width limits, assignment suppression)
 //! - **Pattern Matching**: `fnmatch` (shell wildcards), `glob`/`globfree`
 //!   (pathname expansion), `wordexp`/`wordfree` (word expansion)
 //! - **Character Encoding**: `iconv_open`, `iconv`, `iconv_close`
@@ -66,6 +66,7 @@
 //!   `towlower`, `towupper`, `wctype`, `iswctype`, `wctrans`, `towctrans`,
 //!   `wcscpy`, `wcsncpy`, `wcslen`, `wcscmp`, `wcsncmp`, `wcscat`,
 //!   `wcsncat`, `wcschr`, `wcsrchr`, `wcsstr`,
+//!   `wcstol`, `wcstoul`, `wcstoll`, `wcstoull`, `wcstod`, `wcstof`,
 //!   `wmemcpy`, `wmemset`, `wmemcmp`, `wmemchr`, `wmemmove`,
 //!   `nl_langinfo`
 //! - **File Tree Walk**: `ftw`, `nftw` (recursive directory traversal)

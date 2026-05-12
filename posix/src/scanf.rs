@@ -17,7 +17,11 @@
 //! - `%f`, `%lf` — floating-point → `*mut f32` / `*mut f64`
 //! - `%n` — characters consumed so far → `*mut i32`
 //! - `%%` — literal percent (consumed, not assigned)
-//! - `%[...]` — scanset (NOT yet implemented)
+//! - `%[...]` — scanset (character class matching)
+//!   - `%[abc]` matches characters in the set {a, b, c}
+//!   - `%[^abc]` matches characters NOT in the set
+//!   - `%[a-z]` matches range a through z
+//!   - `%[]abc]` leading `]` is part of the set
 //! - Width: `%5d` limits digits consumed
 //! - `*` (assignment suppression): `%*d` reads but doesn't store
 
@@ -268,6 +272,11 @@ fn scan_core(ctx: &mut ScanCtx) -> i32 {
                 }
                 b'c' => {
                     if !scan_char(ctx, suppress, width, has_width) {
+                        break;
+                    }
+                }
+                b'[' => {
+                    if !scan_scanset(ctx, suppress, width) {
                         break;
                     }
                 }
@@ -600,6 +609,121 @@ fn scan_float(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> 
                 unsafe { *p = val as f32; }
             }
         }
+        ctx.assigned += 1;
+    }
+    true
+}
+
+/// Scan a `%[...]` scanset.
+///
+/// Reads characters from input that match (or don't match, if negated)
+/// the set of characters specified between the brackets.
+///
+/// - `%[abc]`: matches any of a, b, c.
+/// - `%[^abc]`: matches anything NOT in {a, b, c}.
+/// - `%[a-z]`: matches the range a through z.
+/// - `%[]abc]`: a leading `]` is part of the set (not the terminator).
+///
+/// The scanset is stored as a 256-bit bitmap (32 bytes) for O(1) lookup.
+#[allow(clippy::arithmetic_side_effects)]
+fn scan_scanset(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
+    // %[ does NOT skip whitespace (like %c).
+
+    // Build the character class bitmap from the format string.
+    // 256 bits = 32 bytes, one bit per possible byte value.
+    let mut bitmap = [0u8; 32];
+    let mut negated = false;
+
+    // Check for negation.
+    if ctx.fmt_peek() == b'^' {
+        negated = true;
+        ctx.fmt_advance();
+    }
+
+    // A leading ']' right after '[' (or '[^') is part of the set,
+    // not the closing bracket.
+    if ctx.fmt_peek() == b']' {
+        let c = b']';
+        bitmap[(c >> 3) as usize] |= 1u8 << (c & 7);
+        ctx.fmt_advance();
+    }
+
+    // Parse the rest of the scanset until ']' or end of format.
+    loop {
+        let c = ctx.fmt_peek();
+        if c == 0 || c == b']' {
+            break;
+        }
+
+        // Check for range: a-z.
+        let next1 = unsafe { *ctx.fmt.add(ctx.fi.wrapping_add(1)) };
+        let next2 = unsafe { *ctx.fmt.add(ctx.fi.wrapping_add(2)) };
+        if next1 == b'-' && next2 != b']' && next2 != 0 {
+            // Range c..next2 (inclusive).
+            let lo = c;
+            let hi = next2;
+            let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+            let mut ch = lo;
+            loop {
+                bitmap[(ch >> 3) as usize] |= 1u8 << (ch & 7);
+                if ch == hi {
+                    break;
+                }
+                ch = ch.wrapping_add(1);
+            }
+            ctx.fmt_advance(); // skip start
+            ctx.fmt_advance(); // skip '-'
+            ctx.fmt_advance(); // skip end
+        } else {
+            // Single character.
+            bitmap[(c >> 3) as usize] |= 1u8 << (c & 7);
+            ctx.fmt_advance();
+        }
+    }
+
+    // Skip closing ']'.
+    if ctx.fmt_peek() == b']' {
+        ctx.fmt_advance();
+    }
+
+    // Now scan input using the bitmap.
+    if ctx.peek() == 0 {
+        return false;
+    }
+
+    let ptr = if suppress { 0 } else { ctx.next_arg() };
+    let dest = ptr as *mut u8;
+    let mut count: usize = 0;
+
+    while count < width {
+        let c = ctx.peek();
+        if c == 0 {
+            break;
+        }
+
+        let in_set = (bitmap[(c >> 3) as usize] & (1u8 << (c & 7))) != 0;
+        let matches = if negated { !in_set } else { in_set };
+
+        if !matches {
+            break;
+        }
+
+        if !suppress && !dest.is_null() {
+            unsafe { *dest.add(count) = c; }
+        }
+        ctx.advance();
+        count = count.wrapping_add(1);
+    }
+
+    if count == 0 {
+        return false;
+    }
+
+    // Null-terminate.
+    if !suppress && !dest.is_null() {
+        unsafe { *dest.add(count) = 0; }
+    }
+    if !suppress {
         ctx.assigned += 1;
     }
     true

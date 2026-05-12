@@ -20,6 +20,8 @@
 //!   `iswxdigit`, `iswblank` — wide ctype
 //! - `wcscpy`, `wcsncpy`, `wcslen`, `wcscmp`, `wcsncmp`, `wcscat`,
 //!   `wcschr`, `wcsrchr` — wide string operations
+//! - `wcstol`, `wcstoul`, `wcstoll`, `wcstoull` — wide string→integer
+//! - `wcstod`, `wcstof` — wide string→float
 //! - `wmemcpy`, `wmemset`, `wmemcmp` — wide memory operations
 
 /// Wide character type (32-bit Unicode code point).
@@ -1091,7 +1093,262 @@ pub unsafe extern "C" fn wmemcmp(s1: *const WcharT, s2: *const WcharT, n: usize)
 }
 
 // ---------------------------------------------------------------------------
-// nl_langinfo stub
+// Wide string → number conversion (wcstol, wcstoul, wcstoll, wcstoull, wcstod)
+// ---------------------------------------------------------------------------
+
+/// Check if a wide character is ASCII whitespace.
+#[inline]
+const fn wc_space(wc: WcharT) -> bool {
+    matches!(wc, 0x20 | 0x09 | 0x0a | 0x0d | 0x0b | 0x0c)
+}
+
+/// Convert a wide character to its digit value in the given base.
+/// Returns -1 if not a valid digit.
+#[inline]
+fn wc_digit(wc: WcharT, base: i32) -> i32 {
+    let val = match wc {
+        0x30..=0x39 => wc.wrapping_sub(0x30), // '0'..'9'
+        0x61..=0x7a => wc.wrapping_sub(0x61).wrapping_add(10), // 'a'..'z'
+        0x41..=0x5a => wc.wrapping_sub(0x41).wrapping_add(10), // 'A'..'Z'
+        _ => return -1,
+    };
+    if val < base { val } else { -1 }
+}
+
+/// Skip whitespace in a wide string, returning the new index.
+#[inline]
+unsafe fn wc_skip_ws(nptr: *const WcharT, mut i: usize) -> usize {
+    while unsafe { *nptr.add(i) } != 0 && wc_space(unsafe { *nptr.add(i) }) {
+        i = i.wrapping_add(1);
+    }
+    i
+}
+
+/// Detect base and skip prefix for wide integer parsing.
+///
+/// Returns `(actual_base, new_index)`.
+#[allow(clippy::arithmetic_side_effects)]
+unsafe fn wc_detect_base(nptr: *const WcharT, mut i: usize, mut base: i32) -> (i32, usize) {
+    if base == 0 {
+        if unsafe { *nptr.add(i) } == 0x30 {
+            let next = unsafe { *nptr.add(i.wrapping_add(1)) };
+            if next == 0x78 || next == 0x58 {
+                base = 16;
+                i = i.wrapping_add(2);
+            } else {
+                base = 8;
+                i = i.wrapping_add(1);
+            }
+        } else {
+            base = 10;
+        }
+    } else if base == 16 && unsafe { *nptr.add(i) } == 0x30 {
+        let next = unsafe { *nptr.add(i.wrapping_add(1)) };
+        if next == 0x78 || next == 0x58 {
+            i = i.wrapping_add(2);
+        }
+    }
+    (base, i)
+}
+
+/// `wcstol` — convert a wide string to a `long` (`i64` on LP64).
+///
+/// Skips leading whitespace, handles optional sign, auto-detects base
+/// when `base` is 0.  Stores end pointer through `endptr` if non-null.
+///
+/// # Safety
+///
+/// `nptr` must point to a valid null-terminated wide string.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe extern "C" fn wcstol(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+) -> i64 {
+    if nptr.is_null() {
+        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        return 0;
+    }
+
+    let mut i = unsafe { wc_skip_ws(nptr, 0) };
+
+    let negative = unsafe { *nptr.add(i) } == 0x2d;
+    if negative || unsafe { *nptr.add(i) } == 0x2b {
+        i = i.wrapping_add(1);
+    }
+
+    let (actual_base, new_i) = unsafe { wc_detect_base(nptr, i, base) };
+    i = new_i;
+    let start = i;
+    let mut result: i64 = 0;
+
+    loop {
+        let wc = unsafe { *nptr.add(i) };
+        if wc == 0 { break; }
+        let d = wc_digit(wc, actual_base);
+        if d < 0 { break; }
+        result = result.saturating_mul(i64::from(actual_base)).saturating_add(i64::from(d));
+        i = i.wrapping_add(1);
+    }
+
+    if !endptr.is_null() {
+        unsafe { *endptr = if i == start { nptr } else { nptr.add(i) }; }
+    }
+
+    if negative { result.saturating_neg() } else { result }
+}
+
+/// `wcstoul` — convert a wide string to an `unsigned long` (`u64` on LP64).
+///
+/// # Safety
+///
+/// `nptr` must point to a valid null-terminated wide string.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe extern "C" fn wcstoul(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+) -> u64 {
+    if nptr.is_null() {
+        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        return 0;
+    }
+
+    let mut i = unsafe { wc_skip_ws(nptr, 0) };
+    if unsafe { *nptr.add(i) } == 0x2b { i = i.wrapping_add(1); }
+
+    let (actual_base, new_i) = unsafe { wc_detect_base(nptr, i, base) };
+    i = new_i;
+    let start = i;
+    let mut result: u64 = 0;
+
+    loop {
+        let wc = unsafe { *nptr.add(i) };
+        if wc == 0 { break; }
+        let d = wc_digit(wc, actual_base);
+        if d < 0 { break; }
+        result = result.saturating_mul(actual_base as u64).saturating_add(d as u64);
+        i = i.wrapping_add(1);
+    }
+
+    if !endptr.is_null() {
+        unsafe { *endptr = if i == start { nptr } else { nptr.add(i) }; }
+    }
+
+    result
+}
+
+/// `wcstoll` — convert a wide string to `long long` (`i64`).
+///
+/// On LP64, identical to `wcstol`.
+///
+/// # Safety
+///
+/// `nptr` must point to a valid null-terminated wide string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcstoll(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+) -> i64 {
+    unsafe { wcstol(nptr, endptr, base) }
+}
+
+/// `wcstoull` — convert a wide string to `unsigned long long` (`u64`).
+///
+/// On LP64, identical to `wcstoul`.
+///
+/// # Safety
+///
+/// `nptr` must point to a valid null-terminated wide string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcstoull(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+    base: i32,
+) -> u64 {
+    unsafe { wcstoul(nptr, endptr, base) }
+}
+
+/// `wcstod` — convert a wide string to `f64`.
+///
+/// Parses `[sign] digits [. digits] [e [sign] digits]`.  Uses a small
+/// byte buffer to convert the ASCII-range wide characters to a multibyte
+/// string, then delegates to `strtod`.
+///
+/// # Safety
+///
+/// `nptr` must point to a valid null-terminated wide string.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe extern "C" fn wcstod(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+) -> f64 {
+    if nptr.is_null() {
+        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        return 0.0;
+    }
+
+    let mut i = unsafe { wc_skip_ws(nptr, 0) };
+    let start = i;
+
+    // Collect ASCII-range float characters into a byte buffer.
+    let mut buf = [0u8; 64];
+    let mut bi: usize = 0;
+
+    while bi < 62 {
+        let wc = unsafe { *nptr.add(i) };
+        if wc == 0 { break; }
+        match wc {
+            // '+', '-', '.', '0'-'9', 'E', 'e'
+            0x2b | 0x2d | 0x2e | 0x30..=0x39 | 0x45 | 0x65 => {
+                buf[bi] = wc as u8;
+                bi = bi.wrapping_add(1);
+                i = i.wrapping_add(1);
+            }
+            _ => break,
+        }
+    }
+    buf[bi] = 0;
+
+    if bi == 0 {
+        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        return 0.0;
+    }
+
+    let mut byte_end: *const u8 = core::ptr::null();
+    let val = unsafe { crate::stdlib::strtod(buf.as_ptr(), &mut byte_end) };
+
+    if !endptr.is_null() {
+        let bytes_consumed = if byte_end.is_null() {
+            0usize
+        } else {
+            unsafe { byte_end.offset_from(buf.as_ptr()) as usize }
+        };
+        unsafe { *endptr = nptr.add(start.wrapping_add(bytes_consumed)); }
+    }
+
+    val
+}
+
+/// `wcstof` — convert a wide string to `f32`.
+///
+/// # Safety
+///
+/// `nptr` must point to a valid null-terminated wide string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcstof(
+    nptr: *const WcharT,
+    endptr: *mut *const WcharT,
+) -> f32 {
+    unsafe { wcstod(nptr, endptr) as f32 }
+}
+
+// ---------------------------------------------------------------------------
+// nl_langinfo
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

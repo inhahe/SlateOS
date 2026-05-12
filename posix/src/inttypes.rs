@@ -4,7 +4,7 @@
 //! `uint64_t` (= `u64`).  `strtoimax` and `strtoumax` therefore
 //! delegate directly to `strtoll`/`strtoull`.
 //!
-//! Also provides `imaxabs` and `imaxdiv`.
+//! Also provides `imaxabs`, `imaxdiv`, `wcstoimax`, and `wcstoumax`.
 
 /// Absolute value of an `intmax_t`.
 #[unsafe(no_mangle)]
@@ -66,26 +66,272 @@ pub unsafe extern "C" fn strtoumax(
     unsafe { crate::stdlib::strtoull(nptr, endptr, base) }
 }
 
+// ---------------------------------------------------------------------------
+// Wide character → integer conversion helpers
+// ---------------------------------------------------------------------------
+
+/// Check if a wide character is ASCII whitespace.
+#[inline]
+const fn wc_is_space(wc: i32) -> bool {
+    matches!(wc, 0x20 | 0x09 | 0x0a | 0x0d | 0x0b | 0x0c)
+}
+
+/// Convert a wide character to its digit value in the given base.
+/// Returns -1 if not a valid digit.
+#[inline]
+fn wc_digit(wc: i32, base: i32) -> i32 {
+    let val = match wc {
+        0x30..=0x39 => wc.wrapping_sub(0x30), // '0'..'9'
+        0x61..=0x7a => wc.wrapping_sub(0x61).wrapping_add(10), // 'a'..'z'
+        0x41..=0x5a => wc.wrapping_sub(0x41).wrapping_add(10), // 'A'..'Z'
+        _ => return -1,
+    };
+    if val < base { val } else { -1 }
+}
+
 /// Convert a `wchar_t` string to `intmax_t`.
 ///
-/// Stub: returns 0 (wide string parsing not implemented).
+/// Skips leading whitespace, handles optional sign, auto-detects base
+/// if `base` is 0, and skips `0x`/`0X` prefix for hex.  Stores end
+/// pointer through `endptr` if non-null.
+///
+/// # Safety
+///
+/// `nptr` must point to a valid null-terminated wide string.
 #[unsafe(no_mangle)]
-pub extern "C" fn wcstoimax(
-    _nptr: *const i32,
-    _endptr: *mut *const i32,
-    _base: i32,
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe extern "C" fn wcstoimax(
+    nptr: *const i32,
+    endptr: *mut *const i32,
+    mut base: i32,
 ) -> i64 {
-    0
+    if nptr.is_null() {
+        if !endptr.is_null() {
+            unsafe { *endptr = nptr; }
+        }
+        return 0;
+    }
+
+    let mut i: usize = 0;
+
+    // Skip whitespace.
+    while unsafe { *nptr.add(i) } != 0 && wc_is_space(unsafe { *nptr.add(i) }) {
+        i = i.wrapping_add(1);
+    }
+
+    // Handle sign.
+    let negative = unsafe { *nptr.add(i) } == 0x2d; // '-'
+    if negative || unsafe { *nptr.add(i) } == 0x2b { // '+'
+        i = i.wrapping_add(1);
+    }
+
+    // Auto-detect or skip prefix.
+    if base == 0 {
+        if unsafe { *nptr.add(i) } == 0x30 { // '0'
+            let next = unsafe { *nptr.add(i.wrapping_add(1)) };
+            if next == 0x78 || next == 0x58 { // 'x' or 'X'
+                base = 16;
+                i = i.wrapping_add(2);
+            } else {
+                base = 8;
+                i = i.wrapping_add(1);
+            }
+        } else {
+            base = 10;
+        }
+    } else if base == 16 && unsafe { *nptr.add(i) } == 0x30 {
+        let next = unsafe { *nptr.add(i.wrapping_add(1)) };
+        if next == 0x78 || next == 0x58 {
+            i = i.wrapping_add(2);
+        }
+    }
+
+    // Parse digits.
+    let start = i;
+    let mut result: i64 = 0;
+    loop {
+        let wc = unsafe { *nptr.add(i) };
+        if wc == 0 {
+            break;
+        }
+        let d = wc_digit(wc, base);
+        if d < 0 {
+            break;
+        }
+        result = result.saturating_mul(i64::from(base)).saturating_add(i64::from(d));
+        i = i.wrapping_add(1);
+    }
+
+    if !endptr.is_null() {
+        // If no digits were consumed, endptr points to nptr (original start).
+        if i == start {
+            unsafe { *endptr = nptr; }
+        } else {
+            unsafe { *endptr = nptr.add(i); }
+        }
+    }
+
+    if negative { result.saturating_neg() } else { result }
 }
 
 /// Convert a `wchar_t` string to `uintmax_t`.
 ///
-/// Stub: returns 0 (wide string parsing not implemented).
+/// Like `wcstoimax` but parses an unsigned value.
+///
+/// # Safety
+///
+/// `nptr` must point to a valid null-terminated wide string.
 #[unsafe(no_mangle)]
-pub extern "C" fn wcstoumax(
-    _nptr: *const i32,
-    _endptr: *mut *const i32,
-    _base: i32,
+#[allow(clippy::arithmetic_side_effects)]
+pub unsafe extern "C" fn wcstoumax(
+    nptr: *const i32,
+    endptr: *mut *const i32,
+    mut base: i32,
 ) -> u64 {
-    0
+    if nptr.is_null() {
+        if !endptr.is_null() {
+            unsafe { *endptr = nptr; }
+        }
+        return 0;
+    }
+
+    let mut i: usize = 0;
+
+    // Skip whitespace.
+    while unsafe { *nptr.add(i) } != 0 && wc_is_space(unsafe { *nptr.add(i) }) {
+        i = i.wrapping_add(1);
+    }
+
+    // Skip optional '+'.
+    if unsafe { *nptr.add(i) } == 0x2b {
+        i = i.wrapping_add(1);
+    }
+
+    // Auto-detect or skip prefix.
+    if base == 0 {
+        if unsafe { *nptr.add(i) } == 0x30 {
+            let next = unsafe { *nptr.add(i.wrapping_add(1)) };
+            if next == 0x78 || next == 0x58 {
+                base = 16;
+                i = i.wrapping_add(2);
+            } else {
+                base = 8;
+                i = i.wrapping_add(1);
+            }
+        } else {
+            base = 10;
+        }
+    } else if base == 16 && unsafe { *nptr.add(i) } == 0x30 {
+        let next = unsafe { *nptr.add(i.wrapping_add(1)) };
+        if next == 0x78 || next == 0x58 {
+            i = i.wrapping_add(2);
+        }
+    }
+
+    // Parse digits.
+    let start = i;
+    let mut result: u64 = 0;
+    loop {
+        let wc = unsafe { *nptr.add(i) };
+        if wc == 0 {
+            break;
+        }
+        let d = wc_digit(wc, base);
+        if d < 0 {
+            break;
+        }
+        result = result.saturating_mul(base as u64).saturating_add(d as u64);
+        i = i.wrapping_add(1);
+    }
+
+    if !endptr.is_null() {
+        if i == start {
+            unsafe { *endptr = nptr; }
+        } else {
+            unsafe { *endptr = nptr.add(i); }
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_imaxabs() {
+        assert_eq!(imaxabs(42), 42);
+        assert_eq!(imaxabs(-42), 42);
+        assert_eq!(imaxabs(0), 0);
+    }
+
+    #[test]
+    fn test_imaxdiv() {
+        let r = imaxdiv(17, 5);
+        assert_eq!(r.quot, 3);
+        assert_eq!(r.rem, 2);
+    }
+
+    #[test]
+    fn test_imaxdiv_zero() {
+        let r = imaxdiv(42, 0);
+        assert_eq!(r.quot, 0);
+        assert_eq!(r.rem, 0);
+    }
+
+    #[test]
+    fn test_wcstoimax_decimal() {
+        let s: [i32; 5] = [0x20, 0x34, 0x32, 0x00, 0x00]; // " 42\0"
+        let mut end: *const i32 = core::ptr::null();
+        let v = unsafe { wcstoimax(s.as_ptr(), &mut end, 10) };
+        assert_eq!(v, 42);
+        assert_eq!(end, unsafe { s.as_ptr().add(3) });
+    }
+
+    #[test]
+    fn test_wcstoimax_negative() {
+        let s: [i32; 4] = [0x2d, 0x31, 0x30, 0x00]; // "-10\0"
+        let v = unsafe { wcstoimax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, -10);
+    }
+
+    #[test]
+    fn test_wcstoimax_hex_auto() {
+        // "0xff\0"
+        let s: [i32; 5] = [0x30, 0x78, 0x66, 0x66, 0x00];
+        let v = unsafe { wcstoimax(s.as_ptr(), core::ptr::null_mut(), 0) };
+        assert_eq!(v, 255);
+    }
+
+    #[test]
+    fn test_wcstoumax_hex() {
+        // "0x1A\0"
+        let s: [i32; 5] = [0x30, 0x78, 0x31, 0x41, 0x00];
+        let v = unsafe { wcstoumax(s.as_ptr(), core::ptr::null_mut(), 16) };
+        assert_eq!(v, 26);
+    }
+
+    #[test]
+    fn test_wcstoimax_octal() {
+        // "077\0"
+        let s: [i32; 4] = [0x30, 0x37, 0x37, 0x00];
+        let v = unsafe { wcstoimax(s.as_ptr(), core::ptr::null_mut(), 0) };
+        assert_eq!(v, 63);
+    }
+
+    #[test]
+    fn test_wcstoumax_no_digits() {
+        // "abc\0" (no valid digits for base 10)
+        let s: [i32; 4] = [0x61, 0x62, 0x63, 0x00];
+        let mut end: *const i32 = core::ptr::null();
+        let v = unsafe { wcstoumax(s.as_ptr(), &mut end, 10) };
+        assert_eq!(v, 0);
+        // endptr should point to start (no conversion).
+        assert_eq!(end, s.as_ptr());
+    }
 }

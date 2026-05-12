@@ -972,6 +972,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] IPv4/TCP/UDP checksum verification on all incoming packets
   - [x] DNS response source validation (IP + port) against spoofed replies
   - [x] DHCP transaction ID randomization (CSPRNG) against LAN spoofing
+  - [x] TCP window scaling (RFC 7323): negotiated in SYN/SYN-ACK, our scale=0 (64KiB fits), peer scale applied to window updates
+  - [x] TCP SACK (RFC 2018): SACK-Permitted in SYN, receive-side tracks 4 out-of-order blocks, SACK blocks in ACKs, merge/trim logic
+  - [x] UDP multicast (RFC 1112): per-socket group join/leave (8 max), global refcounted membership table, fan-out delivery, IP_ADD_MEMBERSHIP/IP_DROP_MEMBERSHIP setsockopt
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)
@@ -1092,11 +1095,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] C++ ABI: __cxa_atexit/__cxa_finalize (static destructors), __stack_chk_guard/__stack_chk_fail (stack canary), __dso_handle
   - [x] extended locale: newlocale/duplocale/freelocale/uselocale (POSIX 2008 xlocale, C locale only), LC_*_MASK constants
   - [x] sched: POSIX scheduling stubs — sched_getscheduler/setscheduler/getparam/setparam/get_priority_min/get_priority_max/rr_get_interval
-  - [x] socketpair stub, sendmsg/recvmsg (Msghdr/Iovec/Cmsghdr structs, delegates to send/recv for first iov)
+  - [x] socketpair stub, sendmsg/recvmsg (scatter/gather: single iov direct, ≤4KiB coalesce, large per-iov; MSG_TRUNC on recvmsg)
   - [x] posix_fadvise/posix_fallocate stubs (advisory, always succeed)
   - [x] sigsetjmp/siglongjmp/_setjmp/_longjmp: assembly aliases (jmp to setjmp/longjmp), SigjmpBuf type alias
   - [x] daemon: best-effort daemonize (chdir /, close fds, setsid — no fork), getloadavg stub (returns 0.0)
-  - [x] inet_pton/inet_ntop: IPv4 text↔binary address conversion (AF_INET only, AF_INET6 returns EAFNOSUPPORT)
+  - [x] inet_pton/inet_ntop: IPv4 + IPv6 text↔binary address conversion (AF_INET and AF_INET6; :: compression, RFC 5952 canonical output)
+  - [x] accept4: Linux extension with SOCK_NONBLOCK and SOCK_CLOEXEC flags
   - [x] execv: exec without environment (delegates to execve), vfork stub (returns ENOSYS like fork)
   - [x] flockfile/funlockfile/ftrylockfile: thread-safe stdio locking stubs; getc_unlocked/putc_unlocked/getchar_unlocked/putchar_unlocked
   - [x] sigwait/sigtimedwait/sigqueue: signal waiting/queuing stubs (no signal delivery)

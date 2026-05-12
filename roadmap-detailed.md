@@ -604,7 +604,7 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
       - `driver.*` — driver load/unload, device attach/detach, driver errors
       - `application.*` — app-defined events via logging API (namespaced per app)
     - [ ] Severity levels per event: debug, info, notice, warning, error, critical
-    - [ ] Structured fields: timestamp (ns), namespace, severity, source PID/service, message, key-value payload
+    - [ ] Structured fields: timestamp (ns), namespace, severity, source PID/service, source executable path, message, key-value payload
     - [ ] Ring buffer in kernel for early-boot events (before logging service starts)
     - [ ] Logging API for userspace services and applications (IPC channel to logging daemon)
   - [ ] Log storage and rotation

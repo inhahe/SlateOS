@@ -636,6 +636,23 @@ pub unsafe extern "C" fn strftime(
                 pos = write_str(buf, limit, pos, b"UTC");
             }
 
+            // --- ISO 8601 week date (%G, %g, %V) ---
+            b'V' => {
+                // ISO 8601 week number (01-53).
+                let (_, week) = iso_week_date(t);
+                pos = write_dec2(buf, limit, pos, week);
+            }
+            b'G' => {
+                // ISO 8601 week-based year (4 digits).
+                let (year, _) = iso_week_date(t);
+                pos = write_dec4(buf, limit, pos, year);
+            }
+            b'g' => {
+                // ISO 8601 week-based year, last 2 digits.
+                let (year, _) = iso_week_date(t);
+                pos = write_dec2(buf, limit, pos, year.wrapping_rem(100));
+            }
+
             // --- GNU extension ---
             b's' => {
                 // Seconds since epoch (GNU extension).
@@ -680,6 +697,68 @@ const DAYS_IN_MONTH: [i32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
 #[inline]
 fn is_leap(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// Compute ISO 8601 week-based year and week number.
+///
+/// ISO 8601 defines:
+/// - Weeks start on Monday.
+/// - Week 01 is the week containing the first Thursday of the year
+///   (equivalently, the week containing January 4th).
+/// - The year associated with a week can differ from the calendar year
+///   for days near the boundary (e.g., Dec 31 can be in week 01 of
+///   the next year, and Jan 1-3 can be in week 52/53 of the previous year).
+///
+/// Returns `(iso_year, iso_week)` where `iso_week` is in 1..=53.
+#[allow(clippy::arithmetic_side_effects)]
+fn iso_week_date(tm: &Tm) -> (i32, i32) {
+    let year = tm.tm_year + 1900;
+
+    // ISO day of week: Monday=1..Sunday=7.
+    let iso_dow = if tm.tm_wday == 0 { 7 } else { tm.tm_wday };
+
+    // Day of year (0-based).
+    let yday = tm.tm_yday;
+
+    // The ordinal of the Monday of the ISO week containing this day.
+    // yday - iso_dow + 1 gives Monday of this week (since iso_dow is
+    // 1 for Monday).  Then we need the week number relative to the
+    // first Thursday.
+    //
+    // ISO week number formula: the week number is computed by finding
+    // how many Thursdays have occurred so far in the year.  A simpler
+    // way: compute the ordinal of the Thursday in the same ISO week,
+    // then W = (ordinal_of_thursday / 7) + 1.
+    let thursday_yday = yday + (4 - iso_dow); // Thursday of this week.
+
+    if thursday_yday < 0 {
+        // Thursday is in the previous year — this day belongs to the
+        // last week of the previous year.
+        let prev_year = year - 1;
+        let prev_dec31_days = if is_leap(prev_year) { 365 } else { 364 };
+        // Compute week number for Dec 31 of previous year.
+        // Use the number of days in that year.
+        let prev_year_days = if is_leap(prev_year) { 366 } else { 365 };
+        // The Thursday for the adjusted day in the previous year.
+        let adj_thursday = prev_dec31_days + thursday_yday + 1;
+        let week = (adj_thursday / 7) + 1;
+        // Clamp: ISO week is at most 53.
+        let week = if week > 53 { 53 } else { week };
+        let _ = prev_year_days; // Suppress unused warning.
+        return (prev_year, week);
+    }
+
+    let year_days = if is_leap(year) { 366 } else { 365 };
+
+    if thursday_yday >= year_days {
+        // Thursday is in the next year — this day belongs to week 01
+        // of the next year.
+        return (year + 1, 1);
+    }
+
+    // Normal case: week number in the current year.
+    let week = (thursday_yday / 7) + 1;
+    (year, week)
 }
 
 /// Days in a given month (1-indexed month, with leap year check).

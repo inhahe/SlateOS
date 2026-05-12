@@ -71,9 +71,22 @@ pub const ECONNRESET: i32 = 104;   // Connection reset by peer
 pub const EISCONN: i32 = 106;      // Transport endpoint is already connected
 pub const ENOTCONN: i32 = 107;     // Transport endpoint is not connected
 pub const ETIMEDOUT: i32 = 110;    // Connection timed out
+pub const ESHUTDOWN: i32 = 108;    // Cannot send after transport shutdown
 pub const ECONNREFUSED: i32 = 111; // Connection refused
+pub const EHOSTDOWN: i32 = 112;    // Host is down
+pub const EHOSTUNREACH: i32 = 113; // No route to host
 pub const EALREADY: i32 = 114;     // Operation already in progress
 pub const EINPROGRESS: i32 = 115;  // Operation now in progress
+pub const ECANCELED: i32 = 125;    // Operation canceled
+pub const ENOMEDIUM: i32 = 123;    // No medium found
+pub const EILSEQ: i32 = 84;        // Invalid or incomplete multibyte/wide character
+pub const EMSGSIZE: i32 = 90;      // Message too long
+pub const EPROTOTYPE: i32 = 91;    // Protocol wrong type for socket
+pub const ENETDOWN: i32 = 100;     // Network is down
+pub const ENETRESET: i32 = 102;    // Network dropped connection on reset
+pub const ECONNABORTED: i32 = 103; // Software caused connection abort
+pub const ENOBUFS: i32 = 105;      // No buffer space available
+pub const ETXTBSY: i32 = 26;       // Text file busy
 
 // ---------------------------------------------------------------------------
 // Per-thread errno storage

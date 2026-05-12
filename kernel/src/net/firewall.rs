@@ -140,6 +140,11 @@ pub struct Rule {
     pub dst_port: u16,
     /// Rule priority (lower = higher priority, evaluated first).
     pub priority: u16,
+    /// Number of packets this rule has matched.
+    ///
+    /// Incremented each time a packet triggers this rule (regardless
+    /// of action).  Useful for diagnostics and auditing.
+    pub match_count: u64,
 }
 
 impl Rule {
@@ -153,6 +158,7 @@ impl Rule {
             src_prefix: 0,
             dst_port: 0,
             priority: u16::MAX,
+            match_count: 0,
         }
     }
 }
@@ -364,10 +370,88 @@ pub fn stats() -> (u64, u64) {
     )
 }
 
-/// Reset statistics.
+/// Reset statistics (global allow/deny counters).
 pub fn reset_stats() {
     PACKETS_ALLOWED.store(0, Ordering::Relaxed);
     PACKETS_DENIED.store(0, Ordering::Relaxed);
+}
+
+/// Get per-rule match counts for all active rules.
+///
+/// Returns an array of `(priority, protocol, action, match_count)` tuples
+/// for each active rule, sorted by priority.  Maximum 32 entries.
+#[allow(dead_code)] // Public API — used by shell commands.
+pub fn rule_stats() -> ([RuleStats; MAX_RULES], usize) {
+    let rules = RULES.lock();
+    let mut out = [RuleStats::EMPTY; MAX_RULES];
+    let mut count = 0;
+
+    for rule in rules.iter() {
+        if !rule.active {
+            continue;
+        }
+        if count < MAX_RULES {
+            out[count] = RuleStats {
+                priority: rule.priority,
+                protocol: rule.protocol,
+                action: rule.action,
+                direction: rule.direction,
+                match_count: rule.match_count,
+            };
+            count += 1;
+        }
+    }
+
+    // Sort by priority (lower = first).
+    // Simple insertion sort — at most 32 entries.
+    let mut i = 1;
+    while i < count {
+        let key = out[i];
+        let mut j = i;
+        while j > 0 && out[j - 1].priority > key.priority {
+            out[j] = out[j - 1];
+            j -= 1;
+        }
+        out[j] = key;
+        i += 1;
+    }
+
+    (out, count)
+}
+
+/// Per-rule statistics entry.
+#[allow(dead_code)] // Public API — used by shell commands.
+#[derive(Clone, Copy)]
+pub struct RuleStats {
+    /// Rule priority.
+    pub priority: u16,
+    /// Protocol selector.
+    pub protocol: Protocol,
+    /// Action taken.
+    pub action: Action,
+    /// Direction.
+    pub direction: Direction,
+    /// Number of packets matched.
+    pub match_count: u64,
+}
+
+impl RuleStats {
+    const EMPTY: Self = Self {
+        priority: 0,
+        protocol: Protocol::Any,
+        action: Action::Allow,
+        direction: Direction::Both,
+        match_count: 0,
+    };
+}
+
+/// Reset all per-rule match counters to zero.
+#[allow(dead_code)] // Public API — used by shell commands.
+pub fn reset_rule_counters() {
+    let mut rules = RULES.lock();
+    for rule in rules.iter_mut() {
+        rule.match_count = 0;
+    }
 }
 
 /// Clear all connection tracking entries.
@@ -839,7 +923,7 @@ pub fn check_outbound_ns(
     let (src_port, dst_port) = extract_ports(protocol, payload);
 
     // Check rules.
-    let action = match_rules_in_table(&table[idx].rules, Direction::Out, protocol, dst_ip, dst_port);
+    let action = match_rules_in_table(&mut table[idx].rules, Direction::Out, protocol, dst_ip, dst_port);
 
     let allowed = match action {
         Some(Action::Allow) => true,
@@ -901,7 +985,7 @@ pub fn check_inbound_ns(
     }
 
     // Check rules.
-    let action = match_rules_in_table(&table[idx].rules, Direction::In, protocol, src_ip, dst_port);
+    let action = match_rules_in_table(&mut table[idx].rules, Direction::In, protocol, src_ip, dst_port);
 
     match action {
         Some(Action::Allow) => {
@@ -1024,26 +1108,29 @@ fn extract_ports(protocol: u8, payload: &[u8]) -> (u16, u16) {
 /// Match a packet against the global rule table.
 ///
 /// Returns `Some(action)` if a rule matches, `None` if no rule matches.
+/// Increments the matching rule's `match_count`.
 fn match_rules(direction: Direction, protocol: u8, ip: Ipv4Addr, port: u16) -> Option<Action> {
-    let rules = RULES.lock();
-    match_rules_in_table(&*rules, direction, protocol, ip, port)
+    let mut rules = RULES.lock();
+    match_rules_in_table(&mut *rules, direction, protocol, ip, port)
 }
 
 /// Match a packet against a given rule table.
 ///
 /// Shared logic for both the global firewall and per-namespace firewalls.
 /// Returns `Some(action)` if a rule matches, `None` if no rule matches.
+/// Increments the matching rule's `match_count` counter.
+#[allow(clippy::arithmetic_side_effects)]
 fn match_rules_in_table(
-    rules: &[Rule],
+    rules: &mut [Rule],
     direction: Direction,
     protocol: u8,
     ip: Ipv4Addr,
     port: u16,
 ) -> Option<Action> {
     // Find the highest-priority (lowest number) matching rule.
-    let mut best: Option<(u16, Action)> = None;
+    let mut best: Option<(usize, u16, Action)> = None;
 
-    for rule in rules.iter() {
+    for (i, rule) in rules.iter().enumerate() {
         if !rule.active {
             continue;
         }
@@ -1071,15 +1158,15 @@ fn match_rules_in_table(
         // This rule matches — keep the highest priority one.
         match best {
             None => {
-                best = Some((rule.priority, rule.action));
+                best = Some((i, rule.priority, rule.action));
                 // Priority 0 is the highest possible — no rule can beat it.
                 if rule.priority == 0 {
                     break;
                 }
             }
-            Some((best_prio, _)) => {
+            Some((_, best_prio, _)) => {
                 if rule.priority < best_prio {
-                    best = Some((rule.priority, rule.action));
+                    best = Some((i, rule.priority, rule.action));
                     if rule.priority == 0 {
                         break;
                     }
@@ -1088,7 +1175,15 @@ fn match_rules_in_table(
         }
     }
 
-    best.map(|(_, action)| action)
+    // Increment the match counter for the winning rule.
+    if let Some((idx, _, action)) = best {
+        if let Some(rule) = rules.get_mut(idx) {
+            rule.match_count = rule.match_count.wrapping_add(1);
+        }
+        Some(action)
+    } else {
+        None
+    }
 }
 
 /// Check if a protocol byte matches a protocol selector.
@@ -1202,6 +1297,7 @@ fn test_rule_matching() -> KernelResult<()> {
         src_prefix: 0,
         dst_port: 80,
         priority: 10,
+        match_count: 0,
     };
     add_rule(rule)?;
 
@@ -1283,6 +1379,7 @@ fn test_conntrack() -> KernelResult<()> {
         src_prefix: 0,
         dst_port: 0,
         priority: 1,
+        match_count: 0,
     };
     add_rule(rule)?;
 
@@ -1352,6 +1449,7 @@ fn test_ns_firewall_isolation() -> KernelResult<()> {
         src_prefix: 0,
         dst_port: 80,
         priority: 10,
+        match_count: 0,
     };
     ns_add_rule(ns1, rule)?;
 
@@ -1414,6 +1512,7 @@ fn test_ns_firewall_conntrack() -> KernelResult<()> {
         src_prefix: 0,
         dst_port: 0,
         priority: 1,
+        match_count: 0,
     };
     ns_add_rule(ns, rule)?;
 
@@ -1485,6 +1584,7 @@ fn test_ns_firewall_lifecycle() -> KernelResult<()> {
         src_prefix: 0,
         dst_port: 22,
         priority: 5,
+        match_count: 0,
     };
     let idx = ns_add_rule(ns, rule)?;
 

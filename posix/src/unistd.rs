@@ -605,7 +605,7 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
         _SC_CHILD_MAX => 1024,          // Max child processes.
         _SC_NGROUPS_MAX => 32,          // Max supplementary groups.
         _SC_VERSION => 200809,          // POSIX.1-2008.
-        _SC_HOST_NAME_MAX => 64,        // Max hostname length.
+        _SC_HOST_NAME_MAX => HOST_NAME_MAX as i64, // Matches our HOSTNAME_BUF size.
         _SC_LOGIN_NAME_MAX => 256,      // Max login name.
         _SC_LINE_MAX => 2048,           // Max line length.
         _SC_THREADS => 200809,          // POSIX threads supported (version).

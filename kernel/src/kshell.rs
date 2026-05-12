@@ -55039,6 +55039,7 @@ fn cmd_firewall(args: &str) {
                 src_prefix,
                 dst_port,
                 priority,
+                match_count: 0,
             };
 
             match firewall::add_rule(rule) {

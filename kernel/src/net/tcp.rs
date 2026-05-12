@@ -3101,6 +3101,8 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     );
                 } else {
                     conn.state = TcpState::FinWait2;
+                    // Stamp activity so FIN_WAIT_2 timeout starts from now.
+                    conn.last_activity_ns = crate::hrtimer::now_ns();
                 }
             }
         }
@@ -3389,14 +3391,25 @@ pub fn tick_keepalive() {
 /// but Linux uses 60s total for TIME_WAIT, which is the practical standard).
 const TIME_WAIT_DURATION_NS: u64 = 60_000_000_000;
 
-/// Clean up connections in TIME_WAIT state after the 2*MSL timer expires.
+/// FIN_WAIT_2 timeout: 60 seconds (matches Linux `tcp_fin_timeout` default).
+///
+/// A connection enters FIN_WAIT_2 after we send our FIN and receive the
+/// peer's ACK, but the peer hasn't sent its own FIN yet.  If the peer
+/// crashes or forgets to close, the connection stalls here indefinitely.
+/// This timeout reclaims the slot after 60 seconds of inactivity.
+const FIN_WAIT2_TIMEOUT_NS: u64 = 60_000_000_000;
+
+/// Clean up connections in terminal TCP states after their timers expire.
 ///
 /// Called from the same periodic tick as `tick_keepalive`.  Scans all
-/// connections for TIME_WAIT entries whose `last_activity_ns` has exceeded
-/// the TIME_WAIT duration, and reclaims their slots.
+/// connections and reclaims slots for:
 ///
-/// Also cleans up connections in LastAck state that have been idle too
-/// long (the peer's FIN-ACK may have been lost).
+/// - **TIME_WAIT** (60s): the standard 2×MSL wait before slot reuse.
+/// - **FIN_WAIT_2** (60s): we sent FIN and got the ACK, but the peer
+///   never sent its FIN.  Likely a crashed peer or leaked socket.
+///   Matches Linux `tcp_fin_timeout` default.
+/// - **LAST_ACK** (30s): we sent FIN, waiting for the final ACK.  The
+///   peer's FIN-ACK may have been lost.
 pub fn tick_time_wait_cleanup() {
     let now = crate::hrtimer::now_ns();
     let mut conns = CONNECTIONS.lock();
@@ -3412,6 +3425,26 @@ pub fn tick_time_wait_cleanup() {
                 if elapsed >= TIME_WAIT_DURATION_NS {
                     crate::serial_println!(
                         "[tcp] TIME_WAIT expired for port {} → {}:{} — reclaiming slot",
+                        conn.local_port, conn.remote_ip, conn.remote_port
+                    );
+                    conn.active = false;
+                    conn.state = TcpState::Closed;
+                    conn.rx_buffer.clear();
+                    conn.tx_buffer.clear();
+                    conn.nagle_buf.clear();
+                    conn.ooo_buf.clear();
+                }
+            }
+            TcpState::FinWait2 => {
+                // FIN_WAIT_2: we sent our FIN and got the ACK, but
+                // the peer hasn't sent its FIN yet.  If the peer
+                // crashed or the application leaked a socket, this
+                // connection would linger forever.  Clean up after
+                // FIN_WAIT2_TIMEOUT_NS (60s, matching Linux tcp_fin_timeout).
+                let elapsed = now.saturating_sub(conn.last_activity_ns);
+                if elapsed >= FIN_WAIT2_TIMEOUT_NS {
+                    crate::serial_println!(
+                        "[tcp] FIN_WAIT_2 timeout for port {} → {}:{} — reclaiming",
                         conn.local_port, conn.remote_ip, conn.remote_port
                     );
                     conn.active = false;

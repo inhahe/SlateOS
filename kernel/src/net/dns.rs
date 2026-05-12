@@ -751,6 +751,13 @@ fn resolve_single(name: &str) -> KernelResult<Ipv4Addr> {
 
         // Check for a response.
         if let Some(dgram) = super::udp::recv(sock) {
+            // Validate source: must be from our DNS server on port 53.
+            // This prevents off-path attackers from injecting spoofed
+            // responses from arbitrary IPs.
+            if dgram.src_ip != dns_server || dgram.src_port != DNS_PORT {
+                // Wrong source — ignore and keep polling.
+                continue;
+            }
             super::udp::close(sock);
             match parse_response(&dgram.data, query_id) {
                 Ok(result) => {

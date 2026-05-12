@@ -66,7 +66,7 @@ pub fn poll() {
         }
     }
 
-    // Rate-limited TCP keepalive + TIME_WAIT cleanup + retransmit scan.
+    // Rate-limited periodic maintenance (TCP + DHCP).
     let now = crate::hrtimer::now_ns();
     let last = LAST_KEEPALIVE_TICK.load(Ordering::Relaxed);
     if now.saturating_sub(last) >= KEEPALIVE_TICK_INTERVAL_NS {
@@ -74,6 +74,7 @@ pub fn poll() {
         tcp::tick_keepalive();
         tcp::tick_time_wait_cleanup();
         tcp::tick_retransmit();
+        dhcp::tick_renewal();
     }
 }
 

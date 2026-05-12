@@ -20,6 +20,18 @@
 //!   (T1), rebinding time (T2), domain name, NTP server.
 //! - Handles DHCP NAK: resets state to Idle so discovery can retry.
 //! - Sends gratuitous ARP after binding (via `interface::configure`).
+//!
+//! ## Lease renewal (RFC 2131 §4.4.5)
+//!
+//! After obtaining a lease, the client maintains it via periodic renewal:
+//! - At T1 (default 50% of lease), sends unicast REQUEST to the original
+//!   server (Renewing state).
+//! - At T2 (default 87.5% of lease), broadcasts REQUEST to any server
+//!   (Rebinding state) if the original server didn't respond.
+//! - At lease expiration, releases the IP, flushes DNS cache, and returns
+//!   to Idle for re-discovery.
+//!
+//! `tick_renewal()` drives this state machine and is called from `net::poll`.
 
 use alloc::vec::Vec;
 
@@ -104,6 +116,10 @@ enum DhcpState {
     Requesting,
     /// Lease obtained.
     Bound,
+    /// T1 expired, RENEW REQUEST sent unicast to server, waiting for ACK.
+    Renewing,
+    /// T2 expired, REBIND REQUEST sent broadcast, waiting for ACK.
+    Rebinding,
 }
 
 /// Pending DHCP offer data.
@@ -136,6 +152,16 @@ struct DhcpLease {
     ntp_server: Ipv4Addr,
     /// Timestamp when the lease was obtained (hrtimer ns).
     obtained_ns: u64,
+    /// DHCP server that granted this lease (for unicast renewal).
+    server_ip: Ipv4Addr,
+    /// Our assigned IP address.
+    client_ip: Ipv4Addr,
+    /// Subnet mask.
+    subnet_mask: Ipv4Addr,
+    /// Default gateway.
+    gateway: Ipv4Addr,
+    /// DNS server.
+    dns: Ipv4Addr,
 }
 
 impl DhcpLease {
@@ -148,6 +174,11 @@ impl DhcpLease {
             domain_name_len: 0,
             ntp_server: Ipv4Addr::UNSPECIFIED,
             obtained_ns: 0,
+            server_ip: Ipv4Addr::UNSPECIFIED,
+            client_ip: Ipv4Addr::UNSPECIFIED,
+            subnet_mask: Ipv4Addr::UNSPECIFIED,
+            gateway: Ipv4Addr::UNSPECIFIED,
+            dns: Ipv4Addr::UNSPECIFIED,
         }
     }
 }
@@ -224,6 +255,45 @@ fn build_dhcp_message(msg_type: u8, our_mac: &MacAddress, options: &[(u8, &[u8])
     msg
 }
 
+/// Build a DHCP renewal message with `ciaddr` set to our current IP.
+///
+/// Per RFC 2131 §4.3.2: RENEWING/REBINDING clients set `ciaddr` to their
+/// current IP and do NOT include `OPT_REQUESTED_IP` or `OPT_SERVER_ID`.
+#[allow(clippy::arithmetic_side_effects)]
+fn build_dhcp_renew_message(our_mac: &MacAddress, our_ip: Ipv4Addr) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(300);
+
+    msg.push(1);  // op = BOOTREQUEST
+    msg.push(1);  // htype = Ethernet
+    msg.push(6);  // hlen = 6
+    msg.push(0);  // hops
+    msg.extend_from_slice(&current_xid().to_be_bytes());
+    msg.extend_from_slice(&0u16.to_be_bytes()); // secs
+    msg.extend_from_slice(&0u16.to_be_bytes()); // flags = 0 (unicast OK)
+    msg.extend_from_slice(&our_ip.0);           // ciaddr = our current IP
+    msg.extend_from_slice(&[0, 0, 0, 0]);       // yiaddr
+    msg.extend_from_slice(&[0, 0, 0, 0]);       // siaddr
+    msg.extend_from_slice(&[0, 0, 0, 0]);       // giaddr
+    msg.extend_from_slice(&our_mac.0);
+    msg.extend_from_slice(&[0u8; 10]);
+    msg.extend_from_slice(&[0u8; 64]);  // sname
+    msg.extend_from_slice(&[0u8; 128]); // file
+    msg.extend_from_slice(&MAGIC_COOKIE);
+
+    // Option: DHCP Message Type = REQUEST
+    msg.push(OPT_MSG_TYPE);
+    msg.push(1);
+    msg.push(DHCP_REQUEST);
+
+    msg.push(OPT_END);
+
+    while msg.len() < 300 {
+        msg.push(0);
+    }
+
+    msg
+}
+
 /// Build a raw UDP/IP packet for DHCP (0.0.0.0:68 → 255.255.255.255:67).
 ///
 /// DHCP uses broadcast at both IP and Ethernet layers since we have
@@ -262,6 +332,43 @@ fn build_dhcp_ip_udp(dhcp_payload: &[u8]) -> Vec<u8> {
     // --- DHCP payload ---
     pkt.extend_from_slice(dhcp_payload);
 
+    pkt
+}
+
+/// Build a unicast UDP/IP packet for DHCP renewal (our_ip:68 → server_ip:67).
+///
+/// Used for T1 renewal where we send directly to the DHCP server.
+#[allow(clippy::arithmetic_side_effects)]
+fn build_dhcp_ip_udp_unicast(dhcp_payload: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> Vec<u8> {
+    let udp_len = 8 + dhcp_payload.len();
+    let ip_total_len = 20 + udp_len;
+
+    let mut pkt = Vec::with_capacity(ip_total_len);
+
+    // --- IPv4 header (20 bytes) ---
+    pkt.push(0x45);
+    pkt.push(0);
+    pkt.extend_from_slice(&(ip_total_len as u16).to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes());
+    pkt.push(128);  // TTL
+    pkt.push(17);   // Protocol = UDP
+    let checksum_offset = pkt.len();
+    pkt.extend_from_slice(&[0, 0]);
+    pkt.extend_from_slice(&src_ip.0);
+    pkt.extend_from_slice(&dst_ip.0);
+
+    let checksum = super::ipv4::ip_checksum(&pkt[..20]);
+    pkt[checksum_offset] = (checksum >> 8) as u8;
+    pkt[checksum_offset + 1] = checksum as u8;
+
+    // --- UDP header ---
+    pkt.extend_from_slice(&DHCP_CLIENT_PORT.to_be_bytes());
+    pkt.extend_from_slice(&DHCP_SERVER_PORT.to_be_bytes());
+    pkt.extend_from_slice(&(udp_len as u16).to_be_bytes());
+    pkt.extend_from_slice(&0u16.to_be_bytes()); // Checksum disabled
+
+    pkt.extend_from_slice(dhcp_payload);
     pkt
 }
 
@@ -317,6 +424,159 @@ fn send_request(requested_ip: Ipv4Addr, server_ip: Ipv4Addr) -> KernelResult<()>
     crate::serial_println!("[dhcp] REQUEST sent for {}", requested_ip);
 
     Ok(())
+}
+
+/// Send a DHCP RENEW request (unicast to server, RFC 2131 §4.3.2).
+///
+/// Used at T1 — extends the lease by contacting the original server.
+fn send_renew(our_ip: Ipv4Addr, server_ip: Ipv4Addr) -> KernelResult<()> {
+    let our_mac = interface::mac();
+    let xid = new_xid();
+    let _ = xid; // new_xid stores globally; used by build_dhcp_renew_message
+
+    let dhcp_msg = build_dhcp_renew_message(&our_mac, our_ip);
+    let ip_udp_packet = build_dhcp_ip_udp_unicast(&dhcp_msg, our_ip, server_ip);
+
+    // Unicast — need server's MAC.  Use ARP-resolved MAC or fall back
+    // to gateway MAC (the server might be on a different subnet).
+    let dst_mac = super::arp::lookup(server_ip)
+        .or_else(|| {
+            let gw = interface::info().gateway;
+            super::arp::lookup(gw)
+        })
+        .unwrap_or(BROADCAST_MAC);
+
+    let frame = ethernet::build_frame(
+        &dst_mac,
+        &our_mac,
+        ETHERTYPE_IPV4,
+        &ip_udp_packet,
+    );
+
+    super::send_frame(&frame)?;
+
+    *DHCP_STATE.lock() = DhcpState::Renewing;
+    crate::serial_println!("[dhcp] RENEW sent to {} for {}", server_ip, our_ip);
+
+    Ok(())
+}
+
+/// Send a DHCP REBIND request (broadcast, RFC 2131 §4.3.2).
+///
+/// Used at T2 — the original server didn't respond to RENEW, so
+/// broadcast to find any server willing to extend the lease.
+fn send_rebind(our_ip: Ipv4Addr) -> KernelResult<()> {
+    let our_mac = interface::mac();
+
+    let dhcp_msg = build_dhcp_renew_message(&our_mac, our_ip);
+    let ip_udp_packet = build_dhcp_ip_udp(&dhcp_msg);
+
+    let frame = ethernet::build_frame(
+        &BROADCAST_MAC,
+        &our_mac,
+        ETHERTYPE_IPV4,
+        &ip_udp_packet,
+    );
+
+    super::send_frame(&frame)?;
+
+    *DHCP_STATE.lock() = DhcpState::Rebinding;
+    crate::serial_println!("[dhcp] REBIND broadcast for {}", our_ip);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// DHCP lease renewal tick
+// ---------------------------------------------------------------------------
+
+/// Periodic check for DHCP lease renewal (called from net::poll).
+///
+/// RFC 2131 §4.4.5 renewal timers:
+/// - **T1 (default 50% of lease)**: send unicast REQUEST to original server.
+/// - **T2 (default 87.5% of lease)**: broadcast REQUEST to any server.
+/// - **Lease expiration**: release the IP, transition to Idle for re-discovery.
+///
+/// State transitions:
+/// - Bound → Renewing (at T1)
+/// - Renewing → Rebinding (at T2, if server didn't respond)
+/// - Rebinding → Idle (at expiration, if no server responded)
+#[allow(clippy::arithmetic_side_effects)]
+pub fn tick_renewal() {
+    let state = *DHCP_STATE.lock();
+
+    match state {
+        DhcpState::Bound => {
+            // Check if T1 has passed → start renewal.
+            let lease = CURRENT_LEASE.lock();
+            if lease.lease_time_secs == 0 || lease.obtained_ns == 0 {
+                return; // Infinite lease or not configured.
+            }
+            let elapsed_ns = crate::hrtimer::now_ns().saturating_sub(lease.obtained_ns);
+            let elapsed_secs = elapsed_ns / 1_000_000_000;
+            let t1 = lease.renewal_time_secs as u64;
+
+            if elapsed_secs >= t1 {
+                let our_ip = lease.client_ip;
+                let server = lease.server_ip;
+                drop(lease);
+                crate::serial_println!(
+                    "[dhcp] T1 expired ({}s elapsed) — initiating renewal",
+                    elapsed_secs
+                );
+                let _ = send_renew(our_ip, server);
+            }
+        }
+        DhcpState::Renewing => {
+            // Check if T2 has passed → escalate to rebinding.
+            let lease = CURRENT_LEASE.lock();
+            if lease.obtained_ns == 0 {
+                return;
+            }
+            let elapsed_ns = crate::hrtimer::now_ns().saturating_sub(lease.obtained_ns);
+            let elapsed_secs = elapsed_ns / 1_000_000_000;
+            let t2 = lease.rebinding_time_secs as u64;
+
+            if elapsed_secs >= t2 {
+                let our_ip = lease.client_ip;
+                drop(lease);
+                crate::serial_println!(
+                    "[dhcp] T2 expired ({}s elapsed) — escalating to rebind",
+                    elapsed_secs
+                );
+                let _ = send_rebind(our_ip);
+            }
+        }
+        DhcpState::Rebinding => {
+            // Check if lease has expired → release IP and go idle.
+            let lease = CURRENT_LEASE.lock();
+            if lease.obtained_ns == 0 {
+                return;
+            }
+            let elapsed_ns = crate::hrtimer::now_ns().saturating_sub(lease.obtained_ns);
+            let elapsed_secs = elapsed_ns / 1_000_000_000;
+            let total = lease.lease_time_secs as u64;
+
+            if elapsed_secs >= total {
+                drop(lease);
+                crate::serial_println!(
+                    "[dhcp] Lease expired ({}s) — releasing IP, returning to idle",
+                    total
+                );
+                // Clear the IP configuration.
+                interface::configure(
+                    Ipv4Addr::UNSPECIFIED,
+                    Ipv4Addr::UNSPECIFIED,
+                    Ipv4Addr::UNSPECIFIED,
+                    Ipv4Addr::UNSPECIFIED,
+                );
+                super::dns::flush_cache();
+                *DHCP_STATE.lock() = DhcpState::Idle;
+                *CURRENT_LEASE.lock() = DhcpLease::empty();
+            }
+        }
+        _ => {} // Idle, Discovering, Requesting — nothing to do.
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -476,7 +736,9 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
             // Send REQUEST for this offer.
             send_request(offered_ip, server_id)?;
         }
-        Some(DHCP_ACK) if state == DhcpState::Requesting => {
+        Some(DHCP_ACK) if state == DhcpState::Requesting
+            || state == DhcpState::Renewing
+            || state == DhcpState::Rebinding => {
             // Compute default T1/T2 if server didn't provide them.
             let t1 = if renewal_time > 0 {
                 renewal_time
@@ -524,8 +786,15 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
             lease.domain_name_len = domain_name_len;
             lease.ntp_server = ntp_server;
             lease.obtained_ns = crate::hrtimer::now_ns();
+            lease.server_ip = server_id;
+            lease.client_ip = offered_ip;
+            lease.subnet_mask = subnet_mask;
+            lease.gateway = router;
+            lease.dns = dns;
         }
-        Some(DHCP_NAK) if state == DhcpState::Requesting => {
+        Some(DHCP_NAK) if state == DhcpState::Requesting
+            || state == DhcpState::Renewing
+            || state == DhcpState::Rebinding => {
             crate::serial_println!(
                 "[dhcp] NAK from server {} — offer rejected, restarting",
                 server_id
@@ -588,6 +857,8 @@ pub fn state_str() -> &'static str {
         DhcpState::Discovering => "discovering",
         DhcpState::Requesting => "requesting",
         DhcpState::Bound => "bound",
+        DhcpState::Renewing => "renewing",
+        DhcpState::Rebinding => "rebinding",
     }
 }
 

@@ -78,6 +78,7 @@ pub fn poll() {
         tcp::tick_persist();
         dhcp::tick_renewal();
         frag::tick_expire();
+        firewall::tick_conntrack_cleanup();
     }
 }
 

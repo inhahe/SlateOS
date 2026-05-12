@@ -462,6 +462,46 @@ pub fn clear_conntrack() {
     }
 }
 
+/// Periodic conntrack table cleanup.
+///
+/// Proactively removes expired entries from the global connection
+/// tracking table and all active per-namespace tables.  Called from
+/// `net::poll()` on a rate-limited timer tick.
+///
+/// Without this, expired entries persist until an inbound lookup
+/// happens to scan past them in `is_tracked_reply()`.  If the
+/// table fills with stale entries and no inbound lookups trigger
+/// cleanup, new outbound connections are forced to evict the
+/// oldest entry (which may still be valid).
+pub fn tick_conntrack_cleanup() {
+    let now = crate::hrtimer::now_ns();
+
+    // Clean global conntrack table.
+    {
+        let mut ct = CONNTRACK.lock();
+        for entry in ct.iter_mut() {
+            if entry.active && now.saturating_sub(entry.last_seen_ns) > CONNTRACK_EXPIRY_NS {
+                entry.active = false;
+            }
+        }
+    }
+
+    // Clean per-namespace conntrack tables.
+    {
+        let mut table = NS_FIREWALLS.lock();
+        for ns_state in table.iter_mut() {
+            if !ns_state.active {
+                continue;
+            }
+            for entry in ns_state.conntrack.iter_mut() {
+                if entry.active && now.saturating_sub(entry.last_seen_ns) > CONNTRACK_EXPIRY_NS {
+                    entry.active = false;
+                }
+            }
+        }
+    }
+}
+
 /// Get number of active conntrack entries.
 pub fn conntrack_count() -> usize {
     let ct = CONNTRACK.lock();

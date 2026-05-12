@@ -235,6 +235,14 @@ struct SocketMeta {
     nodelay: bool,
     /// SO_REUSEADDR setting.
     reuseaddr: bool,
+    /// SO_RCVBUF: receive buffer size (advisory, in bytes).
+    rcvbuf: i32,
+    /// SO_SNDBUF: send buffer size (advisory, in bytes).
+    sndbuf: i32,
+    /// SO_BROADCAST: permit sending to broadcast addresses.
+    broadcast: bool,
+    /// SO_LINGER: linger time in seconds (0 = disabled).
+    linger_secs: i32,
 }
 
 /// Per-fd socket metadata table.
@@ -978,6 +986,10 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
         keepalive: false,
         nodelay: false,
         reuseaddr: false,
+        rcvbuf: 65536,
+        sndbuf: 65536,
+        broadcast: false,
+        linger_secs: 0,
     });
 
     fd
@@ -1068,6 +1080,10 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 keepalive: meta.keepalive,
                 nodelay: meta.nodelay,
                 reuseaddr: meta.reuseaddr,
+                rcvbuf: meta.rcvbuf,
+                sndbuf: meta.sndbuf,
+                broadcast: meta.broadcast,
+                linger_secs: meta.linger_secs,
             });
 
             0
@@ -1300,6 +1316,10 @@ pub unsafe extern "C" fn accept(
         keepalive: false,
         nodelay: false,
         reuseaddr: false,
+        rcvbuf: 65536,
+        sndbuf: 65536,
+        broadcast: false,
+        linger_secs: 0,
     });
 
     // Fill in the peer address if requested.
@@ -1780,8 +1800,11 @@ pub extern "C" fn setsockopt(
         match (level, optname) {
             (SOL_SOCKET, SO_REUSEADDR) => { meta.reuseaddr = val != 0; }
             (SOL_SOCKET, SO_KEEPALIVE) => { meta.keepalive = val != 0; }
-            (SOL_SOCKET, SO_RCVBUF | SO_SNDBUF | SO_BROADCAST | SO_REUSEPORT
-                       | SO_RCVTIMEO | SO_SNDTIMEO | SO_LINGER) => {
+            (SOL_SOCKET, SO_RCVBUF) => { meta.rcvbuf = val.max(1); }
+            (SOL_SOCKET, SO_SNDBUF) => { meta.sndbuf = val.max(1); }
+            (SOL_SOCKET, SO_BROADCAST) => { meta.broadcast = val != 0; }
+            (SOL_SOCKET, SO_LINGER) => { meta.linger_secs = val; }
+            (SOL_SOCKET, SO_REUSEPORT | SO_RCVTIMEO | SO_SNDTIMEO) => {
                 // Accept silently — these are common options that programs
                 // set but we don't implement at the kernel level yet.
             }
@@ -1891,11 +1914,11 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_SOCKET, SO_ERROR) => 0, // No pending error.
             (SOL_SOCKET, SO_REUSEADDR) => meta.map_or(0, |m| i32::from(m.reuseaddr)),
             (SOL_SOCKET, SO_KEEPALIVE) => meta.map_or(0, |m| i32::from(m.keepalive)),
-            (SOL_SOCKET, SO_RCVBUF) => 65536, // Default buffer size.
-            (SOL_SOCKET, SO_SNDBUF) => 65536,
-            (SOL_SOCKET, SO_BROADCAST) => 0,  // Broadcast not enabled.
-            (SOL_SOCKET, SO_REUSEPORT) => 0,  // Port reuse not enabled.
-            (SOL_SOCKET, SO_LINGER) => 0,     // No linger.
+            (SOL_SOCKET, SO_RCVBUF) => meta.map_or(65536, |m| m.rcvbuf),
+            (SOL_SOCKET, SO_SNDBUF) => meta.map_or(65536, |m| m.sndbuf),
+            (SOL_SOCKET, SO_BROADCAST) => meta.map_or(0, |m| i32::from(m.broadcast)),
+            (SOL_SOCKET, SO_REUSEPORT) => 0,  // Port reuse not supported.
+            (SOL_SOCKET, SO_LINGER) => meta.map_or(0, |m| m.linger_secs),
             (SOL_SOCKET, SO_RCVTIMEO | SO_SNDTIMEO) => 0, // No timeout.
             (SOL_TCP, TCP_NODELAY) => meta.map_or(0, |m| i32::from(m.nodelay)),
             _ => {

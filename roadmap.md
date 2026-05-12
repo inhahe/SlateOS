@@ -975,6 +975,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TCP window scaling (RFC 7323): negotiated in SYN/SYN-ACK, our scale=0 (64KiB fits), peer scale applied to window updates
   - [x] TCP SACK (RFC 2018): SACK-Permitted in SYN, receive-side tracks 4 out-of-order blocks, SACK blocks in ACKs, merge/trim logic
   - [x] UDP multicast (RFC 1112): per-socket group join/leave (8 max), global refcounted membership table, fan-out delivery, IP_ADD_MEMBERSHIP/IP_DROP_MEMBERSHIP setsockopt
+  - [x] ICMP error → TCP notification (RFC 5461): ICMP Destination Unreachable and Time Exceeded parsed to extract original IP+TCP header; SYN_SENT/SYN_RECEIVED connections aborted (hard error); Established connections log soft error only
+  - [x] ICMP Port Unreachable (RFC 1122 §3.2.2.1): UDP sends ICMP type 3 code 3 for datagrams arriving at unbound ports (unicast only); Ipv4Packet raw_header field for ICMP error payload
+  - [x] Ethernet multicast MAC acceptance: accept frames with multicast bit set (bit 0 of first octet), enabling IPv4 multicast delivery via 01:00:5e MAC prefix
+  - [x] TCP duplicate ACK counting + fast recovery (RFC 5681 §3.2): 3 dup ACKs → ssthresh=flight/2, cwnd=ssthresh+3*MSS; additional dup ACKs inflate cwnd by MSS; congestion response without retransmit buffer
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)
@@ -1149,6 +1153,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] strtold: long double conversion (delegates to strtod — Rust lacks 80-bit float)
   - [x] stdio buffering: real FILE structs with 1 KiB buffers, line-buffered stdout (flush on '\n'), unbuffered stderr, fully-buffered fopen'd files; read-ahead for input; printf/fprintf routed through buffer; feof/ferror real status; fseek/ftell account for buffered data; stdout auto-flush before stdin reads; 16-slot static FILE pool for fopen'd files
   - [x] sysconf expansion: 13 additional _SC_* constants (CLK_TCK, ARG_MAX, CHILD_MAX, NGROUPS_MAX, VERSION, HOST_NAME_MAX, LOGIN_NAME_MAX, LINE_MAX, THREADS, THREAD_STACK_MIN, PHYS_PAGES, AVPHYS_PAGES, IOV_MAX) with reasonable values
+  - [x] strverscmp: proper version-aware string comparison (was incorrect strcmp alias); numeric segments compared by value ("file9" < "file10"), glibc-compatible leading-zero handling (fractional vs integer); 8 unit tests
+  - [x] wctype/iswctype: generic character class dispatch by name (12 POSIX classes); wctrans/towctrans: generic transformation dispatch ("tolower"/"toupper"); used by regex engines, grep, sed
+  - [x] dprintf: formatted output to raw fd (assembly trampoline + Rust impl); used for error logging and protocol output to non-stdio fds
+  - [x] tmpfile: fixed to return FILE* via fdopen() (was incorrectly returning raw fd cast to pointer)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

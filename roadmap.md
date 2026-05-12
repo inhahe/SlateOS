@@ -1440,9 +1440,9 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
       - [x] interface.rs: configure() syncs DHCP config to netns root namespace
       - [x] ipv4.rs: send_ns() with per-namespace source IP + route_lookup()
       - [x] netns.rs: is_initialized() for boot-order safety
-      - [x] ARP/firewall doc notes (global/shared, per-namespace is future)
+      - [x] ARP/firewall doc notes (global/shared, per-namespace ARP is future)
       - [ ] Per-namespace ARP cache (requires veth pairs)
-      - [ ] Per-namespace firewall rules
+      - [x] Per-namespace firewall rules (16 rules, 32 conntrack entries per namespace; ns_init/ns_enable/ns_add_rule/ns_check_outbound_ns/ns_check_inbound_ns API; 3 self-tests for isolation, conntrack, lifecycle)
       - [ ] Wire process→container→net_ns into socket layer callers
   - [x] Mount namespace: separate mount point trees (implemented as fs::mount_ns)
   - [x] User namespace: UID/GID remapping for rootless containers

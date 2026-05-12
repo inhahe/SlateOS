@@ -47,6 +47,32 @@ pub const _SC_NPROCESSORS_CONF: i32 = 83;
 pub const _SC_NPROCESSORS_ONLN: i32 = 84;
 /// Open max (max file descriptors).
 pub const _SC_OPEN_MAX: i32 = 4;
+/// Clock ticks per second.
+pub const _SC_CLK_TCK: i32 = 2;
+/// Maximum length of arguments to exec.
+pub const _SC_ARG_MAX: i32 = 0;
+/// Maximum number of child processes per user.
+pub const _SC_CHILD_MAX: i32 = 1;
+/// Maximum number of supplementary groups.
+pub const _SC_NGROUPS_MAX: i32 = 3;
+/// POSIX version (200809L = POSIX.1-2008).
+pub const _SC_VERSION: i32 = 29;
+/// Maximum length of a hostname.
+pub const _SC_HOST_NAME_MAX: i32 = 180;
+/// Maximum length of a login name.
+pub const _SC_LOGIN_NAME_MAX: i32 = 71;
+/// Maximum line length.
+pub const _SC_LINE_MAX: i32 = 43;
+/// Whether POSIX threads are supported.
+pub const _SC_THREADS: i32 = 67;
+/// Minimum stack size for a thread.
+pub const _SC_THREAD_STACK_MIN: i32 = 75;
+/// Total physical memory pages.
+pub const _SC_PHYS_PAGES: i32 = 85;
+/// Available physical memory pages.
+pub const _SC_AVPHYS_PAGES: i32 = 86;
+/// Maximum number of iovec entries for readv/writev.
+pub const _SC_IOV_MAX: i32 = 60;
 
 // ---------------------------------------------------------------------------
 // Current working directory tracking
@@ -537,7 +563,20 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
             // TODO: Query actual CPU count from kernel.
             1
         }
-        _SC_OPEN_MAX => 256, // Reasonable default.
+        _SC_OPEN_MAX => 256,
+        _SC_CLK_TCK => 100,            // 100 Hz timer tick (Linux default).
+        _SC_ARG_MAX => 131072,          // 128 KiB argument limit.
+        _SC_CHILD_MAX => 1024,          // Max child processes.
+        _SC_NGROUPS_MAX => 32,          // Max supplementary groups.
+        _SC_VERSION => 200809,          // POSIX.1-2008.
+        _SC_HOST_NAME_MAX => 64,        // Max hostname length.
+        _SC_LOGIN_NAME_MAX => 256,      // Max login name.
+        _SC_LINE_MAX => 2048,           // Max line length.
+        _SC_THREADS => 200809,          // POSIX threads supported (version).
+        _SC_THREAD_STACK_MIN => 65536,  // 64 KiB minimum thread stack.
+        _SC_PHYS_PAGES => 8192,         // ~128 MiB at 16 KiB pages (TODO: query kernel).
+        _SC_AVPHYS_PAGES => 4096,       // ~64 MiB available (TODO: query kernel).
+        _SC_IOV_MAX => 1024,            // Max iovec entries.
         _ => {
             errno::set_errno(errno::EINVAL);
             -1

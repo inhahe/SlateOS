@@ -85,10 +85,15 @@ pub fn build_frame(dst: &MacAddress, src: &MacAddress, ethertype: u16, payload: 
 pub fn process_frame(data: &[u8]) -> KernelResult<()> {
     let frame = EthernetFrame::parse(data)?;
 
-    // Check if the frame is addressed to us or is broadcast.
+    // Check if the frame is addressed to us, broadcast, or multicast.
+    //
+    // IPv4 multicast (224.0.0.0/4) maps to Ethernet MAC addresses with
+    // the prefix 01:00:5e (IEEE 802.3 §7.8).  The low bit of the first
+    // octet being set indicates a multicast MAC (group address).
     let our_mac = super::interface::mac();
     let is_for_us = frame.dst.0 == our_mac.0
-        || frame.dst.0 == BROADCAST_MAC.0;
+        || frame.dst.0 == BROADCAST_MAC.0
+        || (frame.dst.0[0] & 0x01) != 0; // Multicast bit set.
 
     if !is_for_us {
         return Ok(()); // Not for us, silently drop.

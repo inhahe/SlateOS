@@ -63,8 +63,9 @@
 //! - **Wide Characters** (full UTF-8): `mblen`, `mbtowc`, `wctomb`,
 //!   `mbstowcs`, `wcstombs`, `btowc`, `wctob`, `mbsinit`, `mbrtowc`,
 //!   `wcrtomb`, `mbrlen`, `wcwidth`, `wcswidth`, `iswalnum`..`iswxdigit`,
-//!   `towlower`, `towupper`, `wcscpy`, `wcsncpy`, `wcslen`, `wcscmp`,
-//!   `wcsncmp`, `wcscat`, `wcsncat`, `wcschr`, `wcsrchr`, `wcsstr`,
+//!   `towlower`, `towupper`, `wctype`, `iswctype`, `wctrans`, `towctrans`,
+//!   `wcscpy`, `wcsncpy`, `wcslen`, `wcscmp`, `wcsncmp`, `wcscat`,
+//!   `wcsncat`, `wcschr`, `wcsrchr`, `wcsstr`,
 //!   `wmemcpy`, `wmemset`, `wmemcmp`, `wmemchr`, `wmemmove`,
 //!   `nl_langinfo`
 //! - **File Tree Walk**: `ftw`, `nftw` (recursive directory traversal)

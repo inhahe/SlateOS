@@ -586,24 +586,27 @@ _Dedup: (1) Package manager hardlinks in content-addressed store. (2) Filesystem
 
 _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso` (dynamic shared object), `.slib` (static library)._
 
-### 2.4 Networking Stack (Userspace)
+### 2.4 Networking Stack (Kernel-Resident, Future Userspace Migration)
 
-- [ ] TCP/IP stack (userspace service)
-- [ ] UDP
-- [ ] DNS resolver
-- [ ] DHCP client
-- [ ] Sockets API (dedicated socket handles, NOT file descriptors)
-- [ ] Basic packet filtering firewall
+- [x] TCP/IP stack (kernel-resident; full TCP state machine with 3-way handshake, data transfer, FIN/RST, 32 connections, 8 listeners)
+- [x] UDP (connectionless datagrams, 32 sockets, per-socket receive queue)
+- [x] DNS resolver (A records, CNAME chasing, cache with TTL, negative caching, query ID/port hardening, source validation)
+- [x] DHCP client (DISCOVER/OFFER/REQUEST/ACK, subnet mask, gateway, DNS, random XID)
+- [x] Sockets API (dedicated TCP/UDP handles via syscalls, not file descriptors)
+- [x] Basic packet filtering firewall (stateful, connection tracking, per-namespace rules, priority-ordered, default policy)
+- [x] ARP with cache expiration (5-minute TTL, LRU eviction)
+- [x] ICMP echo request/reply with RTT measurement, checksum verification, Destination Unreachable/Time Exceeded handling
+- [x] IPv4/TCP/UDP checksum verification on all incoming packets
 - [ ] UPnP / NAT-PMP port forwarding (detect and configure router)
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 
 ### 2.5 POSIX Compatibility Layer
 
-- [ ] Enough POSIX libc for: gcc, coreutils, bash, CPython
-- [ ] Translate POSIX calls to native syscalls
-- [ ] /proc, /sys equivalents (for programs that need them)
-- [ ] POSIX signals → translate to native IPC messages
-- [ ] POSIX file descriptors → translate to native handles
+- [x] Enough POSIX libc for: gcc, coreutils, bash, CPython (extensive coverage: stdio, string, stdlib, time, locale, socket, fcntl, stat, mmap, spawn, environ, pthread stubs, and more)
+- [x] Translate POSIX calls to native syscalls (fd table maps POSIX fds to kernel handles by type; read/write/close dispatch by HandleKind)
+- [ ] /proc, /sys equivalents (for programs that need them) — blocked on kernel support
+- [ ] POSIX signals → translate to native IPC messages — blocked on kernel-ipc zone
+- [x] POSIX file descriptors → translate to native handles (256-fd table with per-fd flags, status flags, handle refcounting for dup)
 - [ ] Bug-for-bug behavioral compatibility on ported tools: when reimplementing or porting Unix tools, match original exit codes, error messages, edge-case semantics, and option parsing exactly. Behavioral divergence = security bug when shell scripts depend on original behavior. (Lesson from uutils CVEs: `kill -1` interpreted differently → system-wide kill.)
 
 ### 2.6 Init / Service Manager

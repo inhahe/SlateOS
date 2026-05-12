@@ -958,6 +958,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TCP client (3-way handshake, data transfer, FIN teardown)
   - [x] TCP server (bind/listen/accept, passive open 3-way handshake, backlog queue)
   - [x] DNS resolver (A record queries via UDP)
+  - [x] DNS resolution cache (32-entry fixed-size, TTL-based expiration, case-insensitive matching, flush on DHCP renewal)
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)

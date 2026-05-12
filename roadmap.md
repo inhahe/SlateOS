@@ -994,7 +994,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [-] Enough of POSIX libc for: gcc, coreutils, bash, Python (CPython)
   - [x] Foundation: posix/ crate (no_std staticlib, edition 2024)
   - [x] Syscall ABI: inline asm wrappers for SYSCALL instruction (0-6 args)
-  - [x] Errno: 50+ POSIX errno constants, thread-local storage, native→POSIX translation
+  - [x] Errno: 80+ POSIX errno constants (all network, filesystem, and POSIX errors), native→POSIX translation, strerror covers all defined codes
   - [x] Types: LP64 type aliases (pid_t, off_t, size_t, etc.)
   - [x] File I/O: open, close, read, write, lseek, dup, dup2, stat, fstat, lstat, unlink, rename, link, symlink, readlink, mkdir, rmdir, truncate, ftruncate, fsync
   - [x] Process: _exit, getpid, getppid, waitpid, wait, gettid (fork/execve stubs)
@@ -1067,7 +1067,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] time additions: clock (CPU time via CLOCK_MONOTONIC proxy), strptime (parse time strings — %Y/%m/%d/%H/%M/%S/%j/%n/%t/%%), CLOCKS_PER_SEC
   - [x] scanf: sscanf via assembly trampoline — %d/%i/%u/%x/%o/%s/%c/%f/%lf/%n, width limits, assignment suppression (%*), length modifiers (l/ll/h/hh), literal matching
   - [x] stdio additions: getline/getdelim (dynamic line reading with malloc/realloc buffer growth)
-  - [x] wchar: mblen/mbtowc/wctomb/mbstowcs/wcstombs (ASCII-only), btowc/wctob, mbsinit/mbrtowc/wcrtomb (restartable), wcwidth/wcswidth (CJK-aware display width), wctype classification (iswalpha..iswxdigit, towlower/towupper), wide string ops (wcscpy/wcsncpy/wcslen/wcscmp/wcsncmp/wcscat/wcschr/wcsrchr, wmemcpy/wmemset/wmemcmp), nl_langinfo (locale info stubs)
+  - [x] wchar: full UTF-8 multibyte↔wchar conversion (1-4 byte decode/encode, overlong/surrogate rejection), btowc/wctob, restartable mbrtowc/wcrtomb with MbstateT partial state tracking, mbrlen, wcwidth/wcswidth (CJK-aware display width), wctype classification (iswalpha..iswxdigit, towlower/towupper), wide string ops (wcscpy/wcsncpy/wcslen/wcscmp/wcsncmp/wcscat/wcsncat/wcschr/wcsrchr/wcsstr, wmemcpy/wmemset/wmemcmp/wmemchr/wmemmove), nl_langinfo; 24 unit tests
   - [x] resource additions: nice/getpriority/setpriority (stored locally, clamped to [-20,19], not kernel-enforced), PRIO_PROCESS/PRIO_PGRP/PRIO_USER constants
   - [x] stdlib additions: system() stub (returns ENOSYS — no shell yet)
   - [x] signal improvements: signal() now stores handlers (was returning SIG_ERR), sigaction struct and function (examine/change signal actions), sigprocmask succeeds silently (was ENOSYS), sigsuspend returns EINTR (correct POSIX), sigpending (empty set), SA_RESTART/SA_NOCLDSTOP/SA_SIGINFO flags
@@ -1125,7 +1125,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] mkostemp: mkstemp with additional open flags (flags accepted, not enforced)
   - [x] posix_spawn_file_actions: init/destroy/addclose/adddup2/addopen with storage (16 actions max, paths stored inline); posix_spawnattr: init/destroy/setflags/getflags/setpgroup/getpgroup with storage (actions recorded but not yet applied — blocked on kernel fd inheritance)
   - [x] scandir: filter + sort, malloc'd array of malloc'd Dirent*, insertion sort, full OOM rollback
-  - [x] setsockopt/getsockopt: SO_REUSEADDR, SO_KEEPALIVE, TCP_NODELAY, SO_RCVBUF/SO_SNDBUF stored per-socket; values returned consistently by getsockopt
+  - [x] setsockopt/getsockopt: SO_REUSEADDR, SO_KEEPALIVE, TCP_NODELAY, SO_RCVBUF/SO_SNDBUF, SO_BROADCAST, SO_LINGER, SO_REUSEPORT, SO_RCVTIMEO, SO_SNDTIMEO stored per-socket; values returned consistently by getsockopt
   - [x] pseudo-terminal stubs: posix_openpt (ENOSYS), grantpt/unlockpt (succeed), ptsname/ptsname_r (null/ENOSYS)
   - [x] dladdr: symbol lookup stub (returns 0=failure), DlInfo struct
   - [x] mqueue: POSIX message queue stubs (mq_open/close/unlink/send/receive/getattr/setattr — all ENOSYS)
@@ -1138,7 +1138,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] waitid: extended wait (P_PID/P_ALL/P_PGID, delegates to waitpid)
   - [x] copy_file_range: cross-file copy (userspace read+write loop), offset tracking
   - [x] epoll stubs: epoll_create/create1/ctl/wait/pwait (all ENOSYS), EpollEvent struct, EPOLLIN/OUT/ERR/HUP/ET constants
-  - [x] strftime/strptime expansion: 19 additional format specifiers (%C/%y/%e/%w/%u/%U/%W/%I/%k/%l/%P/%D/%F/%T/%R/%r/%x/%X/%z/%Z/%s), write_space_dec2/hour_12/write_i64/write_u64 helpers, Tm derives Clone+Copy
+  - [x] strftime/strptime expansion: 22 additional format specifiers (%C/%y/%e/%w/%u/%U/%W/%I/%k/%l/%P/%D/%F/%T/%R/%r/%x/%X/%z/%Z/%s + ISO 8601 %V/%G/%g), strptime month/weekday name parsing (%b/%B/%a/%A case-insensitive)
   - [x] system(): posix_spawnp("sh", "-c", command) + waitpid (was ENOSYS stub), NULL→stat /bin/sh check
   - [x] tmpnam: /tmp/tmp_NNNNNN name generation with monotonic counter, L_TMPNAM=20 (was null stub)
   - [x] fcntl advisory locking: F_GETLK/F_SETLK/F_SETLKW commands, struct Flock (l_type/l_whence/l_start/l_len/l_pid), F_RDLCK/F_WRLCK/F_UNLCK constants; stubs (no kernel lock enforcement — F_GETLK returns F_UNLCK, F_SETLK/F_SETLKW always succeed)
@@ -1148,6 +1148,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] string additions: memmem (byte sequence search), mempcpy (copy returning end pointer), rawmemchr (unbounded memchr)
   - [x] strtold: long double conversion (delegates to strtod — Rust lacks 80-bit float)
   - [x] stdio buffering: real FILE structs with 1 KiB buffers, line-buffered stdout (flush on '\n'), unbuffered stderr, fully-buffered fopen'd files; read-ahead for input; printf/fprintf routed through buffer; feof/ferror real status; fseek/ftell account for buffered data; stdout auto-flush before stdin reads; 16-slot static FILE pool for fopen'd files
+  - [x] sysconf expansion: 13 additional _SC_* constants (CLK_TCK, ARG_MAX, CHILD_MAX, NGROUPS_MAX, VERSION, HOST_NAME_MAX, LOGIN_NAME_MAX, LINE_MAX, THREADS, THREAD_STACK_MIN, PHYS_PAGES, AVPHYS_PAGES, IOV_MAX) with reasonable values
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

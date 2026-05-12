@@ -1,5 +1,3 @@
-add event logger like windows' (but more intuitive to use) to roadmap-detailed.md?
-
 add to roadmap-detailed.md to support 3d acceleration under vmware
 
 make sure latest WINE plan and automatic code change plan are in roadmap

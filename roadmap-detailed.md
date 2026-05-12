@@ -483,6 +483,19 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
   - [ ] Bluetooth Low Energy (BLE) for modern peripherals
   - [ ] Settings UI: scan, pair, manage devices, auto-reconnect
   - [ ] Port BlueZ or implement from spec (BlueZ is Linux's Bluetooth stack, well-tested, open source)
+- [ ] Printing: printer driver framework and common drivers
+  - [ ] Print spooler service (queue management, job priority, pause/resume/cancel)
+  - [ ] Port CUPS (Common Unix Printing System) or implement lightweight equivalent
+  - [ ] IPP (Internet Printing Protocol) client — covers most modern network printers
+  - [ ] USB printer class driver (via xHCI)
+  - [ ] PostScript / PDF rendering pipeline (rasterize to printer-native format)
+  - [ ] PCL driver (HP LaserJet family — huge installed base)
+  - [ ] ESC/P driver (Epson inkjets, receipt printers)
+  - [ ] Driverless printing via IPP Everywhere / AirPrint (mDNS discovery + IPP + PDF/PWG-Raster)
+  - [ ] PPD (PostScript Printer Description) file support for printer-specific options (tray, duplex, resolution, paper size)
+  - [ ] Print dialog: printer selection, page range, copies, duplex, quality, paper size/orientation
+  - [ ] Settings UI: add/remove printers, set default, view queue, test page
+  - [ ] Print-to-PDF virtual printer (always available)
 
 ### 2.3 Filesystem
 
@@ -579,6 +592,33 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
 - [ ] Automatic crash restart with exponential backoff
 - [ ] Resource limits per service (cgroup-equivalent)
 - [ ] JSON-lines structured logging (text-based, NOT binary)
+  - [ ] Event logging service (system-wide event collection daemon)
+    - [ ] Hierarchical event namespace taxonomy (mirrors hook namespaces from Phase 6.5):
+      - `system.*` — boot, shutdown, sleep/wake, OOM, hardware errors, DPI changes
+      - `process.*` — launch, exit (normal/crash with exit code), suspend/resume, priority change
+      - `security.*` — login/logout, capability grant/revoke, user create/delete, auth failures
+      - `network.*` — interface up/down, DHCP lease, DNS failures, firewall blocks, connection events
+      - `storage.*` — mount/unmount, partition changes, disk errors, SMART warnings
+      - `filesystem.*` — permission changes, quota exceeded, corruption detected
+      - `service.*` — service start/stop/crash/restart, dependency failures, socket activation
+      - `driver.*` — driver load/unload, device attach/detach, driver errors
+      - `application.*` — app-defined events via logging API (namespaced per app)
+    - [ ] Severity levels per event: debug, info, notice, warning, error, critical
+    - [ ] Structured fields: timestamp (ns), namespace, severity, source PID/service, message, key-value payload
+    - [ ] Ring buffer in kernel for early-boot events (before logging service starts)
+    - [ ] Logging API for userspace services and applications (IPC channel to logging daemon)
+  - [ ] Log storage and rotation
+    - [ ] Configurable per-namespace log files (e.g., security.jsonl, network.jsonl, or single combined.jsonl)
+    - [ ] Rotation policies: by size (default 50 MB per file), by time (daily/weekly), by count (keep N rotated files)
+    - [ ] Compression of rotated logs (zstd)
+    - [ ] Maximum total log storage cap (default 500 MB, configurable)
+    - [ ] Automatic pruning: oldest rotated logs deleted when cap exceeded
+    - [ ] Crash-safe writes: append + fsync, no partial JSON lines on power loss
+  - [ ] Log query API (for Event Viewer and CLI tools)
+    - [ ] Filter by namespace (prefix match: `security.*` gets all security events)
+    - [ ] Filter by severity range, time range, source PID/service name
+    - [ ] Full-text search within message and payload fields
+    - [ ] Streaming mode: tail new events matching a filter (like `journalctl -f`)
 - [ ] "Service ready" notification API (app tells OS "I'm fully loaded")
 - [ ] Startup app list (separate from service manager, simple sequential list)
   - [ ] Disk-idle heuristic for "app is loaded, start next one" (2-3 sec timeout)
@@ -1016,6 +1056,30 @@ _Custom Python (fastpy) text editor. Editing engine is a toolkit widget (Phase 3
   - [ ] Search ranking: hybrid BM25 full-text + semantic cosine similarity, fused via Reciprocal Rank Fusion (same algorithm as thumbsup2)
   - [ ] Results cached by file content hash (re-index only changed files)
   - [ ] Exception to "no AI" rule — user must explicitly opt in, clearly labeled as ML feature
+- [ ] Event Viewer (custom Python/fastpy — replaces Windows Event Viewer with better UX)
+  - [ ] Hierarchical namespace browser (tree view, collapsible):
+    - Top-level: system, process, security, network, storage, filesystem, service, driver, application
+    - Expandable sub-namespaces (e.g., security → login, capability, user, auth)
+    - Tristate checkboxes on each node: ✓ show all, ▪ show some children, ☐ show none
+    - Checking/unchecking a parent propagates to all children; mixed children → parent shows partial
+  - [ ] Event list (main panel): timestamp, severity icon+color, namespace, source, message
+    - [ ] Color-coded severity: debug=gray, info=default, notice=blue, warning=yellow, error=red, critical=red+bold
+    - [ ] Click to expand: full structured payload (key-value pairs), stack trace if present
+    - [ ] Multi-select for export or bulk operations
+  - [ ] Filtering toolbar:
+    - [ ] Severity filter: checkboxes for each level (default: info and above)
+    - [ ] Time range picker: last hour / today / this week / custom range
+    - [ ] Source filter: by service name or PID
+    - [ ] Text search bar (searches message + payload fields)
+    - [ ] Save/load filter presets (e.g., "Security audit", "Network issues", "Service crashes")
+  - [ ] Live tail mode: stream new events in real time (auto-scroll, pause on user scroll-up)
+  - [ ] Log rotation settings panel:
+    - [ ] Per-namespace rotation config: max file size, rotation interval, files to keep
+    - [ ] Global storage cap with visual usage bar
+    - [ ] Manual rotate / purge buttons
+    - [ ] Compression toggle for rotated files
+  - [ ] Export: filtered events to JSON, CSV, or plain text
+  - [ ] Notification integration: configurable alerts for specific event patterns (e.g., "notify me on any critical event", "notify on 3+ auth failures in 5 minutes")
 - [ ] Reminder/calendar/alarm program (custom Python/fastpy — see decision below)
 
 _Custom music player in Python (fastpy). foobar2000 is closed source. Features:_
@@ -1733,7 +1797,7 @@ _WSL-style Linux distro support: built from compat layer + ext4 + container name
 
 ### 6.5 Hooks / Tracing Subsystem
 
-_All hooks are gated by their respective capability from Phase 1.5. Programs can only hook filesystem events on paths they have `fs.*` access to. Hook implementation details:_
+_All hooks are gated by their respective capability from Phase 1.5. Programs can only hook filesystem events on paths they have `fs.*` access to. The event logging service (Phase 2.6) subscribes to these hooks to populate the system event log; the Event Viewer app (Phase 4.4) provides the user-facing UI for browsing and filtering logged events. Hook implementation details:_
 
 _Filesystem hooks — `hook.filesystem` (async notification):_
 - [ ] Rename file or dir

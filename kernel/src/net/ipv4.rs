@@ -298,6 +298,18 @@ pub fn verify_transport_checksum(
     sum == 0xFFFF
 }
 
+/// Check if `addr` is the subnet-directed broadcast for the given IP/mask.
+///
+/// The subnet broadcast address has all host bits set to 1.
+/// E.g., for IP 192.168.1.x with mask 255.255.255.0: broadcast = 192.168.1.255.
+fn is_subnet_broadcast(addr: Ipv4Addr, our_ip: Ipv4Addr, mask: Ipv4Addr) -> bool {
+    let m = mask.to_u32();
+    let net = our_ip.to_u32() & m;
+    let host_bits = !m;
+    // Subnet broadcast has all host bits set.
+    addr.to_u32() == (net | host_bits)
+}
+
 // ---------------------------------------------------------------------------
 // IPv4 processing
 // ---------------------------------------------------------------------------
@@ -315,12 +327,15 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
 
     // Check if the packet is addressed to us, is broadcast, or is
     // multicast for a group we have joined.
-    let our_ip = interface::ip();
-    let is_for_us = packet.dst == our_ip
+    let iface = interface::info();
+    let is_for_us = packet.dst == iface.ip
         || packet.dst.is_broadcast()
-        || our_ip.is_unspecified() // Accept all during DHCP.
+        || iface.ip.is_unspecified() // Accept all during DHCP.
         || (packet.dst.is_multicast()
-            && super::udp::is_multicast_member(packet.dst));
+            && super::udp::is_multicast_member(packet.dst))
+        // Subnet-directed broadcast (e.g., 192.168.1.255 for /24).
+        || (!iface.subnet_mask.is_unspecified()
+            && is_subnet_broadcast(packet.dst, iface.ip, iface.subnet_mask));
 
     if !is_for_us {
         return Ok(());

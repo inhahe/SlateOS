@@ -984,6 +984,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TCP CloseWait send: allow send() in CloseWait state (remote sent FIN but we can still transmit)
   - [x] DNS cache flush on DHCP lease: flush_cache() wired into DHCP ACK handler (was dead code)
   - [x] IPv4 subnet-directed broadcast: accept and send subnet broadcasts (e.g., 192.168.1.255 for /24); is_subnet_broadcast() helper using interface mask
+  - [x] DHCP lease renewal (RFC 2131 §4.4.5): Bound→Renewing (unicast to server at T1) →Rebinding (broadcast at T2) →Idle (lease expired, IP released, DNS flushed); tick_renewal() driven from net::poll; ciaddr-based renewal message (no OPT_REQUESTED_IP per §4.3.2)
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)

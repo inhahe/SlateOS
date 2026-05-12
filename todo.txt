@@ -7,16 +7,21 @@ Per-namespace ARP → blocked on veth pairs
 Wire process→container→net_ns → cross-zone (kernel-process + kernel-ipc)
 
 Net improvements (not blocked, could still do):
-(DONE) TCP keepalive probes (detect dead connections) — RFC 1122 §4.2.3.6;
-  75s idle, 10s interval, 9 probes default.  Probe = ACK with seq=snd_una-1.
-  tick_keepalive() called from net::poll() every 5s.  set_keepalive() /
-  set_keepalive_params() public API.  Dead connections get RST + teardown.
-(DONE) TCP receive window tracking from peer (was fixed 16 KiB) — snd_wnd
-  field tracks peer's advertised window, updated on every incoming segment.
-  send() respects peer window (returns WouldBlock when zero).  Our own
-  window is advertised dynamically based on rx_buffer space via
-  advertised_window().
-(DONE) ICMP destination unreachable / time exceeded handling — commit 56d3997
+(DONE) TCP keepalive probes — RFC 1122, 75s idle, 10s interval, 9 probes.
+(DONE) TCP receive window tracking — dynamic snd_wnd + advertised_window().
+(DONE) ICMP destination unreachable / time exceeded — commit 56d3997.
+(DONE) TCP RTT estimation — Jacobson/Karels (RFC 6298), dynamic RTO.
+(DONE) TCP Nagle algorithm — RFC 896, small segment coalescing.
+(DONE) TCP congestion control — simplified AIMD (RFC 5681), slow start +
+  congestion avoidance, multiplicative decrease on loss.
+(DONE) Gratuitous ARP — announce IP on configure, detect conflicts.
+(DONE) DHCP extended options — lease time, T1/T2 renewal, domain name,
+  NTP server, NAK handling.
+
+Remaining net improvements (diminishing returns):
+TCP window scaling (RFC 7323) — lifts 64 KiB cap, needs options parsing
+TCP SACK — selective acknowledgment for better loss recovery
+UDP multicast — group join/leave for service discovery
 
 ## Completed
 - Per-CPU scheduler lock refactor: DONE (commit 449e218).  Split global

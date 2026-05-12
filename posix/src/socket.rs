@@ -14,8 +14,12 @@
 //! - `bind(fd, addr, len)` + `listen(fd, backlog)` → `SYS_TCP_BIND(port)`
 //! - `accept(fd, addr, len)` → `SYS_TCP_ACCEPT(listener_handle)`
 //! - `socket(AF_INET, SOCK_DGRAM, 0)` → creates an unbound UDP fd
+//! - `connect(fd, addr, len)` on UDP → stores default peer (userspace only)
 //! - `bind(fd, addr, len)` on UDP → `SYS_UDP_BIND(port)`
+//! - `send(fd, ...)` on connected UDP → uses stored peer address
 //! - `sendto(fd, ...)` on UDP → `SYS_UDP_SEND(handle, ip, port, buf, len)`
+//! - `sendto(fd, NULL, ...)` on connected UDP → uses stored peer
+//! - `recv(fd, ...)` on UDP → `SYS_UDP_RECV` (discards source address)
 //! - `recvfrom(fd, ...)` on UDP → `SYS_UDP_RECV(handle, buf, len, addr_out)`
 //!
 //! ## Socket State
@@ -1014,7 +1018,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
         return -1;
     };
 
-    let Some(meta) = get_meta(fd) else {
+    let Some(mut meta) = get_meta(fd) else {
         errno::set_errno(errno::ENOTSOCK);
         return -1;
     };
@@ -1023,7 +1027,8 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
     // Use read_unaligned because Sockaddr has weaker alignment than SockaddrIn.
     let sin = unsafe { core::ptr::read_unaligned(addr.cast::<SockaddrIn>()) };
 
-    if sin.sin_family != AF_INET as u16 {
+    if sin.sin_family != AF_INET as u16 && meta.sock_type != SOCK_DGRAM {
+        // DGRAM connect with AF_UNSPEC (sin_family==0) is valid for disconnect.
         errno::set_errno(errno::EAFNOSUPPORT);
         return -1;
     }
@@ -1068,9 +1073,24 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
             0
         }
         SOCK_DGRAM => {
-            // UDP doesn't have kernel-level "connected" state yet.
-            errno::set_errno(errno::ENOSYS);
-            -1
+            // UDP "connect" is purely a userspace operation — it stores
+            // the default peer address so send() works without sendto().
+            // No kernel call needed; the kernel handles each datagram
+            // independently.  Per POSIX, connect on DGRAM can be called
+            // multiple times (to change peer) or with AF_UNSPEC to
+            // disconnect.
+            if sin.sin_family == 0 {
+                // AF_UNSPEC → disconnect (clear stored peer).
+                meta.peer_addr = 0;
+                meta.peer_port = 0;
+                set_meta(fd, meta);
+                return 0;
+            }
+
+            meta.peer_addr = sin.sin_addr.s_addr;
+            meta.peer_port = sin.sin_port;
+            set_meta(fd, meta);
+            0
         }
         _ => {
             errno::set_errno(errno::ENOTSOCK);
@@ -1371,20 +1391,49 @@ pub unsafe extern "C" fn send(
         return -1;
     };
 
-    if entry.kind != HandleKind::TcpStream {
-        errno::set_errno(errno::ENOTSOCK);
-        return -1;
+    match entry.kind {
+        HandleKind::TcpStream => {
+            if entry.handle == 0 {
+                errno::set_errno(errno::ENOTCONN);
+                return -1;
+            }
+            let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
+            if ret < 0 {
+                errno::set_errno(translate_net_error(ret));
+                return -1;
+            }
+            ret as isize
+        }
+        HandleKind::UdpSocket => {
+            // send() on UDP requires a prior connect() to set the peer.
+            let Some(meta) = get_meta(fd) else {
+                errno::set_errno(errno::ENOTSOCK);
+                return -1;
+            };
+            if meta.peer_addr == 0 && meta.peer_port == 0 {
+                errno::set_errno(errno::EDESTADDRREQ);
+                return -1;
+            }
+            let port = u16::from_be(meta.peer_port);
+            let ret = syscall5(
+                SYS_UDP_SEND,
+                entry.handle,
+                u64::from(meta.peer_addr),
+                u64::from(port),
+                buf as u64,
+                len as u64,
+            );
+            if ret < 0 {
+                errno::set_errno(translate_net_error(ret));
+                return -1;
+            }
+            len as isize
+        }
+        _ => {
+            errno::set_errno(errno::ENOTSOCK);
+            -1
+        }
     }
-    if entry.handle == 0 {
-        errno::set_errno(errno::ENOTCONN);
-        return -1;
-    }
-    let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
-    if ret < 0 {
-        errno::set_errno(translate_net_error(ret));
-        return -1;
-    }
-    ret as isize
 }
 
 /// Receive data from a connected socket.
@@ -1413,20 +1462,44 @@ pub unsafe extern "C" fn recv(
         return -1;
     };
 
-    if entry.kind != HandleKind::TcpStream {
-        errno::set_errno(errno::ENOTSOCK);
-        return -1;
+    match entry.kind {
+        HandleKind::TcpStream => {
+            if entry.handle == 0 {
+                errno::set_errno(errno::ENOTCONN);
+                return -1;
+            }
+            let ret = syscall3(SYS_TCP_RECV, entry.handle, buf as u64, len as u64);
+            if ret < 0 {
+                errno::set_errno(translate_net_error(ret));
+                return -1;
+            }
+            ret as isize
+        }
+        HandleKind::UdpSocket => {
+            // recv() on connected UDP — use recvfrom with no source addr.
+            if entry.handle == 0 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            let mut src_info = [0u8; 6];
+            let ret = syscall4(
+                SYS_UDP_RECV,
+                entry.handle,
+                buf as u64,
+                len as u64,
+                src_info.as_mut_ptr() as u64,
+            );
+            if ret < 0 {
+                errno::set_errno(translate_net_error(ret));
+                return -1;
+            }
+            ret as isize
+        }
+        _ => {
+            errno::set_errno(errno::ENOTSOCK);
+            -1
+        }
     }
-    if entry.handle == 0 {
-        errno::set_errno(errno::ENOTCONN);
-        return -1;
-    }
-    let ret = syscall3(SYS_TCP_RECV, entry.handle, buf as u64, len as u64);
-    if ret < 0 {
-        errno::set_errno(translate_net_error(ret));
-        return -1;
-    }
-    ret as isize
 }
 
 // ---------------------------------------------------------------------------
@@ -1456,14 +1529,6 @@ pub unsafe extern "C" fn sendto(
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    if dest_addr.is_null() {
-        errno::set_errno(errno::EDESTADDRREQ);
-        return -1;
-    }
-    if (addrlen as usize) < core::mem::size_of::<SockaddrIn>() {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
 
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
@@ -1475,17 +1540,36 @@ pub unsafe extern "C" fn sendto(
         return -1;
     }
 
-    // SAFETY: dest_addr is non-null, addrlen checked.
-    // Use read_unaligned because Sockaddr has weaker alignment than SockaddrIn.
-    let sin = unsafe { core::ptr::read_unaligned(dest_addr.cast::<SockaddrIn>()) };
-
-    if sin.sin_family != AF_INET as u16 {
-        errno::set_errno(errno::EAFNOSUPPORT);
-        return -1;
+    // Determine the destination IP and port.
+    // If dest_addr is NULL, use the stored peer from connect() (POSIX:
+    // sendto with NULL addr on a connected DGRAM socket sends to the
+    // connected peer).
+    let (ip, port): (u32, u16);
+    if dest_addr.is_null() {
+        let Some(meta) = get_meta(fd) else {
+            errno::set_errno(errno::ENOTSOCK);
+            return -1;
+        };
+        if meta.peer_addr == 0 && meta.peer_port == 0 {
+            errno::set_errno(errno::EDESTADDRREQ);
+            return -1;
+        }
+        ip = meta.peer_addr;
+        port = u16::from_be(meta.peer_port);
+    } else {
+        if (addrlen as usize) < core::mem::size_of::<SockaddrIn>() {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        // SAFETY: dest_addr is non-null, addrlen checked.
+        let sin = unsafe { core::ptr::read_unaligned(dest_addr.cast::<SockaddrIn>()) };
+        if sin.sin_family != AF_INET as u16 {
+            errno::set_errno(errno::EAFNOSUPPORT);
+            return -1;
+        }
+        ip = sin.sin_addr.s_addr;
+        port = u16::from_be(sin.sin_port);
     }
-
-    let ip = sin.sin_addr.s_addr;
-    let port = u16::from_be(sin.sin_port);
 
     // SYS_UDP_SEND: arg0=handle, arg1=ip, arg2=port, arg3=buf, arg4=len.
     // If handle is 0 (unbound), kernel creates an ephemeral port.

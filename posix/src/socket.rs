@@ -108,6 +108,13 @@ pub const TCP_NODELAY: i32 = 1;
 pub const MSG_PEEK: i32 = 2;
 /// Non-blocking operation.
 pub const MSG_DONTWAIT: i32 = 0x40;
+/// Data was truncated (returned by recvmsg).
+pub const MSG_TRUNC: i32 = 0x20;
+
+/// Socket type flag: set `O_NONBLOCK` on the new socket (Linux extension).
+pub const SOCK_NONBLOCK: i32 = 0o4000;
+/// Socket type flag: set close-on-exec on the new socket (Linux extension).
+pub const SOCK_CLOEXEC: i32 = 0o2_000_000;
 
 // ---------------------------------------------------------------------------
 // sockaddr structures
@@ -1000,6 +1007,43 @@ pub unsafe extern "C" fn accept(
             }
             *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
         }
+    }
+
+    new_fd
+}
+
+/// Accept a connection with flags (Linux extension).
+///
+/// Like `accept`, but `flags` may include `SOCK_NONBLOCK` and/or
+/// `SOCK_CLOEXEC` to set those properties on the returned fd
+/// atomically.
+///
+/// # Safety
+///
+/// Same requirements as `accept`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn accept4(
+    fd: i32,
+    addr: *mut Sockaddr,
+    addrlen: *mut SocklenT,
+    flags: i32,
+) -> i32 {
+    let new_fd = unsafe { accept(fd, addr, addrlen) };
+    if new_fd < 0 {
+        return new_fd;
+    }
+
+    // Apply SOCK_NONBLOCK: set O_NONBLOCK in the fd's status flags.
+    if flags & SOCK_NONBLOCK != 0 {
+        let _ = fdtable::set_status_flags(
+            new_fd,
+            fdtable::get_status_flags(new_fd).unwrap_or(0) | crate::fcntl::O_NONBLOCK,
+        );
+    }
+
+    // Apply SOCK_CLOEXEC: set FD_CLOEXEC in the fd's per-fd flags.
+    if flags & SOCK_CLOEXEC != 0 {
+        let _ = fdtable::set_fd_flags(new_fd, 1); // FD_CLOEXEC = 1
     }
 
     new_fd
@@ -2106,8 +2150,10 @@ pub struct Cmsghdr {
 
 /// Send a message on a socket using a message header.
 ///
-/// Stub: sends only the first iov element using `send`.
-/// Ancillary data is ignored.
+/// Iterates over all iov elements.  For small messages (≤ 4 KiB total),
+/// concatenates into a stack buffer for a single `send` call.  For
+/// larger messages, sends each iov sequentially.
+/// Ancillary data (`msg_control`) is ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isize {
     if msg.is_null() {
@@ -2115,21 +2161,84 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
         return -1;
     }
 
+    // SAFETY: msg is non-null and valid (caller guarantee).
     let m = unsafe { &*msg };
     if m.msg_iov.is_null() || m.msg_iovlen == 0 {
         return 0;
     }
 
-    // Send the first iov element.
-    // SAFETY: msg_iov is non-null, msg_iovlen > 0.
-    let iov = unsafe { &*m.msg_iov };
-    unsafe { send(fd, iov.iov_base, iov.iov_len, flags) }
+    // Calculate total size across all iovecs.
+    let mut total: usize = 0;
+    let mut i: usize = 0;
+    while i < m.msg_iovlen {
+        // SAFETY: msg_iov is valid for msg_iovlen entries.
+        let iov = unsafe { &*m.msg_iov.add(i) };
+        total = total.saturating_add(iov.iov_len);
+        i = i.wrapping_add(1);
+    }
+
+    if total == 0 {
+        return 0;
+    }
+
+    // Single iov — send directly without copying.
+    if m.msg_iovlen == 1 {
+        let iov = unsafe { &*m.msg_iov };
+        return unsafe { send(fd, iov.iov_base, iov.iov_len, flags) };
+    }
+
+    // If total fits in a stack buffer, concatenate for one send call.
+    // This produces a single TCP segment instead of multiple.
+    const STACK_BUF: usize = 4096;
+    if total <= STACK_BUF {
+        let mut buf = [0u8; STACK_BUF];
+        let mut pos: usize = 0;
+        i = 0;
+        while i < m.msg_iovlen {
+            let iov = unsafe { &*m.msg_iov.add(i) };
+            if iov.iov_len > 0 && !iov.iov_base.is_null() {
+                // SAFETY: pos + iov_len <= total <= STACK_BUF.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        iov.iov_base.cast::<u8>(),
+                        buf.as_mut_ptr().add(pos),
+                        iov.iov_len,
+                    );
+                }
+                pos = pos.wrapping_add(iov.iov_len);
+            }
+            i = i.wrapping_add(1);
+        }
+        return unsafe { send(fd, buf.as_ptr().cast(), pos, flags) };
+    }
+
+    // Larger than stack buffer — send each iov individually.
+    let mut sent: isize = 0;
+    i = 0;
+    while i < m.msg_iovlen {
+        let iov = unsafe { &*m.msg_iov.add(i) };
+        if iov.iov_len > 0 && !iov.iov_base.is_null() {
+            let n = unsafe { send(fd, iov.iov_base, iov.iov_len, flags) };
+            if n < 0 {
+                return if sent > 0 { sent } else { n };
+            }
+            sent = sent.wrapping_add(n);
+            // Short send — stop here.
+            if (n as usize) < iov.iov_len {
+                break;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+    sent
 }
 
 /// Receive a message from a socket using a message header.
 ///
-/// Stub: receives into the first iov element using `recv`.
-/// Ancillary data is not populated.
+/// Distributes received data across all iov elements.  For single-iov
+/// messages, receives directly into the buffer.  For multi-iov messages,
+/// receives into a stack buffer and copies out to each iov.
+/// Ancillary data (`msg_control`) is not populated.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize {
     if msg.is_null() {
@@ -2137,16 +2246,82 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
         return -1;
     }
 
+    // SAFETY: msg is non-null and valid (caller guarantee).
     let m = unsafe { &mut *msg };
     if m.msg_iov.is_null() || m.msg_iovlen == 0 {
+        m.msg_flags = 0;
+        m.msg_controllen = 0;
         return 0;
     }
 
-    // Receive into the first iov element.
-    let iov = unsafe { &*m.msg_iov };
-    let ret = unsafe { recv(fd, iov.iov_base, iov.iov_len, flags) };
+    // Single iov — receive directly without copying.
+    if m.msg_iovlen == 1 {
+        let iov = unsafe { &*m.msg_iov };
+        let ret = unsafe { recv(fd, iov.iov_base, iov.iov_len, flags) };
+        m.msg_flags = 0;
+        m.msg_controllen = 0;
+        return ret;
+    }
 
-    m.msg_flags = 0;
+    // Multiple iovs — calculate total capacity.
+    let mut total_cap: usize = 0;
+    let mut i: usize = 0;
+    while i < m.msg_iovlen {
+        let iov = unsafe { &*m.msg_iov.add(i) };
+        total_cap = total_cap.saturating_add(iov.iov_len);
+        i = i.wrapping_add(1);
+    }
+
+    if total_cap == 0 {
+        m.msg_flags = 0;
+        m.msg_controllen = 0;
+        return 0;
+    }
+
+    // Receive into a stack buffer, then distribute across iovs.
+    const STACK_BUF: usize = 4096;
+    let recv_cap = if total_cap < STACK_BUF { total_cap } else { STACK_BUF };
+    let mut buf = [0u8; STACK_BUF];
+    let ret = unsafe {
+        recv(fd, buf.as_mut_ptr().cast(), recv_cap, flags)
+    };
+    if ret <= 0 {
+        m.msg_flags = 0;
+        m.msg_controllen = 0;
+        return ret;
+    }
+
+    // Distribute received bytes across iovecs.
+    let received = ret as usize;
+    let mut remaining = received;
+    let mut src_pos: usize = 0;
+    i = 0;
+    while i < m.msg_iovlen && remaining > 0 {
+        let iov = unsafe { &*m.msg_iov.add(i) };
+        if iov.iov_len > 0 && !iov.iov_base.is_null() {
+            let to_copy = if remaining < iov.iov_len { remaining } else { iov.iov_len };
+            // SAFETY: src_pos + to_copy <= received <= STACK_BUF;
+            //         iov_base is valid for iov_len bytes (caller guarantee).
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    buf.as_ptr().add(src_pos),
+                    iov.iov_base.cast::<u8>(),
+                    to_copy,
+                );
+            }
+            src_pos = src_pos.wrapping_add(to_copy);
+            remaining = remaining.wrapping_sub(to_copy);
+        }
+        i = i.wrapping_add(1);
+    }
+
+    // Set MSG_TRUNC if we received a full buffer but total capacity
+    // was larger (indicating potential data truncation for datagrams).
+    m.msg_flags = if received == recv_cap && recv_cap < total_cap {
+        MSG_TRUNC
+    } else {
+        0
+    };
     m.msg_controllen = 0;
 
     ret

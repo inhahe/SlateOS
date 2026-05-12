@@ -27,8 +27,10 @@
 //! - **RTT estimation** (Jacobson/Karels, RFC 6298): measures round-trip
 //!   time to compute dynamic retransmission timeout (SRTT + 4×RTTVAR).
 //! - **Nagle algorithm** (RFC 896): coalesces small writes into larger
-//!   segments when unacknowledged data is in flight.  Disable with
-//!   `set_nodelay(handle, true)` (TCP_NODELAY).
+//!   segments when unacknowledged data is in flight.  Small writes
+//!   are buffered internally (`nagle_buf`) and flushed when an ACK
+//!   acknowledges all outstanding data or when enough data accumulates
+//!   to fill an MSS.  Disable with `set_nodelay(handle, true)` (TCP_NODELAY).
 //! - **Congestion control** (simplified AIMD, RFC 5681): slow start and
 //!   congestion avoidance via `cwnd`/`ssthresh`.  Multiplicative decrease
 //!   on loss.
@@ -268,6 +270,13 @@ struct TcpConnection {
 
     /// Whether Nagle's algorithm is enabled (TCP_NODELAY = !nagle).
     nagle_enabled: bool,
+    /// Buffer for small writes delayed by Nagle's algorithm.
+    ///
+    /// When Nagle is enabled and unacknowledged data is in flight, writes
+    /// smaller than MSS are buffered here instead of returning WouldBlock.
+    /// The buffer is flushed when an ACK acknowledges all outstanding data
+    /// (snd_una == snd_nxt) or when enough data accumulates to fill an MSS.
+    nagle_buf: Vec<u8>,
 
     // -- Congestion control (AIMD, RFC 5681) --
 
@@ -385,6 +394,7 @@ impl TcpConnection {
             rtt_seq: 0,
             rtt_sent_ns: 0,
             nagle_enabled: NAGLE_DEFAULT,
+            nagle_buf: Vec::new(),
             cwnd: INITIAL_CWND_SEGS.saturating_mul(MSS as u32),
             ssthresh: u32::MAX, // Start in slow-start.
             wscale_ok: false,
@@ -929,6 +939,7 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.ooo_base = 0;
         conn.dup_ack_count = 0;
         conn.tx_buffer.clear();
+        conn.nagle_buf.clear();
         conn.tx_buf_seq = isn.wrapping_add(1); // After SYN sequence.
         conn.tx_last_send_ns = 0;
         conn.keepalive_enabled = false;
@@ -1448,11 +1459,45 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
     // flight, only send if the new data fills a full MSS.  This coalesces
     // small writes into larger segments.
     if nagle && has_unacked && data.len() < MSS {
-        // Buffer the small write — it will be sent when the ACK arrives.
-        // For now we return WouldBlock; the caller should retry later.
-        // A real implementation would buffer internally, but our simple
-        // model works because callers already retry on WouldBlock.
-        return Err(KernelError::WouldBlock);
+        // Buffer the small write internally.  It will be flushed when
+        // an ACK acknowledges all outstanding data (snd_una == snd_nxt)
+        // or when enough data accumulates to fill an MSS.
+        let mut conns = CONNECTIONS.lock();
+        let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+        let space = MSS.saturating_sub(conn.nagle_buf.len());
+        let copy_len = data.len().min(space);
+        if copy_len > 0 {
+            conn.nagle_buf.extend_from_slice(&data[..copy_len]);
+        }
+        // If the nagle_buf now fills an MSS, flush it immediately.
+        if conn.nagle_buf.len() >= MSS {
+            let lp = conn.local_port;
+            let ri = conn.remote_ip;
+            let rp = conn.remote_port;
+            let s = conn.snd_nxt;
+            let a = conn.rcv_nxt;
+            let w = advertised_window(conn);
+            let flush_len = conn.nagle_buf.len().min(MSS);
+            let mut flush_data = [0u8; 1460];
+            flush_data[..flush_len].copy_from_slice(&conn.nagle_buf[..flush_len]);
+            conn.snd_nxt = s.wrapping_add(flush_len as u32);
+            // Buffer for retransmit.
+            let tx_space = MAX_TX_BUFFER.saturating_sub(conn.tx_buffer.len());
+            let tx_copy = flush_len.min(tx_space);
+            if tx_copy > 0 {
+                conn.tx_buffer.extend_from_slice(&flush_data[..tx_copy]);
+            }
+            conn.tx_last_send_ns = crate::hrtimer::now_ns();
+            conn.last_activity_ns = conn.tx_last_send_ns;
+            // Drain flushed data from nagle_buf.
+            conn.nagle_buf.drain(..flush_len);
+            drop(conns);
+            let _ = send_segment_with_window(
+                lp, ri, rp, s, a, TCP_ACK | TCP_PSH, w,
+                &flush_data[..flush_len],
+            );
+        }
+        return Ok(());
     }
 
     // Effective window = min(cwnd, snd_wnd).  Limit data to what we can
@@ -1646,6 +1691,7 @@ pub fn close(handle: usize) -> KernelResult<()> {
     conns[handle].state = TcpState::Closed;
     conns[handle].rx_buffer.clear();
     conns[handle].tx_buffer.clear();
+    conns[handle].nagle_buf.clear();
     conns[handle].ooo_buf.clear();
 
     Ok(())
@@ -1820,6 +1866,7 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
                 conn.state = TcpState::Closed;
                 conn.rx_buffer.clear();
                 conn.tx_buffer.clear();
+                conn.nagle_buf.clear();
                 conn.ooo_buf.clear();
             }
         }
@@ -1894,6 +1941,7 @@ fn handle_incoming_syn(
         conn.rcv_nxt = remote_seq.wrapping_add(1); // Client's SYN consumes 1.
         conn.rx_buffer.clear();
         conn.tx_buffer.clear();
+        conn.nagle_buf.clear();
         conn.tx_buf_seq = isn.wrapping_add(1); // After SYN-ACK sequence.
         conn.tx_last_send_ns = 0;
         conn.ooo_buf.clear();
@@ -2088,6 +2136,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         conn.state = TcpState::Closed;
         conn.rx_buffer.clear();
         conn.tx_buffer.clear();
+        conn.nagle_buf.clear();
         conn.ooo_buf.clear();
         return Ok(());
     }
@@ -2184,6 +2233,41 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
 
                     // Congestion window update.
                     on_ack_congestion(conn, bytes_acked);
+
+                    // Nagle flush: if all outstanding data is now acked
+                    // and the nagle buffer has pending data, send it.
+                    if conn.snd_una == conn.snd_nxt && !conn.nagle_buf.is_empty() {
+                        let lp = conn.local_port;
+                        let ri = conn.remote_ip;
+                        let rp = conn.remote_port;
+                        let s = conn.snd_nxt;
+                        let a = conn.rcv_nxt;
+                        let w = advertised_window(conn);
+                        let flush_len = conn.nagle_buf.len().min(MSS);
+                        let mut flush_data = [0u8; 1460];
+                        flush_data[..flush_len]
+                            .copy_from_slice(&conn.nagle_buf[..flush_len]);
+                        conn.snd_nxt = s.wrapping_add(flush_len as u32);
+                        // Buffer for retransmit.
+                        let tx_space =
+                            MAX_TX_BUFFER.saturating_sub(conn.tx_buffer.len());
+                        let tx_copy = flush_len.min(tx_space);
+                        if tx_copy > 0 {
+                            conn.tx_buffer
+                                .extend_from_slice(&flush_data[..tx_copy]);
+                        }
+                        let now = crate::hrtimer::now_ns();
+                        conn.tx_last_send_ns = now;
+                        conn.last_activity_ns = now;
+                        start_rtt_timing(conn, s);
+                        conn.nagle_buf.drain(..flush_len);
+                        drop(conns);
+                        let _ = send_segment_with_window(
+                            lp, ri, rp, s, a, TCP_ACK | TCP_PSH, w,
+                            &flush_data[..flush_len],
+                        );
+                        return Ok(());
+                    }
                 } else if payload.is_empty() {
                     // Duplicate ACK (no new data, no payload).
                     // RFC 5681 §3.2: after 3 duplicate ACKs, enter fast
@@ -2454,6 +2538,7 @@ pub fn tick_keepalive() {
             conn.state = TcpState::Closed;
             conn.rx_buffer.clear();
             conn.tx_buffer.clear();
+            conn.nagle_buf.clear();
             conn.ooo_buf.clear();
 
             drop(conns);
@@ -2532,6 +2617,7 @@ pub fn tick_time_wait_cleanup() {
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
                     conn.tx_buffer.clear();
+                    conn.nagle_buf.clear();
                     conn.ooo_buf.clear();
                 }
             }
@@ -2549,6 +2635,7 @@ pub fn tick_time_wait_cleanup() {
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
                     conn.tx_buffer.clear();
+                    conn.nagle_buf.clear();
                     conn.ooo_buf.clear();
                 }
             }
@@ -2683,6 +2770,7 @@ pub fn icmp_error(
                 conn.state = TcpState::Closed;
                 conn.rx_buffer.clear();
                 conn.tx_buffer.clear();
+                conn.nagle_buf.clear();
                 conn.ooo_buf.clear();
             }
             TcpState::SynReceived => {
@@ -2697,6 +2785,7 @@ pub fn icmp_error(
                 conn.state = TcpState::Closed;
                 conn.rx_buffer.clear();
                 conn.tx_buffer.clear();
+                conn.nagle_buf.clear();
                 conn.ooo_buf.clear();
             }
             _ => {

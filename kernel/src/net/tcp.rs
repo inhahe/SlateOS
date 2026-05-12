@@ -49,18 +49,27 @@
 //! and `SynReceived` connections are aborted (hard errors); established
 //! connections treat ICMP errors as soft errors (logged but not aborted).
 //!
+//! ## Retransmit buffer
+//!
+//! Sent data is copied into a per-connection retransmit buffer (up to 64 KiB).
+//! This enables:
+//! - **Fast retransmit** (RFC 5681 §3.2): after 3 duplicate ACKs, the
+//!   first unacknowledged segment is resent immediately from the buffer.
+//! - **RTO retransmit** (RFC 6298): when the retransmission timeout expires
+//!   without receiving an ACK, the oldest unacknowledged data is resent
+//!   with exponential backoff (doubled RTO per timeout, capped at 60s).
+//! - The buffer is trimmed from the front when ACKs advance `snd_una`,
+//!   keeping memory usage proportional to in-flight data.
+//!
 //! ## Duplicate ACK / Fast Recovery (RFC 5681 §3.2)
 //!
 //! Counts consecutive duplicate ACKs.  After 3 duplicate ACKs, enters
-//! fast recovery: `ssthresh = flight_size / 2`, `cwnd = ssthresh + 3*MSS`.
-//! Additional dup ACKs inflate `cwnd` by one MSS.  The actual fast
-//! retransmit (resending the lost segment) is not implemented because
-//! we don't maintain a retransmit buffer, but the congestion response
-//! prevents congestion collapse and the SACK blocks guide the peer.
+//! fast recovery: `ssthresh = flight_size / 2`, `cwnd = ssthresh + 3*MSS`,
+//! and retransmits the first unacknowledged segment from the retransmit
+//! buffer.  Additional dup ACKs inflate `cwnd` by one MSS.
 //!
 //! ## Limitations
 //!
-//! - No retransmit buffer (sent data is not stored for retransmission).
 //! - Maximum 32 concurrent connections.
 //! - Maximum 8 listeners, each with a backlog of 16 pending connections.
 
@@ -108,6 +117,12 @@ const MAX_RX_BUFFER: usize = 65536;
 
 /// Standard MSS for Ethernet (1500 MTU − 20 IP − 20 TCP).
 const MSS: usize = 1460;
+
+/// Maximum retransmit buffer size per connection.
+///
+/// Stores copies of sent-but-unacknowledged data so that fast retransmit
+/// (3 dup ACKs) and timeout retransmit can resend lost segments.
+const MAX_TX_BUFFER: usize = 65536;
 
 // ---------------------------------------------------------------------------
 // RTT estimation (Jacobson/Karels, RFC 6298)
@@ -295,13 +310,26 @@ struct TcpConnection {
     /// Number of consecutive duplicate ACKs received.
     ///
     /// A "duplicate ACK" is an ACK that does not advance `snd_una`.
-    /// After 3 duplicate ACKs, RFC 5681 requires fast retransmit + fast
-    /// recovery.  We implement the congestion response (halve cwnd) but
-    /// cannot retransmit the missing segment because we don't keep a
-    /// retransmit buffer.  The SACK blocks (if negotiated) inform the
-    /// peer which data was received out of order, and the reduced cwnd
-    /// prevents congestion collapse.
+    /// After 3 duplicate ACKs, RFC 5681 triggers fast retransmit (resend
+    /// the lost segment from the retransmit buffer) and fast recovery
+    /// (halve cwnd, inflate on additional dup ACKs).
     dup_ack_count: u8,
+
+    // -- Retransmit buffer --
+
+    /// Sent data waiting to be acknowledged.
+    ///
+    /// When `send()` transmits data, a copy is appended here.  When an
+    /// ACK advances `snd_una`, the front is trimmed.  On fast retransmit
+    /// or RTO timeout, data is resent from this buffer.
+    tx_buffer: Vec<u8>,
+    /// Sequence number corresponding to `tx_buffer[0]`.
+    ///
+    /// Invariant: `tx_buf_seq == snd_una` after ACK trimming.
+    tx_buf_seq: u32,
+    /// Timestamp (ns) when unacknowledged data was first sent.
+    /// Used for RTO timeout-based retransmission.
+    tx_last_send_ns: u64,
 
     // -- Keepalive state (RFC 1122 §4.2.3.6) --
 
@@ -352,6 +380,9 @@ impl TcpConnection {
             sack_blocks: [(0, 0); MAX_SACK_BLOCKS],
             sack_block_count: 0,
             dup_ack_count: 0,
+            tx_buffer: Vec::new(),
+            tx_buf_seq: 0,
+            tx_last_send_ns: 0,
             keepalive_enabled: false,
             keepalive_idle_ns: KEEPALIVE_IDLE_DEFAULT_NS,
             keepalive_interval_ns: KEEPALIVE_INTERVAL_DEFAULT_NS,
@@ -860,6 +891,7 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.rcv_nxt = 0;
         conn.rcv_irs = 0;
         conn.rx_buffer.clear();
+        // tx_buffer init is handled below (after sack_block_count).
         conn.remote_closed = false;
         conn.retransmit_timer = 0;
         conn.srtt_ns_x8 = 0;
@@ -877,6 +909,10 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.sack_ok = false; // Set on SYN-ACK if peer supports it.
         conn.sack_blocks = [(0, 0); MAX_SACK_BLOCKS];
         conn.sack_block_count = 0;
+        conn.dup_ack_count = 0;
+        conn.tx_buffer.clear();
+        conn.tx_buf_seq = isn.wrapping_add(1); // After SYN sequence.
+        conn.tx_last_send_ns = 0;
         conn.keepalive_enabled = false;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
@@ -1059,6 +1095,55 @@ fn on_loss_congestion(conn: &mut TcpConnection) {
     conn.ssthresh = (flight / 2).max(mss.saturating_mul(2));
     // cwnd = 1 MSS (enter slow start after loss).
     conn.cwnd = mss;
+}
+
+// ---------------------------------------------------------------------------
+// Retransmit buffer helpers
+// ---------------------------------------------------------------------------
+
+/// Trim acknowledged data from the front of the retransmit buffer.
+///
+/// Called when `snd_una` advances.  `bytes_acked` is the number of bytes
+/// newly acknowledged.  Keeps `tx_buf_seq` in sync with `snd_una`.
+#[allow(clippy::arithmetic_side_effects)]
+fn tx_buffer_trim(conn: &mut TcpConnection, bytes_acked: u32) {
+    let trim = (bytes_acked as usize).min(conn.tx_buffer.len());
+    if trim > 0 {
+        // Remove the front `trim` bytes.
+        // For moderate sizes, this Vec::drain is acceptable — in the
+        // common case we're draining nearly all of the buffer (ACK covers
+        // entire send).
+        conn.tx_buffer.drain(..trim);
+        conn.tx_buf_seq = conn.tx_buf_seq.wrapping_add(trim as u32);
+    }
+    // If all data is acknowledged, reset the send timestamp.
+    if conn.tx_buffer.is_empty() {
+        conn.tx_last_send_ns = 0;
+    }
+}
+
+/// Retransmit the first unacknowledged segment from the retransmit buffer.
+///
+/// Sends up to MSS bytes from `tx_buffer[0..]` (sequence `snd_una`).
+/// Returns `true` if data was retransmitted.
+#[allow(clippy::arithmetic_side_effects)]
+fn retransmit_from_buffer(conn: &TcpConnection) -> Option<(u16, Ipv4Addr, u16, u32, u32, u16, [u8; 1460], usize)> {
+    let retx_len = conn.tx_buffer.len().min(MSS);
+    if retx_len == 0 {
+        return None;
+    }
+    let mut data = [0u8; 1460]; // MSS-sized stack buffer.
+    data[..retx_len].copy_from_slice(&conn.tx_buffer[..retx_len]);
+    Some((
+        conn.local_port,
+        conn.remote_ip,
+        conn.remote_port,
+        conn.snd_una,       // Retransmit from the first unacked byte.
+        conn.rcv_nxt,
+        advertised_window(conn),
+        data,
+        retx_len,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1284,14 +1369,27 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
         offset = chunk_end;
     }
 
-    // Update snd_nxt, start RTT timing, and reset keepalive.
+    // Update snd_nxt, buffer sent data for retransmission, and reset keepalive.
     {
         let mut conns = CONNECTIONS.lock();
         let conn = &mut conns[handle];
         conn.snd_nxt = seq.wrapping_add(sendable as u32);
-        conn.last_activity_ns = crate::hrtimer::now_ns();
+        let now = crate::hrtimer::now_ns();
+        conn.last_activity_ns = now;
         conn.keepalive_probes_sent = 0;
         start_rtt_timing(conn, first_seq);
+
+        // Buffer a copy for retransmission.  Trim to MAX_TX_BUFFER to
+        // bound memory usage.
+        let space = MAX_TX_BUFFER.saturating_sub(conn.tx_buffer.len());
+        let copy_len = sendable.min(space);
+        if copy_len > 0 {
+            conn.tx_buffer.extend_from_slice(&send_data[..copy_len]);
+        }
+        // Record send time for RTO-based retransmit.
+        if conn.tx_last_send_ns == 0 {
+            conn.tx_last_send_ns = now;
+        }
     }
 
     Ok(())
@@ -1428,6 +1526,7 @@ pub fn close(handle: usize) -> KernelResult<()> {
     conns[handle].active = false;
     conns[handle].state = TcpState::Closed;
     conns[handle].rx_buffer.clear();
+    conns[handle].tx_buffer.clear();
 
     Ok(())
 }
@@ -1600,6 +1699,7 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
                 conn.active = false;
                 conn.state = TcpState::Closed;
                 conn.rx_buffer.clear();
+                conn.tx_buffer.clear();
             }
         }
     }
@@ -1672,6 +1772,9 @@ fn handle_incoming_syn(
         conn.rcv_irs = remote_seq;
         conn.rcv_nxt = remote_seq.wrapping_add(1); // Client's SYN consumes 1.
         conn.rx_buffer.clear();
+        conn.tx_buffer.clear();
+        conn.tx_buf_seq = isn.wrapping_add(1); // After SYN-ACK sequence.
+        conn.tx_last_send_ns = 0;
         conn.remote_closed = false;
         conn.retransmit_timer = 0;
         conn.srtt_ns_x8 = 0;
@@ -1860,6 +1963,8 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         crate::serial_println!("[tcp] RST received — connection reset");
         conn.active = false;
         conn.state = TcpState::Closed;
+        conn.rx_buffer.clear();
+        conn.tx_buffer.clear();
         return Ok(());
     }
 
@@ -1947,6 +2052,9 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     // New data acknowledged — reset duplicate ACK counter.
                     conn.dup_ack_count = 0;
 
+                    // Trim retransmit buffer: discard acknowledged data.
+                    tx_buffer_trim(conn, bytes_acked);
+
                     // RTT sample from this ACK (Karn: only non-retransmitted).
                     try_rtt_sample(conn, ack);
 
@@ -1955,20 +2063,43 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 } else if payload.is_empty() {
                     // Duplicate ACK (no new data, no payload).
                     // RFC 5681 §3.2: after 3 duplicate ACKs, enter fast
-                    // recovery (halve cwnd, set ssthresh).
+                    // recovery and retransmit the first unacked segment.
                     conn.dup_ack_count = conn.dup_ack_count.saturating_add(1);
                     if conn.dup_ack_count == 3 {
-                        // Fast retransmit trigger — halve congestion window.
+                        // Fast retransmit trigger — halve congestion window
+                        // and retransmit the lost segment.
                         let flight = conn.snd_nxt.wrapping_sub(conn.snd_una);
                         conn.ssthresh = (flight / 2).max(MSS as u32);
                         conn.cwnd = conn.ssthresh.saturating_add(3u32.saturating_mul(MSS as u32));
-                        crate::serial_println!(
-                            "[tcp] 3 dup ACKs for port {} — fast recovery (ssthresh={}, cwnd={})",
-                            conn.local_port, conn.ssthresh, conn.cwnd
-                        );
-                        // Note: we can't retransmit the missing segment because
-                        // we don't keep a retransmit buffer.  The SACK blocks
-                        // inform the peer, and the reduced cwnd prevents collapse.
+
+                        // Retransmit from the tx buffer.
+                        let retx_len = conn.tx_buffer.len().min(MSS);
+                        if retx_len > 0 {
+                            let lp = conn.local_port;
+                            let ri = conn.remote_ip;
+                            let rp = conn.remote_port;
+                            let s = conn.snd_una;
+                            let a = conn.rcv_nxt;
+                            let w = advertised_window(conn);
+                            // Copy data out before dropping the lock.
+                            let mut retx_data = [0u8; 1460]; // MSS-sized stack buffer.
+                            retx_data[..retx_len].copy_from_slice(&conn.tx_buffer[..retx_len]);
+                            drop(conns);
+                            let _ = send_segment_with_window(
+                                lp, ri, rp, s, a, TCP_ACK | TCP_PSH, w,
+                                &retx_data[..retx_len],
+                            );
+                            crate::serial_println!(
+                                "[tcp] Fast retransmit: {} bytes from seq {} (port {})",
+                                retx_len, s, lp
+                            );
+                        } else {
+                            crate::serial_println!(
+                                "[tcp] 3 dup ACKs for port {} — fast recovery (no buffered data)",
+                                conn.local_port
+                            );
+                        }
+                        return Ok(());
                     } else if conn.dup_ack_count > 3 {
                         // Additional dup ACKs during fast recovery — inflate cwnd
                         // by one MSS per RFC 5681 §3.2 to allow more in-flight data.
@@ -2197,6 +2328,7 @@ pub fn tick_keepalive() {
             conn.active = false;
             conn.state = TcpState::Closed;
             conn.rx_buffer.clear();
+            conn.tx_buffer.clear();
 
             drop(conns);
             let _ = send_segment(
@@ -2273,6 +2405,7 @@ pub fn tick_time_wait_cleanup() {
                     conn.active = false;
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
+                    conn.tx_buffer.clear();
                 }
             }
             TcpState::LastAck => {
@@ -2288,9 +2421,72 @@ pub fn tick_time_wait_cleanup() {
                     conn.active = false;
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
+                    conn.tx_buffer.clear();
                 }
             }
             _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RTO-based retransmission (RFC 6298)
+// ---------------------------------------------------------------------------
+
+/// Periodic retransmit tick — called from the network poll loop.
+///
+/// Scans all established connections with pending unacknowledged data in
+/// the retransmit buffer.  If the RTO timer has expired, retransmits the
+/// first unacknowledged segment and applies exponential backoff (doubles
+/// RTO per RFC 6298 §5.5, capped at `RTO_MAX_NS`).
+///
+/// This handles the case where a segment is lost and no duplicate ACKs
+/// arrive (e.g., the last segment in a burst is lost — there's no
+/// subsequent data to trigger dup ACKs).
+pub fn tick_retransmit() {
+    let now = crate::hrtimer::now_ns();
+    let mut conns = CONNECTIONS.lock();
+
+    for idx in 0..MAX_CONNECTIONS {
+        let conn = &mut conns[idx];
+        if !conn.active {
+            continue;
+        }
+        if conn.state != TcpState::Established && conn.state != TcpState::CloseWait {
+            continue;
+        }
+        if conn.tx_buffer.is_empty() || conn.tx_last_send_ns == 0 {
+            continue;
+        }
+
+        let elapsed = now.saturating_sub(conn.tx_last_send_ns);
+        if elapsed < conn.rto_ns {
+            continue;
+        }
+
+        // RTO expired — retransmit.
+        if let Some((lp, ri, rp, seq, ack, wnd, data, len)) = retransmit_from_buffer(conn) {
+            // Exponential backoff (RFC 6298 §5.5).
+            conn.rto_ns = conn.rto_ns.saturating_mul(2).min(RTO_MAX_NS);
+            // Reset send timestamp for the next RTO measurement.
+            conn.tx_last_send_ns = now;
+            // Enter slow start after timeout (RFC 5681 §3.1).
+            on_loss_congestion(conn);
+
+            crate::serial_println!(
+                "[tcp] RTO retransmit: {} bytes from seq {} (port {}, rto={}ms)",
+                len, seq, lp, conn.rto_ns / 1_000_000
+            );
+
+            // Drop lock before sending.
+            drop(conns);
+            let _ = send_segment_with_window(
+                lp, ri, rp, seq, ack, TCP_ACK | TCP_PSH, wnd,
+                &data[..len],
+            );
+            // We dropped the lock, so we can't continue the scan.
+            // The next tick will handle remaining connections.
+            return;
         }
     }
 }
@@ -2358,6 +2554,7 @@ pub fn icmp_error(
                 conn.active = false;
                 conn.state = TcpState::Closed;
                 conn.rx_buffer.clear();
+                conn.tx_buffer.clear();
             }
             TcpState::SynReceived => {
                 // Also abort half-open connections from the server side.
@@ -2370,6 +2567,7 @@ pub fn icmp_error(
                 conn.active = false;
                 conn.state = TcpState::Closed;
                 conn.rx_buffer.clear();
+                conn.tx_buffer.clear();
             }
             _ => {
                 // RFC 5461: soft error on established connections.

@@ -780,7 +780,8 @@ pub extern "C" fn tmpfile() -> *mut u8 {
     if fd < 0 {
         return core::ptr::null_mut();
     }
-    fd as usize as *mut u8
+    // Return a FILE* (not a raw fd) per POSIX.
+    crate::stdio::fdopen(fd, c"w+".as_ptr().cast::<u8>())
 }
 
 // ---------------------------------------------------------------------------

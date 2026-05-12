@@ -20,12 +20,13 @@
 //!
 //! ## Architecture
 //!
-//! 1. Assembly wrappers (`printf`, `fprintf`, `sprintf`, `snprintf`)
+//! 1. Assembly wrappers (`printf`, `fprintf`, `dprintf`, `sprintf`, `snprintf`)
 //!    capture register args (rsi–r9) into a stack array and call
 //!    the corresponding `_*_impl` Rust function.
 //! 2. All `_*_impl` functions call `format_core()` which parses the
 //!    format string and consumes args from the array.
-//! 3. Output goes to a buffer (snprintf) or to a fd (printf/fprintf).
+//! 3. Output goes to a buffer (snprintf/sprintf), a `FILE*` stream
+//!    (printf/fprintf), or a raw fd (dprintf).
 
 // ---------------------------------------------------------------------------
 // Assembly trampolines
@@ -89,6 +90,32 @@ core::arch::global_asm!(
     // rdi = stream, rsi = fmt (already set)
     "mov rdx, rsp",          // args array
     "call _fprintf_impl",
+    "add rsp, 64",
+    "pop rbp",
+    "ret",
+
+    // dprintf(fd, fmt, ...) → _dprintf_impl(fd, fmt, args_ptr)
+    ".global dprintf",
+    ".type dprintf, @function",
+    "dprintf:",
+    "push rbp",
+    "mov rbp, rsp",
+    "sub rsp, 64",
+    "mov [rsp], rdx",        // vararg 0
+    "mov [rsp+8], rcx",      // vararg 1
+    "mov [rsp+16], r8",      // vararg 2
+    "mov [rsp+24], r9",      // vararg 3
+    "mov rax, [rbp+16]",     // vararg 4 (stack)
+    "mov [rsp+32], rax",
+    "mov rax, [rbp+24]",     // vararg 5
+    "mov [rsp+40], rax",
+    "mov rax, [rbp+32]",     // vararg 6
+    "mov [rsp+48], rax",
+    "mov rax, [rbp+40]",     // vararg 7
+    "mov [rsp+56], rax",
+    // rdi = fd, rsi = fmt (already set)
+    "mov rdx, rsp",          // args array
+    "call _dprintf_impl",
     "add rsp, 64",
     "pop rbp",
     "ret",
@@ -183,6 +210,22 @@ pub extern "C" fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: *const u6
     }
     let write_len = if (n as usize) < PRINTF_BUF_SIZE { n as usize } else { PRINTF_BUF_SIZE };
     let ret = crate::stdio::write_stream(stream, buf.as_ptr(), write_len);
+    if ret < 0 { ret as i32 } else { n }
+}
+
+/// `dprintf(fd, fmt, ...)` — write formatted output to a file descriptor.
+///
+/// Like `fprintf` but takes a raw fd (int) instead of a `FILE*`.
+/// Writes directly to the fd without stdio buffering.
+#[unsafe(no_mangle)]
+pub extern "C" fn _dprintf_impl(fd: i32, fmt: *const u8, args: *const u64) -> i32 {
+    let mut buf = [0u8; PRINTF_BUF_SIZE];
+    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
+    if n <= 0 {
+        return n;
+    }
+    let write_len = if (n as usize) < PRINTF_BUF_SIZE { n as usize } else { PRINTF_BUF_SIZE };
+    let ret = crate::file::write(fd, buf.as_ptr(), write_len);
     if ret < 0 { ret as i32 } else { n }
 }
 

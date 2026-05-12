@@ -40,8 +40,8 @@
 //!   `atoi`/`strtol`,
 //!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification,
 //!   `__ctype_b_loc`/`__ctype_tolower_loc`/`__ctype_toupper_loc`
-//! - **Formatted Output**: `printf`, `fprintf`, `sprintf`, `snprintf`
-//!   (via assembly trampoline for C variadic capture)
+//! - **Formatted Output**: `printf`, `fprintf`, `dprintf`, `sprintf`,
+//!   `snprintf` (via assembly trampoline for C variadic capture)
 //! - **Formatted Input**: `sscanf` (string scanning with `%d`/`%u`/`%x`/
 //!   `%o`/`%s`/`%c`/`%f`/`%n`, width limits, assignment suppression)
 //! - **Pattern Matching**: `fnmatch` (shell wildcards), `glob`/`globfree`

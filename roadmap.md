@@ -1116,6 +1116,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] waitid: extended wait (P_PID/P_ALL/P_PGID, delegates to waitpid)
   - [x] copy_file_range: cross-file copy (userspace read+write loop), offset tracking
   - [x] epoll stubs: epoll_create/create1/ctl/wait/pwait (all ENOSYS), EpollEvent struct, EPOLLIN/OUT/ERR/HUP/ET constants
+  - [x] strftime/strptime expansion: 19 additional format specifiers (%C/%y/%e/%w/%u/%U/%W/%I/%k/%l/%P/%D/%F/%T/%R/%r/%x/%X/%z/%Z/%s), write_space_dec2/hour_12/write_i64/write_u64 helpers, Tm derives Clone+Copy
+  - [x] system(): posix_spawnp("sh", "-c", command) + waitpid (was ENOSYS stub), NULL→stat /bin/sh check
+  - [x] tmpnam: /tmp/tmp_NNNNNN name generation with monotonic counter, L_TMPNAM=20 (was null stub)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

@@ -643,7 +643,10 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
         _ => HandleKind::UdpSocket,
     };
 
-    let Some(fd) = fdtable::alloc_fd(kind, 0) else {
+    // Sockets are bidirectional (O_RDWR).
+    let Some(fd) = fdtable::alloc_fd_with_flags(
+        kind, 0, crate::fcntl::O_RDWR,
+    ) else {
         errno::set_errno(errno::EMFILE);
         return -1;
     };
@@ -933,8 +936,11 @@ pub unsafe extern "C" fn accept(
     }
 
     // Allocate a new fd for the accepted connection.
+    // Accepted sockets are bidirectional (O_RDWR).
     let conn_handle = ret as u64;
-    let Some(new_fd) = fdtable::alloc_fd(HandleKind::TcpStream, conn_handle) else {
+    let Some(new_fd) = fdtable::alloc_fd_with_flags(
+        HandleKind::TcpStream, conn_handle, crate::fcntl::O_RDWR,
+    ) else {
         // Close the connection we just accepted — no fd available.
         let _ = syscall1(SYS_TCP_CLOSE, conn_handle);
         errno::set_errno(errno::EMFILE);

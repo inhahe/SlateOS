@@ -11,7 +11,10 @@
 //! A static array of 256 `FdEntry` slots.  Each slot holds:
 //! - The kernel handle value (u64)
 //! - The handle kind (File, Pipe, Console, TcpStream, etc.)
-//! - Per-fd flags (FD_CLOEXEC, etc.)
+//! - Per-fd flags (FD_CLOEXEC, etc.) — managed by `fcntl(F_GETFD/F_SETFD)`
+//! - File status flags (O_RDONLY/O_WRONLY/O_RDWR, O_APPEND, O_NONBLOCK,
+//!   O_SYNC) — managed by `fcntl(F_GETFL/F_SETFL)`.  Access mode bits
+//!   are set at `open()` time and immutable; status flags can be changed.
 //!
 //! On startup, fds 0/1/2 are pre-initialized as Console handles so
 //! that `read(0, ...)` and `write(1, ...)` work out of the box.
@@ -73,8 +76,16 @@ pub struct FdEntry {
     pub kind: HandleKind,
     /// The raw kernel handle value.
     pub handle: u64,
-    /// Per-fd flags (`FD_CLOEXEC`, etc.).
+    /// Per-fd flags (`FD_CLOEXEC`, etc.) — managed by `F_GETFD`/`F_SETFD`.
     pub flags: u32,
+    /// File status flags (`O_RDONLY`/`O_WRONLY`/`O_RDWR` | `O_APPEND` |
+    /// `O_NONBLOCK` | ...) — managed by `F_GETFL`/`F_SETFL`.
+    ///
+    /// The access mode bits (low 2 bits: `O_ACCMODE`) are immutable after
+    /// `open()`.  `F_SETFL` can only change the status flags: `O_APPEND`,
+    /// `O_NONBLOCK`, `O_SYNC`.  Stored as the original POSIX flag word so
+    /// `F_GETFL` can return it directly.
+    pub status_flags: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,9 +100,10 @@ static mut FD_TABLE: [Option<FdEntry>; MAX_FDS] = {
     let mut table: [Option<FdEntry>; MAX_FDS] = [None; MAX_FDS];
 
     // Pre-initialize stdin/stdout/stderr as console handles.
-    table[0] = Some(FdEntry { kind: HandleKind::Console, handle: 0, flags: 0 });
-    table[1] = Some(FdEntry { kind: HandleKind::Console, handle: 1, flags: 0 });
-    table[2] = Some(FdEntry { kind: HandleKind::Console, handle: 2, flags: 0 });
+    // stdin is read-only, stdout/stderr are write-only.
+    table[0] = Some(FdEntry { kind: HandleKind::Console, handle: 0, flags: 0, status_flags: 0 }); // O_RDONLY
+    table[1] = Some(FdEntry { kind: HandleKind::Console, handle: 1, flags: 0, status_flags: 1 }); // O_WRONLY
+    table[2] = Some(FdEntry { kind: HandleKind::Console, handle: 2, flags: 0, status_flags: 1 }); // O_WRONLY
 
     table
 };
@@ -114,10 +126,23 @@ fn table_ptr() -> *mut [Option<FdEntry>; MAX_FDS] {
 
 /// Allocate the lowest available fd and store an entry.
 ///
+/// Status flags default to 0 (`O_RDONLY`, no special flags).
+/// Use [`set_status_flags()`] afterward if you need different flags,
+/// or use [`alloc_fd_with_flags()`] to set them atomically.
+///
 /// Returns the fd number, or `None` if the table is full.
 #[must_use]
 pub fn alloc_fd(kind: HandleKind, handle: u64) -> Option<i32> {
     alloc_fd_from(0, kind, handle)
+}
+
+/// Allocate the lowest available fd and store an entry with initial
+/// file status flags (e.g., `O_RDWR | O_APPEND`).
+///
+/// Returns the fd number, or `None` if the table is full.
+#[must_use]
+pub fn alloc_fd_with_flags(kind: HandleKind, handle: u64, status_flags: i32) -> Option<i32> {
+    alloc_fd_from_with_flags(0, kind, handle, status_flags)
 }
 
 /// Allocate the lowest available fd >= `min_fd` and store an entry.
@@ -125,6 +150,17 @@ pub fn alloc_fd(kind: HandleKind, handle: u64) -> Option<i32> {
 /// Used by `dup2`/`dup3` to allocate at a specific fd or higher.
 #[must_use]
 pub fn alloc_fd_from(min_fd: i32, kind: HandleKind, handle: u64) -> Option<i32> {
+    alloc_fd_from_with_flags(min_fd, kind, handle, 0)
+}
+
+/// Allocate the lowest available fd >= `min_fd` with initial status flags.
+#[must_use]
+pub fn alloc_fd_from_with_flags(
+    min_fd: i32,
+    kind: HandleKind,
+    handle: u64,
+    status_flags: i32,
+) -> Option<i32> {
     if min_fd < 0 {
         return None;
     }
@@ -137,7 +173,7 @@ pub fn alloc_fd_from(min_fd: i32, kind: HandleKind, handle: u64) -> Option<i32> 
             if let Some(slot) = table.get_mut(i)
                 && slot.is_none()
             {
-                *slot = Some(FdEntry { kind, handle, flags: 0 });
+                *slot = Some(FdEntry { kind, handle, flags: 0, status_flags });
                 return Some(i as i32);
             }
             i = i.wrapping_add(1);
@@ -155,6 +191,17 @@ pub fn alloc_fd_from(min_fd: i32, kind: HandleKind, handle: u64) -> Option<i32> 
 /// Returns `None` if the slot was empty (or fd out of range).
 #[must_use]
 pub fn install_fd(fd: i32, kind: HandleKind, handle: u64) -> Option<FdEntry> {
+    install_fd_with_flags(fd, kind, handle, 0)
+}
+
+/// Install an entry at a specific fd with initial file status flags.
+#[must_use]
+pub fn install_fd_with_flags(
+    fd: i32,
+    kind: HandleKind,
+    handle: u64,
+    status_flags: i32,
+) -> Option<FdEntry> {
     if fd < 0 || fd as usize >= MAX_FDS {
         return None;
     }
@@ -164,7 +211,7 @@ pub fn install_fd(fd: i32, kind: HandleKind, handle: u64) -> Option<FdEntry> {
         let table = &mut *table_ptr();
         let slot = table.get_mut(idx)?;
         let old = slot.take();
-        *slot = Some(FdEntry { kind, handle, flags: 0 });
+        *slot = Some(FdEntry { kind, handle, flags: 0, status_flags });
         old
     }
 }
@@ -219,6 +266,46 @@ pub fn set_fd_flags(fd: i32, flags: u32) -> bool {
         let table = &mut *table_ptr();
         if let Some(Some(entry)) = table.get_mut(fd as usize) {
             entry.flags = flags;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Get the file status flags for an fd (`O_ACCMODE | O_APPEND | O_NONBLOCK | ...`).
+///
+/// Returns the full flags word — includes both the access mode bits
+/// (read-only) and the mutable status flags.
+#[must_use]
+pub fn get_status_flags(fd: i32) -> Option<i32> {
+    get_fd(fd).map(|e| e.status_flags)
+}
+
+/// Mask of bits that `F_SETFL` is allowed to change.
+/// `O_APPEND` (0o2000) | `O_NONBLOCK` (0o4000) | `O_SYNC` (0o4_010_000).
+const SETFL_MASK: i32 = 0o2000 | 0o4000 | 0o4_010_000;
+
+/// Set the file status flags for an fd.
+///
+/// Per POSIX, only the status flag bits may be changed (`O_APPEND`,
+/// `O_NONBLOCK`, `O_SYNC`); the access mode bits (`O_ACCMODE`) are
+/// immutable after `open()`.  This function enforces that: the access
+/// mode bits from the original `open()` are preserved, and only the
+/// changeable bits are updated.
+///
+/// Returns `true` on success, `false` if the fd is not open.
+#[must_use]
+pub fn set_status_flags(fd: i32, new_flags: i32) -> bool {
+    if fd < 0 || fd as usize >= MAX_FDS {
+        return false;
+    }
+    // SAFETY: Single-threaded access.
+    unsafe {
+        let table = &mut *table_ptr();
+        if let Some(Some(entry)) = table.get_mut(fd as usize) {
+            // Preserve access mode, replace changeable bits.
+            entry.status_flags = (entry.status_flags & !SETFL_MASK) | (new_flags & SETFL_MASK);
             true
         } else {
             false

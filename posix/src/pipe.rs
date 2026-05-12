@@ -65,7 +65,15 @@ pub extern "C" fn pipe2(pipefd: *mut Fd, flags: i32) -> i32 {
     }
 
     // Register both handles in the fd table.
-    let Some(read_fd) = fdtable::alloc_fd(HandleKind::Pipe, read_handle) else {
+    // Pipe read end is O_RDONLY, write end is O_WRONLY, plus any
+    // O_NONBLOCK from the flags argument.
+    let nonblock_bit = flags & crate::fcntl::O_NONBLOCK;
+    let read_status = crate::fcntl::O_RDONLY | nonblock_bit;
+    let write_status = crate::fcntl::O_WRONLY | nonblock_bit;
+
+    let Some(read_fd) = fdtable::alloc_fd_with_flags(
+        HandleKind::Pipe, read_handle, read_status,
+    ) else {
         // Table full — close the kernel handles.
         let _ = syscall1(SYS_PIPE_CLOSE, read_handle);
         let _ = syscall1(SYS_PIPE_CLOSE, write_handle);
@@ -73,7 +81,9 @@ pub extern "C" fn pipe2(pipefd: *mut Fd, flags: i32) -> i32 {
         return -1;
     };
 
-    let Some(write_fd) = fdtable::alloc_fd(HandleKind::Pipe, write_handle) else {
+    let Some(write_fd) = fdtable::alloc_fd_with_flags(
+        HandleKind::Pipe, write_handle, write_status,
+    ) else {
         // Table full — close both.
         let _ = fdtable::close_fd(read_fd);
         let _ = syscall1(SYS_PIPE_CLOSE, read_handle);

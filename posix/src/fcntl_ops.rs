@@ -3,8 +3,11 @@
 //! Implements the `fcntl` function for file descriptor manipulation.
 //!
 //! Supported commands:
-//! - `F_GETFD`/`F_SETFD` — fd-level flags (e.g., `FD_CLOEXEC`)
-//! - `F_GETFL`/`F_SETFL` — file status flags (O_NONBLOCK, O_APPEND)
+//! - `F_GETFD`/`F_SETFD` — per-fd flags (e.g., `FD_CLOEXEC`)
+//! - `F_GETFL`/`F_SETFL` — file status flags (`O_NONBLOCK`, `O_APPEND`,
+//!   `O_SYNC`).  `F_GETFL` returns access mode + status flags.
+//!   `F_SETFL` can only change `O_APPEND`, `O_NONBLOCK`, `O_SYNC`;
+//!   access mode bits (`O_RDONLY`/`O_WRONLY`/`O_RDWR`) are immutable.
 //! - `F_DUPFD`/`F_DUPFD_CLOEXEC` — duplicate fd to lowest >= arg
 //! - `F_GETLK`/`F_SETLK`/`F_SETLKW` — advisory record locking
 //!   (stub: no kernel-level locking, always succeeds)
@@ -109,15 +112,24 @@ pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
             }
         }
         F_GETFL => {
-            // TODO: Track per-fd file status flags (O_NONBLOCK, O_APPEND).
-            // For now, return 0 (read-only, no special flags).
-            0
+            // Return access mode + file status flags.
+            if let Some(sf) = fdtable::get_status_flags(fd) {
+                sf
+            } else {
+                errno::set_errno(errno::EBADF);
+                -1
+            }
         }
         F_SETFL => {
-            // TODO: Implement file status flag changes.
-            // For now, silently accept (many programs set O_NONBLOCK).
-            let _ = arg;
-            0
+            // Change mutable file status flags (O_APPEND, O_NONBLOCK, O_SYNC).
+            // Access mode bits (O_ACCMODE) are preserved by set_status_flags().
+            #[allow(clippy::cast_possible_truncation)]
+            if fdtable::set_status_flags(fd, arg as i32) {
+                0
+            } else {
+                errno::set_errno(errno::EBADF);
+                -1
+            }
         }
         F_DUPFD => {
             // Duplicate fd to lowest available >= arg.
@@ -190,7 +202,10 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         | fdtable::HandleKind::UdpSocket => entry.handle,
     };
 
-    if let Some(new_fd) = fdtable::alloc_fd_from(min_fd, entry.kind, new_handle) {
+    // F_DUPFD inherits the source's file status flags (O_APPEND, etc.).
+    if let Some(new_fd) = fdtable::alloc_fd_from_with_flags(
+        min_fd, entry.kind, new_handle, entry.status_flags,
+    ) {
         if cloexec {
             let _ = fdtable::set_fd_flags(new_fd, fdtable::FD_CLOEXEC);
         }

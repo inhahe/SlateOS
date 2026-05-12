@@ -995,7 +995,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] posix_spawn/posix_spawnp via SYS_FS_READ_FILE + SYS_PROCESS_SPAWN (spawnp: PATH search with env fallback to /bin:/usr/bin)
   - [x] execve/execvp via SYS_FS_READ_FILE + SYS_PROCESS_EXEC (execvp: PATH search like posix_spawnp)
   - [x] realpath: resolve_path + stat verification (no symlink following)
-  - [x] fcntl: F_GETFD/F_SETFD/F_GETFL/F_SETFL/F_DUPFD/F_DUPFD_CLOEXEC
+  - [x] fcntl: F_GETFD/F_SETFD/F_GETFL/F_SETFL/F_DUPFD/F_DUPFD_CLOEXEC; per-fd status flags tracked (O_RDONLY/O_WRONLY/O_RDWR, O_APPEND, O_NONBLOCK, O_SYNC) — F_GETFL returns stored flags, F_SETFL changes only mutable bits
   - [x] read/write/close dispatch by handle type (File→SYS_FS_*, Pipe→SYS_PIPE_*, Console→SYS_CONSOLE_*)
   - [x] Strings extended: strcat, strncat, strstr, strspn, strcspn, strpbrk, strtok, strdup (via mmap), strerror
   - [x] stdlib: atoi, atol, strtol, strtoul (base auto-detect), abs, labs, qsort, bsearch, rand/srand

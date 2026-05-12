@@ -59,9 +59,23 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
     }
 
     // Register the kernel file handle in the fd table.
+    // Store the original POSIX flags (access mode + status flags) so
+    // fcntl(F_GETFL) can return them.  Strip creation-only flags
+    // (O_CREAT, O_EXCL, O_TRUNC, O_NOCTTY, O_DIRECTORY) that don't
+    // survive past open().
+    let stored_flags = flags & (fcntl::O_ACCMODE | fcntl::O_APPEND
+        | fcntl::O_NONBLOCK | fcntl::O_SYNC | fcntl::O_NOFOLLOW);
     let kernel_handle = ret as u64;
-    if let Some(fd) = fdtable::alloc_fd(HandleKind::File, kernel_handle) {
-        fd
+    if let Some(fd_num) = fdtable::alloc_fd_with_flags(
+        HandleKind::File,
+        kernel_handle,
+        stored_flags,
+    ) {
+        // Set FD_CLOEXEC if O_CLOEXEC was requested.
+        if flags & fcntl::O_CLOEXEC != 0 {
+            let _ = fdtable::set_fd_flags(fd_num, fdtable::FD_CLOEXEC);
+        }
+        fd_num
     } else {
         // Fd table full — close the kernel handle.
         let _ = syscall1(SYS_FS_CLOSE, kernel_handle);
@@ -429,6 +443,10 @@ pub extern "C" fn writev(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
 pub extern "C" fn dup(oldfd: Fd) -> Fd {
     let Some(entry) = lookup_fd(oldfd) else { return -1; };
 
+    // dup'd fds inherit the source fd's status flags (O_APPEND, etc.)
+    // but NOT the fd-level flags (FD_CLOEXEC is cleared on the new fd).
+    let src_status = entry.status_flags;
+
     match entry.kind {
         HandleKind::File => {
             // Kernel-level dup creates a new independent handle.
@@ -436,7 +454,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
             if ret < 0 {
                 return errno::translate(ret) as Fd;
             }
-            if let Some(fd) = fdtable::alloc_fd(HandleKind::File, ret as u64) {
+            if let Some(fd) = fdtable::alloc_fd_with_flags(
+                HandleKind::File, ret as u64, src_status,
+            ) {
                 fd
             } else {
                 let _ = syscall1(SYS_FS_CLOSE, ret as u64);
@@ -446,7 +466,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
         }
         HandleKind::Console => {
             // Console handles are shared — just allocate a new fd entry.
-            if let Some(fd) = fdtable::alloc_fd(HandleKind::Console, entry.handle) {
+            if let Some(fd) = fdtable::alloc_fd_with_flags(
+                HandleKind::Console, entry.handle, src_status,
+            ) {
                 fd
             } else {
                 errno::set_errno(errno::EMFILE);
@@ -457,7 +479,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
             // No kernel-level dup for pipes.  Share the handle;
             // close() uses is_handle_referenced() to only close the
             // kernel handle when the last fd referencing it is closed.
-            if let Some(fd) = fdtable::alloc_fd(HandleKind::Pipe, entry.handle) {
+            if let Some(fd) = fdtable::alloc_fd_with_flags(
+                HandleKind::Pipe, entry.handle, src_status,
+            ) {
                 fd
             } else {
                 errno::set_errno(errno::EMFILE);
@@ -466,7 +490,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
         }
         HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
             // Share the handle (same refcounting as pipes).
-            if let Some(new_fd) = fdtable::alloc_fd(entry.kind, entry.handle) {
+            if let Some(new_fd) = fdtable::alloc_fd_with_flags(
+                entry.kind, entry.handle, src_status,
+            ) {
                 // Copy socket metadata so getpeername/getsockname
                 // works on the dup'd fd too.
                 crate::socket::copy_meta(oldfd, new_fd);
@@ -520,7 +546,10 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
     };
 
     // Install at newfd, closing whatever was there.
-    if let Some(old) = fdtable::install_fd(newfd, entry.kind, new_handle) {
+    // dup2 inherits the source's status flags (O_APPEND, O_NONBLOCK, etc.).
+    if let Some(old) = fdtable::install_fd_with_flags(
+        newfd, entry.kind, new_handle, entry.status_flags,
+    ) {
         // Clear socket metadata for the evicted fd.
         match old.kind {
             HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
@@ -552,19 +581,21 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
 /// Duplicate a file descriptor, with flags.
 ///
 /// Like `dup2`, but the `flags` parameter can include `O_CLOEXEC`.
-/// We accept the flag but don't enforce it (no exec-close semantics
-/// yet).
 ///
 /// Returns `newfd` on success, -1 on error.
 #[unsafe(no_mangle)]
-pub extern "C" fn dup3(oldfd: Fd, newfd: Fd, _flags: i32) -> Fd {
+pub extern "C" fn dup3(oldfd: Fd, newfd: Fd, flags: i32) -> Fd {
     if oldfd == newfd {
         // POSIX / Linux: dup3 returns EINVAL when oldfd == newfd
         // (unlike dup2 which succeeds).
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    dup2(oldfd, newfd)
+    let result = dup2(oldfd, newfd);
+    if result >= 0 && flags & fcntl::O_CLOEXEC != 0 {
+        let _ = fdtable::set_fd_flags(result, fdtable::FD_CLOEXEC);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------

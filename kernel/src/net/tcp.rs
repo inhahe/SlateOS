@@ -1227,7 +1227,11 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
     let (local_port, remote_ip, remote_port, seq, ack, eff_wnd, our_wnd, nagle, has_unacked) = {
         let conns = CONNECTIONS.lock();
         let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
-        if !conn.active || conn.state != TcpState::Established {
+        // Allow sending in Established (normal) or CloseWait (remote
+        // sent FIN but we haven't — we can still transmit data).
+        if !conn.active
+            || (conn.state != TcpState::Established && conn.state != TcpState::CloseWait)
+        {
             return Err(KernelError::InvalidArgument);
         }
         let unacked = conn.snd_nxt != conn.snd_una;

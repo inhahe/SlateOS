@@ -953,12 +953,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Ethernet frame parsing/building
   - [x] ARP request/reply with cache
   - [x] IPv4 packet parsing/building with checksum
-  - [x] UDP datagram send/receive with socket layer
+  - [x] UDP datagram send/receive with socket layer (32 sockets, 64 queued datagrams)
   - [x] DHCP client (auto-configure IP/mask/gateway/DNS at boot)
-  - [x] TCP client (3-way handshake, data transfer, FIN teardown)
-  - [x] TCP server (bind/listen/accept, passive open 3-way handshake, backlog queue)
+  - [x] TCP client (3-way handshake, data transfer, FIN teardown; 32 max connections)
+  - [x] TCP server (bind/listen/accept, passive open 3-way handshake; 8 listeners, 16 backlog)
   - [x] DNS resolver (A record queries via UDP)
   - [x] DNS resolution cache (32-entry fixed-size, TTL-based expiration, case-insensitive matching, flush on DHCP renewal)
+  - [x] DNS CNAME chasing (follow CNAME chains within responses + follow-up queries, up to 8 hops, cache under original name)
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)

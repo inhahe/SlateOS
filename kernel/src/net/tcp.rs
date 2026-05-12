@@ -42,6 +42,13 @@
 //!   blocks and reports them in ACKs.  Sender uses SACK blocks to avoid
 //!   retransmitting data the receiver already has.
 //!
+//! ## ICMP error handling
+//!
+//! ICMP Destination Unreachable and Time Exceeded errors are dispatched
+//! to `icmp_error()` by the ICMP handler.  Per RFC 5461, only `SynSent`
+//! and `SynReceived` connections are aborted (hard errors); established
+//! connections treat ICMP errors as soft errors (logged but not aborted).
+//!
 //! ## Limitations
 //!
 //! - No fast retransmit / fast recovery (triple duplicate ACK).
@@ -2231,6 +2238,99 @@ pub fn tick_time_wait_cleanup() {
             }
             _ => {}
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ICMP error handling
+// ---------------------------------------------------------------------------
+
+/// Notify the TCP stack about an ICMP error for a connection.
+///
+/// Called by the ICMP handler when it receives a Destination Unreachable
+/// or similar error.  The original IP header + first 8 bytes of the TCP
+/// segment are in `orig_hdr`, which gives us the ports to identify the
+/// connection.
+///
+/// `icmp_type` and `icmp_code` identify the ICMP error (e.g., type 3
+/// code 1 = host unreachable).
+///
+/// Per RFC 5461, a "soft error" (e.g., host unreachable) on an established
+/// connection should NOT abort it — only SYN_SENT connections are aborted
+/// immediately by ICMP errors.  This prevents transient routing issues
+/// from tearing down long-lived connections.
+pub fn icmp_error(
+    orig_src_ip: Ipv4Addr,
+    orig_dst_ip: Ipv4Addr,
+    orig_tcp_hdr: &[u8],
+    icmp_type: u8,
+    icmp_code: u8,
+) {
+    // Need at least 4 bytes for src_port + dst_port.
+    if orig_tcp_hdr.len() < 4 {
+        return;
+    }
+
+    let src_port = u16::from_be_bytes([orig_tcp_hdr[0], orig_tcp_hdr[1]]);
+    let dst_port = u16::from_be_bytes([orig_tcp_hdr[2], orig_tcp_hdr[3]]);
+
+    let mut conns = CONNECTIONS.lock();
+
+    for conn in conns.iter_mut() {
+        if !conn.active {
+            continue;
+        }
+
+        // Match: the *original* packet was from us (local_port = src_port)
+        // to the remote (remote_ip = dst_ip, remote_port = dst_port).
+        if conn.local_port != src_port
+            || conn.remote_port != dst_port
+            || conn.remote_ip != orig_dst_ip
+        {
+            continue;
+        }
+
+        match conn.state {
+            TcpState::SynSent => {
+                // Hard error: abort the connection attempt immediately.
+                // The 3-way handshake cannot complete if the destination
+                // is unreachable.
+                crate::serial_println!(
+                    "[tcp] ICMP error (type={} code={}) for SYN_SENT {}:{} → {}:{} — aborting",
+                    icmp_type, icmp_code,
+                    orig_src_ip, src_port,
+                    orig_dst_ip, dst_port
+                );
+                conn.active = false;
+                conn.state = TcpState::Closed;
+                conn.rx_buffer.clear();
+            }
+            TcpState::SynReceived => {
+                // Also abort half-open connections from the server side.
+                crate::serial_println!(
+                    "[tcp] ICMP error (type={} code={}) for SYN_RECEIVED {}:{} → {}:{} — aborting",
+                    icmp_type, icmp_code,
+                    orig_src_ip, src_port,
+                    orig_dst_ip, dst_port
+                );
+                conn.active = false;
+                conn.state = TcpState::Closed;
+                conn.rx_buffer.clear();
+            }
+            _ => {
+                // RFC 5461: soft error on established connections.
+                // Log but do not abort — the route may recover.
+                crate::serial_println!(
+                    "[tcp] ICMP soft error (type={} code={}) for {:?} {}:{} → {}:{} — ignored",
+                    icmp_type, icmp_code,
+                    conn.state,
+                    orig_src_ip, src_port,
+                    orig_dst_ip, dst_port
+                );
+            }
+        }
+
+        return; // Only one connection per (src_port, dst_ip, dst_port).
     }
 }
 

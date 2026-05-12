@@ -35,7 +35,7 @@ use spin::Mutex;
 use crate::error::KernelResult;
 
 use super::interface::Ipv4Addr;
-use super::ipv4::{self, Ipv4Packet, PROTO_ICMP};
+use super::ipv4::{self, Ipv4Packet, PROTO_ICMP, PROTO_TCP};
 
 // ---------------------------------------------------------------------------
 // ICMP types
@@ -191,6 +191,57 @@ fn verify_checksum(data: &[u8]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// ICMP error → transport notification
+// ---------------------------------------------------------------------------
+
+/// Parse the embedded IP+transport header from an ICMP error payload
+/// and notify the appropriate transport layer (TCP or UDP).
+///
+/// RFC 792 requires the ICMP error payload to contain the original IP
+/// header plus the first 8 bytes of the original datagram (enough for
+/// TCP/UDP port numbers).  We parse just enough to identify the original
+/// 4-tuple and protocol, then dispatch.
+#[allow(clippy::arithmetic_side_effects)]
+fn notify_transport_error(icmp_data: &[u8], icmp_type: u8, icmp_code: u8) {
+    // ICMP header is 8 bytes; original IP header starts at offset 8.
+    if icmp_data.len() < ICMP_HEADER_SIZE + 20 {
+        return; // Not enough data for the embedded IP header.
+    }
+
+    let orig_ip = &icmp_data[ICMP_HEADER_SIZE..];
+
+    // Validate it's IPv4 (version 4, IHL ≥ 5).
+    let version = orig_ip[0] >> 4;
+    let ihl = (orig_ip[0] & 0x0F) as usize;
+    if version != 4 || ihl < 5 {
+        return;
+    }
+
+    let ip_hdr_len = ihl * 4;
+
+    // We need at least the IP header + 8 bytes of transport header.
+    if orig_ip.len() < ip_hdr_len + 8 {
+        return;
+    }
+
+    let protocol = orig_ip[9];
+    let src_ip = Ipv4Addr::new(orig_ip[12], orig_ip[13], orig_ip[14], orig_ip[15]);
+    let dst_ip = Ipv4Addr::new(orig_ip[16], orig_ip[17], orig_ip[18], orig_ip[19]);
+
+    let transport_hdr = &orig_ip[ip_hdr_len..];
+
+    match protocol {
+        PROTO_TCP => {
+            super::tcp::icmp_error(src_ip, dst_ip, transport_hdr, icmp_type, icmp_code);
+        }
+        _ => {
+            // UDP and other protocols: just log for now.
+            // UDP is connectionless, so there's no connection state to abort.
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ICMP error message helpers
 // ---------------------------------------------------------------------------
 
@@ -256,16 +307,16 @@ pub fn process_icmp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
             }
         }
         ICMP_DEST_UNREACHABLE => {
-            // Log the unreachable notification.  The ICMP payload contains
-            // the original IP header + 8 bytes of the triggering packet,
-            // which could be used to cancel pending TCP connections or
-            // notify UDP sockets.  For now, just log.
             crate::serial_println!(
                 "[icmp] Destination unreachable from {}: {} (code {})",
                 ip_packet.src,
                 dest_unreachable_reason(code),
                 code
             );
+            // Notify the transport layer that originated the packet.
+            // ICMP error payload = original IP header + first 8 bytes
+            // of the triggering packet (enough for TCP/UDP port info).
+            notify_transport_error(data, icmp_type, code);
         }
         ICMP_TIME_EXCEEDED => {
             crate::serial_println!(
@@ -274,6 +325,9 @@ pub fn process_icmp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 time_exceeded_reason(code),
                 code
             );
+            // Also notify transport for TTL exceeded — a SYN_SENT
+            // connection to an unreachable-by-TTL host should abort.
+            notify_transport_error(data, icmp_type, code);
         }
         _ => {
             // Other ICMP types — silently ignore.

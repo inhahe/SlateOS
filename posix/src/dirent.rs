@@ -1,8 +1,8 @@
 //! POSIX directory entry functions.
 //!
 //! Implements `opendir`, `readdir`, `closedir`, `rewinddir`,
-//! `seekdir`, `telldir`, `dirfd`, and `alphasort` for directory
-//! iteration.
+//! `seekdir`, `telldir`, `dirfd`, `alphasort`, and `scandir` for
+//! directory iteration.
 //!
 //! Our kernel provides `SYS_FS_LIST_DIR` which returns the full directory
 //! listing at once (not incremental).  We buffer the results and return
@@ -253,6 +253,163 @@ pub extern "C" fn alphasort(a: *const *const Dirent, b: *const *const Dirent) ->
         }
         i = i.wrapping_add(1);
     }
+}
+
+/// Scan a directory and return a sorted array of matching entries.
+///
+/// If `filter` is non-null, only entries for which `filter(entry)` returns
+/// non-zero are included.  The resulting array is sorted using `compar`
+/// (if non-null).
+///
+/// On success, `*namelist` is set to a `malloc`'d array of `malloc`'d
+/// `Dirent` pointers, and the function returns the number of entries.
+/// The caller must `free()` each entry and the array itself.
+///
+/// On failure, returns -1 with errno set.
+///
+/// # Safety
+///
+/// `dirname` must be a valid null-terminated path.
+/// `namelist` must point to a valid `*mut *mut Dirent` location.
+#[unsafe(no_mangle)]
+pub extern "C" fn scandir(
+    dirname: *const u8,
+    namelist: *mut *mut *mut Dirent,
+    filter: Option<extern "C" fn(*const Dirent) -> i32>,
+    compar: Option<extern "C" fn(*const *const Dirent, *const *const Dirent) -> i32>,
+) -> i32 {
+    if dirname.is_null() || namelist.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Open the directory.
+    let dirp = opendir(dirname);
+    if dirp.is_null() {
+        return -1; // errno already set by opendir.
+    }
+
+    // First pass: count matching entries.
+    let dir = unsafe { &mut *dirp };
+    let total = dir.count;
+    let mut count: usize = 0;
+
+    // We'll do two passes: first count, then collect.  This avoids
+    // over-allocating when a filter rejects many entries.
+    dir.pos = 0;
+    for _ in 0..total {
+        let entry = readdir(dirp);
+        if entry.is_null() {
+            break;
+        }
+        let include = match filter {
+            Some(f) => f(entry) != 0,
+            None => true,
+        };
+        if include {
+            count = count.wrapping_add(1);
+        }
+    }
+
+    if count == 0 {
+        closedir(dirp);
+        // Allocate an empty array (POSIX allows returning 0 with a valid
+        // but empty namelist).
+        let arr = crate::malloc::malloc(core::mem::size_of::<*mut Dirent>());
+        if arr.is_null() {
+            errno::set_errno(errno::ENOMEM);
+            return -1;
+        }
+        unsafe { *namelist = arr.cast::<*mut Dirent>(); }
+        return 0;
+    }
+
+    // Allocate the array of pointers.
+    let arr_size = count.wrapping_mul(core::mem::size_of::<*mut Dirent>());
+    let arr = crate::malloc::malloc(arr_size);
+    if arr.is_null() {
+        closedir(dirp);
+        errno::set_errno(errno::ENOMEM);
+        return -1;
+    }
+    let arr_typed = arr.cast::<*mut Dirent>();
+
+    // Second pass: collect entries.
+    dir.pos = 0;
+    let mut idx: usize = 0;
+    for _ in 0..total {
+        let entry = readdir(dirp);
+        if entry.is_null() {
+            break;
+        }
+        let include = match filter {
+            Some(f) => f(entry) != 0,
+            None => true,
+        };
+        if include && idx < count {
+            // Allocate a copy of the Dirent.
+            let dup = crate::malloc::malloc(core::mem::size_of::<Dirent>());
+            if dup.is_null() {
+                // Free everything allocated so far.
+                let mut j: usize = 0;
+                while j < idx {
+                    // SAFETY: we wrote valid pointers at indices < idx.
+                    unsafe { crate::malloc::free((*arr_typed.add(j)).cast::<u8>()); }
+                    j = j.wrapping_add(1);
+                }
+                crate::malloc::free(arr);
+                closedir(dirp);
+                errno::set_errno(errno::ENOMEM);
+                return -1;
+            }
+            // SAFETY: entry points to dir.current which is valid; dup has
+            // enough space for a Dirent.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    entry.cast::<u8>(),
+                    dup,
+                    core::mem::size_of::<Dirent>(),
+                );
+                *arr_typed.add(idx) = dup.cast::<Dirent>();
+            }
+            idx = idx.wrapping_add(1);
+        }
+    }
+
+    closedir(dirp);
+
+    let final_count = idx;
+
+    // Sort if comparator provided.
+    if let Some(cmp) = compar {
+        // Simple insertion sort — directories are typically small.
+        let mut i: usize = 1;
+        while i < final_count {
+            let mut j = i;
+            while j > 0 {
+                // SAFETY: j and j-1 are valid indices.
+                let a = unsafe { arr_typed.add(j.wrapping_sub(1)) };
+                let b = unsafe { arr_typed.add(j) };
+                let a_ref = a.cast::<*const Dirent>();
+                let b_ref = b.cast::<*const Dirent>();
+                if cmp(a_ref, b_ref) > 0 {
+                    // Swap.
+                    unsafe {
+                        let tmp = *a.cast::<*mut Dirent>();
+                        *a.cast::<*mut Dirent>() = *b.cast::<*mut Dirent>();
+                        *b.cast::<*mut Dirent>() = tmp;
+                    }
+                    j = j.wrapping_sub(1);
+                } else {
+                    break;
+                }
+            }
+            i = i.wrapping_add(1);
+        }
+    }
+
+    unsafe { *namelist = arr_typed; }
+    final_count as i32
 }
 
 // ---------------------------------------------------------------------------

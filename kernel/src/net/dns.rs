@@ -35,6 +35,13 @@
 //! record for the final name, a second query is sent for the CNAME
 //! target (up to 8 CNAME hops to prevent loops).
 //!
+//! ## Retry
+//!
+//! On timeout, the resolver retransmits the query with increasing wait
+//! windows (1s → 2s → 4s, up to 3 attempts).  Definitive answers
+//! (NXDOMAIN, parse errors) are not retried — only network-level
+//! timeouts trigger retransmission.
+//!
 //! ## Limitations
 //!
 //! - Only supports A records (IPv4 addresses).
@@ -674,8 +681,20 @@ pub fn resolve(name: &str) -> KernelResult<Ipv4Addr> {
     Err(KernelError::InvalidArgument)
 }
 
-/// Resolve a single name (one DNS query round-trip).
+/// Maximum number of query attempts before giving up.
 ///
+/// Each attempt uses an increasing timeout: 1s, 2s, 4s.  Total worst-case
+/// wait is ~7 seconds, which matches typical resolver behavior.
+const MAX_DNS_ATTEMPTS: usize = 3;
+
+/// Poll iterations per attempt.  Each iteration is ~1ms of spin delay,
+/// so these correspond to roughly 1s, 2s, 4s timeouts.
+const DNS_ATTEMPT_POLLS: [usize; MAX_DNS_ATTEMPTS] = [1000, 2000, 4000];
+
+/// Resolve a single name (with retry on timeout).
+///
+/// Sends a DNS A record query and waits for a response.  On timeout,
+/// retransmits the query with an increasing wait window (1s → 2s → 4s).
 /// Returns `Ok(ip)` on success, `Err(NotFound)` if no A record was
 /// found (check `LAST_CNAME` for CNAME follow-up), or another error.
 #[allow(clippy::arithmetic_side_effects)]
@@ -711,75 +730,85 @@ fn resolve_single(name: &str) -> KernelResult<Ipv4Addr> {
     let query_id = next_query_id();
     let local_port = next_dns_port();
 
-    // Build and send the query.
+    // Build the query once — retransmits send the same bytes.
     let query = build_query(name, query_id);
 
     // Bind a UDP socket to receive the reply.
     let sock = super::udp::bind(local_port)?;
 
-    // Send the query.
-    if let Err(e) = super::udp::send(local_port, dns_server, DNS_PORT, &query) {
-        super::udp::close(sock);
-        return Err(e);
-    }
-
-    // Poll for response (up to ~2 seconds).
-    for _ in 0..2000 {
-        // Poll the NIC.
-        super::poll();
-
-        // Check for a response.
-        if let Some(dgram) = super::udp::recv(sock) {
-            // Validate source: must be from our DNS server on port 53.
-            // This prevents off-path attackers from injecting spoofed
-            // responses from arbitrary IPs.
-            if dgram.src_ip != dns_server || dgram.src_port != DNS_PORT {
-                // Wrong source — ignore and keep polling.
-                continue;
-            }
+    // Retry loop with increasing timeouts.
+    for attempt in 0..MAX_DNS_ATTEMPTS {
+        // Send (or re-send) the query.
+        if let Err(e) = super::udp::send(local_port, dns_server, DNS_PORT, &query) {
             super::udp::close(sock);
-            match parse_response(&dgram.data, query_id) {
-                Ok(result) => {
-                    crate::serial_println!(
-                        "[dns] Resolved '{}' → {} (TTL {}s)",
-                        name, result.ip, result.ttl_secs
-                    );
-                    // Cache the result.
-                    let cache_now = crate::hrtimer::now_ns();
-                    DNS_CACHE.lock().insert(name, result.ip, result.ttl_secs, cache_now);
-                    return Ok(result.ip);
+            return Err(e);
+        }
+
+        if attempt > 0 {
+            crate::serial_println!(
+                "[dns] Retry {} for '{}' (timeout {}ms)",
+                attempt, name,
+                DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000)
+            );
+        }
+
+        let polls = DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000);
+
+        // Poll for response.
+        for _ in 0..polls {
+            super::poll();
+
+            if let Some(dgram) = super::udp::recv(sock) {
+                // Validate source: must be from our DNS server on port 53.
+                if dgram.src_ip != dns_server || dgram.src_port != DNS_PORT {
+                    continue;
                 }
-                Err(KernelError::NotFound) => {
-                    // CNAME-only response — return NotFound so the
-                    // caller can check LAST_CNAME for follow-up.
-                    // Also insert a negative cache entry to avoid
-                    // repeated queries if no CNAME was stored.
-                    if LAST_CNAME.lock().is_none() {
-                        let cache_now = crate::hrtimer::now_ns();
-                        DNS_CACHE.lock().insert(
-                            name,
-                            Ipv4Addr::UNSPECIFIED,
-                            NEGATIVE_CACHE_TTL,
-                            cache_now,
+                super::udp::close(sock);
+                match parse_response(&dgram.data, query_id) {
+                    Ok(result) => {
+                        crate::serial_println!(
+                            "[dns] Resolved '{}' → {} (TTL {}s)",
+                            name, result.ip, result.ttl_secs
                         );
+                        let cache_now = crate::hrtimer::now_ns();
+                        DNS_CACHE.lock().insert(name, result.ip, result.ttl_secs, cache_now);
+                        return Ok(result.ip);
                     }
-                    return Err(KernelError::NotFound);
+                    Err(KernelError::NotFound) => {
+                        // CNAME-only or NXDOMAIN — don't retry, it's a
+                        // definitive answer from the server.
+                        if LAST_CNAME.lock().is_none() {
+                            let cache_now = crate::hrtimer::now_ns();
+                            DNS_CACHE.lock().insert(
+                                name,
+                                Ipv4Addr::UNSPECIFIED,
+                                NEGATIVE_CACHE_TTL,
+                                cache_now,
+                            );
+                        }
+                        return Err(KernelError::NotFound);
+                    }
+                    Err(e) => {
+                        crate::serial_println!("[dns] Parse error: {:?}", e);
+                        return Err(e);
+                    }
                 }
-                Err(e) => {
-                    crate::serial_println!("[dns] Parse error: {:?}", e);
-                    return Err(e);
-                }
+            }
+
+            // Brief spin delay (~1ms per iteration).
+            for _ in 0..10_000 {
+                core::hint::spin_loop();
             }
         }
 
-        // Brief spin delay.
-        for _ in 0..10_000 {
-            core::hint::spin_loop();
-        }
+        // This attempt timed out — retry (unless last attempt).
     }
 
     super::udp::close(sock);
-    crate::serial_println!("[dns] Resolution timed out for '{}'", name);
+    crate::serial_println!(
+        "[dns] Resolution timed out for '{}' after {} attempts",
+        name, MAX_DNS_ATTEMPTS
+    );
     Err(KernelError::TimedOut)
 }
 

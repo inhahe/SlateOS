@@ -298,6 +298,64 @@ pub fn verify_transport_checksum(
     sum == 0xFFFF
 }
 
+/// Compute a TCP/UDP checksum using the IPv4 pseudo-header (RFC 793/768).
+///
+/// The checksum covers:
+/// 1. Pseudo-header: source IP, destination IP, zero byte, protocol, segment length
+/// 2. The full transport segment (header + payload)
+///
+/// The checksum field within the segment MUST be zeroed before calling this.
+/// Returns the 16-bit one's complement checksum (ready to write into the header).
+/// A return value of 0x0000 is replaced with 0xFFFF per RFC 768 (UDP).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn compute_transport_checksum(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    protocol: u8,
+    segment: &[u8],
+) -> u16 {
+    let seg_len = segment.len() as u16;
+    let mut sum: u32 = 0;
+
+    // Pseudo-header: src IP.
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src.0[0], src.0[1]])));
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src.0[2], src.0[3]])));
+    // Pseudo-header: dst IP.
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst.0[0], dst.0[1]])));
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst.0[2], dst.0[3]])));
+    // Pseudo-header: zero + protocol.
+    sum = sum.wrapping_add(u32::from(protocol));
+    // Pseudo-header: segment length.
+    sum = sum.wrapping_add(u32::from(seg_len));
+
+    // Sum the segment (16-bit words).
+    let mut i = 0;
+    while i + 1 < segment.len() {
+        let word = u16::from_be_bytes([segment[i], segment[i + 1]]);
+        sum = sum.wrapping_add(u32::from(word));
+        i += 2;
+    }
+    // Handle odd trailing byte.
+    if i < segment.len() {
+        sum = sum.wrapping_add(u32::from(segment[i]) << 8);
+    }
+
+    // Fold 32-bit sum into 16 bits.
+    while sum > 0xFFFF {
+        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
+    }
+
+    let cksum = !sum as u16;
+
+    // For UDP, a computed checksum of 0x0000 is transmitted as 0xFFFF
+    // (RFC 768: 0x0000 means "no checksum").
+    if protocol == PROTO_UDP && cksum == 0 {
+        0xFFFF
+    } else {
+        cksum
+    }
+}
+
 /// Check if `addr` is the subnet-directed broadcast for the given IP/mask.
 ///
 /// The subnet broadcast address has all host bits set to 1.

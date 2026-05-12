@@ -340,6 +340,12 @@ pub fn recv(handle: usize) -> Option<Datagram> {
 }
 
 /// Send a UDP datagram.
+///
+/// Computes a proper UDP checksum over the pseudo-header + segment
+/// (RFC 768).  While checksum=0 is technically valid for UDP over
+/// IPv4 (meaning "no checksum"), sending real checksums enables
+/// receivers to detect corruption from faulty NICs, bit-flips, or
+/// intermediate routers.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn send(src_port: u16, dst_ip: Ipv4Addr, dst_port: u16, data: &[u8]) -> KernelResult<()> {
     let src_ip = super::interface::ip();
@@ -354,10 +360,17 @@ pub fn send(src_port: u16, dst_ip: Ipv4Addr, dst_port: u16, data: &[u8]) -> Kern
     udp_packet.extend_from_slice(&dst_port.to_be_bytes());
     // Length (header + data).
     udp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
-    // Checksum (0 = disabled — valid for UDP over IPv4).
+    // Checksum placeholder (zeroed for checksum computation).
     udp_packet.extend_from_slice(&0u16.to_be_bytes());
     // Payload.
     udp_packet.extend_from_slice(data);
+
+    // Compute and fill in the UDP checksum.
+    let cksum = ipv4::compute_transport_checksum(
+        src_ip, dst_ip, PROTO_UDP, &udp_packet,
+    );
+    udp_packet[6] = (cksum >> 8) as u8;
+    udp_packet[7] = cksum as u8;
 
     // Send as an IPv4 packet.
     ipv4::send(dst_ip, PROTO_UDP, &udp_packet)

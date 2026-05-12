@@ -163,6 +163,12 @@ struct SocketMeta {
     /// Port bound via `bind()` (deferred until `listen()` for TCP).
     /// Network byte order.  0 if not yet bound.
     bound_port: u16,
+    /// Remote peer IP address (network byte order).  Set on `connect()`.
+    peer_addr: u32,
+    /// Remote peer port (network byte order).  Set on `connect()`.
+    peer_port: u16,
+    /// Local IP address (network byte order).  Set on `bind()`.
+    local_addr: u32,
 }
 
 /// Per-fd socket metadata table.
@@ -634,6 +640,9 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
     set_meta(fd, SocketMeta {
         sock_type,
         bound_port: 0,
+        peer_addr: 0,
+        peer_port: 0,
+        local_addr: 0,
     });
 
     fd
@@ -713,6 +722,15 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
             // Discarding the old entry is safe: handle was 0 (no kernel resource to close).
             let _ = fdtable::install_fd(fd, HandleKind::TcpStream, ret as u64);
 
+            // Store peer address for getpeername().
+            set_meta(fd, SocketMeta {
+                sock_type: SOCK_STREAM,
+                bound_port: meta.bound_port,
+                peer_addr: sin.sin_addr.s_addr,
+                peer_port: sin.sin_port,
+                local_addr: meta.local_addr,
+            });
+
             0
         }
         SOCK_DGRAM => {
@@ -780,8 +798,9 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
     match meta.sock_type {
         SOCK_STREAM => {
             // For TCP, defer the kernel bind until listen().
-            // Just record the port.
+            // Just record the port and local address.
             meta.bound_port = sin.sin_port; // store in network order
+            meta.local_addr = sin.sin_addr.s_addr;
             set_meta(fd, meta);
             0
         }
@@ -797,6 +816,7 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
             // Discarding old entry is safe: handle was 0 (no kernel resource).
             let _ = fdtable::install_fd(fd, HandleKind::UdpSocket, ret as u64);
             meta.bound_port = sin.sin_port;
+            meta.local_addr = sin.sin_addr.s_addr;
             set_meta(fd, meta);
 
             0
@@ -910,9 +930,16 @@ pub unsafe extern "C" fn accept(
     };
 
     // Store metadata for the new connected socket.
+    // Our kernel doesn't return peer info from accept yet, so peer
+    // address fields are zeroed.  When the kernel adds connection
+    // info to the accept response, update these.
+    let listener_meta = get_meta(fd);
     set_meta(new_fd, SocketMeta {
         sock_type: SOCK_STREAM,
-        bound_port: 0,
+        bound_port: listener_meta.map_or(0, |m| m.bound_port),
+        peer_addr: 0,
+        peer_port: 0,
+        local_addr: listener_meta.map_or(0, |m| m.local_addr),
     });
 
     // Fill in the peer address if requested.
@@ -1338,38 +1365,124 @@ pub unsafe extern "C" fn getsockopt(
 // getpeername() / getsockname() stubs
 // ---------------------------------------------------------------------------
 
-/// Get the name of the peer socket.
+/// Get the name of the peer socket (remote address).
 ///
-/// Stub: returns ENOSYS (our kernel doesn't expose peer address).
+/// Returns the remote IP and port that this socket is connected to.
+/// For TCP sockets connected via `connect()`, returns the server's
+/// address.  For accepted sockets, returns zeros (peer info is not
+/// yet returned by the kernel's accept syscall).
+///
+/// # Safety
+///
+/// `addr` must point to writable memory of at least `*addrlen` bytes.
+/// `addrlen` must be a valid pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn getpeername(
+pub unsafe extern "C" fn getpeername(
     fd: i32,
-    _addr: *mut Sockaddr,
-    _addrlen: *mut SocklenT,
+    addr: *mut Sockaddr,
+    addrlen: *mut SocklenT,
 ) -> i32 {
     if fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    errno::set_errno(errno::ENOSYS);
-    -1
+
+    if addr.is_null() || addrlen.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    let Some(meta) = get_meta(fd) else {
+        errno::set_errno(errno::ENOTSOCK);
+        return -1;
+    };
+
+    // If no peer address recorded, the socket is not connected.
+    if meta.peer_addr == 0 && meta.peer_port == 0 {
+        errno::set_errno(errno::ENOTCONN);
+        return -1;
+    }
+
+    // Build a SockaddrIn with the peer address.
+    let sin = SockaddrIn {
+        sin_family: AF_INET as u16,
+        sin_port: meta.peer_port,
+        sin_addr: InAddr { s_addr: meta.peer_addr },
+        sin_zero: [0u8; 8],
+    };
+
+    // SAFETY: caller guarantees addr/addrlen validity.
+    unsafe {
+        let available = *addrlen as usize;
+        let copy_len = available.min(core::mem::size_of::<SockaddrIn>());
+        core::ptr::copy_nonoverlapping(
+            (&raw const sin).cast::<u8>(),
+            addr.cast::<u8>(),
+            copy_len,
+        );
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
+        }
+    }
+
+    0
 }
 
-/// Get the local name of a socket.
+/// Get the local name of a socket (bound address).
 ///
-/// Stub: returns ENOSYS (our kernel doesn't expose local binding info).
+/// Returns the local IP and port this socket is bound to.
+/// For sockets bound via `bind()`, returns the bound address.
+/// For unbound sockets, returns INADDR_ANY (0.0.0.0) with port 0.
+///
+/// # Safety
+///
+/// `addr` must point to writable memory of at least `*addrlen` bytes.
+/// `addrlen` must be a valid pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn getsockname(
+pub unsafe extern "C" fn getsockname(
     fd: i32,
-    _addr: *mut Sockaddr,
-    _addrlen: *mut SocklenT,
+    addr: *mut Sockaddr,
+    addrlen: *mut SocklenT,
 ) -> i32 {
     if fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    errno::set_errno(errno::ENOSYS);
-    -1
+
+    if addr.is_null() || addrlen.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    let Some(meta) = get_meta(fd) else {
+        errno::set_errno(errno::ENOTSOCK);
+        return -1;
+    };
+
+    let sin = SockaddrIn {
+        sin_family: AF_INET as u16,
+        sin_port: meta.bound_port,
+        sin_addr: InAddr { s_addr: meta.local_addr },
+        sin_zero: [0u8; 8],
+    };
+
+    // SAFETY: caller guarantees addr/addrlen validity.
+    unsafe {
+        let available = *addrlen as usize;
+        let copy_len = available.min(core::mem::size_of::<SockaddrIn>());
+        core::ptr::copy_nonoverlapping(
+            (&raw const sin).cast::<u8>(),
+            addr.cast::<u8>(),
+            copy_len,
+        );
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
+        }
+    }
+
+    0
 }
 
 // ---------------------------------------------------------------------------

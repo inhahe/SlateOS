@@ -1992,6 +1992,25 @@ pub const SYS_UDP_RECV: u64 = 812;
 /// Returns: 0 on success.
 pub const SYS_UDP_CLOSE: u64 = 813;
 
+/// Join a multicast group on a UDP socket (RFC 1112).
+///
+/// `arg0`: UDP socket handle.
+/// `arg1`: multicast group address as a u32 in network byte order.
+///
+/// The socket will receive datagrams sent to the multicast group
+/// address on the socket's bound port.
+///
+/// Returns: 0 on success, negative error on failure.
+pub const SYS_UDP_MCAST_JOIN: u64 = 814;
+
+/// Leave a multicast group on a UDP socket.
+///
+/// `arg0`: UDP socket handle.
+/// `arg1`: multicast group address as a u32 in network byte order.
+///
+/// Returns: 0 on success, negative error on failure.
+pub const SYS_UDP_MCAST_LEAVE: u64 = 815;
+
 /// Resolve a hostname to an IPv4 address via DNS.
 ///
 /// `arg0`: pointer to hostname string.

@@ -4,6 +4,15 @@
 //! Used by DHCP, DNS, and other protocols that don't need TCP's
 //! reliability guarantees.
 //!
+//! ## Multicast (RFC 1112)
+//!
+//! UDP sockets can join multicast groups (224.0.0.0/4) via
+//! `join_group()` / `leave_group()`.  Incoming multicast datagrams are
+//! delivered to all sockets bound to the destination port that have
+//! joined the group (fan-out).  A global membership table is maintained
+//! so the IPv4 receive path can quickly accept multicast-addressed
+//! packets without scanning per-socket state.
+//!
 //! ## Header format (8 bytes)
 //!
 //! ```text
@@ -42,6 +51,14 @@ const MAX_SOCKETS: usize = 32;
 /// Maximum queued datagrams per socket.
 const MAX_QUEUED: usize = 64;
 
+/// Maximum number of multicast groups a single socket can join.
+const MAX_GROUPS_PER_SOCKET: usize = 8;
+
+/// Maximum number of total multicast group memberships across all sockets.
+/// Used by the IP layer to quickly check if we should accept a multicast
+/// destination address.
+const MAX_GLOBAL_GROUPS: usize = 32;
+
 // ---------------------------------------------------------------------------
 // UDP socket
 // ---------------------------------------------------------------------------
@@ -65,6 +82,11 @@ struct UdpSocket {
     active: bool,
     /// Received datagrams waiting to be read.
     rx_queue: Vec<Datagram>,
+    /// Multicast groups this socket has joined.
+    /// Each entry is a multicast IPv4 address (224.0.0.0/4).
+    mcast_groups: [Ipv4Addr; MAX_GROUPS_PER_SOCKET],
+    /// Number of active multicast group memberships.
+    mcast_count: u8,
 }
 
 impl UdpSocket {
@@ -73,6 +95,8 @@ impl UdpSocket {
             port: 0,
             active: false,
             rx_queue: Vec::new(),
+            mcast_groups: [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET],
+            mcast_count: 0,
         }
     }
 }
@@ -85,6 +109,79 @@ static SOCKETS: Mutex<[UdpSocket; MAX_SOCKETS]> = Mutex::new(
         [EMPTY; MAX_SOCKETS]
     }
 );
+
+/// Global table of multicast group addresses we have joined.
+///
+/// The IPv4 receive path checks this to decide whether to accept
+/// multicast-destined packets.  Entries are reference-counted:
+/// multiple sockets can join the same group, and the entry is only
+/// removed when the last socket leaves.
+struct McastEntry {
+    /// Multicast group address.
+    addr: Ipv4Addr,
+    /// Number of sockets that have joined this group.
+    refcount: u16,
+}
+
+impl McastEntry {
+    const fn empty() -> Self {
+        Self { addr: Ipv4Addr::UNSPECIFIED, refcount: 0 }
+    }
+}
+
+/// Global multicast group membership table.
+static MCAST_GROUPS: Mutex<[McastEntry; MAX_GLOBAL_GROUPS]> = Mutex::new({
+    const EMPTY: McastEntry = McastEntry::empty();
+    [EMPTY; MAX_GLOBAL_GROUPS]
+});
+
+/// Add a reference to a multicast group in the global table.
+fn mcast_global_join(group: Ipv4Addr) {
+    let mut groups = MCAST_GROUPS.lock();
+
+    // If already present, increment refcount.
+    for entry in groups.iter_mut() {
+        if entry.refcount > 0 && entry.addr == group {
+            entry.refcount = entry.refcount.saturating_add(1);
+            return;
+        }
+    }
+
+    // Not present — find a free slot.
+    for entry in groups.iter_mut() {
+        if entry.refcount == 0 {
+            entry.addr = group;
+            entry.refcount = 1;
+            return;
+        }
+    }
+
+    // Table full — silently ignore (best effort).
+    crate::serial_println!(
+        "[udp] Warning: multicast group table full, cannot join {}",
+        group
+    );
+}
+
+/// Remove a reference from a multicast group in the global table.
+fn mcast_global_leave(group: Ipv4Addr) {
+    let mut groups = MCAST_GROUPS.lock();
+    for entry in groups.iter_mut() {
+        if entry.refcount > 0 && entry.addr == group {
+            entry.refcount = entry.refcount.saturating_sub(1);
+            return;
+        }
+    }
+}
+
+/// Check if any socket has joined the given multicast group.
+///
+/// Called by the IPv4 receive path to decide whether to accept
+/// a packet addressed to a multicast destination.
+pub fn is_multicast_member(group: Ipv4Addr) -> bool {
+    let groups = MCAST_GROUPS.lock();
+    groups.iter().any(|e| e.refcount > 0 && e.addr == group)
+}
 
 // ---------------------------------------------------------------------------
 // Socket API
@@ -118,13 +215,115 @@ pub fn bind(port: u16) -> KernelResult<usize> {
 }
 
 /// Close a UDP socket.
+///
+/// Also leaves all multicast groups the socket had joined.
 pub fn close(handle: usize) {
     let mut sockets = SOCKETS.lock();
     if let Some(sock) = sockets.get_mut(handle) {
+        // Leave all multicast groups before closing.
+        for i in 0..sock.mcast_count as usize {
+            let group = sock.mcast_groups[i];
+            if !group.is_unspecified() {
+                mcast_global_leave(group);
+            }
+        }
         sock.active = false;
         sock.port = 0;
         sock.rx_queue.clear();
+        sock.mcast_groups = [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET];
+        sock.mcast_count = 0;
     }
+}
+
+/// Join a multicast group on a UDP socket.
+///
+/// After joining, the socket will receive datagrams sent to the
+/// multicast group address on the socket's bound port.
+///
+/// # Errors
+///
+/// - `InvalidArgument` — handle invalid, socket not active, or address
+///   is not a multicast address (224.0.0.0/4).
+/// - `OutOfMemory` — socket has joined the maximum number of groups.
+/// - `AlreadyExists` — socket is already a member of this group.
+pub fn join_group(handle: usize, group: Ipv4Addr) -> KernelResult<()> {
+    if !group.is_multicast() {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let mut sockets = SOCKETS.lock();
+    let sock = sockets.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    if !sock.active {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Check if already a member.
+    let count = sock.mcast_count as usize;
+    for i in 0..count {
+        if sock.mcast_groups[i] == group {
+            return Err(KernelError::AlreadyExists);
+        }
+    }
+
+    // Check capacity.
+    if count >= MAX_GROUPS_PER_SOCKET {
+        return Err(KernelError::OutOfMemory);
+    }
+
+    sock.mcast_groups[count] = group;
+    sock.mcast_count = sock.mcast_count.saturating_add(1);
+
+    // Add to global table so the IP layer accepts the multicast address.
+    drop(sockets);
+    mcast_global_join(group);
+
+    crate::serial_println!(
+        "[udp] Socket {} joined multicast group {}",
+        handle, group
+    );
+    Ok(())
+}
+
+/// Leave a multicast group on a UDP socket.
+///
+/// # Errors
+///
+/// - `InvalidArgument` — handle invalid or socket not active.
+/// - `NotFound` — socket is not a member of this group.
+pub fn leave_group(handle: usize, group: Ipv4Addr) -> KernelResult<()> {
+    let mut sockets = SOCKETS.lock();
+    let sock = sockets.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    if !sock.active {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let count = sock.mcast_count as usize;
+    let mut found = false;
+    for i in 0..count {
+        if sock.mcast_groups[i] == group {
+            // Swap-remove: move last entry here and shrink count.
+            let last = count.wrapping_sub(1);
+            sock.mcast_groups[i] = sock.mcast_groups[last];
+            sock.mcast_groups[last] = Ipv4Addr::UNSPECIFIED;
+            sock.mcast_count = sock.mcast_count.saturating_sub(1);
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Err(KernelError::NotFound);
+    }
+
+    // Remove from global table.
+    drop(sockets);
+    mcast_global_leave(group);
+
+    crate::serial_println!(
+        "[udp] Socket {} left multicast group {}",
+        handle, group
+    );
+    Ok(())
 }
 
 /// Receive a datagram from a bound socket.
@@ -200,20 +399,53 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         return super::dhcp::process_dhcp_response(payload);
     }
 
-    // Deliver to bound socket.
+    let is_mcast = ip_packet.dst.is_multicast();
+
+    // Deliver to bound socket(s).
+    // For unicast: deliver to the first matching socket.
+    // For multicast: deliver to ALL sockets bound to this port that have
+    //   joined the multicast group (fan-out).
     let mut sockets = SOCKETS.lock();
+    let mut delivered = false;
     for sock in sockets.iter_mut() {
-        if sock.active && sock.port == dst_port {
-            if sock.rx_queue.len() < MAX_QUEUED {
-                sock.rx_queue.push(Datagram {
-                    src_ip: ip_packet.src,
-                    src_port,
-                    data: Vec::from(payload),
-                });
-            }
-            // else: queue full, drop silently (UDP is unreliable).
-            return Ok(());
+        if !sock.active || sock.port != dst_port {
+            continue;
         }
+
+        // For multicast, check group membership.
+        if is_mcast {
+            let count = sock.mcast_count as usize;
+            let mut member = false;
+            for i in 0..count {
+                if sock.mcast_groups[i] == ip_packet.dst {
+                    member = true;
+                    break;
+                }
+            }
+            if !member {
+                continue;
+            }
+        }
+
+        if sock.rx_queue.len() < MAX_QUEUED {
+            sock.rx_queue.push(Datagram {
+                src_ip: ip_packet.src,
+                src_port,
+                data: Vec::from(payload),
+            });
+        }
+        // else: queue full, drop silently (UDP is unreliable).
+
+        delivered = true;
+
+        // For unicast, only deliver to the first matching socket.
+        if !is_mcast {
+            break;
+        }
+    }
+
+    if delivered {
+        return Ok(());
     }
 
     // No socket bound — drop silently.

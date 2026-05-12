@@ -61,6 +61,13 @@ impl Ipv4Addr {
         self == Self::BROADCAST
     }
 
+    /// Check if this is a multicast address (224.0.0.0/4, RFC 1112).
+    ///
+    /// Multicast addresses have the first nibble set to 0xE (224–239).
+    pub fn is_multicast(self) -> bool {
+        self.0[0] & 0xF0 == 0xE0
+    }
+
     /// Check if this address is in the same subnet as `other`.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn same_subnet(self, other: Self, mask: Self) -> bool {

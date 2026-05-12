@@ -299,11 +299,14 @@ pub fn verify_transport_checksum(
 pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
     let packet = Ipv4Packet::parse(data)?;
 
-    // Check if the packet is addressed to us or is broadcast.
+    // Check if the packet is addressed to us, is broadcast, or is
+    // multicast for a group we have joined.
     let our_ip = interface::ip();
     let is_for_us = packet.dst == our_ip
         || packet.dst.is_broadcast()
-        || our_ip.is_unspecified(); // Accept all during DHCP.
+        || our_ip.is_unspecified() // Accept all during DHCP.
+        || (packet.dst.is_multicast()
+            && super::udp::is_multicast_member(packet.dst));
 
     if !is_for_us {
         return Ok(());

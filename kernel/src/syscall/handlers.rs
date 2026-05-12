@@ -5585,6 +5585,48 @@ pub fn sys_udp_close(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `SYS_UDP_MCAST_JOIN` — join a multicast group on a UDP socket.
+///
+/// `arg0`: socket handle.
+/// `arg1`: multicast group address (u32 in network byte order).
+pub fn sys_udp_mcast_join(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let handle = args.arg0 as usize;
+    let group = crate::net::interface::Ipv4Addr::from_u32(args.arg1 as u32);
+    match crate::net::udp::join_group(handle, group) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UDP_MCAST_LEAVE` — leave a multicast group on a UDP socket.
+///
+/// `arg0`: socket handle.
+/// `arg1`: multicast group address (u32 in network byte order).
+pub fn sys_udp_mcast_leave(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let handle = args.arg0 as usize;
+    let group = crate::net::interface::Ipv4Addr::from_u32(args.arg1 as u32);
+    match crate::net::udp::leave_group(handle, group) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Thread management handlers (510–519)
 // ---------------------------------------------------------------------------

@@ -103,6 +103,20 @@ pub const SO_SNDBUF: i32 = 7;
 /// Disable Nagle's algorithm.
 pub const TCP_NODELAY: i32 = 1;
 
+// IP-level socket options (IPPROTO_IP / SOL_IP).
+/// IP protocol level for setsockopt/getsockopt.
+pub const SOL_IP: i32 = 0;
+/// Join a multicast group (RFC 1112).
+/// Value: `IpMreq` struct.
+pub const IP_ADD_MEMBERSHIP: i32 = 35;
+/// Leave a multicast group.
+/// Value: `IpMreq` struct.
+pub const IP_DROP_MEMBERSHIP: i32 = 36;
+/// Set the TTL for multicast packets.
+pub const IP_MULTICAST_TTL: i32 = 33;
+/// Set the loopback mode for multicast packets.
+pub const IP_MULTICAST_LOOP: i32 = 34;
+
 // MSG flags for send/recv.
 /// Peek at incoming data without consuming.
 pub const MSG_PEEK: i32 = 2;
@@ -115,6 +129,23 @@ pub const MSG_TRUNC: i32 = 0x20;
 pub const SOCK_NONBLOCK: i32 = 0o4000;
 /// Socket type flag: set close-on-exec on the new socket (Linux extension).
 pub const SOCK_CLOEXEC: i32 = 0o2_000_000;
+
+// ---------------------------------------------------------------------------
+// Multicast group request
+// ---------------------------------------------------------------------------
+
+/// IPv4 multicast group membership request (for `setsockopt`).
+///
+/// Used with `IP_ADD_MEMBERSHIP` / `IP_DROP_MEMBERSHIP` to join or
+/// leave a multicast group.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IpMreq {
+    /// Multicast group address.
+    pub imr_multiaddr: InAddr,
+    /// Local interface address (usually `INADDR_ANY`).
+    pub imr_interface: InAddr,
+}
 
 // ---------------------------------------------------------------------------
 // sockaddr structures
@@ -1356,12 +1387,9 @@ pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
 
 /// Set a socket option.
 ///
-/// Supports `SO_REUSEADDR`, `SO_KEEPALIVE` (SOL_SOCKET level) and
-/// `TCP_NODELAY` (SOL_TCP level).  Values are stored in the socket
-/// metadata table so `getsockopt` returns consistent results.
-///
-/// When the kernel adds syscalls for per-connection options, the stored
-/// values will be forwarded to the kernel.
+/// Supports `SO_REUSEADDR`, `SO_KEEPALIVE` (SOL_SOCKET level),
+/// `TCP_NODELAY` (SOL_TCP level), and `IP_ADD_MEMBERSHIP` /
+/// `IP_DROP_MEMBERSHIP` (SOL_IP / IPPROTO_IP level for multicast).
 ///
 /// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
@@ -1386,6 +1414,13 @@ pub extern "C" fn setsockopt(
         }
     }
 
+    // Handle IP-level multicast options (require IpMreq struct, not int).
+    if (level == SOL_IP || level == IPPROTO_IP)
+        && (optname == IP_ADD_MEMBERSHIP || optname == IP_DROP_MEMBERSHIP)
+    {
+        return setsockopt_multicast(fd, &entry, optname, optval, optlen);
+    }
+
     // Read the integer option value.
     let val = if !optval.is_null() && optlen as usize >= 4 {
         // SAFETY: optval points to at least 4 readable bytes.
@@ -1402,12 +1437,57 @@ pub extern "C" fn setsockopt(
             (SOL_SOCKET, SO_KEEPALIVE) => { meta.keepalive = val != 0; }
             (SOL_SOCKET, SO_RCVBUF | SO_SNDBUF) => { /* Accept silently. */ }
             (SOL_TCP, TCP_NODELAY) => { meta.nodelay = val != 0; }
+            (SOL_IP | IPPROTO_IP, IP_MULTICAST_TTL | IP_MULTICAST_LOOP) => {
+                // Accept silently — no kernel support for these yet,
+                // but programs often set them alongside IP_ADD_MEMBERSHIP.
+            }
             _ => {
                 // Accept unknown options silently — many programs set
                 // options we don't implement and don't check the result.
             }
         }
         set_meta(fd, meta);
+    }
+
+    0
+}
+
+/// Handle `IP_ADD_MEMBERSHIP` / `IP_DROP_MEMBERSHIP` setsockopt calls.
+///
+/// Translates to `SYS_UDP_MCAST_JOIN` / `SYS_UDP_MCAST_LEAVE` syscalls.
+fn setsockopt_multicast(
+    fd: i32,
+    entry: &fdtable::FdEntry,
+    optname: i32,
+    optval: *const u8,
+    optlen: SocklenT,
+) -> i32 {
+    // Must be a UDP socket.
+    if entry.kind != HandleKind::UdpSocket {
+        errno::set_errno(errno::ENOPROTOOPT);
+        return -1;
+    }
+
+    // Validate the option value is an IpMreq.
+    if optval.is_null() || (optlen as usize) < core::mem::size_of::<IpMreq>() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // SAFETY: optval is non-null and points to at least sizeof(IpMreq) bytes.
+    let mreq = unsafe { &*(optval.cast::<IpMreq>()) };
+    let group_addr = mreq.imr_multiaddr.s_addr; // Network byte order u32.
+
+    let syscall_nr = if optname == IP_ADD_MEMBERSHIP {
+        SYS_UDP_MCAST_JOIN
+    } else {
+        SYS_UDP_MCAST_LEAVE
+    };
+
+    let ret = syscall2(syscall_nr, entry.handle, group_addr as u64);
+    if ret < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
     }
 
     0

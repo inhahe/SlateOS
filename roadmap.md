@@ -989,6 +989,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] DNS retry with backoff: 3 attempts with increasing timeouts (1s/2s/4s); definitive answers (NXDOMAIN, parse errors) not retried — only network timeouts trigger retransmission
   - [x] ICMP Redirect (Type 5) and Parameter Problem (Type 12): logged with code-specific human-readable reasons; Parameter Problem notifies transport layer
   - [x] TCP Nagle buffer: small writes buffered internally (nagle_buf) instead of returning WouldBlock; flushed when ACK acknowledges all outstanding data or buffer fills MSS
+  - [x] TCP zero window probing (persist timer, RFC 1122 §4.2.2.17): when peer advertises zero receive window, periodic probes with exponential backoff (500ms→60s) prevent permanent connection deadlock from lost window-update ACKs
+  - [x] IPv4 fragmentation reassembly (RFC 791 §3.2): new frag module with 8 concurrent reassembly contexts, 30s timeout, bitmap-based block tracking, out-of-order and overlapping fragment support, oldest-eviction; Ipv4Packet now exposes identification/MF/offset; process_ipv4 routes fragments to reassembly and dispatches complete datagrams
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)
@@ -1002,6 +1004,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] IPv4 hooks: inbound check in process_ipv4, outbound check in send
   - [x] Kshell `firewall`/`fw` command (on/off, policy, allow/deny rules, stats, conntrack)
   - [x] Self-test: disabled passthrough, default DROP, rule matching, IP prefix, connection tracking
+  - [x] Per-rule match counters: each rule tracks packet match count; rule_stats() returns sorted diagnostics; reset_rule_counters() clears counters
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 
 ### 2.5 POSIX compatibility layer
@@ -1174,6 +1177,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Socket option tracking: SO_RCVBUF, SO_SNDBUF, SO_BROADCAST, SO_LINGER stored in SocketMeta and returned by getsockopt (was hardcoded defaults)
   - [x] mkostemp: flags (O_CLOEXEC, O_APPEND) now ORed into open() call (was silently ignored)
   - [x] Terminal fd validation: tcsendbreak/tcdrain/tcflow/tcflush validate fd is a terminal (EBADF/ENOTTY) and validate argument ranges (EINVAL)
+  - [x] Mutable hostname: gethostname/sethostname use static buffer (default "localhost"); _SC_HOST_NAME_MAX returns 255 (matching buffer size)
+  - [x] Process group tracking: PGID, SID, foreground PGRP stored in static variables with lazy init; setpgid/setsid/tcsetpgrp store values; getpgrp/getsid/tcgetpgrp return stored state consistently (was always returning PID)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

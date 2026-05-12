@@ -27,7 +27,17 @@ pub mod tcp;
 pub mod udp;
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::error::{KernelError, KernelResult};
+
+/// Minimum interval (ns) between TCP keepalive scans.
+///
+/// 5 seconds — keepalive probes are on the order of tens of seconds,
+/// so scanning more frequently than this wastes cycles.
+const KEEPALIVE_TICK_INTERVAL_NS: u64 = 5_000_000_000;
+
+/// Timestamp of last keepalive tick.
+static LAST_KEEPALIVE_TICK: AtomicU64 = AtomicU64::new(0);
 
 /// Initialize the networking stack.
 ///
@@ -54,6 +64,14 @@ pub fn poll() {
             }
             None => break,
         }
+    }
+
+    // Rate-limited TCP keepalive scan.
+    let now = crate::hrtimer::now_ns();
+    let last = LAST_KEEPALIVE_TICK.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= KEEPALIVE_TICK_INTERVAL_NS {
+        LAST_KEEPALIVE_TICK.store(now, Ordering::Relaxed);
+        tcp::tick_keepalive();
     }
 }
 

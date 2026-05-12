@@ -18,9 +18,16 @@
 //!   ESTABLISHED → CLOSE_WAIT → LAST_ACK → CLOSED
 //! ```
 //!
+//! ## Features
+//!
+//! - **Receive window tracking**: advertises dynamic window based on buffer
+//!   space; tracks peer's advertised window to avoid overrunning it.
+//! - **Keepalive probes** (RFC 1122 §4.2.3.6): detects dead peers on idle
+//!   connections via periodic probes (`seq = snd_una - 1`).
+//!
 //! ## Limitations
 //!
-//! - Fixed receive window (16 KiB).
+//! - No window scaling (RFC 7323) — max window is 64 KiB.
 //! - No congestion control (sends at wire rate).
 //! - No Nagle algorithm.
 //! - Simple retransmission (single timeout, no RTT estimation).
@@ -65,6 +72,23 @@ const RETRANSMIT_TIMEOUT: u32 = 2000;
 
 /// Maximum data waiting for delivery per connection.
 const MAX_RX_BUFFER: usize = 65536;
+
+// ---------------------------------------------------------------------------
+// TCP keepalive defaults (RFC 1122 §4.2.3.6)
+// ---------------------------------------------------------------------------
+
+/// Default idle time before first keepalive probe (75 seconds).
+///
+/// Linux defaults to 7200s (2 hours) but that's too slow for our use case —
+/// we're a lightweight OS where connections are few and detecting dead peers
+/// quickly matters more than saving a few packets.
+const KEEPALIVE_IDLE_DEFAULT_NS: u64 = 75_000_000_000;
+
+/// Interval between successive keepalive probes (10 seconds).
+const KEEPALIVE_INTERVAL_DEFAULT_NS: u64 = 10_000_000_000;
+
+/// Maximum keepalive probes before declaring the connection dead.
+const KEEPALIVE_PROBES_DEFAULT: u8 = 9;
 
 // TCP flags.
 const TCP_FIN: u8 = 0x01;
@@ -112,6 +136,11 @@ struct TcpConnection {
     snd_una: u32,   // Oldest unacknowledged.
     snd_nxt: u32,   // Next sequence to send.
     snd_iss: u32,   // Initial send sequence number.
+    /// Peer's advertised receive window (how much data we may have in
+    /// flight).  Updated on every incoming segment.  Initialised to
+    /// `DEFAULT_WINDOW` during the handshake and refined when the
+    /// SYN-ACK (client) or first ACK (server) arrives.
+    snd_wnd: u16,
     /// Receive sequence variables.
     rcv_nxt: u32,   // Next expected receive sequence.
     rcv_irs: u32,   // Initial receive sequence number.
@@ -121,6 +150,21 @@ struct TcpConnection {
     remote_closed: bool,
     /// Retransmit counter (incremented each poll cycle).
     retransmit_timer: u32,
+
+    // -- Keepalive state (RFC 1122 §4.2.3.6) --
+
+    /// Whether keepalive probes are enabled on this connection.
+    keepalive_enabled: bool,
+    /// Idle time (ns) before the first keepalive probe.
+    keepalive_idle_ns: u64,
+    /// Interval (ns) between successive probes.
+    keepalive_interval_ns: u64,
+    /// Maximum probes before declaring the connection dead.
+    keepalive_probes_max: u8,
+    /// Number of unanswered probes sent so far.
+    keepalive_probes_sent: u8,
+    /// Timestamp (ns, monotonic) of last data activity (send or receive).
+    last_activity_ns: u64,
 }
 
 impl TcpConnection {
@@ -134,11 +178,18 @@ impl TcpConnection {
             snd_una: 0,
             snd_nxt: 0,
             snd_iss: 0,
+            snd_wnd: DEFAULT_WINDOW,
             rcv_nxt: 0,
             rcv_irs: 0,
             rx_buffer: Vec::new(),
             remote_closed: false,
             retransmit_timer: 0,
+            keepalive_enabled: false,
+            keepalive_idle_ns: KEEPALIVE_IDLE_DEFAULT_NS,
+            keepalive_interval_ns: KEEPALIVE_INTERVAL_DEFAULT_NS,
+            keepalive_probes_max: KEEPALIVE_PROBES_DEFAULT,
+            keepalive_probes_sent: 0,
+            last_activity_ns: 0,
         }
     }
 }
@@ -307,7 +358,33 @@ fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
 // TCP segment sending
 // ---------------------------------------------------------------------------
 
-/// Send a TCP segment via IP.
+/// Send a TCP segment via IP, advertising the given receive window.
+fn send_segment_with_window(
+    local_port: u16,
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    payload: &[u8],
+) -> KernelResult<()> {
+    let local_ip = interface::ip();
+    let seg = build_segment(
+        local_port, remote_port,
+        seq, ack, flags,
+        window,
+        payload,
+        local_ip, remote_ip,
+    );
+
+    ipv4::send(remote_ip, PROTO_TCP, &seg)
+}
+
+/// Send a TCP segment via IP, advertising the default receive window.
+///
+/// Convenience wrapper for control segments (SYN, RST, handshake ACKs)
+/// where we don't have a connection context to compute a dynamic window.
 fn send_segment(
     local_port: u16,
     remote_ip: Ipv4Addr,
@@ -317,16 +394,10 @@ fn send_segment(
     flags: u8,
     payload: &[u8],
 ) -> KernelResult<()> {
-    let local_ip = interface::ip();
-    let seg = build_segment(
-        local_port, remote_port,
-        seq, ack, flags,
-        DEFAULT_WINDOW,
-        payload,
-        local_ip, remote_ip,
-    );
-
-    ipv4::send(remote_ip, PROTO_TCP, &seg)
+    send_segment_with_window(
+        local_port, remote_ip, remote_port,
+        seq, ack, flags, DEFAULT_WINDOW, payload,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -357,11 +428,15 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.snd_iss = isn;
         conn.snd_una = isn;
         conn.snd_nxt = isn.wrapping_add(1); // SYN consumes 1 sequence.
+        conn.snd_wnd = DEFAULT_WINDOW; // Refined on SYN-ACK.
         conn.rcv_nxt = 0;
         conn.rcv_irs = 0;
         conn.rx_buffer.clear();
         conn.remote_closed = false;
         conn.retransmit_timer = 0;
+        conn.keepalive_enabled = false;
+        conn.keepalive_probes_sent = 0;
+        conn.last_activity_ns = crate::hrtimer::now_ns();
         slot
     };
 
@@ -397,42 +472,79 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
     Err(KernelError::TimedOut)
 }
 
+/// Compute the dynamic receive window to advertise to the peer.
+///
+/// Reflects how much buffer space we actually have available for new
+/// data.  Clamped to `DEFAULT_WINDOW` as the upper bound (we don't
+/// support window scaling).
+fn advertised_window(conn: &TcpConnection) -> u16 {
+    let free = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
+    // Clamp to u16 range (max 65535, but we cap at DEFAULT_WINDOW to
+    // stay consistent with the initial window we advertise in handshakes).
+    (free.min(DEFAULT_WINDOW as usize)) as u16
+}
+
 /// Send data on an established TCP connection.
+///
+/// Respects the peer's advertised receive window (`snd_wnd`): data
+/// beyond what the peer can accept is not sent.  Returns `Ok(())` even
+/// if the peer's window truncated the send (caller should check how
+/// much was actually ACK'd and retry if needed).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
-    let (local_port, remote_ip, remote_port, seq, ack) = {
+    let (local_port, remote_ip, remote_port, seq, ack, peer_wnd, our_wnd) = {
         let conns = CONNECTIONS.lock();
         let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
         if !conn.active || conn.state != TcpState::Established {
             return Err(KernelError::InvalidArgument);
         }
-        (conn.local_port, conn.remote_ip, conn.remote_port, conn.snd_nxt, conn.rcv_nxt)
+        (conn.local_port, conn.remote_ip, conn.remote_port,
+         conn.snd_nxt, conn.rcv_nxt, conn.snd_wnd, advertised_window(conn))
     };
+
+    // Respect the peer's advertised receive window: we may only have
+    // `snd_wnd` bytes in flight (between snd_una and snd_nxt + new data).
+    // For simplicity (no retransmit queue), we limit total send size to
+    // the peer window.
+    let usable_window = peer_wnd as usize;
+    let sendable = data.len().min(usable_window);
+
+    if sendable == 0 && !data.is_empty() {
+        // Peer window is zero — can't send anything right now.
+        // The caller should retry after the peer opens its window
+        // (we'll update snd_wnd when the next ACK arrives).
+        return Err(KernelError::WouldBlock);
+    }
+
+    let send_data = &data[..sendable];
 
     // Send data in chunks that fit in a single segment.
     let mss: usize = 1460; // Standard MSS for Ethernet.
     let mut offset = 0;
 
-    while offset < data.len() {
-        let chunk_end = (offset + mss).min(data.len());
-        let chunk = &data[offset..chunk_end];
+    while offset < send_data.len() {
+        let chunk_end = (offset + mss).min(send_data.len());
+        let chunk = &send_data[offset..chunk_end];
 
         let send_seq = seq.wrapping_add(offset as u32);
-        send_segment(
+        send_segment_with_window(
             local_port, remote_ip, remote_port,
             send_seq, ack,
             TCP_ACK | TCP_PSH,
+            our_wnd,
             chunk,
         )?;
 
         offset = chunk_end;
     }
 
-    // Update snd_nxt.
+    // Update snd_nxt and keepalive activity timestamp.
     {
         let mut conns = CONNECTIONS.lock();
         let conn = &mut conns[handle];
-        conn.snd_nxt = seq.wrapping_add(data.len() as u32);
+        conn.snd_nxt = seq.wrapping_add(sendable as u32);
+        conn.last_activity_ns = crate::hrtimer::now_ns();
+        conn.keepalive_probes_sent = 0;
     }
 
     Ok(())
@@ -728,6 +840,7 @@ fn handle_incoming_syn(
     remote_port: u16,
     local_port: u16,
     remote_seq: u32,
+    remote_window: u16,
 ) -> KernelResult<()> {
     // Check if we have a listener for this port.
     let listener_exists = {
@@ -761,11 +874,15 @@ fn handle_incoming_syn(
         conn.snd_iss = isn;
         conn.snd_una = isn;
         conn.snd_nxt = isn.wrapping_add(1); // SYN-ACK consumes 1 seq.
+        conn.snd_wnd = remote_window; // Peer's window from their SYN.
         conn.rcv_irs = remote_seq;
         conn.rcv_nxt = remote_seq.wrapping_add(1); // Client's SYN consumes 1.
         conn.rx_buffer.clear();
         conn.remote_closed = false;
         conn.retransmit_timer = 0;
+        conn.keepalive_enabled = false;
+        conn.keepalive_probes_sent = 0;
+        conn.last_activity_ns = crate::hrtimer::now_ns();
         slot
     };
 
@@ -836,6 +953,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     let ack = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
     let data_offset = ((data[12] >> 4) as usize) * 4;
     let flags = data[13];
+    let window = u16::from_be_bytes([data[14], data[15]]);
 
     let payload = if data_offset < data.len() {
         &data[data_offset..]
@@ -857,7 +975,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         // (passive open / server-side handshake).
         if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 && flags & TCP_RST == 0 {
             drop(conns);
-            return handle_incoming_syn(ip_packet.src, src_port, dst_port, seq);
+            return handle_incoming_syn(ip_packet.src, src_port, dst_port, seq, window);
         }
         // No matching connection and not a SYN for a listener.
         // Send RST if this isn't itself a RST.
@@ -874,6 +992,13 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     };
 
     let conn = &mut conns[idx];
+
+    // Update peer's advertised receive window on every segment.
+    conn.snd_wnd = window;
+
+    // Any incoming segment counts as activity for keepalive purposes.
+    conn.last_activity_ns = crate::hrtimer::now_ns();
+    conn.keepalive_probes_sent = 0;
 
     // Handle RST.
     if flags & TCP_RST != 0 {
@@ -947,17 +1072,19 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(accept as u32);
                 }
 
-                // Send ACK.
+                // Send ACK with dynamic window reflecting our available
+                // buffer space.
                 let local_port = conn.local_port;
                 let remote_ip = conn.remote_ip;
                 let remote_port = conn.remote_port;
                 let snd_nxt = conn.snd_nxt;
                 let rcv_nxt = conn.rcv_nxt;
+                let our_wnd = advertised_window(conn);
 
                 drop(conns);
-                let _ = send_segment(
+                let _ = send_segment_with_window(
                     local_port, remote_ip, remote_port,
-                    snd_nxt, rcv_nxt, TCP_ACK, &[],
+                    snd_nxt, rcv_nxt, TCP_ACK, our_wnd, &[],
                 );
                 return Ok(());
             }
@@ -1041,6 +1168,150 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Keepalive probing (RFC 1122 §4.2.3.6)
+// ---------------------------------------------------------------------------
+
+/// Enable or disable TCP keepalive on a connection.
+///
+/// When enabled, the stack sends keepalive probes (zero-payload ACK with
+/// `seq = snd_una - 1`) after the connection has been idle for
+/// `keepalive_idle` nanoseconds.  If no response arrives after
+/// `keepalive_probes_max` consecutive probes spaced `keepalive_interval`
+/// apart, the connection is reset.
+///
+/// Keepalive parameters use compiled-in defaults (75s idle, 10s interval,
+/// 9 probes).  To customise, use `set_keepalive_params()`.
+pub fn set_keepalive(handle: usize, enabled: bool) -> KernelResult<()> {
+    let mut conns = CONNECTIONS.lock();
+    let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    if !conn.active {
+        return Err(KernelError::InvalidArgument);
+    }
+    conn.keepalive_enabled = enabled;
+    if enabled {
+        // Reset probe state so we start fresh from the current time.
+        conn.keepalive_probes_sent = 0;
+        conn.last_activity_ns = crate::hrtimer::now_ns();
+    }
+    Ok(())
+}
+
+/// Set keepalive timing parameters on a connection.
+///
+/// - `idle_ns`: time of inactivity before the first probe.
+/// - `interval_ns`: time between successive probes.
+/// - `max_probes`: probes sent before declaring the peer dead.
+pub fn set_keepalive_params(
+    handle: usize,
+    idle_ns: u64,
+    interval_ns: u64,
+    max_probes: u8,
+) -> KernelResult<()> {
+    let mut conns = CONNECTIONS.lock();
+    let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    if !conn.active {
+        return Err(KernelError::InvalidArgument);
+    }
+    conn.keepalive_idle_ns = idle_ns;
+    conn.keepalive_interval_ns = interval_ns;
+    conn.keepalive_probes_max = max_probes;
+    Ok(())
+}
+
+/// Periodic keepalive tick — call from the network timer (e.g. softirq
+/// or poll loop).
+///
+/// Scans all established connections with keepalive enabled.  For each
+/// idle connection, either sends a probe or declares the connection dead
+/// if the probe limit has been reached.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn tick_keepalive() {
+    let now = crate::hrtimer::now_ns();
+    let mut conns = CONNECTIONS.lock();
+
+    for idx in 0..MAX_CONNECTIONS {
+        let conn = &mut conns[idx];
+        if !conn.active
+            || conn.state != TcpState::Established
+            || !conn.keepalive_enabled
+        {
+            continue;
+        }
+
+        let elapsed = now.saturating_sub(conn.last_activity_ns);
+
+        // Determine the threshold for the *next* action:
+        //  - If no probes sent yet: must exceed idle_ns.
+        //  - Otherwise: must exceed idle_ns + probes_sent * interval_ns.
+        let threshold = conn.keepalive_idle_ns.saturating_add(
+            (conn.keepalive_probes_sent as u64)
+                .saturating_mul(conn.keepalive_interval_ns),
+        );
+
+        if elapsed < threshold {
+            continue;
+        }
+
+        // Check if we've exhausted all probes.
+        if conn.keepalive_probes_sent >= conn.keepalive_probes_max {
+            crate::serial_println!(
+                "[tcp] Keepalive timeout — connection {}:{} → {}:{} dead after {} probes",
+                conn.local_port, conn.remote_port,
+                conn.remote_ip, conn.remote_port,
+                conn.keepalive_probes_max
+            );
+
+            // Send RST and tear down.
+            let local_port = conn.local_port;
+            let remote_ip = conn.remote_ip;
+            let remote_port = conn.remote_port;
+            let snd_nxt = conn.snd_nxt;
+            let rcv_nxt = conn.rcv_nxt;
+
+            conn.active = false;
+            conn.state = TcpState::Closed;
+            conn.rx_buffer.clear();
+
+            drop(conns);
+            let _ = send_segment(
+                local_port, remote_ip, remote_port,
+                snd_nxt, rcv_nxt, TCP_RST | TCP_ACK, &[],
+            );
+            return; // Dropped lock; restart scan next tick.
+        }
+
+        // Send a keepalive probe: ACK with seq = snd_una - 1, no payload.
+        // This intentionally uses an out-of-window sequence number so the
+        // peer responds with an ACK containing its current window/ack,
+        // confirming liveness.
+        let local_port = conn.local_port;
+        let remote_ip = conn.remote_ip;
+        let remote_port = conn.remote_port;
+        let probe_seq = conn.snd_una.wrapping_sub(1);
+        let rcv_nxt = conn.rcv_nxt;
+        let our_wnd = advertised_window(conn);
+
+        conn.keepalive_probes_sent = conn.keepalive_probes_sent.saturating_add(1);
+
+        crate::serial_println!(
+            "[tcp] Keepalive probe #{} for {}:{} (idle {}ms)",
+            conn.keepalive_probes_sent,
+            remote_ip, remote_port,
+            elapsed / 1_000_000
+        );
+
+        // Must drop the lock before sending (send_segment acquires
+        // interface locks).
+        drop(conns);
+        let _ = send_segment_with_window(
+            local_port, remote_ip, remote_port,
+            probe_seq, rcv_nxt, TCP_ACK, our_wnd, &[],
+        );
+        return; // Dropped lock; restart scan next tick.
+    }
 }
 
 // ---------------------------------------------------------------------------

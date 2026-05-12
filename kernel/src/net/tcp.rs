@@ -24,8 +24,8 @@
 //! - No congestion control (sends at wire rate).
 //! - No Nagle algorithm.
 //! - Simple retransmission (single timeout, no RTT estimation).
-//! - Maximum 8 concurrent connections.
-//! - Maximum 4 listeners, each with a backlog of 8 pending connections.
+//! - Maximum 32 concurrent connections.
+//! - Maximum 8 listeners, each with a backlog of 16 pending connections.
 
 use alloc::vec::Vec;
 use spin::Mutex;
@@ -43,13 +43,18 @@ use super::ipv4::{self, Ipv4Packet, PROTO_TCP};
 const TCP_HEADER_SIZE: usize = 20;
 
 /// Maximum concurrent TCP connections.
-const MAX_CONNECTIONS: usize = 8;
+///
+/// Increased from 8 to support multiple simultaneous network operations
+/// (e.g., HTTP downloads, API calls, WebSocket connections).
+const MAX_CONNECTIONS: usize = 32;
 
 /// Maximum concurrent TCP listeners.
-const MAX_LISTENERS: usize = 4;
+///
+/// Supports multiple server services running concurrently.
+const MAX_LISTENERS: usize = 8;
 
 /// Maximum pending connections per listener (SYN backlog).
-const MAX_BACKLOG: usize = 8;
+const MAX_BACKLOG: usize = 16;
 
 /// Default receive window size (16 KiB).
 const DEFAULT_WINDOW: u16 = 16384;

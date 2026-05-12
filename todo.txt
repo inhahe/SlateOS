@@ -131,8 +131,13 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   send() delegates to send_ns(ROOT_NS, ...).  ARP cache and firewall remain
   global (documented as shared / future per-namespace).  Added is_initialized()
   to netns.rs for boot-order safety (net::init runs before netns::init).
-  Remaining work: per-namespace ARP cache, per-namespace firewall rules,
-  and wiring process→container→net_ns lookup into socket-layer callers.
+  Per-namespace firewall rules: DONE (commit 8f1ec5a).  16 rules + 32
+  conntrack entries per namespace, ns_init/ns_enable/ns_add_rule API,
+  ipv4::send_ns() uses check_outbound_ns().  3 self-tests.
+  Remaining work: per-namespace ARP cache (blocked on veth pairs),
+  and wiring process→container→net_ns lookup into socket-layer callers
+  (requires changes in kernel-process zone for PCB net_ns field and
+  kernel-ipc zone for syscall handler changes — cross-zone work).
 
 ## POSIX Layer Notes
 

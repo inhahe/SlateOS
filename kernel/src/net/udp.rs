@@ -34,10 +34,13 @@ use super::ipv4::{self, Ipv4Packet, PROTO_UDP};
 const UDP_HEADER_SIZE: usize = 8;
 
 /// Maximum number of bound UDP sockets.
-const MAX_SOCKETS: usize = 16;
+///
+/// Supports multiple concurrent UDP services (DNS, DHCP, game
+/// clients, streaming, etc.).
+const MAX_SOCKETS: usize = 32;
 
 /// Maximum queued datagrams per socket.
-const MAX_QUEUED: usize = 32;
+const MAX_QUEUED: usize = 64;
 
 // ---------------------------------------------------------------------------
 // UDP socket

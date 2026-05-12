@@ -20,6 +20,15 @@
 //! programs like `less`, `vim`, and `readline` function.  The default
 //! termios reflects a cooked-mode terminal with echo enabled.
 //!
+//! ## Terminal Control Functions
+//!
+//! - `cfmakeraw` — configure termios for raw I/O (no echo, no canonical)
+//! - `cfsetspeed` — set both input and output baud rate
+//! - `tcsendbreak` — send break condition (stub)
+//! - `tcdrain` — wait for output to complete (stub, writes are synchronous)
+//! - `tcflow` — suspend/restart I/O (stub, no flow control)
+//! - `tcflush` — discard pending I/O (stub, no buffered data)
+//!
 //! ## isatty / ttyname
 //!
 //! `isatty(fd)` returns 1 for Console fds, 0 for everything else.
@@ -65,12 +74,20 @@ pub const TCSAFLUSH: i32 = 2;
 // ---------------------------------------------------------------------------
 
 // c_iflag bits — input modes.
+/// Signal interrupt on break.
+pub const BRKINT: u32 = 0o2;
+/// Enable input parity check.
+pub const INPCK: u32 = 0o20;
+/// Strip high bit from input bytes.
+pub const ISTRIP: u32 = 0o40;
 /// Translate NL to CR on input.
 pub const INLCR: u32 = 0o100;
 /// Ignore CR on input.
 pub const IGNCR: u32 = 0o200;
 /// Translate CR to NL on input.
 pub const ICRNL: u32 = 0o400;
+/// Enable XON/XOFF flow control on output.
+pub const IXON: u32 = 0o2000;
 
 // c_oflag bits — output modes.
 /// Post-process output.
@@ -85,6 +102,8 @@ pub const CSIZE: u32 = 0o60;
 pub const CS8: u32 = 0o60;
 /// Enable receiver.
 pub const CREAD: u32 = 0o200;
+/// Enable parity generation/checking.
+pub const PARENB: u32 = 0o400;
 /// Hang up on last close.
 pub const HUPCL: u32 = 0o2000;
 /// Ignore modem control lines.
@@ -526,6 +545,127 @@ pub unsafe extern "C" fn cfsetospeed(termios_p: *mut Termios, speed: u32) -> i32
 }
 
 // ---------------------------------------------------------------------------
+// cfmakeraw — set raw mode
+// ---------------------------------------------------------------------------
+
+/// Configure termios for raw (non-canonical, no echo) I/O.
+///
+/// Clears all input/output processing flags so that bytes pass through
+/// unmodified.  This is the standard way to prepare a terminal for
+/// interactive programs (editors, games, TUI apps).
+///
+/// # Safety
+///
+/// `termios_p` must be non-null and point to a valid `Termios`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cfmakeraw(termios_p: *mut Termios) {
+    if termios_p.is_null() {
+        return;
+    }
+    // SAFETY: Caller guarantees termios_p is valid.
+    let t = unsafe { &mut *termios_p };
+
+    // Input: disable break/CR/NL translation, parity, strip, flow control.
+    t.c_iflag &= !(BRKINT | ICRNL | IGNCR | INLCR | INPCK | ISTRIP | IXON);
+
+    // Output: disable post-processing.
+    t.c_oflag &= !OPOST;
+
+    // Control: clear size mask, set 8-bit, disable parity.
+    t.c_cflag &= !(CSIZE | PARENB);
+    t.c_cflag |= CS8;
+
+    // Local: disable canonical mode, echo, signals, extended processing.
+    t.c_lflag &= !(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+
+    // Set VMIN=1, VTIME=0 for byte-at-a-time reads.
+    if let Some(slot) = t.c_cc.get_mut(VMIN) {
+        *slot = 1;
+    }
+    if let Some(slot) = t.c_cc.get_mut(VTIME) {
+        *slot = 0;
+    }
+}
+
+/// Set both input and output baud rate in termios.
+///
+/// Convenience function (non-POSIX but widely available).
+///
+/// Returns 0 on success, -1 on error.
+///
+/// # Safety
+///
+/// `termios_p` must be non-null and point to a valid `Termios`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cfsetspeed(termios_p: *mut Termios, speed: u32) -> i32 {
+    if termios_p.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: Caller guarantees termios_p is valid.
+    unsafe {
+        (*termios_p).c_ispeed = speed;
+        (*termios_p).c_ospeed = speed;
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// tcsendbreak / tcdrain / tcflow / tcflush
+// ---------------------------------------------------------------------------
+
+/// Send a break condition on a terminal.
+///
+/// Stub: returns 0.  Our console doesn't have a serial break concept.
+/// Programs that call this (e.g., `stty`) will succeed silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcsendbreak(_fd: i32, _duration: i32) -> i32 {
+    0
+}
+
+/// Wait until all output has been transmitted.
+///
+/// Stub: returns 0 immediately.  Our console writes are synchronous
+/// (framebuffer-backed), so there is no pending output to drain.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcdrain(_fd: i32) -> i32 {
+    0
+}
+
+/// TCOON — restart suspended output.
+pub const TCOON: i32 = 0;
+/// TCOOFF — suspend output.
+pub const TCOOFF: i32 = 1;
+/// TCION — restart suspended input.
+pub const TCION: i32 = 2;
+/// TCIOFF — suspend input.
+pub const TCIOFF: i32 = 3;
+
+/// Suspend or restart terminal I/O.
+///
+/// Stub: returns 0.  Our console doesn't support XON/XOFF flow control.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcflow(_fd: i32, _action: i32) -> i32 {
+    0
+}
+
+/// TCIFLUSH — flush pending input.
+pub const TCIFLUSH: i32 = 0;
+/// TCOFLUSH — flush pending output.
+pub const TCOFLUSH: i32 = 1;
+/// TCIOFLUSH — flush both input and output.
+pub const TCIOFLUSH: i32 = 2;
+
+/// Discard pending terminal I/O data.
+///
+/// Stub: returns 0.  Our console doesn't buffer data beyond the
+/// framebuffer, so there is nothing to flush.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcflush(_fd: i32, _queue_selector: i32) -> i32 {
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Tests — pure logic functions only (no syscalls)
 // ---------------------------------------------------------------------------
 
@@ -635,6 +775,49 @@ mod tests {
         assert_eq!(TCSETS, 0x5402);
         assert_eq!(FIONBIO, 0x5421);
         assert_eq!(FIONREAD, 0x541B);
+    }
+
+    // -- cfmakeraw tests --
+
+    #[test]
+    fn test_cfmakeraw_clears_flags() {
+        let mut t = default_termios();
+        // Starts in canonical + echo mode.
+        assert_ne!(t.c_lflag & ICANON, 0);
+        assert_ne!(t.c_lflag & ECHO, 0);
+        assert_ne!(t.c_iflag & ICRNL, 0);
+        assert_ne!(t.c_oflag & OPOST, 0);
+
+        unsafe { cfmakeraw(&raw mut t); }
+
+        // After raw: no canonical, no echo, no input/output processing.
+        assert_eq!(t.c_lflag & ICANON, 0, "ICANON should be cleared");
+        assert_eq!(t.c_lflag & ECHO, 0, "ECHO should be cleared");
+        assert_eq!(t.c_lflag & ISIG, 0, "ISIG should be cleared");
+        assert_eq!(t.c_iflag & ICRNL, 0, "ICRNL should be cleared");
+        assert_eq!(t.c_oflag & OPOST, 0, "OPOST should be cleared");
+        assert_eq!(t.c_cflag & CSIZE, CS8, "Should be 8-bit");
+    }
+
+    #[test]
+    fn test_cfmakeraw_vmin_vtime() {
+        let mut t = default_termios();
+        unsafe { cfmakeraw(&raw mut t); }
+        assert_eq!(t.c_cc[VMIN], 1, "VMIN should be 1");
+        assert_eq!(t.c_cc[VTIME], 0, "VTIME should be 0");
+    }
+
+    #[test]
+    fn test_cfsetspeed() {
+        let mut t = default_termios();
+        assert_eq!(unsafe { cfsetspeed(&raw mut t, B115200) }, 0);
+        assert_eq!(unsafe { cfgetispeed(&raw const t) }, B115200);
+        assert_eq!(unsafe { cfgetospeed(&raw const t) }, B115200);
+    }
+
+    #[test]
+    fn test_cfsetspeed_null() {
+        assert_eq!(unsafe { cfsetspeed(core::ptr::null_mut(), B9600) }, -1);
     }
 }
 

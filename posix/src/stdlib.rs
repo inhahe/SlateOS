@@ -8,7 +8,7 @@
 //!
 //! - `atoi`, `atol` — quick string→integer
 //! - `strtol`, `strtoul`, `strtoll`, `strtoull` — full string→integer
-//! - `strtod`, `strtof` — string→floating-point
+//! - `strtod`, `strtof`, `strtold` — string→floating-point
 //! - `abs`, `labs`, `llabs` — absolute value
 //! - `div`, `ldiv`, `lldiv` — integer division with quotient/remainder
 //! - `qsort`, `bsearch` — array sorting/searching
@@ -345,6 +345,26 @@ pub unsafe extern "C" fn strtof(
     endptr: *mut *const u8,
 ) -> f32 {
     unsafe { strtod(nptr, endptr) as f32 }
+}
+
+/// Convert a C string to a long double (`strtold`).
+///
+/// On x86_64, `long double` is 80-bit extended precision in the C ABI.
+/// Rust does not have native 80-bit float support, so we delegate to
+/// `strtod` (64-bit `f64`).  This loses precision for values that
+/// require more than 53 bits of mantissa, but covers the vast majority
+/// of real-world uses.
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strtold(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+) -> f64 {
+    // SAFETY: strtod safety requirements are identical.
+    unsafe { strtod(nptr, endptr) }
 }
 
 /// Convert a C string to a double (`atof`).

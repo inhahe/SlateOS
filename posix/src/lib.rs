@@ -22,8 +22,10 @@
 //!   `inet_ntoa`, `inet_pton`, `inet_ntop`
 //! - **I/O Multiplexing**: `poll`, `select`, `pselect`
 //! - **Terminal**: `ioctl` (TIOCGWINSZ, TCGETS, FIONBIO, etc.),
-//!   `isatty`, `ttyname`, `tcgetattr`, `tcsetattr`, termios flags,
-//!   `posix_openpt`, `grantpt`, `unlockpt`, `ptsname`, `ptsname_r`
+//!   `isatty`, `ttyname`, `tcgetattr`, `tcsetattr`, `cfmakeraw`,
+//!   `cfsetspeed`, `tcsendbreak`, `tcdrain`, `tcflow`, `tcflush`,
+//!   termios flags, `posix_openpt`, `grantpt`, `unlockpt`, `ptsname`,
+//!   `ptsname_r`
 //! - **Process**: `_exit`, `getpid`, `getppid`, `posix_spawn`,
 //!   `posix_spawnp`, `execve`, `execvp`, `execv`, `vfork`, `waitpid`,
 //!   `sleep`, `nanosleep`, `getpgrp`, `setpgid`, `setsid`, `getsid`

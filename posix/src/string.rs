@@ -5,7 +5,8 @@
 //! these are correct reference implementations.
 //!
 //! Includes: `memcpy`, `memmove`, `memset`, `memcmp`, `memchr`,
-//! `memrchr`, `memccpy`, `strlen`, `strnlen`, `strcmp`, `strncmp`,
+//! `memrchr`, `memccpy`, `mempcpy`, `memmem`, `rawmemchr`,
+//! `strlen`, `strnlen`, `strcmp`, `strncmp`,
 //! `strcpy`, `strncpy`, `stpcpy`, `stpncpy`, `strchr`, `strrchr`,
 //! `strcat`, `strncat`, `strstr`, `strspn`, `strcspn`, `strpbrk`,
 //! `strtok`, `strtok_r`, `strsep`, `strerror`, `strerror_r`,
@@ -1274,4 +1275,127 @@ pub unsafe extern "C" fn explicit_bzero(s: *mut u8, n: usize) {
         }
         i = i.wrapping_add(1);
     }
+}
+
+// ---------------------------------------------------------------------------
+// mempcpy — copy with end-of-dest return
+// ---------------------------------------------------------------------------
+
+/// Copy `n` bytes from `src` to `dest`, returning a pointer past the
+/// last written byte.
+///
+/// Like `memcpy` but returns `dest + n` instead of `dest`.  This is a
+/// GNU extension commonly used for efficient buffer building (chain
+/// multiple mempcpy calls without tracking the offset manually).
+///
+/// # Safety
+///
+/// `dest` and `src` must be valid for `n` bytes and must not overlap.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mempcpy(
+    dest: *mut u8,
+    src: *const u8,
+    n: SizeT,
+) -> *mut u8 {
+    let mut i: usize = 0;
+    while i < n {
+        // SAFETY: Caller guarantees both pointers valid for n bytes.
+        unsafe { *dest.add(i) = *src.add(i); }
+        i = i.wrapping_add(1);
+    }
+    // SAFETY: dest + n is one-past-end, valid for pointer arithmetic.
+    unsafe { dest.add(n) }
+}
+
+// ---------------------------------------------------------------------------
+// memmem — search for byte sequence in memory
+// ---------------------------------------------------------------------------
+
+/// Locate a byte sequence within a larger memory region.
+///
+/// Searches the first `haystacklen` bytes of `haystack` for the first
+/// occurrence of the `needlelen`-byte sequence at `needle`.
+///
+/// Returns a pointer to the start of the match, or NULL if not found.
+///
+/// Edge cases (per POSIX / glibc):
+/// - If `needlelen` is 0, returns `haystack` (empty pattern always matches).
+/// - If `needlelen > haystacklen`, returns NULL.
+///
+/// Uses a simple linear scan.  For large inputs, a KMP or Two-Way
+/// algorithm would be faster, but the simple version is correct and
+/// sufficient for the buffer sizes we encounter.
+///
+/// # Safety
+///
+/// `haystack` must be valid for `haystacklen` bytes.
+/// `needle` must be valid for `needlelen` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn memmem(
+    haystack: *const u8,
+    haystacklen: SizeT,
+    needle: *const u8,
+    needlelen: SizeT,
+) -> *const u8 {
+    // Empty needle matches immediately.
+    if needlelen == 0 {
+        return haystack;
+    }
+    if haystack.is_null() || needle.is_null() || needlelen > haystacklen {
+        return core::ptr::null();
+    }
+
+    // Scan positions: only need to check up to haystacklen - needlelen.
+    let limit = haystacklen.wrapping_sub(needlelen);
+    let mut i: usize = 0;
+    while i <= limit {
+        // Check if needle matches at position i.
+        let mut j: usize = 0;
+        let mut matched = true;
+        while j < needlelen {
+            // SAFETY: i + j < haystacklen (since i <= limit and
+            // j < needlelen, so i + j <= haystacklen - needlelen +
+            // needlelen - 1 = haystacklen - 1). Both pointers valid.
+            if unsafe { *haystack.add(i.wrapping_add(j)) != *needle.add(j) } {
+                matched = false;
+                break;
+            }
+            j = j.wrapping_add(1);
+        }
+        if matched {
+            // SAFETY: haystack + i is within bounds.
+            return unsafe { haystack.add(i) };
+        }
+        i = i.wrapping_add(1);
+    }
+
+    core::ptr::null()
+}
+
+// ---------------------------------------------------------------------------
+// rawmemchr — unbounded memchr (assumes byte is present)
+// ---------------------------------------------------------------------------
+
+/// Search for a byte in memory without a length bound.
+///
+/// Like `memchr` but assumes the byte `c` WILL be found somewhere in
+/// the buffer.  This is a GNU extension used by glibc internals and
+/// some programs for efficiency when the caller guarantees the
+/// sentinel exists (e.g., searching for `'\0'` in a C string).
+///
+/// # Safety
+///
+/// `s` must point to memory that contains at least one occurrence of
+/// `c` (as the low byte of the int).  If `c` is not present, this
+/// function reads past the end of valid memory (undefined behavior).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rawmemchr(s: *const u8, c: i32) -> *const u8 {
+    let target = c as u8;
+    let mut p = s;
+    // SAFETY: Caller guarantees c exists in the buffer, so we will
+    // find it before reading invalid memory.
+    while unsafe { *p } != target {
+        p = unsafe { p.add(1) };
+    }
+    p
 }

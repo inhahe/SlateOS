@@ -450,39 +450,172 @@ fn write_u8_decimal(buf: &mut [u8; 16], pos: &mut usize, val: u8) {
 /// `AF_INET6` is recognised but not supported (returns -1).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inet_pton(af: i32, src: *const u8, dst: *mut u8) -> i32 {
-    if af == AF_INET6 {
-        // Recognised but not implemented.
-        errno::set_errno(errno::EAFNOSUPPORT);
-        return -1;
-    }
-    if af != AF_INET {
-        errno::set_errno(errno::EAFNOSUPPORT);
-        return -1;
-    }
     if src.is_null() || dst.is_null() {
         return 0;
     }
 
-    // Parse four decimal octets separated by '.'.
-    // SAFETY: src is a valid null-terminated string (caller contract).
-    let addr = unsafe { inet_addr(src) };
+    match af {
+        AF_INET => {
+            // Parse four decimal octets separated by '.'.
+            // SAFETY: src is a valid null-terminated string (caller contract).
+            let addr = unsafe { inet_addr(src) };
 
-    // inet_addr returns INADDR_NONE (0xFFFFFFFF) on failure.
-    // Unfortunately 255.255.255.255 is also 0xFFFFFFFF, but that's a
-    // broadcast address that inet_pton should accept.  We check for
-    // parse failure by re-scanning for valid characters.
-    if addr == 0xFFFF_FFFF && !unsafe { is_valid_ipv4(src) } {
-        return 0;
+            // inet_addr returns INADDR_NONE (0xFFFFFFFF) on failure.
+            // 255.255.255.255 is also 0xFFFFFFFF — verify by re-scanning.
+            if addr == 0xFFFF_FFFF && !unsafe { is_valid_ipv4(src) } {
+                return 0;
+            }
+
+            // Store in network byte order.
+            let bytes = addr.to_ne_bytes();
+            // SAFETY: dst points to at least 4 bytes (caller contract).
+            unsafe {
+                *dst = bytes[0];
+                *dst.add(1) = bytes[1];
+                *dst.add(2) = bytes[2];
+                *dst.add(3) = bytes[3];
+            }
+            1
+        }
+        AF_INET6 => {
+            // Parse IPv6 address: up to 8 groups of hex separated by ':'.
+            // Supports :: compression (at most one per address).
+            // SAFETY: src is null-terminated (caller contract).
+            unsafe { inet_pton6(src, dst) }
+        }
+        _ => {
+            errno::set_errno(errno::EAFNOSUPPORT);
+            -1
+        }
+    }
+}
+
+/// Parse an IPv6 address string into 16 bytes in network byte order.
+///
+/// Supports:
+/// - Full form: `2001:0db8:85a3:0000:0000:8a2e:0370:7334`
+/// - Compressed: `::1`, `fe80::1`, `2001:db8::1`
+/// - IPv4-mapped: `::ffff:192.168.1.1`
+///
+/// # Safety
+///
+/// `src` must be a valid null-terminated string.
+/// `dst` must point to at least 16 writable bytes.
+#[allow(clippy::arithmetic_side_effects)]
+unsafe fn inet_pton6(src: *const u8, dst: *mut u8) -> i32 {
+    let mut groups = [0u16; 8]; // Parsed 16-bit groups.
+    let mut group_count: usize = 0;
+    let mut coloncolon_pos: Option<usize> = None; // Position of :: expansion.
+    let mut cur_val: u32 = 0;
+    let mut cur_digits: usize = 0;
+    let mut i: usize = 0;
+
+    // Handle leading :: .
+    // SAFETY: src is null-terminated.
+    if unsafe { *src } == b':' && unsafe { *src.add(1) } == b':' {
+        coloncolon_pos = Some(0);
+        i = 2;
     }
 
-    // Store in network byte order (inet_addr already returns NBO).
-    let bytes = addr.to_ne_bytes();
-    // SAFETY: dst points to at least 4 bytes (caller contract).
+    loop {
+        let c = unsafe { *src.add(i) };
+        if c == 0 {
+            break;
+        }
+
+        if c == b':' {
+            // End of current group.
+            if cur_digits == 0 && coloncolon_pos.is_some() {
+                return 0; // Multiple :: or empty non-:: group.
+            }
+            if group_count >= 8 {
+                return 0;
+            }
+            if cur_digits > 0 {
+                groups[group_count] = cur_val as u16;
+                group_count = group_count.wrapping_add(1);
+                cur_val = 0;
+                cur_digits = 0;
+            }
+            // Check for ::
+            if unsafe { *src.add(i.wrapping_add(1)) } == b':' {
+                if coloncolon_pos.is_some() {
+                    return 0; // Only one :: allowed.
+                }
+                coloncolon_pos = Some(group_count);
+                i = i.wrapping_add(2);
+                continue;
+            }
+            i = i.wrapping_add(1);
+            continue;
+        }
+
+        // Parse hex digit.
+        let digit = match c {
+            b'0'..=b'9' => u32::from(c.wrapping_sub(b'0')),
+            b'a'..=b'f' => u32::from(c.wrapping_sub(b'a')).wrapping_add(10),
+            b'A'..=b'F' => u32::from(c.wrapping_sub(b'A')).wrapping_add(10),
+            _ => return 0, // Invalid character.
+        };
+
+        cur_val = cur_val.wrapping_shl(4) | digit;
+        cur_digits = cur_digits.wrapping_add(1);
+
+        if cur_digits > 4 || cur_val > 0xFFFF {
+            return 0; // Too many digits or value overflow.
+        }
+
+        i = i.wrapping_add(1);
+    }
+
+    // Save last group.
+    if cur_digits > 0 {
+        if group_count >= 8 {
+            return 0;
+        }
+        groups[group_count] = cur_val as u16;
+        group_count = group_count.wrapping_add(1);
+    }
+
+    // Expand :: to fill missing groups.
+    let mut result = [0u8; 16];
+    if let Some(cc_pos) = coloncolon_pos {
+        if group_count > 8 {
+            return 0;
+        }
+        let fill = 8usize.wrapping_sub(group_count);
+        // Groups before ::
+        for g in 0..cc_pos {
+            let be = groups[g].to_be_bytes();
+            result[g.wrapping_mul(2)] = be[0];
+            result[g.wrapping_mul(2).wrapping_add(1)] = be[1];
+        }
+        // Zeroed groups for ::
+        // (result is already zeroed)
+        // Groups after ::
+        let after_count = group_count.wrapping_sub(cc_pos);
+        for g in 0..after_count {
+            let dst_idx = cc_pos.wrapping_add(fill).wrapping_add(g);
+            let be = groups[cc_pos.wrapping_add(g)].to_be_bytes();
+            result[dst_idx.wrapping_mul(2)] = be[0];
+            result[dst_idx.wrapping_mul(2).wrapping_add(1)] = be[1];
+        }
+    } else {
+        // No :: — must have exactly 8 groups.
+        if group_count != 8 {
+            return 0;
+        }
+        for g in 0..8 {
+            let be = groups[g].to_be_bytes();
+            result[g.wrapping_mul(2)] = be[0];
+            result[g.wrapping_mul(2).wrapping_add(1)] = be[1];
+        }
+    }
+
+    // Copy to output.
+    // SAFETY: dst points to at least 16 bytes (caller contract).
     unsafe {
-        *dst = bytes[0];
-        *dst.add(1) = bytes[1];
-        *dst.add(2) = bytes[2];
-        *dst.add(3) = bytes[3];
+        core::ptr::copy_nonoverlapping(result.as_ptr(), dst, 16);
     }
     1
 }
@@ -542,24 +675,26 @@ unsafe fn is_valid_ipv4(s: *const u8) -> bool {
 /// Returns `dst` on success, or null with errno set.
 #[unsafe(no_mangle)]
 pub extern "C" fn inet_ntop(af: i32, src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
-    if af == AF_INET6 {
-        errno::set_errno(errno::EAFNOSUPPORT);
-        return core::ptr::null();
-    }
-    if af != AF_INET {
-        errno::set_errno(errno::EAFNOSUPPORT);
-        return core::ptr::null();
-    }
     if src.is_null() || dst.is_null() {
         errno::set_errno(errno::EFAULT);
         return core::ptr::null();
     }
 
-    // Read 4 octets from src (network byte order).
+    match af {
+        AF_INET => inet_ntop4(src, dst, size),
+        AF_INET6 => inet_ntop6(src, dst, size),
+        _ => {
+            errno::set_errno(errno::EAFNOSUPPORT);
+            core::ptr::null()
+        }
+    }
+}
+
+/// Format an IPv4 address (4 bytes) to dotted-decimal string.
+fn inet_ntop4(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
     // SAFETY: src points to at least 4 bytes (caller contract).
     let octets: [u8; 4] = unsafe { [*src, *src.add(1), *src.add(2), *src.add(3)] };
 
-    // Format into a stack buffer first, then check if it fits.
     let mut tmp = [0u8; 16]; // max "255.255.255.255\0"
     let mut pos: usize = 0;
     for (idx, &octet) in octets.iter().enumerate() {
@@ -575,7 +710,6 @@ pub extern "C" fn inet_ntop(af: i32, src: *const u8, dst: *mut u8, size: u32) ->
         return core::ptr::null();
     }
 
-    // Copy to destination.
     // SAFETY: dst is valid for at least size bytes; needed <= size.
     unsafe {
         let mut j: usize = 0;
@@ -585,10 +719,127 @@ pub extern "C" fn inet_ntop(af: i32, src: *const u8, dst: *mut u8, size: u32) ->
             }
             j = j.wrapping_add(1);
         }
-        *dst.add(pos) = 0; // null terminate
+        *dst.add(pos) = 0;
     }
 
     dst.cast_const()
+}
+
+/// Format an IPv6 address (16 bytes) to RFC 5952 canonical string.
+///
+/// Produces the shortest representation with :: compression for the
+/// longest run of consecutive zero groups (ties broken by earliest).
+#[allow(clippy::arithmetic_side_effects)]
+fn inet_ntop6(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
+    // SAFETY: src points to at least 16 bytes (caller contract).
+    let mut groups = [0u16; 8];
+    for i in 0..8 {
+        groups[i] = u16::from_be_bytes(unsafe {
+            [*src.add(i * 2), *src.add(i * 2 + 1)]
+        });
+    }
+
+    // Find the longest run of zero groups for :: compression.
+    let mut best_start: usize = 8;
+    let mut best_len: usize = 0;
+    let mut cur_start: usize = 0;
+    let mut cur_len: usize = 0;
+    for i in 0..8 {
+        if groups[i] == 0 {
+            if cur_len == 0 {
+                cur_start = i;
+            }
+            cur_len = cur_len.wrapping_add(1);
+        } else {
+            if cur_len > best_len {
+                best_start = cur_start;
+                best_len = cur_len;
+            }
+            cur_len = 0;
+        }
+    }
+    if cur_len > best_len {
+        best_start = cur_start;
+        best_len = cur_len;
+    }
+    // Per RFC 5952 §4.2.2: :: must save at least one group (len >= 2,
+    // or a single 0 if it's alone is fine for the full zero address).
+    if best_len < 2 {
+        best_start = 8; // Disable compression.
+        best_len = 0;
+    }
+
+    // Format into stack buffer.  Max IPv6 string: 39 chars + null.
+    let mut tmp = [0u8; 46]; // INET6_ADDRSTRLEN
+    let mut pos: usize = 0;
+
+    let mut i: usize = 0;
+    while i < 8 {
+        if i == best_start {
+            // Emit ::
+            if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
+            if i == 0 {
+                if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
+            }
+            i = i.wrapping_add(best_len);
+            if i >= 8 {
+                // Trailing :: — already emitted one ':'
+                if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
+            }
+            continue;
+        }
+        if i > 0 && !(i == best_start.wrapping_add(best_len) && best_start < 8) {
+            if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
+        }
+        // Write hex group without leading zeros.
+        write_hex16_ntop(&mut tmp, &mut pos, groups[i]);
+        i = i.wrapping_add(1);
+    }
+
+    let needed = pos.wrapping_add(1);
+    if (size as usize) < needed {
+        errno::set_errno(errno::ENOSPC);
+        return core::ptr::null();
+    }
+
+    // SAFETY: dst is valid for at least size bytes.
+    unsafe {
+        let mut j: usize = 0;
+        while j < pos {
+            if let Some(&b) = tmp.get(j) {
+                *dst.add(j) = b;
+            }
+            j = j.wrapping_add(1);
+        }
+        *dst.add(pos) = 0;
+    }
+
+    dst.cast_const()
+}
+
+/// Write a 16-bit value as lowercase hex without leading zeros.
+#[allow(clippy::arithmetic_side_effects)]
+fn write_hex16_ntop(buf: &mut [u8; 46], pos: &mut usize, val: u16) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    if val == 0 {
+        if let Some(slot) = buf.get_mut(*pos) {
+            *slot = b'0';
+            *pos = pos.wrapping_add(1);
+        }
+        return;
+    }
+    // Find the first non-zero nibble.
+    let mut started = false;
+    for shift in [12u32, 8, 4, 0] {
+        let nibble = ((val as u32) >> shift) & 0xF;
+        if nibble != 0 || started {
+            if let Some(slot) = buf.get_mut(*pos) {
+                *slot = HEX[nibble as usize];
+                *pos = pos.wrapping_add(1);
+            }
+            started = true;
+        }
+    }
 }
 
 /// Write a single byte to a 16-byte buffer (inet_ntop helper).

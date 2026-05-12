@@ -62,6 +62,15 @@
 //! and `SynReceived` connections are aborted (hard errors); established
 //! connections treat ICMP errors as soft errors (logged but not aborted).
 //!
+//! ## Path MTU Discovery (RFC 1191)
+//!
+//! When an ICMP "Fragmentation Needed" (type 3, code 4) carries a
+//! next-hop MTU, the connection's `peer_mss` is reduced to
+//! `MTU - 40` (IP + TCP headers).  This ensures future segments fit
+//! within the path MTU without IP-level fragmentation.  Combined
+//! with the per-connection `peer_mss` / `effective_mss()`, all
+//! subsequent data segments use the reduced MSS automatically.
+//!
 //! ## Retransmit buffer
 //!
 //! Sent data is copied into a per-connection retransmit buffer (up to 64 KiB).
@@ -3056,12 +3065,26 @@ pub fn tick_retransmit() {
 /// connection should NOT abort it — only SYN_SENT connections are aborted
 /// immediately by ICMP errors.  This prevents transient routing issues
 /// from tearing down long-lived connections.
+/// Handle an ICMP error notification for a TCP connection.
+///
+/// Called by the ICMP handler when an ICMP error references an original
+/// TCP segment (identified by the first 8 bytes of the TCP header
+/// embedded in the ICMP payload).
+///
+/// # Path MTU Discovery (RFC 1191)
+///
+/// When `next_hop_mtu` is `Some(mtu)`, the ICMP was "Fragmentation
+/// Needed" (type 3, code 4) carrying the next-hop MTU.  We reduce the
+/// connection's `peer_mss` to `mtu - 40` (IP + TCP headers) so future
+/// segments fit without fragmentation.  This is the sender-side PMTUD
+/// adjustment.
 pub fn icmp_error(
     orig_src_ip: Ipv4Addr,
     orig_dst_ip: Ipv4Addr,
     orig_tcp_hdr: &[u8],
     icmp_type: u8,
     icmp_code: u8,
+    next_hop_mtu: Option<u16>,
 ) {
     // Need at least 4 bytes for src_port + dst_port.
     if orig_tcp_hdr.len() < 4 {
@@ -3121,6 +3144,23 @@ pub fn icmp_error(
                 conn.ooo_buf.clear();
             }
             _ => {
+                // PMTUD (RFC 1191): if ICMP "Fragmentation Needed" carries
+                // a next-hop MTU, reduce this connection's MSS to fit.
+                // This avoids IP fragmentation on the path.
+                if let Some(mtu) = next_hop_mtu {
+                    // MSS = MTU - 20 (IP header) - 20 (TCP header).
+                    let new_mss = mtu.saturating_sub(40);
+                    if new_mss > 0 && (conn.peer_mss == 0 || new_mss < conn.peer_mss) {
+                        crate::serial_println!(
+                            "[tcp] PMTUD: reducing MSS to {} (MTU={}) for {:?} {}:{} → {}:{}",
+                            new_mss, mtu, conn.state,
+                            orig_src_ip, src_port,
+                            orig_dst_ip, dst_port
+                        );
+                        conn.peer_mss = new_mss;
+                    }
+                }
+
                 // RFC 5461: soft error on established connections.
                 // Log but do not abort — the route may recover.
                 crate::serial_println!(

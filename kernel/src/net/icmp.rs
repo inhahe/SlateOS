@@ -236,9 +236,25 @@ fn notify_transport_error(icmp_data: &[u8], icmp_type: u8, icmp_code: u8) {
 
     let transport_hdr = &orig_ip[ip_hdr_len..];
 
+    // PMTUD (RFC 1191): for "Fragmentation Needed" (type 3, code 4),
+    // extract the next-hop MTU from ICMP header bytes 6-7.  This
+    // tells the sender the maximum packet size the path supports.
+    let next_hop_mtu = if icmp_type == ICMP_DEST_UNREACHABLE
+        && icmp_code == 4
+        && icmp_data.len() >= 8
+    {
+        let mtu = u16::from_be_bytes([icmp_data[6], icmp_data[7]]);
+        if mtu > 0 { Some(mtu) } else { None }
+    } else {
+        None
+    };
+
     match protocol {
         PROTO_TCP => {
-            super::tcp::icmp_error(src_ip, dst_ip, transport_hdr, icmp_type, icmp_code);
+            super::tcp::icmp_error(
+                src_ip, dst_ip, transport_hdr,
+                icmp_type, icmp_code, next_hop_mtu,
+            );
         }
         _ => {
             // UDP and other protocols: just log for now.

@@ -2177,6 +2177,64 @@ pub fn tick_keepalive() {
 }
 
 // ---------------------------------------------------------------------------
+// TIME_WAIT cleanup
+// ---------------------------------------------------------------------------
+
+/// TIME_WAIT duration: 2 × MSL = 60 seconds (RFC 793 recommends MSL=2min,
+/// but Linux uses 60s total for TIME_WAIT, which is the practical standard).
+const TIME_WAIT_DURATION_NS: u64 = 60_000_000_000;
+
+/// Clean up connections in TIME_WAIT state after the 2*MSL timer expires.
+///
+/// Called from the same periodic tick as `tick_keepalive`.  Scans all
+/// connections for TIME_WAIT entries whose `last_activity_ns` has exceeded
+/// the TIME_WAIT duration, and reclaims their slots.
+///
+/// Also cleans up connections in LastAck state that have been idle too
+/// long (the peer's FIN-ACK may have been lost).
+pub fn tick_time_wait_cleanup() {
+    let now = crate::hrtimer::now_ns();
+    let mut conns = CONNECTIONS.lock();
+
+    for conn in conns.iter_mut() {
+        if !conn.active {
+            continue;
+        }
+
+        match conn.state {
+            TcpState::TimeWait => {
+                let elapsed = now.saturating_sub(conn.last_activity_ns);
+                if elapsed >= TIME_WAIT_DURATION_NS {
+                    crate::serial_println!(
+                        "[tcp] TIME_WAIT expired for port {} → {}:{} — reclaiming slot",
+                        conn.local_port, conn.remote_ip, conn.remote_port
+                    );
+                    conn.active = false;
+                    conn.state = TcpState::Closed;
+                    conn.rx_buffer.clear();
+                }
+            }
+            TcpState::LastAck => {
+                // LastAck: we sent FIN, waiting for final ACK.  If idle
+                // for more than 30 seconds, the peer likely crashed —
+                // reclaim the slot.
+                let elapsed = now.saturating_sub(conn.last_activity_ns);
+                if elapsed >= 30_000_000_000 {
+                    crate::serial_println!(
+                        "[tcp] LAST_ACK timeout for port {} → {}:{} — reclaiming",
+                        conn.local_port, conn.remote_ip, conn.remote_port
+                    );
+                    conn.active = false;
+                    conn.state = TcpState::Closed;
+                    conn.rx_buffer.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 

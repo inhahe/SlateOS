@@ -66,12 +66,13 @@ pub fn poll() {
         }
     }
 
-    // Rate-limited TCP keepalive scan.
+    // Rate-limited TCP keepalive + TIME_WAIT cleanup scan.
     let now = crate::hrtimer::now_ns();
     let last = LAST_KEEPALIVE_TICK.load(Ordering::Relaxed);
     if now.saturating_sub(last) >= KEEPALIVE_TICK_INTERVAL_NS {
         LAST_KEEPALIVE_TICK.store(now, Ordering::Relaxed);
         tcp::tick_keepalive();
+        tcp::tick_time_wait_cleanup();
     }
 }
 

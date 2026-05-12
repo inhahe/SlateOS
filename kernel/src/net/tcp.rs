@@ -49,9 +49,18 @@
 //! and `SynReceived` connections are aborted (hard errors); established
 //! connections treat ICMP errors as soft errors (logged but not aborted).
 //!
+//! ## Duplicate ACK / Fast Recovery (RFC 5681 §3.2)
+//!
+//! Counts consecutive duplicate ACKs.  After 3 duplicate ACKs, enters
+//! fast recovery: `ssthresh = flight_size / 2`, `cwnd = ssthresh + 3*MSS`.
+//! Additional dup ACKs inflate `cwnd` by one MSS.  The actual fast
+//! retransmit (resending the lost segment) is not implemented because
+//! we don't maintain a retransmit buffer, but the congestion response
+//! prevents congestion collapse and the SACK blocks guide the peer.
+//!
 //! ## Limitations
 //!
-//! - No fast retransmit / fast recovery (triple duplicate ACK).
+//! - No retransmit buffer (sent data is not stored for retransmission).
 //! - Maximum 32 concurrent connections.
 //! - Maximum 8 listeners, each with a backlog of 16 pending connections.
 
@@ -281,6 +290,19 @@ struct TcpConnection {
     /// Number of active SACK blocks (entries in `sack_blocks`).
     sack_block_count: u8,
 
+    // -- Duplicate ACK / fast retransmit (RFC 5681 §3.2) --
+
+    /// Number of consecutive duplicate ACKs received.
+    ///
+    /// A "duplicate ACK" is an ACK that does not advance `snd_una`.
+    /// After 3 duplicate ACKs, RFC 5681 requires fast retransmit + fast
+    /// recovery.  We implement the congestion response (halve cwnd) but
+    /// cannot retransmit the missing segment because we don't keep a
+    /// retransmit buffer.  The SACK blocks (if negotiated) inform the
+    /// peer which data was received out of order, and the reduced cwnd
+    /// prevents congestion collapse.
+    dup_ack_count: u8,
+
     // -- Keepalive state (RFC 1122 §4.2.3.6) --
 
     /// Whether keepalive probes are enabled on this connection.
@@ -329,6 +351,7 @@ impl TcpConnection {
             sack_ok: false,
             sack_blocks: [(0, 0); MAX_SACK_BLOCKS],
             sack_block_count: 0,
+            dup_ack_count: 0,
             keepalive_enabled: false,
             keepalive_idle_ns: KEEPALIVE_IDLE_DEFAULT_NS,
             keepalive_interval_ns: KEEPALIVE_INTERVAL_DEFAULT_NS,
@@ -1916,11 +1939,38 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 }
                 let bytes_acked = conn.snd_una.wrapping_sub(old_una);
 
-                // RTT sample from this ACK (Karn: only non-retransmitted).
-                try_rtt_sample(conn, ack);
+                if bytes_acked > 0 {
+                    // New data acknowledged — reset duplicate ACK counter.
+                    conn.dup_ack_count = 0;
 
-                // Congestion window update.
-                on_ack_congestion(conn, bytes_acked);
+                    // RTT sample from this ACK (Karn: only non-retransmitted).
+                    try_rtt_sample(conn, ack);
+
+                    // Congestion window update.
+                    on_ack_congestion(conn, bytes_acked);
+                } else if payload.is_empty() {
+                    // Duplicate ACK (no new data, no payload).
+                    // RFC 5681 §3.2: after 3 duplicate ACKs, enter fast
+                    // recovery (halve cwnd, set ssthresh).
+                    conn.dup_ack_count = conn.dup_ack_count.saturating_add(1);
+                    if conn.dup_ack_count == 3 {
+                        // Fast retransmit trigger — halve congestion window.
+                        let flight = conn.snd_nxt.wrapping_sub(conn.snd_una);
+                        conn.ssthresh = (flight / 2).max(MSS as u32);
+                        conn.cwnd = conn.ssthresh.saturating_add(3u32.saturating_mul(MSS as u32));
+                        crate::serial_println!(
+                            "[tcp] 3 dup ACKs for port {} — fast recovery (ssthresh={}, cwnd={})",
+                            conn.local_port, conn.ssthresh, conn.cwnd
+                        );
+                        // Note: we can't retransmit the missing segment because
+                        // we don't keep a retransmit buffer.  The SACK blocks
+                        // inform the peer, and the reduced cwnd prevents collapse.
+                    } else if conn.dup_ack_count > 3 {
+                        // Additional dup ACKs during fast recovery — inflate cwnd
+                        // by one MSS per RFC 5681 §3.2 to allow more in-flight data.
+                        conn.cwnd = conn.cwnd.saturating_add(MSS as u32);
+                    }
+                }
             }
 
             // Process data.

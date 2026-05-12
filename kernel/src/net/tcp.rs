@@ -392,6 +392,16 @@ struct TcpConnection {
     /// Used for RTO timeout-based retransmission.
     tx_last_send_ns: u64,
 
+    // -- Peer MSS (RFC 793 §3.1, RFC 879) --
+
+    /// Maximum segment size the peer will accept.  Parsed from the MSS
+    /// option in the SYN/SYN-ACK.  Outgoing data segments must not
+    /// exceed this value.  0 means no MSS option was present — in that
+    /// case the default 536 bytes applies per RFC 1122 §4.2.2.6, but
+    /// we use our MSS (1460) since we're on the same Ethernet segment
+    /// as the peer in all current configurations.
+    peer_mss: u16,
+
     // -- ECN (Explicit Congestion Notification, RFC 3168) --
 
     /// Whether ECN was negotiated during the handshake (both sides
@@ -473,6 +483,7 @@ impl TcpConnection {
             tx_buffer: Vec::new(),
             tx_buf_seq: 0,
             tx_last_send_ns: 0,
+            peer_mss: 0,
             ecn_ok: false,
             ecn_ce_pending: false,
             ecn_cwr_sent: false,
@@ -1184,6 +1195,22 @@ fn effective_window(conn: &TcpConnection) -> usize {
     peer.min(cong)
 }
 
+/// Effective MSS for outgoing data on this connection.
+///
+/// Returns the smaller of our MSS (Ethernet-derived, 1460) and the
+/// peer's advertised MSS from the SYN/SYN-ACK.  Per RFC 1122 §4.2.2.6,
+/// if the peer didn't send an MSS option, the default is 536 bytes.
+/// However, since we're on the same Ethernet segment in our current
+/// configurations, we fall back to our own MSS rather than the
+/// conservative 536.
+fn effective_mss(conn: &TcpConnection) -> usize {
+    if conn.peer_mss > 0 {
+        MSS.min(conn.peer_mss as usize)
+    } else {
+        MSS
+    }
+}
+
 /// Called when an ACK arrives — updates congestion window (slow-start or
 /// congestion avoidance, RFC 5681 §3.1).
 #[allow(clippy::arithmetic_side_effects)]
@@ -1191,7 +1218,7 @@ fn on_ack_congestion(conn: &mut TcpConnection, bytes_acked: u32) {
     if bytes_acked == 0 {
         return;
     }
-    let mss = MSS as u32;
+    let mss = effective_mss(conn) as u32;
     if conn.cwnd < conn.ssthresh {
         // Slow start: increase cwnd by min(bytes_acked, MSS) per ACK.
         conn.cwnd = conn.cwnd.saturating_add(bytes_acked.min(mss));
@@ -1208,7 +1235,7 @@ fn on_ack_congestion(conn: &mut TcpConnection, bytes_acked: u32) {
 /// Called on packet loss (duplicate ACKs or timeout) — reduces congestion
 /// window (multiplicative decrease, RFC 5681 §3.1).
 fn on_loss_congestion(conn: &mut TcpConnection) {
-    let mss = MSS as u32;
+    let mss = effective_mss(conn) as u32;
     // ssthresh = max(FlightSize / 2, 2*MSS)
     let flight = conn.snd_nxt.wrapping_sub(conn.snd_una);
     conn.ssthresh = (flight / 2).max(mss.saturating_mul(2));
@@ -1243,11 +1270,11 @@ fn tx_buffer_trim(conn: &mut TcpConnection, bytes_acked: u32) {
 
 /// Retransmit the first unacknowledged segment from the retransmit buffer.
 ///
-/// Sends up to MSS bytes from `tx_buffer[0..]` (sequence `snd_una`).
-/// Returns `true` if data was retransmitted.
+/// Sends up to `effective_mss(conn)` bytes from `tx_buffer[0..]`
+/// (sequence `snd_una`).
 #[allow(clippy::arithmetic_side_effects)]
 fn retransmit_from_buffer(conn: &TcpConnection) -> Option<(u16, Ipv4Addr, u16, u32, u32, u16, [u8; 1460], usize)> {
-    let retx_len = conn.tx_buffer.len().min(MSS);
+    let retx_len = conn.tx_buffer.len().min(effective_mss(conn));
     if retx_len == 0 {
         return None;
     }
@@ -1530,7 +1557,7 @@ fn build_sack_option(conn: &TcpConnection) -> ([u8; 34], usize) {
 #[allow(clippy::arithmetic_side_effects)]
 pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
     let (local_port, remote_ip, remote_port, seq, ack, eff_wnd, our_wnd,
-         nagle, has_unacked, ecn_ok, ecn_cwr) = {
+         nagle, has_unacked, ecn_ok, ecn_cwr, eff_mss) = {
         let conns = CONNECTIONS.lock();
         let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
         // Allow sending in Established (normal) or CloseWait (remote
@@ -1544,32 +1571,33 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
         (conn.local_port, conn.remote_ip, conn.remote_port,
          conn.snd_nxt, conn.rcv_nxt, effective_window(conn),
          advertised_window(conn), conn.nagle_enabled, unacked,
-         conn.ecn_ok, conn.ecn_cwr_sent)
+         conn.ecn_ok, conn.ecn_cwr_sent, effective_mss(conn))
     };
 
     // Nagle's algorithm (RFC 896): if we have unacknowledged data in
     // flight, only send if the new data fills a full MSS.  This coalesces
     // small writes into larger segments.
-    if nagle && has_unacked && data.len() < MSS {
+    if nagle && has_unacked && data.len() < eff_mss {
         // Buffer the small write internally.  It will be flushed when
         // an ACK acknowledges all outstanding data (snd_una == snd_nxt)
         // or when enough data accumulates to fill an MSS.
         let mut conns = CONNECTIONS.lock();
         let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
-        let space = MSS.saturating_sub(conn.nagle_buf.len());
+        let conn_mss = effective_mss(conn);
+        let space = conn_mss.saturating_sub(conn.nagle_buf.len());
         let copy_len = data.len().min(space);
         if copy_len > 0 {
             conn.nagle_buf.extend_from_slice(&data[..copy_len]);
         }
         // If the nagle_buf now fills an MSS, flush it immediately.
-        if conn.nagle_buf.len() >= MSS {
+        if conn.nagle_buf.len() >= conn_mss {
             let lp = conn.local_port;
             let ri = conn.remote_ip;
             let rp = conn.remote_port;
             let s = conn.snd_nxt;
             let a = conn.rcv_nxt;
             let w = advertised_window(conn);
-            let flush_len = conn.nagle_buf.len().min(MSS);
+            let flush_len = conn.nagle_buf.len().min(conn_mss);
             let mut flush_data = [0u8; 1460];
             flush_data[..flush_len].copy_from_slice(&conn.nagle_buf[..flush_len]);
             conn.snd_nxt = s.wrapping_add(flush_len as u32);
@@ -1641,7 +1669,7 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
     };
 
     while offset < send_data.len() {
-        let chunk_end = (offset + MSS).min(send_data.len());
+        let chunk_end = (offset + eff_mss).min(send_data.len());
         let chunk = &send_data[offset..chunk_end];
 
         let send_seq = seq.wrapping_add(offset as u32);
@@ -2109,6 +2137,10 @@ fn handle_incoming_syn(
         conn.sack_blocks = [(0, 0); MAX_SACK_BLOCKS];
         conn.sack_block_count = 0;
 
+        // MSS: store the client's advertised MSS so we limit our
+        // outgoing segments accordingly (RFC 793 §3.1).
+        conn.peer_mss = syn_opts.mss;
+
         // ECN (RFC 3168 §6.1.1): if the client's SYN has both ECE and CWR
         // set, it supports ECN.  We confirm by setting ECE (without CWR) in
         // our SYN-ACK.
@@ -2338,6 +2370,10 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 // SACK: both sides must have sent SACK-Permitted (RFC 2018).
                 conn.sack_ok = synack_opts.sack_permitted;
 
+                // MSS: store the peer's advertised MSS to limit our
+                // outgoing segment size (RFC 793 §3.1).
+                conn.peer_mss = synack_opts.mss;
+
                 // ECN (RFC 3168 §6.1.1): the server confirms ECN support
                 // by setting ECE (without CWR) in the SYN-ACK.
                 if flags & TCP_ECE != 0 && flags & TCP_CWR == 0 {
@@ -2439,7 +2475,8 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                         let s = conn.snd_nxt;
                         let a = conn.rcv_nxt;
                         let w = advertised_window(conn);
-                        let flush_len = conn.nagle_buf.len().min(MSS);
+                        let emss = effective_mss(conn);
+                        let flush_len = conn.nagle_buf.len().min(emss);
                         let mut flush_data = [0u8; 1460];
                         flush_data[..flush_len]
                             .copy_from_slice(&conn.nagle_buf[..flush_len]);
@@ -2478,12 +2515,13 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     if conn.dup_ack_count == 3 {
                         // Fast retransmit trigger — halve congestion window
                         // and retransmit the lost segment.
+                        let emss = effective_mss(conn) as u32;
                         let flight = conn.snd_nxt.wrapping_sub(conn.snd_una);
-                        conn.ssthresh = (flight / 2).max(MSS as u32);
-                        conn.cwnd = conn.ssthresh.saturating_add(3u32.saturating_mul(MSS as u32));
+                        conn.ssthresh = (flight / 2).max(emss);
+                        conn.cwnd = conn.ssthresh.saturating_add(3u32.saturating_mul(emss));
 
                         // Retransmit from the tx buffer.
-                        let retx_len = conn.tx_buffer.len().min(MSS);
+                        let retx_len = conn.tx_buffer.len().min(emss as usize);
                         if retx_len > 0 {
                             let lp = conn.local_port;
                             let ri = conn.remote_ip;
@@ -2514,7 +2552,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     } else if conn.dup_ack_count > 3 {
                         // Additional dup ACKs during fast recovery — inflate cwnd
                         // by one MSS per RFC 5681 §3.2 to allow more in-flight data.
-                        conn.cwnd = conn.cwnd.saturating_add(MSS as u32);
+                        conn.cwnd = conn.cwnd.saturating_add(effective_mss(conn) as u32);
                     }
                 }
             }

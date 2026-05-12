@@ -55,8 +55,24 @@ const MAGIC_COOKIE: [u8; 4] = [99, 130, 83, 99];
 /// Minimum DHCP message size (without options).
 const DHCP_MIN_SIZE: usize = 236;
 
-/// Fixed transaction ID (simple, single-session client).
-const XID: u32 = 0x1234_5678;
+/// Current DHCP transaction ID.
+///
+/// Randomized per transaction to prevent spoofed DHCP responses.
+/// An attacker on the LAN who can predict the XID could inject
+/// a fake OFFER/ACK with a rogue gateway or DNS server.
+static CURRENT_XID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Generate a new random DHCP transaction ID.
+fn new_xid() -> u32 {
+    let xid = crate::rng::next_u32();
+    CURRENT_XID.store(xid, core::sync::atomic::Ordering::Relaxed);
+    xid
+}
+
+/// Get the current transaction ID (for matching responses).
+fn current_xid() -> u32 {
+    CURRENT_XID.load(core::sync::atomic::Ordering::Relaxed)
+}
 
 // ---------------------------------------------------------------------------
 // DHCP state
@@ -115,8 +131,8 @@ fn build_dhcp_message(msg_type: u8, our_mac: &MacAddress, options: &[(u8, &[u8])
     msg.push(6);
     // hops.
     msg.push(0);
-    // xid (transaction ID).
-    msg.extend_from_slice(&XID.to_be_bytes());
+    // xid (transaction ID) — use current random XID.
+    msg.extend_from_slice(&current_xid().to_be_bytes());
     // secs (seconds since start).
     msg.extend_from_slice(&0u16.to_be_bytes());
     // flags (0x8000 = broadcast flag — request broadcast reply).
@@ -275,7 +291,7 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
 
     // Verify xid matches.
     let xid = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-    if xid != XID {
+    if xid != current_xid() {
         return Ok(());
     }
 
@@ -406,7 +422,9 @@ pub fn discover() -> KernelResult<Ipv4Addr> {
         return Err(KernelError::NoSuchDevice);
     }
 
-    crate::serial_println!("[dhcp] Starting DHCP discovery...");
+    // Generate a fresh random transaction ID for this discovery.
+    let xid = new_xid();
+    crate::serial_println!("[dhcp] Starting DHCP discovery (xid=0x{:08x})...", xid);
     send_discover()?;
 
     // Poll for responses (up to ~5 seconds).

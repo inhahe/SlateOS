@@ -819,6 +819,17 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         return Ok(());
     }
 
+    // Verify TCP checksum (pseudo-header + segment).
+    if !ipv4::verify_transport_checksum(
+        ip_packet.src, ip_packet.dst, PROTO_TCP, data,
+    ) {
+        crate::serial_println!(
+            "[tcp] Dropped segment from {} — bad checksum",
+            ip_packet.src
+        );
+        return Ok(());
+    }
+
     let src_port = u16::from_be_bytes([data[0], data[1]]);
     let dst_port = u16::from_be_bytes([data[2], data[3]]);
     let seq = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);

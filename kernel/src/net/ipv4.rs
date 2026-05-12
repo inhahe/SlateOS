@@ -101,6 +101,14 @@ impl<'a> Ipv4Packet<'a> {
             return Err(KernelError::InvalidArgument);
         }
 
+        // Verify IP header checksum.  The checksum covers only the
+        // IP header (not the payload).  A correct checksum folds to
+        // zero when computed over the header including the checksum
+        // field (one's complement property, RFC 1071).
+        if ip_checksum(&data[..header_len]) != 0 {
+            return Err(KernelError::InvalidArgument);
+        }
+
         let total_length = u16::from_be_bytes([data[2], data[3]]);
         let ttl = data[8];
         let protocol = data[9];
@@ -218,6 +226,69 @@ pub fn ip_checksum(data: &[u8]) -> u16 {
     }
 
     !sum as u16
+}
+
+/// Verify a TCP or UDP checksum using the IPv4 pseudo-header (RFC 793/768).
+///
+/// The transport-layer checksum covers:
+/// 1. A pseudo-header: source IP, destination IP, zero byte, protocol, segment length
+/// 2. The full transport segment (header + payload)
+///
+/// Returns `true` if the checksum is valid (folds to zero) or if the
+/// checksum field is zero (valid for UDP over IPv4, meaning "no checksum").
+///
+/// `segment` is the full transport-layer data (TCP/UDP header + payload).
+/// `protocol` is the IP protocol number (6 = TCP, 17 = UDP).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn verify_transport_checksum(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    protocol: u8,
+    segment: &[u8],
+) -> bool {
+    // UDP with checksum field = 0 means "no checksum" (valid per RFC 768).
+    if protocol == PROTO_UDP && segment.len() >= 8 {
+        let cksum_field = u16::from_be_bytes([segment[6], segment[7]]);
+        if cksum_field == 0 {
+            return true;
+        }
+    }
+
+    // Build pseudo-header + segment and compute checksum.
+    let seg_len = segment.len() as u16;
+    let mut sum: u32 = 0;
+
+    // Pseudo-header: src IP (4 bytes as two 16-bit words).
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src.0[0], src.0[1]])));
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src.0[2], src.0[3]])));
+    // Pseudo-header: dst IP.
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst.0[0], dst.0[1]])));
+    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst.0[2], dst.0[3]])));
+    // Pseudo-header: zero + protocol.
+    sum = sum.wrapping_add(u32::from(protocol));
+    // Pseudo-header: segment length.
+    sum = sum.wrapping_add(u32::from(seg_len));
+
+    // Sum the segment itself (16-bit words).
+    let mut i = 0;
+    while i + 1 < segment.len() {
+        let word = u16::from_be_bytes([segment[i], segment[i + 1]]);
+        sum = sum.wrapping_add(u32::from(word));
+        i += 2;
+    }
+    // Handle odd trailing byte.
+    if i < segment.len() {
+        sum = sum.wrapping_add(u32::from(segment[i]) << 8);
+    }
+
+    // Fold 32-bit sum into 16 bits.
+    while sum > 0xFFFF {
+        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
+    }
+
+    // Valid checksum folds to 0xFFFF (since the checksum field is
+    // included in the computation, the complement is zero).
+    sum == 0xFFFF
 }
 
 // ---------------------------------------------------------------------------

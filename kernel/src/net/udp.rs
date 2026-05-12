@@ -176,10 +176,22 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         return Err(KernelError::InvalidArgument);
     }
 
+    // Verify UDP checksum (pseudo-header + segment).
+    // verify_transport_checksum handles the "checksum = 0 means no
+    // checksum" case for UDP over IPv4 (RFC 768).
+    if !ipv4::verify_transport_checksum(
+        ip_packet.src, ip_packet.dst, PROTO_UDP, data,
+    ) {
+        crate::serial_println!(
+            "[udp] Dropped datagram from {} — bad checksum",
+            ip_packet.src
+        );
+        return Ok(());
+    }
+
     let src_port = u16::from_be_bytes([data[0], data[1]]);
     let dst_port = u16::from_be_bytes([data[2], data[3]]);
     let _length = u16::from_be_bytes([data[4], data[5]]);
-    // Skip checksum validation for now (checksum field = 0 is valid).
 
     let payload = &data[UDP_HEADER_SIZE..];
 

@@ -155,6 +155,9 @@ core::arch::global_asm!(
 const PRINTF_BUF_SIZE: usize = 4096;
 
 /// `printf(fmt, ...)` — write formatted output to stdout.
+///
+/// Output goes through the stdio buffer (line-buffered on stdout) so
+/// printf output is properly coalesced with other stdout writes.
 #[unsafe(no_mangle)]
 pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
@@ -163,21 +166,23 @@ pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64) -> i32 {
         return n;
     }
     let write_len = if (n as usize) < PRINTF_BUF_SIZE { n as usize } else { PRINTF_BUF_SIZE };
-    let ret = crate::file::write(1, buf.as_ptr(), write_len);
+    let ret = crate::stdio::write_stream(1 as *mut u8, buf.as_ptr(), write_len);
     if ret < 0 { ret as i32 } else { n }
 }
 
 /// `fprintf(stream, fmt, ...)` — write formatted output to a stream.
+///
+/// Output goes through the stdio buffer so fprintf output is properly
+/// coalesced with other writes to the same stream.
 #[unsafe(no_mangle)]
 pub extern "C" fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: *const u64) -> i32 {
-    let fd = stream as usize as i32;
     let mut buf = [0u8; PRINTF_BUF_SIZE];
     let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
     if n <= 0 {
         return n;
     }
     let write_len = if (n as usize) < PRINTF_BUF_SIZE { n as usize } else { PRINTF_BUF_SIZE };
-    let ret = crate::file::write(fd, buf.as_ptr(), write_len);
+    let ret = crate::stdio::write_stream(stream, buf.as_ptr(), write_len);
     if ret < 0 { ret as i32 } else { n }
 }
 

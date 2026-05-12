@@ -1143,6 +1143,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] terminal control: cfmakeraw (raw mode for TUI apps), cfsetspeed, tcsendbreak/tcdrain/tcflow/tcflush stubs; BRKINT/INPCK/ISTRIP/IXON/PARENB constants
   - [x] string additions: memmem (byte sequence search), mempcpy (copy returning end pointer), rawmemchr (unbounded memchr)
   - [x] strtold: long double conversion (delegates to strtod — Rust lacks 80-bit float)
+  - [x] stdio buffering: real FILE structs with 1 KiB buffers, line-buffered stdout (flush on '\n'), unbuffered stderr, fully-buffered fopen'd files; read-ahead for input; printf/fprintf routed through buffer; feof/ferror real status; fseek/ftell account for buffered data; stdout auto-flush before stdin reads; 16-slot static FILE pool for fopen'd files
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

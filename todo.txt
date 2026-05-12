@@ -194,6 +194,14 @@ UDP multicast — group join/leave for service discovery
   VT100 escape sequences.  Will need real terminal mode support when
   porting interactive programs (vim, less, etc.).
 
+- (DONE) stdio buffering: Replaced unbuffered FILE* sentinels with real
+  FILE structs backed by 1 KiB internal buffers.  stdout is line-buffered
+  (flushes on '\n'), stderr is unbuffered, fopen'd files fully-buffered.
+  Static pool of 16 FILE slots for fopen'd files.  Read-ahead buffering
+  for input.  printf/fprintf now go through the buffer.  feof/ferror now
+  report real status.  fseek/ftell account for buffered data.  Stdout is
+  auto-flushed before stdin reads for interactive prompt support.
+
 - Unit tests exist in #[cfg(test)] modules but can't run on the host
   because the crate targets x86_64-unknown-none.  Need a QEMU-based
   test runner or a separate host-testable crate that extracts pure
@@ -205,6 +213,14 @@ UDP multicast — group join/leave for service discovery
   during rip_sample self-test on SMP.  APs contribute timer samples between
   baseline and final check.  Fixed: changed exact assert_eq to >= checks.
   Commit 0d6e5f8.  Verified BOOT_OK reached in QEMU SMP boot.
+
+- scfilter.rs:538 assertion failure (`left: Some(1024), right: Some(1000)`)
+  — panics during scfilter self-test.  allowed_count() counts all set bits
+  in the bitmap (16 words × 64 bits = 1024 bits) but MAX_SYSCALL_NR is 1000.
+  The 24 extra bits (1000..1023) are set to 1 during install() (allow-all)
+  but should either not be set or not counted.  Fix: cap the bit count in
+  allowed_count() to MAX_SYSCALL_NR, or clear bits >= MAX_SYSCALL_NR in
+  install().  Zone: kernel-ipc / kernel-security.
 
 ## Judgment Calls
 

@@ -1119,6 +1119,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] strftime/strptime expansion: 19 additional format specifiers (%C/%y/%e/%w/%u/%U/%W/%I/%k/%l/%P/%D/%F/%T/%R/%r/%x/%X/%z/%Z/%s), write_space_dec2/hour_12/write_i64/write_u64 helpers, Tm derives Clone+Copy
   - [x] system(): posix_spawnp("sh", "-c", command) + waitpid (was ENOSYS stub), NULL→stat /bin/sh check
   - [x] tmpnam: /tmp/tmp_NNNNNN name generation with monotonic counter, L_TMPNAM=20 (was null stub)
+  - [x] fcntl advisory locking: F_GETLK/F_SETLK/F_SETLKW commands, struct Flock (l_type/l_whence/l_start/l_len/l_pid), F_RDLCK/F_WRLCK/F_UNLCK constants; stubs (no kernel lock enforcement — F_GETLK returns F_UNLCK, F_SETLK/F_SETLKW always succeed)
+  - [x] signal additions: sigaltstack (stack_t struct, SS_ONSTACK/SS_DISABLE/MINSIGSTKSZ/SIGSTKSZ constants, validates stack size), siginterrupt (stub — no SA_RESTART behavior to toggle)
+  - [x] setgroups: stub succeeding silently (single-user OS)
+  - [x] terminal control: cfmakeraw (raw mode for TUI apps), cfsetspeed, tcsendbreak/tcdrain/tcflow/tcflush stubs; BRKINT/INPCK/ISTRIP/IXON/PARENB constants
+  - [x] string additions: memmem (byte sequence search), mempcpy (copy returning end pointer), rawmemchr (unbounded memchr)
+  - [x] strtold: long double conversion (delegates to strtod — Rust lacks 80-bit float)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

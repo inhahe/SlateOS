@@ -77,6 +77,13 @@ pub struct Ipv4Packet<'a> {
     /// Layout: `[0][DF][MF][Fragment Offset (13 bits)]`.
     /// Fragment offset is in 8-byte units.
     flags_frag: u16,
+    /// ECN field (2 low bits of the DSCP/ECN byte, RFC 3168).
+    ///
+    /// - `0b00` (NotECT): Not ECN-Capable Transport.
+    /// - `0b01` (ECT(1)): ECN-capable, codepoint 1.
+    /// - `0b10` (ECT(0)): ECN-capable, codepoint 0.
+    /// - `0b11` (CE): Congestion Experienced.
+    pub ecn: u8,
     /// Time to live.
     pub ttl: u8,
     /// Protocol number (6=TCP, 17=UDP, 1=ICMP).
@@ -94,6 +101,17 @@ pub struct Ipv4Packet<'a> {
     /// reference to the raw header avoids reconstructing it later.
     pub raw_header: &'a [u8],
 }
+
+/// ECN codepoint: Congestion Experienced (CE).  Set by routers when
+/// their queues are filling up, as an alternative to dropping packets.
+pub const ECN_CE: u8 = 0b11;
+
+/// ECN codepoint: ECN-Capable Transport, codepoint 0.
+pub const ECN_ECT0: u8 = 0b10;
+
+/// ECN codepoint: ECN-Capable Transport, codepoint 1.
+#[allow(dead_code)] // Used for reference; we send ECT(0).
+pub const ECN_ECT1: u8 = 0b01;
 
 impl Ipv4Packet<'_> {
     /// More Fragments flag — `true` if this is not the last fragment.
@@ -143,6 +161,8 @@ impl<'a> Ipv4Packet<'a> {
         }
 
         let total_length = u16::from_be_bytes([data[2], data[3]]);
+        // ECN is the low 2 bits of the DSCP/ECN byte (byte 1).
+        let ecn = data[1] & 0x03;
         let identification = u16::from_be_bytes([data[4], data[5]]);
         let flags_frag = u16::from_be_bytes([data[6], data[7]]);
         let ttl = data[8];
@@ -166,6 +186,7 @@ impl<'a> Ipv4Packet<'a> {
             total_length,
             identification,
             flags_frag,
+            ecn,
             ttl,
             protocol,
             src: Ipv4Addr(src),
@@ -180,7 +201,7 @@ impl<'a> Ipv4Packet<'a> {
 // IPv4 packet construction
 // ---------------------------------------------------------------------------
 
-/// Build an IPv4 packet.
+/// Build an IPv4 packet (ECN field set to 0 — not ECN-capable).
 ///
 /// Returns the raw packet bytes (header + payload), or an error if
 /// the payload is too large to fit in a single IPv4 packet (max
@@ -188,12 +209,26 @@ impl<'a> Ipv4Packet<'a> {
 /// 20-byte header).
 ///
 /// Computes the IP header checksum.
-#[allow(clippy::arithmetic_side_effects)]
 pub fn build_packet(
     src: Ipv4Addr,
     dst: Ipv4Addr,
     protocol: u8,
     payload: &[u8],
+) -> Vec<u8> {
+    build_packet_ecn(src, dst, protocol, payload, 0)
+}
+
+/// Build an IPv4 packet with an explicit ECN codepoint.
+///
+/// `ecn` is the 2-bit ECN field (0 = Not-ECT, 1 = ECT(1), 2 = ECT(0),
+/// 3 = CE).  For TCP with ECN negotiated, use `ECN_ECT0` (2).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn build_packet_ecn(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    protocol: u8,
+    payload: &[u8],
+    ecn: u8,
 ) -> Vec<u8> {
     let total_len = IPV4_HEADER_SIZE + payload.len();
 
@@ -207,8 +242,8 @@ pub fn build_packet(
 
     // Version (4) + IHL (5 = 20 bytes, no options).
     pkt.push(0x45);
-    // DSCP + ECN.
-    pkt.push(0);
+    // DSCP (0) + ECN (low 2 bits).
+    pkt.push(ecn & 0x03);
     // Total length.
     pkt.extend_from_slice(&total_len_u16.to_be_bytes());
     // Identification (0 for now — no fragmentation).
@@ -498,6 +533,7 @@ fn dispatch_reassembled(
         total_length: total_len,
         identification: 0,
         flags_frag: 0,
+        ecn: 0, // ECN not tracked through reassembly.
         ttl: 0,
         protocol: pkt.protocol,
         src: pkt.src,
@@ -523,6 +559,15 @@ fn dispatch_reassembled(
 /// addresses), wraps in an Ethernet frame, and sends via the NIC.
 pub fn send(dst: Ipv4Addr, protocol: u8, payload: &[u8]) -> KernelResult<()> {
     send_ns(crate::netns::ROOT_NS, dst, protocol, payload)
+}
+
+/// Send an IPv4 packet with an explicit ECN codepoint in the IP header.
+///
+/// Identical to [`send`] except the 2-bit ECN field is set to `ecn`
+/// (use [`ECN_ECT0`] for TCP with ECN negotiated).  Non-ECN callers
+/// should use [`send`] which defaults to Not-ECT (0).
+pub fn send_ecn(dst: Ipv4Addr, protocol: u8, payload: &[u8], ecn: u8) -> KernelResult<()> {
+    send_ns_ecn(crate::netns::ROOT_NS, dst, protocol, payload, ecn)
 }
 
 /// Send an IPv4 packet within a specific network namespace.
@@ -554,6 +599,37 @@ pub fn send_ns(
     protocol: u8,
     payload: &[u8],
 ) -> KernelResult<()> {
+    send_ns_ecn(ns_id, dst, protocol, payload, 0)
+}
+
+/// Send an IPv4 packet within a specific network namespace, with an
+/// explicit ECN codepoint.
+///
+/// This is the core send path.  [`send_ns`] and [`send`] are convenience
+/// wrappers that pass `ecn = 0` (Not-ECT).
+///
+/// # Parameters
+///
+/// - `ns_id`: Network namespace ID.  Use `ROOT_NS` (0) for the
+///   physical NIC's namespace.
+/// - `dst`: Destination IPv4 address.
+/// - `protocol`: IP protocol number (e.g., `PROTO_TCP`, `PROTO_UDP`).
+/// - `payload`: Protocol payload (e.g., TCP/UDP segment).
+/// - `ecn`: 2-bit ECN codepoint for the IP header (0 = Not-ECT,
+///   [`ECN_ECT1`] = 1, [`ECN_ECT0`] = 2, [`ECN_CE`] = 3).
+///
+/// # Errors
+///
+/// - [`KernelError::PermissionDenied`] if the firewall blocks the packet.
+/// - [`KernelError::TimedOut`] if ARP resolution fails.
+/// - [`KernelError::NoSuchDevice`] if no NIC is available.
+fn send_ns_ecn(
+    ns_id: crate::netns::NetNsId,
+    dst: Ipv4Addr,
+    protocol: u8,
+    payload: &[u8],
+    ecn: u8,
+) -> KernelResult<()> {
     // Namespace-aware firewall outbound check.
     // Root namespace (0) uses the global firewall; child namespaces use
     // their own per-namespace firewall state.
@@ -567,8 +643,8 @@ pub fn send_ns(
     // Source IP comes from the namespace's interface configuration.
     let our_ip = interface::ns_ip(ns_id);
 
-    // Build the IP packet with the namespace's source address.
-    let ip_packet = build_packet(our_ip, dst, protocol, payload);
+    // Build the IP packet with the namespace's source address and ECN.
+    let ip_packet = build_packet_ecn(our_ip, dst, protocol, payload, ecn);
 
     // Determine the next-hop MAC address.
     let iface_info = interface::info();

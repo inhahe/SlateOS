@@ -38,6 +38,12 @@
 //!   peer advertises a zero receive window, the persist timer sends periodic
 //!   probes with exponential backoff (500ms → 60s).  This prevents permanent
 //!   deadlock when the receiver's window update ACK is lost.
+//! - **ECN** (Explicit Congestion Notification, RFC 3168): negotiated in the
+//!   3-way handshake via ECE+CWR flags (both client and server).  When a
+//!   router CE-marks an IP packet, the receiver echoes ECE in ACKs; the
+//!   sender reduces cwnd (like a loss event) and sets CWR.  IP datagrams
+//!   on ECN-negotiated connections are marked ECT(0) so routers can signal
+//!   congestion without dropping packets.
 //!
 //! - **Window scaling** (RFC 7323): negotiated during the 3-way handshake
 //!   so that peers with large receive windows (Linux default scale 7) are
@@ -211,6 +217,17 @@ const TCP_SYN: u8 = 0x02;
 const TCP_RST: u8 = 0x04;
 const TCP_PSH: u8 = 0x08;
 const TCP_ACK: u8 = 0x10;
+/// Congestion Window Reduced (RFC 3168 §6.1).
+///
+/// Set by the sender to indicate it has reduced its congestion window
+/// in response to an ECE-flagged ACK from the receiver.
+const TCP_CWR: u8 = 0x80;
+/// ECN-Echo (RFC 3168 §6.1).
+///
+/// In the SYN: sender supports ECN.
+/// In ACKs: the receiver saw a CE-marked IP packet and is echoing
+/// the congestion signal to the sender.
+const TCP_ECE: u8 = 0x40;
 
 // ---------------------------------------------------------------------------
 // TCP state machine
@@ -375,6 +392,19 @@ struct TcpConnection {
     /// Used for RTO timeout-based retransmission.
     tx_last_send_ns: u64,
 
+    // -- ECN (Explicit Congestion Notification, RFC 3168) --
+
+    /// Whether ECN was negotiated during the handshake (both sides
+    /// set ECE+CWR in their SYN).
+    ecn_ok: bool,
+    /// Whether we've received a CE-marked packet and need to echo
+    /// ECE in our next ACK.  Cleared when we send an ACK with ECE set.
+    ecn_ce_pending: bool,
+    /// Whether we've already reduced cwnd for the current CE event.
+    /// Prevents multiple reductions for a burst of CE-marked packets.
+    /// Reset when we receive a CWR from the peer.
+    ecn_cwr_sent: bool,
+
     // -- Persist timer (zero window probe, RFC 1122 §4.2.2.17) --
 
     /// Whether the persist timer is active (peer advertised zero window
@@ -443,6 +473,9 @@ impl TcpConnection {
             tx_buffer: Vec::new(),
             tx_buf_seq: 0,
             tx_last_send_ns: 0,
+            ecn_ok: false,
+            ecn_ce_pending: false,
+            ecn_cwr_sent: false,
             persist_active: false,
             persist_interval_ns: PERSIST_MIN_NS,
             persist_last_ns: 0,
@@ -835,6 +868,7 @@ fn send_segment_with_window(
     flags: u8,
     window: u16,
     payload: &[u8],
+    ip_ecn: u8,
 ) -> KernelResult<()> {
     let local_ip = interface::ip();
     let seg = build_segment(
@@ -845,7 +879,7 @@ fn send_segment_with_window(
         local_ip, remote_ip,
     );
 
-    ipv4::send(remote_ip, PROTO_TCP, &seg)
+    ipv4::send_ecn(remote_ip, PROTO_TCP, &seg, ip_ecn)
 }
 
 /// Send a TCP segment via IP, advertising the default receive window.
@@ -863,7 +897,7 @@ fn send_segment(
 ) -> KernelResult<()> {
     send_segment_with_window(
         local_port, remote_ip, remote_port,
-        seq, ack, flags, DEFAULT_WINDOW, payload,
+        seq, ack, flags, DEFAULT_WINDOW, payload, 0,
     )
 }
 
@@ -898,7 +932,20 @@ fn send_syn_segment(
 /// If SACK was negotiated and the connection has out-of-order blocks,
 /// the ACK includes a SACK option listing them.  Otherwise sends a
 /// plain ACK.
+///
+/// ECN handling (RFC 3168 §6.1.3): if `ecn_ce_pending` is set, the
+/// ACK includes the ECE flag to echo the congestion signal back to the
+/// sender.  The IP header is marked ECT(0) when ECN is negotiated.
 fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
+    // ECN: add ECE flag to ACKs when we've seen CE-marked packets.
+    let mut flags = TCP_ACK;
+    if conn.ecn_ok && conn.ecn_ce_pending {
+        flags |= TCP_ECE;
+    }
+
+    // IP ECN: mark ECT(0) for ECN-negotiated connections.
+    let ip_ecn = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
+
     let (sack_opt, sack_len) = build_sack_option(conn);
 
     if sack_len > 0 {
@@ -906,18 +953,18 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
         let seg = build_segment_with_options(
             conn.local_port, conn.remote_port,
             conn.snd_nxt, conn.rcv_nxt,
-            TCP_ACK,
+            flags,
             advertised_window(conn),
             &sack_opt[..sack_len],
             &[],
             local_ip, conn.remote_ip,
         );
-        ipv4::send(conn.remote_ip, PROTO_TCP, &seg)
+        ipv4::send_ecn(conn.remote_ip, PROTO_TCP, &seg, ip_ecn)
     } else {
         send_segment_with_window(
             conn.local_port, conn.remote_ip, conn.remote_port,
             conn.snd_nxt, conn.rcv_nxt,
-            TCP_ACK, advertised_window(conn), &[],
+            flags, advertised_window(conn), &[], ip_ecn,
         )
     }
 }
@@ -979,6 +1026,9 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.nagle_buf.clear();
         conn.tx_buf_seq = isn.wrapping_add(1); // After SYN sequence.
         conn.tx_last_send_ns = 0;
+        conn.ecn_ok = false; // Confirmed on SYN-ACK.
+        conn.ecn_ce_pending = false;
+        conn.ecn_cwr_sent = false;
         conn.keepalive_enabled = false;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
@@ -987,9 +1037,12 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
 
     // Send SYN with MSS + WScale options (RFC 7323).
     // The window field in the SYN itself is NOT scaled (RFC 7323 §2.2).
+    // ECN negotiation (RFC 3168 §6.1.1): set ECE+CWR in the SYN to
+    // signal ECN support.  The server responds with ECE (no CWR) if
+    // it also supports ECN.
     send_syn_segment(
         local_port, remote_ip, remote_port,
-        isn, 0, TCP_SYN, DEFAULT_WINDOW, OUR_WSCALE,
+        isn, 0, TCP_SYN | TCP_ECE | TCP_CWR, DEFAULT_WINDOW, OUR_WSCALE,
     )?;
     crate::serial_println!(
         "[tcp] SYN sent to {}:{} (seq={}, wscale={})",
@@ -1476,7 +1529,8 @@ fn build_sack_option(conn: &TcpConnection) -> ([u8; 34], usize) {
 /// Returns `Ok(())` even if the effective window truncated the send.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
-    let (local_port, remote_ip, remote_port, seq, ack, eff_wnd, our_wnd, nagle, has_unacked) = {
+    let (local_port, remote_ip, remote_port, seq, ack, eff_wnd, our_wnd,
+         nagle, has_unacked, ecn_ok, ecn_cwr) = {
         let conns = CONNECTIONS.lock();
         let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
         // Allow sending in Established (normal) or CloseWait (remote
@@ -1489,7 +1543,8 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
         let unacked = conn.snd_nxt != conn.snd_una;
         (conn.local_port, conn.remote_ip, conn.remote_port,
          conn.snd_nxt, conn.rcv_nxt, effective_window(conn),
-         advertised_window(conn), conn.nagle_enabled, unacked)
+         advertised_window(conn), conn.nagle_enabled, unacked,
+         conn.ecn_ok, conn.ecn_cwr_sent)
     };
 
     // Nagle's algorithm (RFC 896): if we have unacknowledged data in
@@ -1526,12 +1581,23 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
             }
             conn.tx_last_send_ns = crate::hrtimer::now_ns();
             conn.last_activity_ns = conn.tx_last_send_ns;
+            // ECN: add CWR flag on data segments when we've reduced
+            // cwnd for a congestion event (tells peer to stop echoing ECE).
+            let mut tcp_flags = TCP_ACK | TCP_PSH;
+            let ip_ecn_val = if conn.ecn_ok {
+                if conn.ecn_cwr_sent {
+                    tcp_flags |= TCP_CWR;
+                }
+                ipv4::ECN_ECT0
+            } else {
+                0
+            };
             // Drain flushed data from nagle_buf.
             conn.nagle_buf.drain(..flush_len);
             drop(conns);
             let _ = send_segment_with_window(
-                lp, ri, rp, s, a, TCP_ACK | TCP_PSH, w,
-                &flush_data[..flush_len],
+                lp, ri, rp, s, a, tcp_flags, w,
+                &flush_data[..flush_len], ip_ecn_val,
             );
         }
         return Ok(());
@@ -1561,6 +1627,19 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
     let mut offset = 0;
     let mut first_seq = seq;
 
+    // ECN: set CWR on data segments when we've reduced cwnd in response
+    // to peer's ECE (RFC 3168 §6.1.2).  Mark IP header ECT(0) for
+    // ECN-negotiated connections so routers can CE-mark instead of drop.
+    let mut data_flags = TCP_ACK | TCP_PSH;
+    let ip_ecn_data = if ecn_ok {
+        if ecn_cwr {
+            data_flags |= TCP_CWR;
+        }
+        ipv4::ECN_ECT0
+    } else {
+        0
+    };
+
     while offset < send_data.len() {
         let chunk_end = (offset + MSS).min(send_data.len());
         let chunk = &send_data[offset..chunk_end];
@@ -1569,9 +1648,10 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
         send_segment_with_window(
             local_port, remote_ip, remote_port,
             send_seq, ack,
-            TCP_ACK | TCP_PSH,
+            data_flags,
             our_wnd,
             chunk,
+            ip_ecn_data,
         )?;
 
         if offset == 0 {
@@ -1938,6 +2018,9 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
 ///
 /// `option_bytes` contains the TCP options from the SYN segment (bytes
 /// 20..data_offset of the TCP header).  Used to parse window scale.
+///
+/// `syn_flags` is the full TCP flags byte from the SYN segment, used to
+/// detect ECN negotiation (RFC 3168 §6.1.1: ECE+CWR in SYN).
 #[allow(clippy::arithmetic_side_effects)]
 fn handle_incoming_syn(
     remote_ip: Ipv4Addr,
@@ -1946,6 +2029,7 @@ fn handle_incoming_syn(
     remote_seq: u32,
     remote_window: u16,
     option_bytes: &[u8],
+    syn_flags: u8,
 ) -> KernelResult<()> {
     // Check if we have a listener for this port.
     let listener_exists = {
@@ -2025,6 +2109,13 @@ fn handle_incoming_syn(
         conn.sack_blocks = [(0, 0); MAX_SACK_BLOCKS];
         conn.sack_block_count = 0;
 
+        // ECN (RFC 3168 §6.1.1): if the client's SYN has both ECE and CWR
+        // set, it supports ECN.  We confirm by setting ECE (without CWR) in
+        // our SYN-ACK.
+        conn.ecn_ok = (syn_flags & TCP_ECE != 0) && (syn_flags & TCP_CWR != 0);
+        conn.ecn_ce_pending = false;
+        conn.ecn_cwr_sent = false;
+
         conn.keepalive_enabled = false;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
@@ -2032,18 +2123,29 @@ fn handle_incoming_syn(
     };
 
     // Send SYN-ACK with WScale option (only if the client sent one).
+    // ECN: add ECE flag if ECN was negotiated (RFC 3168 §6.1.1).
     let rcv_nxt = remote_seq.wrapping_add(1);
+    let ecn_negotiated = {
+        let conns = CONNECTIONS.lock();
+        conns.get(handle).map_or(false, |c| c.ecn_ok)
+    };
+    let synack_flags = if ecn_negotiated {
+        TCP_SYN | TCP_ACK | TCP_ECE
+    } else {
+        TCP_SYN | TCP_ACK
+    };
+
     if syn_opts.wscale.is_some() {
         send_syn_segment(
             local_port, remote_ip, remote_port,
-            isn, rcv_nxt, TCP_SYN | TCP_ACK,
+            isn, rcv_nxt, synack_flags,
             DEFAULT_WINDOW, OUR_WSCALE,
         )?;
     } else {
         // Client doesn't support window scaling — plain SYN-ACK.
         send_segment(
             local_port, remote_ip, remote_port,
-            isn, rcv_nxt, TCP_SYN | TCP_ACK, &[],
+            isn, rcv_nxt, synack_flags, &[],
         )?;
     }
 
@@ -2139,7 +2241,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
             drop(conns);
             return handle_incoming_syn(
                 ip_packet.src, src_port, dst_port, seq, window,
-                option_bytes,
+                option_bytes, flags,
             );
         }
         // No matching connection and not a SYN for a listener.
@@ -2179,6 +2281,19 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         conn.persist_active = false;
         conn.persist_interval_ns = PERSIST_MIN_NS;
         conn.persist_last_ns = 0;
+    }
+
+    // ECN: if the IP header has CE (Congestion Experienced) set and
+    // ECN was negotiated, remember that we need to echo ECE in our
+    // next ACK so the sender knows to reduce its congestion window.
+    if conn.ecn_ok && ip_packet.ecn == ipv4::ECN_CE {
+        conn.ecn_ce_pending = true;
+    }
+
+    // ECN: if the peer sends CWR, it has acknowledged our ECE — we
+    // can stop echoing ECE.
+    if conn.ecn_ok && (flags & TCP_CWR != 0) {
+        conn.ecn_ce_pending = false;
     }
 
     // Any incoming segment counts as activity for keepalive purposes.
@@ -2222,6 +2337,13 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
 
                 // SACK: both sides must have sent SACK-Permitted (RFC 2018).
                 conn.sack_ok = synack_opts.sack_permitted;
+
+                // ECN (RFC 3168 §6.1.1): the server confirms ECN support
+                // by setting ECE (without CWR) in the SYN-ACK.
+                if flags & TCP_ECE != 0 && flags & TCP_CWR == 0 {
+                    conn.ecn_ok = true;
+                    crate::serial_println!("[tcp] ECN negotiated");
+                }
 
                 conn.state = TcpState::Established;
 
@@ -2290,6 +2412,24 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     // Congestion window update.
                     on_ack_congestion(conn, bytes_acked);
 
+                    // ECN: if the peer sent ECE, it received a CE-marked
+                    // packet.  Reduce cwnd (like a loss event) and set
+                    // CWR to tell the peer we've responded.  Only reduce
+                    // once per congestion event (ecn_cwr_sent guards).
+                    if conn.ecn_ok && (flags & TCP_ECE != 0) && !conn.ecn_cwr_sent {
+                        on_loss_congestion(conn);
+                        conn.ecn_cwr_sent = true;
+                        crate::serial_println!(
+                            "[tcp] ECN: peer reported congestion (ECE) — cwnd reduced to {}",
+                            conn.cwnd
+                        );
+                    }
+                    // Clear CWR-sent once the peer stops sending ECE
+                    // (the congestion event is resolved).
+                    if conn.ecn_ok && (flags & TCP_ECE == 0) && conn.ecn_cwr_sent {
+                        conn.ecn_cwr_sent = false;
+                    }
+
                     // Nagle flush: if all outstanding data is now acked
                     // and the nagle buffer has pending data, send it.
                     if conn.snd_una == conn.snd_nxt && !conn.nagle_buf.is_empty() {
@@ -2316,11 +2456,17 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                         conn.tx_last_send_ns = now;
                         conn.last_activity_ns = now;
                         start_rtt_timing(conn, s);
+                        // ECN: CWR on data segments, ECT(0) in IP header.
+                        let mut nagle_flags = TCP_ACK | TCP_PSH;
+                        let nagle_ecn = if conn.ecn_ok {
+                            if conn.ecn_cwr_sent { nagle_flags |= TCP_CWR; }
+                            ipv4::ECN_ECT0
+                        } else { 0 };
                         conn.nagle_buf.drain(..flush_len);
                         drop(conns);
                         let _ = send_segment_with_window(
-                            lp, ri, rp, s, a, TCP_ACK | TCP_PSH, w,
-                            &flush_data[..flush_len],
+                            lp, ri, rp, s, a, nagle_flags, w,
+                            &flush_data[..flush_len], nagle_ecn,
                         );
                         return Ok(());
                     }
@@ -2345,13 +2491,14 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                             let s = conn.snd_una;
                             let a = conn.rcv_nxt;
                             let w = advertised_window(conn);
+                            let retx_ecn = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
                             // Copy data out before dropping the lock.
                             let mut retx_data = [0u8; 1460]; // MSS-sized stack buffer.
                             retx_data[..retx_len].copy_from_slice(&conn.tx_buffer[..retx_len]);
                             drop(conns);
                             let _ = send_segment_with_window(
                                 lp, ri, rp, s, a, TCP_ACK | TCP_PSH, w,
-                                &retx_data[..retx_len],
+                                &retx_data[..retx_len], retx_ecn,
                             );
                             crate::serial_println!(
                                 "[tcp] Fast retransmit: {} bytes from seq {} (port {})",
@@ -2610,6 +2757,8 @@ pub fn tick_persist() {
             .min(PERSIST_MAX_NS);
         conn.persist_last_ns = now;
 
+        let probe_ecn = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
+
         crate::serial_println!(
             "[tcp] Zero-window probe for {}:{} → {}:{} (next in {}ms)",
             lp, rp, ri, rp,
@@ -2620,7 +2769,7 @@ pub fn tick_persist() {
         // interface locks).
         drop(conns);
         let _ = send_segment_with_window(
-            lp, ri, rp, probe_seq, ack, TCP_ACK, wnd, &[],
+            lp, ri, rp, probe_seq, ack, TCP_ACK, wnd, &[], probe_ecn,
         );
         // Dropped lock — restart scan next tick.
         return;
@@ -2702,6 +2851,7 @@ pub fn tick_keepalive() {
         let probe_seq = conn.snd_una.wrapping_sub(1);
         let rcv_nxt = conn.rcv_nxt;
         let our_wnd = advertised_window(conn);
+        let ka_ecn = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
 
         conn.keepalive_probes_sent = conn.keepalive_probes_sent.saturating_add(1);
 
@@ -2717,7 +2867,7 @@ pub fn tick_keepalive() {
         drop(conns);
         let _ = send_segment_with_window(
             local_port, remote_ip, remote_port,
-            probe_seq, rcv_nxt, TCP_ACK, our_wnd, &[],
+            probe_seq, rcv_nxt, TCP_ACK, our_wnd, &[], ka_ecn,
         );
         return; // Dropped lock; restart scan next tick.
     }
@@ -2830,6 +2980,7 @@ pub fn tick_retransmit() {
             conn.tx_last_send_ns = now;
             // Enter slow start after timeout (RFC 5681 §3.1).
             on_loss_congestion(conn);
+            let rto_ecn = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
 
             crate::serial_println!(
                 "[tcp] RTO retransmit: {} bytes from seq {} (port {}, rto={}ms)",
@@ -2840,7 +2991,7 @@ pub fn tick_retransmit() {
             drop(conns);
             let _ = send_segment_with_window(
                 lp, ri, rp, seq, ack, TCP_ACK | TCP_PSH, wnd,
-                &data[..len],
+                &data[..len], rto_ecn,
             );
             // We dropped the lock, so we can't continue the scan.
             // The next tick will handle remaining connections.

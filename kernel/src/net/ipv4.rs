@@ -79,6 +79,12 @@ pub struct Ipv4Packet<'a> {
     pub dst: Ipv4Addr,
     /// Payload (after IP header).
     pub payload: &'a [u8],
+    /// Raw IP header bytes (for ICMP error generation).
+    ///
+    /// RFC 792 requires ICMP error messages to include the original IP
+    /// header + first 8 bytes of the triggering packet.  Storing a
+    /// reference to the raw header avoids reconstructing it later.
+    pub raw_header: &'a [u8],
 }
 
 impl<'a> Ipv4Packet<'a> {
@@ -134,6 +140,7 @@ impl<'a> Ipv4Packet<'a> {
             src: Ipv4Addr(src),
             dst: Ipv4Addr(dst),
             payload,
+            raw_header: &data[..header_len],
         })
     }
 }

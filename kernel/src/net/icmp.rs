@@ -466,3 +466,54 @@ pub fn wait_reply_rtt(seq: u16, timeout_polls: u32) -> Option<u64> {
 pub fn last_rtt_ns() -> u64 {
     LAST_RTT_NS.load(Ordering::Relaxed)
 }
+
+/// Send an ICMP Destination Unreachable (Port Unreachable) message.
+///
+/// Per RFC 792 / RFC 1122 §3.2.2.1, when a UDP datagram arrives at a
+/// port with no listener, the host should send back an ICMP type 3
+/// code 3 (port unreachable).  The ICMP error payload contains the
+/// original IP header plus the first 8 bytes of the triggering UDP
+/// datagram.
+///
+/// `orig_ip_hdr` is the full original IP header (typically 20 bytes).
+/// `orig_transport_8` is the first 8 bytes of the transport layer
+/// (src_port + dst_port + length + checksum for UDP).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn send_port_unreachable(
+    dst: Ipv4Addr,
+    orig_ip_hdr: &[u8],
+    orig_transport_8: &[u8],
+) -> KernelResult<()> {
+    // Need the original IP header (≥20 bytes) and 8 bytes of transport.
+    if orig_ip_hdr.len() < 20 || orig_transport_8.len() < 8 {
+        return Ok(());
+    }
+
+    // ICMP Destination Unreachable format:
+    //   Type (3) | Code (3=port unreachable) | Checksum
+    //   Unused (4 bytes, must be 0)
+    //   Original IP header + first 8 bytes of triggering datagram
+    let payload_len = orig_ip_hdr.len() + 8; // IP header + 8 bytes transport
+    let total = ICMP_HEADER_SIZE + payload_len;
+    let mut pkt = Vec::with_capacity(total);
+
+    // Type: Destination Unreachable.
+    pkt.push(ICMP_DEST_UNREACHABLE);
+    // Code: Port Unreachable.
+    pkt.push(3);
+    // Checksum placeholder.
+    pkt.extend_from_slice(&[0, 0]);
+    // Unused (4 bytes).
+    pkt.extend_from_slice(&[0, 0, 0, 0]);
+    // Original IP header.
+    pkt.extend_from_slice(orig_ip_hdr);
+    // First 8 bytes of the original transport header.
+    pkt.extend_from_slice(&orig_transport_8[..8]);
+
+    // Compute checksum over the entire ICMP message.
+    let checksum = ipv4::ip_checksum(&pkt);
+    pkt[2] = (checksum >> 8) as u8;
+    pkt[3] = checksum as u8;
+
+    ipv4::send(dst, PROTO_ICMP, &pkt)
+}

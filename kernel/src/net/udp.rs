@@ -448,6 +448,18 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         return Ok(());
     }
 
-    // No socket bound — drop silently.
+    // No socket bound — send ICMP Port Unreachable (RFC 1122 §3.2.2.1).
+    // Only for unicast; multicast/broadcast should be dropped silently.
+    if !is_mcast && !ip_packet.dst.is_broadcast() {
+        // First 8 bytes of the UDP header for the ICMP error payload.
+        if data.len() >= 8 {
+            let _ = super::icmp::send_port_unreachable(
+                ip_packet.src,
+                ip_packet.raw_header,
+                &data[..8],
+            );
+        }
+    }
+
     Ok(())
 }

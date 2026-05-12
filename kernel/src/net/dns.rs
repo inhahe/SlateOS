@@ -11,11 +11,19 @@
 //! TTL elapses.  The cache holds up to 32 entries; when full, the
 //! oldest entry is evicted.
 //!
+//! Negative caching: names that fail to resolve (NXDOMAIN, no A
+//! record, no CNAME) are cached for 60 seconds with a sentinel IP
+//! (0.0.0.0) to avoid repeated queries for non-existent domains.
+//!
 //! ## Protocol overview
 //!
 //! DNS uses UDP port 53.  A query contains a question section with
 //! the domain name and record type.  The server responds with answer
 //! records containing the resolved IP addresses.
+//!
+//! Each query uses a unique transaction ID (monotonically incrementing
+//! AtomicU16) and a unique ephemeral source port (from the 49152–65535
+//! range) to prevent spoofed responses and port collisions.
 //!
 //! ## CNAME chasing
 //!
@@ -35,6 +43,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, Ordering};
 use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
@@ -58,11 +67,51 @@ const CLASS_IN: u16 = 1;
 /// DNS flags: standard query, recursion desired.
 const FLAGS_QUERY_RD: u16 = 0x0100;
 
-/// Transaction ID for our queries.
-const QUERY_ID: u16 = 0xBEEF;
+/// Monotonically incrementing transaction ID for DNS queries.
+///
+/// Using a unique ID per query prevents spoofed responses from matching
+/// a different query's transaction ID.  Starts at 1 (0 is reserved by
+/// some implementations as invalid).
+static NEXT_QUERY_ID: AtomicU16 = AtomicU16::new(1);
+
+/// Allocate the next unique transaction ID.
+fn next_query_id() -> u16 {
+    let id = NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed);
+    // Skip 0 on wrap-around (some resolvers treat 0 as invalid).
+    if id == 0 {
+        NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed)
+    } else {
+        id
+    }
+}
+
+/// Ephemeral port counter for DNS queries.
+///
+/// Each query binds a unique local port to avoid collisions when
+/// multiple resolutions are in flight (e.g., during CNAME chasing).
+/// Range: 49152–65535 (IANA dynamic/private port range).
+static NEXT_DNS_PORT: AtomicU16 = AtomicU16::new(49152);
+
+/// Allocate the next ephemeral port for DNS.
+fn next_dns_port() -> u16 {
+    let port = NEXT_DNS_PORT.fetch_add(1, Ordering::Relaxed);
+    // Wrap back to start of ephemeral range.
+    if port == 0 || port < 49152 {
+        NEXT_DNS_PORT.store(49153, Ordering::Relaxed);
+        49152
+    } else {
+        port
+    }
+}
 
 /// Maximum CNAME hops to follow before giving up.
 const MAX_CNAME_HOPS: usize = 8;
+
+/// TTL (in seconds) for negative cache entries (NXDOMAIN / not found).
+///
+/// Prevents repeated queries for names that don't exist.  Short TTL
+/// ensures we retry promptly if the name is created.
+const NEGATIVE_CACHE_TTL: u32 = 60;
 
 // ---------------------------------------------------------------------------
 // DNS cache
@@ -125,15 +174,21 @@ impl DnsCache {
 
     /// Look up a name in the cache.
     ///
-    /// Returns the cached IP if the entry exists and hasn't expired.
-    fn lookup(&self, name: &str, now_ns: u64) -> Option<Ipv4Addr> {
+    /// Returns `Some(Some(ip))` for a positive cache hit,
+    /// `Some(None)` for a negative cache hit (name was previously
+    /// queried and returned NXDOMAIN), or `None` for a cache miss.
+    fn lookup(&self, name: &str, now_ns: u64) -> Option<Option<Ipv4Addr>> {
         let name_bytes = name.as_bytes();
         for entry in &self.entries {
             if entry.name_len == name_bytes.len()
                 && entry.is_valid(now_ns)
                 && Self::names_match(&entry.name, entry.name_len, name_bytes)
             {
-                return Some(entry.ip);
+                // Unspecified IP (0.0.0.0) is our sentinel for negative cache entries.
+                if entry.ip.is_unspecified() {
+                    return Some(None);
+                }
+                return Some(Some(entry.ip));
             }
         }
         None
@@ -227,18 +282,21 @@ static DNS_CACHE: Mutex<DnsCache> = Mutex::new(DnsCache::new());
 
 /// Build a DNS query packet for an A record.
 ///
+/// `query_id` is the transaction ID for this query — used to match
+/// the response and prevent spoofed replies.
+///
 /// Returns the raw UDP payload.
 #[allow(clippy::arithmetic_side_effects)]
-fn build_query(name: &str) -> Vec<u8> {
+fn build_query(name: &str, query_id: u16) -> Vec<u8> {
     let mut pkt = Vec::with_capacity(64);
 
     // Header (12 bytes).
-    pkt.extend_from_slice(&QUERY_ID.to_be_bytes());   // ID.
+    pkt.extend_from_slice(&query_id.to_be_bytes());       // ID.
     pkt.extend_from_slice(&FLAGS_QUERY_RD.to_be_bytes()); // Flags.
-    pkt.extend_from_slice(&1u16.to_be_bytes());         // QDCOUNT = 1.
-    pkt.extend_from_slice(&0u16.to_be_bytes());         // ANCOUNT = 0.
-    pkt.extend_from_slice(&0u16.to_be_bytes());         // NSCOUNT = 0.
-    pkt.extend_from_slice(&0u16.to_be_bytes());         // ARCOUNT = 0.
+    pkt.extend_from_slice(&1u16.to_be_bytes());           // QDCOUNT = 1.
+    pkt.extend_from_slice(&0u16.to_be_bytes());           // ANCOUNT = 0.
+    pkt.extend_from_slice(&0u16.to_be_bytes());           // NSCOUNT = 0.
+    pkt.extend_from_slice(&0u16.to_be_bytes());           // ARCOUNT = 0.
 
     // Question section: encode domain name as labels.
     encode_name(&mut pkt, name);
@@ -275,6 +333,9 @@ struct DnsResult {
 
 /// Parse a DNS response and extract the first A record IP and TTL.
 ///
+/// `expected_id` is the transaction ID from the query — responses
+/// with a different ID are rejected (prevents spoofed replies).
+///
 /// If the answer section contains CNAME records, follows the chain
 /// to find the A record for the final canonical name.  Most DNS
 /// servers include both the CNAME and the A record for the target
@@ -285,8 +346,8 @@ struct DnsResult {
 /// has CNAMEs but no matching A record (caller should re-query for
 /// the CNAME target).
 #[allow(clippy::arithmetic_side_effects)]
-fn parse_response(data: &[u8]) -> KernelResult<DnsResult> {
-    parse_response_inner(data, None)
+fn parse_response(data: &[u8], expected_id: u16) -> KernelResult<DnsResult> {
+    parse_response_inner(data, expected_id, None)
 }
 
 /// Inner response parser that can optionally look for an A record
@@ -294,6 +355,7 @@ fn parse_response(data: &[u8]) -> KernelResult<DnsResult> {
 #[allow(clippy::arithmetic_side_effects)]
 fn parse_response_inner(
     data: &[u8],
+    expected_id: u16,
     target_name: Option<&str>,
 ) -> KernelResult<DnsResult> {
     if data.len() < 12 {
@@ -301,7 +363,7 @@ fn parse_response_inner(
     }
 
     let id = u16::from_be_bytes([data[0], data[1]]);
-    if id != QUERY_ID {
+    if id != expected_id {
         return Err(KernelError::InvalidArgument);
     }
 
@@ -600,15 +662,22 @@ pub fn resolve(name: &str) -> KernelResult<Ipv4Addr> {
                     );
                     // Check cache for the CNAME target before querying.
                     let now_ns = crate::hrtimer::now_ns();
-                    if let Some(ip) = DNS_CACHE.lock().lookup(&target, now_ns) {
-                        crate::serial_println!(
-                            "[dns] Cache hit for CNAME target: '{}' → {}",
-                            target, ip
-                        );
-                        // Also cache under the original name.
-                        let cache_now = crate::hrtimer::now_ns();
-                        DNS_CACHE.lock().insert(name, ip, 60, cache_now);
-                        return Ok(ip);
+                    match DNS_CACHE.lock().lookup(&target, now_ns) {
+                        Some(Some(ip)) => {
+                            crate::serial_println!(
+                                "[dns] Cache hit for CNAME target: '{}' → {}",
+                                target, ip
+                            );
+                            // Also cache under the original name.
+                            let cache_now = crate::hrtimer::now_ns();
+                            DNS_CACHE.lock().insert(name, ip, 60, cache_now);
+                            return Ok(ip);
+                        }
+                        Some(None) => {
+                            // CNAME target is negatively cached — fail.
+                            return Err(KernelError::NotFound);
+                        }
+                        None => {} // Cache miss — will re-query.
                     }
                     current_name = target;
                     continue;
@@ -634,10 +703,18 @@ pub fn resolve(name: &str) -> KernelResult<Ipv4Addr> {
 fn resolve_single(name: &str) -> KernelResult<Ipv4Addr> {
     let now_ns = crate::hrtimer::now_ns();
 
-    // Check cache first.
-    if let Some(ip) = DNS_CACHE.lock().lookup(name, now_ns) {
-        crate::serial_println!("[dns] Cache hit: '{}' → {}", name, ip);
-        return Ok(ip);
+    // Check cache first (positive and negative entries).
+    match DNS_CACHE.lock().lookup(name, now_ns) {
+        Some(Some(ip)) => {
+            crate::serial_println!("[dns] Cache hit: '{}' → {}", name, ip);
+            return Ok(ip);
+        }
+        Some(None) => {
+            // Negative cache hit — name was recently queried and not found.
+            crate::serial_println!("[dns] Negative cache hit: '{}'", name);
+            return Err(KernelError::NotFound);
+        }
+        None => {} // Cache miss — proceed with query.
     }
 
     let dns_server = interface::info().dns;
@@ -651,11 +728,12 @@ fn resolve_single(name: &str) -> KernelResult<Ipv4Addr> {
     // Clear any previous CNAME target.
     *LAST_CNAME.lock() = None;
 
-    // Build and send the query.
-    let query = build_query(name);
+    // Use a unique transaction ID and ephemeral port per query.
+    let query_id = next_query_id();
+    let local_port = next_dns_port();
 
-    // Use a local port for the DNS query.
-    let local_port: u16 = 49152; // Ephemeral port.
+    // Build and send the query.
+    let query = build_query(name, query_id);
 
     // Bind a UDP socket to receive the reply.
     let sock = super::udp::bind(local_port)?;
@@ -674,7 +752,7 @@ fn resolve_single(name: &str) -> KernelResult<Ipv4Addr> {
         // Check for a response.
         if let Some(dgram) = super::udp::recv(sock) {
             super::udp::close(sock);
-            match parse_response(&dgram.data) {
+            match parse_response(&dgram.data, query_id) {
                 Ok(result) => {
                     crate::serial_println!(
                         "[dns] Resolved '{}' → {} (TTL {}s)",
@@ -685,12 +763,23 @@ fn resolve_single(name: &str) -> KernelResult<Ipv4Addr> {
                     DNS_CACHE.lock().insert(name, result.ip, result.ttl_secs, cache_now);
                     return Ok(result.ip);
                 }
-                Err(e) => {
-                    // NotFound may indicate a CNAME-only response.
-                    // Return the error so the caller can check LAST_CNAME.
-                    if e == KernelError::NotFound {
-                        return Err(e);
+                Err(KernelError::NotFound) => {
+                    // CNAME-only response — return NotFound so the
+                    // caller can check LAST_CNAME for follow-up.
+                    // Also insert a negative cache entry to avoid
+                    // repeated queries if no CNAME was stored.
+                    if LAST_CNAME.lock().is_none() {
+                        let cache_now = crate::hrtimer::now_ns();
+                        DNS_CACHE.lock().insert(
+                            name,
+                            Ipv4Addr::UNSPECIFIED,
+                            NEGATIVE_CACHE_TTL,
+                            cache_now,
+                        );
                     }
+                    return Err(KernelError::NotFound);
+                }
+                Err(e) => {
                     crate::serial_println!("[dns] Parse error: {:?}", e);
                     return Err(e);
                 }

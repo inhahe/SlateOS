@@ -958,8 +958,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TCP client (3-way handshake, data transfer, FIN teardown; 32 max connections)
   - [x] TCP server (bind/listen/accept, passive open 3-way handshake; 8 listeners, 16 backlog)
   - [x] DNS resolver (A record queries via UDP)
-  - [x] DNS resolution cache (32-entry fixed-size, TTL-based expiration, case-insensitive matching, flush on DHCP renewal)
+  - [x] DNS resolution cache (32-entry fixed-size, TTL-based expiration, case-insensitive matching, flush on DHCP renewal, negative caching for NXDOMAIN with 60s TTL)
   - [x] DNS CNAME chasing (follow CNAME chains within responses + follow-up queries, up to 8 hops, cache under original name)
+  - [x] DNS query hardening: unique transaction IDs (AtomicU16 counter, prevents spoofed responses), unique ephemeral source ports (49152-65535, prevents port collisions)
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)

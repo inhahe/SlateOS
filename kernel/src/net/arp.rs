@@ -107,6 +107,13 @@ pub fn lookup(ip: Ipv4Addr) -> Option<MacAddress> {
 
 /// Insert or update an ARP cache entry.
 fn cache_insert(ip: Ipv4Addr, mac: MacAddress) {
+    // Reject broadcast, multicast, and loopback IPs — these should
+    // never appear as ARP cache entries.  Prevents cache pollution
+    // from malformed or malicious ARP packets.
+    if ip.is_multicast() || ip.is_broadcast() || ip.0[0] == 127 {
+        return;
+    }
+
     let now = crate::hrtimer::now_ns();
     let mut cache = ARP_CACHE.lock();
 

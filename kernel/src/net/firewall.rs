@@ -1070,10 +1070,19 @@ fn match_rules_in_table(
 
         // This rule matches — keep the highest priority one.
         match best {
-            None => best = Some((rule.priority, rule.action)),
+            None => {
+                best = Some((rule.priority, rule.action));
+                // Priority 0 is the highest possible — no rule can beat it.
+                if rule.priority == 0 {
+                    break;
+                }
+            }
             Some((best_prio, _)) => {
                 if rule.priority < best_prio {
                     best = Some((rule.priority, rule.action));
+                    if rule.priority == 0 {
+                        break;
+                    }
                 }
             }
         }

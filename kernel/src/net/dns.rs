@@ -449,7 +449,17 @@ fn parse_response_inner(
         }
     }
 
-    // If we have any A record, return the first one.
+    // If we have a CNAME, check if any A record resolves the CNAME
+    // target (common in responses that include the full CNAME chain).
+    if let Some(ref cname) = cname_target {
+        for (name, ip, ttl) in &a_results {
+            if names_eq_case_insensitive(name, cname) {
+                return Ok(DnsResult { ip: *ip, ttl_secs: *ttl });
+            }
+        }
+    }
+
+    // If we have any A record at all, return the first one.
     if let Some((_, ip, ttl)) = a_results.first() {
         return Ok(DnsResult { ip: *ip, ttl_secs: *ttl });
     }
@@ -461,37 +471,6 @@ fn parse_response_inner(
         // Store the CNAME target for the caller to re-query.
         *LAST_CNAME.lock() = cname_target;
         return Err(KernelError::NotFound);
-    }
-
-    // Re-scan from answer_start in the simple way (fallback for
-    // responses that our richer parsing somehow missed).
-    offset = answer_start;
-    for _ in 0..ancount {
-        if offset >= data.len() {
-            break;
-        }
-        offset = skip_name(data, offset)?;
-        if offset + 10 > data.len() {
-            break;
-        }
-        let rtype = u16::from_be_bytes([data[offset], data[offset + 1]]);
-        let rclass = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
-        let ttl = u32::from_be_bytes([
-            data[offset + 4], data[offset + 5],
-            data[offset + 6], data[offset + 7],
-        ]);
-        let rdlength = u16::from_be_bytes([data[offset + 8], data[offset + 9]]);
-        offset += 10;
-        let rd_end = offset + rdlength as usize;
-        if rd_end > data.len() {
-            break;
-        }
-        if rtype == TYPE_A && rclass == CLASS_IN && rdlength == 4 {
-            let mut ip = [0u8; 4];
-            ip.copy_from_slice(&data[offset..offset + 4]);
-            return Ok(DnsResult { ip: Ipv4Addr(ip), ttl_secs: ttl });
-        }
-        offset = rd_end;
     }
 
     Err(KernelError::NotFound)

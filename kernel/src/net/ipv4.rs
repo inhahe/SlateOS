@@ -299,6 +299,13 @@ pub fn verify_transport_checksum(
 pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
     let packet = Ipv4Packet::parse(data)?;
 
+    // Reject packets with invalid source IPs — these violate protocol
+    // rules and could pollute ARP caches or connection state.
+    // RFC 1122 §3.2.1.3: source must not be broadcast or multicast.
+    if packet.src.is_broadcast() || packet.src.is_multicast() {
+        return Ok(()); // Silently drop.
+    }
+
     // Check if the packet is addressed to us, is broadcast, or is
     // multicast for a group we have joined.
     let our_ip = interface::ip();

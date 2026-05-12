@@ -433,9 +433,14 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
                 ]);
             }
             OPT_DOMAIN_NAME => {
-                // Copy domain name (truncate to buffer size).
+                // Copy domain name (truncate to buffer size, leave room
+                // for null terminator).
                 let copy_len = opt_len.min(domain_name.len().saturating_sub(1));
                 domain_name[..copy_len].copy_from_slice(&opt_data[..copy_len]);
+                // Explicitly null-terminate to prevent unterminated reads.
+                if let Some(slot) = domain_name.get_mut(copy_len) {
+                    *slot = 0;
+                }
                 domain_name_len = copy_len;
             }
             OPT_NTP if opt_len >= 4 => {

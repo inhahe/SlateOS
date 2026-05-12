@@ -45,6 +45,14 @@
 //!   on ECN-negotiated connections are marked ECT(0) so routers can signal
 //!   congestion without dropping packets.
 //!
+//! - **Timestamps** (RFC 7323 §3-4): negotiated in the 3-way handshake via
+//!   the Timestamp option (kind=8, len=10).  Every segment carries TSval
+//!   (our millisecond clock) and TSecr (echoed peer clock).  Provides per-ACK
+//!   RTT measurement (instead of timing one segment per flight) and PAWS
+//!   (Protection Against Wrapped Sequence numbers) which drops old duplicate
+//!   segments with stale timestamps.  When both timestamps and SACK are
+//!   active, SACK is limited to 3 blocks (12 + 28 ≤ 40 byte option space).
+//!
 //! - **Window scaling** (RFC 7323): negotiated during the 3-way handshake
 //!   so that peers with large receive windows (Linux default scale 7) are
 //!   interpreted correctly.  Our advertised scale is 0 (64 KiB rx buffer
@@ -424,6 +432,21 @@ struct TcpConnection {
     /// Reset when we receive a CWR from the peer.
     ecn_cwr_sent: bool,
 
+    // -- Timestamps (RFC 7323 §3-4) --
+
+    /// Whether TCP timestamps were negotiated during the handshake.
+    /// Both sides must include the TSopt in their SYN for timestamps
+    /// to be active.
+    ts_ok: bool,
+    /// Most recent valid TSval received from the peer (TS.Recent).
+    /// Echoed back in TSecr of outgoing segments so the peer can
+    /// measure RTT.
+    ts_recent: u32,
+    /// Monotonic time (ns) when `ts_recent` was last updated.
+    /// Used for PAWS aging — segments are not rejected by PAWS if
+    /// `ts_recent` is older than 24 days (the TCP MSL equivalent).
+    ts_recent_age_ns: u64,
+
     // -- Persist timer (zero window probe, RFC 1122 §4.2.2.17) --
 
     /// Whether the persist timer is active (peer advertised zero window
@@ -496,6 +519,9 @@ impl TcpConnection {
             ecn_ok: false,
             ecn_ce_pending: false,
             ecn_cwr_sent: false,
+            ts_ok: false,
+            ts_recent: 0,
+            ts_recent_age_ns: 0,
             persist_active: false,
             persist_interval_ns: PERSIST_MIN_NS,
             persist_last_ns: 0,
@@ -732,6 +758,7 @@ const TCP_OPT_MSS: u8 = 2;        // Maximum segment size.
 const TCP_OPT_WSCALE: u8 = 3;     // Window scale (RFC 7323).
 const TCP_OPT_SACK_PERM: u8 = 4;  // SACK permitted (RFC 2018).
 const TCP_OPT_SACK: u8 = 5;       // SACK blocks (RFC 2018).
+const TCP_OPT_TIMESTAMP: u8 = 8;  // Timestamps (RFC 7323).
 
 /// Our advertised window scale shift count.
 ///
@@ -739,6 +766,23 @@ const TCP_OPT_SACK: u8 = 5;       // SACK blocks (RFC 2018).
 /// We still *send* the option so the peer knows we understand
 /// scaling and will apply its shift to their advertised window.
 const OUR_WSCALE: u8 = 0;
+
+/// Get the current TCP timestamp value (millisecond granularity).
+///
+/// Uses the monotonic clock divided to milliseconds, truncated to
+/// 32 bits.  This wraps every ~49.7 days — fine for PAWS since the
+/// window for detecting old duplicates is much shorter.
+#[allow(clippy::arithmetic_side_effects)]
+fn tcp_now_ms() -> u32 {
+    (crate::hrtimer::now_ns() / 1_000_000) as u32
+}
+
+/// Maximum number of SACK blocks when timestamps are also in use.
+///
+/// The Timestamp option consumes 12 bytes (NOP+NOP+kind+len+TSval+TSecr)
+/// of the 40-byte TCP option space.  SACK header is 4 bytes (NOP+NOP+kind+len)
+/// plus 8 bytes per block.  With 28 bytes left: 4 + 3×8 = 28 → max 3 blocks.
+const MAX_SACK_BLOCKS_WITH_TS: usize = 3;
 
 /// Parsed TCP options from an incoming segment.
 struct TcpOptions {
@@ -748,6 +792,8 @@ struct TcpOptions {
     wscale: Option<u8>,
     /// Whether SACK-Permitted option was present (RFC 2018, SYN only).
     sack_permitted: bool,
+    /// Timestamp option (TSval, TSecr).  None if option not present.
+    timestamp: Option<(u32, u32)>,
 }
 
 /// Parse TCP options from the option bytes (header bytes 20..data_offset).
@@ -755,7 +801,7 @@ struct TcpOptions {
 /// Returns the parsed `TcpOptions`.  Unknown options are skipped.
 /// Malformed options (truncated length, etc.) terminate parsing early.
 fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
-    let mut opts = TcpOptions { mss: 0, wscale: None, sack_permitted: false };
+    let mut opts = TcpOptions { mss: 0, wscale: None, sack_permitted: false, timestamp: None };
     let mut i = 0;
     while i < option_bytes.len() {
         let kind = option_bytes[i];
@@ -789,6 +835,22 @@ fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
                     TCP_OPT_SACK_PERM if len == 2 => {
                         opts.sack_permitted = true;
                     }
+                    TCP_OPT_TIMESTAMP if len == 10 => {
+                        // RFC 7323 §3.2: TSval (4 bytes) + TSecr (4 bytes).
+                        let tsval = u32::from_be_bytes([
+                            option_bytes[i.wrapping_add(2)],
+                            option_bytes[i.wrapping_add(3)],
+                            option_bytes[i.wrapping_add(4)],
+                            option_bytes[i.wrapping_add(5)],
+                        ]);
+                        let tsecr = u32::from_be_bytes([
+                            option_bytes[i.wrapping_add(6)],
+                            option_bytes[i.wrapping_add(7)],
+                            option_bytes[i.wrapping_add(8)],
+                            option_bytes[i.wrapping_add(9)],
+                        ]);
+                        opts.timestamp = Some((tsval, tsecr));
+                    }
                     _ => {} // Unknown option — skip.
                 }
                 i = i.wrapping_add(len);
@@ -798,17 +860,20 @@ fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
     opts
 }
 
-/// Build a TCP segment with SYN options (MSS + WScale + SACK-Permitted).
+/// Build a TCP segment with SYN options (MSS + WScale + SACK-Permitted + Timestamps).
 ///
 /// SYN and SYN-ACK segments carry options to negotiate parameters.
 /// Layout:
-///   MSS(kind=2, len=4, value)     = 4 bytes
-///   NOP(kind=1)                   = 1 byte
-///   WScale(kind=3, len=3, shift)  = 3 bytes
-///   NOP(kind=1)                   = 1 byte
-///   NOP(kind=1)                   = 1 byte
-///   SACK-Perm(kind=4, len=2)      = 2 bytes
-///   Total options: 12 bytes → header is 32 bytes (8 words).
+///   MSS(kind=2, len=4, value)                           =  4 bytes
+///   NOP(kind=1)                                         =  1 byte
+///   WScale(kind=3, len=3, shift)                        =  3 bytes
+///   NOP(kind=1)                                         =  1 byte
+///   NOP(kind=1)                                         =  1 byte
+///   SACK-Perm(kind=4, len=2)                            =  2 bytes
+///   NOP(kind=1)                                         =  1 byte
+///   NOP(kind=1)                                         =  1 byte
+///   Timestamp(kind=8, len=10, TSval=4, TSecr=4)         = 10 bytes
+///   Total options: 24 bytes → header is 44 bytes (11 words).
 #[allow(clippy::arithmetic_side_effects)]
 fn build_segment_with_syn_options(
     src_port: u16,
@@ -821,9 +886,12 @@ fn build_segment_with_syn_options(
     src_ip: Ipv4Addr,
     dst_ip: Ipv4Addr,
     wscale: u8,
+    tsval: u32,
+    tsecr: u32,
 ) -> Vec<u8> {
-    // Options: MSS(4) + NOP(1) + WScale(3) + NOP(1) + NOP(1) + SACK-Perm(2) = 12 bytes.
-    let header_words: u8 = 8; // (20 + 12) / 4 = 8 words.
+    // Options: MSS(4) + NOP(1) + WScale(3) + NOP(1) + NOP(1) + SACK-Perm(2)
+    //        + NOP(1) + NOP(1) + Timestamp(10) = 24 bytes.
+    let header_words: u8 = 11; // (20 + 24) / 4 = 11 words.
     let header_len = (header_words as usize) * 4;
     let total_len = header_len + payload.len();
     let mut seg = Vec::with_capacity(total_len);
@@ -860,6 +928,16 @@ fn build_segment_with_syn_options(
     // Options: SACK-Permitted (RFC 2018 §2).
     seg.push(TCP_OPT_SACK_PERM);
     seg.push(2); // Option length.
+
+    // Options: NOP + NOP (alignment for Timestamp).
+    seg.push(TCP_OPT_NOP);
+    seg.push(TCP_OPT_NOP);
+
+    // Options: Timestamp (RFC 7323 §3.2).
+    seg.push(TCP_OPT_TIMESTAMP);
+    seg.push(10); // Option length.
+    seg.extend_from_slice(&tsval.to_be_bytes());
+    seg.extend_from_slice(&tsecr.to_be_bytes());
 
     debug_assert_eq!(seg.len(), header_len, "SYN options size mismatch");
 
@@ -921,9 +999,11 @@ fn send_segment(
     )
 }
 
-/// Send a SYN (or SYN-ACK) segment with TCP options (MSS + WScale).
+/// Send a SYN (or SYN-ACK) segment with TCP options (MSS + WScale + Timestamps).
 ///
-/// Used during the 3-way handshake to negotiate window scaling.
+/// Used during the 3-way handshake to negotiate window scaling and timestamps.
+/// `tsval` is our current timestamp; `tsecr` echoes the peer's TSval
+/// (0 for the initial SYN since we haven't received one yet).
 fn send_syn_segment(
     local_port: u16,
     remote_ip: Ipv4Addr,
@@ -933,6 +1013,8 @@ fn send_syn_segment(
     flags: u8,
     window: u16,
     wscale: u8,
+    tsval: u32,
+    tsecr: u32,
 ) -> KernelResult<()> {
     let local_ip = interface::ip();
     let seg = build_segment_with_syn_options(
@@ -942,16 +1024,65 @@ fn send_syn_segment(
         &[],
         local_ip, remote_ip,
         wscale,
+        tsval,
+        tsecr,
     );
 
     ipv4::send(remote_ip, PROTO_TCP, &seg)
 }
 
-/// Send an ACK segment with SACK option blocks if appropriate.
+/// Send a data segment with optional Timestamp option.
 ///
-/// If SACK was negotiated and the connection has out-of-order blocks,
-/// the ACK includes a SACK option listing them.  Otherwise sends a
-/// plain ACK.
+/// When timestamps are negotiated (`ts_ok=true`), the segment includes a
+/// Timestamp option (TSval=our clock, TSecr=echoed peer clock) so the peer
+/// can update its ts_recent and measure RTT from our TSval.  When timestamps
+/// are not active, this delegates to `send_segment_with_window()`.
+fn send_data_with_ts(
+    local_port: u16,
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    payload: &[u8],
+    ip_ecn: u8,
+    ts_ok: bool,
+    ts_recent: u32,
+) -> KernelResult<()> {
+    if ts_ok {
+        // Build timestamp option: NOP + NOP + kind(8) + len(10) + TSval + TSecr.
+        let mut ts_opt = [0u8; 12];
+        ts_opt[0] = TCP_OPT_NOP;
+        ts_opt[1] = TCP_OPT_NOP;
+        ts_opt[2] = TCP_OPT_TIMESTAMP;
+        ts_opt[3] = 10;
+        let tsval = tcp_now_ms();
+        ts_opt[4..8].copy_from_slice(&tsval.to_be_bytes());
+        ts_opt[8..12].copy_from_slice(&ts_recent.to_be_bytes());
+
+        let local_ip = interface::ip();
+        let seg = build_segment_with_options(
+            local_port, remote_port,
+            seq, ack, flags, window,
+            &ts_opt, payload,
+            local_ip, remote_ip,
+        );
+        ipv4::send_ecn(remote_ip, PROTO_TCP, &seg, ip_ecn)
+    } else {
+        send_segment_with_window(
+            local_port, remote_ip, remote_port,
+            seq, ack, flags, window, payload, ip_ecn,
+        )
+    }
+}
+
+/// Send an ACK segment with TCP options (Timestamps and/or SACK blocks).
+///
+/// If timestamps were negotiated, every outgoing segment carries a
+/// Timestamp option.  If SACK was also negotiated and there are
+/// out-of-order blocks, SACK blocks are appended (limited to 3 when
+/// timestamps are also present, to fit in the 40-byte option space).
 ///
 /// ECN handling (RFC 3168 §6.1.3): if `ecn_ce_pending` is set, the
 /// ACK includes the ECE flag to echo the congestion signal back to the
@@ -966,6 +1097,26 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
     // IP ECN: mark ECT(0) for ECN-negotiated connections.
     let ip_ecn = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
 
+    // When timestamps are active, use the combined builder that puts
+    // TSopt first, then SACK blocks (limited to 3 blocks).
+    if conn.ts_ok {
+        let (opts, opts_len) = build_ts_and_sack_options(conn);
+        if opts_len > 0 {
+            let local_ip = interface::ip();
+            let seg = build_segment_with_options(
+                conn.local_port, conn.remote_port,
+                conn.snd_nxt, conn.rcv_nxt,
+                flags,
+                advertised_window(conn),
+                &opts[..opts_len],
+                &[],
+                local_ip, conn.remote_ip,
+            );
+            return ipv4::send_ecn(conn.remote_ip, PROTO_TCP, &seg, ip_ecn);
+        }
+    }
+
+    // No timestamps — use the old SACK-only builder.
     let (sack_opt, sack_len) = build_sack_option(conn);
 
     if sack_len > 0 {
@@ -1049,20 +1200,25 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.ecn_ok = false; // Confirmed on SYN-ACK.
         conn.ecn_ce_pending = false;
         conn.ecn_cwr_sent = false;
+        conn.ts_ok = false; // Set on SYN-ACK if peer supports timestamps.
+        conn.ts_recent = 0;
+        conn.ts_recent_age_ns = 0;
         conn.keepalive_enabled = false;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
         slot
     };
 
-    // Send SYN with MSS + WScale options (RFC 7323).
+    // Send SYN with MSS + WScale + Timestamp options (RFC 7323).
     // The window field in the SYN itself is NOT scaled (RFC 7323 §2.2).
+    // Timestamp: TSval = our clock, TSecr = 0 (no peer value yet).
     // ECN negotiation (RFC 3168 §6.1.1): set ECE+CWR in the SYN to
     // signal ECN support.  The server responds with ECE (no CWR) if
     // it also supports ECN.
     send_syn_segment(
         local_port, remote_ip, remote_port,
         isn, 0, TCP_SYN | TCP_ECE | TCP_CWR, DEFAULT_WINDOW, OUR_WSCALE,
+        tcp_now_ms(), 0,
     )?;
     crate::serial_println!(
         "[tcp] SYN sent to {}:{} (seq={}, wscale={})",
@@ -1182,6 +1338,31 @@ fn try_rtt_sample(conn: &mut TcpConnection, ack: u32) -> bool {
     true
 }
 
+/// Attempt an RTT sample using TCP timestamps (RFC 7323 §4.1).
+///
+/// When timestamps are negotiated, the TSecr field of every ACK echoes
+/// back the TSval we sent with the original data.  Since our TSval is
+/// `tcp_now_ms()`, RTT = now_ms − TSecr (in milliseconds).
+///
+/// This provides a sample on every ACK, much better than timing a single
+/// segment per flight (which is the fallback when timestamps aren't available).
+#[allow(clippy::arithmetic_side_effects)]
+fn try_rtt_sample_ts(conn: &mut TcpConnection, tsecr: u32) {
+    if tsecr == 0 {
+        return; // No echo yet (e.g. pure SYN-ACK response).
+    }
+    let now_ms = tcp_now_ms();
+    // Wrapping subtraction handles clock wrap naturally.
+    let rtt_ms = now_ms.wrapping_sub(tsecr);
+    // Sanity: reject RTT > 60s (likely a stale or corrupt TSecr).
+    if rtt_ms > 60_000 {
+        return;
+    }
+    // Convert to nanoseconds for the existing RTT estimator.
+    let sample_ns = u64::from(rtt_ms).saturating_mul(1_000_000);
+    update_rtt(conn, sample_ns);
+}
+
 /// Start timing a segment for RTT measurement.
 ///
 /// Only starts if no timing is currently in progress (one sample at
@@ -1282,7 +1463,10 @@ fn tx_buffer_trim(conn: &mut TcpConnection, bytes_acked: u32) {
 /// Sends up to `effective_mss(conn)` bytes from `tx_buffer[0..]`
 /// (sequence `snd_una`).
 #[allow(clippy::arithmetic_side_effects)]
-fn retransmit_from_buffer(conn: &TcpConnection) -> Option<(u16, Ipv4Addr, u16, u32, u32, u16, [u8; 1460], usize)> {
+/// Retransmit info tuple.
+type RetxInfo = (u16, Ipv4Addr, u16, u32, u32, u16, [u8; 1460], usize, bool, u32);
+
+fn retransmit_from_buffer(conn: &TcpConnection) -> Option<RetxInfo> {
     let retx_len = conn.tx_buffer.len().min(effective_mss(conn));
     if retx_len == 0 {
         return None;
@@ -1298,6 +1482,8 @@ fn retransmit_from_buffer(conn: &TcpConnection) -> Option<(u16, Ipv4Addr, u16, u
         advertised_window(conn),
         data,
         retx_len,
+        conn.ts_ok,
+        conn.ts_recent,
     ))
 }
 
@@ -1527,6 +1713,56 @@ fn seq_lt(a: u32, b: u32) -> bool {
 ///   [left_edge2, right_edge2]
 ///   ...
 #[allow(clippy::arithmetic_side_effects)]
+/// Build combined options (Timestamp + optional SACK) for outgoing segments.
+///
+/// When timestamps are negotiated, every outgoing segment must carry the
+/// Timestamp option (RFC 7323 §3.2).  If SACK blocks are also needed,
+/// they are appended after the timestamp, limited to 3 blocks (the
+/// 40-byte option space is shared: 12 for TSopt + up to 28 for SACK).
+///
+/// Returns `(buffer, length)`.  `length` is the total option bytes to
+/// include.  If neither timestamps nor SACK is active, returns length 0.
+fn build_ts_and_sack_options(conn: &TcpConnection) -> ([u8; 40], usize) {
+    let mut buf = [0u8; 40];
+    let mut pos = 0;
+
+    if conn.ts_ok {
+        // Timestamp option: NOP(1) + NOP(1) + kind(1) + len(1) + TSval(4) + TSecr(4) = 12.
+        buf[pos] = TCP_OPT_NOP;
+        buf[pos + 1] = TCP_OPT_NOP;
+        buf[pos + 2] = TCP_OPT_TIMESTAMP;
+        buf[pos + 3] = 10;
+        let tsval = tcp_now_ms();
+        buf[pos + 4..pos + 8].copy_from_slice(&tsval.to_be_bytes());
+        buf[pos + 8..pos + 12].copy_from_slice(&conn.ts_recent.to_be_bytes());
+        pos += 12;
+    }
+
+    // SACK blocks (if negotiated and present).
+    if conn.sack_ok && conn.sack_block_count > 0 {
+        // When timestamps are active, limit to 3 SACK blocks (28 bytes
+        // remain from the 40-byte option space after the 12-byte TSopt).
+        let max_blocks = if conn.ts_ok { MAX_SACK_BLOCKS_WITH_TS } else { MAX_SACK_BLOCKS };
+        let n = (conn.sack_block_count as usize).min(max_blocks);
+        let opt_len = 2 + n * 8; // kind + length + blocks.
+
+        buf[pos] = TCP_OPT_NOP;
+        buf[pos + 1] = TCP_OPT_NOP;
+        buf[pos + 2] = TCP_OPT_SACK;
+        buf[pos + 3] = opt_len as u8;
+        pos += 4;
+
+        for i in 0..n {
+            let (left, right) = conn.sack_blocks[i];
+            buf[pos..pos + 4].copy_from_slice(&left.to_be_bytes());
+            buf[pos + 4..pos + 8].copy_from_slice(&right.to_be_bytes());
+            pos += 8;
+        }
+    }
+
+    (buf, pos)
+}
+
 fn build_sack_option(conn: &TcpConnection) -> ([u8; 34], usize) {
     // Max: 2 (NOP+NOP) + 2 (kind+len) + 4*8 (4 blocks × 8 bytes) = 36.
     // But we limit to 34 bytes (for options ≤ 40 total).
@@ -1566,7 +1802,8 @@ fn build_sack_option(conn: &TcpConnection) -> ([u8; 34], usize) {
 #[allow(clippy::arithmetic_side_effects)]
 pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
     let (local_port, remote_ip, remote_port, seq, ack, eff_wnd, our_wnd,
-         nagle, has_unacked, ecn_ok, ecn_cwr, eff_mss) = {
+         nagle, has_unacked, ecn_ok, ecn_cwr, eff_mss,
+         ts_ok, ts_recent) = {
         let conns = CONNECTIONS.lock();
         let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
         // Allow sending in Established (normal) or CloseWait (remote
@@ -1580,7 +1817,8 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
         (conn.local_port, conn.remote_ip, conn.remote_port,
          conn.snd_nxt, conn.rcv_nxt, effective_window(conn),
          advertised_window(conn), conn.nagle_enabled, unacked,
-         conn.ecn_ok, conn.ecn_cwr_sent, effective_mss(conn))
+         conn.ecn_ok, conn.ecn_cwr_sent, effective_mss(conn),
+         conn.ts_ok, conn.ts_recent)
     };
 
     // Nagle's algorithm (RFC 896): if we have unacknowledged data in
@@ -1630,11 +1868,14 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
                 0
             };
             // Drain flushed data from nagle_buf.
+            let n_ts_ok = conn.ts_ok;
+            let n_ts_recent = conn.ts_recent;
             conn.nagle_buf.drain(..flush_len);
             drop(conns);
-            let _ = send_segment_with_window(
+            let _ = send_data_with_ts(
                 lp, ri, rp, s, a, tcp_flags, w,
                 &flush_data[..flush_len], ip_ecn_val,
+                n_ts_ok, n_ts_recent,
             );
         }
         return Ok(());
@@ -1682,13 +1923,14 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
         let chunk = &send_data[offset..chunk_end];
 
         let send_seq = seq.wrapping_add(offset as u32);
-        send_segment_with_window(
+        send_data_with_ts(
             local_port, remote_ip, remote_port,
             send_seq, ack,
             data_flags,
             our_wnd,
             chunk,
             ip_ecn_data,
+            ts_ok, ts_recent,
         )?;
 
         if offset == 0 {
@@ -1793,6 +2035,8 @@ pub struct TcpConnectionInfo {
     pub sack_ok: bool,
     /// Whether window scaling was negotiated.
     pub wscale_ok: bool,
+    /// Whether TCP timestamps (RFC 7323) were negotiated.
+    pub ts_ok: bool,
     /// Whether keepalive probes are enabled.
     pub keepalive: bool,
     /// Whether Nagle's algorithm is enabled.
@@ -1827,6 +2071,7 @@ pub fn connection_info(handle: usize) -> Option<TcpConnectionInfo> {
         ecn_ok: conn.ecn_ok,
         sack_ok: conn.sack_ok,
         wscale_ok: conn.wscale_ok,
+        ts_ok: conn.ts_ok,
         keepalive: conn.keepalive_enabled,
         nagle: conn.nagle_enabled,
     })
@@ -1859,6 +2104,7 @@ pub fn all_connections() -> Vec<TcpConnectionInfo> {
                 ecn_ok: conn.ecn_ok,
                 sack_ok: conn.sack_ok,
                 wscale_ok: conn.wscale_ok,
+                ts_ok: conn.ts_ok,
                 keepalive: conn.keepalive_enabled,
                 nagle: conn.nagle_enabled,
             });
@@ -2275,18 +2521,31 @@ fn handle_incoming_syn(
         conn.ecn_ce_pending = false;
         conn.ecn_cwr_sent = false;
 
+        // Timestamps (RFC 7323 §3.2): if the client's SYN included a
+        // Timestamp option, we negotiate timestamps and store its TSval
+        // as ts_recent so we can echo it in the SYN-ACK.
+        if let Some((peer_tsval, _)) = syn_opts.timestamp {
+            conn.ts_ok = true;
+            conn.ts_recent = peer_tsval;
+            conn.ts_recent_age_ns = crate::hrtimer::now_ns();
+        } else {
+            conn.ts_ok = false;
+            conn.ts_recent = 0;
+            conn.ts_recent_age_ns = 0;
+        }
+
         conn.keepalive_enabled = false;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
         slot
     };
 
-    // Send SYN-ACK with WScale option (only if the client sent one).
+    // Send SYN-ACK with WScale + Timestamp options (if the client sent them).
     // ECN: add ECE flag if ECN was negotiated (RFC 3168 §6.1.1).
     let rcv_nxt = remote_seq.wrapping_add(1);
-    let ecn_negotiated = {
+    let (ecn_negotiated, ts_negotiated, ts_recent_echo) = {
         let conns = CONNECTIONS.lock();
-        conns.get(handle).map_or(false, |c| c.ecn_ok)
+        conns.get(handle).map_or((false, false, 0), |c| (c.ecn_ok, c.ts_ok, c.ts_recent))
     };
     let synack_flags = if ecn_negotiated {
         TCP_SYN | TCP_ACK | TCP_ECE
@@ -2295,10 +2554,14 @@ fn handle_incoming_syn(
     };
 
     if syn_opts.wscale.is_some() {
+        // SYN-ACK with full options (WScale + SACK-Perm + Timestamp).
+        // Timestamp TSecr echoes the client's TSval from the SYN.
         send_syn_segment(
             local_port, remote_ip, remote_port,
             isn, rcv_nxt, synack_flags,
             DEFAULT_WINDOW, OUR_WSCALE,
+            tcp_now_ms(),
+            if ts_negotiated { ts_recent_echo } else { 0 },
         )?;
     } else {
         // Client doesn't support window scaling — plain SYN-ACK.
@@ -2309,9 +2572,10 @@ fn handle_incoming_syn(
     }
 
     crate::serial_println!(
-        "[tcp] SYN-ACK sent to {}:{} (handle={}, isn={}, wscale={})",
+        "[tcp] SYN-ACK sent to {}:{} (handle={}, isn={}, wscale={}, ts={})",
         remote_ip, remote_port, handle, isn,
-        if syn_opts.wscale.is_some() { OUR_WSCALE } else { 0 }
+        if syn_opts.wscale.is_some() { OUR_WSCALE } else { 0 },
+        ts_negotiated
     );
 
     Ok(())
@@ -2442,6 +2706,55 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         conn.persist_last_ns = 0;
     }
 
+    // Timestamps / PAWS (RFC 7323 §4):
+    // Parse the Timestamp option from the incoming segment.  If timestamps
+    // were negotiated, perform PAWS check: reject segments with TSval older
+    // than ts_recent (protects against wrapped sequence numbers and old
+    // duplicate segments).  Then update ts_recent with the segment's TSval.
+    let seg_opts = parse_tcp_options(option_bytes);
+    if conn.ts_ok {
+        if let Some((tsval, _tsecr)) = seg_opts.timestamp {
+            // PAWS check (RFC 7323 §5.2): drop segments with TSval
+            // strictly less than ts_recent, unless ts_recent hasn't been
+            // updated in >24 days (the timestamp clock could have wrapped
+            // on the peer side).
+            //
+            // We use wrapping subtraction: if tsval < ts_recent in modular
+            // arithmetic (high bit set), it's an old duplicate.
+            let ts_delta = tsval.wrapping_sub(conn.ts_recent);
+            let now_ns = crate::hrtimer::now_ns();
+            // 24-day aging window in nanoseconds.
+            const PAWS_IDLE_NS: u64 = 24 * 86400 * 1_000_000_000;
+            let ts_recent_too_old =
+                now_ns.saturating_sub(conn.ts_recent_age_ns) > PAWS_IDLE_NS;
+
+            if ts_delta >= 0x8000_0000 && !ts_recent_too_old && conn.ts_recent != 0 {
+                // Old duplicate — drop silently but send an ACK (RFC 7323 §5.2
+                // step R4).
+                let lp = conn.local_port;
+                let ri = conn.remote_ip;
+                let rp = conn.remote_port;
+                let sn = conn.snd_nxt;
+                let rn = conn.rcv_nxt;
+                let w = advertised_window(conn);
+                let ie = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
+                let paws_ts_recent = conn.ts_recent;
+                drop(conns);
+                let _ = send_data_with_ts(lp, ri, rp, sn, rn, TCP_ACK, w, &[], ie, true, paws_ts_recent);
+                return Ok(());
+            }
+
+            // Update ts_recent with the segment's TSval.
+            // RFC 7323 §4.3: only accept TSval if the segment is at or
+            // past the expected sequence (no older data).
+            let seq_delta = seq.wrapping_sub(conn.rcv_nxt);
+            if seq_delta < 0x8000_0000 || seq == conn.rcv_nxt {
+                conn.ts_recent = tsval;
+                conn.ts_recent_age_ns = now_ns;
+            }
+        }
+    }
+
     // ECN: if the IP header has CE (Congestion Experienced) set and
     // ECN was negotiated, remember that we need to echo ECE in our
     // next ACK so the sender knows to reduce its congestion window.
@@ -2508,6 +2821,16 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     crate::serial_println!("[tcp] ECN negotiated");
                 }
 
+                // Timestamps (RFC 7323 §3.2): if the SYN-ACK included a
+                // Timestamp option, timestamps are negotiated.  Store the
+                // peer's TSval as ts_recent for echoing in future segments.
+                if let Some((peer_tsval, _tsecr)) = synack_opts.timestamp {
+                    conn.ts_ok = true;
+                    conn.ts_recent = peer_tsval;
+                    conn.ts_recent_age_ns = crate::hrtimer::now_ns();
+                    crate::serial_println!("[tcp] Timestamps negotiated");
+                }
+
                 conn.state = TcpState::Established;
 
                 // Take initial RTT sample from SYN → SYN-ACK.
@@ -2569,8 +2892,16 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     // Trim retransmit buffer: discard acknowledged data.
                     tx_buffer_trim(conn, bytes_acked);
 
-                    // RTT sample from this ACK (Karn: only non-retransmitted).
-                    try_rtt_sample(conn, ack);
+                    // RTT sample: prefer timestamps (RFC 7323 §4.1)
+                    // which give a sample on every ACK, over the legacy
+                    // single-segment timing (Karn's algorithm).
+                    if conn.ts_ok {
+                        if let Some((_tsval, tsecr)) = seg_opts.timestamp {
+                            try_rtt_sample_ts(conn, tsecr);
+                        }
+                    } else {
+                        try_rtt_sample(conn, ack);
+                    }
 
                     // Congestion window update.
                     on_ack_congestion(conn, bytes_acked);
@@ -2626,11 +2957,14 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                             if conn.ecn_cwr_sent { nagle_flags |= TCP_CWR; }
                             ipv4::ECN_ECT0
                         } else { 0 };
+                        let n_ts_ok = conn.ts_ok;
+                        let n_ts_recent = conn.ts_recent;
                         conn.nagle_buf.drain(..flush_len);
                         drop(conns);
-                        let _ = send_segment_with_window(
+                        let _ = send_data_with_ts(
                             lp, ri, rp, s, a, nagle_flags, w,
                             &flush_data[..flush_len], nagle_ecn,
+                            n_ts_ok, n_ts_recent,
                         );
                         return Ok(());
                     }
@@ -2657,13 +2991,16 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                             let a = conn.rcv_nxt;
                             let w = advertised_window(conn);
                             let retx_ecn = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
+                            let r_ts_ok = conn.ts_ok;
+                            let r_ts_recent = conn.ts_recent;
                             // Copy data out before dropping the lock.
                             let mut retx_data = [0u8; 1460]; // MSS-sized stack buffer.
                             retx_data[..retx_len].copy_from_slice(&conn.tx_buffer[..retx_len]);
                             drop(conns);
-                            let _ = send_segment_with_window(
+                            let _ = send_data_with_ts(
                                 lp, ri, rp, s, a, TCP_ACK | TCP_PSH, w,
                                 &retx_data[..retx_len], retx_ecn,
+                                r_ts_ok, r_ts_recent,
                             );
                             crate::serial_println!(
                                 "[tcp] Fast retransmit: {} bytes from seq {} (port {})",
@@ -2923,6 +3260,8 @@ pub fn tick_persist() {
         conn.persist_last_ns = now;
 
         let probe_ecn = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
+        let p_ts_ok = conn.ts_ok;
+        let p_ts_recent = conn.ts_recent;
 
         crate::serial_println!(
             "[tcp] Zero-window probe for {}:{} → {}:{} (next in {}ms)",
@@ -2933,8 +3272,9 @@ pub fn tick_persist() {
         // Drop the lock before sending (send_segment acquires
         // interface locks).
         drop(conns);
-        let _ = send_segment_with_window(
+        let _ = send_data_with_ts(
             lp, ri, rp, probe_seq, ack, TCP_ACK, wnd, &[], probe_ecn,
+            p_ts_ok, p_ts_recent,
         );
         // Dropped lock — restart scan next tick.
         return;
@@ -3017,6 +3357,8 @@ pub fn tick_keepalive() {
         let rcv_nxt = conn.rcv_nxt;
         let our_wnd = advertised_window(conn);
         let ka_ecn = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
+        let k_ts_ok = conn.ts_ok;
+        let k_ts_recent = conn.ts_recent;
 
         conn.keepalive_probes_sent = conn.keepalive_probes_sent.saturating_add(1);
 
@@ -3030,9 +3372,10 @@ pub fn tick_keepalive() {
         // Must drop the lock before sending (send_segment acquires
         // interface locks).
         drop(conns);
-        let _ = send_segment_with_window(
+        let _ = send_data_with_ts(
             local_port, remote_ip, remote_port,
             probe_seq, rcv_nxt, TCP_ACK, our_wnd, &[], ka_ecn,
+            k_ts_ok, k_ts_recent,
         );
         return; // Dropped lock; restart scan next tick.
     }
@@ -3138,7 +3481,7 @@ pub fn tick_retransmit() {
         }
 
         // RTO expired — retransmit.
-        if let Some((lp, ri, rp, seq, ack, wnd, data, len)) = retransmit_from_buffer(conn) {
+        if let Some((lp, ri, rp, seq, ack, wnd, data, len, r_ts_ok, r_ts_recent)) = retransmit_from_buffer(conn) {
             // Exponential backoff (RFC 6298 §5.5).
             conn.rto_ns = conn.rto_ns.saturating_mul(2).min(RTO_MAX_NS);
             // Reset send timestamp for the next RTO measurement.
@@ -3154,9 +3497,10 @@ pub fn tick_retransmit() {
 
             // Drop lock before sending.
             drop(conns);
-            let _ = send_segment_with_window(
+            let _ = send_data_with_ts(
                 lp, ri, rp, seq, ack, TCP_ACK | TCP_PSH, wnd,
                 &data[..len], rto_ecn,
+                r_ts_ok, r_ts_recent,
             );
             // We dropped the lock, so we can't continue the scan.
             // The next tick will handle remaining connections.

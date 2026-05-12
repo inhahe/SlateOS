@@ -322,6 +322,7 @@ pub extern "C" fn difftime(time1: TimeT, time0: TimeT) -> f64 {
 
 /// Broken-down time (struct tm).
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Tm {
     /// Seconds [0, 60] (60 for leap second).
     pub tm_sec: i32,
@@ -428,11 +429,29 @@ pub extern "C" fn ctime(timep: *const TimeT) -> *const u8 {
 
 /// Format time according to a format string.
 ///
-/// Supports a subset of strftime conversions:
-/// `%Y` (year), `%m` (month), `%d` (day), `%H` (hour), `%M` (minute),
-/// `%S` (second), `%A`/`%a` (weekday), `%B`/`%b` (month name),
-/// `%c` (date+time), `%p` (AM/PM), `%j` (day of year), `%n` (newline),
-/// `%t` (tab), `%%` (percent).
+/// Supports these POSIX and GNU extension conversions:
+///
+/// **Date components**: `%Y` (4-digit year), `%C` (century), `%y` (2-digit year),
+/// `%m` (month 01-12), `%d` (day 01-31), `%e` (day, space-padded),
+/// `%j` (day of year 001-366), `%w` (weekday 0-6, Sun=0),
+/// `%u` (weekday 1-7, Mon=1, ISO 8601),
+/// `%U` (week of year, Sunday start), `%W` (week of year, Monday start).
+///
+/// **Time components**: `%H` (hour 00-23), `%I` (hour 01-12),
+/// `%k` (hour 0-23, space-padded), `%l` (hour 1-12, space-padded),
+/// `%M` (minute), `%S` (second), `%p` (AM/PM), `%P` (am/pm, GNU).
+///
+/// **Names**: `%A`/`%a` (weekday), `%B`/`%b`/`%h` (month).
+///
+/// **Composites**: `%c` (date+time), `%D` (%m/%d/%y), `%F` (%Y-%m-%d),
+/// `%T` (%H:%M:%S), `%R` (%H:%M), `%r` (%I:%M:%S %p),
+/// `%x` (locale date), `%X` (locale time).
+///
+/// **Timezone**: `%z` (+0000, always UTC), `%Z` (UTC).
+///
+/// **GNU extensions**: `%s` (epoch seconds), `%P` (lowercase am/pm).
+///
+/// **Literal**: `%n` (newline), `%t` (tab), `%%` (percent).
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_lines)]
 pub unsafe extern "C" fn strftime(
@@ -473,28 +492,71 @@ pub unsafe extern "C" fn strftime(
         fpos = fpos.wrapping_add(1);
 
         match spec {
+            // --- Date components ---
             b'Y' => pos = write_dec4(buf, limit, pos, t.tm_year.wrapping_add(1900)),
+            b'C' => pos = write_dec2(buf, limit, pos,
+                t.tm_year.wrapping_add(1900).wrapping_div(100)),
+            b'y' => pos = write_dec2(buf, limit, pos,
+                t.tm_year.wrapping_add(1900).wrapping_rem(100)),
             b'm' => pos = write_dec2(buf, limit, pos, t.tm_mon.wrapping_add(1)),
             b'd' => pos = write_dec2(buf, limit, pos, t.tm_mday),
+            b'e' => pos = write_space_dec2(buf, limit, pos, t.tm_mday),
+            b'j' => pos = write_dec3(buf, limit, pos, t.tm_yday.wrapping_add(1)),
+            b'w' => pos = write_char(buf, limit, pos,
+                b'0'.wrapping_add((t.tm_wday % 7) as u8)),
+            b'u' => {
+                // ISO 8601: Monday=1 .. Sunday=7.
+                let iso = if t.tm_wday == 0 { 7 } else { t.tm_wday };
+                pos = write_char(buf, limit, pos, b'0'.wrapping_add(iso as u8));
+            }
+            b'U' => {
+                // Week number, Sunday as first day (00-53).
+                #[allow(clippy::arithmetic_side_effects)]
+                let wn = (t.tm_yday.wrapping_add(7).wrapping_sub(t.tm_wday)) / 7;
+                pos = write_dec2(buf, limit, pos, wn);
+            }
+            b'W' => {
+                // Week number, Monday as first day (00-53).
+                let mon_wday = if t.tm_wday == 0 { 6 } else { t.tm_wday.wrapping_sub(1) };
+                #[allow(clippy::arithmetic_side_effects)]
+                let wn = (t.tm_yday.wrapping_add(7).wrapping_sub(mon_wday)) / 7;
+                pos = write_dec2(buf, limit, pos, wn);
+            }
+
+            // --- Time components ---
             b'H' => pos = write_dec2(buf, limit, pos, t.tm_hour),
+            b'I' => {
+                let h12 = hour_12(t.tm_hour);
+                pos = write_dec2(buf, limit, pos, h12);
+            }
+            b'k' => pos = write_space_dec2(buf, limit, pos, t.tm_hour),
+            b'l' => pos = write_space_dec2(buf, limit, pos, hour_12(t.tm_hour)),
             b'M' => pos = write_dec2(buf, limit, pos, t.tm_min),
             b'S' => pos = write_dec2(buf, limit, pos, t.tm_sec),
-            b'j' => pos = write_dec3(buf, limit, pos, t.tm_yday.wrapping_add(1)),
-            b'A' => pos = write_str(buf, limit, pos, wday_full(t.tm_wday)),
-            b'a' => pos = write_str(buf, limit, pos, wday_abbr(t.tm_wday)),
-            b'B' => pos = write_str(buf, limit, pos, mon_full(t.tm_mon)),
-            b'b' | b'h' => pos = write_str(buf, limit, pos, mon_abbr(t.tm_mon)),
             b'p' => {
                 let label = if t.tm_hour < 12 { b"AM" } else { b"PM" };
                 pos = write_str(buf, limit, pos, label);
             }
+            b'P' => {
+                // GNU extension: lowercase am/pm.
+                let label = if t.tm_hour < 12 { b"am" } else { b"pm" };
+                pos = write_str(buf, limit, pos, label);
+            }
+
+            // --- Name components ---
+            b'A' => pos = write_str(buf, limit, pos, wday_full(t.tm_wday)),
+            b'a' => pos = write_str(buf, limit, pos, wday_abbr(t.tm_wday)),
+            b'B' => pos = write_str(buf, limit, pos, mon_full(t.tm_mon)),
+            b'b' | b'h' => pos = write_str(buf, limit, pos, mon_abbr(t.tm_mon)),
+
+            // --- Composite specifiers ---
             b'c' => {
-                // "Thu Jan  1 00:00:00 1970" format.
+                // "Thu Jan  1 00:00:00 1970" (asctime format).
                 pos = write_str(buf, limit, pos, wday_abbr(t.tm_wday));
                 pos = write_char(buf, limit, pos, b' ');
                 pos = write_str(buf, limit, pos, mon_abbr(t.tm_mon));
                 pos = write_char(buf, limit, pos, b' ');
-                pos = write_dec2(buf, limit, pos, t.tm_mday);
+                pos = write_space_dec2(buf, limit, pos, t.tm_mday);
                 pos = write_char(buf, limit, pos, b' ');
                 pos = write_dec2(buf, limit, pos, t.tm_hour);
                 pos = write_char(buf, limit, pos, b':');
@@ -504,6 +566,85 @@ pub unsafe extern "C" fn strftime(
                 pos = write_char(buf, limit, pos, b' ');
                 pos = write_dec4(buf, limit, pos, t.tm_year.wrapping_add(1900));
             }
+            b'D' => {
+                // %m/%d/%y
+                pos = write_dec2(buf, limit, pos, t.tm_mon.wrapping_add(1));
+                pos = write_char(buf, limit, pos, b'/');
+                pos = write_dec2(buf, limit, pos, t.tm_mday);
+                pos = write_char(buf, limit, pos, b'/');
+                pos = write_dec2(buf, limit, pos,
+                    t.tm_year.wrapping_add(1900).wrapping_rem(100));
+            }
+            b'F' => {
+                // %Y-%m-%d (ISO 8601 date).
+                pos = write_dec4(buf, limit, pos, t.tm_year.wrapping_add(1900));
+                pos = write_char(buf, limit, pos, b'-');
+                pos = write_dec2(buf, limit, pos, t.tm_mon.wrapping_add(1));
+                pos = write_char(buf, limit, pos, b'-');
+                pos = write_dec2(buf, limit, pos, t.tm_mday);
+            }
+            b'T' => {
+                // %H:%M:%S
+                pos = write_dec2(buf, limit, pos, t.tm_hour);
+                pos = write_char(buf, limit, pos, b':');
+                pos = write_dec2(buf, limit, pos, t.tm_min);
+                pos = write_char(buf, limit, pos, b':');
+                pos = write_dec2(buf, limit, pos, t.tm_sec);
+            }
+            b'R' => {
+                // %H:%M
+                pos = write_dec2(buf, limit, pos, t.tm_hour);
+                pos = write_char(buf, limit, pos, b':');
+                pos = write_dec2(buf, limit, pos, t.tm_min);
+            }
+            b'r' => {
+                // %I:%M:%S %p (12-hour time with AM/PM).
+                pos = write_dec2(buf, limit, pos, hour_12(t.tm_hour));
+                pos = write_char(buf, limit, pos, b':');
+                pos = write_dec2(buf, limit, pos, t.tm_min);
+                pos = write_char(buf, limit, pos, b':');
+                pos = write_dec2(buf, limit, pos, t.tm_sec);
+                pos = write_char(buf, limit, pos, b' ');
+                let label = if t.tm_hour < 12 { b"AM" } else { b"PM" };
+                pos = write_str(buf, limit, pos, label);
+            }
+            b'x' => {
+                // Locale date (C locale: %m/%d/%y).
+                pos = write_dec2(buf, limit, pos, t.tm_mon.wrapping_add(1));
+                pos = write_char(buf, limit, pos, b'/');
+                pos = write_dec2(buf, limit, pos, t.tm_mday);
+                pos = write_char(buf, limit, pos, b'/');
+                pos = write_dec2(buf, limit, pos,
+                    t.tm_year.wrapping_add(1900).wrapping_rem(100));
+            }
+            b'X' => {
+                // Locale time (C locale: %H:%M:%S).
+                pos = write_dec2(buf, limit, pos, t.tm_hour);
+                pos = write_char(buf, limit, pos, b':');
+                pos = write_dec2(buf, limit, pos, t.tm_min);
+                pos = write_char(buf, limit, pos, b':');
+                pos = write_dec2(buf, limit, pos, t.tm_sec);
+            }
+
+            // --- Timezone ---
+            b'z' => {
+                // UTC offset: always +0000 (we have no timezone support).
+                pos = write_str(buf, limit, pos, b"+0000");
+            }
+            b'Z' => {
+                // Timezone name: always UTC.
+                pos = write_str(buf, limit, pos, b"UTC");
+            }
+
+            // --- GNU extension ---
+            b's' => {
+                // Seconds since epoch (GNU extension).
+                let mut tmp = unsafe { *tm };
+                let epoch = tm_to_secs(&mut tmp);
+                pos = write_i64(buf, limit, pos, epoch);
+            }
+
+            // --- Literal ---
             b'n' => {
                 pos = write_char(buf, limit, pos, b'\n');
             }
@@ -756,6 +897,63 @@ fn write_dec3(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
     write_char(buf, limit, p1, d0)
 }
 
+/// Write a 2-digit space-padded decimal (e.g., " 5" for 5).
+fn write_space_dec2(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
+    let v = if val < 0 { 0 } else { val as u32 };
+    let tens = v.wrapping_div(10) % 10;
+    let ones = v % 10;
+    let d1 = if tens == 0 { b' ' } else { b'0'.wrapping_add(tens as u8) };
+    let d0 = b'0'.wrapping_add(ones as u8);
+    let p1 = write_char(buf, limit, pos, d1);
+    write_char(buf, limit, p1, d0)
+}
+
+/// Convert 24-hour clock to 12-hour clock (1-12).
+fn hour_12(h24: i32) -> i32 {
+    let h = h24 % 12;
+    if h == 0 { 12 } else { h }
+}
+
+/// Write an `i64` value as decimal digits (no padding, handles negatives).
+fn write_i64(buf: *mut u8, limit: usize, mut pos: usize, val: i64) -> usize {
+    if val < 0 {
+        pos = write_char(buf, limit, pos, b'-');
+        // Avoid overflow on i64::MIN by using wrapping.
+        return write_u64(buf, limit, pos, (val.wrapping_neg()) as u64);
+    }
+    write_u64(buf, limit, pos, val as u64)
+}
+
+/// Write a `u64` value as decimal digits (no padding).
+fn write_u64(buf: *mut u8, limit: usize, pos: usize, val: u64) -> usize {
+    // Stack buffer for up to 20 digits (u64::MAX = ~1.8e19).
+    let mut digits = [0u8; 20];
+    let mut n = val;
+    let mut count: usize = 0;
+
+    if n == 0 {
+        return write_char(buf, limit, pos, b'0');
+    }
+
+    while n > 0 {
+        if let Some(slot) = digits.get_mut(count) {
+            *slot = b'0'.wrapping_add((n % 10) as u8);
+        }
+        count = count.wrapping_add(1);
+        n = n.wrapping_div(10);
+    }
+
+    // Write digits in reverse (most significant first).
+    let mut p = pos;
+    let mut i = count;
+    while i > 0 {
+        i = i.wrapping_sub(1);
+        let d = digits.get(i).copied().unwrap_or(b'0');
+        p = write_char(buf, limit, p, d);
+    }
+    p
+}
+
 /// Write a 4-digit zero-padded year.
 fn write_dec4(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
     let v = if val < 0 { 0 } else { val as u32 };
@@ -805,14 +1003,15 @@ pub extern "C" fn clock() -> i64 {
 /// filling fields in `tm`.  Returns a pointer to the first character
 /// not consumed, or NULL if the input doesn't match.
 ///
-/// Supports: `%Y`, `%m`, `%d`, `%H`, `%M`, `%S`, `%j`, `%n`, `%t`, `%%`.
+/// Supports: `%Y`, `%C`, `%y`, `%m`, `%d`, `%e`, `%H`, `%I`, `%M`,
+/// `%S`, `%j`, `%w`, `%u`, `%p`, `%n`, `%t`, `%%`.
 ///
 /// # Safety
 ///
 /// `buf` and `format` must be valid null-terminated strings.
 /// `tm` must point to a valid `Tm`.
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
 pub unsafe extern "C" fn strptime(
     buf: *const u8,
     format: *const u8,
@@ -848,6 +1047,25 @@ pub unsafe extern "C" fn strptime(
                     unsafe { (*tm).tm_year = val - 1900; }
                     bi = bi.wrapping_add(consumed);
                 }
+                b'C' => {
+                    // Century (2 digits).  Sets year = century*100 + (year%100).
+                    let (val, consumed) = parse_int(buf, bi, 2);
+                    if consumed == 0 { return core::ptr::null(); }
+                    unsafe {
+                        let cur_y2 = ((*tm).tm_year.wrapping_add(1900)) % 100;
+                        (*tm).tm_year = val.wrapping_mul(100).wrapping_add(cur_y2).wrapping_sub(1900);
+                    }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'y' => {
+                    // 2-digit year. 69-99 → 1969-1999, 00-68 → 2000-2068.
+                    let (val, consumed) = parse_int(buf, bi, 2);
+                    if consumed == 0 { return core::ptr::null(); }
+                    let full_year = if val >= 69 { val.wrapping_add(1900) }
+                                    else { val.wrapping_add(2000) };
+                    unsafe { (*tm).tm_year = full_year.wrapping_sub(1900); }
+                    bi = bi.wrapping_add(consumed);
+                }
                 b'm' => {
                     // Month 01-12.
                     let (val, consumed) = parse_int(buf, bi, 2);
@@ -855,17 +1073,41 @@ pub unsafe extern "C" fn strptime(
                     unsafe { (*tm).tm_mon = val - 1; }
                     bi = bi.wrapping_add(consumed);
                 }
-                b'd' => {
-                    // Day 01-31.
+                b'd' | b'e' => {
+                    // Day 01-31 (or space-padded for %e).
+                    // Skip leading space for %e.
+                    if spec == b'e' {
+                        while (unsafe { *buf.add(bi) }) == b' ' {
+                            bi = bi.wrapping_add(1);
+                        }
+                    }
                     let (val, consumed) = parse_int(buf, bi, 2);
                     if consumed == 0 { return core::ptr::null(); }
                     unsafe { (*tm).tm_mday = val; }
                     bi = bi.wrapping_add(consumed);
                 }
-                b'H' => {
-                    // Hour 00-23.
+                b'H' | b'k' => {
+                    // Hour 00-23 (%k allows space-padded).
+                    if spec == b'k' {
+                        while (unsafe { *buf.add(bi) }) == b' ' {
+                            bi = bi.wrapping_add(1);
+                        }
+                    }
                     let (val, consumed) = parse_int(buf, bi, 2);
                     if consumed == 0 { return core::ptr::null(); }
+                    unsafe { (*tm).tm_hour = val; }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'I' | b'l' => {
+                    // Hour 01-12 (12-hour clock).
+                    if spec == b'l' {
+                        while (unsafe { *buf.add(bi) }) == b' ' {
+                            bi = bi.wrapping_add(1);
+                        }
+                    }
+                    let (val, consumed) = parse_int(buf, bi, 2);
+                    if consumed == 0 { return core::ptr::null(); }
+                    // Store as-is; %p adjusts for AM/PM later.
                     unsafe { (*tm).tm_hour = val; }
                     bi = bi.wrapping_add(consumed);
                 }
@@ -889,6 +1131,40 @@ pub unsafe extern "C" fn strptime(
                     if consumed == 0 { return core::ptr::null(); }
                     unsafe { (*tm).tm_yday = val - 1; }
                     bi = bi.wrapping_add(consumed);
+                }
+                b'w' => {
+                    // Weekday 0-6 (Sunday=0).
+                    let (val, consumed) = parse_int(buf, bi, 1);
+                    if consumed == 0 { return core::ptr::null(); }
+                    unsafe { (*tm).tm_wday = val; }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'u' => {
+                    // ISO weekday 1-7 (Monday=1).
+                    let (val, consumed) = parse_int(buf, bi, 1);
+                    if consumed == 0 { return core::ptr::null(); }
+                    unsafe { (*tm).tm_wday = if val == 7 { 0 } else { val }; }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'p' | b'P' => {
+                    // AM/PM (or am/pm). Adjusts tm_hour for 12-hour input.
+                    let c1 = unsafe { *buf.add(bi) };
+                    let c2 = unsafe { *buf.add(bi.wrapping_add(1)) };
+                    let afternoon = (c1 == b'P' || c1 == b'p')
+                        && (c2 == b'M' || c2 == b'm');
+                    let morning = (c1 == b'A' || c1 == b'a')
+                        && (c2 == b'M' || c2 == b'm');
+                    if !afternoon && !morning {
+                        return core::ptr::null();
+                    }
+                    unsafe {
+                        if afternoon && (*tm).tm_hour < 12 {
+                            (*tm).tm_hour = (*tm).tm_hour.wrapping_add(12);
+                        } else if morning && (*tm).tm_hour == 12 {
+                            (*tm).tm_hour = 0;
+                        }
+                    }
+                    bi = bi.wrapping_add(2);
                 }
                 b'n' | b't' => {
                     // Skip any whitespace.

@@ -799,10 +799,76 @@ pub extern "C" fn tmpfile() -> *mut u8 {
 /// `template` must be a writable null-terminated string with at least
 /// 6 trailing 'X' characters.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn mkostemp(template: *mut u8, _flags: i32) -> i32 {
-    // Flags like O_CLOEXEC are accepted but not enforced — just
-    // delegate to mkstemp which does all the work.
-    unsafe { mkstemp(template) }
+pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
+    if template.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+
+    let len = unsafe { crate::string::strlen(template) };
+    if len < 6 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+
+    // Verify the last 6 characters are 'X'.
+    let suffix_start = len.wrapping_sub(6);
+    let mut i: usize = 0;
+    while i < 6 {
+        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        i = i.wrapping_add(1);
+    }
+
+    // Try up to 100 unique names.
+    let mut attempt: u32 = 0;
+    while attempt < 100 {
+        let counter = unsafe { *core::ptr::addr_of!(MKSTEMP_COUNTER) };
+        unsafe { core::ptr::addr_of_mut!(MKSTEMP_COUNTER).write(counter.wrapping_add(1)); }
+
+        let pid = crate::process::getpid() as u32;
+        let seed = counter
+            .wrapping_mul(31)
+            .wrapping_add(pid)
+            .wrapping_mul(17)
+            .wrapping_add(attempt);
+
+        let mut val = seed;
+        let mut j: usize = 0;
+        while j < 6 {
+            let idx = (val % 36) as u8;
+            let ch = if idx < 10 {
+                b'0'.wrapping_add(idx)
+            } else {
+                b'a'.wrapping_add(idx.wrapping_sub(10))
+            };
+            unsafe { *template.add(suffix_start.wrapping_add(j)) = ch; }
+            val = val.wrapping_div(36).wrapping_add(1);
+            j = j.wrapping_add(1);
+        }
+
+        // OR the caller's flags (e.g., O_CLOEXEC, O_APPEND) with the
+        // mandatory O_RDWR | O_CREAT | O_EXCL flags.
+        let open_flags = crate::fcntl::O_RDWR
+            | crate::fcntl::O_CREAT
+            | crate::fcntl::O_EXCL
+            | flags;
+        let fd = crate::file::open(template, open_flags, 0o600);
+        if fd >= 0 {
+            return fd;
+        }
+
+        if crate::errno::get_errno() != crate::errno::EEXIST {
+            return -1;
+        }
+
+        attempt = attempt.wrapping_add(1);
+    }
+
+    crate::errno::set_errno(crate::errno::EEXIST);
+    -1
 }
 
 // ---------------------------------------------------------------------------

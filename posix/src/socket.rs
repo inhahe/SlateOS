@@ -98,6 +98,16 @@ pub const SO_ERROR: i32 = 4;
 pub const SO_RCVBUF: i32 = 8;
 /// Send buffer size.
 pub const SO_SNDBUF: i32 = 7;
+/// Permit broadcast datagrams.
+pub const SO_BROADCAST: i32 = 6;
+/// Linger on close if unsent data.
+pub const SO_LINGER: i32 = 13;
+/// Reuse local port.
+pub const SO_REUSEPORT: i32 = 15;
+/// Receive timeout.
+pub const SO_RCVTIMEO: i32 = 20;
+/// Send timeout.
+pub const SO_SNDTIMEO: i32 = 21;
 
 // TCP-level socket options (SOL_TCP).
 /// Disable Nagle's algorithm.
@@ -1686,7 +1696,11 @@ pub extern "C" fn setsockopt(
         match (level, optname) {
             (SOL_SOCKET, SO_REUSEADDR) => { meta.reuseaddr = val != 0; }
             (SOL_SOCKET, SO_KEEPALIVE) => { meta.keepalive = val != 0; }
-            (SOL_SOCKET, SO_RCVBUF | SO_SNDBUF) => { /* Accept silently. */ }
+            (SOL_SOCKET, SO_RCVBUF | SO_SNDBUF | SO_BROADCAST | SO_REUSEPORT
+                       | SO_RCVTIMEO | SO_SNDTIMEO | SO_LINGER) => {
+                // Accept silently — these are common options that programs
+                // set but we don't implement at the kernel level yet.
+            }
             (SOL_TCP, TCP_NODELAY) => { meta.nodelay = val != 0; }
             (SOL_IP | IPPROTO_IP, IP_MULTICAST_TTL | IP_MULTICAST_LOOP) => {
                 // Accept silently — no kernel support for these yet,
@@ -1795,6 +1809,10 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_SOCKET, SO_KEEPALIVE) => meta.map_or(0, |m| i32::from(m.keepalive)),
             (SOL_SOCKET, SO_RCVBUF) => 65536, // Default buffer size.
             (SOL_SOCKET, SO_SNDBUF) => 65536,
+            (SOL_SOCKET, SO_BROADCAST) => 0,  // Broadcast not enabled.
+            (SOL_SOCKET, SO_REUSEPORT) => 0,  // Port reuse not enabled.
+            (SOL_SOCKET, SO_LINGER) => 0,     // No linger.
+            (SOL_SOCKET, SO_RCVTIMEO | SO_SNDTIMEO) => 0, // No timeout.
             (SOL_TCP, TCP_NODELAY) => meta.map_or(0, |m| i32::from(m.nodelay)),
             _ => {
                 errno::set_errno(errno::ENOPROTOOPT);

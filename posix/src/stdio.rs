@@ -334,7 +334,7 @@ fn file_write(f: *mut File, data: *const u8, len: usize) -> i64 {
             file.buf_len = 0;
         }
         file.buf_dir = BUF_DIR_WRITE;
-        let ret = crate::file::write(file.fd, data, len);
+        let ret = crate::file::write(file.fd, data, len) as i64;
         if ret < 0 {
             file.flags |= FLAG_ERR;
         }

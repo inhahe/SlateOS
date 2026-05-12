@@ -357,7 +357,8 @@ pub extern "C" fn scandir(
                     unsafe { crate::malloc::free((*arr_typed.add(j)).cast::<u8>()); }
                     j = j.wrapping_add(1);
                 }
-                crate::malloc::free(arr);
+                // SAFETY: arr was allocated by malloc above.
+                unsafe { crate::malloc::free(arr); }
                 closedir(dirp);
                 errno::set_errno(errno::ENOMEM);
                 return -1;

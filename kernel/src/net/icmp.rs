@@ -1,6 +1,12 @@
 //! ICMP (Internet Control Message Protocol) implementation.
 //!
-//! Supports ICMP Echo Request/Reply (ping) per RFC 792.
+//! Supports ICMP Echo Request/Reply (ping) per RFC 792, plus
+//! handling of ICMP error messages:
+//!
+//! - **Type 0**: Echo Reply — matched to outstanding pings
+//! - **Type 3**: Destination Unreachable — logged with code-specific reason
+//! - **Type 8**: Echo Request — generates Echo Reply
+//! - **Type 11**: Time Exceeded — logged (useful for traceroute)
 //!
 //! ## Echo Request/Reply format
 //!
@@ -9,11 +15,24 @@
 //! Identifier                | Sequence Number
 //! Data ...
 //! ```
+//!
+//! ## Checksum verification
+//!
+//! All incoming ICMP packets are checksum-verified before processing.
+//! Packets with invalid checksums are silently dropped (RFC 792).
+//!
+//! ## Ping RTT measurement
+//!
+//! Each outstanding ping records a timestamp.  When the reply arrives,
+//! the RTT is computed and reported.  Supports up to 16 concurrent
+//! outstanding pings.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
+use spin::Mutex;
+
+use crate::error::KernelResult;
 
 use super::interface::Ipv4Addr;
 use super::ipv4::{self, Ipv4Packet, PROTO_ICMP};
@@ -24,20 +43,107 @@ use super::ipv4::{self, Ipv4Packet, PROTO_ICMP};
 
 /// Echo Reply.
 const ICMP_ECHO_REPLY: u8 = 0;
+/// Destination Unreachable.
+const ICMP_DEST_UNREACHABLE: u8 = 3;
 /// Echo Request.
 const ICMP_ECHO_REQUEST: u8 = 8;
+/// Time Exceeded.
+const ICMP_TIME_EXCEEDED: u8 = 11;
 
-/// ICMP header size (type + code + checksum + id + seq).
+/// ICMP header size (type + code + checksum + id/seq or unused).
 const ICMP_HEADER_SIZE: usize = 8;
 
 /// Ping identifier (fixed for our kernel).
 const PING_ID: u16 = 0x1234;
 
+/// Maximum outstanding pings tracked for RTT measurement.
+const MAX_OUTSTANDING: usize = 16;
+
+// ---------------------------------------------------------------------------
+// Ping tracking
+// ---------------------------------------------------------------------------
+
 /// Next sequence number.
 static PING_SEQ: AtomicU16 = AtomicU16::new(1);
 
-/// Last received ping reply sequence.
+/// Last received ping reply sequence number.
+///
+/// Used by the simple `wait_reply()` API.  For RTT-aware pings, use
+/// `ping_with_rtt()` + `wait_reply_rtt()` instead.
 static LAST_REPLY_SEQ: AtomicU16 = AtomicU16::new(0);
+
+/// Last measured RTT in nanoseconds (0 if no reply received yet).
+static LAST_RTT_NS: AtomicU64 = AtomicU64::new(0);
+
+/// An outstanding ping awaiting a reply.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // `dst` stored for future per-ping diagnostics
+struct PingSlot {
+    /// Whether this slot is in use.
+    active: bool,
+    /// Sequence number of the outstanding ping.
+    seq: u16,
+    /// Timestamp (monotonic ns) when the ping was sent.
+    sent_ns: u64,
+    /// Destination IP (for logging).
+    dst: Ipv4Addr,
+}
+
+impl PingSlot {
+    const fn empty() -> Self {
+        Self {
+            active: false,
+            seq: 0,
+            sent_ns: 0,
+            dst: Ipv4Addr::UNSPECIFIED,
+        }
+    }
+}
+
+/// Table of outstanding pings for RTT tracking.
+static OUTSTANDING: Mutex<[PingSlot; MAX_OUTSTANDING]> =
+    Mutex::new([PingSlot::empty(); MAX_OUTSTANDING]);
+
+/// Record an outstanding ping.
+fn record_outstanding(seq: u16, dst: Ipv4Addr) {
+    let now = crate::hrtimer::now_ns();
+    let mut table = OUTSTANDING.lock();
+
+    // Find an empty slot (or reuse the oldest if full).
+    for slot in table.iter_mut() {
+        if !slot.active {
+            *slot = PingSlot { active: true, seq, sent_ns: now, dst };
+            return;
+        }
+    }
+
+    // All slots full — evict the oldest.
+    let mut oldest_idx = 0;
+    let mut oldest_time = u64::MAX;
+    for (i, slot) in table.iter().enumerate() {
+        if slot.sent_ns < oldest_time {
+            oldest_time = slot.sent_ns;
+            oldest_idx = i;
+        }
+    }
+    if let Some(slot) = table.get_mut(oldest_idx) {
+        *slot = PingSlot { active: true, seq, sent_ns: now, dst };
+    }
+}
+
+/// Match a reply to an outstanding ping and return the RTT in nanoseconds.
+fn match_outstanding(seq: u16) -> Option<u64> {
+    let now = crate::hrtimer::now_ns();
+    let mut table = OUTSTANDING.lock();
+    for slot in table.iter_mut() {
+        if slot.active && slot.seq == seq {
+            let rtt = now.wrapping_sub(slot.sent_ns);
+            slot.active = false;
+            return Some(rtt);
+        }
+    }
+    None
+}
 
 // ---------------------------------------------------------------------------
 // ICMP packet building
@@ -72,6 +178,50 @@ fn build_echo_request(seq: u16) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// Checksum verification
+// ---------------------------------------------------------------------------
+
+/// Verify the ICMP checksum.
+///
+/// The checksum covers the entire ICMP message.  A correct checksum
+/// folds to zero when computed over the full message including the
+/// checksum field (one's complement property).
+fn verify_checksum(data: &[u8]) -> bool {
+    ipv4::ip_checksum(data) == 0
+}
+
+// ---------------------------------------------------------------------------
+// ICMP error message helpers
+// ---------------------------------------------------------------------------
+
+/// Human-readable Destination Unreachable code.
+fn dest_unreachable_reason(code: u8) -> &'static str {
+    match code {
+        0 => "network unreachable",
+        1 => "host unreachable",
+        2 => "protocol unreachable",
+        3 => "port unreachable",
+        4 => "fragmentation needed but DF set",
+        5 => "source route failed",
+        6 => "destination network unknown",
+        7 => "destination host unknown",
+        9 => "network administratively prohibited",
+        10 => "host administratively prohibited",
+        13 => "communication administratively prohibited",
+        _ => "unknown",
+    }
+}
+
+/// Human-readable Time Exceeded code.
+fn time_exceeded_reason(code: u8) -> &'static str {
+    match code {
+        0 => "TTL exceeded in transit",
+        1 => "fragment reassembly time exceeded",
+        _ => "unknown",
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ICMP processing
 // ---------------------------------------------------------------------------
 
@@ -82,23 +232,21 @@ pub fn process_icmp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         return Ok(());
     }
 
+    // Verify ICMP checksum before processing.
+    if !verify_checksum(data) {
+        crate::serial_println!(
+            "[icmp] Dropped packet from {} — bad checksum",
+            ip_packet.src
+        );
+        return Ok(());
+    }
+
     let icmp_type = data[0];
-    let _code = data[1];
+    let code = data[1];
 
     match icmp_type {
         ICMP_ECHO_REPLY => {
-            // Verify it's our ping.
-            if data.len() >= 8 {
-                let id = u16::from_be_bytes([data[4], data[5]]);
-                let seq = u16::from_be_bytes([data[6], data[7]]);
-                if id == PING_ID {
-                    LAST_REPLY_SEQ.store(seq, Ordering::Relaxed);
-                    crate::serial_println!(
-                        "[icmp] Echo reply from {} seq={}",
-                        ip_packet.src, seq
-                    );
-                }
-            }
+            handle_echo_reply(ip_packet, data);
         }
         ICMP_ECHO_REQUEST => {
             // Reply to echo requests (respond to pings directed at us).
@@ -107,12 +255,75 @@ pub fn process_icmp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 send_echo_reply(ip_packet)?;
             }
         }
+        ICMP_DEST_UNREACHABLE => {
+            // Log the unreachable notification.  The ICMP payload contains
+            // the original IP header + 8 bytes of the triggering packet,
+            // which could be used to cancel pending TCP connections or
+            // notify UDP sockets.  For now, just log.
+            crate::serial_println!(
+                "[icmp] Destination unreachable from {}: {} (code {})",
+                ip_packet.src,
+                dest_unreachable_reason(code),
+                code
+            );
+        }
+        ICMP_TIME_EXCEEDED => {
+            crate::serial_println!(
+                "[icmp] Time exceeded from {}: {} (code {})",
+                ip_packet.src,
+                time_exceeded_reason(code),
+                code
+            );
+        }
         _ => {
-            // Other ICMP types — ignore for now.
+            // Other ICMP types — silently ignore.
         }
     }
 
     Ok(())
+}
+
+/// Handle an ICMP Echo Reply.
+fn handle_echo_reply(ip_packet: &Ipv4Packet<'_>, data: &[u8]) {
+    if data.len() < 8 {
+        return;
+    }
+
+    let id = u16::from_be_bytes([data[4], data[5]]);
+    let seq = u16::from_be_bytes([data[6], data[7]]);
+
+    if id != PING_ID {
+        return; // Not our ping.
+    }
+
+    LAST_REPLY_SEQ.store(seq, Ordering::Relaxed);
+
+    // Try to match against outstanding pings for RTT.
+    if let Some(rtt_ns) = match_outstanding(seq) {
+        LAST_RTT_NS.store(rtt_ns, Ordering::Relaxed);
+
+        // Format RTT in human-readable units.
+        #[allow(clippy::arithmetic_side_effects)]
+        let rtt_us = rtt_ns / 1000;
+        if rtt_us >= 1000 {
+            #[allow(clippy::arithmetic_side_effects)]
+            let rtt_ms = rtt_us / 1000;
+            crate::serial_println!(
+                "[icmp] Echo reply from {} seq={} rtt={} ms",
+                ip_packet.src, seq, rtt_ms
+            );
+        } else {
+            crate::serial_println!(
+                "[icmp] Echo reply from {} seq={} rtt={} us",
+                ip_packet.src, seq, rtt_us
+            );
+        }
+    } else {
+        crate::serial_println!(
+            "[icmp] Echo reply from {} seq={}",
+            ip_packet.src, seq
+        );
+    }
 }
 
 /// Send an ICMP echo reply in response to a request.
@@ -142,10 +353,15 @@ fn send_echo_reply(request_ip: &Ipv4Packet<'_>) -> KernelResult<()> {
 
 /// Send an ICMP echo request (ping) to the given IP address.
 ///
+/// Records the ping for RTT measurement.  Use [`wait_reply_rtt()`] to
+/// wait for the reply and retrieve the RTT, or [`wait_reply()`] for
+/// the simple boolean API.
+///
 /// Returns the sequence number used.
 pub fn ping(dst: Ipv4Addr) -> KernelResult<u16> {
     let seq = PING_SEQ.fetch_add(1, Ordering::Relaxed);
     let pkt = build_echo_request(seq);
+    record_outstanding(seq, dst);
     ipv4::send(dst, PROTO_ICMP, &pkt)?;
     Ok(seq)
 }
@@ -167,4 +383,32 @@ pub fn wait_reply(seq: u16, timeout_polls: u32) -> bool {
         }
     }
     false
+}
+
+/// Wait for a ping reply and return the RTT in nanoseconds.
+///
+/// Polls the NIC for up to `timeout_polls` iterations.
+/// Returns `Some(rtt_ns)` on success, `None` on timeout.
+#[allow(dead_code)] // Public API for userspace ping utility
+pub fn wait_reply_rtt(seq: u16, timeout_polls: u32) -> Option<u64> {
+    for _ in 0..timeout_polls {
+        super::poll();
+
+        if LAST_REPLY_SEQ.load(Ordering::Relaxed) == seq {
+            return Some(LAST_RTT_NS.load(Ordering::Relaxed));
+        }
+
+        for _ in 0..10_000 {
+            core::hint::spin_loop();
+        }
+    }
+    None
+}
+
+/// Get the last measured RTT in nanoseconds.
+///
+/// Returns 0 if no ping reply has been received yet.
+#[allow(dead_code)] // Public API for network diagnostics
+pub fn last_rtt_ns() -> u64 {
+    LAST_RTT_NS.load(Ordering::Relaxed)
 }

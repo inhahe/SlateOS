@@ -1,6 +1,3 @@
-osb: "The ipv4.rs clippy issues are pre-existing (in build_packet and ip_checksum). Only the interface.rs:257 issue is mine. Let me fix it:"
-^^ clippy issues we have to fix?
-
 add event logger like windows' (but more intuitive to use) to roadmap-detailed.md?
 
 add to roadmap-detailed.md to support 3d acceleration under vmware

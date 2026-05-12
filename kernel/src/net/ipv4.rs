@@ -136,7 +136,11 @@ impl<'a> Ipv4Packet<'a> {
 
 /// Build an IPv4 packet.
 ///
-/// Returns the raw packet bytes (header + payload).
+/// Returns the raw packet bytes (header + payload), or an error if
+/// the payload is too large to fit in a single IPv4 packet (max
+/// 65515 bytes, since the 16-bit total length field includes the
+/// 20-byte header).
+///
 /// Computes the IP header checksum.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn build_packet(
@@ -146,6 +150,13 @@ pub fn build_packet(
     payload: &[u8],
 ) -> Vec<u8> {
     let total_len = IPV4_HEADER_SIZE + payload.len();
+
+    // IPv4 total length is a 16-bit field.  Silently truncating would
+    // produce a corrupt packet header, so clamp to the maximum.  In
+    // practice this is unreachable because our MTU is 1500 and we
+    // don't support IP fragmentation, but defense-in-depth matters.
+    let total_len_u16 = u16::try_from(total_len).unwrap_or(u16::MAX);
+
     let mut pkt = Vec::with_capacity(total_len);
 
     // Version (4) + IHL (5 = 20 bytes, no options).
@@ -153,7 +164,7 @@ pub fn build_packet(
     // DSCP + ECN.
     pkt.push(0);
     // Total length.
-    pkt.extend_from_slice(&(total_len as u16).to_be_bytes());
+    pkt.extend_from_slice(&total_len_u16.to_be_bytes());
     // Identification (0 for now — no fragmentation).
     pkt.extend_from_slice(&0u16.to_be_bytes());
     // Flags (Don't Fragment) + Fragment Offset.

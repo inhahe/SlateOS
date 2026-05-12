@@ -6353,6 +6353,60 @@ pub fn sys_dns_resolve(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_DNS_REVERSE_RESOLVE` — reverse-resolve an IPv4 address to a hostname.
+///
+/// `arg0`: IPv4 address as a 32-bit integer in network byte order.
+/// `arg1`: pointer to output buffer for hostname string.
+/// `arg2`: size of the output buffer in bytes.
+///
+/// Returns: number of bytes written (hostname length) on success,
+/// negative error on failure.
+pub fn sys_dns_reverse_resolve(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: same as forward DNS.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let ip_u32 = args.arg0 as u32;
+    let out_ptr = args.arg1 as *mut u8;
+    let out_len = args.arg2 as usize;
+
+    if out_ptr.is_null() || out_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Cap output to a reasonable hostname length.
+    let safe_out_len = out_len.min(253);
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, safe_out_len) {
+        return SyscallResult::err(e);
+    }
+
+    // Reconstruct Ipv4Addr from network byte order u32.
+    let ip = crate::net::interface::Ipv4Addr::from_u32(ip_u32);
+
+    match crate::net::dns::reverse_resolve(ip) {
+        Ok(hostname) => {
+            let copy_len = hostname.len().min(safe_out_len);
+            if copy_len == 0 {
+                return SyscallResult::err(KernelError::InvalidArgument);
+            }
+            // SAFETY: out_ptr validated for safe_out_len bytes above.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    hostname.as_bytes().as_ptr(),
+                    out_ptr,
+                    copy_len,
+                );
+            }
+            SyscallResult::ok(copy_len as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Scheduler configuration (50–59)
 // ---------------------------------------------------------------------------

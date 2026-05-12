@@ -77,7 +77,6 @@ const TYPE_A: u16 = 1;
 /// DNS record type: CNAME (canonical name alias).
 const TYPE_CNAME: u16 = 5;
 /// DNS record type: PTR (pointer / reverse DNS).
-#[allow(dead_code)] // Used by reverse_resolve() — public API.
 const TYPE_PTR: u16 = 12;
 /// DNS record class: IN (Internet).
 const CLASS_IN: u16 = 1;
@@ -948,7 +947,6 @@ pub fn resolve_str(name: &str) -> KernelResult<String> {
     Ok(alloc::format!("{}", ip))
 }
 
-#[allow(dead_code)] // Public API — used by kshell and diagnostics.
 /// Reverse-resolve an IPv4 address to a hostname (PTR record).
 ///
 /// Sends a PTR query to the configured DNS server for the `in-addr.arpa`

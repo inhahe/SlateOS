@@ -2022,6 +2022,21 @@ pub const SYS_UDP_MCAST_LEAVE: u64 = 815;
 /// Returns: 0 on success, negative error on failure.
 pub const SYS_DNS_RESOLVE: u64 = 820;
 
+/// Reverse-resolve an IPv4 address to a hostname via DNS PTR query.
+///
+/// `arg0`: IPv4 address as a 32-bit integer in **network byte order**
+///         (big-endian, e.g., 192.168.1.1 = 0xC0A80101).
+/// `arg1`: pointer to output buffer for the hostname string (not
+///         null-terminated).
+/// `arg2`: size of the output buffer in bytes.
+///
+/// Performs a blocking PTR query for the `in-addr.arpa` domain
+/// (UDP, ~7s total timeout with retries).
+///
+/// Returns: number of bytes written to the output buffer on success
+/// (the hostname length), or negative error on failure.
+pub const SYS_DNS_REVERSE_RESOLVE: u64 = 821;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

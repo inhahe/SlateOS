@@ -268,77 +268,162 @@ pub extern "C" fn gettid() -> PidT {
 // process appear to be its own group and session leader.  This is
 // sufficient for programs that query but don't rely on job control.
 
+// ---------------------------------------------------------------------------
+// Process group / session tracking
+// ---------------------------------------------------------------------------
+//
+// Without kernel support for multi-process job control, we track the
+// calling process's own PGID and SID in static variables.  Queries for
+// other PIDs fall back to returning the PID itself (each process is its
+// own group leader).  This gives consistent behavior for programs that
+// call setpgid/setsid and later query their own group/session.
+
+/// Process group ID of the calling process.  Initialized to our PID
+/// on first call (lazy init via 0 sentinel; real PIDs are ≥ 1).
+static mut OUR_PGID: PidT = 0;
+
+/// Session ID of the calling process.  Same lazy-init pattern.
+static mut OUR_SID: PidT = 0;
+
+/// Foreground process group of the terminal (set by tcsetpgrp).
+static mut FG_PGRP: PidT = 0;
+
+/// Ensure our PGID/SID are initialized (called before any getter).
+///
+/// On first call, sets both to our PID (process is its own group/session
+/// leader at startup, matching POSIX semantics for the initial process).
+fn ensure_pg_init() {
+    // SAFETY: single-address-space process, no concurrency.
+    unsafe {
+        if OUR_PGID == 0 {
+            OUR_PGID = getpid();
+        }
+        if OUR_SID == 0 {
+            OUR_SID = getpid();
+        }
+        if FG_PGRP == 0 {
+            FG_PGRP = getpid();
+        }
+    }
+}
+
 /// Get the process group ID of the calling process.
 ///
-/// Stub: returns the caller's PID (every process is its own group).
+/// Returns the PGID set by `setpgid()` or `setpgrp()`, defaulting
+/// to our own PID (we are our own group leader at startup).
 #[unsafe(no_mangle)]
 pub extern "C" fn getpgrp() -> PidT {
-    getpid()
+    ensure_pg_init();
+    // SAFETY: initialized above.
+    unsafe { OUR_PGID }
 }
 
 /// Get the process group ID of a specific process.
 ///
-/// Stub: if `pid` is 0 or the caller's own PID, returns the caller's
-/// PID.  For other PIDs, also returns the PID (as if each process is
-/// its own group leader).
+/// For `pid` == 0 or our own PID, returns the stored PGID.
+/// For other PIDs, returns the PID itself (no kernel visibility into
+/// other processes' groups).
 #[unsafe(no_mangle)]
 pub extern "C" fn getpgid(pid: PidT) -> PidT {
-    if pid == 0 {
-        return getpid();
+    ensure_pg_init();
+    let us = getpid();
+    if pid == 0 || pid == us {
+        // SAFETY: initialized.
+        return unsafe { OUR_PGID };
     }
-    // Without kernel support, just return the pid itself.
+    // Without kernel support, each other process is assumed to be its
+    // own group leader.
     pid
 }
 
 /// Set the process group ID of a process.
 ///
-/// Stub: succeeds silently (no-op).  Real implementation needs kernel
-/// support for process group tracking.
+/// `pid` == 0 means the calling process.  `pgid` == 0 means set the
+/// PGID to the target PID.  Only our own PGID can actually be changed
+/// (no kernel support for modifying other processes).
+///
+/// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
-pub extern "C" fn setpgid(_pid: PidT, _pgid: PidT) -> i32 {
+pub extern "C" fn setpgid(pid: PidT, pgid: PidT) -> i32 {
+    ensure_pg_init();
+    let us = getpid();
+    let target = if pid == 0 { us } else { pid };
+    if target != us {
+        // Can't change other processes — succeed silently to avoid
+        // breaking programs that call setpgid(child, ...) after spawn.
+        return 0;
+    }
+    let new_pgid = if pgid == 0 { us } else { pgid };
+    // SAFETY: single process.
+    unsafe { OUR_PGID = new_pgid; }
     0
 }
 
-/// Set the process group ID of the calling process.
+/// Set the process group ID of the calling process to its own PID.
 ///
-/// Stub: succeeds silently.
+/// Equivalent to `setpgid(0, 0)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn setpgrp() -> i32 {
-    0
+    setpgid(0, 0)
 }
 
 /// Get the session ID of a process.
 ///
-/// Stub: returns the PID (every process is its own session leader).
+/// For `pid` == 0 or our own PID, returns the stored SID.
+/// For other PIDs, returns the PID itself.
 #[unsafe(no_mangle)]
 pub extern "C" fn getsid(pid: PidT) -> PidT {
-    if pid == 0 {
-        return getpid();
+    ensure_pg_init();
+    let us = getpid();
+    if pid == 0 || pid == us {
+        // SAFETY: initialized.
+        return unsafe { OUR_SID };
     }
     pid
 }
 
 /// Create a new session.
 ///
-/// Stub: returns the caller's PID (as if a new session was created).
-/// Real implementation needs kernel session/controlling-terminal support.
+/// Sets our SID and PGID to our own PID (new session leader is its
+/// own process group leader).  Returns the new SID.
+///
+/// POSIX requires the caller not be a process group leader already,
+/// but since we track only our own state and have no kernel enforcement,
+/// we always succeed.
 #[unsafe(no_mangle)]
 pub extern "C" fn setsid() -> PidT {
-    getpid()
+    let us = getpid();
+    // SAFETY: single process.
+    unsafe {
+        OUR_SID = us;
+        OUR_PGID = us;
+        FG_PGRP = us;
+    }
+    us
 }
 
 /// Get the foreground process group ID of a terminal.
 ///
-/// Stub: returns the caller's PID.
+/// Returns the PGID last set by `tcsetpgrp()`, defaulting to our
+/// own PID.
 #[unsafe(no_mangle)]
 pub extern "C" fn tcgetpgrp(_fd: crate::types::Fd) -> PidT {
-    getpid()
+    ensure_pg_init();
+    // SAFETY: initialized.
+    unsafe { FG_PGRP }
 }
 
 /// Set the foreground process group ID of a terminal.
 ///
-/// Stub: succeeds silently (no-op).
+/// Stores the value for later retrieval by `tcgetpgrp()`.
 #[unsafe(no_mangle)]
-pub extern "C" fn tcsetpgrp(_fd: crate::types::Fd, _pgrp: PidT) -> i32 {
+pub extern "C" fn tcsetpgrp(_fd: crate::types::Fd, pgrp: PidT) -> i32 {
+    ensure_pg_init();
+    if pgrp <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: single process.
+    unsafe { FG_PGRP = pgrp; }
     0
 }

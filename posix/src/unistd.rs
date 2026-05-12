@@ -506,9 +506,41 @@ pub extern "C" fn setgroups(_size: usize, _list: *const GidT) -> i32 {
     0
 }
 
+// ---------------------------------------------------------------------------
+// Hostname storage
+// ---------------------------------------------------------------------------
+
+/// Maximum hostname length (POSIX HOST_NAME_MAX is typically 255).
+const HOST_NAME_MAX: usize = 255;
+
+/// Hostname buffer (including null terminator space).
+///
+/// Initialized to "localhost" — can be changed via `sethostname()`.
+/// SAFETY: single-process, no concurrency — direct access is safe.
+static mut HOSTNAME_BUF: [u8; HOST_NAME_MAX + 1] = {
+    let mut buf = [0u8; HOST_NAME_MAX + 1];
+    // "localhost" = 9 bytes.
+    buf[0] = b'l';
+    buf[1] = b'o';
+    buf[2] = b'c';
+    buf[3] = b'a';
+    buf[4] = b'l';
+    buf[5] = b'h';
+    buf[6] = b'o';
+    buf[7] = b's';
+    buf[8] = b't';
+    buf
+};
+
+/// Length of the current hostname (excluding null terminator).
+static mut HOSTNAME_LEN: usize = 9; // "localhost".len()
+
 /// Get the hostname.
 ///
-/// Returns "localhost" (our OS doesn't have a hostname yet).
+/// Copies the stored hostname into `name` (null-terminated).
+/// Defaults to "localhost" until changed via `sethostname()`.
+///
+/// Returns 0 on success, -1 on error (ENAMETOOLONG if buffer too small).
 #[unsafe(no_mangle)]
 pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
     if name.is_null() {
@@ -516,20 +548,24 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
         return -1;
     }
 
-    let hostname = b"localhost";
-    let needed = hostname.len().wrapping_add(1); // +null
+    // SAFETY: single-address-space, no concurrent writes during read.
+    let (hostname, hlen) = unsafe { (&HOSTNAME_BUF, HOSTNAME_LEN) };
+    let needed = hlen.wrapping_add(1); // +null
     if len < needed {
         errno::set_errno(errno::ENAMETOOLONG);
         return -1;
     }
 
     let mut idx: usize = 0;
-    while idx < hostname.len() {
+    while idx < hlen {
         if let Some(&byte) = hostname.get(idx) {
+            // SAFETY: idx < hlen < len, so name.add(idx) is within bounds.
             unsafe { *name.add(idx) = byte; }
         }
         idx = idx.wrapping_add(1);
     }
+    // Null-terminate.
+    // SAFETY: idx == hlen < len, so name.add(idx) is valid.
     unsafe { *name.add(idx) = 0; }
     0
 }
@@ -753,12 +789,33 @@ pub extern "C" fn sync() {
 
 /// Set the system hostname.
 ///
-/// Stub: returns -1 with `EPERM`.  Hostname is currently hardcoded
-/// to "localhost" in `gethostname()`.
+/// Stores the hostname in a process-local static buffer.  Retrieved
+/// via `gethostname()`.  Maximum length is 255 bytes (HOST_NAME_MAX).
+///
+/// Returns 0 on success, -1 on error (EINVAL if too long, EFAULT if null).
 #[unsafe(no_mangle)]
-pub extern "C" fn sethostname(_name: *const u8, _len: usize) -> i32 {
-    errno::set_errno(errno::EPERM);
-    -1
+pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if len > HOST_NAME_MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // SAFETY: single-address-space, no concurrent access.
+    unsafe {
+        let mut idx = 0;
+        while idx < len {
+            HOSTNAME_BUF[idx] = *name.add(idx);
+            idx = idx.wrapping_add(1);
+        }
+        // Null-terminate the stored hostname.
+        HOSTNAME_BUF[len] = 0;
+        HOSTNAME_LEN = len;
+    }
+    0
 }
 
 /// Change the root directory.

@@ -321,3 +321,40 @@ pub fn resolve(ip: Ipv4Addr) -> KernelResult<MacAddress> {
 
     Err(KernelError::TimedOut)
 }
+
+/// Send a gratuitous ARP announcement.
+///
+/// A gratuitous ARP is an ARP request where both sender and target
+/// protocol addresses are our own IP.  This serves two purposes:
+///
+/// 1. **Cache update**: Neighbors that have a stale ARP entry for our IP
+///    (e.g., after DHCP renewal with a new MAC) will update their cache
+///    from the sender fields.
+/// 2. **Duplicate detection**: If another host on the LAN has the same IP,
+///    it will respond with its own ARP reply, alerting us to the conflict.
+///
+/// Sent automatically when the interface is configured via DHCP or
+/// manual configuration.
+pub fn send_gratuitous() -> KernelResult<()> {
+    let our_mac = interface::mac();
+    let our_ip = interface::ip();
+
+    if our_ip.is_unspecified() {
+        return Ok(()); // No IP configured — nothing to announce.
+    }
+
+    // Gratuitous ARP: request for our own IP, broadcast target MAC.
+    let arp_data = build_arp(
+        ARP_REQUEST,
+        &our_mac,
+        our_ip,
+        &MacAddress([0; 6]),
+        our_ip, // Target IP = our IP (gratuitous).
+    );
+    let frame = ethernet::build_frame(&BROADCAST_MAC, &our_mac, ETHERTYPE_ARP, &arp_data);
+
+    super::send_frame(&frame)?;
+    crate::serial_println!("[arp] Gratuitous ARP sent for {}", our_ip);
+
+    Ok(())
+}

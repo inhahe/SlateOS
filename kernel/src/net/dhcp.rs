@@ -14,8 +14,12 @@
 //!
 //! - Uses raw MAC-level broadcast (0.0.0.0 → 255.255.255.255) since
 //!   we have no IP address yet when starting DHCP.
-//! - Transaction ID (xid) is used to match replies to our request.
-//! - Only handles the basic options we need: subnet mask, router, DNS.
+//! - Transaction ID (xid) randomized per transaction to prevent spoofed
+//!   DHCP responses from LAN attackers.
+//! - Parsed options: subnet mask, router, DNS, lease time, renewal time
+//!   (T1), rebinding time (T2), domain name, NTP server.
+//! - Handles DHCP NAK: resets state to Idle so discovery can retry.
+//! - Sends gratuitous ARP after binding (via `interface::configure`).
 
 use alloc::vec::Vec;
 
@@ -40,13 +44,22 @@ const DHCP_OFFER: u8 = 2;
 const DHCP_REQUEST: u8 = 3;
 const DHCP_ACK: u8 = 5;
 
+/// DHCP message types.
+const DHCP_NAK: u8 = 6;
+
 /// DHCP option codes.
 const OPT_SUBNET_MASK: u8 = 1;
+const OPT_HOSTNAME: u8 = 12;
+const OPT_DOMAIN_NAME: u8 = 15;
 const OPT_ROUTER: u8 = 3;
 const OPT_DNS: u8 = 6;
+const OPT_NTP: u8 = 42;
 const OPT_REQUESTED_IP: u8 = 50;
+const OPT_LEASE_TIME: u8 = 51;
 const OPT_MSG_TYPE: u8 = 53;
 const OPT_SERVER_ID: u8 = 54;
+const OPT_RENEWAL_TIME: u8 = 58;
+const OPT_REBINDING_TIME: u8 = 59;
 const OPT_END: u8 = 255;
 
 /// DHCP magic cookie (99.130.83.99).
@@ -107,8 +120,41 @@ struct DhcpOffer {
     dns: Ipv4Addr,
 }
 
+/// DHCP lease information (stored after successful ACK).
+struct DhcpLease {
+    /// Lease duration in seconds (0 = infinite).
+    lease_time_secs: u32,
+    /// T1 renewal time in seconds (default: 50% of lease).
+    renewal_time_secs: u32,
+    /// T2 rebinding time in seconds (default: 87.5% of lease).
+    rebinding_time_secs: u32,
+    /// Domain name (null-terminated, max 64 bytes).
+    domain_name: [u8; 64],
+    /// Domain name length (0 if not provided).
+    domain_name_len: usize,
+    /// NTP server address.
+    ntp_server: Ipv4Addr,
+    /// Timestamp when the lease was obtained (hrtimer ns).
+    obtained_ns: u64,
+}
+
+impl DhcpLease {
+    const fn empty() -> Self {
+        Self {
+            lease_time_secs: 0,
+            renewal_time_secs: 0,
+            rebinding_time_secs: 0,
+            domain_name: [0; 64],
+            domain_name_len: 0,
+            ntp_server: Ipv4Addr::UNSPECIFIED,
+            obtained_ns: 0,
+        }
+    }
+}
+
 static DHCP_STATE: Mutex<DhcpState> = Mutex::new(DhcpState::Idle);
 static PENDING_OFFER: Mutex<Option<DhcpOffer>> = Mutex::new(None);
+static CURRENT_LEASE: Mutex<DhcpLease> = Mutex::new(DhcpLease::empty());
 
 // ---------------------------------------------------------------------------
 // DHCP packet building
@@ -316,6 +362,12 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
     let mut router = Ipv4Addr::UNSPECIFIED;
     let mut dns = Ipv4Addr::UNSPECIFIED;
     let mut server_id = Ipv4Addr::UNSPECIFIED;
+    let mut lease_time: u32 = 0;
+    let mut renewal_time: u32 = 0;
+    let mut rebinding_time: u32 = 0;
+    let mut domain_name = [0u8; 64];
+    let mut domain_name_len: usize = 0;
+    let mut ntp_server = Ipv4Addr::UNSPECIFIED;
 
     let mut i = options_start;
     while i < data.len() {
@@ -365,6 +417,33 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
                 s.copy_from_slice(&opt_data[..4]);
                 server_id = Ipv4Addr(s);
             }
+            OPT_LEASE_TIME if opt_len >= 4 => {
+                lease_time = u32::from_be_bytes([
+                    opt_data[0], opt_data[1], opt_data[2], opt_data[3],
+                ]);
+            }
+            OPT_RENEWAL_TIME if opt_len >= 4 => {
+                renewal_time = u32::from_be_bytes([
+                    opt_data[0], opt_data[1], opt_data[2], opt_data[3],
+                ]);
+            }
+            OPT_REBINDING_TIME if opt_len >= 4 => {
+                rebinding_time = u32::from_be_bytes([
+                    opt_data[0], opt_data[1], opt_data[2], opt_data[3],
+                ]);
+            }
+            OPT_DOMAIN_NAME => {
+                // Copy domain name (truncate to buffer size).
+                let copy_len = opt_len.min(domain_name.len().saturating_sub(1));
+                domain_name[..copy_len].copy_from_slice(&opt_data[..copy_len]);
+                domain_name_len = copy_len;
+            }
+            OPT_NTP if opt_len >= 4 => {
+                let mut n = [0u8; 4];
+                n.copy_from_slice(&opt_data[..4]);
+                ntp_server = Ipv4Addr(n);
+            }
+            OPT_HOSTNAME => { /* Informational — we don't set hostname from DHCP. */ }
             _ => { /* Unknown option — skip. */ }
         }
 
@@ -393,14 +472,57 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
             send_request(offered_ip, server_id)?;
         }
         Some(DHCP_ACK) if state == DhcpState::Requesting => {
+            // Compute default T1/T2 if server didn't provide them.
+            let t1 = if renewal_time > 0 {
+                renewal_time
+            } else {
+                lease_time / 2 // 50% of lease (RFC 2131 default).
+            };
+            let t2 = if rebinding_time > 0 {
+                rebinding_time
+            } else {
+                // 87.5% of lease (RFC 2131 default).
+                lease_time.saturating_mul(7) / 8
+            };
+
             crate::serial_println!(
-                "[dhcp] ACK: IP {} mask {} gw {} dns {}",
-                offered_ip, subnet_mask, router, dns
+                "[dhcp] ACK: IP {} mask {} gw {} dns {} lease={}s T1={}s T2={}s",
+                offered_ip, subnet_mask, router, dns,
+                lease_time, t1, t2
             );
+            if domain_name_len > 0 {
+                // Log domain name as best-effort UTF-8 (only for serial
+                // display; the stored bytes are the canonical form).
+                if let Ok(name) = core::str::from_utf8(&domain_name[..domain_name_len]) {
+                    crate::serial_println!("[dhcp]   domain: {}", name);
+                }
+            }
+            if !ntp_server.is_unspecified() {
+                crate::serial_println!("[dhcp]   NTP: {}", ntp_server);
+            }
 
             // Apply the lease.
             interface::configure(offered_ip, subnet_mask, router, dns);
             *DHCP_STATE.lock() = DhcpState::Bound;
+
+            // Store lease details.
+            let mut lease = CURRENT_LEASE.lock();
+            lease.lease_time_secs = lease_time;
+            lease.renewal_time_secs = t1;
+            lease.rebinding_time_secs = t2;
+            lease.domain_name[..domain_name_len].copy_from_slice(&domain_name[..domain_name_len]);
+            lease.domain_name_len = domain_name_len;
+            lease.ntp_server = ntp_server;
+            lease.obtained_ns = crate::hrtimer::now_ns();
+        }
+        Some(DHCP_NAK) if state == DhcpState::Requesting => {
+            crate::serial_println!(
+                "[dhcp] NAK from server {} — offer rejected, restarting",
+                server_id
+            );
+            // Clear offer and return to Idle so discovery can retry.
+            *PENDING_OFFER.lock() = None;
+            *DHCP_STATE.lock() = DhcpState::Idle;
         }
         _ => {
             // Unexpected message type or state — ignore.
@@ -457,4 +579,40 @@ pub fn state_str() -> &'static str {
         DhcpState::Requesting => "requesting",
         DhcpState::Bound => "bound",
     }
+}
+
+/// Return the current lease duration in seconds (0 if not bound or
+/// server didn't provide a lease time).
+#[allow(dead_code)] // Diagnostic/status API.
+pub fn lease_time_secs() -> u32 {
+    CURRENT_LEASE.lock().lease_time_secs
+}
+
+/// Return the remaining lease time in seconds, or 0 if not bound.
+#[allow(dead_code, clippy::arithmetic_side_effects)]
+pub fn lease_remaining_secs() -> u64 {
+    let lease = CURRENT_LEASE.lock();
+    if lease.lease_time_secs == 0 || lease.obtained_ns == 0 {
+        return 0;
+    }
+    let elapsed_ns = crate::hrtimer::now_ns().saturating_sub(lease.obtained_ns);
+    let elapsed_secs = elapsed_ns / 1_000_000_000;
+    let total = lease.lease_time_secs as u64;
+    total.saturating_sub(elapsed_secs)
+}
+
+/// Return the NTP server address from the DHCP lease (UNSPECIFIED if
+/// the server didn't provide one).
+#[allow(dead_code)] // Will be used when NTP client is implemented.
+pub fn ntp_server() -> Ipv4Addr {
+    CURRENT_LEASE.lock().ntp_server
+}
+
+/// Return the domain name from the DHCP lease as a byte slice.
+///
+/// Returns an empty slice if the server didn't provide a domain name.
+#[allow(dead_code)] // Status/diagnostic API.
+pub fn domain_name() -> ([u8; 64], usize) {
+    let lease = CURRENT_LEASE.lock();
+    (lease.domain_name, lease.domain_name_len)
 }

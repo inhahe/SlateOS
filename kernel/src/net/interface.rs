@@ -210,6 +210,10 @@ pub fn configure(ip: Ipv4Addr, mask: Ipv4Addr, gateway: Ipv4Addr, dns: Ipv4Addr)
             to_netns_ip(dns),
         );
     }
+
+    // Send a gratuitous ARP to announce our IP on the LAN.
+    // Failures are non-fatal — best-effort announcement.
+    let _ = super::arp::send_gratuitous();
 }
 
 // ---------------------------------------------------------------------------

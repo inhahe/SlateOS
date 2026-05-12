@@ -1245,6 +1245,66 @@ pub unsafe extern "C" fn strptime(
                     }
                     bi = bi.wrapping_add(2);
                 }
+                b'b' | b'B' | b'h' => {
+                    // Month name (abbreviated or full).
+                    if let Some((mon, consumed)) = match_month_name(buf, bi) {
+                        unsafe { (*tm).tm_mon = mon; }
+                        bi = bi.wrapping_add(consumed);
+                    } else {
+                        return core::ptr::null();
+                    }
+                }
+                b'a' | b'A' => {
+                    // Weekday name (abbreviated or full).
+                    if let Some((wday, consumed)) = match_wday_name(buf, bi) {
+                        unsafe { (*tm).tm_wday = wday; }
+                        bi = bi.wrapping_add(consumed);
+                    } else {
+                        return core::ptr::null();
+                    }
+                }
+                b'V' => {
+                    // ISO 8601 week number (01-53) — informational only,
+                    // we parse the digits but don't derive date fields from
+                    // the week number alone (would need %G too).
+                    let (_, consumed) = parse_int(buf, bi, 2);
+                    if consumed == 0 { return core::ptr::null(); }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'G' => {
+                    // ISO 8601 week-based year — treat as regular year.
+                    let (val, consumed) = parse_int(buf, bi, 4);
+                    if consumed == 0 { return core::ptr::null(); }
+                    unsafe { (*tm).tm_year = val - 1900; }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'g' => {
+                    // ISO 8601 week-based year (2-digit).
+                    let (val, consumed) = parse_int(buf, bi, 2);
+                    if consumed == 0 { return core::ptr::null(); }
+                    let full_year = if val >= 69 { val.wrapping_add(1900) }
+                                    else { val.wrapping_add(2000) };
+                    unsafe { (*tm).tm_year = full_year.wrapping_sub(1900); }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'z' => {
+                    // Timezone offset (+HHMM or -HHMM).  Parse but ignore
+                    // (we always use UTC).
+                    let sign = unsafe { *buf.add(bi) };
+                    if sign != b'+' && sign != b'-' {
+                        return core::ptr::null();
+                    }
+                    bi = bi.wrapping_add(1);
+                    let (_, consumed) = parse_int(buf, bi, 4);
+                    if consumed < 2 { return core::ptr::null(); }
+                    bi = bi.wrapping_add(consumed);
+                }
+                b'Z' => {
+                    // Timezone abbreviation — skip alphabetic chars.
+                    while (unsafe { *buf.add(bi) }).is_ascii_alphabetic() {
+                        bi = bi.wrapping_add(1);
+                    }
+                }
                 b'n' | b't' => {
                     // Skip any whitespace.
                     while (unsafe { *buf.add(bi) }) == b' '
@@ -1300,6 +1360,79 @@ fn parse_int(buf: *const u8, off: usize, max_digits: usize) -> (i32, usize) {
         count = count.wrapping_add(1);
     }
     (val, count)
+}
+
+/// Match a month name (abbreviated or full) at position `off` in `buf`.
+///
+/// Returns `(month_0_indexed, chars_consumed)` or `None` if no match.
+///
+/// # Safety
+///
+/// `buf` must be valid for at least `off + 9` bytes (longest month name).
+fn match_month_name(buf: *const u8, off: usize) -> Option<(i32, usize)> {
+    // Try full names first (longer match wins), then abbreviated.
+    static MONTHS: [(&[u8], &[u8]); 12] = [
+        (b"January", b"Jan"),   (b"February", b"Feb"),
+        (b"March", b"Mar"),     (b"April", b"Apr"),
+        (b"May", b"May"),       (b"June", b"Jun"),
+        (b"July", b"Jul"),      (b"August", b"Aug"),
+        (b"September", b"Sep"), (b"October", b"Oct"),
+        (b"November", b"Nov"),  (b"December", b"Dec"),
+    ];
+
+    for (i, (full, abbr)) in MONTHS.iter().enumerate() {
+        // Try full name first.
+        if ci_match(buf, off, full) {
+            return Some((i as i32, full.len()));
+        }
+        // Then abbreviated.
+        if ci_match(buf, off, abbr) {
+            return Some((i as i32, abbr.len()));
+        }
+    }
+    None
+}
+
+/// Match a weekday name (abbreviated or full) at position `off` in `buf`.
+///
+/// Returns `(wday_sunday_0, chars_consumed)` or `None` if no match.
+///
+/// # Safety
+///
+/// `buf` must be valid for at least `off + 9` bytes (longest weekday name).
+fn match_wday_name(buf: *const u8, off: usize) -> Option<(i32, usize)> {
+    static WDAYS: [(&[u8], &[u8]); 7] = [
+        (b"Sunday", b"Sun"),    (b"Monday", b"Mon"),
+        (b"Tuesday", b"Tue"),   (b"Wednesday", b"Wed"),
+        (b"Thursday", b"Thu"),  (b"Friday", b"Fri"),
+        (b"Saturday", b"Sat"),
+    ];
+
+    for (i, (full, abbr)) in WDAYS.iter().enumerate() {
+        if ci_match(buf, off, full) {
+            return Some((i as i32, full.len()));
+        }
+        if ci_match(buf, off, abbr) {
+            return Some((i as i32, abbr.len()));
+        }
+    }
+    None
+}
+
+/// Case-insensitive match of `pattern` against `buf[off..]`.
+///
+/// # Safety
+///
+/// `buf` must be valid for at least `off + pattern.len()` bytes.
+fn ci_match(buf: *const u8, off: usize, pattern: &[u8]) -> bool {
+    for (j, &p) in pattern.iter().enumerate() {
+        // SAFETY: Caller guarantees buf is valid for off + pattern.len() bytes.
+        let c = unsafe { *buf.add(off.wrapping_add(j)) };
+        if c.to_ascii_lowercase() != p.to_ascii_lowercase() {
+            return false;
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------

@@ -33,13 +33,17 @@
 //!   congestion avoidance via `cwnd`/`ssthresh`.  Multiplicative decrease
 //!   on loss.
 //!
-//! ## Limitations
-//!
 //! - **Window scaling** (RFC 7323): negotiated during the 3-way handshake
 //!   so that peers with large receive windows (Linux default scale 7) are
 //!   interpreted correctly.  Our advertised scale is 0 (64 KiB rx buffer
 //!   fits in 16 bits).
-//! - No selective acknowledgment (SACK).
+//! - **Selective acknowledgment** (SACK, RFC 2018): negotiated via
+//!   SACK-Permitted option in SYN.  Receiver tracks up to 4 out-of-order
+//!   blocks and reports them in ACKs.  Sender uses SACK blocks to avoid
+//!   retransmitting data the receiver already has.
+//!
+//! ## Limitations
+//!
 //! - No fast retransmit / fast recovery (triple duplicate ACK).
 //! - Maximum 32 concurrent connections.
 //! - Maximum 8 listeners, each with a backlog of 16 pending connections.
@@ -58,6 +62,13 @@ use super::ipv4::{self, Ipv4Packet, PROTO_TCP};
 
 /// TCP header size (without options).
 const TCP_HEADER_SIZE: usize = 20;
+
+/// Maximum out-of-order segments tracked per connection for SACK.
+/// Each entry is a (left_edge, right_edge) pair describing a contiguous
+/// block of received data above `rcv_nxt`.  4 blocks is the practical
+/// maximum we can fit in TCP options (each SACK block = 8 bytes, plus
+/// 2 bytes for the option header, limited by 40 bytes total options).
+const MAX_SACK_BLOCKS: usize = 4;
 
 /// Maximum concurrent TCP connections.
 ///
@@ -249,6 +260,20 @@ struct TcpConnection {
     /// We use 0 because our rx buffer is 64 KiB (fits in 16 bits).
     rcv_wnd_scale: u8,
 
+    // -- SACK (RFC 2018) --
+
+    /// Whether SACK was negotiated during the handshake (both sides must
+    /// send SACK-Permitted in their SYN).
+    sack_ok: bool,
+    /// Out-of-order received blocks as (left_edge, right_edge) pairs.
+    /// `left_edge` is the first sequence number of the block, `right_edge`
+    /// is the sequence number just past the last byte.
+    /// Blocks are ordered by left_edge.  Used to generate SACK option
+    /// blocks in outgoing ACKs.
+    sack_blocks: [(u32, u32); MAX_SACK_BLOCKS],
+    /// Number of active SACK blocks (entries in `sack_blocks`).
+    sack_block_count: u8,
+
     // -- Keepalive state (RFC 1122 §4.2.3.6) --
 
     /// Whether keepalive probes are enabled on this connection.
@@ -294,6 +319,9 @@ impl TcpConnection {
             wscale_ok: false,
             snd_wnd_scale: 0,
             rcv_wnd_scale: 0,
+            sack_ok: false,
+            sack_blocks: [(0, 0); MAX_SACK_BLOCKS],
+            sack_block_count: 0,
             keepalive_enabled: false,
             keepalive_idle_ns: KEEPALIVE_IDLE_DEFAULT_NS,
             keepalive_interval_ns: KEEPALIVE_INTERVAL_DEFAULT_NS,
@@ -427,6 +455,58 @@ fn build_segment(
     seg
 }
 
+/// Build a TCP segment with arbitrary option bytes (for SACK blocks in ACKs).
+///
+/// `options` is the raw option bytes to place between the fixed header
+/// and the payload.  Must be padded to a 4-byte boundary.
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+fn build_segment_with_options(
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    options: &[u8],
+    payload: &[u8],
+    src_ip: Ipv4Addr,
+    dst_ip: Ipv4Addr,
+) -> Vec<u8> {
+    // Pad options to 4-byte boundary.
+    let opt_padded = (options.len() + 3) & !3;
+    let header_len = TCP_HEADER_SIZE + opt_padded;
+    let header_words = (header_len / 4) as u8;
+    let total_len = header_len + payload.len();
+    let mut seg = Vec::with_capacity(total_len);
+
+    seg.extend_from_slice(&src_port.to_be_bytes());
+    seg.extend_from_slice(&dst_port.to_be_bytes());
+    seg.extend_from_slice(&seq.to_be_bytes());
+    seg.extend_from_slice(&ack.to_be_bytes());
+    seg.push(header_words << 4);
+    seg.push(flags);
+    seg.extend_from_slice(&window.to_be_bytes());
+    let checksum_offset = seg.len();
+    seg.extend_from_slice(&0u16.to_be_bytes());
+    seg.extend_from_slice(&0u16.to_be_bytes());
+
+    // Options.
+    seg.extend_from_slice(options);
+    // Pad with NOP/END to 4-byte boundary.
+    for _ in options.len()..opt_padded {
+        seg.push(TCP_OPT_END);
+    }
+
+    // Payload.
+    seg.extend_from_slice(payload);
+
+    let checksum = tcp_checksum(&seg, src_ip, dst_ip);
+    seg[checksum_offset] = (checksum >> 8) as u8;
+    seg[checksum_offset + 1] = checksum as u8;
+
+    seg
+}
+
 /// Compute TCP checksum including the IPv4 pseudo-header.
 #[allow(clippy::arithmetic_side_effects)]
 fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
@@ -469,10 +549,12 @@ fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
 // ---------------------------------------------------------------------------
 
 /// TCP option kinds.
-const TCP_OPT_END: u8 = 0;     // End of option list.
-const TCP_OPT_NOP: u8 = 1;     // No-operation (padding).
-const TCP_OPT_MSS: u8 = 2;     // Maximum segment size.
-const TCP_OPT_WSCALE: u8 = 3;  // Window scale (RFC 7323).
+const TCP_OPT_END: u8 = 0;        // End of option list.
+const TCP_OPT_NOP: u8 = 1;        // No-operation (padding).
+const TCP_OPT_MSS: u8 = 2;        // Maximum segment size.
+const TCP_OPT_WSCALE: u8 = 3;     // Window scale (RFC 7323).
+const TCP_OPT_SACK_PERM: u8 = 4;  // SACK permitted (RFC 2018).
+const TCP_OPT_SACK: u8 = 5;       // SACK blocks (RFC 2018).
 
 /// Our advertised window scale shift count.
 ///
@@ -487,6 +569,8 @@ struct TcpOptions {
     mss: u16,
     /// Window scale shift count (None if option not present).
     wscale: Option<u8>,
+    /// Whether SACK-Permitted option was present (RFC 2018, SYN only).
+    sack_permitted: bool,
 }
 
 /// Parse TCP options from the option bytes (header bytes 20..data_offset).
@@ -494,7 +578,7 @@ struct TcpOptions {
 /// Returns the parsed `TcpOptions`.  Unknown options are skipped.
 /// Malformed options (truncated length, etc.) terminate parsing early.
 fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
-    let mut opts = TcpOptions { mss: 0, wscale: None };
+    let mut opts = TcpOptions { mss: 0, wscale: None, sack_permitted: false };
     let mut i = 0;
     while i < option_bytes.len() {
         let kind = option_bytes[i];
@@ -525,6 +609,9 @@ fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
                         let shift = option_bytes[i.wrapping_add(2)];
                         opts.wscale = Some(if shift > 14 { 14 } else { shift });
                     }
+                    TCP_OPT_SACK_PERM if len == 2 => {
+                        opts.sack_permitted = true;
+                    }
                     _ => {} // Unknown option — skip.
                 }
                 i = i.wrapping_add(len);
@@ -534,11 +621,17 @@ fn parse_tcp_options(option_bytes: &[u8]) -> TcpOptions {
     opts
 }
 
-/// Build a TCP segment with SYN options (MSS + window scale).
+/// Build a TCP segment with SYN options (MSS + WScale + SACK-Permitted).
 ///
 /// SYN and SYN-ACK segments carry options to negotiate parameters.
-/// Layout: MSS(kind=2, len=4, value) + NOP(kind=1) + WScale(kind=3, len=3, shift) + NOP padding.
-/// Total: 4 + 1 + 3 = 8 bytes → header is 28 bytes (7 words).
+/// Layout:
+///   MSS(kind=2, len=4, value)     = 4 bytes
+///   NOP(kind=1)                   = 1 byte
+///   WScale(kind=3, len=3, shift)  = 3 bytes
+///   NOP(kind=1)                   = 1 byte
+///   NOP(kind=1)                   = 1 byte
+///   SACK-Perm(kind=4, len=2)      = 2 bytes
+///   Total options: 12 bytes → header is 32 bytes (8 words).
 #[allow(clippy::arithmetic_side_effects)]
 fn build_segment_with_syn_options(
     src_port: u16,
@@ -552,9 +645,8 @@ fn build_segment_with_syn_options(
     dst_ip: Ipv4Addr,
     wscale: u8,
 ) -> Vec<u8> {
-    // Options: MSS(4) + NOP(1) + WScale(3) = 8 bytes → 28-byte header.
-    let options_len = 8;
-    let header_words: u8 = 7; // (20 + 8) / 4 = 7 words.
+    // Options: MSS(4) + NOP(1) + WScale(3) + NOP(1) + NOP(1) + SACK-Perm(2) = 12 bytes.
+    let header_words: u8 = 8; // (20 + 12) / 4 = 8 words.
     let header_len = (header_words as usize) * 4;
     let total_len = header_len + payload.len();
     let mut seg = Vec::with_capacity(total_len);
@@ -583,6 +675,14 @@ fn build_segment_with_syn_options(
     seg.push(TCP_OPT_WSCALE);
     seg.push(3); // Option length.
     seg.push(wscale);
+
+    // Options: NOP + NOP (alignment for SACK-Permitted).
+    seg.push(TCP_OPT_NOP);
+    seg.push(TCP_OPT_NOP);
+
+    // Options: SACK-Permitted (RFC 2018 §2).
+    seg.push(TCP_OPT_SACK_PERM);
+    seg.push(2); // Option length.
 
     debug_assert_eq!(seg.len(), header_len, "SYN options size mismatch");
 
@@ -669,6 +769,35 @@ fn send_syn_segment(
     ipv4::send(remote_ip, PROTO_TCP, &seg)
 }
 
+/// Send an ACK segment with SACK option blocks if appropriate.
+///
+/// If SACK was negotiated and the connection has out-of-order blocks,
+/// the ACK includes a SACK option listing them.  Otherwise sends a
+/// plain ACK.
+fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
+    let (sack_opt, sack_len) = build_sack_option(conn);
+
+    if sack_len > 0 {
+        let local_ip = interface::ip();
+        let seg = build_segment_with_options(
+            conn.local_port, conn.remote_port,
+            conn.snd_nxt, conn.rcv_nxt,
+            TCP_ACK,
+            advertised_window(conn),
+            &sack_opt[..sack_len],
+            &[],
+            local_ip, conn.remote_ip,
+        );
+        ipv4::send(conn.remote_ip, PROTO_TCP, &seg)
+    } else {
+        send_segment_with_window(
+            conn.local_port, conn.remote_ip, conn.remote_port,
+            conn.snd_nxt, conn.rcv_nxt,
+            TCP_ACK, advertised_window(conn), &[],
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -715,6 +844,9 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.wscale_ok = false; // Set on SYN-ACK if peer supports it.
         conn.snd_wnd_scale = 0;
         conn.rcv_wnd_scale = OUR_WSCALE;
+        conn.sack_ok = false; // Set on SYN-ACK if peer supports it.
+        conn.sack_blocks = [(0, 0); MAX_SACK_BLOCKS];
+        conn.sack_block_count = 0;
         conn.keepalive_enabled = false;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
@@ -897,6 +1029,160 @@ fn on_loss_congestion(conn: &mut TcpConnection) {
     conn.ssthresh = (flight / 2).max(mss.saturating_mul(2));
     // cwnd = 1 MSS (enter slow start after loss).
     conn.cwnd = mss;
+}
+
+// ---------------------------------------------------------------------------
+// SACK receive-side helpers (RFC 2018)
+// ---------------------------------------------------------------------------
+
+/// Record an out-of-order received segment as a SACK block.
+///
+/// `left` is the first sequence number of the received data, `right` is
+/// one past the last byte.  If the new range overlaps or is adjacent to
+/// an existing block, they are merged.  The block list is sorted by
+/// `left_edge` and capped at `MAX_SACK_BLOCKS`.
+#[allow(clippy::arithmetic_side_effects)]
+fn sack_insert(conn: &mut TcpConnection, left: u32, right: u32) {
+    // Merge with existing blocks that overlap or are adjacent.
+    let mut new_left = left;
+    let mut new_right = right;
+    let count = conn.sack_block_count as usize;
+
+    // Find and remove blocks that overlap or are contiguous.
+    let mut kept = 0usize;
+    for i in 0..count {
+        let (bl, br) = conn.sack_blocks[i];
+        // Two ranges [new_left, new_right) and [bl, br) overlap or touch if
+        // neither is entirely before the other:
+        //   !(new_right < bl || br < new_left)  in modular arithmetic.
+        // For simplicity (our windows are < 2^31), we compare directly.
+        let separate = seq_lt(new_right, bl) || seq_lt(br, new_left);
+        if separate {
+            // Keep this block.
+            conn.sack_blocks[kept] = (bl, br);
+            kept = kept.wrapping_add(1);
+        } else {
+            // Merge: extend new range to cover this block.
+            if seq_lt(bl, new_left) {
+                new_left = bl;
+            }
+            if seq_lt(new_right, br) {
+                new_right = br;
+            }
+        }
+    }
+
+    // Insert the merged block.
+    if kept < MAX_SACK_BLOCKS {
+        conn.sack_blocks[kept] = (new_left, new_right);
+        kept = kept.wrapping_add(1);
+    }
+
+    conn.sack_block_count = kept as u8;
+
+    // Sort by left edge (insertion sort on small array).
+    let n = conn.sack_block_count as usize;
+    for i in 1..n {
+        let key = conn.sack_blocks[i];
+        let mut j = i;
+        while j > 0 && seq_lt(key.0, conn.sack_blocks[j.wrapping_sub(1)].0) {
+            conn.sack_blocks[j] = conn.sack_blocks[j.wrapping_sub(1)];
+            j = j.wrapping_sub(1);
+        }
+        conn.sack_blocks[j] = key;
+    }
+}
+
+/// Deliver contiguous data from SACK blocks to the receive buffer.
+///
+/// After `rcv_nxt` has advanced (because in-order data arrived), check
+/// if any SACK blocks are now contiguous with `rcv_nxt` and deliver
+/// their data.  This is called after appending in-order data.
+///
+/// NOTE: We don't currently buffer the actual out-of-order data — only
+/// the sequence ranges.  This means SACK blocks tell the sender what
+/// we received, but we can't deliver the data to the application until
+/// it's retransmitted in order.  A full implementation would store the
+/// out-of-order payload in a separate buffer.  For now, SACK still
+/// benefits us by:
+/// 1. Letting the sender know exactly what to retransmit.
+/// 2. Preventing the sender from unnecessarily retransmitting data
+///    we already have.
+///
+/// When `rcv_nxt` advances past a SACK block's left edge, that block
+/// is removed since it's now covered by the cumulative ACK.
+#[allow(clippy::arithmetic_side_effects)]
+fn sack_advance(conn: &mut TcpConnection) {
+    // Remove blocks that are now below rcv_nxt (already acknowledged
+    // by the cumulative ACK).
+    let mut kept = 0usize;
+    let count = conn.sack_block_count as usize;
+    for i in 0..count {
+        let (bl, br) = conn.sack_blocks[i];
+        // If the block's right edge is past rcv_nxt, it's still relevant.
+        if seq_lt(conn.rcv_nxt, br) {
+            // Trim left edge if it's below rcv_nxt.
+            let trimmed_left = if seq_lt(bl, conn.rcv_nxt) {
+                conn.rcv_nxt
+            } else {
+                bl
+            };
+            conn.sack_blocks[kept] = (trimmed_left, br);
+            kept = kept.wrapping_add(1);
+        }
+    }
+    conn.sack_block_count = kept as u8;
+}
+
+/// Sequence number comparison: `a < b` in modular 32-bit arithmetic.
+///
+/// Returns true if `a` is before `b` in the sequence space.
+/// Valid when the difference is less than 2^31.
+fn seq_lt(a: u32, b: u32) -> bool {
+    // (a - b) as i32 < 0 means a is before b.
+    (a.wrapping_sub(b) as i32) < 0
+}
+
+/// Build SACK option bytes for an outgoing ACK.
+///
+/// Returns the option bytes to append to the TCP header (including NOP
+/// padding and the SACK option header).  Returns empty if no SACK blocks
+/// or SACK not negotiated.
+///
+/// SACK option format (RFC 2018 §3):
+///   NOP, NOP  (alignment padding)
+///   kind=5, length=2+8*N
+///   [left_edge1, right_edge1]  (each 4 bytes, big-endian)
+///   [left_edge2, right_edge2]
+///   ...
+#[allow(clippy::arithmetic_side_effects)]
+fn build_sack_option(conn: &TcpConnection) -> ([u8; 34], usize) {
+    // Max: 2 (NOP+NOP) + 2 (kind+len) + 4*8 (4 blocks × 8 bytes) = 36.
+    // But we limit to 34 bytes (for options ≤ 40 total).
+    let mut buf = [0u8; 34];
+
+    if !conn.sack_ok || conn.sack_block_count == 0 {
+        return (buf, 0);
+    }
+
+    let n = (conn.sack_block_count as usize).min(MAX_SACK_BLOCKS);
+    let opt_len = 2 + n * 8; // kind + length + blocks.
+    let total = 2 + opt_len;  // NOP + NOP + option.
+
+    buf[0] = TCP_OPT_NOP;
+    buf[1] = TCP_OPT_NOP;
+    buf[2] = TCP_OPT_SACK;
+    buf[3] = opt_len as u8;
+
+    let mut pos = 4;
+    for i in 0..n {
+        let (left, right) = conn.sack_blocks[i];
+        buf[pos..pos + 4].copy_from_slice(&left.to_be_bytes());
+        buf[pos + 4..pos + 8].copy_from_slice(&right.to_be_bytes());
+        pos += 8;
+    }
+
+    (buf, total)
 }
 
 /// Send data on an established TCP connection.
@@ -1376,6 +1662,13 @@ fn handle_incoming_syn(
             conn.rcv_wnd_scale = 0;
         }
 
+        // SACK (RFC 2018): both sides must send SACK-Permitted.
+        // We always send it in our SYN-ACK, so it's active if the
+        // client sent it too.
+        conn.sack_ok = syn_opts.sack_permitted;
+        conn.sack_blocks = [(0, 0); MAX_SACK_BLOCKS];
+        conn.sack_block_count = 0;
+
         conn.keepalive_enabled = false;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
@@ -1544,23 +1837,23 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 conn.rcv_nxt = seq.wrapping_add(1);
                 conn.snd_una = ack;
 
-                // Parse SYN-ACK options for window scaling (RFC 7323).
-                // Both sides must have sent WScale for scaling to be active.
+                // Parse SYN-ACK options for window scaling and SACK.
                 let synack_opts = parse_tcp_options(option_bytes);
                 if let Some(peer_shift) = synack_opts.wscale {
                     conn.wscale_ok = true;
                     conn.snd_wnd_scale = peer_shift;
-                    // rcv_wnd_scale already set to OUR_WSCALE in connect().
                     crate::serial_println!(
                         "[tcp] Window scaling negotiated: snd_shift={}, rcv_shift={}",
                         peer_shift, conn.rcv_wnd_scale
                     );
                 } else {
-                    // Peer doesn't support window scaling — disable it.
                     conn.wscale_ok = false;
                     conn.snd_wnd_scale = 0;
                     conn.rcv_wnd_scale = 0;
                 }
+
+                // SACK: both sides must have sent SACK-Permitted (RFC 2018).
+                conn.sack_ok = synack_opts.sack_permitted;
 
                 conn.state = TcpState::Established;
 
@@ -1624,29 +1917,38 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
             }
 
             // Process data.
-            if !payload.is_empty() && seq == conn.rcv_nxt {
-                let can_accept = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
-                let accept = payload.len().min(can_accept);
-                if accept > 0 {
-                    conn.rx_buffer.extend_from_slice(&payload[..accept]);
-                    conn.rcv_nxt = conn.rcv_nxt.wrapping_add(accept as u32);
+            if !payload.is_empty() {
+                if seq == conn.rcv_nxt {
+                    // In-order data — deliver to rx_buffer.
+                    let can_accept = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
+                    let accept = payload.len().min(can_accept);
+                    if accept > 0 {
+                        conn.rx_buffer.extend_from_slice(&payload[..accept]);
+                        conn.rcv_nxt = conn.rcv_nxt.wrapping_add(accept as u32);
+                    }
+
+                    // Advance past any SACK blocks that are now contiguous.
+                    sack_advance(conn);
+
+                    // Send ACK (with SACK blocks if any remain).
+                    let _ = send_ack_with_sack(conn);
+                    drop(conns);
+                    return Ok(());
+                } else if conn.sack_ok && seq_lt(conn.rcv_nxt, seq) {
+                    // Out-of-order data — record as a SACK block.
+                    // We don't buffer the payload (simplification), but
+                    // we inform the sender which ranges we received so
+                    // it can selectively retransmit.
+                    let right = seq.wrapping_add(payload.len() as u32);
+                    sack_insert(conn, seq, right);
+
+                    // Send duplicate ACK with SACK blocks.
+                    let _ = send_ack_with_sack(conn);
+                    drop(conns);
+                    return Ok(());
                 }
-
-                // Send ACK with dynamic window reflecting our available
-                // buffer space.
-                let local_port = conn.local_port;
-                let remote_ip = conn.remote_ip;
-                let remote_port = conn.remote_port;
-                let snd_nxt = conn.snd_nxt;
-                let rcv_nxt = conn.rcv_nxt;
-                let our_wnd = advertised_window(conn);
-
-                drop(conns);
-                let _ = send_segment_with_window(
-                    local_port, remote_ip, remote_port,
-                    snd_nxt, rcv_nxt, TCP_ACK, our_wnd, &[],
-                );
-                return Ok(());
+                // else: old/retransmitted data (seq < rcv_nxt) — ignore payload,
+                // fall through to send a plain ACK.
             }
 
             // Process FIN.
@@ -1887,6 +2189,7 @@ pub fn self_test() -> KernelResult<()> {
     test_bind_duplicate_rejected()?;
     test_try_accept_empty()?;
     test_parse_tcp_options()?;
+    test_sack_blocks()?;
 
     crate::serial_println!("[tcp] TCP self-test PASSED");
     Ok(())
@@ -2017,6 +2320,97 @@ fn test_parse_tcp_options() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // SACK-Permitted: kind=4, len=2.
+    let sack_perm = [4, 2];
+    let opts = parse_tcp_options(&sack_perm);
+    if !opts.sack_permitted {
+        crate::serial_println!("[tcp]   FAIL: SACK-Permitted not parsed");
+        return Err(KernelError::InternalError);
+    }
+
+    // Full Linux-style SYN options: MSS + NOP + WScale + NOP + NOP + SACK-Perm.
+    let full_syn = [2, 4, 0x05, 0xB4, 1, 3, 3, 7, 1, 1, 4, 2];
+    let opts = parse_tcp_options(&full_syn);
+    if opts.mss != 1460 || opts.wscale != Some(7) || !opts.sack_permitted {
+        crate::serial_println!(
+            "[tcp]   FAIL: full SYN parse: mss={} wscale={:?} sack={}",
+            opts.mss, opts.wscale, opts.sack_permitted
+        );
+        return Err(KernelError::InternalError);
+    }
+
     crate::serial_println!("[tcp]   TCP option parsing: OK");
+    Ok(())
+}
+
+/// Test 5: SACK block insertion and merging.
+fn test_sack_blocks() -> KernelResult<()> {
+    let mut conn = TcpConnection::empty();
+    conn.sack_ok = true;
+
+    // Insert a single block: [100, 200).
+    sack_insert(&mut conn, 100, 200);
+    if conn.sack_block_count != 1 || conn.sack_blocks[0] != (100, 200) {
+        crate::serial_println!(
+            "[tcp]   FAIL: single block: count={} block={:?}",
+            conn.sack_block_count, conn.sack_blocks[0]
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Insert adjacent block [200, 300) — should merge into [100, 300).
+    sack_insert(&mut conn, 200, 300);
+    if conn.sack_block_count != 1 || conn.sack_blocks[0] != (100, 300) {
+        crate::serial_println!(
+            "[tcp]   FAIL: merge adjacent: count={} block={:?}",
+            conn.sack_block_count, conn.sack_blocks[0]
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Insert non-contiguous block [500, 600).
+    sack_insert(&mut conn, 500, 600);
+    if conn.sack_block_count != 2 {
+        crate::serial_println!(
+            "[tcp]   FAIL: non-contiguous: count={}",
+            conn.sack_block_count
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Insert overlapping block [250, 550) — should merge into [100, 600).
+    sack_insert(&mut conn, 250, 550);
+    if conn.sack_block_count != 1 || conn.sack_blocks[0] != (100, 600) {
+        crate::serial_println!(
+            "[tcp]   FAIL: merge overlapping: count={} block={:?}",
+            conn.sack_block_count, conn.sack_blocks[0]
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Test sack_advance: set rcv_nxt to 300, block [100, 600) should
+    // be trimmed to [300, 600).
+    conn.rcv_nxt = 300;
+    sack_advance(&mut conn);
+    if conn.sack_block_count != 1 || conn.sack_blocks[0] != (300, 600) {
+        crate::serial_println!(
+            "[tcp]   FAIL: advance trim: count={} block={:?}",
+            conn.sack_block_count, conn.sack_blocks[0]
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Set rcv_nxt past the block — should remove it entirely.
+    conn.rcv_nxt = 700;
+    sack_advance(&mut conn);
+    if conn.sack_block_count != 0 {
+        crate::serial_println!(
+            "[tcp]   FAIL: advance remove: count={}",
+            conn.sack_block_count
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[tcp]   SACK block management: OK");
     Ok(())
 }

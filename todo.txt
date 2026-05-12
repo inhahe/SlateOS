@@ -22,7 +22,9 @@ Remaining net improvements (diminishing returns):
 (DONE) TCP window scaling (RFC 7323) — negotiated in SYN/SYN-ACK, peer's
   shift applied to window updates.  Our scale = 0 (64 KiB rx fits in 16 bits).
   Options parsing (MSS, WScale) implemented.  Commit 3a82fe8.
-TCP SACK — selective acknowledgment for better loss recovery
+(DONE) TCP SACK — selective acknowledgment (RFC 2018).  SACK-Permitted
+  negotiated in SYN, receiver tracks up to 4 out-of-order blocks,
+  ACKs include SACK option blocks, merge/trim logic.  Commit 5523781.
 (DONE) UDP multicast — group join/leave for service discovery.
   Per-socket group list (8 max), global refcounted membership table,
   fan-out delivery to all joined sockets, IPv4 multicast acceptance,

@@ -2411,10 +2411,16 @@ pub const NI_DGRAM: i32 = 16;
 /// This is the reverse of `getaddrinfo`.  Given a `sockaddr_in`, it
 /// produces human-readable host and service strings.
 ///
+/// ## Reverse DNS
+///
+/// When `NI_NUMERICHOST` is *not* set, attempts a PTR lookup via
+/// `SYS_DNS_REVERSE_RESOLVE`.  If the lookup fails and `NI_NAMEREQD`
+/// is set, returns `EAI_NONAME`.  Otherwise falls back to the numeric
+/// IP representation.
+///
 /// ## Limitations
 ///
 /// - Only supports `AF_INET` (IPv4).
-/// - Always returns the numeric IP address (no reverse DNS).
 /// - Service is always returned as the numeric port number.
 ///
 /// Returns 0 on success, or an EAI_* error code.
@@ -2442,34 +2448,65 @@ pub extern "C" fn getnameinfo(
 
     // Format the host address.
     if !host.is_null() && hostlen > 0 {
-        // Always numeric for now (no reverse DNS).
-        let _ = flags; // NI_NAMEREQD would fail, but we always return numeric.
         let ip_bytes = addr.sin_addr.s_addr.to_ne_bytes();
-        let mut tmp = [0u8; 16]; // max "255.255.255.255\0"
-        let mut pos: usize = 0;
+        let mut used_reverse = false;
 
-        for (idx, &octet) in ip_bytes.iter().enumerate() {
-            if idx > 0 {
-                write_byte_ntop(&mut tmp, &mut pos, b'.');
+        // Try reverse DNS unless NI_NUMERICHOST is set.
+        if (flags & NI_NUMERICHOST) == 0 {
+            // SYS_DNS_REVERSE_RESOLVE: arg0 = IP (network order u32),
+            // arg1 = output buffer ptr, arg2 = output buffer size.
+            // Returns hostname length on success, negative on failure.
+            let ip_u32 = u32::from_be_bytes(ip_bytes);
+            let ret = crate::syscall::syscall3(
+                crate::syscall::SYS_DNS_REVERSE_RESOLVE,
+                ip_u32 as u64,
+                host as u64,
+                // Reserve 1 byte for null terminator.
+                (hostlen as usize).saturating_sub(1) as u64,
+            );
+            if ret > 0 {
+                let name_len = ret as usize;
+                // Null-terminate the hostname.
+                // SAFETY: ret < hostlen-1 (kernel ensures copy_len <= buffer),
+                // and host is valid for hostlen bytes.
+                unsafe { *host.add(name_len) = 0; }
+                used_reverse = true;
             }
-            write_u8_dec_ntop(&mut tmp, &mut pos, octet);
         }
 
-        let needed = pos.wrapping_add(1); // +null
-        if (hostlen as usize) < needed {
-            return EAI_OVERFLOW;
-        }
+        if !used_reverse {
+            // NI_NAMEREQD: error if name can't be determined.
+            if (flags & NI_NAMEREQD) != 0 {
+                return EAI_NONAME;
+            }
 
-        // SAFETY: host is valid for hostlen bytes (caller contract).
-        unsafe {
-            let mut j: usize = 0;
-            while j < pos {
-                if let Some(&b) = tmp.get(j) {
-                    *host.add(j) = b;
+            // Fall back to numeric representation.
+            let mut tmp = [0u8; 16]; // max "255.255.255.255\0"
+            let mut pos: usize = 0;
+
+            for (idx, &octet) in ip_bytes.iter().enumerate() {
+                if idx > 0 {
+                    write_byte_ntop(&mut tmp, &mut pos, b'.');
                 }
-                j = j.wrapping_add(1);
+                write_u8_dec_ntop(&mut tmp, &mut pos, octet);
             }
-            *host.add(pos) = 0;
+
+            let needed = pos.wrapping_add(1); // +null
+            if (hostlen as usize) < needed {
+                return EAI_OVERFLOW;
+            }
+
+            // SAFETY: host is valid for hostlen bytes (caller contract).
+            unsafe {
+                let mut j: usize = 0;
+                while j < pos {
+                    if let Some(&b) = tmp.get(j) {
+                        *host.add(j) = b;
+                    }
+                    j = j.wrapping_add(1);
+                }
+                *host.add(pos) = 0;
+            }
         }
     }
 

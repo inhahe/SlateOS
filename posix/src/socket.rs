@@ -2117,19 +2117,50 @@ fn parse_port_string(s: *const u8) -> u16 {
 /// interfaces yet.  Programs that enumerate interfaces will see this
 /// as "interface not found".
 #[unsafe(no_mangle)]
-pub extern "C" fn if_nametoindex(_ifname: *const u8) -> u32 {
-    // 0 means "no such interface" per POSIX.
-    0
+pub unsafe extern "C" fn if_nametoindex(ifname: *const u8) -> u32 {
+    if ifname.is_null() {
+        return 0; // 0 means "no such interface" per POSIX.
+    }
+
+    // Our kernel has a single network interface named "eth0".
+    // SAFETY: caller guarantees ifname is a valid C string.
+    let len = unsafe { crate::string::strlen(ifname) };
+    let name = unsafe { core::slice::from_raw_parts(ifname, len) };
+    if name == b"eth0" || name == b"lo" {
+        // eth0 = index 1, lo = index 1 (we only have one real interface).
+        1
+    } else {
+        0
+    }
 }
 
 /// Convert a network interface index to its name.
 ///
-/// Stub: returns null since we don't have named interfaces.
+/// Returns a pointer to `ifname` on success, null on error.
 /// `ifname` must point to a buffer of at least `IF_NAMESIZE` bytes.
+///
+/// # Safety
+///
+/// `ifname` must point to writable memory of at least `IF_NAMESIZE` bytes.
 #[unsafe(no_mangle)]
-pub extern "C" fn if_indextoname(_ifindex: u32, _ifname: *mut u8) -> *mut u8 {
-    errno::set_errno(errno::ENXIO);
-    core::ptr::null_mut()
+pub unsafe extern "C" fn if_indextoname(ifindex: u32, ifname: *mut u8) -> *mut u8 {
+    if ifname.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return core::ptr::null_mut();
+    }
+
+    // Index 1 = "eth0" (our only interface).
+    if ifindex == 1 {
+        // SAFETY: caller guarantees ifname has IF_NAMESIZE bytes.
+        let name = b"eth0\0";
+        unsafe {
+            core::ptr::copy_nonoverlapping(name.as_ptr(), ifname, name.len());
+        }
+        ifname
+    } else {
+        errno::set_errno(errno::ENXIO);
+        core::ptr::null_mut()
+    }
 }
 
 /// Maximum interface name length.

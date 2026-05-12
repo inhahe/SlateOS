@@ -39,8 +39,9 @@
 //!   fits in 16 bits).
 //! - **Selective acknowledgment** (SACK, RFC 2018): negotiated via
 //!   SACK-Permitted option in SYN.  Receiver tracks up to 4 out-of-order
-//!   blocks and reports them in ACKs.  Sender uses SACK blocks to avoid
-//!   retransmitting data the receiver already has.
+//!   blocks and reports them in ACKs.  Out-of-order data is buffered in
+//!   `ooo_buf` and delivered to `rx_buffer` when the gap fills — no need
+//!   to wait for retransmission of already-received data.
 //!
 //! ## ICMP error handling
 //!
@@ -305,6 +306,19 @@ struct TcpConnection {
     /// Number of active SACK blocks (entries in `sack_blocks`).
     sack_block_count: u8,
 
+    // -- Out-of-order receive buffer --
+
+    /// Buffer holding out-of-order received data indexed by sequence offset.
+    ///
+    /// `ooo_buf[i]` corresponds to sequence number `ooo_base + i`.  Only
+    /// ranges covered by SACK blocks contain valid data; the gaps are
+    /// undefined.  When in-order data fills a gap (rcv_nxt advances into
+    /// a SACK block), the contiguous data is moved to `rx_buffer`.
+    ooo_buf: Vec<u8>,
+    /// Sequence number of `ooo_buf[0]`.  Kept equal to `rcv_nxt` after
+    /// delivery so the buffer only holds data above the cumulative ACK.
+    ooo_base: u32,
+
     // -- Duplicate ACK / fast retransmit (RFC 5681 §3.2) --
 
     /// Number of consecutive duplicate ACKs received.
@@ -379,6 +393,8 @@ impl TcpConnection {
             sack_ok: false,
             sack_blocks: [(0, 0); MAX_SACK_BLOCKS],
             sack_block_count: 0,
+            ooo_buf: Vec::new(),
+            ooo_base: 0,
             dup_ack_count: 0,
             tx_buffer: Vec::new(),
             tx_buf_seq: 0,
@@ -909,6 +925,8 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.sack_ok = false; // Set on SYN-ACK if peer supports it.
         conn.sack_blocks = [(0, 0); MAX_SACK_BLOCKS];
         conn.sack_block_count = 0;
+        conn.ooo_buf.clear();
+        conn.ooo_base = 0;
         conn.dup_ack_count = 0;
         conn.tx_buffer.clear();
         conn.tx_buf_seq = isn.wrapping_add(1); // After SYN sequence.
@@ -1208,24 +1226,11 @@ fn sack_insert(conn: &mut TcpConnection, left: u32, right: u32) {
     }
 }
 
-/// Deliver contiguous data from SACK blocks to the receive buffer.
+/// Clean up SACK blocks that are now below `rcv_nxt`.
 ///
-/// After `rcv_nxt` has advanced (because in-order data arrived), check
-/// if any SACK blocks are now contiguous with `rcv_nxt` and deliver
-/// their data.  This is called after appending in-order data.
-///
-/// NOTE: We don't currently buffer the actual out-of-order data — only
-/// the sequence ranges.  This means SACK blocks tell the sender what
-/// we received, but we can't deliver the data to the application until
-/// it's retransmitted in order.  A full implementation would store the
-/// out-of-order payload in a separate buffer.  For now, SACK still
-/// benefits us by:
-/// 1. Letting the sender know exactly what to retransmit.
-/// 2. Preventing the sender from unnecessarily retransmitting data
-///    we already have.
-///
-/// When `rcv_nxt` advances past a SACK block's left edge, that block
-/// is removed since it's now covered by the cumulative ACK.
+/// After `rcv_nxt` advances (because in-order or OOO-delivered data was
+/// accepted), removes SACK blocks whose left edge is at or below
+/// `rcv_nxt` (they're covered by the cumulative ACK).
 #[allow(clippy::arithmetic_side_effects)]
 fn sack_advance(conn: &mut TcpConnection) {
     // Remove blocks that are now below rcv_nxt (already acknowledged
@@ -1247,6 +1252,120 @@ fn sack_advance(conn: &mut TcpConnection) {
         }
     }
     conn.sack_block_count = kept as u8;
+}
+
+// ---------------------------------------------------------------------------
+// Out-of-order receive buffer
+// ---------------------------------------------------------------------------
+
+/// Maximum size of the OOO receive buffer per connection.
+///
+/// Limits memory consumption from buffered out-of-order data.  Must
+/// be at least as large as the receive window (MAX_RX_BUFFER) to handle
+/// a full window of reordered data.
+const MAX_OOO_BUF: usize = MAX_RX_BUFFER;
+
+/// Store an out-of-order segment's payload in the OOO buffer.
+///
+/// `seq` is the segment's starting sequence number, `data` is the
+/// payload.  Data is written into `ooo_buf` at offset `seq - ooo_base`.
+/// The buffer is grown as needed (bounded by `MAX_OOO_BUF`).
+#[allow(clippy::arithmetic_side_effects)]
+fn ooo_store(conn: &mut TcpConnection, seq: u32, data: &[u8]) {
+    if data.is_empty() {
+        return;
+    }
+
+    // Initialize ooo_base to rcv_nxt if the buffer is empty.
+    if conn.ooo_buf.is_empty() {
+        conn.ooo_base = conn.rcv_nxt;
+    }
+
+    // Compute offset into the buffer.
+    let offset = seq.wrapping_sub(conn.ooo_base) as usize;
+    let end = offset.saturating_add(data.len());
+
+    // Refuse if the data would place beyond our buffer limit.
+    if end > MAX_OOO_BUF {
+        return;
+    }
+
+    // Grow the buffer if needed (zero-fill gaps — the SACK blocks
+    // track which ranges contain valid data).
+    if end > conn.ooo_buf.len() {
+        conn.ooo_buf.resize(end, 0);
+    }
+
+    // Copy payload into the buffer at the right offset.
+    conn.ooo_buf[offset..end].copy_from_slice(data);
+}
+
+/// Deliver contiguous OOO-buffered data to the receive buffer.
+///
+/// After in-order data has been accepted (advancing `rcv_nxt`), scan
+/// the SACK blocks to find contiguous data starting at `rcv_nxt`.
+/// Copy that data from `ooo_buf` to `rx_buffer`, advance `rcv_nxt`,
+/// and trim the OOO buffer.
+///
+/// Called before `sack_advance` so the SACK blocks are still present
+/// for lookup.
+#[allow(clippy::arithmetic_side_effects)]
+fn ooo_deliver(conn: &mut TcpConnection) {
+    if conn.ooo_buf.is_empty() {
+        return;
+    }
+
+    // Repeatedly scan SACK blocks for one whose left edge == rcv_nxt.
+    // When found, deliver that block's data and advance rcv_nxt.
+    loop {
+        let mut found = false;
+        let count = conn.sack_block_count as usize;
+
+        for i in 0..count {
+            let (bl, br) = conn.sack_blocks[i];
+            // Check if this block starts at (or before) rcv_nxt and
+            // extends past it — i.e., it's contiguous with what we've
+            // already received.
+            if !seq_lt(conn.rcv_nxt, bl) && seq_lt(conn.rcv_nxt, br) {
+                // This block overlaps rcv_nxt.  Deliver from rcv_nxt to br.
+                let start_off = conn.rcv_nxt.wrapping_sub(conn.ooo_base) as usize;
+                let end_off = br.wrapping_sub(conn.ooo_base) as usize;
+
+                // Bounds check against actual buffer size.
+                if end_off > conn.ooo_buf.len() || start_off >= conn.ooo_buf.len() {
+                    break;
+                }
+
+                // Limit by rx_buffer capacity.
+                let can_accept = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
+                let deliver_len = (end_off.saturating_sub(start_off)).min(can_accept);
+                if deliver_len == 0 {
+                    break;
+                }
+
+                let actual_end = start_off.saturating_add(deliver_len);
+                conn.rx_buffer.extend_from_slice(&conn.ooo_buf[start_off..actual_end]);
+                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(deliver_len as u32);
+                found = true;
+                break; // Re-scan from the beginning (blocks may now be contiguous).
+            }
+        }
+
+        if !found {
+            break;
+        }
+    }
+
+    // Trim consumed data from the front of ooo_buf.
+    let consumed = conn.rcv_nxt.wrapping_sub(conn.ooo_base) as usize;
+    if consumed > 0 && consumed <= conn.ooo_buf.len() {
+        conn.ooo_buf.drain(..consumed);
+        conn.ooo_base = conn.rcv_nxt;
+    } else if consumed > conn.ooo_buf.len() {
+        // rcv_nxt advanced past all buffered data.
+        conn.ooo_buf.clear();
+        conn.ooo_base = conn.rcv_nxt;
+    }
 }
 
 /// Sequence number comparison: `a < b` in modular 32-bit arithmetic.
@@ -1527,6 +1646,7 @@ pub fn close(handle: usize) -> KernelResult<()> {
     conns[handle].state = TcpState::Closed;
     conns[handle].rx_buffer.clear();
     conns[handle].tx_buffer.clear();
+    conns[handle].ooo_buf.clear();
 
     Ok(())
 }
@@ -1700,6 +1820,7 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
                 conn.state = TcpState::Closed;
                 conn.rx_buffer.clear();
                 conn.tx_buffer.clear();
+                conn.ooo_buf.clear();
             }
         }
     }
@@ -1775,6 +1896,8 @@ fn handle_incoming_syn(
         conn.tx_buffer.clear();
         conn.tx_buf_seq = isn.wrapping_add(1); // After SYN-ACK sequence.
         conn.tx_last_send_ns = 0;
+        conn.ooo_buf.clear();
+        conn.ooo_base = remote_seq.wrapping_add(1);
         conn.remote_closed = false;
         conn.retransmit_timer = 0;
         conn.srtt_ns_x8 = 0;
@@ -1965,6 +2088,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         conn.state = TcpState::Closed;
         conn.rx_buffer.clear();
         conn.tx_buffer.clear();
+        conn.ooo_buf.clear();
         return Ok(());
     }
 
@@ -2119,7 +2243,9 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                         conn.rcv_nxt = conn.rcv_nxt.wrapping_add(accept as u32);
                     }
 
-                    // Advance past any SACK blocks that are now contiguous.
+                    // Deliver contiguous OOO-buffered data now that the
+                    // gap has been filled.
+                    ooo_deliver(conn);
                     sack_advance(conn);
 
                     // Send ACK (with SACK blocks if any remain).
@@ -2127,12 +2253,11 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     drop(conns);
                     return Ok(());
                 } else if conn.sack_ok && seq_lt(conn.rcv_nxt, seq) {
-                    // Out-of-order data — record as a SACK block.
-                    // We don't buffer the payload (simplification), but
-                    // we inform the sender which ranges we received so
-                    // it can selectively retransmit.
+                    // Out-of-order data — record SACK block and buffer
+                    // the payload for delivery when the gap fills.
                     let right = seq.wrapping_add(payload.len() as u32);
                     sack_insert(conn, seq, right);
+                    ooo_store(conn, seq, payload);
 
                     // Send duplicate ACK with SACK blocks.
                     let _ = send_ack_with_sack(conn);
@@ -2329,6 +2454,7 @@ pub fn tick_keepalive() {
             conn.state = TcpState::Closed;
             conn.rx_buffer.clear();
             conn.tx_buffer.clear();
+            conn.ooo_buf.clear();
 
             drop(conns);
             let _ = send_segment(
@@ -2406,6 +2532,7 @@ pub fn tick_time_wait_cleanup() {
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
                     conn.tx_buffer.clear();
+                    conn.ooo_buf.clear();
                 }
             }
             TcpState::LastAck => {
@@ -2422,6 +2549,7 @@ pub fn tick_time_wait_cleanup() {
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
                     conn.tx_buffer.clear();
+                    conn.ooo_buf.clear();
                 }
             }
             _ => {}
@@ -2555,6 +2683,7 @@ pub fn icmp_error(
                 conn.state = TcpState::Closed;
                 conn.rx_buffer.clear();
                 conn.tx_buffer.clear();
+                conn.ooo_buf.clear();
             }
             TcpState::SynReceived => {
                 // Also abort half-open connections from the server side.
@@ -2568,6 +2697,7 @@ pub fn icmp_error(
                 conn.state = TcpState::Closed;
                 conn.rx_buffer.clear();
                 conn.tx_buffer.clear();
+                conn.ooo_buf.clear();
             }
             _ => {
                 // RFC 5461: soft error on established connections.

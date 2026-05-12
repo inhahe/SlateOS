@@ -991,6 +991,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TCP Nagle buffer: small writes buffered internally (nagle_buf) instead of returning WouldBlock; flushed when ACK acknowledges all outstanding data or buffer fills MSS
   - [x] TCP zero window probing (persist timer, RFC 1122 §4.2.2.17): when peer advertises zero receive window, periodic probes with exponential backoff (500ms→60s) prevent permanent connection deadlock from lost window-update ACKs
   - [x] IPv4 fragmentation reassembly (RFC 791 §3.2): new frag module with 8 concurrent reassembly contexts, 30s timeout, bitmap-based block tracking, out-of-order and overlapping fragment support, oldest-eviction; Ipv4Packet now exposes identification/MF/offset; process_ipv4 routes fragments to reassembly and dispatches complete datagrams
+  - [x] TCP ECN (Explicit Congestion Notification, RFC 3168): full handshake negotiation (client SYN ECE+CWR, server SYN-ACK ECE); CE detection → ECE echo in ACKs; sender cwnd reduction on ECE + CWR in data segments; IP header ECT(0) marking for ECN-negotiated connections; ipv4::send_ecn()/send_ns_ecn() infrastructure
+  - [x] TCP peer MSS honoring (RFC 793 §3.1): store peer's advertised MSS from SYN/SYN-ACK; effective_mss() returns min(our MSS, peer MSS); all outgoing data chunking, Nagle thresholds, retransmit sizes, and congestion control calculations use effective MSS
+  - [x] Path MTU Discovery (RFC 1191): ICMP "Fragmentation Needed" (type 3, code 4) carries next-hop MTU; icmp_error() reduces peer_mss to MTU-40; future segments automatically use reduced MSS via effective_mss()
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)

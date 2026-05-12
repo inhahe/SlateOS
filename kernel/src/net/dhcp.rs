@@ -508,6 +508,11 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
 
             // Apply the lease.
             interface::configure(offered_ip, subnet_mask, router, dns);
+
+            // Flush DNS cache — the DNS server may have changed, and
+            // cached results from the old server may be stale or wrong.
+            super::dns::flush_cache();
+
             *DHCP_STATE.lock() = DhcpState::Bound;
 
             // Store lease details.

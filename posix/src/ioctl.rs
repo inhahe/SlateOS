@@ -616,19 +616,29 @@ pub unsafe extern "C" fn cfsetspeed(termios_p: *mut Termios, speed: u32) -> i32 
 
 /// Send a break condition on a terminal.
 ///
-/// Stub: returns 0.  Our console doesn't have a serial break concept.
-/// Programs that call this (e.g., `stty`) will succeed silently.
+/// Our console doesn't have a serial break concept, so this is a
+/// no-op on valid terminal fds.  Returns -1 with `EBADF` for invalid
+/// fds or `ENOTTY` for non-terminal fds.
 #[unsafe(no_mangle)]
-pub extern "C" fn tcsendbreak(_fd: i32, _duration: i32) -> i32 {
+pub extern "C" fn tcsendbreak(fd: i32, _duration: i32) -> i32 {
+    if let Err(e) = validate_terminal_fd(fd) {
+        errno::set_errno(e);
+        return -1;
+    }
     0
 }
 
 /// Wait until all output has been transmitted.
 ///
-/// Stub: returns 0 immediately.  Our console writes are synchronous
-/// (framebuffer-backed), so there is no pending output to drain.
+/// Our console writes are synchronous (framebuffer-backed), so there
+/// is no pending output to drain.  Returns 0 immediately for valid
+/// terminal fds, -1 with `ENOTTY` for non-terminal fds.
 #[unsafe(no_mangle)]
-pub extern "C" fn tcdrain(_fd: i32) -> i32 {
+pub extern "C" fn tcdrain(fd: i32) -> i32 {
+    if let Err(e) = validate_terminal_fd(fd) {
+        errno::set_errno(e);
+        return -1;
+    }
     0
 }
 
@@ -643,9 +653,18 @@ pub const TCIOFF: i32 = 3;
 
 /// Suspend or restart terminal I/O.
 ///
-/// Stub: returns 0.  Our console doesn't support XON/XOFF flow control.
+/// Our console doesn't support XON/XOFF flow control.  Validates that
+/// `fd` refers to a terminal and `action` is a known constant.
 #[unsafe(no_mangle)]
-pub extern "C" fn tcflow(_fd: i32, _action: i32) -> i32 {
+pub extern "C" fn tcflow(fd: i32, action: i32) -> i32 {
+    if let Err(e) = validate_terminal_fd(fd) {
+        errno::set_errno(e);
+        return -1;
+    }
+    if !(TCOON..=TCIOFF).contains(&action) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
 }
 
@@ -658,11 +677,35 @@ pub const TCIOFLUSH: i32 = 2;
 
 /// Discard pending terminal I/O data.
 ///
-/// Stub: returns 0.  Our console doesn't buffer data beyond the
-/// framebuffer, so there is nothing to flush.
+/// Our console doesn't buffer data beyond the framebuffer, so there
+/// is nothing to flush.  Validates `fd` is a terminal and
+/// `queue_selector` is a known constant.
 #[unsafe(no_mangle)]
-pub extern "C" fn tcflush(_fd: i32, _queue_selector: i32) -> i32 {
+pub extern "C" fn tcflush(fd: i32, queue_selector: i32) -> i32 {
+    if let Err(e) = validate_terminal_fd(fd) {
+        errno::set_errno(e);
+        return -1;
+    }
+    if !(TCIFLUSH..=TCIOFLUSH).contains(&queue_selector) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
+}
+
+/// Validate that `fd` is an open terminal.
+///
+/// Returns `Ok(())` if the fd is valid and refers to a Console,
+/// `Err(EBADF)` if the fd is invalid, or `Err(ENOTTY)` if it's
+/// not a terminal.
+fn validate_terminal_fd(fd: i32) -> Result<(), i32> {
+    let Some(entry) = fdtable::get_fd(fd) else {
+        return Err(errno::EBADF);
+    };
+    if entry.kind != HandleKind::Console {
+        return Err(errno::ENOTTY);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

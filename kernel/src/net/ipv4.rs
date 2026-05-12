@@ -414,7 +414,11 @@ pub fn send_ns(
     let ip_packet = build_packet(our_ip, dst, protocol, payload);
 
     // Determine the next-hop MAC address.
-    let dst_mac = if dst.is_broadcast() {
+    let iface_info = interface::info();
+    let dst_mac = if dst.is_broadcast()
+        || (!iface_info.subnet_mask.is_unspecified()
+            && is_subnet_broadcast(dst, iface_info.ip, iface_info.subnet_mask))
+    {
         ethernet::BROADCAST_MAC
     } else {
         let next_hop = resolve_next_hop(ns_id, our_ip, dst);

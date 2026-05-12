@@ -173,6 +173,8 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
     };
 
     // For File handles, create a kernel-level duplicate.
+    // For Console/Pipe/Socket, share the same handle (refcounted
+    // via is_handle_referenced() in close()).
     let new_handle = match entry.kind {
         fdtable::HandleKind::File => {
             let ret = crate::syscall::syscall1(crate::syscall::SYS_FS_DUP, entry.handle);
@@ -181,23 +183,29 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
             }
             ret as u64
         }
-        fdtable::HandleKind::Console => entry.handle,
-        fdtable::HandleKind::Pipe
+        fdtable::HandleKind::Console
+        | fdtable::HandleKind::Pipe
         | fdtable::HandleKind::TcpStream
         | fdtable::HandleKind::TcpListener
-        | fdtable::HandleKind::UdpSocket => {
-            errno::set_errno(errno::ENOSYS);
-            return -1;
-        }
+        | fdtable::HandleKind::UdpSocket => entry.handle,
     };
 
     if let Some(new_fd) = fdtable::alloc_fd_from(min_fd, entry.kind, new_handle) {
         if cloexec {
             let _ = fdtable::set_fd_flags(new_fd, fdtable::FD_CLOEXEC);
         }
+        // Copy socket metadata for dup'd socket fds.
+        match entry.kind {
+            fdtable::HandleKind::TcpStream
+            | fdtable::HandleKind::TcpListener
+            | fdtable::HandleKind::UdpSocket => {
+                crate::socket::copy_meta(oldfd, new_fd);
+            }
+            _ => {}
+        }
         new_fd
     } else {
-        // Clean up the kernel handle if it's a file.
+        // Clean up the kernel handle if it's a file (has independent handle).
         if entry.kind == fdtable::HandleKind::File {
             let _ = crate::syscall::syscall1(crate::syscall::SYS_FS_CLOSE, new_handle);
         }

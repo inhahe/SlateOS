@@ -10,11 +10,24 @@
 //!
 //! A static array of 256 `FdEntry` slots.  Each slot holds:
 //! - The kernel handle value (u64)
-//! - The handle kind (File, Pipe, Console)
+//! - The handle kind (File, Pipe, Console, TcpStream, etc.)
 //! - Per-fd flags (FD_CLOEXEC, etc.)
 //!
 //! On startup, fds 0/1/2 are pre-initialized as Console handles so
 //! that `read(0, ...)` and `write(1, ...)` work out of the box.
+//!
+//! ## Handle Sharing and Refcounting
+//!
+//! File handles have kernel-level duplication (`SYS_FS_DUP`), so
+//! each dup'd fd gets an independent kernel handle.  Pipe and socket
+//! handles do not have kernel-level dup, so `dup()` creates a new fd
+//! entry pointing to the **same** kernel handle.
+//!
+//! [`is_handle_referenced()`] scans the table to determine whether
+//! any other fd still uses a given handle.  `close()` calls this
+//! after removing the fd entry: if the handle is still referenced,
+//! the kernel close is skipped.  This O(256) scan is negligible
+//! since `close()` is not a hot path.
 //!
 //! ## Thread Safety
 //!
@@ -211,4 +224,31 @@ pub fn set_fd_flags(fd: i32, flags: u32) -> bool {
             false
         }
     }
+}
+
+/// Check whether any open fd references the given (kind, handle) pair.
+///
+/// Used after [`close_fd()`] to determine whether the underlying
+/// kernel handle should actually be closed.  When multiple fds share
+/// the same kernel handle (via [`dup()`] on handle types that lack
+/// kernel-level duplication, such as pipes and sockets), closing one
+/// fd must not destroy the handle if another fd still references it.
+///
+/// Returns `true` if at least one open fd matches `(kind, handle)`.
+#[must_use]
+pub fn is_handle_referenced(kind: HandleKind, handle: u64) -> bool {
+    // SAFETY: Single-threaded access.  Read-only scan.
+    unsafe {
+        let table = &*table_ptr();
+        let mut i = 0;
+        while i < MAX_FDS {
+            if let Some(Some(entry)) = table.get(i)
+                && entry.kind == kind && entry.handle == handle
+            {
+                return true;
+            }
+            i = i.wrapping_add(1);
+        }
+    }
+    false
 }

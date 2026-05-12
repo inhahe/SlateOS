@@ -222,6 +222,18 @@ pub(crate) fn clear_meta(fd: i32) {
     }
 }
 
+/// Copy socket metadata from one fd to another.
+///
+/// Called from `file.rs` when duplicating a socket fd via `dup()`
+/// or `dup2()`.  Both fds share the same kernel handle, and the
+/// metadata (peer address, bound port, etc.) must be available
+/// from either fd for `getpeername()`/`getsockname()` to work.
+pub(crate) fn copy_meta(src_fd: i32, dst_fd: i32) {
+    if let Some(meta) = get_meta(src_fd) {
+        set_meta(dst_fd, meta);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Byte-order functions
 // ---------------------------------------------------------------------------
@@ -2126,12 +2138,8 @@ pub unsafe extern "C" fn if_nametoindex(ifname: *const u8) -> u32 {
     // SAFETY: caller guarantees ifname is a valid C string.
     let len = unsafe { crate::string::strlen(ifname) };
     let name = unsafe { core::slice::from_raw_parts(ifname, len) };
-    if name == b"eth0" || name == b"lo" {
-        // eth0 = index 1, lo = index 1 (we only have one real interface).
-        1
-    } else {
-        0
-    }
+    // eth0 = index 1, lo = index 1 (we only have one real interface).
+    u32::from(name == b"eth0" || name == b"lo")
 }
 
 /// Convert a network interface index to its name.

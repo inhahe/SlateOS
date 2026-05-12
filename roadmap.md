@@ -1008,7 +1008,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] C runtime: atexit (32 handlers LIFO), exit, __libc_start_main (glibc convention)
   - [x] locale: setlocale (C locale only), localeconv (static lconv)
   - [x] pthread: working pthread_create (mmap stack + asm trampoline + SYS_THREAD_CREATE), pthread_join (SYS_THREAD_JOIN + stack cleanup), pthread_detach, pthread_self (SYS_TASK_ID), pthread_exit (SYS_THREAD_EXIT); atomic mutexes (CAS + spin-yield), thread-safe pthread_once; TSD (64 keys, global — per-thread TLS needs kernel FS/GS support)
-  - [ ] dup/dup2 for pipe handles (needs SYS_PIPE_DUP or fd-level refcounting)
+  - [x] dup/dup2 for pipe and socket handles (fd-level refcounting via is_handle_referenced scan; close() skips kernel handle close when shared; socket metadata copied on dup)
   - [x] ioctl: ioctl() dispatch for TIOCGWINSZ/TIOCSWINSZ, FIONBIO, FIONREAD, TCGETS/TCSETS/TCSETSW/TCSETSF; struct Winsize + struct Termios with full flag constants; isatty(), ttyname(), tcgetattr(), tcsetattr(), cfget/setispeed/ospeed(); default cooked-mode termios for Console fds
   - [x] select/poll: poll() with struct pollfd + POLLIN/POLLOUT/POLLHUP/POLLNVAL/POLLPRI constants, select() with fd_set + FD_ZERO/FD_SET/FD_CLR/FD_ISSET helpers, pselect() with timespec+sigmask (sigmask ignored); readiness reporting by handle kind (Console/File/Pipe always ready, TCP/UDP based on handle state); timeout via SYS_SLEEP; struct Timeval
   - [ ] epoll (deferred — needs kernel event notification support)

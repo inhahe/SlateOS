@@ -83,21 +83,33 @@ pub extern "C" fn close(fd: Fd) -> i32 {
         return -1;
     };
 
+    // Clear per-fd socket metadata regardless of sharing.
+    match entry.kind {
+        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+            crate::socket::clear_meta(fd);
+        }
+        _ => {}
+    }
+
+    // If another fd still references the same kernel handle (from
+    // dup on handle types without kernel-level duplication), skip
+    // the kernel close — the handle is still in use.
+    if fdtable::is_handle_referenced(entry.kind, entry.handle) {
+        return 0;
+    }
+
     let ret = match entry.kind {
         HandleKind::File => syscall1(SYS_FS_CLOSE, entry.handle),
         HandleKind::Pipe => syscall1(SYS_PIPE_CLOSE, entry.handle),
         HandleKind::Console => return 0, // Console fds don't need kernel close.
         HandleKind::TcpStream => {
-            crate::socket::clear_meta(fd);
             if entry.handle == 0 { return 0; } // Unconnected socket, nothing to close.
             syscall1(SYS_TCP_CLOSE, entry.handle)
         }
         HandleKind::TcpListener => {
-            crate::socket::clear_meta(fd);
             syscall1(SYS_TCP_CLOSE_LISTENER, entry.handle)
         }
         HandleKind::UdpSocket => {
-            crate::socket::clear_meta(fd);
             if entry.handle == 0 { return 0; } // Unbound socket, nothing to close.
             syscall1(SYS_UDP_CLOSE, entry.handle)
         }
@@ -441,12 +453,28 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
                 -1
             }
         }
-        HandleKind::Pipe
-        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
-            // No kernel-level dup available for pipes or sockets.
-            // TODO: Add refcounting to fd table or per-kind kernel dup.
-            errno::set_errno(errno::ENOSYS);
-            -1
+        HandleKind::Pipe => {
+            // No kernel-level dup for pipes.  Share the handle;
+            // close() uses is_handle_referenced() to only close the
+            // kernel handle when the last fd referencing it is closed.
+            if let Some(fd) = fdtable::alloc_fd(HandleKind::Pipe, entry.handle) {
+                fd
+            } else {
+                errno::set_errno(errno::EMFILE);
+                -1
+            }
+        }
+        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+            // Share the handle (same refcounting as pipes).
+            if let Some(new_fd) = fdtable::alloc_fd(entry.kind, entry.handle) {
+                // Copy socket metadata so getpeername/getsockname
+                // works on the dup'd fd too.
+                crate::socket::copy_meta(oldfd, new_fd);
+                new_fd
+            } else {
+                errno::set_errno(errno::EMFILE);
+                -1
+            }
         }
     }
 }
@@ -474,8 +502,8 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
     }
 
     // For File handles, create a kernel-level duplicate.
-    // For Console, share the handle.
-    // For Pipe, not yet supported.
+    // For Console/Pipe/Socket, share the same handle (refcounted
+    // via is_handle_referenced() in close()).
     let new_handle = match entry.kind {
         HandleKind::File => {
             let ret = syscall1(SYS_FS_DUP, entry.handle);
@@ -484,18 +512,34 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
             }
             ret as u64
         }
-        HandleKind::Console => entry.handle,
-        HandleKind::Pipe
+        HandleKind::Console
+        | HandleKind::Pipe
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
-            errno::set_errno(errno::ENOSYS);
-            return -1;
+            entry.handle
         }
     };
 
     // Install at newfd, closing whatever was there.
     if let Some(old) = fdtable::install_fd(newfd, entry.kind, new_handle) {
-        // Close the previously open handle.
-        let _ = close_kernel_handle(old.kind, old.handle);
+        // Clear socket metadata for the evicted fd.
+        match old.kind {
+            HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+                crate::socket::clear_meta(newfd);
+            }
+            _ => {}
+        }
+        // Only close the old kernel handle if no other fd still uses it.
+        if !fdtable::is_handle_referenced(old.kind, old.handle) {
+            let _ = close_kernel_handle(old.kind, old.handle);
+        }
+    }
+
+    // Copy socket metadata for dup'd socket fds.
+    match entry.kind {
+        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+            crate::socket::copy_meta(oldfd, newfd);
+        }
+        _ => {}
     }
 
     newfd

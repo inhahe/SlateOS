@@ -145,18 +145,19 @@ make sure latest WINE plan and automatic code change plan are in roadmap
   opendir, posix_spawn, execve).  Path normalization handles ".", "..",
   redundant "/", and trailing slashes.  20 unit tests for normalize_path.
 
-- Pipe dup is not yet supported.  dup(pipe_fd) returns ENOSYS because there is
-  no SYS_PIPE_DUP kernel syscall and the fd table has no handle refcounting.
-  Fix requires either: (a) adding SYS_PIPE_DUP to kernel (kernel-ipc zone),
-  or (b) adding refcounted handle wrappers to the fd table.  Shell pipelines
-  (cmd1 | cmd2) will need this eventually.
+- (FIXED) Pipe/socket dup: dup(pipe_fd) and dup(socket_fd) now work.
+  Implemented fd-level handle refcounting via is_handle_referenced() scan
+  in fdtable.rs.  close() skips kernel handle close when other fds still
+  reference it.  Socket metadata (SocketMeta) is copied on dup for
+  getpeername/getsockname support.  Shell pipelines (cmd1 | cmd2) can
+  now properly redirect pipe endpoints.
 
 - (FIXED) posix_spawn/execve now use mmap for dynamic ELF buffer allocation.
   stat() gets file size, mmap allocates exactly that, munmap frees after
   spawn/exec.  No longer limited to 512 KiB.
 
-- Socket dup is not supported.  dup(tcp_fd) returns ENOSYS.  Same reason
-  as pipe dup — no kernel-level handle duplication for sockets.
+- (FIXED) Socket dup now works.  Same refcounting fix as pipe dup
+  (is_handle_referenced scan + copy_meta for socket metadata).
 
 - poll/select report all valid fds as ready (optimistic readiness).  This
   works correctly for files (POSIX says always ready) and is conservative

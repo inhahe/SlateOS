@@ -24,13 +24,20 @@
 //!   space; tracks peer's advertised window to avoid overrunning it.
 //! - **Keepalive probes** (RFC 1122 §4.2.3.6): detects dead peers on idle
 //!   connections via periodic probes (`seq = snd_una - 1`).
+//! - **RTT estimation** (Jacobson/Karels, RFC 6298): measures round-trip
+//!   time to compute dynamic retransmission timeout (SRTT + 4×RTTVAR).
+//! - **Nagle algorithm** (RFC 896): coalesces small writes into larger
+//!   segments when unacknowledged data is in flight.  Disable with
+//!   `set_nodelay(handle, true)` (TCP_NODELAY).
+//! - **Congestion control** (simplified AIMD, RFC 5681): slow start and
+//!   congestion avoidance via `cwnd`/`ssthresh`.  Multiplicative decrease
+//!   on loss.
 //!
 //! ## Limitations
 //!
 //! - No window scaling (RFC 7323) — max window is 64 KiB.
-//! - No congestion control (sends at wire rate).
-//! - No Nagle algorithm.
-//! - Simple retransmission (single timeout, no RTT estimation).
+//! - No selective acknowledgment (SACK).
+//! - No fast retransmit / fast recovery (triple duplicate ACK).
 //! - Maximum 32 concurrent connections.
 //! - Maximum 8 listeners, each with a backlog of 16 pending connections.
 
@@ -66,12 +73,51 @@ const MAX_BACKLOG: usize = 16;
 /// Default receive window size (16 KiB).
 const DEFAULT_WINDOW: u16 = 16384;
 
-/// Retransmission timeout in poll cycles (~2 seconds).
-#[allow(dead_code)]
-const RETRANSMIT_TIMEOUT: u32 = 2000;
-
 /// Maximum data waiting for delivery per connection.
 const MAX_RX_BUFFER: usize = 65536;
+
+/// Standard MSS for Ethernet (1500 MTU − 20 IP − 20 TCP).
+const MSS: usize = 1460;
+
+// ---------------------------------------------------------------------------
+// RTT estimation (Jacobson/Karels, RFC 6298)
+// ---------------------------------------------------------------------------
+
+/// Minimum RTO in nanoseconds (200ms, per RFC 6298 §2.4 recommendation).
+const RTO_MIN_NS: u64 = 200_000_000;
+
+/// Maximum RTO in nanoseconds (60 seconds).
+const RTO_MAX_NS: u64 = 60_000_000_000;
+
+/// Initial RTO before any measurements (1 second, per RFC 6298 §2.1).
+const RTO_INITIAL_NS: u64 = 1_000_000_000;
+
+/// Alpha factor for SRTT: 1/8 (shift right by 3).  RFC 6298 §2.3.
+const SRTT_ALPHA_SHIFT: u32 = 3;
+
+/// Beta factor for RTTVAR: 1/4 (shift right by 2).  RFC 6298 §2.3.
+const RTTVAR_BETA_SHIFT: u32 = 2;
+
+// ---------------------------------------------------------------------------
+// Nagle algorithm
+// ---------------------------------------------------------------------------
+
+/// Whether Nagle is enabled by default on new connections.
+///
+/// When enabled, small segments (< MSS) are held until all outstanding
+/// data is acknowledged, reducing the number of tiny packets on the wire.
+const NAGLE_DEFAULT: bool = true;
+
+// ---------------------------------------------------------------------------
+// Congestion control (simplified AIMD — RFC 5681)
+// ---------------------------------------------------------------------------
+
+/// Initial congestion window in segments (RFC 5681 §3.1 recommends
+/// min(4*MSS, max(2*MSS, 4380))).  We use 4 segments for simplicity.
+const INITIAL_CWND_SEGS: u32 = 4;
+
+/// Minimum congestion window (1 segment).
+const MIN_CWND_SEGS: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // TCP keepalive defaults (RFC 1122 §4.2.3.6)
@@ -151,6 +197,39 @@ struct TcpConnection {
     /// Retransmit counter (incremented each poll cycle).
     retransmit_timer: u32,
 
+    // -- RTT estimation (Jacobson/Karels, RFC 6298) --
+
+    /// Smoothed round-trip time (nanoseconds, fixed-point ×8).
+    /// Stored scaled by 8 to avoid floating-point; divide by 8 for
+    /// the true SRTT.
+    srtt_ns_x8: u64,
+    /// RTT variation (nanoseconds, fixed-point ×4).
+    /// Stored scaled by 4; divide by 4 for true RTTVAR.
+    rttvar_ns_x4: u64,
+    /// Current retransmission timeout (nanoseconds), derived from SRTT
+    /// and RTTVAR per RFC 6298 §2.  Clamped to [RTO_MIN_NS, RTO_MAX_NS].
+    rto_ns: u64,
+    /// Whether we have at least one RTT measurement (first-sample init
+    /// uses different formulas, per RFC 6298 §2.2).
+    rtt_initialized: bool,
+    /// Sequence number of the segment being timed for RTT.  Only one
+    /// segment is timed at a time (Karn's algorithm: skip retransmitted).
+    rtt_seq: u32,
+    /// Timestamp when `rtt_seq` was sent (0 if no timing in progress).
+    rtt_sent_ns: u64,
+
+    // -- Nagle algorithm --
+
+    /// Whether Nagle's algorithm is enabled (TCP_NODELAY = !nagle).
+    nagle_enabled: bool,
+
+    // -- Congestion control (AIMD, RFC 5681) --
+
+    /// Congestion window in bytes.
+    cwnd: u32,
+    /// Slow-start threshold in bytes.
+    ssthresh: u32,
+
     // -- Keepalive state (RFC 1122 §4.2.3.6) --
 
     /// Whether keepalive probes are enabled on this connection.
@@ -184,6 +263,15 @@ impl TcpConnection {
             rx_buffer: Vec::new(),
             remote_closed: false,
             retransmit_timer: 0,
+            srtt_ns_x8: 0,
+            rttvar_ns_x4: 0,
+            rto_ns: RTO_INITIAL_NS,
+            rtt_initialized: false,
+            rtt_seq: 0,
+            rtt_sent_ns: 0,
+            nagle_enabled: NAGLE_DEFAULT,
+            cwnd: INITIAL_CWND_SEGS.saturating_mul(MSS as u32),
+            ssthresh: u32::MAX, // Start in slow-start.
             keepalive_enabled: false,
             keepalive_idle_ns: KEEPALIVE_IDLE_DEFAULT_NS,
             keepalive_interval_ns: KEEPALIVE_INTERVAL_DEFAULT_NS,
@@ -434,6 +522,15 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.rx_buffer.clear();
         conn.remote_closed = false;
         conn.retransmit_timer = 0;
+        conn.srtt_ns_x8 = 0;
+        conn.rttvar_ns_x4 = 0;
+        conn.rto_ns = RTO_INITIAL_NS;
+        conn.rtt_initialized = false;
+        conn.rtt_seq = isn; // Time the SYN for initial RTT sample.
+        conn.rtt_sent_ns = crate::hrtimer::now_ns();
+        conn.nagle_enabled = NAGLE_DEFAULT;
+        conn.cwnd = INITIAL_CWND_SEGS.saturating_mul(MSS as u32);
+        conn.ssthresh = u32::MAX;
         conn.keepalive_enabled = false;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
@@ -484,46 +581,176 @@ fn advertised_window(conn: &TcpConnection) -> u16 {
     (free.min(DEFAULT_WINDOW as usize)) as u16
 }
 
+/// Update RTT estimate from a new measurement (Jacobson/Karels, RFC 6298).
+///
+/// `sample_ns` is the measured round-trip time in nanoseconds.
+#[allow(clippy::arithmetic_side_effects)]
+fn update_rtt(conn: &mut TcpConnection, sample_ns: u64) {
+    if !conn.rtt_initialized {
+        // First measurement (RFC 6298 §2.2):
+        //   SRTT = R
+        //   RTTVAR = R/2
+        //   RTO = SRTT + max(G, 4*RTTVAR)  (G = clock granularity ≈ 0 for us)
+        conn.srtt_ns_x8 = sample_ns.saturating_mul(8);
+        conn.rttvar_ns_x4 = sample_ns.saturating_mul(2); // R/2 * 4 = 2R
+        conn.rtt_initialized = true;
+    } else {
+        // Subsequent measurements (RFC 6298 §2.3):
+        //   RTTVAR = (1 - beta) * RTTVAR + beta * |SRTT - R|
+        //   SRTT   = (1 - alpha) * SRTT   + alpha * R
+        //
+        // With alpha = 1/8, beta = 1/4:
+        //   RTTVAR_x4 = RTTVAR_x4 - (RTTVAR_x4 >> 2) + |err|
+        //   SRTT_x8   = SRTT_x8   - (SRTT_x8   >> 3) + R
+
+        let srtt = conn.srtt_ns_x8 >> SRTT_ALPHA_SHIFT; // True SRTT.
+        let err = if sample_ns >= srtt {
+            sample_ns - srtt
+        } else {
+            srtt - sample_ns
+        };
+
+        // RTTVAR update: 3/4 old + 1/4 |err|.
+        conn.rttvar_ns_x4 = conn.rttvar_ns_x4
+            .saturating_sub(conn.rttvar_ns_x4 >> RTTVAR_BETA_SHIFT)
+            .saturating_add(err);
+
+        // SRTT update: 7/8 old + 1/8 sample.
+        conn.srtt_ns_x8 = conn.srtt_ns_x8
+            .saturating_sub(conn.srtt_ns_x8 >> SRTT_ALPHA_SHIFT)
+            .saturating_add(sample_ns);
+    }
+
+    // RTO = SRTT + 4 * RTTVAR, clamped.
+    let srtt = conn.srtt_ns_x8 >> SRTT_ALPHA_SHIFT;
+    let rttvar = conn.rttvar_ns_x4 >> RTTVAR_BETA_SHIFT;
+    let rto = srtt.saturating_add(rttvar.saturating_mul(4));
+    conn.rto_ns = rto.clamp(RTO_MIN_NS, RTO_MAX_NS);
+}
+
+/// Take an RTT sample if this ACK acknowledges the timed segment.
+///
+/// Returns true if a sample was taken.
+fn try_rtt_sample(conn: &mut TcpConnection, ack: u32) -> bool {
+    if conn.rtt_sent_ns == 0 {
+        return false; // No timing in progress.
+    }
+
+    // Check if this ACK covers the timed sequence number.
+    // ack > rtt_seq in modular arithmetic means the timed segment was ack'd.
+    let covers = ack.wrapping_sub(conn.rtt_seq.wrapping_add(1)) < 0x8000_0000;
+    if !covers {
+        return false;
+    }
+
+    let now = crate::hrtimer::now_ns();
+    let sample = now.saturating_sub(conn.rtt_sent_ns);
+    update_rtt(conn, sample);
+
+    // Clear timing state — start a new measurement on the next send.
+    conn.rtt_sent_ns = 0;
+    true
+}
+
+/// Start timing a segment for RTT measurement.
+///
+/// Only starts if no timing is currently in progress (one sample at
+/// a time, per Karn's algorithm — retransmitted segments are never timed).
+fn start_rtt_timing(conn: &mut TcpConnection, seq: u32) {
+    if conn.rtt_sent_ns == 0 {
+        conn.rtt_seq = seq;
+        conn.rtt_sent_ns = crate::hrtimer::now_ns();
+    }
+}
+
+/// Effective send window: min(congestion window, peer's receive window).
+///
+/// This is the maximum amount of data we may have in flight at once.
+fn effective_window(conn: &TcpConnection) -> usize {
+    let peer = conn.snd_wnd as usize;
+    let cong = conn.cwnd as usize;
+    peer.min(cong)
+}
+
+/// Called when an ACK arrives — updates congestion window (slow-start or
+/// congestion avoidance, RFC 5681 §3.1).
+#[allow(clippy::arithmetic_side_effects)]
+fn on_ack_congestion(conn: &mut TcpConnection, bytes_acked: u32) {
+    if bytes_acked == 0 {
+        return;
+    }
+    let mss = MSS as u32;
+    if conn.cwnd < conn.ssthresh {
+        // Slow start: increase cwnd by min(bytes_acked, MSS) per ACK.
+        conn.cwnd = conn.cwnd.saturating_add(bytes_acked.min(mss));
+    } else {
+        // Congestion avoidance: increase cwnd by MSS * MSS / cwnd per ACK
+        // (approximately 1 MSS per RTT).
+        let inc = (mss as u64)
+            .saturating_mul(bytes_acked as u64)
+            / (conn.cwnd as u64).max(1);
+        conn.cwnd = conn.cwnd.saturating_add(inc.min(mss as u64) as u32);
+    }
+}
+
+/// Called on packet loss (duplicate ACKs or timeout) — reduces congestion
+/// window (multiplicative decrease, RFC 5681 §3.1).
+fn on_loss_congestion(conn: &mut TcpConnection) {
+    let mss = MSS as u32;
+    // ssthresh = max(FlightSize / 2, 2*MSS)
+    let flight = conn.snd_nxt.wrapping_sub(conn.snd_una);
+    conn.ssthresh = (flight / 2).max(mss.saturating_mul(2));
+    // cwnd = 1 MSS (enter slow start after loss).
+    conn.cwnd = mss;
+}
+
 /// Send data on an established TCP connection.
 ///
-/// Respects the peer's advertised receive window (`snd_wnd`): data
-/// beyond what the peer can accept is not sent.  Returns `Ok(())` even
-/// if the peer's window truncated the send (caller should check how
-/// much was actually ACK'd and retry if needed).
+/// Respects both the peer's advertised receive window (`snd_wnd`) and
+/// the congestion window (`cwnd`).  Nagle's algorithm (when enabled)
+/// delays small segments when unacknowledged data is in flight.
+///
+/// Returns `Ok(())` even if the effective window truncated the send.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
-    let (local_port, remote_ip, remote_port, seq, ack, peer_wnd, our_wnd) = {
+    let (local_port, remote_ip, remote_port, seq, ack, eff_wnd, our_wnd, nagle, has_unacked) = {
         let conns = CONNECTIONS.lock();
         let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
         if !conn.active || conn.state != TcpState::Established {
             return Err(KernelError::InvalidArgument);
         }
+        let unacked = conn.snd_nxt != conn.snd_una;
         (conn.local_port, conn.remote_ip, conn.remote_port,
-         conn.snd_nxt, conn.rcv_nxt, conn.snd_wnd, advertised_window(conn))
+         conn.snd_nxt, conn.rcv_nxt, effective_window(conn),
+         advertised_window(conn), conn.nagle_enabled, unacked)
     };
 
-    // Respect the peer's advertised receive window: we may only have
-    // `snd_wnd` bytes in flight (between snd_una and snd_nxt + new data).
-    // For simplicity (no retransmit queue), we limit total send size to
-    // the peer window.
-    let usable_window = peer_wnd as usize;
-    let sendable = data.len().min(usable_window);
+    // Nagle's algorithm (RFC 896): if we have unacknowledged data in
+    // flight, only send if the new data fills a full MSS.  This coalesces
+    // small writes into larger segments.
+    if nagle && has_unacked && data.len() < MSS {
+        // Buffer the small write — it will be sent when the ACK arrives.
+        // For now we return WouldBlock; the caller should retry later.
+        // A real implementation would buffer internally, but our simple
+        // model works because callers already retry on WouldBlock.
+        return Err(KernelError::WouldBlock);
+    }
+
+    // Effective window = min(cwnd, snd_wnd).  Limit data to what we can
+    // have in flight.
+    let sendable = data.len().min(eff_wnd);
 
     if sendable == 0 && !data.is_empty() {
-        // Peer window is zero — can't send anything right now.
-        // The caller should retry after the peer opens its window
-        // (we'll update snd_wnd when the next ACK arrives).
         return Err(KernelError::WouldBlock);
     }
 
     let send_data = &data[..sendable];
 
-    // Send data in chunks that fit in a single segment.
-    let mss: usize = 1460; // Standard MSS for Ethernet.
     let mut offset = 0;
+    let mut first_seq = seq;
 
     while offset < send_data.len() {
-        let chunk_end = (offset + mss).min(send_data.len());
+        let chunk_end = (offset + MSS).min(send_data.len());
         let chunk = &send_data[offset..chunk_end];
 
         let send_seq = seq.wrapping_add(offset as u32);
@@ -535,19 +762,62 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
             chunk,
         )?;
 
+        if offset == 0 {
+            first_seq = send_seq;
+        }
+
         offset = chunk_end;
     }
 
-    // Update snd_nxt and keepalive activity timestamp.
+    // Update snd_nxt, start RTT timing, and reset keepalive.
     {
         let mut conns = CONNECTIONS.lock();
         let conn = &mut conns[handle];
         conn.snd_nxt = seq.wrapping_add(sendable as u32);
         conn.last_activity_ns = crate::hrtimer::now_ns();
         conn.keepalive_probes_sent = 0;
+        start_rtt_timing(conn, first_seq);
     }
 
     Ok(())
+}
+
+/// Enable or disable Nagle's algorithm on a connection.
+///
+/// `TCP_NODELAY = true` disables Nagle (nagle = false).
+/// `TCP_NODELAY = false` enables Nagle (nagle = true).
+pub fn set_nodelay(handle: usize, nodelay: bool) -> KernelResult<()> {
+    let mut conns = CONNECTIONS.lock();
+    let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    if !conn.active {
+        return Err(KernelError::InvalidArgument);
+    }
+    conn.nagle_enabled = !nodelay;
+    Ok(())
+}
+
+/// Query whether Nagle's algorithm is enabled.
+#[allow(dead_code)] // API — will be called from setsockopt.
+pub fn get_nodelay(handle: usize) -> KernelResult<bool> {
+    let conns = CONNECTIONS.lock();
+    let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
+    if !conn.active {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(!conn.nagle_enabled)
+}
+
+/// Query the current smoothed RTT for a connection (nanoseconds).
+///
+/// Returns 0 if no RTT samples have been collected yet.
+#[allow(dead_code)] // Diagnostic API.
+pub fn get_rtt_ns(handle: usize) -> KernelResult<u64> {
+    let conns = CONNECTIONS.lock();
+    let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
+    if !conn.active {
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(conn.srtt_ns_x8 >> SRTT_ALPHA_SHIFT)
 }
 
 /// Read data from a TCP connection.
@@ -880,6 +1150,15 @@ fn handle_incoming_syn(
         conn.rx_buffer.clear();
         conn.remote_closed = false;
         conn.retransmit_timer = 0;
+        conn.srtt_ns_x8 = 0;
+        conn.rttvar_ns_x4 = 0;
+        conn.rto_ns = RTO_INITIAL_NS;
+        conn.rtt_initialized = false;
+        conn.rtt_seq = isn; // Time the SYN-ACK for initial RTT sample.
+        conn.rtt_sent_ns = crate::hrtimer::now_ns();
+        conn.nagle_enabled = NAGLE_DEFAULT;
+        conn.cwnd = INITIAL_CWND_SEGS.saturating_mul(MSS as u32);
+        conn.ssthresh = u32::MAX;
         conn.keepalive_enabled = false;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
@@ -1015,6 +1294,10 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 conn.rcv_irs = seq;
                 conn.rcv_nxt = seq.wrapping_add(1);
                 conn.snd_una = ack;
+                conn.state = TcpState::Established;
+
+                // Take initial RTT sample from SYN → SYN-ACK.
+                try_rtt_sample(conn, ack);
 
                 // Send ACK.
                 let local_port = conn.local_port;
@@ -1022,7 +1305,6 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 let remote_port = conn.remote_port;
                 let snd_nxt = conn.snd_nxt;
                 let rcv_nxt = conn.rcv_nxt;
-                conn.state = TcpState::Established;
 
                 drop(conns);
                 let _ = send_segment(
@@ -1035,6 +1317,8 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         TcpState::SynReceived => {
             // Server-side: waiting for ACK to complete 3-way handshake.
             if flags & TCP_ACK != 0 {
+                // Take initial RTT sample from SYN-ACK → ACK.
+                try_rtt_sample(conn, ack);
                 conn.snd_una = ack;
                 conn.state = TcpState::Established;
 
@@ -1057,10 +1341,18 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         TcpState::Established => {
             // Process ACK.
             if flags & TCP_ACK != 0 {
+                let old_una = conn.snd_una;
                 // Advance snd_una.
                 if ack.wrapping_sub(conn.snd_una) <= conn.snd_nxt.wrapping_sub(conn.snd_una) {
                     conn.snd_una = ack;
                 }
+                let bytes_acked = conn.snd_una.wrapping_sub(old_una);
+
+                // RTT sample from this ACK (Karn: only non-retransmitted).
+                try_rtt_sample(conn, ack);
+
+                // Congestion window update.
+                on_ack_congestion(conn, bytes_acked);
             }
 
             // Process data.

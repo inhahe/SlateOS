@@ -34,6 +34,10 @@
 //! - **Congestion control** (simplified AIMD, RFC 5681): slow start and
 //!   congestion avoidance via `cwnd`/`ssthresh`.  Multiplicative decrease
 //!   on loss.
+//! - **Zero window probing** (persist timer, RFC 1122 §4.2.2.17): when the
+//!   peer advertises a zero receive window, the persist timer sends periodic
+//!   probes with exponential backoff (500ms → 60s).  This prevents permanent
+//!   deadlock when the receiver's window update ACK is lost.
 //!
 //! - **Window scaling** (RFC 7323): negotiated during the 3-way handshake
 //!   so that peers with large receive windows (Linux default scale 7) are
@@ -183,6 +187,23 @@ const KEEPALIVE_INTERVAL_DEFAULT_NS: u64 = 10_000_000_000;
 
 /// Maximum keepalive probes before declaring the connection dead.
 const KEEPALIVE_PROBES_DEFAULT: u8 = 9;
+
+// ---------------------------------------------------------------------------
+// Zero window probe (persist timer, RFC 793 §3.7, RFC 1122 §4.2.2.17)
+// ---------------------------------------------------------------------------
+
+/// Minimum persist timer interval (500ms).
+///
+/// The persist timer fires to probe a peer that has advertised a zero
+/// window.  Per RFC 1122 §4.2.2.17, the interval should use exponential
+/// backoff starting near the RTO, bounded between a minimum and maximum.
+const PERSIST_MIN_NS: u64 = 500_000_000;
+
+/// Maximum persist timer interval (60 seconds).
+///
+/// RFC 1122 §4.2.2.17 says the upper bound should be "at least 60
+/// seconds."  We cap at 60s to avoid unnecessarily long stalls.
+const PERSIST_MAX_NS: u64 = 60_000_000_000;
 
 // TCP flags.
 const TCP_FIN: u8 = 0x01;
@@ -354,6 +375,19 @@ struct TcpConnection {
     /// Used for RTO timeout-based retransmission.
     tx_last_send_ns: u64,
 
+    // -- Persist timer (zero window probe, RFC 1122 §4.2.2.17) --
+
+    /// Whether the persist timer is active (peer advertised zero window
+    /// and we have data pending).
+    persist_active: bool,
+    /// Current persist timer interval (nanoseconds).  Doubles on each
+    /// probe (exponential backoff), clamped to [PERSIST_MIN_NS, PERSIST_MAX_NS].
+    persist_interval_ns: u64,
+    /// Timestamp (ns, monotonic) when we last sent a window probe.
+    /// Zero means no probe sent yet — use `persist_interval_ns` from the
+    /// moment `persist_active` was set.
+    persist_last_ns: u64,
+
     // -- Keepalive state (RFC 1122 §4.2.3.6) --
 
     /// Whether keepalive probes are enabled on this connection.
@@ -409,6 +443,9 @@ impl TcpConnection {
             tx_buffer: Vec::new(),
             tx_buf_seq: 0,
             tx_last_send_ns: 0,
+            persist_active: false,
+            persist_interval_ns: PERSIST_MIN_NS,
+            persist_last_ns: 0,
             keepalive_enabled: false,
             keepalive_idle_ns: KEEPALIVE_IDLE_DEFAULT_NS,
             keepalive_interval_ns: KEEPALIVE_INTERVAL_DEFAULT_NS,
@@ -1505,6 +1542,17 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
     let sendable = data.len().min(eff_wnd);
 
     if sendable == 0 && !data.is_empty() {
+        // Peer advertised a zero window (or cwnd is exhausted).  Activate
+        // the persist timer so tick_persist() will probe periodically until
+        // the window opens.  The caller gets WouldBlock and retries later.
+        let mut conns = CONNECTIONS.lock();
+        if let Some(conn) = conns.get_mut(handle) {
+            if conn.snd_wnd == 0 && !conn.persist_active {
+                conn.persist_active = true;
+                conn.persist_interval_ns = conn.rto_ns.max(PERSIST_MIN_NS);
+                conn.persist_last_ns = crate::hrtimer::now_ns();
+            }
+        }
         return Err(KernelError::WouldBlock);
     }
 
@@ -2125,6 +2173,14 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         conn.snd_wnd = window as u32;
     }
 
+    // Window opened — deactivate persist timer so the sender can resume
+    // normal transmission.  Reset the backoff interval for next time.
+    if conn.snd_wnd > 0 && conn.persist_active {
+        conn.persist_active = false;
+        conn.persist_interval_ns = PERSIST_MIN_NS;
+        conn.persist_last_ns = 0;
+    }
+
     // Any incoming segment counts as activity for keepalive purposes.
     conn.last_activity_ns = crate::hrtimer::now_ns();
     conn.keepalive_probes_sent = 0;
@@ -2482,6 +2538,93 @@ pub fn set_keepalive_params(
     conn.keepalive_interval_ns = interval_ns;
     conn.keepalive_probes_max = max_probes;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Zero window probe — persist timer (RFC 1122 §4.2.2.17)
+// ---------------------------------------------------------------------------
+
+/// Periodic persist-timer tick — probes peers that have advertised a zero
+/// receive window.
+///
+/// When a receiver's buffer is full it advertises window=0.  Without the
+/// persist timer the sender would stall forever: the receiver's eventual
+/// window update is a bare ACK which is not retransmitted, so a single
+/// lost ACK causes permanent deadlock.
+///
+/// The probe sends a 1-byte segment at `snd_nxt` (i.e., the next
+/// unsent sequence number).  The peer will either:
+/// - Still have a zero window → responds with ACK + window=0.  We back
+///   off and try again later.
+/// - Have freed buffer space → responds with ACK + window>0.  The
+///   `snd_wnd` update above clears `persist_active` and normal sending
+///   resumes.
+///
+/// Called from the same periodic tick as `tick_keepalive`.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn tick_persist() {
+    let now = crate::hrtimer::now_ns();
+    let mut conns = CONNECTIONS.lock();
+
+    for idx in 0..MAX_CONNECTIONS {
+        let conn = &mut conns[idx];
+        if !conn.active || !conn.persist_active {
+            continue;
+        }
+        // Only probe in states where we'd be sending data.
+        if conn.state != TcpState::Established && conn.state != TcpState::CloseWait {
+            conn.persist_active = false;
+            continue;
+        }
+        // Window opened since we last checked (e.g., ACK processed
+        // between ticks).
+        if conn.snd_wnd > 0 {
+            conn.persist_active = false;
+            conn.persist_interval_ns = PERSIST_MIN_NS;
+            conn.persist_last_ns = 0;
+            continue;
+        }
+
+        let elapsed = now.saturating_sub(conn.persist_last_ns);
+        if elapsed < conn.persist_interval_ns {
+            continue;
+        }
+
+        // Time to send a zero-window probe.  The probe is a 1-byte
+        // segment at `snd_nxt`.  We don't advance `snd_nxt` because
+        // the peer may discard the byte (zero window) and we'd need
+        // to resend it.  We use `snd_una` (the last acknowledged seq)
+        // so the peer's ACK tells us the current window without
+        // requiring it to buffer new data.
+        let lp = conn.local_port;
+        let ri = conn.remote_ip;
+        let rp = conn.remote_port;
+        let probe_seq = conn.snd_una.wrapping_sub(1);
+        let ack = conn.rcv_nxt;
+        let wnd = advertised_window(conn);
+
+        // Exponential backoff for the persist interval.
+        conn.persist_interval_ns = conn
+            .persist_interval_ns
+            .saturating_mul(2)
+            .min(PERSIST_MAX_NS);
+        conn.persist_last_ns = now;
+
+        crate::serial_println!(
+            "[tcp] Zero-window probe for {}:{} → {}:{} (next in {}ms)",
+            lp, rp, ri, rp,
+            conn.persist_interval_ns / 1_000_000
+        );
+
+        // Drop the lock before sending (send_segment acquires
+        // interface locks).
+        drop(conns);
+        let _ = send_segment_with_window(
+            lp, ri, rp, probe_seq, ack, TCP_ACK, wnd, &[],
+        );
+        // Dropped lock — restart scan next tick.
+        return;
+    }
 }
 
 /// Periodic keepalive tick — call from the network timer (e.g. softirq

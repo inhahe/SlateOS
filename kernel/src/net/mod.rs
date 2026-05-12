@@ -74,6 +74,7 @@ pub fn poll() {
         tcp::tick_keepalive();
         tcp::tick_time_wait_cleanup();
         tcp::tick_retransmit();
+        tcp::tick_persist();
         dhcp::tick_renewal();
     }
 }

@@ -18,8 +18,8 @@
 //! - **Sockets**: `socket`, `connect`, `bind`, `listen`, `accept`,
 //!   `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`,
 //!   `getsockopt`, `getpeername`, `getsockname`, `getaddrinfo`,
-//!   `freeaddrinfo`, `gethostbyname`, `htons`, `htonl`, `inet_addr`,
-//!   `inet_ntoa`, `inet_pton`, `inet_ntop`
+//!   `freeaddrinfo`, `getnameinfo`, `gethostbyname`, `htons`, `htonl`,
+//!   `inet_addr`, `inet_ntoa`, `inet_aton`, `inet_pton`, `inet_ntop`
 //! - **I/O Multiplexing**: `poll`, `select`, `pselect`
 //! - **Terminal**: `ioctl` (TIOCGWINSZ, TCGETS, FIONBIO, etc.),
 //!   `isatty`, `ttyname`, `tcgetattr`, `tcsetattr`, `cfmakeraw`,

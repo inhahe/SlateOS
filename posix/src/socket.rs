@@ -544,6 +544,42 @@ fn write_u8_dec_ntop(buf: &mut [u8; 16], pos: &mut usize, val: u8) {
 }
 
 // ---------------------------------------------------------------------------
+// inet_aton — BSD-style address parsing
+// ---------------------------------------------------------------------------
+
+/// Convert an IPv4 address from dotted-decimal string to binary form.
+///
+/// Like `inet_addr` but stores the result in a `struct in_addr`
+/// pointed to by `inp`.  Returns 1 on success, 0 on parse error.
+///
+/// This is a BSD extension commonly used by older programs and some
+/// configuration parsers.
+///
+/// # Safety
+///
+/// `cp` must be a valid null-terminated string.
+/// `inp` must point to at least 4 bytes (a `struct in_addr`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inet_aton(cp: *const u8, inp: *mut u32) -> i32 {
+    if cp.is_null() || inp.is_null() {
+        return 0;
+    }
+
+    // SAFETY: inet_addr parses the same dotted-decimal format.
+    let addr = unsafe { inet_addr(cp) };
+
+    // inet_addr returns INADDR_NONE (0xFFFFFFFF) on failure.
+    // 255.255.255.255 is valid, so we double-check with the validator.
+    if addr == 0xFFFF_FFFF && !unsafe { is_valid_ipv4(cp) } {
+        return 0;
+    }
+
+    // SAFETY: inp is valid for 4 bytes (caller contract).
+    unsafe { *inp = addr; }
+    1
+}
+
+// ---------------------------------------------------------------------------
 // socket()
 // ---------------------------------------------------------------------------
 
@@ -1662,6 +1698,156 @@ pub extern "C" fn gai_strerror(errcode: i32) -> *const u8 {
         EAI_SOCKTYPE => c"Socket type not supported".as_ptr().cast::<u8>(),
         EAI_SYSTEM => c"System error".as_ptr().cast::<u8>(),
         _ => c"Unknown error".as_ptr().cast::<u8>(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// getnameinfo — reverse DNS + service lookup
+// ---------------------------------------------------------------------------
+
+/// `NI_NUMERICHOST` — return the numeric form of the host address.
+pub const NI_NUMERICHOST: i32 = 1;
+/// `NI_NUMERICSERV` — return the numeric form of the service port.
+pub const NI_NUMERICSERV: i32 = 2;
+/// `NI_NOFQDN` — return only the hostname part of the FQDN.
+pub const NI_NOFQDN: i32 = 4;
+/// `NI_NAMEREQD` — return an error if the hostname cannot be determined.
+pub const NI_NAMEREQD: i32 = 8;
+/// `NI_DGRAM` — the service is datagram (UDP) based.
+pub const NI_DGRAM: i32 = 16;
+
+/// Translate a socket address to a host name and service string.
+///
+/// This is the reverse of `getaddrinfo`.  Given a `sockaddr_in`, it
+/// produces human-readable host and service strings.
+///
+/// ## Limitations
+///
+/// - Only supports `AF_INET` (IPv4).
+/// - Always returns the numeric IP address (no reverse DNS).
+/// - Service is always returned as the numeric port number.
+///
+/// Returns 0 on success, or an EAI_* error code.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn getnameinfo(
+    sa: *const SockaddrIn,
+    _salen: SocklenT,
+    host: *mut u8,
+    hostlen: SocklenT,
+    serv: *mut u8,
+    servlen: SocklenT,
+    flags: i32,
+) -> i32 {
+    if sa.is_null() {
+        return EAI_FAIL;
+    }
+
+    // SAFETY: sa is non-null (checked above); caller guarantees validity.
+    let addr = unsafe { &*sa };
+
+    if i32::from(addr.sin_family) != AF_INET {
+        return EAI_FAMILY;
+    }
+
+    // Format the host address.
+    if !host.is_null() && hostlen > 0 {
+        // Always numeric for now (no reverse DNS).
+        let _ = flags; // NI_NAMEREQD would fail, but we always return numeric.
+        let ip_bytes = addr.sin_addr.s_addr.to_ne_bytes();
+        let mut tmp = [0u8; 16]; // max "255.255.255.255\0"
+        let mut pos: usize = 0;
+
+        for (idx, &octet) in ip_bytes.iter().enumerate() {
+            if idx > 0 {
+                write_byte_ntop(&mut tmp, &mut pos, b'.');
+            }
+            write_u8_dec_ntop(&mut tmp, &mut pos, octet);
+        }
+
+        let needed = pos.wrapping_add(1); // +null
+        if (hostlen as usize) < needed {
+            return EAI_OVERFLOW;
+        }
+
+        // SAFETY: host is valid for hostlen bytes (caller contract).
+        unsafe {
+            let mut j: usize = 0;
+            while j < pos {
+                if let Some(&b) = tmp.get(j) {
+                    *host.add(j) = b;
+                }
+                j = j.wrapping_add(1);
+            }
+            *host.add(pos) = 0;
+        }
+    }
+
+    // Format the service/port.
+    if !serv.is_null() && servlen > 0 {
+        let port = u16::from_be(addr.sin_port);
+        // Convert port to decimal string.
+        let mut tmp = [0u8; 6]; // max "65535\0"
+        let mut pos: usize = 0;
+        write_u16_decimal(&mut tmp, &mut pos, port);
+
+        let needed = pos.wrapping_add(1);
+        if (servlen as usize) < needed {
+            return EAI_OVERFLOW;
+        }
+
+        unsafe {
+            let mut j: usize = 0;
+            while j < pos {
+                if let Some(&b) = tmp.get(j) {
+                    *serv.add(j) = b;
+                }
+                j = j.wrapping_add(1);
+            }
+            *serv.add(pos) = 0;
+        }
+    }
+
+    0
+}
+
+/// `EAI_OVERFLOW` — buffer too small for result.
+pub const EAI_OVERFLOW: i32 = -12;
+
+/// Write a u16 as decimal digits into a small buffer.
+fn write_u16_decimal(buf: &mut [u8; 6], pos: &mut usize, val: u16) {
+    if val >= 10000 {
+        #[allow(clippy::arithmetic_side_effects)]
+        if let Some(slot) = buf.get_mut(*pos) {
+            *slot = b'0' + (val / 10000) as u8;
+            *pos = pos.wrapping_add(1);
+        }
+    }
+    if val >= 1000 {
+        #[allow(clippy::arithmetic_side_effects)]
+        if let Some(slot) = buf.get_mut(*pos) {
+            *slot = b'0' + ((val / 1000) % 10) as u8;
+            *pos = pos.wrapping_add(1);
+        }
+    }
+    if val >= 100 {
+        #[allow(clippy::arithmetic_side_effects)]
+        if let Some(slot) = buf.get_mut(*pos) {
+            *slot = b'0' + ((val / 100) % 10) as u8;
+            *pos = pos.wrapping_add(1);
+        }
+    }
+    if val >= 10 {
+        #[allow(clippy::arithmetic_side_effects)]
+        if let Some(slot) = buf.get_mut(*pos) {
+            *slot = b'0' + ((val / 10) % 10) as u8;
+            *pos = pos.wrapping_add(1);
+        }
+    }
+    #[allow(clippy::arithmetic_side_effects)]
+    if let Some(slot) = buf.get_mut(*pos) {
+        *slot = b'0' + (val % 10) as u8;
+        *pos = pos.wrapping_add(1);
     }
 }
 

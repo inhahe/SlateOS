@@ -3541,6 +3541,7 @@ const COMMANDS: &[&str] = &[
     "tftp", "tftpd",
     "netsyslog", "rsyslog",
     "wol", "wakeonlan",
+    "pcap", "tcpdump",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4736,6 +4737,7 @@ fn dispatch(line: &str) {
         "tftp" | "tftpd" => cmd_tftp(args),
         "netsyslog" | "rsyslog" => cmd_netsyslog(args),
         "wol" | "wakeonlan" => cmd_wol(args),
+        "pcap" | "tcpdump" => cmd_pcap(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35161,6 +35163,123 @@ fn cmd_wol(args: &str) {
                 Ok(()) => shell_println!("Magic packet sent"),
                 Err(e) => shell_println!("Failed: {:?}", e),
             }
+        }
+    }
+}
+
+/// `pcap` / `tcpdump` — Network packet capture.
+fn cmd_pcap(args: &str) {
+    use crate::net::pcap;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("pcap — Network packet capture (libpcap format)");
+            shell_println!("  pcap start           Start capturing all traffic");
+            shell_println!("  pcap start tcp       Capture TCP only");
+            shell_println!("  pcap start udp       Capture UDP only");
+            shell_println!("  pcap start port <N>  Capture traffic on port N");
+            shell_println!("  pcap start rx        Capture RX only");
+            shell_println!("  pcap start tx        Capture TX only");
+            shell_println!("  pcap stop            Stop capture");
+            shell_println!("  pcap status          Show capture statistics");
+            shell_println!("  pcap export <file>   Export ring buffer to .pcap file");
+            shell_println!("  pcap snaplen <N>     Set max bytes per packet");
+            shell_println!("  pcap test            Run self-tests");
+        }
+        "start" => {
+            if pcap::is_capturing() {
+                shell_println!("Capture already running — stop first");
+                return;
+            }
+            let filter_arg = parts.get(1).copied().unwrap_or("all");
+            let filter = match filter_arg {
+                "tcp" => pcap::CaptureFilter::tcp_only(),
+                "udp" => pcap::CaptureFilter::udp_only(),
+                "rx" => {
+                    let mut f = pcap::CaptureFilter::all();
+                    f.capture_tx = false;
+                    f
+                }
+                "tx" => {
+                    let mut f = pcap::CaptureFilter::all();
+                    f.capture_rx = false;
+                    f
+                }
+                "port" => {
+                    let port_num = parts.get(2).and_then(|s| s.parse::<u16>().ok());
+                    match port_num {
+                        Some(p) => {
+                            let mut f = pcap::CaptureFilter::all();
+                            f.port = p;
+                            f
+                        }
+                        None => {
+                            shell_println!("Usage: pcap start port <N>");
+                            return;
+                        }
+                    }
+                }
+                "all" | _ => pcap::CaptureFilter::all(),
+            };
+            pcap::start(filter);
+            shell_println!("Packet capture started");
+        }
+        "stop" => {
+            if !pcap::is_capturing() {
+                shell_println!("No capture is running");
+                return;
+            }
+            pcap::stop();
+            shell_println!("Packet capture stopped");
+        }
+        "status" | "stats" => {
+            let s = pcap::stats();
+            shell_println!("Packet Capture Status");
+            shell_println!("  Active:    {}", if s.capturing { "CAPTURING" } else { "idle" });
+            shell_println!("  Snaplen:   {} bytes", s.snaplen);
+            shell_println!("  Ring:      {}/{} packets", s.ring_used, s.ring_capacity);
+            shell_println!("  Captured:  {} ({} RX, {} TX)", s.total_captured, s.rx_captured, s.tx_captured);
+            shell_println!("  Filtered:  {}", s.total_filtered);
+            shell_println!("  Dropped:   {}", s.total_dropped);
+        }
+        "export" => {
+            let filename = parts.get(1).copied().unwrap_or("capture.pcap");
+            let data = pcap::export();
+            if data.len() <= 24 {
+                shell_println!("No packets captured — nothing to export");
+                return;
+            }
+            // Write to VFS.
+            let path = resolve_path(filename);
+            match crate::fs::vfs::Vfs::write_file(&path, &data) {
+                Ok(()) => {
+                    shell_println!("Exported {} bytes to {}", data.len(), path);
+                }
+                Err(e) => {
+                    shell_println!("Export failed: {:?}", e);
+                }
+            }
+        }
+        "snaplen" => {
+            match parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+                Some(n) => {
+                    pcap::set_snaplen(n);
+                    shell_println!("Snaplen set to {} bytes", n.min(1500));
+                }
+                None => {
+                    shell_println!("Usage: pcap snaplen <bytes>");
+                }
+            }
+        }
+        "test" => {
+            match pcap::self_test() {
+                Ok(()) => shell_println!("pcap self-test: PASSED"),
+                Err(e) => shell_println!("pcap self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Unknown subcommand '{}'. Try 'pcap help'.", sub);
         }
     }
 }
@@ -65619,7 +65738,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

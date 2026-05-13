@@ -32,6 +32,7 @@ pub mod interface;
 pub mod ipv4;
 pub mod tcp;
 pub mod udp;
+pub mod pcap;
 pub mod upnp;
 pub mod wol;
 
@@ -67,6 +68,7 @@ pub fn poll() {
         let frame = recv_frame();
         match frame {
             Some(data) => {
+                pcap::capture_rx(&data);
                 interface::record_rx(data.len());
                 if let Err(e) = ethernet::process_frame(&data) {
                     interface::record_rx_drop();
@@ -121,6 +123,8 @@ fn recv_frame() -> Option<Vec<u8>> {
 /// Used by the IPv4 layer and ARP to transmit packets.
 /// Tries virtio-net first, falls back to e1000, then rtl8139.
 pub fn send_frame(frame: &[u8]) -> KernelResult<()> {
+    pcap::capture_tx(frame);
+
     // Try virtio-net first.
     if let Some(result) = crate::virtio::net::with_device(|dev| dev.send(frame)) {
         if result.is_ok() {

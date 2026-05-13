@@ -183,6 +183,92 @@ pub extern "C" fn fcntl64(fd: Fd, cmd: i32, arg: i64) -> i32 {
     fcntl(fd, cmd, arg)
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- fcntl command constants (match Linux/glibc) --
+
+    #[test]
+    fn test_fcntl_commands() {
+        assert_eq!(F_DUPFD, 0);
+        assert_eq!(F_GETFD, 1);
+        assert_eq!(F_SETFD, 2);
+        assert_eq!(F_GETFL, 3);
+        assert_eq!(F_SETFL, 4);
+        assert_eq!(F_GETLK, 5);
+        assert_eq!(F_SETLK, 6);
+        assert_eq!(F_SETLKW, 7);
+    }
+
+    #[test]
+    fn test_f_dupfd_cloexec_value() {
+        // Linux defines F_DUPFD_CLOEXEC = 1030.
+        assert_eq!(F_DUPFD_CLOEXEC, 1030);
+    }
+
+    // -- Lock type constants --
+
+    #[test]
+    fn test_lock_type_constants() {
+        assert_eq!(F_RDLCK, 0);
+        assert_eq!(F_WRLCK, 1);
+        assert_eq!(F_UNLCK, 2);
+    }
+
+    #[test]
+    fn test_lock_types_distinct() {
+        assert_ne!(F_RDLCK, F_WRLCK);
+        assert_ne!(F_RDLCK, F_UNLCK);
+        assert_ne!(F_WRLCK, F_UNLCK);
+    }
+
+    // -- Flock struct layout --
+
+    #[test]
+    fn test_flock_size() {
+        // Linux x86_64: struct flock is 32 bytes.
+        // l_type(2) + l_whence(2) + padding(4) + l_start(8) + l_len(8) + l_pid(4) + padding(4) = 32
+        // Our repr(C) layout: l_type(i16) + l_whence(i16) + l_start(i64) + l_len(i64) + l_pid(i32)
+        // With alignment: i16+i16 = 4 bytes, then padding for i64 alignment = 4 bytes, then 8+8+4 = 20, + padding = 4 → 32
+        let size = core::mem::size_of::<Flock>();
+        assert!(size >= 24, "Flock must be at least 24 bytes, got {size}");
+    }
+
+    #[test]
+    fn test_flock_fields() {
+        let f = Flock {
+            l_type: F_WRLCK,
+            l_whence: 0, // SEEK_SET
+            l_start: 100,
+            l_len: 200,
+            l_pid: 42,
+        };
+        assert_eq!(f.l_type, F_WRLCK);
+        assert_eq!(f.l_whence, 0);
+        assert_eq!(f.l_start, 100);
+        assert_eq!(f.l_len, 200);
+        assert_eq!(f.l_pid, 42);
+    }
+
+    #[test]
+    fn test_flock_zero_len_means_eof() {
+        // POSIX: l_len == 0 means "lock to end of file".
+        let f = Flock {
+            l_type: F_RDLCK,
+            l_whence: 0,
+            l_start: 0,
+            l_len: 0,
+            l_pid: 0,
+        };
+        assert_eq!(f.l_len, 0);
+    }
+}
+
 /// Duplicate fd to lowest available >= `min_fd`.
 fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
     // POSIX: F_DUPFD with negative arg or arg >= OPEN_MAX → EINVAL.

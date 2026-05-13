@@ -636,3 +636,159 @@ pub extern "C" fn scandir64(
 ) -> i32 {
     scandir(dirname, namelist, filter, compar)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- DT_* type constants --
+
+    #[test]
+    fn test_dt_constants() {
+        assert_eq!(DT_UNKNOWN, 0);
+        assert_eq!(DT_REG, 1);
+        assert_eq!(DT_DIR, 2);
+        assert_eq!(DT_LNK, 3);
+    }
+
+    #[test]
+    fn test_dt_types_distinct() {
+        let types = [DT_UNKNOWN, DT_REG, DT_DIR, DT_LNK];
+        for (i, &a) in types.iter().enumerate() {
+            for &b in &types[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    // -- Dirent struct layout --
+
+    #[test]
+    fn test_dirent_d_name_size() {
+        // d_name must be at least 256 bytes for POSIX compliance.
+        let d = Dirent {
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
+            d_name: [0u8; 256],
+        };
+        assert_eq!(d.d_name.len(), 256);
+    }
+
+    #[test]
+    fn test_dirent_fields() {
+        let d = Dirent {
+            d_ino: 42,
+            d_off: 100,
+            d_reclen: 280,
+            d_type: DT_REG,
+            d_name: [0u8; 256],
+        };
+        assert_eq!(d.d_ino, 42);
+        assert_eq!(d.d_off, 100);
+        assert_eq!(d.d_reclen, 280);
+        assert_eq!(d.d_type, DT_REG);
+    }
+
+    // -- Internal constants --
+
+    #[test]
+    fn test_max_dir_entries() {
+        assert_eq!(MAX_DIR_ENTRIES, 256);
+    }
+
+    #[test]
+    fn test_dir_entry_size() {
+        // Kernel entry: name[256] + size[4] + type[1] + pad[3] = 264.
+        assert_eq!(DIR_ENTRY_SIZE, 264);
+    }
+
+    // -- alphasort (pure function — can test without kernel) --
+
+    #[test]
+    fn test_alphasort_equal() {
+        let mut a = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let mut b = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        a.d_name[0] = b'f'; a.d_name[1] = b'o'; a.d_name[2] = b'o';
+        b.d_name[0] = b'f'; b.d_name[1] = b'o'; b.d_name[2] = b'o';
+        let pa: *const Dirent = &a;
+        let pb: *const Dirent = &b;
+        assert_eq!(alphasort(&pa, &pb), 0);
+    }
+
+    #[test]
+    fn test_alphasort_less() {
+        let mut a = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let mut b = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        a.d_name[0] = b'a'; a.d_name[1] = b'b'; a.d_name[2] = b'c';
+        b.d_name[0] = b'x'; b.d_name[1] = b'y'; b.d_name[2] = b'z';
+        let pa: *const Dirent = &a;
+        let pb: *const Dirent = &b;
+        assert!(alphasort(&pa, &pb) < 0);
+    }
+
+    #[test]
+    fn test_alphasort_greater() {
+        let mut a = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let mut b = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        a.d_name[0] = b'z';
+        b.d_name[0] = b'a';
+        let pa: *const Dirent = &a;
+        let pb: *const Dirent = &b;
+        assert!(alphasort(&pa, &pb) > 0);
+    }
+
+    #[test]
+    fn test_alphasort_null_outer() {
+        // Null outer pointer (the *const *const Dirent itself).
+        let d = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let pd: *const Dirent = &d;
+        assert_eq!(alphasort(core::ptr::null(), &pd), 0);
+        assert_eq!(alphasort(&pd, core::ptr::null()), 0);
+        assert_eq!(alphasort(core::ptr::null(), core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_alphasort_prefix() {
+        // "ab" < "abc"
+        let mut a = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let mut b = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        a.d_name[0] = b'a'; a.d_name[1] = b'b';
+        b.d_name[0] = b'a'; b.d_name[1] = b'b'; b.d_name[2] = b'c';
+        let pa: *const Dirent = &a;
+        let pb: *const Dirent = &b;
+        assert!(alphasort(&pa, &pb) < 0); // "ab\0" < "abc\0"
+    }
+}

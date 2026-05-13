@@ -270,6 +270,13 @@ global_asm!(
     "    xor ecx, ecx",          // 4th arg: init = 0 (unused)
     "    xor r8d, r8d",          // 5th arg: fini = 0 (unused)
     "    xor r9d, r9d",          // 6th arg: rtld_fini = 0 (unused)
+    // SysV ABI requires (RSP+8) % 16 == 0 on function entry.
+    // After `and rsp, -16`, RSP is 16-aligned.  One `push` makes it
+    // 8-aligned, then `call` pushes the return address making it
+    // 16-aligned — which violates the (RSP+8)%16==0 rule.
+    // Insert 8 bytes of padding so the alignment works out:
+    //   sub rsp,8 → 8-aligned; push 0 → 16-aligned; call → 8-aligned ✓
+    "    sub rsp, 8",            // alignment padding
     "    push 0",                // 7th arg: stack_end = NULL (on stack)
     "    call __libc_start_main",
     // __libc_start_main should not return, but if it does, halt.

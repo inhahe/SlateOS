@@ -16012,7 +16012,7 @@ fn cmd_findex(args: &str) {
 }
 
 fn cmd_thumbcache(args: &str) {
-    use crate::fs::thumbcache::{self, ThumbSize};
+    use crate::fs::thumbcache;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -22497,7 +22497,6 @@ fn cmd_mmtune(args: &str) {
 /// `capsettings` / `caps` — capability settings management.
 fn cmd_capsettings(args: &str) {
     use crate::fs::capsettings;
-    use alloc::format;
 
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -25345,7 +25344,6 @@ fn cmd_focusassist(args: &str) {
 /// `storageclean` / `sclean` — storage cleanup and disk space analysis.
 fn cmd_storageclean(args: &str) {
     use crate::fs::storageclean;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -25564,7 +25562,6 @@ fn parse_size_arg(s: &str) -> u64 {
 /// `sysdiag` / `diag` — system diagnostics and troubleshooting.
 fn cmd_sysdiag(args: &str) {
     use crate::fs::sysdiag;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -25754,7 +25751,6 @@ fn parse_diag_category(name: &str) -> Option<crate::fs::sysdiag::DiagCategory> {
 /// `nightlight` / `nlight` — blue light filter / night mode.
 fn cmd_nightlight(args: &str) {
     use crate::fs::nightlight;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -26014,7 +26010,6 @@ fn parse_time_hhmm(s: &str) -> Option<(u8, u8)> {
 /// `tasksched` / `schtask` — scheduled task management.
 fn cmd_tasksched(args: &str) {
     use crate::fs::tasksched;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -26808,7 +26803,6 @@ fn cmd_bluetooth(args: &str) {
 /// `printmgr` / `lp` — print management.
 fn cmd_printmgr(args: &str) {
     use crate::fs::printmgr;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -27020,7 +27014,6 @@ fn cmd_printmgr(args: &str) {
 /// `screenrec` / `srec` — screen recording management.
 fn cmd_screenrec(args: &str) {
     use crate::fs::screenrec;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -27278,7 +27271,6 @@ fn format_size_helper(bytes: u64) -> alloc::string::String {
 /// `datausage` / `dusage` — network data usage monitoring.
 fn cmd_datausage(args: &str) {
     use crate::fs::datausage;
-    use alloc::format;
 
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -27664,7 +27656,6 @@ fn cmd_mousesettings(args: &str) {
 /// `touchpad` / `tpad` — touchpad settings and gestures.
 fn cmd_touchpad(args: &str) {
     use crate::fs::touchpad;
-    use alloc::format;
 
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -27797,7 +27788,6 @@ fn cmd_touchpad(args: &str) {
 /// `powerprofile` / `pprofile` — power profiles management.
 fn cmd_powerprofile(args: &str) {
     use crate::fs::powerprofile;
-    use alloc::format;
 
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -28460,7 +28450,6 @@ fn cmd_fwsettings(args: &str) {
 /// `updatemgr` / `updates` — system update management.
 fn cmd_updatemgr(args: &str) {
     use crate::fs::updatemgr;
-    use alloc::format;
 
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -28800,7 +28789,6 @@ fn cmd_notifprefs(args: &str) {
 /// `fileshare` / `share` — network file sharing.
 fn cmd_fileshare(args: &str) {
     use crate::fs::fileshare;
-    use alloc::format;
 
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -28974,7 +28962,6 @@ fn cmd_fileshare(args: &str) {
 /// `parental` / `pctl` — parental controls for child accounts.
 fn cmd_parental(args: &str) {
     use crate::fs::parental;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -29287,7 +29274,6 @@ fn cmd_parental(args: &str) {
 /// `audiodevice` / `adev` — audio device management.
 fn cmd_audiodevice(args: &str) {
     use crate::fs::audiodevice;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -29528,7 +29514,6 @@ fn cmd_audiodevice(args: &str) {
 /// `sessionmgr` / `session` — user session management.
 fn cmd_sessionmgr(args: &str) {
     use crate::fs::sessionmgr;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -29694,7 +29679,6 @@ fn cmd_sessionmgr(args: &str) {
 /// `crashreport` / `crash` — crash report management.
 fn cmd_crashreport(args: &str) {
     use crate::fs::crashreport;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -30019,7 +30003,6 @@ fn cmd_netproxy(args: &str) {
 /// `fileversion` / `fver` — file versioning and history.
 fn cmd_fileversion(args: &str) {
     use crate::fs::fileversion;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -30203,7 +30186,6 @@ fn cmd_fileversion(args: &str) {
 /// `devicemgr` / `devmgr` — hardware device management.
 fn cmd_devicemgr(args: &str) {
     use crate::fs::devicemgr;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -30379,7 +30361,6 @@ fn cmd_devicemgr(args: &str) {
 /// `location` / `loc` — location services and permissions.
 fn cmd_location(args: &str) {
     use crate::fs::location;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -30519,7 +30500,6 @@ fn cmd_location(args: &str) {
 /// `diskencrypt` / `dencrypt` — disk encryption management.
 fn cmd_diskencrypt(args: &str) {
     use crate::fs::diskencrypt;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -30679,7 +30659,6 @@ fn cmd_diskencrypt(args: &str) {
 /// `pkgmgr` / `pkg` — package management.
 fn cmd_pkgmgr(args: &str) {
     use crate::fs::pkgmgr;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -30839,7 +30818,6 @@ fn cmd_pkgmgr(args: &str) {
 /// `remotedesktop` / `rdp` — remote desktop management.
 fn cmd_remotedesktop(args: &str) {
     use crate::fs::remotedesktop;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -30925,7 +30903,6 @@ fn cmd_remotedesktop(args: &str) {
 /// `restorepoint` / `rpoint` — system restore points.
 fn cmd_restorepoint(args: &str) {
     use crate::fs::restorepoint;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -31016,7 +30993,6 @@ fn cmd_restorepoint(args: &str) {
 /// `battery` / `batt` — battery and UPS management.
 fn cmd_battery(args: &str) {
     use crate::fs::battery;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -31134,7 +31110,6 @@ fn cmd_battery(args: &str) {
 /// `dictation` / `dict` — speech-to-text dictation.
 fn cmd_dictation(args: &str) {
     use crate::fs::dictation;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -31261,7 +31236,6 @@ fn cmd_dictation(args: &str) {
 /// `screenreader` / `sr` — screen reader / UI narration.
 fn cmd_screenreader(args: &str) {
     use crate::fs::screenreader;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -31404,7 +31378,6 @@ fn cmd_screenreader(args: &str) {
 /// `langpack` / `lpack` — language pack and translation management.
 fn cmd_langpack(args: &str) {
     use crate::fs::langpack;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -31533,7 +31506,6 @@ fn cmd_langpack(args: &str) {
 /// `spellcheck` / `spell` — system spell checker.
 fn cmd_spellcheck(args: &str) {
     use crate::fs::spellcheck;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -31641,7 +31613,6 @@ fn cmd_spellcheck(args: &str) {
 /// `screentime` / `stime` — screen time and app usage tracking.
 fn cmd_screentime(args: &str) {
     use crate::fs::screentime;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -31820,7 +31791,6 @@ fn cmd_disksmart(args: &str) {
 /// `magnifier` / `mag` — accessibility screen magnification.
 fn cmd_magnifier(args: &str) {
     use crate::fs::magnifier;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -31929,7 +31899,6 @@ fn cmd_magnifier(args: &str) {
 /// `cloudsync` / `csync` — cloud storage synchronization.
 fn cmd_cloudsync(args: &str) {
     use crate::fs::cloudsync;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -32030,7 +31999,6 @@ fn cmd_cloudsync(args: &str) {
 /// `gestures` / `gesture` — touchpad/touchscreen gesture management.
 fn cmd_gestures(args: &str) {
     use crate::fs::gestures;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -32279,7 +32247,6 @@ fn cmd_usbmgr(args: &str) {
 /// `cliphistory` / `cliphist` — clipboard history.
 fn cmd_cliphistory(args: &str) {
     use crate::fs::cliphistory;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -32383,7 +32350,6 @@ fn cmd_cliphistory(args: &str) {
 /// `displaycolor` / `dcolor` — ICC color profile management.
 fn cmd_displaycolor(args: &str) {
     use crate::fs::displaycolor;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -32461,7 +32427,6 @@ fn cmd_displaycolor(args: &str) {
 /// `syslog` / `slog` — system log viewer.
 fn cmd_syslog(args: &str) {
     use crate::fs::syslog;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -32572,7 +32537,6 @@ fn cmd_syslog(args: &str) {
 /// `inputa11y` / `ia11y` — input accessibility features.
 fn cmd_inputa11y(args: &str) {
     use crate::fs::inputa11y;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -32682,7 +32646,6 @@ fn cmd_inputa11y(args: &str) {
 /// `driverupdate` / `dupdate` — driver version and update management.
 fn cmd_driverupdate(args: &str) {
     use crate::fs::driverupdate;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -32798,7 +32761,6 @@ fn cmd_driverupdate(args: &str) {
 /// `netshare` / `nshare` — network share management.
 fn cmd_netshare(args: &str) {
     use crate::fs::netshare;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -32892,7 +32854,6 @@ fn cmd_netshare(args: &str) {
 /// `startuprepair` / `srepair` — boot diagnostics and repair.
 fn cmd_startuprepair(args: &str) {
     use crate::fs::startuprepair;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -32988,7 +32949,6 @@ fn cmd_startuprepair(args: &str) {
 /// `remoteassist` / `rassist` — remote assistance sessions.
 fn cmd_remoteassist(args: &str) {
     use crate::fs::remoteassist;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -33118,7 +33078,6 @@ fn cmd_remoteassist(args: &str) {
 /// `taskmon` / `tmon` — process monitoring and task management.
 fn cmd_taskmon(args: &str) {
     use crate::fs::taskmon;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -33247,7 +33206,6 @@ fn cmd_taskmon(args: &str) {
 /// `printqueue` / `pqueue` — print job queue management.
 fn cmd_printqueue(args: &str) {
     use crate::fs::printqueue;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -33387,7 +33345,6 @@ fn cmd_printqueue(args: &str) {
 /// `servicemgr` / `svcmgr` — system service management.
 fn cmd_servicemgr(args: &str) {
     use crate::fs::servicemgr;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -33637,7 +33594,6 @@ fn cmd_hwmonitor(args: &str) {
 /// `appsandbox` / `sandbox` — application sandboxing.
 fn cmd_appsandbox(args: &str) {
     use crate::fs::appsandbox;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -33872,7 +33828,6 @@ fn cmd_gamepadinput(args: &str) {
 /// `sysrestore` / `srestore` — system snapshot management.
 fn cmd_sysrestore(args: &str) {
     use crate::fs::sysrestore;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -33986,7 +33941,6 @@ fn cmd_sysrestore(args: &str) {
 /// `audiomux` / `amux` — per-app audio routing.
 fn cmd_audiomux(args: &str) {
     use crate::fs::audiomux;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -34103,7 +34057,6 @@ fn cmd_audiomux(args: &str) {
 /// `netthrottle` / `nthrottle` — network bandwidth throttling.
 fn cmd_netthrottle(args: &str) {
     use crate::fs::netthrottle;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -34199,7 +34152,6 @@ fn cmd_netthrottle(args: &str) {
 /// `dumpanalyzer` / `dump` — crash dump analysis.
 fn cmd_dumpanalyzer(args: &str) {
     use crate::fs::dumpanalyzer;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -34277,7 +34229,6 @@ fn cmd_dumpanalyzer(args: &str) {
 /// `memdiag` / `mdiag` — memory diagnostics.
 fn cmd_memdiag(args: &str) {
     use crate::fs::memdiag;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -34357,7 +34308,6 @@ fn cmd_memdiag(args: &str) {
 /// `parentaltime` / `ptime` — parental time limits.
 fn cmd_parentaltime(args: &str) {
     use crate::fs::parentaltime;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -34473,7 +34423,6 @@ fn cmd_parentaltime(args: &str) {
 /// `mediakeys` / `mkeys` — media playback session management.
 fn cmd_mediakeys(args: &str) {
     use crate::fs::mediakeys;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -34605,7 +34554,6 @@ fn cmd_mediakeys(args: &str) {
 /// `webcam` / `cam` — camera device management.
 fn cmd_webcam(args: &str) {
     use crate::fs::webcam;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -34781,7 +34729,6 @@ fn cmd_webcam(args: &str) {
 /// `speechio` / `speech` — speech input/output services.
 fn cmd_speechio(args: &str) {
     use crate::fs::speechio;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -34947,7 +34894,6 @@ fn cmd_speechio(args: &str) {
 /// `mobilelink` / `mlink` — phone/mobile device linking.
 fn cmd_mobilelink(args: &str) {
     use crate::fs::mobilelink;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -35107,7 +35053,6 @@ fn cmd_mobilelink(args: &str) {
 /// `screenlock` / `slock` — screen lock management.
 fn cmd_screenlock(args: &str) {
     use crate::fs::screenlock;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -35207,7 +35152,6 @@ fn cmd_screenlock(args: &str) {
 /// `appstore` / `store` — application marketplace.
 fn cmd_appstore(args: &str) {
     use crate::fs::appstore;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -35374,7 +35318,6 @@ fn cmd_appstore(args: &str) {
 /// `wintiling` / `tile` — window tiling and workspace management.
 fn cmd_wintiling(args: &str) {
     use crate::fs::wintiling;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -35556,7 +35499,6 @@ fn cmd_wintiling(args: &str) {
 /// `peninput` / `pen` — stylus and pen input.
 fn cmd_peninput(args: &str) {
     use crate::fs::peninput;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -35684,7 +35626,6 @@ fn cmd_peninput(args: &str) {
 /// `brightness` / `bright` — display brightness control.
 fn cmd_brightness(args: &str) {
     use crate::fs::brightness;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -35867,7 +35808,6 @@ fn cmd_quicksettings(args: &str) {
 /// `volumeosd` / `vosd` — on-screen volume/brightness display.
 fn cmd_volumeosd(args: &str) {
     use crate::fs::volumeosd;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -35954,7 +35894,6 @@ fn cmd_volumeosd(args: &str) {
 /// `netdiag` / `ndiag` — network diagnostics.
 fn cmd_netdiag(args: &str) {
     use crate::fs::netdiag;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -36041,7 +35980,6 @@ fn cmd_netdiag(args: &str) {
 /// `sharesheet` / `ssheet` — cross-app content sharing.
 fn cmd_sharesheet(args: &str) {
     use crate::fs::sharesheet;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -36147,7 +36085,6 @@ fn cmd_sharesheet(args: &str) {
 /// `oobe` / `setup` — out-of-box experience setup wizard.
 fn cmd_oobe(args: &str) {
     use crate::fs::oobe;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -36276,7 +36213,6 @@ fn cmd_oobe(args: &str) {
 /// `hdrdisplay` / `hdr` — HDR display management.
 fn cmd_hdrdisplay(args: &str) {
     use crate::fs::hdrdisplay;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -36397,7 +36333,6 @@ fn cmd_hdrdisplay(args: &str) {
 /// `surroundsound` / `ssound` — spatial audio and surround configuration.
 fn cmd_surroundsound(args: &str) {
     use crate::fs::surroundsound;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -36658,7 +36593,6 @@ fn cmd_audioeq(args: &str) {
 /// `screensaver` / `ssaver` — screen saver management.
 fn cmd_screensaver(args: &str) {
     use crate::fs::screensaver;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -36776,7 +36710,6 @@ fn cmd_screensaver(args: &str) {
 /// `colortemp` / `ctemp` — color temperature scheduling.
 fn cmd_colortemp(args: &str) {
     use crate::fs::colortemp;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -36909,7 +36842,6 @@ fn cmd_colortemp(args: &str) {
 /// `gamemode` / `gmode` — gaming performance optimization.
 fn cmd_gamemode(args: &str) {
     use crate::fs::gamemode;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -37014,7 +36946,6 @@ fn cmd_gamemode(args: &str) {
 /// `dpiscaling` / `dpi` — display scaling management.
 fn cmd_dpiscaling(args: &str) {
     use crate::fs::dpiscaling;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -37114,7 +37045,6 @@ fn cmd_dpiscaling(args: &str) {
 /// `netprofile` / `nprof` — network profile management.
 fn cmd_netprofile(args: &str) {
     use crate::fs::netprofile;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -37247,7 +37177,6 @@ fn cmd_netprofile(args: &str) {
 /// `apppermissions` / `apperm` — app permission management.
 fn cmd_apppermissions(args: &str) {
     use crate::fs::apppermissions;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
 
@@ -37361,7 +37290,6 @@ fn cmd_apppermissions(args: &str) {
 /// `kbshortcuts` / `kbsc` — keyboard shortcut management.
 fn cmd_kbshortcuts(args: &str) {
     use crate::fs::kbshortcuts;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -37470,7 +37398,6 @@ fn cmd_kbshortcuts(args: &str) {
 /// `displayarrange` / `darr` — multi-monitor arrangement.
 fn cmd_displayarrange(args: &str) {
     use crate::fs::displayarrange;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -37572,7 +37499,6 @@ fn cmd_displayarrange(args: &str) {
 /// `sysanimations` / `sanim` — system animation settings.
 fn cmd_sysanimations(args: &str) {
     use crate::fs::sysanimations;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -37636,7 +37562,6 @@ fn cmd_sysanimations(args: &str) {
 /// `filevault` / `fvault` — encrypted folder management.
 fn cmd_filevault(args: &str) {
     use crate::fs::filevault;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -37724,7 +37649,6 @@ fn cmd_filevault(args: &str) {
 /// `mousegestures` / `mgest` — mouse gesture navigation.
 fn cmd_mousegestures(args: &str) {
     use crate::fs::mousegestures;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -37828,7 +37752,6 @@ fn cmd_mousegestures(args: &str) {
 /// `fontsettings` / `fntset` — font rendering configuration.
 fn cmd_fontsettings(args: &str) {
     use crate::fs::fontsettings;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -37953,7 +37876,6 @@ fn cmd_fontsettings(args: &str) {
 /// `notifbadge` / `nbadge` — notification badge management.
 fn cmd_notifbadge(args: &str) {
     use crate::fs::notifbadge;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -38080,7 +38002,6 @@ fn cmd_notifbadge(args: &str) {
 /// `lockwallpaper` / `lwp` — lock screen wallpaper management.
 fn cmd_lockwallpaper(args: &str) {
     use crate::fs::lockwallpaper;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -38230,7 +38151,6 @@ fn cmd_lockwallpaper(args: &str) {
 /// `systemsounds` / `ssounds` — system sound scheme management.
 fn cmd_systemsounds(args: &str) {
     use crate::fs::systemsounds;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -38378,7 +38298,6 @@ fn parse_sound_event(name: &str) -> Option<crate::fs::systemsounds::SoundEvent> 
 /// `hotcorners` / `hcorn` — hot corner screen actions.
 fn cmd_hotcorners(args: &str) {
     use crate::fs::hotcorners;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -38497,7 +38416,6 @@ fn parse_corner_action(s: &str) -> Option<crate::fs::hotcorners::CornerAction> {
 /// `dynlock` / `dlock` — dynamic proximity-based screen lock.
 fn cmd_dynlock(args: &str) {
     use crate::fs::dynlock;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -38607,7 +38525,6 @@ fn cmd_dynlock(args: &str) {
 /// `snaplayout` / `snlayout` — snap layout zones and templates.
 fn cmd_snaplayout(args: &str) {
     use crate::fs::snaplayout;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -38710,7 +38627,6 @@ fn cmd_snaplayout(args: &str) {
 /// `haptfeedback` / `haptic` — haptic feedback settings.
 fn cmd_haptfeedback(args: &str) {
     use crate::fs::haptfeedback;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -38868,7 +38784,6 @@ fn parse_haptic_pattern(s: &str) -> Option<crate::fs::haptfeedback::HapticPatter
 /// `eyeprotect` / `eye` — eye strain protection with break reminders.
 fn cmd_eyeprotect(args: &str) {
     use crate::fs::eyeprotect;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -39089,7 +39004,6 @@ fn cmd_pinnedapps(args: &str) {
 /// `inputmethod` / `imf` — input method framework.
 fn cmd_inputmethod(args: &str) {
     use crate::fs::inputmethod;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -39214,7 +39128,6 @@ fn cmd_inputmethod(args: &str) {
 /// `storagesense` / `ssense` — smart automated storage cleanup.
 fn cmd_storagesense(args: &str) {
     use crate::fs::storagesense;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -39350,7 +39263,6 @@ fn parse_cleanup_category(s: &str) -> Option<crate::fs::storagesense::CleanupCat
 /// `autofix` / `afix` — automated problem detection and repair.
 fn cmd_autofix(args: &str) {
     use crate::fs::autofix;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -39425,7 +39337,6 @@ fn cmd_autofix(args: &str) {
 /// `recentsearch` / `rsearch` — search query history and suggestions.
 fn cmd_recentsearch(args: &str) {
     use crate::fs::recentsearch;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -39548,7 +39459,6 @@ fn cmd_recentsearch(args: &str) {
 /// `sysmaint` / `maint` — system maintenance scheduling.
 fn cmd_sysmaint(args: &str) {
     use crate::fs::sysmaint;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -39781,7 +39691,6 @@ fn cmd_multiclip(args: &str) {
 /// `focussession` / `fsess` — pomodoro-style focus session timer.
 fn cmd_focussession(args: &str) {
     use crate::fs::focussession;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -39899,7 +39808,6 @@ fn cmd_focussession(args: &str) {
 /// `quicknote` / `qnote` — quick notes and scratchpad.
 fn cmd_quicknote(args: &str) {
     use crate::fs::quicknote;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -40093,7 +40001,6 @@ fn parse_note_color(s: &str) -> Option<crate::fs::quicknote::NoteColor> {
 /// `cscheme` / `uischeme` — UI color scheme management.
 fn cmd_uicolorscheme(args: &str) {
     use crate::fs::colorscheme;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -40220,7 +40127,6 @@ fn parse_color_role(s: &str) -> Option<crate::fs::colorscheme::ColorRole> {
 /// `appcompat` / `acompat` — application compatibility layer.
 fn cmd_appcompat(args: &str) {
     use crate::fs::appcompat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -40390,7 +40296,6 @@ fn parse_shim(s: &str) -> Option<crate::fs::appcompat::Shim> {
 /// `windowrules` / `wrules` — per-window placement and behavior rules.
 fn cmd_windowrules(args: &str) {
     use crate::fs::windowrules;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -40539,7 +40444,6 @@ fn parse_rule_action(s: &str) -> Option<crate::fs::windowrules::RuleAction> {
 /// `spatialaudio` / `spatial` — 3D audio positioning.
 fn cmd_spatialaudio(args: &str) {
     use crate::fs::spatialaudio;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -40689,7 +40593,6 @@ fn parse_room_size(s: &str) -> Option<crate::fs::spatialaudio::RoomSize> {
 /// `filetransfer` / `ftrans` — device-to-device file sharing.
 fn cmd_filetransfer(args: &str) {
     use crate::fs::filetransfer;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -40838,7 +40741,6 @@ fn parse_transport(s: &str) -> Option<crate::fs::filetransfer::Transport> {
 /// `startupopt` / `sopt` — boot profiling and optimization.
 fn cmd_startupopt(args: &str) {
     use crate::fs::startupopt;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -41247,7 +41149,6 @@ fn cmd_voicecontrol(args: &str) {
 /// `devpair` / `dpair` — device pairing workflow.
 fn cmd_devpair(args: &str) {
     use crate::fs::devpair;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -41402,7 +41303,6 @@ fn parse_pair_device_type(s: &str) -> Option<crate::fs::devpair::PairDeviceType>
 /// `notifgroup` / `ngroup` — notification grouping and bundling.
 fn cmd_notifgroup(args: &str) {
     use crate::fs::notifgroup;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -41565,7 +41465,6 @@ fn parse_grouping_mode(s: &str) -> Option<crate::fs::notifgroup::GroupingMode> {
 /// `playmedia` / `pmedia` — system-wide media playback controls.
 fn cmd_playmedia(args: &str) {
     use crate::fs::playmedia;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -41682,7 +41581,6 @@ fn cmd_playmedia(args: &str) {
 /// `kbmacro` / `macro` — keyboard macro recording and playback.
 fn cmd_kbmacro(args: &str) {
     use crate::fs::kbmacro;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -41836,7 +41734,6 @@ fn cmd_kbmacro(args: &str) {
 /// `sysresource` / `sres` — system resource monitoring dashboard.
 fn cmd_sysresource(args: &str) {
     use crate::fs::sysresource;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -41951,7 +41848,6 @@ fn cmd_sysresource(args: &str) {
 /// `faceunlock` / `face` — facial recognition authentication.
 fn cmd_faceunlock(args: &str) {
     use crate::fs::faceunlock;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -42218,7 +42114,6 @@ fn parse_usb_decision(s: &str) -> crate::fs::usbpolicy::Decision {
 /// `applaunch` / `alaunch` — search-based application launcher.
 fn cmd_applaunch(args: &str) {
     use crate::fs::applaunch;
-    use alloc::string::String;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -42343,7 +42238,6 @@ fn parse_result_type(s: &str) -> crate::fs::applaunch::ResultType {
 /// `sysprofiler` / `sprof` — detailed hardware/software inventory.
 fn cmd_sysprofiler(args: &str) {
     use crate::fs::sysprofiler;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -42449,7 +42343,6 @@ fn parse_profiler_section(s: &str) -> crate::fs::sysprofiler::Section {
 /// `clipsync` / `clsync` — cross-device clipboard sync.
 fn cmd_clipsync(args: &str) {
     use crate::fs::clipsync;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -42627,7 +42520,6 @@ fn parse_sync_content_type(s: &str) -> crate::fs::clipsync::SyncContentType {
 /// `netusage` / `nusage` — network usage monitor.
 fn cmd_netusage(args: &str) {
     use crate::fs::netusage;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -42775,7 +42667,6 @@ fn parse_interface_type(s: &str) -> crate::fs::netusage::InterfaceType {
 /// `touchscreen` / `tscreen` — touchscreen settings.
 fn cmd_touchscreen(args: &str) {
     use crate::fs::touchscreen;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -42950,7 +42841,6 @@ fn parse_gesture_type(s: &str) -> crate::fs::touchscreen::GestureType {
 /// `diskquota` / `dquota` — disk quota management.
 fn cmd_diskquota(args: &str) {
     use crate::fs::diskquota;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -43116,7 +43006,6 @@ fn cmd_diskquota(args: &str) {
 /// `appdefaults` / `adef` — per-app default settings.
 fn cmd_appdefaults(args: &str) {
     use crate::fs::appdefaults;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -43413,7 +43302,6 @@ fn parse_policy_effect(s: &str) -> crate::fs::policyengine::Effect {
 /// `fontpreview` / `fprev` — font preview and comparison.
 fn cmd_fontpreview(args: &str) {
     use crate::fs::fontpreview;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -43575,7 +43463,6 @@ fn parse_font_category(s: &str) -> crate::fs::fontpreview::FontCategory {
 /// `wifiscan` / `wifi` — Wi-Fi network scanning and management.
 fn cmd_wifiscan(args: &str) {
     use crate::fs::wifiscan;
-    use alloc::format;
     use alloc::string::String;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -43850,7 +43737,6 @@ fn cmd_splitview(args: &str) {
 /// `iotdevice` / `iot` — IoT/smart home device management.
 fn cmd_iotdevice(args: &str) {
     use crate::fs::iotdevice;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -44130,7 +44016,6 @@ fn parse_exit_reason(s: &str) -> crate::fs::prochistory::ExitReason {
 /// `notiffilter` / `nfilter` — notification filtering rules.
 fn cmd_notiffilter(args: &str) {
     use crate::fs::notiffilter;
-    use alloc::format;
     use alloc::string::String;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -44243,7 +44128,6 @@ fn parse_filter_action(s: &str) -> crate::fs::notiffilter::FilterAction {
 /// `colorblind` / `cvd` — color blindness accessibility filters.
 fn cmd_colorblind(args: &str) {
     use crate::fs::colorblind;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -44353,7 +44237,6 @@ fn parse_cvd_type(s: &str) -> crate::fs::colorblind::CvdType {
 /// `clipaction` / `caction` — clipboard quick actions.
 fn cmd_clipaction(args: &str) {
     use crate::fs::clipaction;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -44454,7 +44337,6 @@ fn parse_clip_content_type(s: &str) -> crate::fs::clipaction::ContentType {
 /// `energysaver` / `esaver` — system power optimization.
 fn cmd_energysaver(args: &str) {
     use crate::fs::energysaver;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -44592,7 +44474,6 @@ fn parse_energy_mode(s: &str) -> crate::fs::energysaver::EnergyMode {
 /// `filerules` / `frules` — automatic file organization rules.
 fn cmd_filerules(args: &str) {
     use crate::fs::filerules;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -44713,7 +44594,6 @@ fn parse_filerule_action(s: &str) -> crate::fs::filerules::RuleAction {
 fn cmd_secureboot(args: &str) {
     use crate::fs::secureboot;
     use crate::fs::secureboot::BootState;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -44827,7 +44707,6 @@ fn parse_sboot_key_type(s: &str) -> crate::fs::secureboot::KeyType {
 /// `eventlog` / `elog` — centralized system event logging.
 fn cmd_eventlog(args: &str) {
     use crate::fs::eventlog;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -45068,7 +44947,6 @@ fn parse_image_type(s: &str) -> crate::fs::systemimage::ImageType {
 /// `raidmgr` / `raid` — software RAID array management.
 fn cmd_raidmgr(args: &str) {
     use crate::fs::raidmgr;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -45213,7 +45091,6 @@ fn parse_raid_level(s: &str) -> crate::fs::raidmgr::RaidLevel {
 /// `networkbridge` / `nbridge` — network bridge management.
 fn cmd_networkbridge(args: &str) {
     use crate::fs::networkbridge;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -45387,7 +45264,6 @@ fn parse_iface_type(s: &str) -> crate::fs::networkbridge::IfaceType {
 /// `secureerase` / `serase` — secure data deletion.
 fn cmd_secureerase(args: &str) {
     use crate::fs::secureerase;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -45480,7 +45356,6 @@ fn parse_erase_method(s: &str) -> crate::fs::secureerase::EraseMethod {
 /// `dnssettings` / `dns` — DNS resolver configuration.
 fn cmd_dnssettings(args: &str) {
     use crate::fs::dnssettings;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -45573,7 +45448,6 @@ fn parse_dns_protocol(s: &str) -> crate::fs::dnssettings::DnsProtocol {
 /// `backupsched` / `bsched` — automated backup scheduling.
 fn cmd_backupsched(args: &str) {
     use crate::fs::backupsched;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -45691,7 +45565,6 @@ fn parse_backup_freq(s: &str) -> crate::fs::backupsched::BackupFrequency {
 /// `displaycal` / `dcal` — display color calibration.
 fn cmd_displaycal(args: &str) {
     use crate::fs::displaycal;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -45833,7 +45706,6 @@ fn parse_profile_type(s: &str) -> crate::fs::displaycal::ProfileType {
 /// `vpnprofile` / `vpnp` — VPN connection profile management.
 fn cmd_vpnprofile(args: &str) {
     use crate::fs::vpnprofile;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -45961,7 +45833,6 @@ fn parse_vpn_protocol(s: &str) -> crate::fs::vpnprofile::VpnProtocol {
 /// `diskhealth` / `dhealth` — disk health monitoring.
 fn cmd_diskhealth(args: &str) {
     use crate::fs::diskhealth;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -46061,7 +45932,6 @@ fn parse_disk_type(s: &str) -> crate::fs::diskhealth::DiskType {
 /// `recoverypart` / `rpart` — recovery partition management.
 fn cmd_recoverypart(args: &str) {
     use crate::fs::recoverypart;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -46154,7 +46024,6 @@ fn parse_recovery_tool_type(s: &str) -> crate::fs::recoverypart::ToolType {
 /// `userprofile` / `uprof` — user account profile management.
 fn cmd_userprofile(args: &str) {
     use crate::fs::userprofile;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -46282,7 +46151,6 @@ fn parse_account_type(s: &str) -> crate::fs::userprofile::AccountType {
 /// `diskclean` / `dclean` — automated disk cleanup.
 fn cmd_diskclean(args: &str) {
     use crate::fs::diskclean;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -46368,7 +46236,6 @@ fn parse_clean_category(s: &str) -> crate::fs::diskclean::CleanCategory {
 /// `cas` — content-addressed store management.
 fn cmd_cas(args: &str) {
     use crate::fs::cas;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -46475,7 +46342,6 @@ fn cmd_cas(args: &str) {
 /// `logrotate` / `lrot` — log rotation management.
 fn cmd_logrotate(args: &str) {
     use crate::fs::logrotate;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -46572,7 +46438,6 @@ fn parse_logrotate_compress(s: &str) -> crate::fs::logrotate::CompressMethod {
 /// `powerwake` / `pwake` — wake-on-LAN and scheduled wake management.
 fn cmd_powerwake(args: &str) {
     use crate::fs::powerwake;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -46689,7 +46554,6 @@ fn cmd_powerwake(args: &str) {
 /// `diskio` / `dio` — disk I/O statistics.
 fn cmd_diskio(args: &str) {
     use crate::fs::diskio;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -46753,7 +46617,6 @@ fn cmd_diskio(args: &str) {
 /// `sysuptime` / `suptime` — system uptime tracking.
 fn cmd_sysuptime(args: &str) {
     use crate::fs::sysuptime;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -46801,7 +46664,6 @@ fn cmd_sysuptime(args: &str) {
 /// `netspeed` / `nspeed` — network speed testing and bandwidth.
 fn cmd_netspeed(args: &str) {
     use crate::fs::netspeed;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -46865,7 +46727,6 @@ fn cmd_netspeed(args: &str) {
 /// `cfreq` — CPU frequency scaling management (fs::cpufreq).
 fn cmd_cfreq(args: &str) {
     use crate::fs::cpufreq;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -46952,7 +46813,6 @@ fn parse_cpufreq_governor(s: &str) -> crate::fs::cpufreq::Governor {
 /// `therm` — system thermal monitoring (fs::thermal).
 fn cmd_therm(args: &str) {
     use crate::fs::thermal;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47017,7 +46877,6 @@ fn cmd_therm(args: &str) {
 /// `swapmon` / `smon` — swap usage monitoring.
 fn cmd_swapmon(args: &str) {
     use crate::fs::swapmon;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47076,7 +46935,6 @@ fn cmd_swapmon(args: &str) {
 /// `sysctlfs` / `sctlfs` — system parameter tuning.
 fn cmd_sysctlfs(args: &str) {
     use crate::fs::sysctlfs;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47141,7 +46999,6 @@ fn cmd_sysctlfs(args: &str) {
 /// `cputopo` / `ctopo` — CPU topology information.
 fn cmd_cputopo(args: &str) {
     use crate::fs::cputopo;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47208,7 +47065,6 @@ fn cmd_cputopo(args: &str) {
 /// `memlayout` / `mlayout` — memory layout information.
 fn cmd_memlayout(args: &str) {
     use crate::fs::memlayout;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47247,7 +47103,6 @@ fn cmd_memlayout(args: &str) {
 /// `irqbal` — IRQ affinity balancing (fs::irqbalance).
 fn cmd_irqbal(args: &str) {
     use crate::fs::irqbalance;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47329,7 +47184,6 @@ fn parse_irqbal_policy(s: &str) -> crate::fs::irqbalance::BalancePolicy {
 /// `lavg` — fs-zone load average tracking (EMA-based).
 fn cmd_lavg(args: &str) {
     use crate::fs::loadavg;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47387,7 +47241,6 @@ fn cmd_lavg(args: &str) {
 /// `kernlog` / `klog` — kernel log ring buffer.
 fn cmd_kernlog(args: &str) {
     use crate::fs::kernlog;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47494,7 +47347,6 @@ fn parse_kernlog_level(s: &str) -> crate::fs::kernlog::LogLevel {
 /// `coredump` / `cdump` — crash dump management.
 fn cmd_coredump(args: &str) {
     use crate::fs::coredump;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47592,7 +47444,6 @@ fn cmd_coredump(args: &str) {
 /// `fwupdate` / `fwup` — firmware version management and update tracking.
 fn cmd_fwupdate(args: &str) {
     use crate::fs::fwupdate;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47678,7 +47529,6 @@ fn cmd_fwupdate(args: &str) {
 /// `timesync` / `tsync` — NTP time synchronization.
 fn cmd_timesync(args: &str) {
     use crate::fs::timesync;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47779,7 +47629,6 @@ fn parse_timesync_stratum(s: &str) -> crate::fs::timesync::Stratum {
 /// `kmod` — kernel module management.
 fn cmd_kmod(args: &str) {
     use crate::fs::kmod;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47893,7 +47742,6 @@ fn parse_kmod_type(s: &str) -> crate::fs::kmod::ModuleType {
 /// `entropy` / `epool` — system entropy pool management.
 fn cmd_entropy(args: &str) {
     use crate::fs::entropy;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -47978,7 +47826,6 @@ fn parse_entropy_source(s: &str) -> crate::fs::entropy::EntropySource {
 /// `iosched` / `ioq` — block I/O scheduler configuration.
 fn cmd_iosched(args: &str) {
     use crate::fs::iosched;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -48084,7 +47931,6 @@ fn parse_iosched_algo(s: &str) -> crate::fs::iosched::IoAlgorithm {
 /// `netmon` / `nmon` — active network connection tracking.
 fn cmd_netmon(args: &str) {
     use crate::fs::netmon;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -48270,7 +48116,6 @@ fn parse_groupmgr_type(s: &str) -> crate::fs::groupmgr::GroupType {
 /// `sysrq` — magic SysRq key handler management.
 fn cmd_sysrq(args: &str) {
     use crate::fs::sysrq;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -48360,7 +48205,6 @@ fn cmd_sysrq(args: &str) {
 /// `telemetry` / `telem` — system telemetry collection.
 fn cmd_telemetry(args: &str) {
     use crate::fs::telemetry;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -48469,7 +48313,6 @@ fn parse_telemetry_type(s: &str) -> crate::fs::telemetry::MetricType {
 /// `fscache` / `fcache` — filesystem cache policy management.
 fn cmd_fscache(args: &str) {
     use crate::fs::fscache;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -48624,7 +48467,6 @@ fn cmd_nameservice(args: &str) {
 /// `oomkiller` / `oom` — OOM killer policy and scoring.
 fn cmd_oomkiller(args: &str) {
     use crate::fs::oomkiller;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -48738,7 +48580,6 @@ fn parse_oom_policy(s: &str) -> crate::fs::oomkiller::OomPolicy {
 /// `blktrace` / `btrace` — block I/O tracing.
 fn cmd_blktrace(args: &str) {
     use crate::fs::blktrace;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -48816,7 +48657,6 @@ fn cmd_blktrace(args: &str) {
 /// `cgroupfs` / `cgrp` — cgroup v2 resource management.
 fn cmd_cgroupfs(args: &str) {
     use crate::fs::cgroupfs;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -48918,7 +48758,6 @@ fn cmd_cgroupfs(args: &str) {
 /// `secpolicy` / `spol` — mandatory access control policy.
 fn cmd_secpolicy(args: &str) {
     use crate::fs::secpolicy;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -49026,7 +48865,6 @@ fn cmd_secpolicy(args: &str) {
 /// `procstat` / `pstat` — per-process resource statistics.
 fn cmd_procstat(args: &str) {
     use crate::fs::procstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -49120,7 +48958,6 @@ fn cmd_procstat(args: &str) {
 /// `kernparam` / `kparam` — kernel boot parameters.
 fn cmd_kernparam(args: &str) {
     use crate::fs::kernparam;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -49206,7 +49043,6 @@ fn cmd_kernparam(args: &str) {
 /// `tracemon` / `trcmon` — kernel tracing and profiling.
 fn cmd_tracemon(args: &str) {
     use crate::fs::tracemon;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -49314,7 +49150,6 @@ fn cmd_tracemon(args: &str) {
 /// `authbroker` / `abroker` — authentication and credential management.
 fn cmd_authbroker(args: &str) {
     use crate::fs::authbroker;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -49566,7 +49401,6 @@ fn cmd_prociso(args: &str) {
 /// `dmevent` / `dmev` — device hotplug and event monitoring.
 fn cmd_dmevent(args: &str) {
     use crate::fs::dmevent;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -49664,7 +49498,6 @@ fn cmd_dmevent(args: &str) {
 /// `pftrack` / `pft` — page fault tracking and analysis.
 fn cmd_pftrack(args: &str) {
     use crate::fs::pftrack;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -49739,7 +49572,6 @@ fn cmd_pftrack(args: &str) {
 /// `ipclog` / `ipcl` — IPC message logging.
 fn cmd_ipclog(args: &str) {
     use crate::fs::ipclog;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -49839,7 +49671,6 @@ fn cmd_ipclog(args: &str) {
 /// `numastat` / `nstat` — NUMA node statistics.
 fn cmd_numastat(args: &str) {
     use crate::fs::numastat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -49895,7 +49726,6 @@ fn cmd_numastat(args: &str) {
 /// `shmem` / `shm` — shared memory regions.
 fn cmd_shmem(args: &str) {
     use crate::fs::shmem;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50004,7 +49834,6 @@ fn cmd_shmem(args: &str) {
 /// `wqstat` / `wqs` — workqueue statistics.
 fn cmd_wqstat(args: &str) {
     use crate::fs::wqstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50060,7 +49889,6 @@ fn cmd_wqstat(args: &str) {
 /// `slabstat` / `slab` — slab allocator statistics.
 fn cmd_slabstat(args: &str) {
     use crate::fs::slabstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50125,7 +49953,6 @@ fn cmd_slabstat(args: &str) {
 /// `timerq` / `tq` — kernel timer queue.
 fn cmd_timerq(args: &str) {
     use crate::fs::timerq;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50186,7 +50013,6 @@ fn cmd_timerq(args: &str) {
 /// `fdtable` / `fdt` — file descriptor table management.
 fn cmd_fdtable(args: &str) {
     use crate::fs::fdtable;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50269,7 +50095,6 @@ fn cmd_fdtable(args: &str) {
 /// `rcustat` / `rcu` — RCU subsystem statistics.
 fn cmd_rcustat(args: &str) {
     use crate::fs::rcustat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50346,7 +50171,6 @@ fn cmd_rcustat(args: &str) {
 /// `kconsole` / `kcon` — virtual console management.
 fn cmd_kconsole(args: &str) {
     use crate::fs::kconsole;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50415,7 +50239,6 @@ fn cmd_kconsole(args: &str) {
 /// `signalq` / `sigq` — signal/exception queue.
 fn cmd_signalq(args: &str) {
     use crate::fs::signalq;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50602,7 +50425,6 @@ fn cmd_memcg(args: &str) {
 /// `tlbstat` / `tstat` — TLB performance statistics.
 fn cmd_tlbstat(args: &str) {
     use crate::fs::tlbstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50655,7 +50477,6 @@ fn cmd_tlbstat(args: &str) {
 /// `pagestat` / `pgstat` — page allocator statistics.
 fn cmd_pagestat(args: &str) {
     use crate::fs::pagestat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50707,7 +50528,6 @@ fn cmd_pagestat(args: &str) {
 /// `dmastat` / `dma` — DMA and IOMMU statistics.
 fn cmd_dmastat(args: &str) {
     use crate::fs::dmastat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50763,7 +50583,6 @@ fn cmd_dmastat(args: &str) {
 /// `compstat` / `cstat` — memory compaction statistics.
 fn cmd_compstat(args: &str) {
     use crate::fs::compstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50817,7 +50636,6 @@ fn cmd_compstat(args: &str) {
 /// `irqstat` / `istat` — interrupt request statistics.
 fn cmd_irqstat(args: &str) {
     use crate::fs::irqstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50868,7 +50686,6 @@ fn cmd_irqstat(args: &str) {
 /// `epollstat` / `epoll` — event polling statistics.
 fn cmd_epollstat(args: &str) {
     use crate::fs::epollstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50933,7 +50750,6 @@ fn cmd_epollstat(args: &str) {
 /// `vmmap` / `vmap` — virtual memory map monitoring.
 fn cmd_vmmap(args: &str) {
     use crate::fs::vmmap;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -50999,7 +50815,6 @@ fn cmd_vmmap(args: &str) {
 /// `softirq` / `sirq` — soft interrupt statistics.
 fn cmd_softirq(args: &str) {
     use crate::fs::softirq;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51059,7 +50874,6 @@ fn cmd_softirq(args: &str) {
 /// `netfilter` / `nfilt` — network packet filter statistics.
 fn cmd_netfilter(args: &str) {
     use crate::fs::netfilter;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51141,7 +50955,6 @@ fn cmd_netfilter(args: &str) {
 /// `schedclass` / `sclass` — scheduler class statistics.
 fn cmd_schedclass(args: &str) {
     use crate::fs::schedclass;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51195,7 +51008,6 @@ fn cmd_schedclass(args: &str) {
 /// `cpuidle` / `cidle` — CPU idle state monitoring.
 fn cmd_cpuidle(args: &str) {
     use crate::fs::cpuidle;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51239,7 +51051,6 @@ fn cmd_cpuidle(args: &str) {
 /// `futexstat` / `fxstat` — futex contention statistics.
 fn cmd_futexstat(args: &str) {
     use crate::fs::futexstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51282,7 +51093,6 @@ fn cmd_futexstat(args: &str) {
 /// `writeback` / `wback` — dirty page writeback monitoring.
 fn cmd_writeback(args: &str) {
     use crate::fs::writeback;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51346,7 +51156,6 @@ fn cmd_writeback(args: &str) {
 /// `iolatency` / `iolat` — I/O latency monitoring.
 fn cmd_iolatency(args: &str) {
     use crate::fs::iolatency;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51401,7 +51210,6 @@ fn cmd_iolatency(args: &str) {
 /// `taskstats` / `tstats` — per-task comprehensive accounting.
 fn cmd_taskstats(args: &str) {
     use crate::fs::taskstats;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51456,7 +51264,6 @@ fn cmd_taskstats(args: &str) {
 /// `kprobes` / `kprb` — dynamic kernel probes.
 fn cmd_kprobes(args: &str) {
     use crate::fs::kprobes;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51528,7 +51335,6 @@ fn cmd_kprobes(args: &str) {
 /// `netsock` / `nsock` — network socket statistics.
 fn cmd_netsock(args: &str) {
     use crate::fs::netsock;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51584,7 +51390,6 @@ fn cmd_netsock(args: &str) {
 /// `blkqueue` / `bqueue` — block I/O request queue monitoring.
 fn cmd_blkqueue(args: &str) {
     use crate::fs::blkqueue;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51629,7 +51434,6 @@ fn cmd_blkqueue(args: &str) {
 /// `powerstat` / `pwstat` — power domain monitoring.
 fn cmd_powerstat(args: &str) {
     use crate::fs::powerstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51664,7 +51468,6 @@ fn cmd_powerstat(args: &str) {
 /// `inodestat` / `icache` — inode/dentry cache statistics.
 fn cmd_inodestat(args: &str) {
     use crate::fs::inodestat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51706,7 +51509,6 @@ fn cmd_inodestat(args: &str) {
 /// `migstat` / `mig` — process migration statistics.
 fn cmd_migstat(args: &str) {
     use crate::fs::migstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51745,7 +51547,6 @@ fn cmd_migstat(args: &str) {
 /// `pagecache` / `pcache` — page cache monitoring.
 fn cmd_pagecache(args: &str) {
     use crate::fs::pagecache;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51783,7 +51584,6 @@ fn cmd_pagecache(args: &str) {
 /// `netdev` / `ndev` — network device statistics.
 fn cmd_netdev(args: &str) {
     use crate::fs::netdev;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51952,7 +51752,6 @@ fn cmd_pidstat(args: &str) {
 /// `binfmt` / `bfmt` — binary format loader statistics.
 fn cmd_binfmt(args: &str) {
     use crate::fs::binfmt;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -51984,7 +51783,6 @@ fn cmd_binfmt(args: &str) {
 /// `pipestat` / `pipest` — pipe/FIFO I/O statistics.
 fn cmd_pipestat(args: &str) {
     use crate::fs::pipestat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52023,7 +51821,6 @@ fn cmd_pipestat(args: &str) {
 /// `sockbuf` / `sbuf` — socket buffer pool monitoring.
 fn cmd_sockbuf(args: &str) {
     use crate::fs::sockbuf;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52053,7 +51850,6 @@ fn cmd_sockbuf(args: &str) {
 /// `schedlat` / `slat` — scheduler latency monitoring.
 fn cmd_schedlat(args: &str) {
     use crate::fs::schedlat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52092,7 +51888,6 @@ fn cmd_schedlat(args: &str) {
 /// `mempress` / `mpress` — memory pressure monitoring.
 fn cmd_mempress(args: &str) {
     use crate::fs::mempress;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52123,7 +51918,6 @@ fn cmd_mempress(args: &str) {
 /// `cpucache` / `ccache` — CPU cache hierarchy monitoring.
 fn cmd_cpucache(args: &str) {
     use crate::fs::cpucache;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52162,7 +51956,6 @@ fn cmd_cpucache(args: &str) {
 /// `aiostat` / `aio` — async I/O (io_uring-style) statistics.
 fn cmd_aiostat(args: &str) {
     use crate::fs::aiostat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52224,7 +52017,6 @@ fn cmd_aiostat(args: &str) {
 /// `kthread` / `kthr` — kernel thread lifecycle monitoring.
 fn cmd_kthread(args: &str) {
     use crate::fs::kthread;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52290,7 +52082,6 @@ fn cmd_kthread(args: &str) {
 /// `mmapstat` / `mmap` — memory mapping operation monitoring.
 fn cmd_mmapstat(args: &str) {
     use crate::fs::mmapstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52365,7 +52156,6 @@ fn cmd_mmapstat(args: &str) {
 /// `rqstat` / `runq` — per-CPU runqueue depth monitoring.
 fn cmd_rqstat(args: &str) {
     use crate::fs::rqstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52426,7 +52216,6 @@ fn cmd_rqstat(args: &str) {
 /// `thpstat` / `thp` — transparent huge page statistics.
 fn cmd_thpstat(args: &str) {
     use crate::fs::thpstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52500,7 +52289,6 @@ fn cmd_thpstat(args: &str) {
 /// `cgiostat` / `cgio` — cgroup I/O accounting.
 fn cmd_cgiostat(args: &str) {
     use crate::fs::cgiostat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52568,7 +52356,6 @@ fn cmd_cgiostat(args: &str) {
 /// `bpfstat` / `bpf` — BPF program lifecycle monitoring.
 fn cmd_bpfstat(args: &str) {
     use crate::fs::bpfstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52634,7 +52421,6 @@ fn cmd_bpfstat(args: &str) {
 /// `pgtable` / `pgtbl` — page table allocation and TLB stats.
 fn cmd_pgtable(args: &str) {
     use crate::fs::pgtable;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52707,7 +52493,6 @@ fn cmd_pgtable(args: &str) {
 /// `zramstat` / `zram` — ZRAM compressed swap monitoring.
 fn cmd_zramstat(args: &str) {
     use crate::fs::zramstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52769,7 +52554,6 @@ fn cmd_zramstat(args: &str) {
 /// `ksmstat` / `ksm` — kernel same-page merging monitoring.
 fn cmd_ksmstat(args: &str) {
     use crate::fs::ksmstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52826,7 +52610,6 @@ fn cmd_ksmstat(args: &str) {
 /// `clocksrc` / `clksrc` — system clock source monitoring.
 fn cmd_clocksrc(args: &str) {
     use crate::fs::clocksrc;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52882,7 +52665,6 @@ fn cmd_clocksrc(args: &str) {
 /// `pmcstat` / `pmc` — hardware performance monitoring counters.
 fn cmd_pmcstat(args: &str) {
     use crate::fs::pmcstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -52941,7 +52723,6 @@ fn cmd_pmcstat(args: &str) {
 /// `cputhr` / `cthr` — CPU thermal throttle monitoring.
 fn cmd_cputhr(args: &str) {
     use crate::fs::cputhr;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53004,7 +52785,6 @@ fn cmd_cputhr(args: &str) {
 /// `ipcns` / `ipcn` — IPC namespace monitoring.
 fn cmd_ipcns(args: &str) {
     use crate::fs::ipcns;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53071,7 +52851,6 @@ fn cmd_ipcns(args: &str) {
 /// `netqueue` / `nq` — network queue and NAPI monitoring.
 fn cmd_netqueue(args: &str) {
     use crate::fs::netqueue;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53121,7 +52900,6 @@ fn cmd_netqueue(args: &str) {
 /// `secmod` / `smod` — security module monitoring.
 fn cmd_secmod(args: &str) {
     use crate::fs::secmod;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53190,7 +52968,6 @@ fn cmd_secmod(args: &str) {
 /// `vmballoon` / `vbal` — VM memory balloon monitoring.
 fn cmd_vmballoon(args: &str) {
     use crate::fs::vmballoon;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53244,7 +53021,6 @@ fn cmd_vmballoon(args: &str) {
 /// `devfreq` / `dfreq` — device frequency scaling monitoring.
 fn cmd_devfreq(args: &str) {
     use crate::fs::devfreq;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53303,7 +53079,6 @@ fn cmd_devfreq(args: &str) {
 /// `hwrng` / `hrng` — hardware random number generator stats.
 fn cmd_hwrng(args: &str) {
     use crate::fs::hwrng;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53357,7 +53132,6 @@ fn cmd_hwrng(args: &str) {
 /// `acpistat` / `acpi` — ACPI event monitoring.
 fn cmd_acpistat(args: &str) {
     use crate::fs::acpistat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53419,7 +53193,6 @@ fn cmd_acpistat(args: &str) {
 /// `userfault` / `uffd` — userfaultfd monitoring.
 fn cmd_userfault(args: &str) {
     use crate::fs::userfault;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53485,7 +53258,6 @@ fn cmd_userfault(args: &str) {
 /// `ioport` / `iop` — I/O port access monitoring.
 fn cmd_ioport(args: &str) {
     use crate::fs::ioport;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53539,7 +53311,6 @@ fn cmd_ioport(args: &str) {
 /// `msivec` / `msi` — MSI/MSI-X vector monitoring.
 fn cmd_msivec(args: &str) {
     use crate::fs::msivec;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53604,7 +53375,6 @@ fn cmd_msivec(args: &str) {
 /// `cpuset` / `cset` — CPU set/affinity monitoring.
 fn cmd_cpuset(args: &str) {
     use crate::fs::cpuset;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53673,7 +53443,6 @@ fn cmd_cpuset(args: &str) {
 /// `ftrace` / `ftr` — function tracing stats.
 fn cmd_ftrace(args: &str) {
     use crate::fs::ftrace;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53754,7 +53523,6 @@ fn cmd_ftrace(args: &str) {
 /// `kstack` / `kstk` — kernel stack monitoring.
 fn cmd_kstack(args: &str) {
     use crate::fs::kstack;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53814,7 +53582,6 @@ fn cmd_kstack(args: &str) {
 /// `fnotify` / `fnot` — file notification monitoring.
 fn cmd_fnotify(args: &str) {
     use crate::fs::fnotify;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -53965,7 +53732,6 @@ fn cmd_netlat(args: &str) {
 /// `diskstat` / `dstat` — block device I/O statistics.
 fn cmd_diskstat(args: &str) {
     use crate::fs::diskstat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -54035,7 +53801,6 @@ fn cmd_diskstat(args: &str) {
 /// `taskio` / `tio` — per-task I/O accounting.
 fn cmd_taskio(args: &str) {
     use crate::fs::taskio;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -54103,7 +53868,6 @@ fn cmd_taskio(args: &str) {
 /// `ttystat` / `ttys` — terminal/serial device monitoring.
 fn cmd_ttystat(args: &str) {
     use crate::fs::ttystat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -54170,7 +53934,6 @@ fn cmd_ttystat(args: &str) {
 /// `swapact` / `swact` — swap activity monitoring.
 fn cmd_swapact(args: &str) {
     use crate::fs::swapact;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -54236,7 +53999,6 @@ fn cmd_swapact(args: &str) {
 /// `schedwait` / `swait` — scheduler wait accounting.
 fn cmd_schedwait(args: &str) {
     use crate::fs::schedwait;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -54285,7 +54047,6 @@ fn cmd_schedwait(args: &str) {
 /// `ratestat` / `rstat` — rate limiter monitoring.
 fn cmd_ratestat(args: &str) {
     use crate::fs::ratestat;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -54345,7 +54106,6 @@ fn cmd_ratestat(args: &str) {
 /// `iomem` / `imem` — I/O memory region monitoring.
 fn cmd_iomem(args: &str) {
     use crate::fs::iomem;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -54403,7 +54163,6 @@ fn cmd_iomem(args: &str) {
 /// `vmzone` / `vzone` — VM zone statistics.
 fn cmd_vmzone(args: &str) {
     use crate::fs::vmzone;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -54641,7 +54400,6 @@ fn cmd_vmfrag(args: &str) {
 /// `pidfd` / `pfd` — process file descriptor monitoring.
 fn cmd_pidfd(args: &str) {
     use crate::fs::pidfd;
-    use alloc::format;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
@@ -70238,7 +69996,6 @@ fn cmd_unzip(args: &str) {
 ///   cpio -i archive.cpio [-d DIR]  Extract archive
 ///   cpio -o archive.cpio FILE..  Create archive from files
 fn cmd_cpio(args: &str) {
-    use crate::fs::Vfs;
 
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
@@ -70566,7 +70323,6 @@ fn cmd_cpio_create(args: &[&str]) {
 ///   ar x archive.a [-d DIR]  Extract members
 ///   ar r archive.a FILE..    Create archive
 fn cmd_ar(args: &str) {
-    use crate::fs::Vfs;
 
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
@@ -70802,7 +70558,6 @@ fn cmd_ar_create(args: &[&str]) {
 ///   dpkg -c pkg.deb          List data files
 ///   dpkg -x pkg.deb [-d DIR] Extract data files
 fn cmd_dpkg(args: &str) {
-    use crate::fs::Vfs;
 
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {

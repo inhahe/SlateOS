@@ -36,6 +36,7 @@ pub type JmpBuf = [u64; 8];
 // The actual implementations must be in assembly because setjmp
 // needs to capture the caller's registers — a Rust function would
 // have already clobbered them.
+#[cfg(target_os = "none")]
 global_asm!(
     // ---------------------------------------------------------------
     // int setjmp(jmp_buf env)

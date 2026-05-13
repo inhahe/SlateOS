@@ -145,7 +145,9 @@
 //! - Redox relibc (Rust POSIX libc for a custom OS)
 //! - musl libc (minimal Linux libc, good reference for what to implement)
 
-#![no_std]
+// On our OS target (x86_64-unknown-none, target_os = "none"), build as
+// no_std.  On the host (Windows/Linux), use std so `cargo test` works.
+#![cfg_attr(target_os = "none", no_std)]
 #![deny(clippy::all, clippy::pedantic)]
 #![allow(
     clippy::module_name_repetitions,
@@ -163,7 +165,7 @@
 // Panic handler for no_std staticlib.
 // When linked into a binary that provides its own panic handler,
 // the linker will use the binary's version.  This is a fallback.
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {

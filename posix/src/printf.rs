@@ -45,7 +45,7 @@
 //
 // We save up to 8 args (5 register + 3 stack) for printf, fewer for others.
 
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 core::arch::global_asm!(
     // printf(fmt, ...) → _printf_impl(fmt, int_args, float_args)
     ".global printf",
@@ -272,7 +272,7 @@ const PRINTF_BUF_SIZE: usize = 4096;
 ///
 /// Output goes through the stdio buffer (line-buffered on stdout) so
 /// printf output is properly coalesced with other stdout writes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
     let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args, fargs);
@@ -288,7 +288,7 @@ pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64, fargs: *const u
 ///
 /// Output goes through the stdio buffer so fprintf output is properly
 /// coalesced with other writes to the same stream.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
     let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args, fargs);
@@ -304,7 +304,7 @@ pub extern "C" fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: *const u6
 ///
 /// Like `fprintf` but takes a raw fd (int) instead of a `FILE*`.
 /// Writes directly to the fd without stdio buffering.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _dprintf_impl(fd: i32, fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
     let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args, fargs);
@@ -317,7 +317,7 @@ pub extern "C" fn _dprintf_impl(fd: i32, fmt: *const u8, args: *const u64, fargs
 }
 
 /// `snprintf(buf, size, fmt, ...)` — write formatted output to a buffer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _snprintf_impl(
     buf: *mut u8,
     size: usize,
@@ -342,7 +342,7 @@ pub extern "C" fn _snprintf_impl(
 }
 
 /// `sprintf(buf, fmt, ...)` — write formatted output to a buffer (no limit).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _sprintf_impl(buf: *mut u8, fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
     // No size limit — dangerous but matches C semantics.
     let n = format_core(buf, usize::MAX, fmt, args, fargs);
@@ -361,7 +361,7 @@ pub extern "C" fn _sprintf_impl(buf: *mut u8, fmt: *const u8, args: *const u64, 
 /// (including null terminator) and stores a pointer to it in `*strp`.
 /// Returns the number of characters written (excluding null), or -1
 /// on allocation failure.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _asprintf_impl(
     strp: *mut *mut u8,
     fmt: *const u8,

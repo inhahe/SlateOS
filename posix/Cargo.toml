@@ -5,6 +5,8 @@ edition = "2024"
 description = "POSIX compatibility library — C-compatible function signatures backed by native syscalls"
 
 [lib]
+# staticlib is for linking into OS userspace programs; rlib is for tests.
+# `cargo test` only uses the rlib.
 crate-type = ["staticlib", "rlib"]
 
 [profile.release]
@@ -13,7 +15,7 @@ lto = false           # LTO conflicts with code-model in cross-compilation.
 panic = "abort"
 
 [profile.dev]
-panic = "abort"
+panic = "abort"        # Required for no_std lib build; test harness overrides.
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }

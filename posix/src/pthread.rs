@@ -114,7 +114,7 @@ pub type PthreadCondattrT = [u8; 8];
 
 /// Static initializer for `pthread_cond_t`.
 #[allow(clippy::declare_interior_mutable_const)]
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static PTHREAD_COND_INITIALIZER: PthreadCondT = PthreadCondT {
     generation: AtomicI32::new(0),
     _pad: [0; 44],
@@ -228,7 +228,7 @@ fn take_thread_info(task_id: u64) -> Option<ThreadInfo> {
 // Stack alignment: after two pops RSP is 16-byte aligned (the mmap'd
 // stack top is page-aligned), so the CALL satisfies the SysV ABI
 // requirement.
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 core::arch::global_asm!(
     ".global _pthread_trampoline",
     ".type _pthread_trampoline, @function",
@@ -242,7 +242,7 @@ core::arch::global_asm!(
     "    ud2",               // unreachable
 );
 
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 unsafe extern "C" {
     fn _pthread_trampoline();
 }
@@ -258,7 +258,7 @@ unsafe extern "C" {
 /// kernel task ID in `*thread`.
 ///
 /// Returns 0 on success, or a POSIX error number on failure.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_create(
     thread: *mut PthreadT,
     _attr: *const PthreadAttrT,
@@ -294,9 +294,9 @@ pub extern "C" fn pthread_create(
     let user_rsp = stack_top.wrapping_sub(16) as u64;
 
     // Get the trampoline's address.
-    #[cfg(not(test))]
+    #[cfg(target_os = "none")]
     let entry = _pthread_trampoline as *const () as u64;
-    #[cfg(test)]
+    #[cfg(not(target_os = "none"))]
     let entry: u64 = 0;
 
     // Create the kernel thread.
@@ -337,7 +337,7 @@ pub extern "C" fn pthread_create(
 /// in `*retval` (if non-null), and frees the thread's stack.
 ///
 /// Returns 0 on success, or a POSIX error number on failure.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32 {
     let ret = syscall::syscall1(syscall::SYS_THREAD_JOIN, thread_id);
 
@@ -371,7 +371,7 @@ pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32
 /// **Known limitation**: detached thread stacks are currently leaked
 /// because there is no kernel notification when a thread exits.  A
 /// reaper thread or kernel callback would be needed to fix this.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_detach(thread_id: PthreadT) -> i32 {
     // SAFETY: Thread table access is serialized by convention.
     unsafe {
@@ -391,13 +391,13 @@ pub extern "C" fn pthread_detach(thread_id: PthreadT) -> i32 {
 /// Get the calling thread's ID.
 ///
 /// Returns the kernel task ID of the calling thread.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_self() -> PthreadT {
     syscall::syscall0(syscall::SYS_TASK_ID) as PthreadT
 }
 
 /// Compare two thread IDs.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_equal(t1: PthreadT, t2: PthreadT) -> i32 {
     i32::from(t1 == t2)
 }
@@ -406,7 +406,7 @@ pub extern "C" fn pthread_equal(t1: PthreadT, t2: PthreadT) -> i32 {
 ///
 /// Issues `SYS_THREAD_EXIT` with the specified return value.
 /// If this is the last thread in the process, the process exits.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     let _ = syscall::syscall1(syscall::SYS_THREAD_EXIT, retval as u64);
     // SAFETY: SYS_THREAD_EXIT never returns; this is a safety net.
@@ -426,7 +426,7 @@ const MUTEX_SPIN_LIMIT: u32 = 100;
 ///
 /// Reads the mutex type from `attr` (if non-null) to determine whether
 /// the mutex is normal, recursive, or error-checking.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_init(
     mutex: *mut PthreadMutexT,
     attr: *const PthreadMutexattrT,
@@ -464,7 +464,7 @@ pub unsafe extern "C" fn pthread_mutex_init(
 ///   recursion count and returns 0.
 /// - **Error-checking**: if already held by calling thread, returns
 ///   EDEADLK without blocking.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
         return errno::EINVAL;
@@ -523,7 +523,7 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
 /// Returns 0 on success, `EBUSY` if the mutex is already locked
 /// (by another thread).  For recursive mutexes, succeeds if the
 /// calling thread already holds the lock.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
         return errno::EINVAL;
@@ -560,7 +560,7 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32
 /// For recursive mutexes, decrements the recursion count; the mutex
 /// is only released when the count reaches zero.  For error-checking
 /// mutexes, returns EPERM if the calling thread does not own the lock.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
         return errno::EINVAL;
@@ -598,7 +598,7 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 
 }
 
 /// Destroy a mutex.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
         return errno::EINVAL;
@@ -620,7 +620,7 @@ pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut PthreadMutexT) -> i32
 /// - 1: initialization complete
 ///
 /// Threads that arrive while init is running spin-wait until complete.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_once(
     once: *mut PthreadOnceT,
     init: extern "C" fn(),
@@ -671,7 +671,7 @@ static mut TSD_VALUES: [*mut u8; MAX_KEYS] = [core::ptr::null_mut(); MAX_KEYS];
 static mut TSD_NEXT_KEY: u32 = 0;
 
 /// Create a thread-specific data key.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_key_create(
     key: *mut PthreadKeyT,
     _destructor: Option<extern "C" fn(*mut u8)>,
@@ -691,7 +691,7 @@ pub unsafe extern "C" fn pthread_key_create(
 }
 
 /// Get thread-specific data.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_getspecific(key: PthreadKeyT) -> *mut u8 {
     let vals = unsafe { core::ptr::addr_of_mut!(TSD_VALUES).as_ref() };
     let Some(vals) = vals else { return core::ptr::null_mut() };
@@ -701,7 +701,7 @@ pub unsafe extern "C" fn pthread_getspecific(key: PthreadKeyT) -> *mut u8 {
 }
 
 /// Set thread-specific data.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_setspecific(key: PthreadKeyT, value: *mut u8) -> i32 {
     let vals = unsafe { core::ptr::addr_of_mut!(TSD_VALUES).as_mut() };
     let Some(vals) = vals else { return errno::EINVAL };
@@ -714,7 +714,7 @@ pub unsafe extern "C" fn pthread_setspecific(key: PthreadKeyT, value: *mut u8) -
 }
 
 /// Delete a thread-specific data key.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_key_delete(_key: PthreadKeyT) -> i32 {
     0 // No-op: we don't reclaim key indices.
 }
@@ -724,7 +724,7 @@ pub extern "C" fn pthread_key_delete(_key: PthreadKeyT) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Initialize a condition variable.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_init(
     cond: *mut PthreadCondT,
     _attr: *const PthreadCondattrT,
@@ -741,7 +741,7 @@ pub extern "C" fn pthread_cond_init(
 }
 
 /// Destroy a condition variable.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_destroy(_cond: *mut PthreadCondT) -> i32 {
     0 // No resources to free.
 }
@@ -751,7 +751,7 @@ pub extern "C" fn pthread_cond_destroy(_cond: *mut PthreadCondT) -> i32 {
 /// Atomically releases `mutex`, waits for a signal/broadcast on `cond`,
 /// then re-acquires `mutex`.  Uses a spin-yield loop watching the
 /// generation counter — not ideal but correct.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_wait(
     cond: *mut PthreadCondT,
     mutex: *mut PthreadMutexT,
@@ -785,7 +785,7 @@ pub extern "C" fn pthread_cond_wait(
 ///
 /// Like `pthread_cond_wait` but returns `ETIMEDOUT` if the absolute
 /// time `abstime` passes before a signal.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_timedwait(
     cond: *mut PthreadCondT,
     mutex: *mut PthreadMutexT,
@@ -826,7 +826,7 @@ pub extern "C" fn pthread_cond_timedwait(
 }
 
 /// Signal (wake one waiter on) a condition variable.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_signal(cond: *mut PthreadCondT) -> i32 {
     if cond.is_null() {
         return errno::EINVAL;
@@ -838,7 +838,7 @@ pub extern "C" fn pthread_cond_signal(cond: *mut PthreadCondT) -> i32 {
 }
 
 /// Broadcast (wake all waiters on) a condition variable.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cond_broadcast(cond: *mut PthreadCondT) -> i32 {
     // Same as signal — our spin-based implementation wakes all waiters
     // since they all see the generation change.
@@ -866,14 +866,14 @@ pub type PthreadRwlockattrT = [u8; 8];
 
 /// Static initializer for `pthread_rwlock_t`.
 #[allow(clippy::declare_interior_mutable_const)]
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static PTHREAD_RWLOCK_INITIALIZER: PthreadRwlockT = PthreadRwlockT {
     state: AtomicI32::new(0),
     _pad: [0; 52],
 };
 
 /// Initialize a read-write lock.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_init(
     rwlock: *mut PthreadRwlockT,
     _attr: *const PthreadRwlockattrT,
@@ -886,7 +886,7 @@ pub extern "C" fn pthread_rwlock_init(
 }
 
 /// Destroy a read-write lock.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_destroy(_rwlock: *mut PthreadRwlockT) -> i32 {
     0
 }
@@ -894,7 +894,7 @@ pub extern "C" fn pthread_rwlock_destroy(_rwlock: *mut PthreadRwlockT) -> i32 {
 /// Acquire a read lock (shared).
 ///
 /// Spins until no writer holds the lock, then increments the reader count.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_rdlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if rwlock.is_null() {
         return errno::EINVAL;
@@ -922,7 +922,7 @@ pub extern "C" fn pthread_rwlock_rdlock(rwlock: *mut PthreadRwlockT) -> i32 {
 }
 
 /// Try to acquire a read lock without blocking.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if rwlock.is_null() {
         return errno::EINVAL;
@@ -947,7 +947,7 @@ pub extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut PthreadRwlockT) -> i32 {
 /// Acquire a write lock (exclusive).
 ///
 /// Spins until no readers or writers hold the lock.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_wrlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if rwlock.is_null() {
         return errno::EINVAL;
@@ -968,7 +968,7 @@ pub extern "C" fn pthread_rwlock_wrlock(rwlock: *mut PthreadRwlockT) -> i32 {
 }
 
 /// Try to acquire a write lock without blocking.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_trywrlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if rwlock.is_null() {
         return errno::EINVAL;
@@ -990,7 +990,7 @@ pub extern "C" fn pthread_rwlock_trywrlock(rwlock: *mut PthreadRwlockT) -> i32 {
 ///
 /// If the calling thread holds a read lock, decrements the reader count.
 /// If the calling thread holds a write lock, releases it (sets state to 0).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlock_unlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if rwlock.is_null() {
         return errno::EINVAL;
@@ -1013,7 +1013,7 @@ pub extern "C" fn pthread_rwlock_unlock(rwlock: *mut PthreadRwlockT) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Yield the processor to another thread/process.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_yield() -> i32 {
     let _ = syscall::syscall1(syscall::SYS_SLEEP, 0);
     0
@@ -1026,7 +1026,7 @@ pub extern "C" fn sched_yield() -> i32 {
 /// Initialize a thread attribute object to default values.
 ///
 /// Defaults: joinable (not detached), stack size = `DEFAULT_THREAD_STACK_SIZE`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_init(attr: *mut PthreadAttrT) -> i32 {
     if attr.is_null() {
         return errno::EINVAL;
@@ -1048,13 +1048,13 @@ pub extern "C" fn pthread_attr_init(attr: *mut PthreadAttrT) -> i32 {
 /// Destroy a thread attribute object.
 ///
 /// No-op — no resources to release.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_destroy(_attr: *mut PthreadAttrT) -> i32 {
     0
 }
 
 /// Set the stack size in a thread attribute object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_setstacksize(attr: *mut PthreadAttrT, stacksize: usize) -> i32 {
     if attr.is_null() || stacksize < 4096 {
         return errno::EINVAL;
@@ -1069,7 +1069,7 @@ pub extern "C" fn pthread_attr_setstacksize(attr: *mut PthreadAttrT, stacksize: 
 }
 
 /// Get the stack size from a thread attribute object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_getstacksize(attr: *const PthreadAttrT, stacksize: *mut usize) -> i32 {
     if attr.is_null() || stacksize.is_null() {
         return errno::EINVAL;
@@ -1089,7 +1089,7 @@ pub const PTHREAD_CREATE_JOINABLE: i32 = 0;
 pub const PTHREAD_CREATE_DETACHED: i32 = 1;
 
 /// Set the detach state in a thread attribute object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_setdetachstate(attr: *mut PthreadAttrT, detachstate: i32) -> i32 {
     if attr.is_null() || (detachstate != PTHREAD_CREATE_JOINABLE && detachstate != PTHREAD_CREATE_DETACHED) {
         return errno::EINVAL;
@@ -1104,7 +1104,7 @@ pub extern "C" fn pthread_attr_setdetachstate(attr: *mut PthreadAttrT, detachsta
 }
 
 /// Get the detach state from a thread attribute object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_attr_getdetachstate(attr: *const PthreadAttrT, detachstate: *mut i32) -> i32 {
     if attr.is_null() || detachstate.is_null() {
         return errno::EINVAL;
@@ -1147,7 +1147,7 @@ pub const PTHREAD_BARRIER_SERIAL_THREAD: i32 = -1;
 ///
 /// `count` is the number of threads that must call `pthread_barrier_wait`
 /// before any of them successfully return.  Must be > 0.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_barrier_init(
     barrier: *mut PthreadBarrierT,
     _attr: *const PthreadBarrierattrT,
@@ -1166,7 +1166,7 @@ pub extern "C" fn pthread_barrier_init(
 }
 
 /// Destroy a barrier.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_barrier_destroy(_barrier: *mut PthreadBarrierT) -> i32 {
     0
 }
@@ -1176,7 +1176,7 @@ pub extern "C" fn pthread_barrier_destroy(_barrier: *mut PthreadBarrierT) -> i32
 /// Blocks until `count` threads have called this function on the same
 /// barrier.  Exactly one thread returns `PTHREAD_BARRIER_SERIAL_THREAD`;
 /// all others return 0.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_barrier_wait(barrier: *mut PthreadBarrierT) -> i32 {
     if barrier.is_null() {
         return errno::EINVAL;
@@ -1211,7 +1211,7 @@ pub extern "C" fn pthread_barrier_wait(barrier: *mut PthreadBarrierT) -> i32 {
 pub type PthreadSpinlockT = AtomicI32;
 
 /// Initialize a spinlock.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_spin_init(lock: *mut PthreadSpinlockT, _pshared: i32) -> i32 {
     if lock.is_null() {
         return errno::EINVAL;
@@ -1224,7 +1224,7 @@ pub extern "C" fn pthread_spin_init(lock: *mut PthreadSpinlockT, _pshared: i32) 
 }
 
 /// Destroy a spinlock.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_spin_destroy(_lock: *mut PthreadSpinlockT) -> i32 {
     0
 }
@@ -1232,7 +1232,7 @@ pub extern "C" fn pthread_spin_destroy(_lock: *mut PthreadSpinlockT) -> i32 {
 /// Acquire a spinlock.
 ///
 /// Busy-waits until the lock is acquired.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_spin_lock(lock: *mut PthreadSpinlockT) -> i32 {
     if lock.is_null() {
         return errno::EINVAL;
@@ -1249,7 +1249,7 @@ pub extern "C" fn pthread_spin_lock(lock: *mut PthreadSpinlockT) -> i32 {
 }
 
 /// Try to acquire a spinlock without blocking.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_spin_trylock(lock: *mut PthreadSpinlockT) -> i32 {
     if lock.is_null() {
         return errno::EINVAL;
@@ -1267,7 +1267,7 @@ pub extern "C" fn pthread_spin_trylock(lock: *mut PthreadSpinlockT) -> i32 {
 }
 
 /// Release a spinlock.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_spin_unlock(lock: *mut PthreadSpinlockT) -> i32 {
     if lock.is_null() {
         return errno::EINVAL;
@@ -1298,7 +1298,7 @@ pub const PTHREAD_CANCEL_DISABLE: i32 = 1;
 /// Set the calling thread's cancellation state.
 ///
 /// Stub: succeeds silently, stores the old state.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_setcancelstate(state: i32, oldstate: *mut i32) -> i32 {
     if !oldstate.is_null() {
         // Report that cancellation was enabled (harmless default).
@@ -1312,7 +1312,7 @@ pub extern "C" fn pthread_setcancelstate(state: i32, oldstate: *mut i32) -> i32 
 /// Set the calling thread's cancellation type.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_setcanceltype(cancel_type: i32, oldtype: *mut i32) -> i32 {
     if !oldtype.is_null() {
         // SAFETY: caller guarantees oldtype is valid if non-null.
@@ -1325,13 +1325,13 @@ pub extern "C" fn pthread_setcanceltype(cancel_type: i32, oldtype: *mut i32) -> 
 /// Create a cancellation point.
 ///
 /// Stub: no-op (cancellation is not supported).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_testcancel() {}
 
 /// Cancel a thread.
 ///
 /// Stub: returns ENOSYS (cancellation is not supported).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_cancel(_thread: PthreadT) -> i32 {
     errno::ENOSYS
 }
@@ -1350,7 +1350,7 @@ pub const PTHREAD_MUTEX_ERRORCHECK: i32 = 2;
 pub const PTHREAD_MUTEX_DEFAULT: i32 = 0;
 
 /// Initialize a mutex attribute object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_mutexattr_init(attr: *mut PthreadMutexattrT) -> i32 {
     if attr.is_null() {
         return errno::EINVAL;
@@ -1361,7 +1361,7 @@ pub extern "C" fn pthread_mutexattr_init(attr: *mut PthreadMutexattrT) -> i32 {
 }
 
 /// Destroy a mutex attribute object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_mutexattr_destroy(_attr: *mut PthreadMutexattrT) -> i32 {
     0
 }
@@ -1370,7 +1370,7 @@ pub extern "C" fn pthread_mutexattr_destroy(_attr: *mut PthreadMutexattrT) -> i3
 ///
 /// Supported types: `PTHREAD_MUTEX_NORMAL` (default),
 /// `PTHREAD_MUTEX_RECURSIVE`, `PTHREAD_MUTEX_ERRORCHECK`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_mutexattr_settype(attr: *mut PthreadMutexattrT, kind: i32) -> i32 {
     if attr.is_null() {
         return errno::EINVAL;
@@ -1386,7 +1386,7 @@ pub extern "C" fn pthread_mutexattr_settype(attr: *mut PthreadMutexattrT, kind: 
 }
 
 /// Get the mutex type attribute.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_mutexattr_gettype(attr: *const PthreadMutexattrT, kind: *mut i32) -> i32 {
     if attr.is_null() || kind.is_null() {
         return errno::EINVAL;
@@ -1415,7 +1415,7 @@ pub extern "C" fn pthread_mutexattr_gettype(attr: *const PthreadMutexattrT, kind
 ///
 /// `mutex` must point to a valid initialized mutex.
 /// `abstime` must point to a valid `timespec`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_mutex_timedlock(
     mutex: *mut PthreadMutexT,
     abstime: *const crate::stat::Timespec,
@@ -1481,7 +1481,7 @@ pub extern "C" fn pthread_mutex_timedlock(
 // ---------------------------------------------------------------------------
 
 /// Initialize a condition variable attribute object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_condattr_init(attr: *mut PthreadCondattrT) -> i32 {
     if attr.is_null() {
         return errno::EINVAL;
@@ -1492,7 +1492,7 @@ pub extern "C" fn pthread_condattr_init(attr: *mut PthreadCondattrT) -> i32 {
 }
 
 /// Destroy a condition variable attribute object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_condattr_destroy(_attr: *mut PthreadCondattrT) -> i32 {
     0
 }
@@ -1502,7 +1502,7 @@ pub extern "C" fn pthread_condattr_destroy(_attr: *mut PthreadCondattrT) -> i32 
 /// Stores the clock ID for use by `pthread_cond_timedwait`.
 /// We accept any valid clock but our timedwait currently only uses
 /// the real-time clock.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_condattr_setclock(attr: *mut PthreadCondattrT, clock_id: i32) -> i32 {
     if attr.is_null() {
         return errno::EINVAL;
@@ -1517,7 +1517,7 @@ pub extern "C" fn pthread_condattr_setclock(attr: *mut PthreadCondattrT, clock_i
 }
 
 /// Get the clock for a condition variable attribute.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_condattr_getclock(attr: *const PthreadCondattrT, clock_id: *mut i32) -> i32 {
     if attr.is_null() || clock_id.is_null() {
         return errno::EINVAL;
@@ -1531,7 +1531,7 @@ pub extern "C" fn pthread_condattr_getclock(attr: *const PthreadCondattrT, clock
 // ---------------------------------------------------------------------------
 
 /// Initialize a rwlock attribute object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlockattr_init(attr: *mut PthreadRwlockattrT) -> i32 {
     if attr.is_null() {
         return errno::EINVAL;
@@ -1541,7 +1541,7 @@ pub extern "C" fn pthread_rwlockattr_init(attr: *mut PthreadRwlockattrT) -> i32 
 }
 
 /// Destroy a rwlock attribute object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlockattr_destroy(_attr: *mut PthreadRwlockattrT) -> i32 {
     0
 }
@@ -1549,7 +1549,7 @@ pub extern "C" fn pthread_rwlockattr_destroy(_attr: *mut PthreadRwlockattrT) -> 
 /// Set the process-shared attribute for a rwlock.
 ///
 /// We only support `PTHREAD_PROCESS_PRIVATE` (0).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlockattr_setpshared(attr: *mut PthreadRwlockattrT, pshared: i32) -> i32 {
     if attr.is_null() {
         return errno::EINVAL;
@@ -1563,7 +1563,7 @@ pub extern "C" fn pthread_rwlockattr_setpshared(attr: *mut PthreadRwlockattrT, p
 }
 
 /// Get the process-shared attribute for a rwlock.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_rwlockattr_getpshared(attr: *const PthreadRwlockattrT, pshared: *mut i32) -> i32 {
     if attr.is_null() || pshared.is_null() {
         return errno::EINVAL;
@@ -1597,7 +1597,7 @@ static mut THREAD_NAMES: [[u8; PTHREAD_NAME_MAX]; MAX_NAMED_THREADS] =
 /// # Safety
 ///
 /// `name` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_setname_np(thread: PthreadT, name: *const u8) -> i32 {
     if name.is_null() {
         return errno::EINVAL;
@@ -1639,7 +1639,7 @@ pub unsafe extern "C" fn pthread_setname_np(thread: PthreadT, name: *const u8) -
 /// # Safety
 ///
 /// `name` must be valid for `len` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len: usize) -> i32 {
     if name.is_null() || len == 0 {
         return errno::EINVAL;
@@ -1687,7 +1687,7 @@ pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len
 ///
 /// Since our OS doesn't have fork() yet, this is a stub that accepts
 /// handlers but never calls them.  Returns 0 (success) always.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_atfork(
     _prepare: Option<extern "C" fn()>,
     _parent: Option<extern "C" fn()>,

@@ -1,11 +1,13 @@
 # Build configuration for the posix crate.
 #
-# Default target is bare-metal x86_64 (matches the workspace config).
+# Default target is bare-metal x86_64 (our OS kernel target).
 # For running tests on the host:
-#   cargo test --target x86_64-pc-windows-gnu
+#   cargo test --target x86_64-pc-windows-gnu -- --test-threads=1
 #
-# Note: setjmp is gated behind #[cfg(not(test))] because it uses
-# ELF-specific global_asm directives.
+# Single-threaded is required because getopt/stdlib tests use global state.
+# The crate conditionally compiles:
+#   - target_os = "none": no_std, no_mangle symbols, global_asm trampolines
+#   - otherwise (host):   std, mangled symbols, asm excluded
 
 [build]
 target = "x86_64-unknown-none"

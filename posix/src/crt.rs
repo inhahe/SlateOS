@@ -44,7 +44,7 @@ static mut QUICKEXIT_COUNT: usize = 0;
 /// Register a function to be called at normal process termination.
 ///
 /// Returns 0 on success, -1 if the atexit table is full.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn atexit(func: AtexitFn) -> i32 {
     // SAFETY: Single-threaded access.
     let count = unsafe { addr_of_mut!(ATEXIT_COUNT).read() };
@@ -68,7 +68,7 @@ pub extern "C" fn atexit(func: AtexitFn) -> i32 {
 ///
 /// Calls registered atexit functions in reverse order, then
 /// calls `_exit(status)`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn exit(status: i32) -> ! {
     // Run atexit handlers in LIFO order.
     // SAFETY: Single-threaded access.
@@ -103,7 +103,7 @@ pub extern "C" fn exit(status: i32) -> ! {
 ///
 /// Unlike `atexit`, these handlers are only called by `quick_exit`,
 /// not by normal `exit`.  Returns 0 on success, -1 if full.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn at_quick_exit(func: AtexitFn) -> i32 {
     // SAFETY: Single-threaded access.
     let count = unsafe { addr_of_mut!(QUICKEXIT_COUNT).read() };
@@ -126,7 +126,7 @@ pub extern "C" fn at_quick_exit(func: AtexitFn) -> i32 {
 /// Unlike `exit`, does NOT call `atexit` handlers or flush stdio.
 /// Calls handlers registered with `at_quick_exit` in LIFO order,
 /// then calls `_Exit`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn quick_exit(status: i32) -> ! {
     // Run at_quick_exit handlers in LIFO order.
     let count = unsafe { addr_of_mut!(QUICKEXIT_COUNT).read() };
@@ -163,7 +163,7 @@ pub extern "C" fn quick_exit(status: i32) -> ! {
 /// # Safety
 ///
 /// All pointer arguments must be valid per the C ABI.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __libc_start_main(
     main: extern "C" fn(i32, *const *const u8, *const *const u8) -> i32,
     arg_count: i32,
@@ -240,6 +240,7 @@ pub unsafe extern "C" fn __libc_start_main(
 // arguments.  The `weak` linkage lets programs provide their own _start
 // if they prefer raw entry (like the current hello/ticker programs).
 
+#[cfg(target_os = "none")]
 global_asm!(
     // ---------------------------------------------------------------
     // void _start(void)  — process entry point
@@ -290,7 +291,7 @@ global_asm!(
 ///
 /// We ignore `arg` and `dso_handle` and simply register `func` as an
 /// atexit handler.  This is correct for single-module static binaries.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_atexit(
     func: extern "C" fn(*mut u8),
     _arg: *mut u8,
@@ -311,7 +312,7 @@ pub extern "C" fn __cxa_atexit(
 /// If non-NULL, runs destructors for that specific DSO (called at dlclose).
 /// Since we don't support dynamic loading, this is a no-op (atexit
 /// handlers are run by `exit()` instead).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_finalize(_dso_handle: *mut u8) {
     // No-op: exit() runs atexit handlers.
 }
@@ -326,14 +327,14 @@ pub extern "C" fn __cxa_finalize(_dso_handle: *mut u8) {
 /// it on return.  A mismatch means stack corruption.  We use a fixed
 /// value since we don't have /dev/urandom yet; a real implementation
 /// would initialize this from a random source at process startup.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static __stack_chk_guard: u64 = 0x0000_DEAD_BEEF_CAFE;
 
 /// Called when a stack buffer overflow is detected.
 ///
 /// This function never returns — the stack is corrupt, so continuing
 /// would be undefined behavior.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __stack_chk_fail() -> ! {
     // Write a message to stderr.
     let msg = b"*** stack smashing detected ***\n";
@@ -351,7 +352,7 @@ pub extern "C" fn __stack_chk_fail() -> ! {
 ///
 /// Programs compiled with GCC/Clang reference this symbol.
 /// For a static binary, it just needs to exist (value doesn't matter).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static __dso_handle: u8 = 0;
 
 // ---------------------------------------------------------------------------
@@ -365,24 +366,24 @@ static UNKNOWN_PROG: [u8; 8] = *b"unknown\0";
 ///
 /// Set during `__libc_start_main`.  Programs that read this symbol
 /// expect it to point to argv[0].
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut program_invocation_name: *const u8 = UNKNOWN_PROG.as_ptr();
 
 /// GNU extension: basename of the program.
 ///
 /// Set during `__libc_start_main`.  Points into the same string as
 /// `program_invocation_name` but after the last '/'.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut program_invocation_short_name: *const u8 = UNKNOWN_PROG.as_ptr();
 
 /// BSD/common: short program name.
 ///
 /// Alias for `program_invocation_short_name`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut __progname: *const u8 = UNKNOWN_PROG.as_ptr();
 
 /// Full program name (BSD alias).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut __progname_full: *const u8 = UNKNOWN_PROG.as_ptr();
 
 // ---------------------------------------------------------------------------
@@ -395,7 +396,7 @@ pub static mut __progname_full: *const u8 = UNKNOWN_PROG.as_ptr();
 /// constructors in `.init_array`.  Modern toolchains use
 /// `.init_array` entries directly, but the symbol must exist for
 /// link compatibility.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __libc_csu_init() {
     // No-op: we don't have a .init_array processing loop yet.
     // Static constructors (if any) would be called here.
@@ -406,7 +407,7 @@ pub extern "C" fn __libc_csu_init() {
 /// Called during exit to run `.fini_array` destructors.  Modern
 /// toolchains use `__cxa_finalize` instead, but the symbol must
 /// exist for link compatibility.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __libc_csu_fini() {
     // No-op: destructors are handled by atexit/__cxa_finalize.
 }
@@ -421,7 +422,7 @@ pub extern "C" fn __libc_csu_fini() {
 /// duration that have non-trivial destructors.  Since we don't support
 /// thread-local storage cleanup yet, we ignore the registration.
 /// The destructor will leak (not be called at thread exit).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_thread_atexit_impl(
     _dtor: extern "C" fn(*mut u8),
     _obj: *mut u8,
@@ -441,7 +442,7 @@ pub extern "C" fn __cxa_thread_atexit_impl(
 ///
 /// Some glibc-linked code calls this directly instead of
 /// `pthread_atfork`.  We delegate to our existing stub.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __register_atfork(
     prepare: Option<extern "C" fn()>,
     parent: Option<extern "C" fn()>,
@@ -468,13 +469,13 @@ static LIBC_RELEASE: [u8; 8] = *b"stable\0\0";
 ///
 /// We're not actually glibc, but programs that check this at runtime
 /// (rather than link time) need a non-null result.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gnu_get_libc_version() -> *const u8 {
     LIBC_VERSION.as_ptr()
 }
 
 /// Return the "glibc release" string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gnu_get_libc_release() -> *const u8 {
     LIBC_RELEASE.as_ptr()
 }
@@ -488,7 +489,7 @@ pub extern "C" fn gnu_get_libc_release() -> *const u8 {
 /// glibc uses this to optimize mutex operations (skip atomic ops when
 /// single-threaded).  Value: 1 = single-threaded, 0 = multi-threaded.
 /// We start as single-threaded; `pthread_create` should set this to 0.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut __libc_single_threaded: u8 = 1;
 
 // ---------------------------------------------------------------------------
@@ -501,7 +502,7 @@ pub static mut __libc_single_threaded: u8 = 1;
 /// information to userspace at process startup (page size, UID, etc.).
 /// Since our kernel doesn't populate an auxv yet, we return sensible
 /// defaults for known types and 0 for everything else.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getauxval(typ: u64) -> u64 {
     // Common AT_* values (from Linux headers).
     const AT_PAGESZ: u64 = 6;
@@ -540,7 +541,7 @@ pub extern "C" fn getauxval(typ: u64) -> u64 {
 // pointer.  `init_environ` in environ.rs sets the real `environ`.
 // For programs that need __environ, they should use `environ` instead.
 // This exists purely for link compatibility.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut __environ: *mut *const u8 = core::ptr::null_mut();
 
 // ---------------------------------------------------------------------------
@@ -552,7 +553,7 @@ pub static mut __environ: *mut *const u8 = core::ptr::null_mut();
 /// This should never happen in correct code.  It means a base class
 /// constructor called a pure virtual method, or a dangling vtable
 /// reference was followed.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_pure_virtual() -> ! {
     let msg = b"pure virtual method called\n";
     let _ = crate::file::write(2, msg.as_ptr(), msg.len());
@@ -563,7 +564,7 @@ pub extern "C" fn __cxa_pure_virtual() -> ! {
 ///
 /// Similar to `__cxa_pure_virtual` but for functions marked `= delete`.
 /// Prints a diagnostic and aborts.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_deleted_virtual() -> ! {
     let msg = b"deleted virtual method called\n";
     let _ = crate::file::write(2, msg.as_ptr(), msg.len());
@@ -590,7 +591,7 @@ pub extern "C" fn __cxa_deleted_virtual() -> ! {
 ///
 /// Returns 1 if the caller should perform initialization (guard was
 /// uninitialized), or 0 if initialization already completed.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_guard_acquire(guard: *mut u64) -> i32 {
     if guard.is_null() {
         return 0;
@@ -603,7 +604,7 @@ pub extern "C" fn __cxa_guard_acquire(guard: *mut u64) -> i32 {
 }
 
 /// Release the initialization guard (mark as initialized).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_guard_release(guard: *mut u64) {
     if guard.is_null() {
         return;
@@ -616,7 +617,7 @@ pub extern "C" fn __cxa_guard_release(guard: *mut u64) {
 /// Abort initialization (exception during construction).
 ///
 /// Resets the guard so a future attempt can retry.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_guard_abort(guard: *mut u64) {
     if guard.is_null() {
         return;
@@ -639,7 +640,7 @@ pub extern "C" fn __cxa_guard_abort(guard: *mut u64) {
 /// Stub: always returns a pointer to a static buffer (only one
 /// exception can be in-flight at a time, but since we abort on throw
 /// this doesn't matter).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_allocate_exception(_thrown_size: usize) -> *mut u8 {
     static mut EXCEPTION_BUF: [u8; 128] = [0; 128];
     // SAFETY: Single-threaded; exceptions abort anyway.
@@ -649,7 +650,7 @@ pub extern "C" fn __cxa_allocate_exception(_thrown_size: usize) -> *mut u8 {
 /// C++ ABI: Throw an exception.
 ///
 /// Stub: aborts the process.  We don't support exception unwinding.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_throw(
     _thrown_exception: *mut u8,
     _tinfo: *mut u8,
@@ -663,7 +664,7 @@ pub extern "C" fn __cxa_throw(
 /// C++ ABI: Begin catching an exception.
 ///
 /// Stub: returns the exception object pointer (or null).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_begin_catch(exception_object: *mut u8) -> *mut u8 {
     exception_object
 }
@@ -671,14 +672,14 @@ pub extern "C" fn __cxa_begin_catch(exception_object: *mut u8) -> *mut u8 {
 /// C++ ABI: End catching an exception.
 ///
 /// Stub: no-op.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __cxa_end_catch() {}
 
 /// GCC C++ personality routine for exception handling.
 ///
 /// Stub: always returns `_URC_FATAL_PHASE1_ERROR` (8) to indicate
 /// we can't handle exceptions.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __gxx_personality_v0() -> i32 {
     8 // _URC_FATAL_PHASE1_ERROR
 }
@@ -686,7 +687,7 @@ pub extern "C" fn __gxx_personality_v0() -> i32 {
 /// Unwind library: Resume exception propagation.
 ///
 /// Stub: aborts.  We don't support stack unwinding.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _Unwind_Resume(_exception_object: *mut u8) -> ! {
     let msg = b"_Unwind_Resume called (not supported)\n";
     let _ = crate::file::write(2, msg.as_ptr(), msg.len());
@@ -702,7 +703,7 @@ pub extern "C" fn _Unwind_Resume(_exception_object: *mut u8) -> ! {
 /// GCC's `-fstack-protector-strong` may emit calls to this symbol
 /// instead of `__stack_chk_fail` for functions with local visibility.
 /// Same behavior: stack is corrupt, abort immediately.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __stack_chk_fail_local() -> ! {
     __stack_chk_fail()
 }

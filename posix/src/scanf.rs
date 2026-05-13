@@ -36,7 +36,7 @@
 // sscanf(str, fmt, ...) → _sscanf_impl(str, fmt, args_ptr)
 // scanf(fmt, ...) → reads from stdin (stub)
 
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 core::arch::global_asm!(
     // sscanf(str, fmt, ...) → _sscanf_impl(str, fmt, args_ptr)
     ".global sscanf",
@@ -145,7 +145,7 @@ core::arch::global_asm!(
 ///
 /// Returns the number of items successfully assigned, or EOF (-1)
 /// if the input is exhausted before the first conversion.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn _sscanf_impl(
     input: *const u8,
@@ -177,7 +177,7 @@ const SCANF_LINE_BUF: usize = 4096;
 /// Reads a line from stdin, then scans it using the same engine as
 /// `sscanf`.  Returns the number of items successfully assigned,
 /// or EOF (-1) if stdin is at end-of-file.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn _scanf_impl(
     fmt: *const u8,
@@ -211,7 +211,7 @@ pub extern "C" fn _scanf_impl(
 ///
 /// Reads a line from the given stream, then scans it.  The stream
 /// pointer is interpreted as a FILE* (our stdio fd encoding).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn _fscanf_impl(
     stream: *mut u8,

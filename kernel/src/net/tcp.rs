@@ -1716,16 +1716,25 @@ fn ooo_deliver(conn: &mut TcpConnection) {
                     break;
                 }
 
-                // Limit by rx_buffer capacity.
-                let can_accept = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
-                let deliver_len = (end_off.saturating_sub(start_off)).min(can_accept);
-                if deliver_len == 0 {
+                // Limit buffered amount by rx_buffer capacity.
+                let raw_len = end_off.saturating_sub(start_off);
+                if raw_len == 0 {
                     break;
                 }
+                // When read side is shut down, still advance rcv_nxt
+                // (so ACKs are correct) but don't buffer the data.
+                let buffer_len = if conn.local_read_closed {
+                    0
+                } else {
+                    raw_len.min(MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len()))
+                };
 
-                let actual_end = start_off.saturating_add(deliver_len);
-                conn.rx_buffer.extend_from_slice(&conn.ooo_buf[start_off..actual_end]);
-                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(deliver_len as u32);
+                if buffer_len > 0 {
+                    let actual_end = start_off.saturating_add(buffer_len);
+                    conn.rx_buffer.extend_from_slice(&conn.ooo_buf[start_off..actual_end]);
+                }
+                // Advance rcv_nxt for the full range regardless of buffering.
+                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(raw_len as u32);
                 found = true;
                 break; // Re-scan from the beginning (blocks may now be contiguous).
             }
@@ -2383,8 +2392,11 @@ pub fn read_blocking(handle: usize, timeout_polls: u32, max_bytes: usize) -> Ker
             if !conn.active {
                 return Err(KernelError::InvalidArgument);
             }
-            if !conn.rx_buffer.is_empty() || conn.remote_closed {
-                // Data available or connection closed.
+            // Return immediately if: data available, remote closed (EOF),
+            // or local read side shut down.
+            if !conn.rx_buffer.is_empty() || conn.remote_closed
+                || conn.local_read_closed
+            {
                 break;
             }
         }

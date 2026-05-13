@@ -249,7 +249,11 @@ fn file_flush(f: *mut File) -> i32 {
             unsafe { file.buf.as_ptr().add(written) },
             remaining,
         );
-        if ret < 0 {
+        if ret <= 0 {
+            // ret < 0: write error.
+            // ret == 0: kernel refused to write any bytes (e.g., full
+            //   disk, broken pipe).  Treat as fatal to avoid spinning
+            //   in an infinite loop.
             file.flags |= FLAG_ERR;
             // Shift unsent data to front of buffer so the next flush
             // retries from where we left off.
@@ -1217,13 +1221,20 @@ pub extern "C" fn setvbuf(
         }
     };
 
-    // Flush any pending data before changing mode.
+    // Flush pending writes / discard buffered reads before changing mode.
     if f.buf_dir == BUF_DIR_WRITE {
         file_flush(file);
-        // Re-borrow.
+        // Re-borrow after file_flush (which takes *mut File).
         let f = unsafe { &mut *file };
         f.buf_mode = new_mode;
     } else {
+        // Discard any buffered read data — switching modes invalidates
+        // the current buffer contents.  Without this, a mode switch
+        // (e.g., fully-buffered → unbuffered) could serve stale data
+        // from the old buffer on the next read.
+        f.buf_pos = 0;
+        f.buf_len = 0;
+        f.buf_dir = BUF_DIR_IDLE;
         f.buf_mode = new_mode;
     }
 

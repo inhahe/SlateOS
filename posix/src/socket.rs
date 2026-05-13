@@ -1393,24 +1393,74 @@ pub unsafe extern "C" fn accept(
         return -1;
     }
 
-    // If the listener socket has O_NONBLOCK, use non-blocking accept.
-    let nb_flag: u64 = if fdtable::get_status_flags(fd).unwrap_or(0)
-        & crate::fcntl::O_NONBLOCK != 0
-    {
-        1 // ACCEPT_NONBLOCK
-    } else {
-        0
-    };
+    let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
+        & crate::fcntl::O_NONBLOCK != 0;
 
-    let ret = syscall2(SYS_TCP_ACCEPT, entry.handle, nb_flag);
-    if ret < 0 {
-        errno::set_errno(translate_net_error(ret));
+    // Always use non-blocking accept (ACCEPT_NONBLOCK=1) to avoid the
+    // kernel's limited internal timeout.  Implement blocking semantics
+    // in the POSIX layer with a proper poll-wait loop.
+    let ret = syscall2(SYS_TCP_ACCEPT, entry.handle, 1); // Non-blocking
+    if ret >= 0 {
+        // Connection available immediately — fall through.
+    } else {
+        let err = translate_net_error(ret);
+        if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
+            // Blocking mode: poll-wait for a connection.
+            let conn = accept_wait(entry.handle);
+            if conn < 0 {
+                return conn;
+            }
+            // Fall through with conn as the handle.
+            // SAFETY: addr/addrlen validity ensured by caller of accept().
+            return unsafe { finish_accept(fd, conn as u64, addr, addrlen) };
+        }
+        errno::set_errno(err);
         return -1;
     }
 
+    let conn_handle = ret as u64;
+    // SAFETY: addr/addrlen validity ensured by caller of accept().
+    unsafe { finish_accept(fd, conn_handle, addr, addrlen) }
+}
+
+/// Poll-wait for a connection on a blocking listener.
+///
+/// Retries `SYS_TCP_ACCEPT` (non-blocking) in a loop with 10ms sleeps
+/// until a connection arrives.  Returns the connection handle (≥0) or
+/// -1 with errno set.
+fn accept_wait(listener_handle: u64) -> i32 {
+    const POLL_NS: u64 = 10_000_000; // 10ms
+
+    loop {
+        let _ = syscall1(SYS_SLEEP, POLL_NS);
+
+        let ret = syscall2(SYS_TCP_ACCEPT, listener_handle, 1);
+        if ret >= 0 {
+            return ret as i32;
+        }
+        let err = translate_net_error(ret);
+        if err != errno::EAGAIN && err != errno::EWOULDBLOCK {
+            // Real error (listener closed, etc.)
+            errno::set_errno(err);
+            return -1;
+        }
+        // Still no connection — keep polling.
+    }
+}
+
+/// Finish the accept operation: allocate fd, query peer address, store metadata.
+///
+/// # Safety
+///
+/// `addr` and `addrlen` must be valid as per the `accept()` contract.
+unsafe fn finish_accept(
+    listener_fd: i32,
+    conn_handle: u64,
+    addr: *mut Sockaddr,
+    addrlen: *mut SocklenT,
+) -> i32 {
     // Allocate a new fd for the accepted connection.
     // Accepted sockets are bidirectional (O_RDWR).
-    let conn_handle = ret as u64;
     let Some(new_fd) = fdtable::alloc_fd_with_flags(
         HandleKind::TcpStream, conn_handle, crate::fcntl::O_RDWR,
     ) else {
@@ -1436,7 +1486,7 @@ pub unsafe extern "C" fn accept(
     };
 
     // Store metadata for the new connected socket.
-    let listener_meta = get_meta(fd);
+    let listener_meta = get_meta(listener_fd);
     set_meta(new_fd, SocketMeta {
         sock_type: SOCK_STREAM,
         bound_port: listener_meta.map_or(0, |m| m.bound_port),

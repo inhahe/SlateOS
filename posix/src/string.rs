@@ -3815,6 +3815,67 @@ mod tests {
         }
         unsafe { *p.add(expected.len()) == 0 }
     }
+
+    // -------------------------------------------------------------------
+    // FORTIFY _chk wrappers — smoke tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_memcpy_chk_delegates() {
+        let src = [1u8, 2, 3, 4];
+        let mut dest = [0u8; 4];
+        let ret = unsafe { __memcpy_chk(dest.as_mut_ptr(), src.as_ptr(), 4, 4) };
+        assert_eq!(dest, [1, 2, 3, 4]);
+        assert_eq!(ret, dest.as_mut_ptr());
+    }
+
+    #[test]
+    fn test_memmove_chk_delegates() {
+        let src = [5u8, 6, 7, 8];
+        let mut dest = [0u8; 4];
+        let ret = unsafe { __memmove_chk(dest.as_mut_ptr(), src.as_ptr(), 4, 4) };
+        assert_eq!(dest, [5, 6, 7, 8]);
+        assert_eq!(ret, dest.as_mut_ptr());
+    }
+
+    #[test]
+    fn test_memset_chk_delegates() {
+        let mut buf = [0xFFu8; 4];
+        let ret = unsafe { __memset_chk(buf.as_mut_ptr(), 0, 4, 4) };
+        assert_eq!(buf, [0, 0, 0, 0]);
+        assert_eq!(ret, buf.as_mut_ptr());
+    }
+
+    #[test]
+    fn test_strcpy_chk_delegates() {
+        let src = b"hi\0";
+        let mut dest = [0u8; 4];
+        let ret = unsafe { __strcpy_chk(dest.as_mut_ptr(), src.as_ptr(), 4) };
+        assert_eq!(&dest[..3], b"hi\0");
+        assert_eq!(ret, dest.as_mut_ptr());
+    }
+
+    #[test]
+    fn test_strcat_chk_delegates() {
+        let mut buf = [0u8; 16];
+        buf[0] = b'A';
+        buf[1] = 0;
+        let src = b"BC\0";
+        let ret = unsafe { __strcat_chk(buf.as_mut_ptr(), src.as_ptr(), 16) };
+        assert_eq!(&buf[..4], b"ABC\0");
+        assert_eq!(ret, buf.as_mut_ptr());
+    }
+
+    #[test]
+    fn test_stpcpy_chk_delegates() {
+        let src = b"ok\0";
+        let mut dest = [0u8; 4];
+        let ret = unsafe { __stpcpy_chk(dest.as_mut_ptr(), src.as_ptr(), 4) };
+        assert_eq!(&dest[..3], b"ok\0");
+        // stpcpy returns pointer to the NUL.
+        let offset = ret as usize - dest.as_ptr() as usize;
+        assert_eq!(offset, 2);
+    }
 }
 
 // ===========================================================================

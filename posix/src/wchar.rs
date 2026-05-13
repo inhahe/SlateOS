@@ -351,6 +351,7 @@ pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) ->
 
         let seq_len = utf8_seq_len(lead);
         if seq_len == 0 {
+            crate::errno::set_errno(crate::errno::EILSEQ);
             return usize::MAX; // EILSEQ.
         }
 
@@ -360,6 +361,7 @@ pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) ->
         while i < seq_len {
             let b = unsafe { *src.add(src_off + i) };
             if !is_cont(b) {
+                crate::errno::set_errno(crate::errno::EILSEQ);
                 return usize::MAX;
             }
             buf[i] = b;
@@ -374,7 +376,10 @@ pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) ->
                 src_off += seq_len;
                 dst_count += 1;
             }
-            None => return usize::MAX,
+            None => {
+                crate::errno::set_errno(crate::errno::EILSEQ);
+                return usize::MAX;
+            }
         }
     }
     dst_count
@@ -409,12 +414,14 @@ pub unsafe extern "C" fn wcstombs(dst: *mut u8, src: *const WcharT, n: usize) ->
         }
 
         if wc < 0 {
+            crate::errno::set_errno(crate::errno::EILSEQ);
             return usize::MAX;
         }
 
         let mut buf = [0u8; 4];
         let enc_len = utf8_encode(wc as u32, &mut buf);
         if enc_len == 0 {
+            crate::errno::set_errno(crate::errno::EILSEQ);
             return usize::MAX; // Invalid code point.
         }
 
@@ -526,6 +533,7 @@ pub unsafe extern "C" fn mbrtowc(
 
         let seq_len = utf8_seq_len(lead);
         if seq_len == 0 {
+            crate::errno::set_errno(crate::errno::EILSEQ);
             return usize::MAX; // -1: EILSEQ.
         }
 
@@ -540,6 +548,7 @@ pub unsafe extern "C" fn mbrtowc(
             let b = unsafe { *s.add(consumed) };
             if !is_cont(b) {
                 state.reset();
+                crate::errno::set_errno(crate::errno::EILSEQ);
                 return usize::MAX; // -1: EILSEQ.
             }
             state.push(b);
@@ -562,7 +571,10 @@ pub unsafe extern "C" fn mbrtowc(
                 }
                 if cp == 0 { 0 } else { consumed }
             }
-            None => usize::MAX, // -1: EILSEQ.
+            None => {
+                crate::errno::set_errno(crate::errno::EILSEQ);
+                usize::MAX // -1: EILSEQ.
+            }
         }
     } else {
         // Continue from partial state.
@@ -571,6 +583,7 @@ pub unsafe extern "C" fn mbrtowc(
             let b = unsafe { *s.add(consumed) };
             if !is_cont(b) {
                 state.reset();
+                crate::errno::set_errno(crate::errno::EILSEQ);
                 return usize::MAX; // -1: EILSEQ.
             }
             state.push(b);
@@ -592,7 +605,10 @@ pub unsafe extern "C" fn mbrtowc(
                 }
                 if cp == 0 { 0 } else { consumed }
             }
-            None => usize::MAX,
+            None => {
+                crate::errno::set_errno(crate::errno::EILSEQ);
+                usize::MAX
+            }
         }
     }
 }
@@ -617,12 +633,14 @@ pub unsafe extern "C" fn wcrtomb(
     }
 
     if wc < 0 {
+        crate::errno::set_errno(crate::errno::EILSEQ);
         return usize::MAX;
     }
 
     let mut buf = [0u8; 4];
     let n = utf8_encode(wc as u32, &mut buf);
     if n == 0 {
+        crate::errno::set_errno(crate::errno::EILSEQ);
         return usize::MAX; // Invalid code point.
     }
 
@@ -1164,6 +1182,7 @@ unsafe fn wc_detect_base(nptr: *const WcharT, mut i: usize, mut base: i32) -> (i
 ///
 /// Skips leading whitespace, handles optional sign, auto-detects base
 /// when `base` is 0.  Stores end pointer through `endptr` if non-null.
+/// Sets errno to ERANGE on overflow (returns LONG_MAX/LONG_MIN).
 ///
 /// # Safety
 ///
@@ -1180,6 +1199,13 @@ pub unsafe extern "C" fn wcstol(
         return 0;
     }
 
+    // POSIX: base must be 0 or in [2, 36].
+    if base != 0 && (base < 2 || base > 36) {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        return 0;
+    }
+
     let mut i = unsafe { wc_skip_ws(nptr, 0) };
 
     let negative = unsafe { *nptr.add(i) } == 0x2d;
@@ -1190,14 +1216,28 @@ pub unsafe extern "C" fn wcstol(
     let (actual_base, new_i) = unsafe { wc_detect_base(nptr, i, base) };
     i = new_i;
     let start = i;
-    let mut result: i64 = 0;
+
+    // Accumulate in negative space to correctly handle LONG_MIN
+    // (whose absolute value exceeds LONG_MAX by one).
+    let base64 = i64::from(actual_base);
+    let cutoff = i64::MIN / base64;       // Most-negative safe value before multiply.
+    let cutlim = -(i64::MIN % base64);    // Maximum digit before overflow after multiply.
+    let mut acc: i64 = 0;
+    let mut overflow = false;
 
     loop {
         let wc = unsafe { *nptr.add(i) };
         if wc == 0 { break; }
         let d = wc_digit(wc, actual_base);
         if d < 0 { break; }
-        result = result.saturating_mul(i64::from(actual_base)).saturating_add(i64::from(d));
+
+        // Check for overflow before accumulating.
+        if acc < cutoff || (acc == cutoff && i64::from(d) > cutlim) {
+            overflow = true;
+            // Continue parsing to set endptr correctly per POSIX.
+        } else if !overflow {
+            acc = acc * base64 - i64::from(d);
+        }
         i = i.wrapping_add(1);
     }
 
@@ -1205,10 +1245,18 @@ pub unsafe extern "C" fn wcstol(
         unsafe { *endptr = if i == start { nptr } else { nptr.add(i) }; }
     }
 
-    if negative { result.saturating_neg() } else { result }
+    if overflow {
+        crate::errno::set_errno(crate::errno::ERANGE);
+        return if negative { i64::MIN } else { i64::MAX };
+    }
+
+    // acc is non-positive; negate if the input was positive.
+    if negative { acc } else { -acc }
 }
 
 /// `wcstoul` — convert a wide string to an `unsigned long` (`u64` on LP64).
+///
+/// Sets errno to ERANGE on overflow (returns ULONG_MAX).
 ///
 /// # Safety
 ///
@@ -1221,6 +1269,13 @@ pub unsafe extern "C" fn wcstoul(
     base: i32,
 ) -> u64 {
     if nptr.is_null() {
+        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        return 0;
+    }
+
+    // POSIX: base must be 0 or in [2, 36].
+    if base != 0 && (base < 2 || base > 36) {
+        crate::errno::set_errno(crate::errno::EINVAL);
         if !endptr.is_null() { unsafe { *endptr = nptr; } }
         return 0;
     }
@@ -1238,18 +1293,34 @@ pub unsafe extern "C" fn wcstoul(
     i = new_i;
     let start = i;
     let mut result: u64 = 0;
+    let base_u64 = actual_base as u64;
+    let cutoff = u64::MAX / base_u64;
+    let cutlim = u64::MAX % base_u64;
+    let mut overflow = false;
 
     loop {
         let wc = unsafe { *nptr.add(i) };
         if wc == 0 { break; }
         let d = wc_digit(wc, actual_base);
         if d < 0 { break; }
-        result = result.saturating_mul(actual_base as u64).saturating_add(d as u64);
+        let d_u64 = d as u64;
+
+        if result > cutoff || (result == cutoff && d_u64 > cutlim) {
+            overflow = true;
+            // Continue parsing to set endptr correctly per POSIX.
+        } else if !overflow {
+            result = result * base_u64 + d_u64;
+        }
         i = i.wrapping_add(1);
     }
 
     if !endptr.is_null() {
         unsafe { *endptr = if i == start { nptr } else { nptr.add(i) }; }
+    }
+
+    if overflow {
+        crate::errno::set_errno(crate::errno::ERANGE);
+        return u64::MAX;
     }
 
     if negative { result.wrapping_neg() } else { result }

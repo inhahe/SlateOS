@@ -962,6 +962,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] I/O Latency (fs::iolatency): Block I/O latency monitoring with 8-bucket histograms, per-device stats, slow I/O detection, configurable threshold; `iolatency`/`iolat` kshell command; /proc/iolatency; 8 self-tests
   - [x] Task Stats (fs::taskstats): Per-task comprehensive accounting with CPU/IO/memory/scheduling stats, 6 delay types, top-CPU ranking; `taskstats`/`tstats` kshell command; /proc/taskstats; 8 self-tests
   - [x] Kernel Probes (fs::kprobes): Dynamic tracing with 5 probe types (kprobe/kretprobe/tracepoint/uprobe/uretprobe), hit/miss counting, overhead tracking, enable/disable; `kprobes`/`kprb` kshell command; /proc/kprobes; 8 self-tests
+  - [x] Net Socket (fs::netsock): TCP/UDP/Unix socket tracking with connection states, traffic accounting, retransmit counting, per-PID/proto/state filtering; `netsock`/`nsock` kshell command; /proc/netsock; 8 self-tests
+  - [x] Block Queue (fs::blkqueue): Block I/O request queue monitoring with per-device depth, submit/complete/merge counters, plug/unplug tracking; `blkqueue`/`bqueue` kshell command; /proc/blkqueue; 8 self-tests
+  - [x] Power Stats (fs::powerstat): Power domain monitoring with 8 domains, 5 power states, energy accounting (uJ), wake event logging with 6 sources; `powerstat`/`pwstat` kshell command; /proc/powerstat; 8 self-tests
+  - [x] Inode Stats (fs::inodestat): Inode/dentry cache monitoring with per-FS inode counts, dcache hit/miss/eviction tracking, hit rate calculation; `inodestat`/`icache` kshell command; /proc/inodestat; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

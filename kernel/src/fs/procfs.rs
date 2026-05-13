@@ -436,6 +436,10 @@ const ROOT_FILES: &[&str] = &[
     "iolatency",
     "taskstats",
     "kprobes",
+    "netsock",
+    "blkqueue",
+    "powerstat",
+    "inodestat",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8478,6 +8482,83 @@ fn gen_kprobes() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_netsock() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (socks, opened, closed, rx, tx, retrans, ops) = crate::fs::netsock::stats();
+    out.push_str(&format!("sockets: {}\n", socks));
+    out.push_str(&format!("total_opened: {}\n", opened));
+    out.push_str(&format!("total_closed: {}\n", closed));
+    out.push_str(&format!("total_rx_bytes: {}\n", rx));
+    out.push_str(&format!("total_tx_bytes: {}\n", tx));
+    out.push_str(&format!("total_retransmits: {}\n", retrans));
+    out.push_str(&format!("ops: {}\n", ops));
+    for s in crate::fs::netsock::list() {
+        out.push_str(&format!("{} pid={} {}:{} -> {}:{} {} rx={} tx={}\n",
+            s.proto.label(), s.pid, s.local_addr, s.local_port,
+            s.remote_addr, s.remote_port, s.state.label(), s.rx_bytes, s.tx_bytes));
+    }
+    out.into_bytes()
+}
+
+fn gen_blkqueue() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (devs, submitted, completed, merged, plugs, ops) = crate::fs::blkqueue::stats();
+    out.push_str(&format!("devices: {}\n", devs));
+    out.push_str(&format!("total_submitted: {}\n", submitted));
+    out.push_str(&format!("total_completed: {}\n", completed));
+    out.push_str(&format!("total_merged: {}\n", merged));
+    out.push_str(&format!("total_plugs: {}\n", plugs));
+    out.push_str(&format!("ops: {}\n", ops));
+    for d in crate::fs::blkqueue::device_queues() {
+        out.push_str(&format!("{}: depth={}/{} sub={} comp={} merged={} plugs={}/{} {}\n",
+            d.device, d.queue_depth, d.max_depth, d.submitted, d.completed,
+            d.merged, d.plug_count, d.unplug_count,
+            if d.plugged { "PLUGGED" } else { "unplugged" }));
+    }
+    out.into_bytes()
+}
+
+fn gen_powerstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (domains, energy, transitions, wakes, ops) = crate::fs::powerstat::stats();
+    out.push_str(&format!("domains: {}\n", domains));
+    out.push_str(&format!("total_energy_uj: {}\n", energy));
+    out.push_str(&format!("total_transitions: {}\n", transitions));
+    out.push_str(&format!("total_wakes: {}\n", wakes));
+    out.push_str(&format!("ops: {}\n", ops));
+    for d in crate::fs::powerstat::domain_stats() {
+        out.push_str(&format!("{}: {} energy={}uJ trans={} active={}ns idle={}ns\n",
+            d.domain.label(), d.current_state.label(), d.energy_uj,
+            d.transitions, d.active_time_ns, d.idle_time_ns));
+    }
+    out.into_bytes()
+}
+
+fn gen_inodestat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (fss, allocs, frees, evictions, lookups, ops) = crate::fs::inodestat::stats();
+    out.push_str(&format!("filesystems: {}\n", fss));
+    out.push_str(&format!("total_allocs: {}\n", allocs));
+    out.push_str(&format!("total_frees: {}\n", frees));
+    out.push_str(&format!("total_evictions: {}\n", evictions));
+    out.push_str(&format!("dcache_lookups: {}\n", lookups));
+    out.push_str(&format!("ops: {}\n", ops));
+    let d = crate::fs::inodestat::dcache_stats();
+    let rate = crate::fs::inodestat::dcache_hit_rate();
+    out.push_str(&format!("dcache: entries={} hits={} misses={} rate={}.{}%\n",
+        d.entries, d.hits, d.misses, rate / 100, rate % 100));
+    for f in crate::fs::inodestat::fs_stats() {
+        out.push_str(&format!("{} ({}): active={} alloc={} free={} evict={} dirty={}\n",
+            f.mount_point, f.fs_type.label(), f.active, f.allocated, f.freed,
+            f.evicted, f.dirty));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9079,6 +9160,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "iolatency" => Ok(gen_iolatency()),
         "taskstats" => Ok(gen_taskstats()),
         "kprobes" => Ok(gen_kprobes()),
+        "netsock" => Ok(gen_netsock()),
+        "blkqueue" => Ok(gen_blkqueue()),
+        "powerstat" => Ok(gen_powerstat()),
+        "inodestat" => Ok(gen_inodestat()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

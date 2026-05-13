@@ -49,7 +49,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::vfs::{DirEntry, EntryType, Vfs};
+use crate::fs::vfs::{EntryType, Vfs};
 
 /// Disk usage percentage (0–100) above which auto-prune activates.
 ///

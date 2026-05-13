@@ -459,7 +459,4 @@ pub mod zip;
 pub mod zstd;
 pub mod zramstat;
 
-pub use vfs::{
-    DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, LockType, Timestamp, Vfs,
-    validate_path,
-};
+pub use vfs::{DirEntry, EntryType, FileAttr, FileMeta, LockType, Vfs};

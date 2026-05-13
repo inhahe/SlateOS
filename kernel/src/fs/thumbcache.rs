@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::error::{KernelError, KernelResult};
+use crate::error::KernelResult;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------

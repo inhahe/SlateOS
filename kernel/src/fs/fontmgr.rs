@@ -376,7 +376,6 @@ pub fn render_settings() -> RenderSettings {
 fn add_system_font(state: &mut State, family: &str, style: FontStyle, format: FontFormat,
     category: FontCategory, path: &str, glyphs: u32)
 {
-    use alloc::format;
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     state.fonts.push(FontInfo {
         id,
@@ -391,7 +390,6 @@ fn add_system_font(state: &mut State, family: &str, style: FontStyle, format: Fo
         glyph_count: glyphs,
         unicode_range_count: 4,
     });
-    let _ = format; // suppress if unused
 }
 
 /// Initialise with system fonts.

@@ -177,6 +177,39 @@ pub unsafe extern "C" fn __libc_start_main(
     // The fd table is statically initialized, so this is a no-op,
     // but explicit initialization would go here.
 
+    // Set program name from argv[0] if available.
+    // err/warn/errx/warnx use __progname for the "prog: msg" prefix.
+    if arg_count > 0 && !arg_vec.is_null() {
+        // SAFETY: arg_count > 0 guarantees argv[0] exists.
+        let argv0 = unsafe { *arg_vec };
+        if !argv0.is_null() {
+            unsafe {
+                addr_of_mut!(program_invocation_name).write(argv0);
+                addr_of_mut!(__progname_full).write(argv0);
+            }
+            // Find basename (after last '/').
+            let mut last_slash: *const u8 = core::ptr::null();
+            let mut scan = argv0;
+            unsafe {
+                while *scan != 0 {
+                    if *scan == b'/' {
+                        last_slash = scan;
+                    }
+                    scan = scan.add(1);
+                }
+            }
+            let short = if last_slash.is_null() {
+                argv0
+            } else {
+                unsafe { last_slash.add(1) }
+            };
+            unsafe {
+                addr_of_mut!(program_invocation_short_name).write(short);
+                addr_of_mut!(__progname).write(short);
+            }
+        }
+    }
+
     // Ensure `environ` points at a valid (empty) null-terminated array.
     // POSIX requires environ to be non-NULL so programs can safely
     // iterate it without checking for NULL first.

@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-use crate::error::{KernelError, KernelResult};
+use crate::error::KernelResult;
 use crate::fs::{EntryType, Vfs};
 use crate::serial_println;
 

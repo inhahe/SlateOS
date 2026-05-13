@@ -21,9 +21,6 @@
 //!   → hotkeys (zoom in/out bindings)
 //! ```
 
-use alloc::string::String;
-use alloc::vec::Vec;
-use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 

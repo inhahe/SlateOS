@@ -459,9 +459,10 @@ fn rebuild_environ_ptrs() {
     }
 
     // Update the environ pointer.
+    let ptr_val = core::ptr::addr_of_mut!(ENVIRON_PTRS).cast::<*const u8>();
     unsafe {
-        core::ptr::addr_of_mut!(environ).write(
-            core::ptr::addr_of_mut!(ENVIRON_PTRS).cast::<*const u8>()
-        );
+        core::ptr::addr_of_mut!(environ).write(ptr_val);
+        // Keep __environ (glibc alias) in sync.
+        core::ptr::addr_of_mut!(crate::crt::__environ).write(ptr_val);
     }
 }

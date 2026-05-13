@@ -34,7 +34,6 @@
 //! - **taskbar**: reads task list for running-app display
 //! - **sysdiag**: reads resources for system health panels
 
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;

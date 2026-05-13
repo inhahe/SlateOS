@@ -41,7 +41,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::{DirEntry, EntryType, FileMeta, Vfs};
+use crate::fs::{EntryType, FileMeta, Vfs};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------

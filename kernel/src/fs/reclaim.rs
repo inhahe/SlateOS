@@ -35,11 +35,10 @@
 //! design.txt: "Per-user, per-group, and per-app quotas" + trash auto-prune
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
-use crate::error::{KernelError, KernelResult};
+use crate::error::KernelResult;
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------

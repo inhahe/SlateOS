@@ -669,7 +669,10 @@ unsafe fn inet_pton6(src: *const u8, dst: *mut u8) -> i32 {
     // Expand :: to fill missing groups.
     let mut result = [0u8; 16];
     if let Some(cc_pos) = coloncolon_pos {
-        if group_count > 8 {
+        // RFC 2373: :: represents "one or more groups of 16 bits of
+        // zeros".  If group_count >= 8 there is nothing to fill, which
+        // means the :: is invalid (e.g. "1:2:3:4:5:6:7::8").
+        if group_count > 7 {
             return 0;
         }
         let fill = 8usize.wrapping_sub(group_count);
@@ -3809,7 +3812,8 @@ pub unsafe extern "C" fn getaddrinfo(
             };
             let serv = unsafe { getservbyname(service, proto_filter) };
             if serv.is_null() {
-                0
+                // POSIX: service name not found → EAI_SERVICE.
+                return EAI_SERVICE;
             } else {
                 // s_port is in network byte order.
                 let s = unsafe { &*serv };

@@ -39,7 +39,7 @@ use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
-use crate::fs::{DirEntry, EntryType, Vfs};
+use crate::fs::{EntryType, Vfs};
 use crate::serial_println;
 
 // ---------------------------------------------------------------------------

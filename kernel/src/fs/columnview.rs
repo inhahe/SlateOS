@@ -32,7 +32,6 @@
 //! (length, bitrate for audio; width, height for images) appear only
 //! when files of that type are present.
 
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

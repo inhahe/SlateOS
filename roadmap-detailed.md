@@ -476,10 +476,10 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
 
 ### 2.1 Driver Framework
 
-- [ ] Userspace driver framework:
-  - [ ] MMIO mapping into driver process address space
+- [-] Userspace driver framework: _(udriver.rs: kernel-side resource tracking, MMIO mapping management, DMA buffer lifecycle, IRQ association, IOMMU domain tracking, crash cleanup)_
+  - [x] MMIO mapping into driver process address space _(udriver.rs: BAR mapping, permission control, page-aligned, per-driver tracking)_
   - [x] Interrupt delivery via IPC — SYS_IRQ_REGISTER/WAIT/RELEASE
-  - [ ] DMA mapping setup syscalls
+  - [x] DMA mapping setup syscalls _(udriver.rs: alloc/free DMA buffers, direction control, bus addr translation, IOMMU domain integration)_
   - [x] Driver crash detection and automatic restart _(drvmon.rs: heartbeat/process-alive health modes, exponential backoff restart, configurable policies)_
 - [ ] Ada/SPARK FFI bridge for kernel-space safety-critical drivers
 - [-] virtio drivers (disk, network, GPU) for VM development/testing — virtio-blk and virtio-net done (in-kernel, legacy PCI transport); GPU pending

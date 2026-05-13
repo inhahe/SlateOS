@@ -142,6 +142,7 @@ mod serial;
 mod smep_smap;
 mod smp;
 mod spectre;
+mod sockact;
 mod softirq;
 mod svcstart;
 mod sync;

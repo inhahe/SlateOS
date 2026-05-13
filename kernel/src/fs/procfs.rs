@@ -363,6 +363,7 @@ const ROOT_FILES: &[&str] = &[
     "sysevents",
     "logpersist",
     "svcstart",
+    "sockactivation",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7376,6 +7377,10 @@ fn gen_svcstart() -> Vec<u8> {
     crate::svcstart::procfs_content().into_bytes()
 }
 
+fn gen_sockactivation() -> Vec<u8> {
+    crate::sockact::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10046,6 +10051,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "sysevents" => Ok(gen_sysevents()),
         "logpersist" => Ok(gen_logpersist()),
         "svcstart" => Ok(gen_svcstart()),
+        "sockactivation" => Ok(gen_sockactivation()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

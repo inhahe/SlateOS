@@ -33020,6 +33020,67 @@ fn cmd_svcstart(args: &str) {
             svcstart::init();
             shell_println!("Startup orchestrator initialized");
         }
+        "sockets" | "sock" => {
+            use crate::sockact;
+            let entries = sockact::list();
+            if entries.is_empty() {
+                shell_println!("No socket activations configured.");
+            } else {
+                shell_println!("{:>3} {:>5} {:4} {:>6} {:16} {:12} {:>6} {:>4}",
+                    "ID", "SvcID", "Type", "Port", "Service", "State", "Activ", "Pend");
+                for e in &entries {
+                    shell_println!("{:>3} {:>5} {:4} {:>6} {:16} {:12} {:>6} {:>4}",
+                        e.id, e.service_id, e.socket_type.label(),
+                        if e.port > 0 { alloc::format!("{}", e.port) } else { alloc::string::String::from("-") },
+                        e.service_name, e.state.label(), e.activation_count, e.pending_connections);
+                }
+            }
+        }
+        "addsock" => {
+            use crate::sockact::{self, SocketSpec, SocketType};
+            if parts.len() >= 4 {
+                let svc_id_str = parts.get(1).copied().unwrap_or("0");
+                let sock_type_str = parts.get(2).copied().unwrap_or("tcp");
+                let port_or_path = parts.get(3).copied().unwrap_or("0");
+                if let Ok(svc_id) = svc_id_str.parse::<u32>() {
+                    let (socket_type, port, path) = match sock_type_str {
+                        "tcp" => (SocketType::Tcp, port_or_path.parse::<u16>().unwrap_or(0), String::new()),
+                        "udp" => (SocketType::Udp, port_or_path.parse::<u16>().unwrap_or(0), String::new()),
+                        "unix" => (SocketType::Unix, 0u16, String::from(port_or_path)),
+                        "ipc" => (SocketType::IpcChannel, 0u16, String::from(port_or_path)),
+                        _ => {
+                            shell_println!("Unknown socket type: {}", sock_type_str);
+                            return;
+                        }
+                    };
+                    match sockact::register(svc_id, SocketSpec {
+                        socket_type, port, path, bind_addr: String::new(), backlog: 128,
+                    }) {
+                        Ok(id) => shell_println!("Socket activation entry {} registered", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid service ID");
+                }
+            } else {
+                shell_println!("Usage: svcstart addsock <svc-id> <tcp|udp|unix|ipc> <port|path>");
+            }
+        }
+        "rmsock" => {
+            use crate::sockact;
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match sockact::unregister(id) {
+                        Ok(()) => shell_println!("Socket entry {} removed", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid entry ID");
+                }
+            } else {
+                shell_println!("Usage: svcstart rmsock <entry-id>");
+            }
+        }
         "test" => {
             match svcstart::self_test() {
                 Ok(()) => shell_println!("Service startup self-test: PASSED"),
@@ -33038,6 +33099,9 @@ fn cmd_svcstart(args: &str) {
             shell_println!("  apps               List startup apps");
             shell_println!("  addapp <path> <name> [wait]  Add a startup app");
             shell_println!("  rmapp <id>         Remove a startup app");
+            shell_println!("  sockets            List socket activations");
+            shell_println!("  addsock <svc-id> <type> <port|path>  Register socket");
+            shell_println!("  rmsock <entry-id>  Remove socket activation");
             shell_println!("  init               Initialize orchestrator");
             shell_println!("  test               Run self-test");
         }

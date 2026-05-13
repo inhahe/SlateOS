@@ -132,7 +132,7 @@ pub extern "C" fn __errno_location() -> *mut i32 {
 /// These are the negative values returned by native syscalls.
 /// MUST stay in sync with kernel/src/error.rs — any mismatch causes
 /// wrong errno values throughout the entire POSIX layer.
-mod native {
+pub(crate) mod native {
     // --- General (0-99 range: -1 to -6) ---
     pub const INTERNAL_ERROR: i64 = -1;
     pub const NOT_SUPPORTED: i64 = -2;

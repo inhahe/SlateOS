@@ -265,7 +265,23 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64)
         }
         HandleKind::TcpStream => {
-            syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64)
+            let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64);
+            if ret >= 0 {
+                return ret as SsizeT;
+            }
+            // Check if WouldBlock on a blocking socket — retry with timeout.
+            let is_would_block = ret == errno::native::WOULD_BLOCK;
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
+                & crate::fcntl::O_NONBLOCK != 0;
+            if is_would_block && !is_nb {
+                let timeout_ms = crate::socket::get_meta(fd)
+                    .map_or(0u64, |m| m.sndtimeo_ms);
+                return crate::socket::tcp_send_wait(
+                    entry.handle, buf, count, timeout_ms,
+                );
+            }
+            // Non-blocking or non-WouldBlock error — translate normally.
+            return errno::translate(ret) as SsizeT;
         }
         HandleKind::UdpSocket => {
             // POSIX: write() on a connected UDP socket behaves like send().

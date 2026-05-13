@@ -1848,6 +1848,57 @@ pub(crate) fn tcp_recv_wait(
     }
 }
 
+/// Poll-wait for TCP send to succeed (blocking write with SO_SNDTIMEO).
+///
+/// Retries `SYS_TCP_SEND` in a loop with 10ms sleeps until the kernel
+/// accepts data or the timeout expires.  `timeout_ms == 0` means wait
+/// indefinitely.
+///
+/// Returns bytes sent or -1 (with errno set).
+pub(crate) fn tcp_send_wait(
+    handle: u64,
+    buf: *const u8,
+    len: usize,
+    timeout_ms: u64,
+) -> isize {
+    const POLL_NS: u64 = 10_000_000; // 10ms
+
+    let deadline = if timeout_ms > 0 {
+        let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+        now.saturating_add(timeout_ms.saturating_mul(1_000_000))
+    } else {
+        u64::MAX
+    };
+
+    loop {
+        let _ = syscall1(SYS_SLEEP, POLL_NS);
+
+        let ret = syscall3(SYS_TCP_SEND, handle, buf as u64, len as u64);
+        if ret > 0 {
+            return ret as isize;
+        }
+        if ret == 0 {
+            // 0 bytes sent — connection may be closing.
+            return 0;
+        }
+        // Negative: check if it's just WouldBlock (window still closed).
+        let err = translate_net_error(ret);
+        if err != errno::EAGAIN && err != errno::EWOULDBLOCK {
+            // Real error (ECONNRESET, EPIPE, etc.)
+            errno::set_errno(err);
+            return -1;
+        }
+        // Still can't send — check timeout.
+        if deadline != u64::MAX {
+            let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+            if now >= deadline {
+                errno::set_errno(errno::EAGAIN);
+                return -1;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // sendto() / recvfrom()
 // ---------------------------------------------------------------------------

@@ -27,10 +27,12 @@ pub extern "C" fn imaxdiv(numer: i64, denom: i64) -> ImaxdivT {
     if denom == 0 {
         return ImaxdivT { quot: 0, rem: 0 };
     }
-    #[allow(clippy::arithmetic_side_effects)]
+    // Guard against overflow: i64::MIN / -1 would panic in debug builds.
+    // POSIX leaves this undefined, but a C library must not crash.
+    // Use wrapping division (same as release-mode behavior).
     ImaxdivT {
-        quot: numer / denom,
-        rem: numer % denom,
+        quot: numer.wrapping_div(denom),
+        rem: numer.wrapping_rem(denom),
     }
 }
 
@@ -160,9 +162,12 @@ pub unsafe extern "C" fn wcstoimax(
         }
     }
 
-    // Parse digits.
+    // Parse digits into u64 for full range coverage.
+    // Accumulating as i64 cannot represent i64::MIN's absolute value
+    // (9223372036854775808 > i64::MAX), so we parse unsigned and convert.
     let start = i;
-    let mut result: i64 = 0;
+    let mut acc: u64 = 0;
+    let mut overflowed = false;
     loop {
         let wc = unsafe { *nptr.add(i) };
         if wc == 0 {
@@ -172,7 +177,10 @@ pub unsafe extern "C" fn wcstoimax(
         if d < 0 {
             break;
         }
-        result = result.saturating_mul(i64::from(base)).saturating_add(i64::from(d));
+        match acc.checked_mul(base as u64).and_then(|a| a.checked_add(d as u64)) {
+            Some(v) => acc = v,
+            None => overflowed = true,
+        }
         i = i.wrapping_add(1);
     }
 
@@ -185,7 +193,30 @@ pub unsafe extern "C" fn wcstoimax(
         }
     }
 
-    if negative { result.saturating_neg() } else { result }
+    // Convert u64 accumulator to signed result with overflow detection.
+    // i64::MIN magnitude (9223372036854775808) is (i64::MAX as u64) + 1.
+    if overflowed {
+        crate::errno::set_errno(crate::errno::ERANGE);
+        if negative { i64::MIN } else { i64::MAX }
+    } else if negative {
+        let min_mag = (i64::MAX as u64).wrapping_add(1); // 9223372036854775808
+        if acc > min_mag {
+            crate::errno::set_errno(crate::errno::ERANGE);
+            i64::MIN
+        } else if acc == min_mag {
+            i64::MIN // Exactly representable.
+        } else {
+            // acc <= i64::MAX, safe to cast and negate.
+            -(acc as i64)
+        }
+    } else {
+        if acc > i64::MAX as u64 {
+            crate::errno::set_errno(crate::errno::ERANGE);
+            i64::MAX
+        } else {
+            acc as i64
+        }
+    }
 }
 
 /// Convert a `wchar_t` string to `uintmax_t`.
@@ -256,6 +287,7 @@ pub unsafe extern "C" fn wcstoumax(
     // Parse digits.
     let start = i;
     let mut result: u64 = 0;
+    let mut overflowed = false;
     loop {
         let wc = unsafe { *nptr.add(i) };
         if wc == 0 {
@@ -265,7 +297,10 @@ pub unsafe extern "C" fn wcstoumax(
         if d < 0 {
             break;
         }
-        result = result.saturating_mul(base as u64).saturating_add(d as u64);
+        match result.checked_mul(base as u64).and_then(|a| a.checked_add(d as u64)) {
+            Some(v) => result = v,
+            None => overflowed = true,
+        }
         i = i.wrapping_add(1);
     }
 
@@ -275,6 +310,11 @@ pub unsafe extern "C" fn wcstoumax(
         } else {
             unsafe { *endptr = nptr.add(i); }
         }
+    }
+
+    if overflowed {
+        crate::errno::set_errno(crate::errno::ERANGE);
+        return u64::MAX;
     }
 
     // POSIX: negative sign means wrapping negation of the unsigned result.
@@ -359,5 +399,167 @@ mod tests {
         assert_eq!(v, 0);
         // endptr should point to start (no conversion).
         assert_eq!(end, s.as_ptr());
+    }
+
+    // -----------------------------------------------------------------------
+    // wcstoimax edge cases: i64::MIN, overflow, ERANGE
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcstoimax_i64_min() {
+        // "-9223372036854775808\0" — exactly i64::MIN
+        let s: [i32; 21] = [
+            0x2d, // '-'
+            0x39, 0x32, 0x32, 0x33, 0x33, 0x37, 0x32, 0x30, // 92233720
+            0x33, 0x36, 0x38, 0x35, 0x34, 0x37, 0x37, 0x35, // 36854775
+            0x38, 0x30, 0x38, // 808
+            0x00,
+        ];
+        crate::errno::set_errno(0);
+        let v = unsafe { wcstoimax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, i64::MIN);
+        // Not an overflow — should NOT set ERANGE.
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_wcstoimax_i64_max() {
+        // "9223372036854775807\0" — exactly i64::MAX
+        let s: [i32; 20] = [
+            0x39, 0x32, 0x32, 0x33, 0x33, 0x37, 0x32, 0x30, // 92233720
+            0x33, 0x36, 0x38, 0x35, 0x34, 0x37, 0x37, 0x35, // 36854775
+            0x38, 0x30, 0x37, // 807
+            0x00,
+        ];
+        crate::errno::set_errno(0);
+        let v = unsafe { wcstoimax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, i64::MAX);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_wcstoimax_positive_overflow_sets_erange() {
+        // "9223372036854775808\0" — one past i64::MAX
+        let s: [i32; 20] = [
+            0x39, 0x32, 0x32, 0x33, 0x33, 0x37, 0x32, 0x30, // 92233720
+            0x33, 0x36, 0x38, 0x35, 0x34, 0x37, 0x37, 0x35, // 36854775
+            0x38, 0x30, 0x38, // 808
+            0x00,
+        ];
+        crate::errno::set_errno(0);
+        let v = unsafe { wcstoimax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, i64::MAX);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_wcstoimax_negative_overflow_sets_erange() {
+        // "-9223372036854775809\0" — one past i64::MIN magnitude
+        let s: [i32; 21] = [
+            0x2d, // '-'
+            0x39, 0x32, 0x32, 0x33, 0x33, 0x37, 0x32, 0x30, // 92233720
+            0x33, 0x36, 0x38, 0x35, 0x34, 0x37, 0x37, 0x35, // 36854775
+            0x38, 0x30, 0x39, // 809
+            0x00,
+        ];
+        crate::errno::set_errno(0);
+        let v = unsafe { wcstoimax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, i64::MIN);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_wcstoimax_massive_overflow() {
+        // "99999999999999999999\0" — way past u64::MAX, digit overflow
+        let s: [i32; 21] = [
+            0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39,
+            0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39,
+            0x00,
+        ];
+        crate::errno::set_errno(0);
+        let v = unsafe { wcstoimax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, i64::MAX);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
+
+    // -----------------------------------------------------------------------
+    // wcstoumax edge cases: overflow, ERANGE, wrapping negation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcstoumax_u64_max() {
+        // "18446744073709551615\0" — exactly u64::MAX
+        let s: [i32; 21] = [
+            0x31, 0x38, 0x34, 0x34, 0x36, 0x37, 0x34, 0x34, 0x30, 0x37, // 1844674407
+            0x33, 0x37, 0x30, 0x39, 0x35, 0x35, 0x31, 0x36, 0x31, 0x35, // 3709551615
+            0x00,
+        ];
+        crate::errno::set_errno(0);
+        let v = unsafe { wcstoumax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, u64::MAX);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_wcstoumax_overflow_sets_erange() {
+        // "18446744073709551616\0" — one past u64::MAX
+        let s: [i32; 21] = [
+            0x31, 0x38, 0x34, 0x34, 0x36, 0x37, 0x34, 0x34, 0x30, 0x37, // 1844674407
+            0x33, 0x37, 0x30, 0x39, 0x35, 0x35, 0x31, 0x36, 0x31, 0x36, // 3709551616
+            0x00,
+        ];
+        crate::errno::set_errno(0);
+        let v = unsafe { wcstoumax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, u64::MAX);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_wcstoumax_negative_wraps() {
+        // "-1\0" — POSIX says wrapping negation: 0u64.wrapping_sub(1) = u64::MAX
+        let s: [i32; 3] = [0x2d, 0x31, 0x00];
+        crate::errno::set_errno(0);
+        let v = unsafe { wcstoumax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, u64::MAX);
+        // Wrapping negation is NOT an error.
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_wcstoumax_negative_two_wraps() {
+        // "-2\0" — wraps to u64::MAX - 1
+        let s: [i32; 3] = [0x2d, 0x32, 0x00];
+        let v = unsafe { wcstoumax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, u64::MAX - 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // imaxabs / imaxdiv edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_imaxabs_i64_min() {
+        // i64::MIN.wrapping_neg() = i64::MIN (two's complement).
+        // This is defined behavior for imaxabs per POSIX (undefined in C
+        // standard, but we use wrapping_neg so it's deterministic).
+        let r = imaxabs(i64::MIN);
+        assert_eq!(r, i64::MIN); // wrapping semantics
+    }
+
+    #[test]
+    fn test_imaxdiv_negative() {
+        let r = imaxdiv(-17, 5);
+        assert_eq!(r.quot, -3);
+        assert_eq!(r.rem, -2);
+    }
+
+    #[test]
+    fn test_imaxdiv_i64_min_by_minus_one() {
+        // Division overflow: i64::MIN / -1 can't be represented in i64.
+        // POSIX leaves this undefined, but we must not crash.
+        // Our implementation uses wrapping division → quot = i64::MIN, rem = 0.
+        let r = imaxdiv(i64::MIN, -1);
+        assert_eq!(r.quot, i64::MIN);
+        assert_eq!(r.rem, 0);
     }
 }

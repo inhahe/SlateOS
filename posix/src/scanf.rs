@@ -397,8 +397,8 @@ fn scan_core(ctx: &mut ScanCtx) -> i32 {
             while ctx.fmt_peek().is_ascii_digit() {
                 has_width = true;
                 width = width
-                    .wrapping_mul(10)
-                    .wrapping_add(usize::from(ctx.fmt_peek().wrapping_sub(b'0')));
+                    .saturating_mul(10)
+                    .saturating_add(usize::from(ctx.fmt_peek().wrapping_sub(b'0')));
                 ctx.fmt_advance();
             }
             if !has_width {
@@ -683,7 +683,9 @@ fn scan_unsigned_int(
         return false;
     }
 
-    // Skip optional 0x prefix for hex.
+    // Skip optional 0x/0X prefix for hex, with backtracking if no
+    // valid hex digit follows (e.g. "0xG" → parse "0" as the result).
+    let saved_pos = ctx.si;
     let mut consumed_prefix: usize = 0;
     if base == 16 && ctx.peek() == b'0' {
         let next = unsafe { *ctx.input.add(ctx.si.wrapping_add(1)) };
@@ -715,7 +717,14 @@ fn scan_unsigned_int(
     }
 
     if count == 0 {
-        return false;
+        if consumed_prefix > 0 {
+            // Incomplete hex prefix ("0xG"): backtrack and parse "0".
+            ctx.si = saved_pos;
+            ctx.advance(); // consume the '0'
+            val = 0;
+        } else {
+            return false;
+        }
     }
 
     if !suppress {
@@ -1606,5 +1615,86 @@ mod tests {
         );
         assert_eq!(n, 1);
         assert_eq!(val, 0xDEAD_BEEF_CAFEu64);
+    }
+
+    // -----------------------------------------------------------------------
+    // Hex prefix backtracking: "0xG" should parse as 0, not fail
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scan_hex_incomplete_prefix_backtracks() {
+        // Input "0xG" with %x: "0x" is not followed by hex digit,
+        // so backtrack and parse "0" as the hex value 0.
+        let mut val: u32 = 99;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(
+            b"0xG\0".as_ptr(),
+            b"%x\0".as_ptr(),
+            args.as_ptr(),
+        );
+        assert_eq!(n, 1);
+        assert_eq!(val, 0);
+    }
+
+    #[test]
+    fn scan_hex_just_zero() {
+        // "0" alone should parse as hex value 0.
+        let mut val: u32 = 99;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(
+            b"0\0".as_ptr(),
+            b"%x\0".as_ptr(),
+            args.as_ptr(),
+        );
+        assert_eq!(n, 1);
+        assert_eq!(val, 0);
+    }
+
+    #[test]
+    fn scan_hex_width_limits_prefix() {
+        // "%1x" on "0xFF" — width=1, so only "0" is consumed (1 char).
+        // The prefix "0x" would need width >= 3 to be useful.
+        let mut val: u32 = 99;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(
+            b"0xFF\0".as_ptr(),
+            b"%1x\0".as_ptr(),
+            args.as_ptr(),
+        );
+        assert_eq!(n, 1);
+        assert_eq!(val, 0);
+    }
+
+    #[test]
+    fn scan_hex_width_3_parses_one_digit_after_prefix() {
+        // "%3x" on "0xFF" — width=3: "0x" prefix (2) + "F" (1) = 3 total.
+        let mut val: u32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(
+            b"0xFF\0".as_ptr(),
+            b"%3x\0".as_ptr(),
+            args.as_ptr(),
+        );
+        assert_eq!(n, 1);
+        assert_eq!(val, 0xF);
+    }
+
+    // -----------------------------------------------------------------------
+    // Width overflow: huge width in format string should not wrap
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scan_width_overflow_no_crash() {
+        // "%99999999999999999999d" — width overflows usize in wrapping mode.
+        // With saturating arithmetic, it becomes usize::MAX (= "no limit").
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(
+            b"42\0".as_ptr(),
+            b"%99999999999999999999d\0".as_ptr(),
+            args.as_ptr(),
+        );
+        assert_eq!(n, 1);
+        assert_eq!(val, 42);
     }
 }

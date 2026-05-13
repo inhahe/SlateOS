@@ -512,7 +512,11 @@ fn track_hole(path: &str, offset: u64, length: u64) -> bool {
             holes: Vec::new(),
             last_access_ns: now,
         });
-        table.last_mut().unwrap()
+        // SAFETY invariant: we just pushed, so last_mut() is always Some.
+        match table.last_mut() {
+            Some(entry) => entry,
+            None => return false,
+        }
     };
 
     // Insert hole in sorted order, merging with adjacent.

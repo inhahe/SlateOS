@@ -309,7 +309,8 @@ pub fn get_app_pref(app_id: &str) -> KernelResult<AppNotifPref> {
 pub fn set_app_enabled(app_id: &str, enabled: bool) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id).unwrap();
+        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+            .ok_or(KernelError::NotFound)?;
         pref.enabled = enabled;
         Ok(())
     })
@@ -319,7 +320,8 @@ pub fn set_app_enabled(app_id: &str, enabled: bool) -> KernelResult<()> {
 pub fn set_banner_style(app_id: &str, style: BannerStyle) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id).unwrap();
+        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+            .ok_or(KernelError::NotFound)?;
         pref.banner_style = style;
         Ok(())
     })
@@ -329,7 +331,8 @@ pub fn set_banner_style(app_id: &str, style: BannerStyle) -> KernelResult<()> {
 pub fn set_app_sound(app_id: &str, enabled: bool) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id).unwrap();
+        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+            .ok_or(KernelError::NotFound)?;
         pref.sound = enabled;
         Ok(())
     })
@@ -339,7 +342,8 @@ pub fn set_app_sound(app_id: &str, enabled: bool) -> KernelResult<()> {
 pub fn set_app_priority(app_id: &str, priority: NotifPriority) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id).unwrap();
+        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+            .ok_or(KernelError::NotFound)?;
         pref.priority = priority;
         Ok(())
     })
@@ -349,7 +353,8 @@ pub fn set_app_priority(app_id: &str, priority: NotifPriority) -> KernelResult<(
 pub fn set_app_lock_screen(app_id: &str, vis: LockScreenVisibility) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id).unwrap();
+        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+            .ok_or(KernelError::NotFound)?;
         pref.lock_screen = vis;
         Ok(())
     })
@@ -359,7 +364,8 @@ pub fn set_app_lock_screen(app_id: &str, vis: LockScreenVisibility) -> KernelRes
 pub fn set_dnd_override(app_id: &str, allowed: bool) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id).unwrap();
+        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+            .ok_or(KernelError::NotFound)?;
         pref.dnd_override = allowed;
         Ok(())
     })
@@ -369,7 +375,8 @@ pub fn set_dnd_override(app_id: &str, allowed: bool) -> KernelResult<()> {
 pub fn set_app_group(app_id: &str, group: bool) -> KernelResult<()> {
     ensure_app_pref(app_id)?;
     with_state(|state| {
-        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id).unwrap();
+        let pref = state.app_prefs.iter_mut().find(|p| p.app_id == app_id)
+            .ok_or(KernelError::NotFound)?;
         pref.group = group;
         Ok(())
     })

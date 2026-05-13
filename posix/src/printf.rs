@@ -345,7 +345,14 @@ pub extern "C" fn _snprintf_impl(
 #[unsafe(no_mangle)]
 pub extern "C" fn _sprintf_impl(buf: *mut u8, fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
     // No size limit — dangerous but matches C semantics.
-    format_core(buf, usize::MAX, fmt, args, fargs)
+    let n = format_core(buf, usize::MAX, fmt, args, fargs);
+    // C99: "A null character is written at the end of the characters written."
+    if !buf.is_null() && n >= 0 {
+        // SAFETY: format_core wrote n bytes starting at buf; caller must provide
+        // a buffer large enough for the output + null terminator.
+        unsafe { *buf.add(n as usize) = 0; }
+    }
+    n
 }
 
 /// `asprintf(strp, fmt, ...)` — allocate and format a string.
@@ -580,9 +587,32 @@ fn dispatch_spec(
 
         b'p' => {
             let val = consume_arg(args, arg_idx);
+            // Count hex digits to determine total output width for padding.
+            let hex_len = if val == 0 {
+                1usize
+            } else {
+                let mut n = val;
+                let mut count = 0usize;
+                while n > 0 {
+                    count = count.wrapping_add(1);
+                    n = n.wrapping_shr(4);
+                }
+                count
+            };
+            let total = 2usize.wrapping_add(hex_len); // "0x" + digits
+
+            // Right-justify padding.
+            if !spec.flags.left_align && spec.width > total {
+                emit_padding(dst, b' ', spec.width.wrapping_sub(total));
+            }
             emit_byte(dst, b'0');
             emit_byte(dst, b'x');
-            format_unsigned(dst, val, 16, false, &spec.flags, 0, None);
+            // Emit hex digits without additional padding (handled here).
+            format_unsigned(dst, val, 16, false, &FormatFlags::new(), 0, None);
+            // Left-justify padding.
+            if spec.flags.left_align && spec.width > total {
+                emit_padding(dst, b' ', spec.width.wrapping_sub(total));
+            }
         }
 
         b'n' => {

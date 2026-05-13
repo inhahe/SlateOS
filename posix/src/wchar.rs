@@ -3518,4 +3518,202 @@ mod tests {
         assert_eq!(dst[0], b'x' as i32);
         assert_eq!(dst[1], 0); // Unchanged.
     }
+
+    // -------------------------------------------------------------------
+    // Wide character classification (isw* functions)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_iswalnum_alpha() {
+        assert_ne!(iswalnum(b'A' as i32), 0);
+        assert_ne!(iswalnum(b'z' as i32), 0);
+        assert_ne!(iswalnum(b'5' as i32), 0);
+        assert_eq!(iswalnum(b' ' as i32), 0);
+        assert_eq!(iswalnum(b'!' as i32), 0);
+    }
+
+    #[test]
+    fn test_iswalpha_letters_only() {
+        assert_ne!(iswalpha(b'A' as i32), 0);
+        assert_ne!(iswalpha(b'Z' as i32), 0);
+        assert_ne!(iswalpha(b'a' as i32), 0);
+        assert_ne!(iswalpha(b'z' as i32), 0);
+        assert_eq!(iswalpha(b'0' as i32), 0);
+        assert_eq!(iswalpha(b' ' as i32), 0);
+    }
+
+    #[test]
+    fn test_iswdigit_digits() {
+        assert_ne!(iswdigit(b'0' as i32), 0);
+        assert_ne!(iswdigit(b'9' as i32), 0);
+        assert_eq!(iswdigit(b'a' as i32), 0);
+        assert_eq!(iswdigit(b'/' as i32), 0);
+        assert_eq!(iswdigit(b':' as i32), 0); // just past '9'
+    }
+
+    #[test]
+    fn test_iswxdigit_hex() {
+        assert_ne!(iswxdigit(b'0' as i32), 0);
+        assert_ne!(iswxdigit(b'9' as i32), 0);
+        assert_ne!(iswxdigit(b'a' as i32), 0);
+        assert_ne!(iswxdigit(b'f' as i32), 0);
+        assert_ne!(iswxdigit(b'A' as i32), 0);
+        assert_ne!(iswxdigit(b'F' as i32), 0);
+        assert_eq!(iswxdigit(b'g' as i32), 0);
+        assert_eq!(iswxdigit(b'G' as i32), 0);
+    }
+
+    #[test]
+    fn test_iswspace_whitespace() {
+        assert_ne!(iswspace(b' ' as i32), 0);
+        assert_ne!(iswspace(b'\t' as i32), 0);
+        assert_ne!(iswspace(b'\n' as i32), 0);
+        assert_ne!(iswspace(b'\r' as i32), 0);
+        assert_ne!(iswspace(0x0b), 0); // vertical tab
+        assert_ne!(iswspace(0x0c), 0); // form feed
+        assert_eq!(iswspace(b'a' as i32), 0);
+    }
+
+    #[test]
+    fn test_iswblank_tab_space() {
+        assert_ne!(iswblank(b' ' as i32), 0);
+        assert_ne!(iswblank(b'\t' as i32), 0);
+        assert_eq!(iswblank(b'\n' as i32), 0);
+        assert_eq!(iswblank(b'a' as i32), 0);
+    }
+
+    #[test]
+    fn test_iswupper_lowercase() {
+        assert_ne!(iswupper(b'A' as i32), 0);
+        assert_ne!(iswupper(b'Z' as i32), 0);
+        assert_eq!(iswupper(b'a' as i32), 0);
+        assert_eq!(iswupper(b'0' as i32), 0);
+    }
+
+    #[test]
+    fn test_iswlower_uppercase() {
+        assert_ne!(iswlower(b'a' as i32), 0);
+        assert_ne!(iswlower(b'z' as i32), 0);
+        assert_eq!(iswlower(b'A' as i32), 0);
+        assert_eq!(iswlower(b'0' as i32), 0);
+    }
+
+    #[test]
+    fn test_iswpunct_punctuation() {
+        assert_ne!(iswpunct(b'!' as i32), 0);
+        assert_ne!(iswpunct(b'.' as i32), 0);
+        assert_ne!(iswpunct(b',' as i32), 0);
+        assert_ne!(iswpunct(b'@' as i32), 0);
+        assert_eq!(iswpunct(b'A' as i32), 0);
+        assert_eq!(iswpunct(b'0' as i32), 0);
+        assert_eq!(iswpunct(b' ' as i32), 0);
+    }
+
+    #[test]
+    fn test_iswgraph_printable_not_space() {
+        assert_ne!(iswgraph(b'A' as i32), 0);
+        assert_ne!(iswgraph(b'!' as i32), 0);
+        assert_ne!(iswgraph(b'0' as i32), 0);
+        assert_eq!(iswgraph(b' ' as i32), 0); // space is not graph
+        assert_eq!(iswgraph(0x00), 0); // NUL is not graph
+    }
+
+    // -------------------------------------------------------------------
+    // Wide character case conversion (towlower/towupper)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_towlower_conversion() {
+        assert_eq!(towlower(b'A' as i32), b'a' as i32);
+        assert_eq!(towlower(b'Z' as i32), b'z' as i32);
+        // Already lowercase — no change.
+        assert_eq!(towlower(b'a' as i32), b'a' as i32);
+        // Non-alpha — no change.
+        assert_eq!(towlower(b'5' as i32), b'5' as i32);
+    }
+
+    #[test]
+    fn test_towupper_conversion() {
+        assert_eq!(towupper(b'a' as i32), b'A' as i32);
+        assert_eq!(towupper(b'z' as i32), b'Z' as i32);
+        // Already uppercase — no change.
+        assert_eq!(towupper(b'A' as i32), b'A' as i32);
+        // Non-alpha — no change.
+        assert_eq!(towupper(b'!' as i32), b'!' as i32);
+    }
+
+    // -------------------------------------------------------------------
+    // btowc / wctob — byte ↔ wide character
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_btowc_ascii() {
+        assert_eq!(btowc(b'A' as i32), b'A' as i32);
+        assert_eq!(btowc(0), 0); // NUL
+        assert_eq!(btowc(127), 127); // DEL
+    }
+
+    #[test]
+    fn test_btowc_non_ascii() {
+        // Values > 127 return WEOF (-1).
+        assert_eq!(btowc(128), -1);
+        assert_eq!(btowc(255), -1);
+        assert_eq!(btowc(-1), -1); // EOF
+    }
+
+    #[test]
+    fn test_wctob_ascii() {
+        assert_eq!(wctob(b'A' as i32), b'A' as i32);
+        assert_eq!(wctob(0), 0);
+        assert_eq!(wctob(127), 127);
+    }
+
+    #[test]
+    fn test_wctob_non_ascii() {
+        assert_eq!(wctob(128), -1);
+        assert_eq!(wctob(0x1000), -1);
+        assert_eq!(wctob(-1), -1); // WEOF
+    }
+
+    // -------------------------------------------------------------------
+    // mbsinit
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_mbsinit_null_is_initial() {
+        assert_ne!(mbsinit(core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_mbsinit_fresh_state() {
+        let state = MbstateT::new();
+        assert_ne!(mbsinit(&raw const state), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // nl_langinfo
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_nl_langinfo_codeset() {
+        let s = nl_langinfo(14); // CODESET
+        assert!(!s.is_null());
+        // Should return "UTF-8".
+        assert_eq!(unsafe { *s }, b'U');
+    }
+
+    #[test]
+    fn test_nl_langinfo_radixchar() {
+        let s = nl_langinfo(4); // RADIXCHAR
+        assert!(!s.is_null());
+        assert_eq!(unsafe { *s }, b'.');
+    }
+
+    #[test]
+    fn test_nl_langinfo_unknown_item() {
+        let s = nl_langinfo(9999);
+        assert!(!s.is_null());
+        // Should return empty string.
+        assert_eq!(unsafe { *s }, 0);
+    }
 }

@@ -381,25 +381,25 @@ pub(crate) fn copy_meta(src_fd: i32, dst_fd: i32) {
 // ---------------------------------------------------------------------------
 
 /// Convert a 16-bit value from host to network byte order.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn htons(hostshort: u16) -> u16 {
     hostshort.to_be()
 }
 
 /// Convert a 32-bit value from host to network byte order.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn htonl(hostlong: u32) -> u32 {
     hostlong.to_be()
 }
 
 /// Convert a 16-bit value from network to host byte order.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ntohs(netshort: u16) -> u16 {
     u16::from_be(netshort)
 }
 
 /// Convert a 32-bit value from network to host byte order.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ntohl(netlong: u32) -> u32 {
     u32::from_be(netlong)
 }
@@ -415,7 +415,7 @@ pub extern "C" fn ntohl(netlong: u32) -> u32 {
 /// # Safety
 ///
 /// `cp` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
     /// Sentinel for parse failure.
     const INADDR_NONE: u32 = 0xFFFF_FFFF;
@@ -481,7 +481,7 @@ pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
 /// # Safety
 ///
 /// The returned pointer is valid until the next call to `inet_ntoa`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inet_ntoa(addr: InAddr) -> *const u8 {
     static mut NTOA_BUF: [u8; 16] = [0u8; 16];
 
@@ -538,7 +538,7 @@ fn write_u8_decimal(buf: &mut [u8; 16], pos: &mut usize, val: u8) {
 /// or -1 with errno set to `EAFNOSUPPORT` if `af` is unsupported.
 ///
 /// `AF_INET6` is recognised but not supported (returns -1).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn inet_pton(af: i32, src: *const u8, dst: *mut u8) -> i32 {
     if src.is_null() || dst.is_null() {
         return 0;
@@ -766,7 +766,7 @@ unsafe fn is_valid_ipv4(s: *const u8) -> bool {
 /// least `size` bytes.
 ///
 /// Returns `dst` on success, or null with errno set.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inet_ntop(af: i32, src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
     if src.is_null() || dst.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -975,7 +975,7 @@ fn write_u8_dec_ntop(buf: &mut [u8; 16], pos: &mut usize, val: u8) {
 ///
 /// `cp` must be a valid null-terminated string.
 /// `inp` must point to at least 4 bytes (a `struct in_addr`).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn inet_aton(cp: *const u8, inp: *mut u32) -> i32 {
     if cp.is_null() || inp.is_null() {
         return 0;
@@ -1006,7 +1006,7 @@ pub unsafe extern "C" fn inet_aton(cp: *const u8, inp: *mut u32) -> i32 {
 /// `bind()`/`listen()`.
 ///
 /// Returns a file descriptor on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
     // Validate domain.
     if domain != AF_INET {
@@ -1107,7 +1107,7 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
 /// # Safety
 ///
 /// `addr` must point to a valid `SockaddrIn` of at least `addrlen` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // Splitting this function would fragment the connect() logic across TCP/UDP handling.
 pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: SocklenT) -> i32 {
     if addr.is_null() {
@@ -1340,7 +1340,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
 /// # Safety
 ///
 /// `addr` must point to a valid `SockaddrIn`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT) -> i32 {
     if addr.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -1436,7 +1436,7 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
 /// uses a fixed backlog).
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
@@ -1501,7 +1501,7 @@ pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
 ///
 /// If `addr` is non-null, it must point to a buffer of at least
 /// `*addrlen` bytes, and `addrlen` must be non-null.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn accept(
     fd: i32,
     addr: *mut Sockaddr,
@@ -1685,7 +1685,7 @@ unsafe fn finish_accept(
 /// # Safety
 ///
 /// Same requirements as `accept`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn accept4(
     fd: i32,
     addr: *mut Sockaddr,
@@ -1726,7 +1726,7 @@ pub unsafe extern "C" fn accept4(
 /// # Safety
 ///
 /// `buf` must be valid for `len` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn send(
     fd: i32,
     buf: *const u8,
@@ -1865,7 +1865,7 @@ pub unsafe extern "C" fn send(
 /// # Safety
 ///
 /// `buf` must be valid for `len` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn recv(
     fd: i32,
     buf: *mut u8,
@@ -2270,7 +2270,7 @@ pub(crate) fn tcp_send_wait(
 ///
 /// `buf` must be valid for `len` bytes.  `dest_addr` must point to
 /// a valid `SockaddrIn` of at least `addrlen` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // Unified TCP/UDP sendto with implicit bind; splitting would scatter the logic.
 pub unsafe extern "C" fn sendto(
     fd: i32,
@@ -2425,7 +2425,7 @@ pub unsafe extern "C" fn sendto(
 ///
 /// `buf` must be valid for `len` bytes.  If `src_addr` is non-null,
 /// it must point to a buffer of at least `*addrlen` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // TCP/UDP recvfrom with blocking, timeout, and address fill logic; splitting would fragment the flow.
 pub unsafe extern "C" fn recvfrom(
     fd: i32,
@@ -2641,7 +2641,7 @@ pub unsafe extern "C" fn recvfrom(
 /// fully closed).
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
     if !(SHUT_RD..=SHUT_RDWR).contains(&how) {
         errno::set_errno(errno::EINVAL);
@@ -2714,7 +2714,7 @@ pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
 /// `IP_DROP_MEMBERSHIP` (SOL_IP / IPPROTO_IP level for multicast).
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::similar_names)] // tv_sec/tv_usec are standard POSIX field names.
 #[allow(clippy::too_many_lines)] // Large match over socket option levels/names; splitting would scatter related option handling.
 pub extern "C" fn setsockopt(
@@ -2946,7 +2946,7 @@ fn setsockopt_multicast(
 /// (SOL_SOCKET) and `TCP_NODELAY` (SOL_TCP).
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::similar_names)] // tv_sec/tv_usec are standard POSIX field names.
 #[allow(clippy::too_many_lines)] // Large match over socket option levels/names; splitting would scatter related option handling.
 pub unsafe extern "C" fn getsockopt(
@@ -3146,7 +3146,7 @@ pub unsafe extern "C" fn getsockopt(
 ///
 /// `addr` must point to writable memory of at least `*addrlen` bytes.
 /// `addrlen` must be a valid pointer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getpeername(
     fd: i32,
     addr: *mut Sockaddr,
@@ -3227,7 +3227,7 @@ pub unsafe extern "C" fn getpeername(
 ///
 /// `addr` must point to writable memory of at least `*addrlen` bytes.
 /// `addrlen` must be a valid pointer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getsockname(
     fd: i32,
     addr: *mut Sockaddr,
@@ -3361,7 +3361,7 @@ static mut HOSTENT_RESULT: Hostent = Hostent {
 /// # Safety
 ///
 /// `name` must be a valid null-terminated hostname string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn gethostbyname(name: *const u8) -> *const Hostent {
     if name.is_null() {
         return core::ptr::null();
@@ -3435,7 +3435,7 @@ pub unsafe extern "C" fn gethostbyname(name: *const u8) -> *const Hostent {
 /// # Safety
 ///
 /// `name` must be a valid null-terminated C string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn gethostbyname2(name: *const u8, af: i32) -> *const Hostent {
     match af {
         AF_INET => {
@@ -3478,7 +3478,7 @@ static mut HOSTENT_REV_RESULT: Hostent = Hostent {
 /// # Safety
 ///
 /// `addr` must point to at least `len` (4) bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn gethostbyaddr(
     addr: *const u8,
     len: i32,
@@ -3569,19 +3569,19 @@ pub const NO_DATA: i32 = 4;
 ///
 /// Programs can access this as `extern int h_errno` or via
 /// `*__h_errno_location()`.  Both refer to the same storage.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut h_errno: i32 = 0;
 
 /// Get a pointer to the resolver error variable.
 ///
 /// Used by C code as `extern int h_errno;` via `*__h_errno_location()`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __h_errno_location() -> *mut i32 {
     core::ptr::addr_of_mut!(h_errno)
 }
 
 /// Return a string describing a resolver error code.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hstrerror(err: i32) -> *const u8 {
     match err {
         0 => c"Resolver Error 0 (no error)".as_ptr().cast::<u8>(),
@@ -3594,7 +3594,7 @@ pub extern "C" fn hstrerror(err: i32) -> *const u8 {
 }
 
 /// Print a resolver error message to stderr.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn herror(s: *const u8) {
     // SAFETY: s is null-terminated.
     if !s.is_null() {
@@ -3727,7 +3727,7 @@ static mut GAI_ADDR2: SockaddrIn = SockaddrIn {
 ///
 /// - `node` and `service` must be valid null-terminated strings (or null).
 /// - `res` must be a valid pointer to a `*mut Addrinfo`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // DNS resolution + result assembly; splitting would scatter the getaddrinfo logic.
 pub unsafe extern "C" fn getaddrinfo(
     node: *const u8,
@@ -3905,13 +3905,13 @@ pub unsafe extern "C" fn getaddrinfo(
 ///
 /// Since our getaddrinfo uses static storage (not heap allocation),
 /// this is a no-op.  Programs must still call it for POSIX compliance.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn freeaddrinfo(_res: *mut Addrinfo) {
     // No-op: we use static storage, not heap allocation.
 }
 
 /// Return a string describing a getaddrinfo error code.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gai_strerror(errcode: i32) -> *const u8 {
     match errcode {
         0 => c"Success".as_ptr().cast::<u8>(),
@@ -3968,7 +3968,7 @@ pub const NI_DGRAM: i32 = 16;
 /// - Only supports `AF_INET` (IPv4).
 ///
 /// Returns 0 on success, or an EAI_* error code.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_arguments)] // POSIX-defined signature.
 #[allow(clippy::too_many_lines)] // Host + service formatting with reverse DNS; splitting would fragment the logic.
 pub extern "C" fn getnameinfo(
@@ -4178,7 +4178,7 @@ fn write_u16_decimal(buf: &mut [u8; 6], pos: &mut usize, val: u16) {
 ///
 /// Stub: returns -1/ENOSYS.  Our kernel doesn't yet support
 /// connected socket pairs (used for Unix domain IPC).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn socketpair(
     _domain: i32,
     _sock_type: i32,
@@ -4239,7 +4239,7 @@ pub struct Cmsghdr {
 /// concatenates into a stack buffer for a single `send` call.  For
 /// larger messages, sends each iov sequentially.
 /// Ancillary data (`msg_control`) is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // Scatter/gather send with stack buffer consolidation for TCP/UDP; splitting would fragment the iov assembly logic.
 #[allow(clippy::cast_ptr_alignment)] // SAFETY: msg_name is typed as *mut u8 in Msghdr but actually points to a sockaddr; callers guarantee correct alignment.
 pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isize {
@@ -4446,7 +4446,7 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
 /// messages, receives directly into the buffer.  For multi-iov messages,
 /// receives into a stack buffer and copies out to each iov.
 /// Ancillary data (`msg_control`) is not populated.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // Scatter/gather recv with multi-iov distribution and MSG_WAITALL; splitting would fragment the logic.
 #[allow(clippy::cast_ptr_alignment)] // SAFETY: msg_name is typed as *mut u8 in Msghdr but actually points to a sockaddr; callers guarantee correct alignment.
 pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize {
@@ -4756,7 +4756,7 @@ fn parse_port_string(s: *const u8) -> i32 {
 /// Stub: returns 0 (failure) since our OS doesn't have named network
 /// interfaces yet.  Programs that enumerate interfaces will see this
 /// as "interface not found".
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn if_nametoindex(ifname: *const u8) -> u32 {
     if ifname.is_null() {
         return 0; // 0 means "no such interface" per POSIX.
@@ -4778,7 +4778,7 @@ pub unsafe extern "C" fn if_nametoindex(ifname: *const u8) -> u32 {
 /// # Safety
 ///
 /// `ifname` must point to writable memory of at least `IF_NAMESIZE` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn if_indextoname(ifindex: u32, ifname: *mut u8) -> *mut u8 {
     if ifname.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -4890,7 +4890,7 @@ static mut IFADDRS_LO_MASK: SockaddrIn = SockaddrIn {
 /// # Safety
 ///
 /// `ifap` must be a valid pointer to write the result.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32 {
     if ifap.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -4955,7 +4955,7 @@ pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32 {
 /// Free memory allocated by `getifaddrs()`.
 ///
 /// No-op: our implementation uses static storage.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn freeifaddrs(_ifa: *mut Ifaddrs) {
     // Static storage — nothing to free.
 }
@@ -5071,7 +5071,7 @@ unsafe fn fill_servent(entry: &ServiceEntry) -> *const Servent {
 ///
 /// `name` must be a valid null-terminated string.
 /// `proto` may be null (match any protocol) or a null-terminated protocol name.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getservbyname(
     name: *const u8,
     proto: *const u8,
@@ -5107,7 +5107,7 @@ pub unsafe extern "C" fn getservbyname(
 /// # Safety
 ///
 /// `proto` may be null (match any protocol) or a null-terminated protocol name.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getservbyport(
     port: i32,
     proto: *const u8,
@@ -5221,7 +5221,7 @@ unsafe fn fill_protoent(entry: &ProtoEntry) -> *const Protoent {
 /// # Safety
 ///
 /// `name` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getprotobyname(name: *const u8) -> *const Protoent {
     if name.is_null() {
         return core::ptr::null();
@@ -5248,7 +5248,7 @@ pub unsafe extern "C" fn getprotobyname(name: *const u8) -> *const Protoent {
 /// Look up a protocol by number.
 ///
 /// Returns a pointer to a static `Protoent`, or NULL if not found.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getprotobynumber(number: i32) -> *const Protoent {
     for entry in PROTOCOLS {
         if entry.number == number {
@@ -5354,10 +5354,12 @@ mod tests {
 
     #[test]
     fn test_htons_big_endian() {
-        // On little-endian x86_64, htons should swap bytes.
+        // htons converts host byte order to network (big-endian) byte order.
+        // On little-endian x86_64, this means swapping bytes.
         let val: u16 = 0x1234;
         let net = htons(val);
-        assert_eq!(net.to_be(), val.to_be());
+        // htons(x) == x.to_be() — that IS the conversion.
+        assert_eq!(net, val.to_be());
         // Round-trip must recover original.
         assert_eq!(ntohs(net), val);
     }

@@ -256,7 +256,7 @@ fn default_termios() -> Termios {
 /// The third argument is a pointer whose type depends on `request`.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
@@ -463,7 +463,7 @@ fn handle_tcsets(kind: HandleKind) -> i32 {
 ///
 /// Returns 1 if `fd` is a Console fd, 0 otherwise (with errno set
 /// to `ENOTTY`).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn isatty(fd: i32) -> i32 {
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
@@ -485,7 +485,7 @@ pub extern "C" fn isatty(fd: i32) -> i32 {
 /// Return the name of the terminal device.
 ///
 /// Returns "/dev/console\0" for Console fds, NULL otherwise.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ttyname(fd: i32) -> *const u8 {
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
@@ -508,7 +508,7 @@ pub extern "C" fn ttyname(fd: i32) -> *const u8 {
 /// string is returned.
 ///
 /// Our OS always uses `/dev/console` as the controlling terminal.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ctermid(s: *mut u8) -> *const u8 {
     let path = c"/dev/console";
     if s.is_null() {
@@ -540,7 +540,7 @@ pub extern "C" fn ctermid(s: *mut u8) -> *const u8 {
 /// # Safety
 ///
 /// `termios_p` must point to a valid `Termios` structure.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcgetattr(fd: i32, termios_p: *mut Termios) -> i32 {
     ioctl(fd, TCGETS, termios_p.cast::<u8>())
 }
@@ -557,7 +557,7 @@ pub extern "C" fn tcgetattr(fd: i32, termios_p: *mut Termios) -> i32 {
 /// # Safety
 ///
 /// `termios_p` must point to a valid `Termios` structure.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcsetattr(fd: i32, optional_actions: i32, termios_p: *const Termios) -> i32 {
     let request = match optional_actions {
         TCSANOW => TCSETS,
@@ -583,7 +583,7 @@ pub extern "C" fn tcsetattr(fd: i32, optional_actions: i32, termios_p: *const Te
 /// # Safety
 ///
 /// `termios_p` must be non-null and point to a valid `Termios`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfgetispeed(termios_p: *const Termios) -> u32 {
     if termios_p.is_null() {
         return 0;
@@ -597,7 +597,7 @@ pub unsafe extern "C" fn cfgetispeed(termios_p: *const Termios) -> u32 {
 /// # Safety
 ///
 /// `termios_p` must be non-null and point to a valid `Termios`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfgetospeed(termios_p: *const Termios) -> u32 {
     if termios_p.is_null() {
         return 0;
@@ -613,7 +613,7 @@ pub unsafe extern "C" fn cfgetospeed(termios_p: *const Termios) -> u32 {
 /// # Safety
 ///
 /// `termios_p` must be non-null and point to a valid `Termios`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfsetispeed(termios_p: *mut Termios, speed: u32) -> i32 {
     if termios_p.is_null() {
         errno::set_errno(errno::EINVAL);
@@ -631,7 +631,7 @@ pub unsafe extern "C" fn cfsetispeed(termios_p: *mut Termios, speed: u32) -> i32
 /// # Safety
 ///
 /// `termios_p` must be non-null and point to a valid `Termios`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfsetospeed(termios_p: *mut Termios, speed: u32) -> i32 {
     if termios_p.is_null() {
         errno::set_errno(errno::EINVAL);
@@ -655,7 +655,7 @@ pub unsafe extern "C" fn cfsetospeed(termios_p: *mut Termios, speed: u32) -> i32
 /// # Safety
 ///
 /// `termios_p` must be non-null and point to a valid `Termios`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfmakeraw(termios_p: *mut Termios) {
     if termios_p.is_null() {
         return;
@@ -694,7 +694,7 @@ pub unsafe extern "C" fn cfmakeraw(termios_p: *mut Termios) {
 /// # Safety
 ///
 /// `termios_p` must be non-null and point to a valid `Termios`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfsetspeed(termios_p: *mut Termios, speed: u32) -> i32 {
     if termios_p.is_null() {
         errno::set_errno(errno::EINVAL);
@@ -717,7 +717,7 @@ pub unsafe extern "C" fn cfsetspeed(termios_p: *mut Termios, speed: u32) -> i32 
 /// Our console doesn't have a serial break concept, so this is a
 /// no-op on valid terminal fds.  Returns -1 with `EBADF` for invalid
 /// fds or `ENOTTY` for non-terminal fds.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcsendbreak(fd: i32, _duration: i32) -> i32 {
     if let Err(e) = validate_terminal_fd(fd) {
         errno::set_errno(e);
@@ -731,7 +731,7 @@ pub extern "C" fn tcsendbreak(fd: i32, _duration: i32) -> i32 {
 /// Our console writes are synchronous (framebuffer-backed), so there
 /// is no pending output to drain.  Returns 0 immediately for valid
 /// terminal fds, -1 with `ENOTTY` for non-terminal fds.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcdrain(fd: i32) -> i32 {
     if let Err(e) = validate_terminal_fd(fd) {
         errno::set_errno(e);
@@ -753,7 +753,7 @@ pub const TCIOFF: i32 = 3;
 ///
 /// Our console doesn't support XON/XOFF flow control.  Validates that
 /// `fd` refers to a terminal and `action` is a known constant.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcflow(fd: i32, action: i32) -> i32 {
     if let Err(e) = validate_terminal_fd(fd) {
         errno::set_errno(e);
@@ -778,7 +778,7 @@ pub const TCIOFLUSH: i32 = 2;
 /// Our console doesn't buffer data beyond the framebuffer, so there
 /// is nothing to flush.  Validates `fd` is a terminal and
 /// `queue_selector` is a known constant.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcflush(fd: i32, queue_selector: i32) -> i32 {
     if let Err(e) = validate_terminal_fd(fd) {
         errno::set_errno(e);
@@ -827,9 +827,7 @@ mod tests {
         // Termios layout: c_iflag(4) + c_oflag(4) + c_cflag(4) + c_lflag(4) +
         // c_line(1) + c_cc(32) + padding(3) + c_ispeed(4) + c_ospeed(4) = 60.
         let size = core::mem::size_of::<Termios>();
-        // Exact size depends on alignment/padding; just verify it's reasonable.
-        assert!(size >= 44 + NCCS, "Termios too small: {size}");
-        assert!(size <= 64, "Termios too large: {size}");
+        assert_eq!(size, 60, "Termios size mismatch");
     }
 
     // -- Default terminal dimensions --
@@ -969,7 +967,7 @@ mod tests {
 /// Open a pseudo-terminal master device.
 ///
 /// Stub: returns -1 with ENOSYS.  PTY support requires kernel /dev/ptmx.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_openpt(_oflag: i32) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
@@ -978,7 +976,7 @@ pub extern "C" fn posix_openpt(_oflag: i32) -> i32 {
 /// Grant access to the slave pseudo-terminal device.
 ///
 /// Stub: returns 0 (success) since we don't enforce PTY permissions.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn grantpt(_fd: i32) -> i32 {
     0
 }
@@ -986,7 +984,7 @@ pub extern "C" fn grantpt(_fd: i32) -> i32 {
 /// Unlock a pseudo-terminal master/slave pair.
 ///
 /// Stub: returns 0 (success).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn unlockpt(_fd: i32) -> i32 {
     0
 }
@@ -994,7 +992,7 @@ pub extern "C" fn unlockpt(_fd: i32) -> i32 {
 /// Get the name of the slave pseudo-terminal device.
 ///
 /// Stub: returns null (no PTY support).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ptsname(_fd: i32) -> *mut u8 {
     core::ptr::null_mut()
 }
@@ -1002,7 +1000,7 @@ pub extern "C" fn ptsname(_fd: i32) -> *mut u8 {
 /// Thread-safe version of `ptsname`.
 ///
 /// Stub: returns ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ptsname_r(_fd: i32, _buf: *mut u8, _buflen: usize) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1

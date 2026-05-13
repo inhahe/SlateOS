@@ -26,7 +26,7 @@ use crate::types::SizeT;
 /// # Safety
 ///
 /// `dest` and `src` must be valid for `n` bytes and must not overlap.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memcpy(
     dest: *mut u8,
     src: *const u8,
@@ -48,7 +48,7 @@ pub unsafe extern "C" fn memcpy(
 /// # Safety
 ///
 /// `dest` and `src` must be valid for `n` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memmove(
     dest: *mut u8,
     src: *const u8,
@@ -80,7 +80,7 @@ pub unsafe extern "C" fn memmove(
 /// # Safety
 ///
 /// `dest` must be valid for `n` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memset(
     dest: *mut u8,
     c: i32,
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn memset(
 /// # Safety
 ///
 /// `s1` and `s2` must be valid for `n` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memcmp(
     s1: *const u8,
     s2: *const u8,
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn memcmp(
 /// # Safety
 ///
 /// `s` must be valid for `n` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memchr(
     s: *const u8,
     c: i32,
@@ -149,7 +149,7 @@ pub unsafe extern "C" fn memchr(
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strlen(s: *const u8) -> SizeT {
     let mut len: usize = 0;
     while unsafe { *s.add(len) } != 0 {
@@ -164,7 +164,7 @@ pub unsafe extern "C" fn strlen(s: *const u8) -> SizeT {
 ///
 /// `s` must be valid for at least `maxlen` bytes, or be
 /// null-terminated before `maxlen`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strnlen(s: *const u8, maxlen: SizeT) -> SizeT {
     let mut len: usize = 0;
     while len < maxlen && unsafe { *s.add(len) } != 0 {
@@ -180,7 +180,7 @@ pub unsafe extern "C" fn strnlen(s: *const u8, maxlen: SizeT) -> SizeT {
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcmp(s1: *const u8, s2: *const u8) -> i32 {
     let mut i: usize = 0;
     loop {
@@ -199,7 +199,7 @@ pub unsafe extern "C" fn strcmp(s1: *const u8, s2: *const u8) -> i32 {
 ///
 /// Both strings must be valid for at least `n` bytes or be
 /// null-terminated before `n`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strncmp(s1: *const u8, s2: *const u8, n: SizeT) -> i32 {
     let mut i: usize = 0;
     while i < n {
@@ -219,7 +219,7 @@ pub unsafe extern "C" fn strncmp(s1: *const u8, s2: *const u8, n: SizeT) -> i32 
 ///
 /// `dest` must be large enough to hold the string.  `src` must be
 /// a valid null-terminated string.  Regions must not overlap.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
     let mut i: usize = 0;
     loop {
@@ -239,7 +239,7 @@ pub unsafe extern "C" fn strcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
 ///
 /// `dest` must be valid for `n` bytes.  `src` must be a valid
 /// null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strncpy(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
     let mut i: usize = 0;
     // Copy up to null or n bytes.
@@ -267,7 +267,7 @@ pub unsafe extern "C" fn strncpy(dest: *mut u8, src: *const u8, n: SizeT) -> *mu
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *const u8 {
     let val = c as u8;
     let mut i: usize = 0;
@@ -291,7 +291,7 @@ pub unsafe extern "C" fn strchr(s: *const u8, c: i32) -> *const u8 {
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strchrnul(s: *const u8, c: i32) -> *const u8 {
     let val = c as u8;
     let mut i: usize = 0;
@@ -310,7 +310,7 @@ pub unsafe extern "C" fn strchrnul(s: *const u8, c: i32) -> *const u8 {
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *const u8 {
     let val = c as u8;
     let mut last: *const u8 = core::ptr::null();
@@ -335,7 +335,7 @@ pub unsafe extern "C" fn strrchr(s: *const u8, c: i32) -> *const u8 {
 ///
 /// `dest` must have enough space for the combined string.
 /// Both must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcat(dest: *mut u8, src: *const u8) -> *mut u8 {
     // Find end of dest.
     let mut i: usize = 0;
@@ -362,7 +362,7 @@ pub unsafe extern "C" fn strcat(dest: *mut u8, src: *const u8) -> *mut u8 {
 ///
 /// `dest` must have enough space for the combined string (up to n extra
 /// bytes + null terminator).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strncat(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
     // Find end of dest.
     let mut i: usize = 0;
@@ -392,7 +392,7 @@ pub unsafe extern "C" fn strncat(dest: *mut u8, src: *const u8, n: SizeT) -> *mu
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strstr(haystack: *const u8, needle: *const u8) -> *const u8 {
     // Empty needle matches everything.
     if unsafe { *needle } == 0 {
@@ -425,7 +425,7 @@ pub unsafe extern "C" fn strstr(haystack: *const u8, needle: *const u8) -> *cons
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::many_single_char_names)] // POSIX function signature, C convention variables.
 pub unsafe extern "C" fn strspn(s: *const u8, accept: *const u8) -> SizeT {
     let mut i: usize = 0;
@@ -456,7 +456,7 @@ pub unsafe extern "C" fn strspn(s: *const u8, accept: *const u8) -> SizeT {
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::many_single_char_names)]
 pub unsafe extern "C" fn strcspn(s: *const u8, reject: *const u8) -> SizeT {
     let mut i: usize = 0;
@@ -487,7 +487,7 @@ pub unsafe extern "C" fn strcspn(s: *const u8, reject: *const u8) -> SizeT {
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::many_single_char_names)]
 pub unsafe extern "C" fn strpbrk(s: *const u8, accept: *const u8) -> *const u8 {
     let mut i: usize = 0;
@@ -523,7 +523,7 @@ pub unsafe extern "C" fn strpbrk(s: *const u8, accept: *const u8) -> *const u8 {
 ///
 /// `s` (if non-null) and `delim` must be valid null-terminated strings.
 /// Not thread-safe (uses a static saved position).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtok(s: *mut u8, delim: *const u8) -> *mut u8 {
     // Static saved position (POSIX strtok is not reentrant).
     static mut SAVED: *mut u8 = core::ptr::null_mut();
@@ -594,7 +594,7 @@ unsafe fn is_delim(c: u8, delim: *const u8) -> bool {
 ///
 /// Returns a pointer to a static string.  The returned string must
 /// not be modified by the caller.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn strerror(errnum: i32) -> *const u8 {
     // Return a pointer to a static null-terminated C string.
     // These match the Linux error descriptions for the codes we support.
@@ -693,7 +693,7 @@ pub extern "C" fn strerror(errnum: i32) -> *const u8 {
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
     if s.is_null() {
         return core::ptr::null_mut();
@@ -725,7 +725,7 @@ pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string (or valid for `n` bytes).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strndup(s: *const u8, n: usize) -> *mut u8 {
     if s.is_null() {
         return core::ptr::null_mut();
@@ -754,7 +754,7 @@ pub unsafe extern "C" fn strndup(s: *const u8, n: usize) -> *mut u8 {
 /// # Safety
 ///
 /// `s` must be valid for `n` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memrchr(s: *const u8, c: i32, n: usize) -> *const u8 {
     let val = c as u8;
     let mut i = n;
@@ -775,7 +775,7 @@ pub unsafe extern "C" fn memrchr(s: *const u8, c: i32, n: usize) -> *const u8 {
 /// # Safety
 ///
 /// `src` and `dest` must be valid for `n` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn bcopy(src: *const u8, dest: *mut u8, n: usize) {
     unsafe { memmove(dest, src, n); }
 }
@@ -785,7 +785,7 @@ pub unsafe extern "C" fn bcopy(src: *const u8, dest: *mut u8, n: usize) {
 /// # Safety
 ///
 /// `s` must be valid for `n` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn bzero(s: *mut u8, n: usize) {
     unsafe { memset(s, 0, n); }
 }
@@ -798,7 +798,7 @@ pub unsafe extern "C" fn bzero(s: *mut u8, n: usize) {
 ///
 /// Returns the 1-based position of the least significant set bit,
 /// or 0 if `i` is 0.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ffs(i: i32) -> i32 {
     if i == 0 {
         return 0;
@@ -808,7 +808,7 @@ pub extern "C" fn ffs(i: i32) -> i32 {
 }
 
 /// Find the first set bit in a long integer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ffsl(i: i64) -> i32 {
     if i == 0 {
         return 0;
@@ -817,7 +817,7 @@ pub extern "C" fn ffsl(i: i64) -> i32 {
 }
 
 /// Find the first set bit in a long long integer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ffsll(i: i64) -> i32 {
     ffsl(i)
 }
@@ -827,7 +827,7 @@ pub extern "C" fn ffsll(i: i64) -> i32 {
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcasecmp(s1: *const u8, s2: *const u8) -> i32 {
     let mut i: usize = 0;
     loop {
@@ -848,7 +848,7 @@ pub unsafe extern "C" fn strcasecmp(s1: *const u8, s2: *const u8) -> i32 {
 ///
 /// Both strings must be valid for at least `n` bytes or be
 /// null-terminated before `n`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strncasecmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
     let mut i: usize = 0;
     while i < n {
@@ -877,7 +877,7 @@ pub unsafe extern "C" fn strncasecmp(s1: *const u8, s2: *const u8, n: usize) -> 
 ///
 /// `dest` must have enough space for the full `src` string plus null.
 /// `src` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn stpcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
     let mut i: usize = 0;
     loop {
@@ -899,7 +899,7 @@ pub unsafe extern "C" fn stpcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
 /// # Safety
 ///
 /// `dest` must have space for at least `n` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn stpncpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     let mut i: usize = 0;
     // Copy up to n chars from src.
@@ -935,7 +935,7 @@ pub unsafe extern "C" fn stpncpy(dest: *mut u8, src: *const u8, n: usize) -> *mu
 /// `stringp` must point to a valid `*mut u8` pointer (which itself
 /// points to a writable null-terminated string or is null).
 /// `delim` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::many_single_char_names)] // POSIX function, C convention variables.
 pub unsafe extern "C" fn strsep(stringp: *mut *mut u8, delim: *const u8) -> *mut u8 {
     if stringp.is_null() {
@@ -995,7 +995,7 @@ pub unsafe extern "C" fn strsep(stringp: *mut *mut u8, delim: *const u8) -> *mut
 /// # Safety
 ///
 /// Both pointers must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strverscmp(s1: *const u8, s2: *const u8) -> i32 {
     let mut i: usize = 0;
 
@@ -1023,6 +1023,14 @@ pub unsafe extern "C" fn strverscmp(s1: *const u8, s2: *const u8) -> i32 {
             let mut start = i;
             while start > 0 && unsafe { *s1.add(start.wrapping_sub(1)) }.is_ascii_digit() {
                 start = start.wrapping_sub(1);
+            }
+
+            // If we're NOT inside a digit run (start == i) and only one
+            // side has a digit, fall back to plain byte comparison.  This
+            // matches glibc's state-machine behaviour in state S_N (normal):
+            // a lone digit vs a letter is compared by code point value.
+            if start == i && (!a_dig || !b_dig) {
+                return i32::from(a).wrapping_sub(i32::from(b));
             }
 
             // Check for leading zeros in the shared digit run.
@@ -1115,7 +1123,7 @@ fn strverscmp_int(s1: *const u8, s2: *const u8, start: usize) -> i32 {
 ///
 /// `s` (if non-null) and `delim` must be valid null-terminated strings.
 /// `saveptr` must point to a valid `*mut u8`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtok_r(
     s: *mut u8,
     delim: *const u8,
@@ -1178,7 +1186,7 @@ pub unsafe extern "C" fn strtok_r(
 /// # Safety
 ///
 /// `dest` must be valid for `n` bytes.  `src` must be valid for `n` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memccpy(
     dest: *mut u8,
     src: *const u8,
@@ -1205,7 +1213,7 @@ pub unsafe extern "C" fn memccpy(
 /// # Safety
 ///
 /// Both strings must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcoll(s1: *const u8, s2: *const u8) -> i32 {
     unsafe { strcmp(s1, s2) }
 }
@@ -1221,7 +1229,7 @@ pub unsafe extern "C" fn strcoll(s1: *const u8, s2: *const u8) -> i32 {
 /// # Safety
 ///
 /// `dest` must be valid for `n` bytes.  `src` must be null-terminated.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strxfrm(dest: *mut u8, src: *const u8, n: usize) -> usize {
     let len = unsafe { strlen(src) };
     if n > 0 {
@@ -1238,7 +1246,7 @@ pub unsafe extern "C" fn strxfrm(dest: *mut u8, src: *const u8, n: usize) -> usi
 /// # Safety
 ///
 /// `buf` must be valid for `buflen` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut u8, buflen: usize) -> i32 {
     if buf.is_null() || buflen == 0 {
         return crate::errno::ERANGE;
@@ -1261,7 +1269,7 @@ pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut u8, buflen: usize) ->
 /// Locale-aware string comparison (locale variant).
 ///
 /// Since we only support the C locale, delegates to `strcmp`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcoll_l(s1: *const u8, s2: *const u8, _locale: usize) -> i32 {
     unsafe { strcmp(s1, s2) }
 }
@@ -1269,7 +1277,7 @@ pub unsafe extern "C" fn strcoll_l(s1: *const u8, s2: *const u8, _locale: usize)
 /// Transform a string for locale-aware comparison (locale variant).
 ///
 /// Since we only support the C locale, delegates to `strxfrm`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strxfrm_l(dest: *mut u8, src: *const u8, n: usize, _locale: usize) -> usize {
     unsafe { strxfrm(dest, src, n) }
 }
@@ -1277,7 +1285,7 @@ pub unsafe extern "C" fn strxfrm_l(dest: *mut u8, src: *const u8, n: usize, _loc
 /// Locale-aware `strerror`.
 ///
 /// Returns the same result as `strerror` (locale is ignored).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn strerror_l(errnum: i32, _locale: usize) -> *const u8 {
     strerror(errnum)
 }
@@ -1287,7 +1295,7 @@ pub extern "C" fn strerror_l(errnum: i32, _locale: usize) -> *const u8 {
 /// Some glibc-compiled programs reference `__xpg_strerror_r` instead
 /// of the GNU-specific `strerror_r`.  The XPG version returns 0 on
 /// success and an error code on failure (same as our `strerror_r`).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __xpg_strerror_r(errnum: i32, buf: *mut u8, buflen: usize) -> i32 {
     unsafe { strerror_r(errnum, buf, buflen) }
 }
@@ -1309,7 +1317,7 @@ pub unsafe extern "C" fn __xpg_strerror_r(errnum: i32, buf: *mut u8, buflen: usi
 ///
 /// `dst` must be valid for `size` bytes.  `src` must be a valid
 /// NUL-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strlcpy(dst: *mut u8, src: *const u8, size: SizeT) -> SizeT {
     let src_len = unsafe { strlen(src) };
 
@@ -1336,7 +1344,7 @@ pub unsafe extern "C" fn strlcpy(dst: *mut u8, src: *const u8, size: SizeT) -> S
 ///
 /// `dst` must be valid for `size` bytes and contain a NUL-terminated
 /// string.  `src` must be a valid NUL-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strlcat(dst: *mut u8, src: *const u8, size: SizeT) -> SizeT {
     let dst_len = unsafe { strnlen(dst, size) };
     let src_len = unsafe { strlen(src) };
@@ -1371,7 +1379,7 @@ pub unsafe extern "C" fn strlcat(dst: *mut u8, src: *const u8, size: SizeT) -> S
 /// # Safety
 ///
 /// Both `haystack` and `needle` must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strcasestr(
     haystack: *const u8,
     needle: *const u8,
@@ -1444,7 +1452,7 @@ fn to_lower(c: u8) -> u8 {
 /// # Safety
 ///
 /// `s` must be valid for `n` bytes of writing.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn explicit_bzero(s: *mut u8, n: usize) {
     if s.is_null() || n == 0 {
         return;
@@ -1475,7 +1483,7 @@ pub unsafe extern "C" fn explicit_bzero(s: *mut u8, n: usize) {
 /// # Safety
 ///
 /// `dest` and `src` must be valid for `n` bytes and must not overlap.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mempcpy(
     dest: *mut u8,
     src: *const u8,
@@ -1514,7 +1522,7 @@ pub unsafe extern "C" fn mempcpy(
 ///
 /// `haystack` must be valid for `haystacklen` bytes.
 /// `needle` must be valid for `needlelen` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn memmem(
     haystack: *const u8,
     haystacklen: SizeT,
@@ -1572,7 +1580,7 @@ pub unsafe extern "C" fn memmem(
 /// `s` must point to memory that contains at least one occurrence of
 /// `c` (as the low byte of the int).  If `c` is not present, this
 /// function reads past the end of valid memory (undefined behavior).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn rawmemchr(s: *const u8, c: i32) -> *const u8 {
     let target = c as u8;
     let mut p = s;
@@ -1593,7 +1601,7 @@ pub unsafe extern "C" fn rawmemchr(s: *const u8, c: i32) -> *const u8 {
 /// Deprecated since POSIX.1-2001, removed in POSIX.1-2008, but many
 /// programs and libraries still reference it for link compatibility.
 /// Our highest errno is 131 (ENOTRECOVERABLE), so sys_nerr = 132.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static sys_nerr: i32 = 132;
 
 /// Wrapper to make `*const u8` usable in a static array.
@@ -1620,7 +1628,7 @@ unsafe impl Sync for SyncPtr {}
 /// The `SyncPtr` wrapper is `repr(transparent)` so the array layout
 /// matches `[*const u8; 132]` exactly — C code sees a plain pointer
 /// array.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static sys_errlist: [SyncPtr; 132] = {
     // Inline const: build the table.  Every index maps to a c-string.
     // Indices with no defined errno get "Unknown error".
@@ -1802,6 +1810,327 @@ mod tests {
         // "1.2.30" vs "1.2.4" — comparison triggers at the third segment.
         assert!(ver(b"1.2.30\0", b"1.2.4\0") > 0);
     }
+
+    // -- strlen tests --
+
+    #[test]
+    fn test_strlen_basic() {
+        assert_eq!(unsafe { strlen(b"hello\0".as_ptr()) }, 5);
+        assert_eq!(unsafe { strlen(b"\0".as_ptr()) }, 0);
+        assert_eq!(unsafe { strlen(b"a\0".as_ptr()) }, 1);
+    }
+
+    #[test]
+    fn test_strnlen_basic() {
+        assert_eq!(unsafe { strnlen(b"hello\0".as_ptr(), 10) }, 5);
+        assert_eq!(unsafe { strnlen(b"hello\0".as_ptr(), 3) }, 3);
+        assert_eq!(unsafe { strnlen(b"hello\0".as_ptr(), 0) }, 0);
+    }
+
+    // -- strcmp / strncmp tests --
+
+    #[test]
+    fn test_strcmp_basic() {
+        assert_eq!(unsafe { strcmp(b"abc\0".as_ptr(), b"abc\0".as_ptr()) }, 0);
+        assert!(unsafe { strcmp(b"abc\0".as_ptr(), b"abd\0".as_ptr()) } < 0);
+        assert!(unsafe { strcmp(b"abd\0".as_ptr(), b"abc\0".as_ptr()) } > 0);
+        assert!(unsafe { strcmp(b"ab\0".as_ptr(), b"abc\0".as_ptr()) } < 0);
+    }
+
+    #[test]
+    fn test_strncmp_basic() {
+        assert_eq!(
+            unsafe { strncmp(b"abc\0".as_ptr(), b"abd\0".as_ptr(), 2) },
+            0
+        );
+        assert!(unsafe { strncmp(b"abc\0".as_ptr(), b"abd\0".as_ptr(), 3) } < 0);
+        assert_eq!(
+            unsafe { strncmp(b"abc\0".as_ptr(), b"xyz\0".as_ptr(), 0) },
+            0
+        );
+    }
+
+    // -- strcasecmp tests --
+
+    #[test]
+    fn test_strcasecmp_basic() {
+        assert_eq!(
+            unsafe { strcasecmp(b"Hello\0".as_ptr(), b"hello\0".as_ptr()) },
+            0
+        );
+        assert_eq!(
+            unsafe { strcasecmp(b"ABC\0".as_ptr(), b"abc\0".as_ptr()) },
+            0
+        );
+        assert!(unsafe { strcasecmp(b"a\0".as_ptr(), b"B\0".as_ptr()) } < 0);
+    }
+
+    // -- strchr / strrchr tests --
+
+    #[test]
+    fn test_strchr_found() {
+        let s = b"hello world\0";
+        let p = unsafe { strchr(s.as_ptr(), i32::from(b'o')) };
+        assert!(!p.is_null());
+        assert_eq!(unsafe { *p }, b'o');
+        // First occurrence: should be at position 4.
+        let offset = (p as usize).wrapping_sub(s.as_ptr() as usize);
+        assert_eq!(offset, 4);
+    }
+
+    #[test]
+    fn test_strchr_not_found() {
+        let s = b"hello\0";
+        let p = unsafe { strchr(s.as_ptr(), i32::from(b'z')) };
+        assert!(p.is_null());
+    }
+
+    #[test]
+    fn test_strchr_null_terminator() {
+        // strchr should find the null terminator.
+        let s = b"abc\0";
+        let p = unsafe { strchr(s.as_ptr(), 0) };
+        assert!(!p.is_null());
+        assert_eq!(unsafe { *p }, 0);
+    }
+
+    #[test]
+    fn test_strrchr_found() {
+        let s = b"hello world\0";
+        let p = unsafe { strrchr(s.as_ptr(), i32::from(b'o')) };
+        assert!(!p.is_null());
+        // Last 'o' is at position 7 ("world").
+        let offset = (p as usize).wrapping_sub(s.as_ptr() as usize);
+        assert_eq!(offset, 7);
+    }
+
+    // -- strstr / strcasestr tests --
+
+    #[test]
+    fn test_strstr_found() {
+        let hay = b"hello world\0";
+        let needle = b"world\0";
+        let p = unsafe { strstr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(!p.is_null());
+        let offset = (p as usize).wrapping_sub(hay.as_ptr() as usize);
+        assert_eq!(offset, 6);
+    }
+
+    #[test]
+    fn test_strstr_not_found() {
+        let hay = b"hello\0";
+        let needle = b"xyz\0";
+        let p = unsafe { strstr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(p.is_null());
+    }
+
+    #[test]
+    fn test_strstr_empty_needle() {
+        let hay = b"hello\0";
+        let needle = b"\0";
+        let p = unsafe { strstr(hay.as_ptr(), needle.as_ptr()) };
+        // Empty needle matches at start.
+        assert!(!p.is_null());
+        assert_eq!(p, hay.as_ptr());
+    }
+
+    #[test]
+    fn test_strcasestr_found() {
+        let hay = b"Hello World\0";
+        let needle = b"world\0";
+        let p = unsafe { strcasestr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(!p.is_null());
+        let offset = (p as usize).wrapping_sub(hay.as_ptr() as usize);
+        assert_eq!(offset, 6);
+    }
+
+    // -- strspn / strcspn tests --
+
+    #[test]
+    fn test_strspn_basic() {
+        let s = b"aabbc123\0";
+        let accept = b"abc\0";
+        assert_eq!(unsafe { strspn(s.as_ptr(), accept.as_ptr()) }, 5);
+    }
+
+    #[test]
+    fn test_strcspn_basic() {
+        let s = b"hello123\0";
+        let reject = b"0123456789\0";
+        assert_eq!(unsafe { strcspn(s.as_ptr(), reject.as_ptr()) }, 5);
+    }
+
+    // -- strpbrk tests --
+
+    #[test]
+    fn test_strpbrk_found() {
+        let s = b"hello world\0";
+        let accept = b"wrd\0";
+        let p = unsafe { strpbrk(s.as_ptr(), accept.as_ptr()) };
+        assert!(!p.is_null());
+        // First match is 'r' at position... actually 'w' at 6, 'r' at 8, 'd' at 10.
+        // strpbrk returns first match in s. Let's check.
+        assert_eq!(unsafe { *p }, b'w');
+    }
+
+    // -- memcmp tests --
+
+    #[test]
+    fn test_memcmp_equal() {
+        let a = b"hello";
+        let b_arr = b"hello";
+        assert_eq!(
+            unsafe { memcmp(a.as_ptr().cast(), b_arr.as_ptr().cast(), 5) },
+            0
+        );
+    }
+
+    #[test]
+    fn test_memcmp_less() {
+        let a = b"abc";
+        let b_arr = b"abd";
+        assert!(unsafe { memcmp(a.as_ptr().cast(), b_arr.as_ptr().cast(), 3) } < 0);
+    }
+
+    #[test]
+    fn test_memcmp_zero_length() {
+        let a = b"abc";
+        let b_arr = b"xyz";
+        assert_eq!(
+            unsafe { memcmp(a.as_ptr().cast(), b_arr.as_ptr().cast(), 0) },
+            0
+        );
+    }
+
+    // -- memchr / memrchr tests --
+
+    #[test]
+    fn test_memchr_found() {
+        let data = b"abcdef";
+        let p = unsafe { memchr(data.as_ptr().cast(), i32::from(b'd'), 6) };
+        assert!(!p.is_null());
+        let offset = (p as usize).wrapping_sub(data.as_ptr() as usize);
+        assert_eq!(offset, 3);
+    }
+
+    #[test]
+    fn test_memchr_not_found() {
+        let data = b"abcdef";
+        let p = unsafe { memchr(data.as_ptr().cast(), i32::from(b'z'), 6) };
+        assert!(p.is_null());
+    }
+
+    #[test]
+    fn test_memrchr_found() {
+        let data = b"abcabc";
+        let p = unsafe { memrchr(data.as_ptr().cast(), i32::from(b'a'), 6) };
+        assert!(!p.is_null());
+        let offset = (p as usize).wrapping_sub(data.as_ptr() as usize);
+        assert_eq!(offset, 3); // Last 'a' is at index 3.
+    }
+
+    // -- memmem tests --
+
+    #[test]
+    fn test_memmem_found() {
+        let hay = b"hello world";
+        let needle = b"world";
+        let p = unsafe {
+            memmem(
+                hay.as_ptr().cast(),
+                11,
+                needle.as_ptr().cast(),
+                5,
+            )
+        };
+        assert!(!p.is_null());
+        let offset = (p as usize).wrapping_sub(hay.as_ptr() as usize);
+        assert_eq!(offset, 6);
+    }
+
+    #[test]
+    fn test_memmem_empty_needle() {
+        let hay = b"hello";
+        let p = unsafe {
+            memmem(hay.as_ptr().cast(), 5, hay.as_ptr().cast(), 0)
+        };
+        // Empty needle returns haystack start.
+        assert_eq!(p, hay.as_ptr().cast());
+    }
+
+    // -- strtok_r tests --
+
+    #[test]
+    fn test_strtok_r_basic() {
+        let mut buf = *b"hello,world,foo\0";
+        let delim = b",\0";
+        let mut saveptr: *mut u8 = core::ptr::null_mut();
+
+        let tok1 = unsafe {
+            strtok_r(buf.as_mut_ptr(), delim.as_ptr(), &mut saveptr)
+        };
+        assert!(!tok1.is_null());
+        assert_eq!(unsafe { strlen(tok1) }, 5); // "hello"
+
+        let tok2 = unsafe {
+            strtok_r(core::ptr::null_mut(), delim.as_ptr(), &mut saveptr)
+        };
+        assert!(!tok2.is_null());
+        assert_eq!(unsafe { strlen(tok2) }, 5); // "world"
+
+        let tok3 = unsafe {
+            strtok_r(core::ptr::null_mut(), delim.as_ptr(), &mut saveptr)
+        };
+        assert!(!tok3.is_null());
+        assert_eq!(unsafe { strlen(tok3) }, 3); // "foo"
+
+        let tok4 = unsafe {
+            strtok_r(core::ptr::null_mut(), delim.as_ptr(), &mut saveptr)
+        };
+        assert!(tok4.is_null()); // No more tokens.
+    }
+
+    // -- ffs tests --
+
+    #[test]
+    fn test_ffs_basic() {
+        assert_eq!(ffs(0), 0);
+        assert_eq!(ffs(1), 1);    // bit 0 set
+        assert_eq!(ffs(2), 2);    // bit 1 set
+        assert_eq!(ffs(4), 3);    // bit 2 set
+        assert_eq!(ffs(6), 2);    // bits 1 and 2 set, first is bit 1
+        assert_eq!(ffs(-1), 1);   // all bits set, first is bit 0
+    }
+
+    // -- strlcpy / strlcat tests --
+
+    #[test]
+    fn test_strlcpy_basic() {
+        let mut dst = [0u8; 10];
+        let src = b"hello\0";
+        let len = unsafe { strlcpy(dst.as_mut_ptr(), src.as_ptr(), 10) };
+        assert_eq!(len, 5);
+        assert_eq!(&dst[..6], b"hello\0");
+    }
+
+    #[test]
+    fn test_strlcpy_truncation() {
+        let mut dst = [0u8; 4];
+        let src = b"hello\0";
+        let len = unsafe { strlcpy(dst.as_mut_ptr(), src.as_ptr(), 4) };
+        assert_eq!(len, 5); // Returns full src length.
+        assert_eq!(&dst[..4], b"hel\0"); // Truncated but null-terminated.
+    }
+
+    #[test]
+    fn test_strlcat_basic() {
+        let mut dst = [0u8; 20];
+        dst[..6].copy_from_slice(b"hello\0");
+        let src = b" world\0";
+        let len = unsafe { strlcat(dst.as_mut_ptr(), src.as_ptr(), 20) };
+        assert_eq!(len, 11); // 5 + 6
+        assert_eq!(&dst[..12], b"hello world\0");
+    }
 }
 
 // ===========================================================================
@@ -1819,7 +2148,7 @@ mod tests {
 /// # Safety
 ///
 /// Same as `memcpy`.  `destlen` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __memcpy_chk(
     dest: *mut u8,
     src: *const u8,
@@ -1834,7 +2163,7 @@ pub unsafe extern "C" fn __memcpy_chk(
 /// # Safety
 ///
 /// Same as `memmove`.  `destlen` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __memmove_chk(
     dest: *mut u8,
     src: *const u8,
@@ -1849,7 +2178,7 @@ pub unsafe extern "C" fn __memmove_chk(
 /// # Safety
 ///
 /// Same as `memset`.  `destlen` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __memset_chk(
     dest: *mut u8,
     c: i32,
@@ -1864,7 +2193,7 @@ pub unsafe extern "C" fn __memset_chk(
 /// # Safety
 ///
 /// Same as `strcpy`.  `destlen` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __strcpy_chk(
     dest: *mut u8,
     src: *const u8,
@@ -1878,7 +2207,7 @@ pub unsafe extern "C" fn __strcpy_chk(
 /// # Safety
 ///
 /// Same as `strncpy`.  `destlen` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __strncpy_chk(
     dest: *mut u8,
     src: *const u8,
@@ -1893,7 +2222,7 @@ pub unsafe extern "C" fn __strncpy_chk(
 /// # Safety
 ///
 /// Same as `strcat`.  `destlen` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __strcat_chk(
     dest: *mut u8,
     src: *const u8,
@@ -1907,7 +2236,7 @@ pub unsafe extern "C" fn __strcat_chk(
 /// # Safety
 ///
 /// Same as `strncat`.  `destlen` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __strncat_chk(
     dest: *mut u8,
     src: *const u8,
@@ -1922,7 +2251,7 @@ pub unsafe extern "C" fn __strncat_chk(
 /// # Safety
 ///
 /// Same as `stpcpy`.  `destlen` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __stpcpy_chk(
     dest: *mut u8,
     src: *const u8,
@@ -1936,7 +2265,7 @@ pub unsafe extern "C" fn __stpcpy_chk(
 /// # Safety
 ///
 /// Same as `stpncpy`.  `destlen` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __stpncpy_chk(
     dest: *mut u8,
     src: *const u8,
@@ -1959,7 +2288,7 @@ pub unsafe extern "C" fn __stpncpy_chk(
 ///
 /// `src` and `dest` must point to valid memory of at least `nbytes`
 /// bytes.  The regions must not overlap.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn swab(
     src: *const u8,
     dest: *mut u8,

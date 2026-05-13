@@ -53,7 +53,7 @@ pub struct Timeval {
 /// Sleep for a specified number of seconds.
 ///
 /// Returns 0 on success, or the remaining seconds if interrupted.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sleep(seconds: u32) -> u32 {
     // Convert seconds to nanoseconds for our native SYS_SLEEP.
     let ns: u64 = u64::from(seconds).saturating_mul(1_000_000_000);
@@ -74,7 +74,7 @@ pub extern "C" fn sleep(seconds: u32) -> u32 {
 /// remaining time is stored in `rem` (if non-null).
 ///
 /// Returns 0 on success, -1 if interrupted (errno = EINTR).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
     if req.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -119,7 +119,7 @@ pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
 /// many programs still use it.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn usleep(usec: u32) -> i32 {
     let ns: u64 = u64::from(usec).saturating_mul(1_000);
     let ret = syscall1(SYS_SLEEP, ns);
@@ -132,7 +132,7 @@ pub extern "C" fn usleep(usec: u32) -> i32 {
 /// native `SYS_CLOCK_MONOTONIC`).
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
     if tp.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -166,7 +166,7 @@ pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
 /// Get the resolution of a clock.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
     match clk_id {
         CLOCK_MONOTONIC | CLOCK_REALTIME => {
@@ -190,7 +190,7 @@ pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
 ///
 /// Stub: returns -1 with `EPERM`.  The kernel clock cannot be
 /// adjusted from userspace yet.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_settime(_clk_id: ClockidT, _tp: *const Timespec) -> i32 {
     errno::set_errno(errno::EPERM);
     -1
@@ -207,7 +207,7 @@ pub const TIMER_ABSTIME: i32 = 1;
 ///
 /// Returns 0 on success, or an error code (not via errno — POSIX
 /// specifies direct return for this function).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_nanosleep(
     clk_id: ClockidT,
     flags: i32,
@@ -266,7 +266,7 @@ pub extern "C" fn clock_nanosleep(
 ///
 /// Uses `CLOCK_MONOTONIC` since we don't have a wall clock yet.
 /// The `tz` parameter is ignored (deprecated in POSIX).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut core::ffi::c_void) -> i32 {
     if tv.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -293,7 +293,7 @@ pub extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut core::ffi::c_void) ->
 ///
 /// Stub: returns -1 with `EPERM`.  The kernel clock cannot be adjusted
 /// from userspace yet.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn settimeofday(
     _tv: *const Timeval,
     _tz: *const core::ffi::c_void,
@@ -305,7 +305,7 @@ pub extern "C" fn settimeofday(
 /// Return approximate time in seconds since epoch.
 ///
 /// Uses monotonic clock (not true wall clock).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn time(tloc: *mut TimeT) -> TimeT {
     let ns = syscall0(SYS_CLOCK_MONOTONIC);
     if ns < 0 {
@@ -325,7 +325,7 @@ pub extern "C" fn time(tloc: *mut TimeT) -> TimeT {
 }
 
 /// Compute the difference between two time_t values.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::cast_precision_loss)]
 // Precision loss is acceptable for difftime — POSIX defines it as
 // returning double, and time differences rarely need 52-bit precision.
@@ -351,7 +351,7 @@ unsafe impl Sync for TzPtr {}
 /// POSIX requires `tzname` to be a `char *[2]`.  Since we have no
 /// timezone support, both are "UTC".  `repr(transparent)` on `TzPtr`
 /// ensures the layout matches `[*const u8; 2]` for C interop.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static tzname: [TzPtr; 2] = [
     TzPtr(c"UTC".as_ptr().cast::<u8>()),
     TzPtr(c"UTC".as_ptr().cast::<u8>()),
@@ -360,20 +360,20 @@ pub static tzname: [TzPtr; 2] = [
 /// Seconds west of UTC.
 ///
 /// POSIX/BSD variable.  Always 0 since we are always UTC.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static timezone: i64 = 0;
 
 /// Whether daylight saving is ever in effect.
 ///
 /// Always 0 — our OS has no DST support.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static daylight: i32 = 0;
 
 /// Initialize timezone information from the TZ environment variable.
 ///
 /// Since our OS doesn't support timezones, this is a no-op.  Programs
 /// call this early in main() per POSIX convention.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tzset() {
     // No-op: we are always UTC.
 }
@@ -416,7 +416,7 @@ static mut TM_RESULT: Tm = Tm {
 /// Convert time_t to broken-down UTC time.
 ///
 /// Returns a pointer to a static Tm (not thread-safe).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gmtime(timep: *const TimeT) -> *mut Tm {
     if timep.is_null() {
         return core::ptr::null_mut();
@@ -431,7 +431,7 @@ pub extern "C" fn gmtime(timep: *const TimeT) -> *mut Tm {
 /// Convert time_t to broken-down local time.
 ///
 /// We don't have timezone support, so this returns UTC.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn localtime(timep: *const TimeT) -> *mut Tm {
     // No timezone — UTC is local time.
     gmtime(timep)
@@ -440,7 +440,7 @@ pub extern "C" fn localtime(timep: *const TimeT) -> *mut Tm {
 /// Convert broken-down time to time_t.
 ///
 /// Normalizes the Tm fields and returns seconds since epoch.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
     if tm.is_null() {
         return -1;
@@ -454,8 +454,16 @@ pub extern "C" fn mktime(tm: *mut Tm) -> TimeT {
 /// Like `mktime` but always interprets the Tm as UTC (no timezone
 /// adjustment).  Since our OS is always UTC, this is identical to
 /// `mktime`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timegm(tm: *mut Tm) -> TimeT {
+    mktime(tm)
+}
+
+/// Convert broken-down local time to seconds since epoch.
+///
+/// BSD/GNU extension.  Equivalent to `mktime` — our OS is always UTC.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn timelocal(tm: *mut Tm) -> TimeT {
     mktime(tm)
 }
 
@@ -463,7 +471,7 @@ pub extern "C" fn timegm(tm: *mut Tm) -> TimeT {
 ///
 /// Returns a pointer to a static string in the format
 /// "Wed Jun 30 21:49:08 1993\n\0".
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn asctime(tm: *const Tm) -> *const u8 {
     if tm.is_null() {
         return c"??? ??? ?? ??:??:?? ????\n".as_ptr().cast::<u8>();
@@ -484,7 +492,7 @@ static mut ASCTIME_BUF: [u8; 32] = [0u8; 32];
 /// Convert time_t to string.
 ///
 /// Equivalent to `asctime(localtime(timep))`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ctime(timep: *const TimeT) -> *const u8 {
     asctime(localtime(timep))
 }
@@ -501,7 +509,7 @@ pub extern "C" fn ctime(timep: *const TimeT) -> *const u8 {
 /// # Safety
 ///
 /// Both pointers must be valid and non-null.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn gmtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm {
     if timep.is_null() || result.is_null() {
         return core::ptr::null_mut();
@@ -519,7 +527,7 @@ pub unsafe extern "C" fn gmtime_r(timep: *const TimeT, result: *mut Tm) -> *mut 
 /// # Safety
 ///
 /// Both pointers must be valid and non-null.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm {
     unsafe { gmtime_r(timep, result) }
 }
@@ -532,7 +540,7 @@ pub unsafe extern "C" fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *m
 /// # Safety
 ///
 /// `tm` must point to a valid `Tm`.  `buf` must be at least 26 bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn asctime_r(tm: *const Tm, buf: *mut u8) -> *mut u8 {
     if tm.is_null() || buf.is_null() {
         return core::ptr::null_mut();
@@ -565,7 +573,7 @@ pub unsafe extern "C" fn asctime_r(tm: *const Tm, buf: *mut u8) -> *mut u8 {
 /// # Safety
 ///
 /// `timep` must be valid.  `buf` must be at least 26 bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn ctime_r(timep: *const TimeT, buf: *mut u8) -> *mut u8 {
     if timep.is_null() || buf.is_null() {
         return core::ptr::null_mut();
@@ -606,7 +614,7 @@ pub unsafe extern "C" fn ctime_r(timep: *const TimeT, buf: *mut u8) -> *mut u8 {
 /// **GNU extensions**: `%s` (epoch seconds), `%P` (lowercase am/pm).
 ///
 /// **Literal**: `%n` (newline), `%t` (tab), `%%` (percent).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)]
 pub unsafe extern "C" fn strftime(
     buf: *mut u8,
@@ -1292,7 +1300,7 @@ fn write_dec4(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
 /// `CLOCKS_PER_SEC` for the `clock()` function.
 ///
 /// POSIX requires this to be 1,000,000.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static CLOCKS_PER_SEC: i64 = 1_000_000;
 
 /// Return an approximation of CPU time used by the process.
@@ -1300,7 +1308,7 @@ pub static CLOCKS_PER_SEC: i64 = 1_000_000;
 /// Returns microseconds elapsed since an arbitrary point (we use
 /// `CLOCK_MONOTONIC` as a proxy since we don't track per-process
 /// CPU time yet).  Returns -1 on failure.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn clock() -> i64 {
     let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
@@ -1328,7 +1336,7 @@ pub extern "C" fn clock() -> i64 {
 ///
 /// `buf` and `format` must be valid null-terminated strings.
 /// `tm` must point to a valid `Tm`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
 pub unsafe extern "C" fn strptime(
     buf: *const u8,
@@ -1729,7 +1737,7 @@ static mut TIMER_TABLE: [Option<Itimerspec>; MAX_TIMERS] = [None; MAX_TIMERS];
 ///
 /// Allocates a timer ID and stores it in `*timerid`.  The timer
 /// never actually fires (no signal delivery), but the API succeeds.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_create(
     _clockid: ClockidT,
     _sevp: *const Sigevent,
@@ -1768,7 +1776,7 @@ pub extern "C" fn timer_create(
 ///
 /// Stores the new value and returns the old value (if `old_value` is
 /// non-null).  The timer never actually fires.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_settime(
     timerid: TimerT,
     _flags: i32,
@@ -1811,7 +1819,7 @@ pub extern "C" fn timer_settime(
 /// Get the remaining time on a timer.
 ///
 /// Always returns zeros (timers don't actually run).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_gettime(timerid: TimerT, curr_value: *mut Itimerspec) -> i32 {
     if curr_value.is_null() {
         errno::set_errno(errno::EINVAL);
@@ -1840,7 +1848,7 @@ pub extern "C" fn timer_gettime(timerid: TimerT, curr_value: *mut Itimerspec) ->
 }
 
 /// Delete a per-process timer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
     let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
     let Some(table) = table else {
@@ -1865,7 +1873,7 @@ pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
 /// Get the overrun count for a timer.
 ///
 /// Always returns 0 (timers don't actually fire).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_getoverrun(_timerid: TimerT) -> i32 {
     0
 }
@@ -1902,7 +1910,7 @@ pub const ITIMER_PROF: i32 = 2;
 /// # Safety
 ///
 /// `new_value` must be a valid pointer.  `old_value` may be null.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setitimer(
     which: i32,
     new_value: *const Itimerval,
@@ -1936,7 +1944,7 @@ pub extern "C" fn setitimer(
 /// # Safety
 ///
 /// `curr_value` must be a valid, writable pointer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getitimer(which: i32, curr_value: *mut Itimerval) -> i32 {
     if which != ITIMER_REAL && which != ITIMER_VIRTUAL && which != ITIMER_PROF {
         errno::set_errno(errno::EINVAL);

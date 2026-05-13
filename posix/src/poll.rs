@@ -112,7 +112,7 @@ pub struct Timeval {
 // ---------------------------------------------------------------------------
 
 /// Clear all bits in an `fd_set`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fd_set_zero(set: *mut FdSet) {
     if set.is_null() {
         return;
@@ -124,7 +124,7 @@ pub extern "C" fn fd_set_zero(set: *mut FdSet) {
 }
 
 /// Set a bit in an `fd_set`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fd_set_set(fd: i32, set: *mut FdSet) {
     if set.is_null() || fd < 0 || fd as usize >= FD_SETSIZE {
         return;
@@ -141,7 +141,7 @@ pub extern "C" fn fd_set_set(fd: i32, set: *mut FdSet) {
 }
 
 /// Clear a bit in an `fd_set`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fd_set_clr(fd: i32, set: *mut FdSet) {
     if set.is_null() || fd < 0 || fd as usize >= FD_SETSIZE {
         return;
@@ -160,7 +160,7 @@ pub extern "C" fn fd_set_clr(fd: i32, set: *mut FdSet) {
 /// Test a bit in an `fd_set`.
 ///
 /// Returns non-zero if `fd` is set, 0 if not.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fd_set_isset(fd: i32, set: *const FdSet) -> i32 {
     if set.is_null() || fd < 0 || fd as usize >= FD_SETSIZE {
         return 0;
@@ -198,7 +198,7 @@ pub extern "C" fn fd_set_isset(fd: i32, set: *const FdSet) -> i32 {
 /// # Safety
 ///
 /// `fds` must point to an array of at least `nfds` `Pollfd` entries.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i32 {
     // Sleep interval: 10ms (balance between responsiveness and CPU).
     const POLL_INTERVAL_NS: u64 = 10_000_000;
@@ -311,7 +311,7 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
 /// `fds` must be valid for `nfds` elements.  `timeout_ts` may be null
 /// (infinite wait) or point to a valid `Timespec`.
 #[allow(clippy::similar_names)] // tspec vs tms — both timeout-related.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn ppoll(
     fds: *mut Pollfd,
     nfds: NfdsT,
@@ -441,7 +441,7 @@ fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool,
 /// # Safety
 ///
 /// All non-null pointers must point to valid `FdSet` / `Timeval` structures.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn select(
     nfds: i32,
     readfds: *mut FdSet,
@@ -613,7 +613,7 @@ fn is_set_in(fd: i32, set: &FdSet) -> bool {
 /// # Safety
 ///
 /// Same requirements as `select()`.  `sigmask` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pselect(
     nfds: i32,
     readfds: *mut FdSet,
@@ -768,6 +768,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "none")] // Calls real syscalls — only runs on our OS.
     fn test_check_readiness_tcp_connected() {
         let (r, w, h, e) = check_readiness(fdtable::HandleKind::TcpStream, 123);
         assert!(r);

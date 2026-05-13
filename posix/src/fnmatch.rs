@@ -33,7 +33,7 @@ pub const FNM_PERIOD: i32 = 4;
 /// # Safety
 ///
 /// Both `pattern` and `string` must be valid null-terminated C strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn fnmatch(
     pattern: *const u8,
     string: *const u8,
@@ -321,5 +321,586 @@ fn posix_class_matches(pat: *const u8, name_start: usize, name_len: usize, c: u8
         c == b' ' || c == b'\t'
     } else {
         false // Unknown class — no match.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: call `fnmatch` with byte slices (must be null-terminated).
+    fn matches(pat: &[u8], s: &[u8], flags: i32) -> bool {
+        let result = unsafe { fnmatch(pat.as_ptr(), s.as_ptr(), flags) };
+        result == 0
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. Basic wildcard matching (* and ?)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn star_matches_empty() {
+        assert!(matches(b"*\0", b"\0", 0));
+    }
+
+    #[test]
+    fn star_matches_any_string() {
+        assert!(matches(b"*\0", b"hello\0", 0));
+    }
+
+    #[test]
+    fn star_matches_middle() {
+        assert!(matches(b"he*lo\0", b"hello\0", 0));
+        assert!(matches(b"he*lo\0", b"hemiddlelo\0", 0));
+    }
+
+    #[test]
+    fn star_matches_beginning() {
+        assert!(matches(b"*ello\0", b"hello\0", 0));
+    }
+
+    #[test]
+    fn star_matches_end() {
+        assert!(matches(b"hell*\0", b"hello\0", 0));
+    }
+
+    #[test]
+    fn star_no_match() {
+        assert!(!matches(b"he*lx\0", b"hello\0", 0));
+    }
+
+    #[test]
+    fn consecutive_stars() {
+        assert!(matches(b"**\0", b"abc\0", 0));
+        assert!(matches(b"a***b\0", b"aXYZb\0", 0));
+    }
+
+    #[test]
+    fn question_mark_single_char() {
+        assert!(matches(b"?\0", b"a\0", 0));
+        assert!(matches(b"h?llo\0", b"hello\0", 0));
+    }
+
+    #[test]
+    fn question_mark_no_match_empty() {
+        assert!(!matches(b"?\0", b"\0", 0));
+    }
+
+    #[test]
+    fn question_mark_no_match_multiple() {
+        assert!(!matches(b"?\0", b"ab\0", 0));
+    }
+
+    #[test]
+    fn multiple_question_marks() {
+        assert!(matches(b"???\0", b"abc\0", 0));
+        assert!(!matches(b"???\0", b"ab\0", 0));
+        assert!(!matches(b"???\0", b"abcd\0", 0));
+    }
+
+    #[test]
+    fn literal_match() {
+        assert!(matches(b"hello\0", b"hello\0", 0));
+        assert!(!matches(b"hello\0", b"world\0", 0));
+    }
+
+    #[test]
+    fn literal_empty() {
+        assert!(matches(b"\0", b"\0", 0));
+        assert!(!matches(b"\0", b"a\0", 0));
+        assert!(!matches(b"a\0", b"\0", 0));
+    }
+
+    #[test]
+    fn star_and_question_combined() {
+        assert!(matches(b"*?*\0", b"x\0", 0));
+        assert!(!matches(b"*?*\0", b"\0", 0));
+        assert!(matches(b"?*?\0", b"ab\0", 0));
+        assert!(matches(b"?*?\0", b"abc\0", 0));
+        assert!(!matches(b"?*?\0", b"a\0", 0));
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Character classes [abc], [a-z], [!abc]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bracket_single_chars() {
+        assert!(matches(b"[abc]\0", b"a\0", 0));
+        assert!(matches(b"[abc]\0", b"b\0", 0));
+        assert!(matches(b"[abc]\0", b"c\0", 0));
+        assert!(!matches(b"[abc]\0", b"d\0", 0));
+    }
+
+    #[test]
+    fn bracket_range() {
+        assert!(matches(b"[a-z]\0", b"m\0", 0));
+        assert!(matches(b"[a-z]\0", b"a\0", 0));
+        assert!(matches(b"[a-z]\0", b"z\0", 0));
+        assert!(!matches(b"[a-z]\0", b"A\0", 0));
+        assert!(!matches(b"[a-z]\0", b"0\0", 0));
+    }
+
+    #[test]
+    fn bracket_range_digits() {
+        assert!(matches(b"[0-9]\0", b"5\0", 0));
+        assert!(!matches(b"[0-9]\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn bracket_negation_excl() {
+        assert!(!matches(b"[!abc]\0", b"a\0", 0));
+        assert!(matches(b"[!abc]\0", b"d\0", 0));
+    }
+
+    #[test]
+    fn bracket_negation_caret() {
+        assert!(!matches(b"[^abc]\0", b"b\0", 0));
+        assert!(matches(b"[^abc]\0", b"x\0", 0));
+    }
+
+    #[test]
+    fn bracket_negated_range() {
+        assert!(!matches(b"[!a-z]\0", b"m\0", 0));
+        assert!(matches(b"[!a-z]\0", b"5\0", 0));
+    }
+
+    #[test]
+    fn bracket_literal_close_bracket_first() {
+        // ']' as first char in bracket is literal per POSIX.
+        assert!(matches(b"[]abc]\0", b"]\0", 0));
+        assert!(matches(b"[]abc]\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn bracket_in_pattern() {
+        assert!(matches(b"file[0-9].txt\0", b"file3.txt\0", 0));
+        assert!(!matches(b"file[0-9].txt\0", b"filea.txt\0", 0));
+    }
+
+    #[test]
+    fn bracket_unclosed() {
+        // Unclosed bracket: no match.
+        assert!(!matches(b"[abc\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn bracket_mixed_chars_and_ranges() {
+        // 'x' or digits 0-9
+        assert!(matches(b"[x0-9]\0", b"x\0", 0));
+        assert!(matches(b"[x0-9]\0", b"5\0", 0));
+        assert!(!matches(b"[x0-9]\0", b"y\0", 0));
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. POSIX character classes [:alpha:], [:digit:], etc.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn posix_class_alpha() {
+        assert!(matches(b"[[:alpha:]]\0", b"a\0", 0));
+        assert!(matches(b"[[:alpha:]]\0", b"Z\0", 0));
+        assert!(!matches(b"[[:alpha:]]\0", b"5\0", 0));
+    }
+
+    #[test]
+    fn posix_class_digit() {
+        assert!(matches(b"[[:digit:]]\0", b"7\0", 0));
+        assert!(!matches(b"[[:digit:]]\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn posix_class_alnum() {
+        assert!(matches(b"[[:alnum:]]\0", b"a\0", 0));
+        assert!(matches(b"[[:alnum:]]\0", b"9\0", 0));
+        assert!(!matches(b"[[:alnum:]]\0", b"!\0", 0));
+    }
+
+    #[test]
+    fn posix_class_upper() {
+        assert!(matches(b"[[:upper:]]\0", b"A\0", 0));
+        assert!(!matches(b"[[:upper:]]\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn posix_class_lower() {
+        assert!(matches(b"[[:lower:]]\0", b"a\0", 0));
+        assert!(!matches(b"[[:lower:]]\0", b"A\0", 0));
+    }
+
+    #[test]
+    fn posix_class_space() {
+        assert!(matches(b"[[:space:]]\0", b" \0", 0));
+        assert!(matches(b"[[:space:]]\0", b"\t\0", 0));
+        assert!(!matches(b"[[:space:]]\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn posix_class_punct() {
+        assert!(matches(b"[[:punct:]]\0", b"!\0", 0));
+        assert!(matches(b"[[:punct:]]\0", b".\0", 0));
+        assert!(!matches(b"[[:punct:]]\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn posix_class_xdigit() {
+        assert!(matches(b"[[:xdigit:]]\0", b"a\0", 0));
+        assert!(matches(b"[[:xdigit:]]\0", b"F\0", 0));
+        assert!(matches(b"[[:xdigit:]]\0", b"9\0", 0));
+        assert!(!matches(b"[[:xdigit:]]\0", b"g\0", 0));
+    }
+
+    #[test]
+    fn posix_class_blank() {
+        assert!(matches(b"[[:blank:]]\0", b" \0", 0));
+        assert!(matches(b"[[:blank:]]\0", b"\t\0", 0));
+        assert!(!matches(b"[[:blank:]]\0", b"\n\0", 0));
+    }
+
+    #[test]
+    fn posix_class_print() {
+        assert!(matches(b"[[:print:]]\0", b" \0", 0));
+        assert!(matches(b"[[:print:]]\0", b"~\0", 0));
+        assert!(!matches(b"[[:print:]]\0", b"\x01\0", 0));
+    }
+
+    #[test]
+    fn posix_class_graph() {
+        assert!(matches(b"[[:graph:]]\0", b"!\0", 0));
+        assert!(!matches(b"[[:graph:]]\0", b" \0", 0));
+        assert!(!matches(b"[[:graph:]]\0", b"\x01\0", 0));
+    }
+
+    #[test]
+    fn posix_class_cntrl() {
+        assert!(matches(b"[[:cntrl:]]\0", b"\x01\0", 0));
+        assert!(matches(b"[[:cntrl:]]\0", b"\x7f\0", 0));
+        assert!(!matches(b"[[:cntrl:]]\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn posix_class_unknown() {
+        // Unknown class name should not match.
+        assert!(!matches(b"[[:bogus:]]\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn posix_class_in_context() {
+        assert!(matches(b"file[[:digit:]][[:digit:]].txt\0", b"file42.txt\0", 0));
+        assert!(!matches(b"file[[:digit:]][[:digit:]].txt\0", b"fileAB.txt\0", 0));
+    }
+
+    #[test]
+    fn posix_class_negated() {
+        assert!(!matches(b"[![:digit:]]\0", b"5\0", 0));
+        assert!(matches(b"[![:digit:]]\0", b"a\0", 0));
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. FNM_PATHNAME flag (wildcards don't match /)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pathname_star_does_not_cross_slash() {
+        assert!(matches(b"*\0", b"a/b\0", 0)); // Without flag, * matches /
+        assert!(!matches(b"*\0", b"a/b\0", FNM_PATHNAME));
+    }
+
+    #[test]
+    fn pathname_question_does_not_match_slash() {
+        assert!(matches(b"a?b\0", b"a/b\0", 0)); // Without flag
+        assert!(!matches(b"a?b\0", b"a/b\0", FNM_PATHNAME));
+    }
+
+    #[test]
+    fn pathname_explicit_slash_matches() {
+        assert!(matches(b"a/b\0", b"a/b\0", FNM_PATHNAME));
+        assert!(matches(b"*/b\0", b"a/b\0", FNM_PATHNAME));
+        assert!(matches(b"a/*\0", b"a/b\0", FNM_PATHNAME));
+    }
+
+    #[test]
+    fn pathname_star_per_component() {
+        assert!(matches(b"*/*\0", b"a/b\0", FNM_PATHNAME));
+        assert!(!matches(b"*/*\0", b"a/b/c\0", FNM_PATHNAME));
+        assert!(matches(b"*/*/*\0", b"a/b/c\0", FNM_PATHNAME));
+    }
+
+    #[test]
+    fn pathname_bracket_does_not_match_slash() {
+        assert!(!matches(b"a[/]b\0", b"a/b\0", FNM_PATHNAME));
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. FNM_PERIOD flag (leading . must be explicit)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn period_star_does_not_match_leading_dot() {
+        assert!(matches(b"*\0", b".hidden\0", 0)); // Without flag
+        assert!(!matches(b"*\0", b".hidden\0", FNM_PERIOD));
+    }
+
+    #[test]
+    fn period_question_does_not_match_leading_dot() {
+        assert!(matches(b"?hidden\0", b".hidden\0", 0));
+        assert!(!matches(b"?hidden\0", b".hidden\0", FNM_PERIOD));
+    }
+
+    #[test]
+    fn period_explicit_dot_matches() {
+        assert!(matches(b".hidden\0", b".hidden\0", FNM_PERIOD));
+        assert!(matches(b".*\0", b".hidden\0", FNM_PERIOD));
+    }
+
+    #[test]
+    fn period_not_leading_dot_ok() {
+        // Dot that is not leading should still match *.
+        assert!(matches(b"*\0", b"file.txt\0", FNM_PERIOD));
+    }
+
+    #[test]
+    fn period_bracket_does_not_match_leading_dot() {
+        assert!(!matches(b"[.]\0", b".\0", FNM_PERIOD));
+    }
+
+    #[test]
+    fn period_with_pathname_after_slash() {
+        // With both FNM_PATHNAME and FNM_PERIOD, a dot at the start of a
+        // path component (after /) should require an explicit match.
+        let flags = FNM_PATHNAME | FNM_PERIOD;
+        assert!(!matches(b"dir/*\0", b"dir/.hidden\0", flags));
+        assert!(matches(b"dir/.*\0", b"dir/.hidden\0", flags));
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. FNM_NOESCAPE flag
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn noescape_backslash_literal() {
+        // With FNM_NOESCAPE, backslash is treated as ordinary character.
+        assert!(matches(b"\\\0", b"\\\0", FNM_NOESCAPE));
+        assert!(!matches(b"\\\0", b"a\0", FNM_NOESCAPE));
+    }
+
+    #[test]
+    fn noescape_backslash_in_bracket() {
+        // With FNM_NOESCAPE, backslash in bracket is literal.
+        assert!(matches(b"[\\\\a]\0", b"\\\0", FNM_NOESCAPE));
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Backslash escaping (when FNM_NOESCAPE is NOT set)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn escape_star() {
+        // \* matches literal *
+        assert!(matches(b"\\*\0", b"*\0", 0));
+        assert!(!matches(b"\\*\0", b"abc\0", 0));
+    }
+
+    #[test]
+    fn escape_question() {
+        assert!(matches(b"\\?\0", b"?\0", 0));
+        assert!(!matches(b"\\?\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn escape_bracket() {
+        assert!(matches(b"\\[\0", b"[\0", 0));
+    }
+
+    #[test]
+    fn escape_backslash() {
+        assert!(matches(b"\\\\\0", b"\\\0", 0));
+    }
+
+    #[test]
+    fn escape_in_bracket_range() {
+        // Escaped character as a range endpoint.
+        assert!(matches(b"[\\a-\\c]\0", b"b\0", 0));
+    }
+
+    #[test]
+    fn escape_trailing_backslash_no_match() {
+        // Pattern ending with lone backslash (without FNM_NOESCAPE) cannot
+        // match because the escaped char is NUL.
+        assert!(!matches(b"a\\\0", b"a\0", 0));
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. Edge cases: empty strings, null pointers, adjacent wildcards
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn null_pattern() {
+        let result = unsafe { fnmatch(core::ptr::null(), b"test\0".as_ptr(), 0) };
+        assert_eq!(result, FNM_NOMATCH);
+    }
+
+    #[test]
+    fn null_string() {
+        let result = unsafe { fnmatch(b"*\0".as_ptr(), core::ptr::null(), 0) };
+        assert_eq!(result, FNM_NOMATCH);
+    }
+
+    #[test]
+    fn both_null() {
+        let result = unsafe { fnmatch(core::ptr::null(), core::ptr::null(), 0) };
+        assert_eq!(result, FNM_NOMATCH);
+    }
+
+    #[test]
+    fn empty_pattern_empty_string() {
+        assert!(matches(b"\0", b"\0", 0));
+    }
+
+    #[test]
+    fn empty_pattern_nonempty_string() {
+        assert!(!matches(b"\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn nonempty_pattern_empty_string() {
+        assert!(!matches(b"a\0", b"\0", 0));
+    }
+
+    #[test]
+    fn star_only_empty_string() {
+        assert!(matches(b"*\0", b"\0", 0));
+    }
+
+    #[test]
+    fn question_only_single_char() {
+        assert!(matches(b"?\0", b"x\0", 0));
+    }
+
+    #[test]
+    fn adjacent_stars() {
+        assert!(matches(b"***\0", b"anything\0", 0));
+        assert!(matches(b"***\0", b"\0", 0));
+    }
+
+    #[test]
+    fn star_question_star() {
+        // At least one character required (due to ?).
+        assert!(matches(b"*?*\0", b"a\0", 0));
+        assert!(!matches(b"*?*\0", b"\0", 0));
+    }
+
+    #[test]
+    fn long_string_star_prefix() {
+        // Stress: * at beginning with long string.
+        assert!(matches(b"*end\0", b"a]very]long]string]with]end\0", 0));
+        assert!(!matches(b"*end\0", b"a]very]long]string]with]enD\0", 0));
+    }
+
+    #[test]
+    fn pattern_longer_than_string() {
+        assert!(!matches(b"abcdef\0", b"abc\0", 0));
+    }
+
+    #[test]
+    fn string_longer_than_pattern() {
+        assert!(!matches(b"abc\0", b"abcdef\0", 0));
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. Complex patterns combining features
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn complex_glob_file_matching() {
+        assert!(matches(b"*.txt\0", b"readme.txt\0", 0));
+        assert!(!matches(b"*.txt\0", b"readme.md\0", 0));
+        assert!(matches(b"*.tar.gz\0", b"archive.tar.gz\0", 0));
+    }
+
+    #[test]
+    fn complex_directory_pattern() {
+        assert!(matches(
+            b"src/*/test_*.rs\0",
+            b"src/module/test_foo.rs\0",
+            0,
+        ));
+    }
+
+    #[test]
+    fn complex_bracket_and_star() {
+        assert!(matches(b"[a-z]*.log\0", b"server.log\0", 0));
+        assert!(!matches(b"[a-z]*.log\0", b"Server.log\0", 0));
+        assert!(!matches(b"[a-z]*.log\0", b"1server.log\0", 0));
+    }
+
+    #[test]
+    fn complex_multiple_brackets() {
+        assert!(matches(b"[abc][def][ghi]\0", b"adg\0", 0));
+        assert!(matches(b"[abc][def][ghi]\0", b"cfi\0", 0));
+        assert!(!matches(b"[abc][def][ghi]\0", b"aaa\0", 0));
+    }
+
+    #[test]
+    fn complex_escaped_in_pattern() {
+        // Match literal "[test].txt"
+        assert!(matches(b"\\[test\\].txt\0", b"[test].txt\0", 0));
+    }
+
+    #[test]
+    fn complex_pathname_period_combined() {
+        let flags = FNM_PATHNAME | FNM_PERIOD;
+        assert!(matches(b"src/*/*.rs\0", b"src/mod/lib.rs\0", flags));
+        assert!(!matches(b"src/*/*.rs\0", b"src/.hidden/lib.rs\0", flags));
+        assert!(matches(b"src/.*/*.rs\0", b"src/.hidden/lib.rs\0", flags));
+    }
+
+    #[test]
+    fn complex_question_in_extension() {
+        assert!(matches(b"file.???\0", b"file.txt\0", 0));
+        assert!(matches(b"file.???\0", b"file.htm\0", 0));
+        assert!(!matches(b"file.???\0", b"file.html\0", 0));
+        assert!(!matches(b"file.???\0", b"file.rs\0", 0));
+    }
+
+    #[test]
+    fn complex_posix_class_with_star() {
+        assert!(matches(b"[[:upper:]]*\0", b"Hello\0", 0));
+        assert!(!matches(b"[[:upper:]]*\0", b"hello\0", 0));
+    }
+
+    #[test]
+    fn complex_all_flags() {
+        let flags = FNM_PATHNAME | FNM_PERIOD | FNM_NOESCAPE;
+        // Backslash is literal (NOESCAPE), star stops at / (PATHNAME),
+        // leading dot must be explicit (PERIOD).
+        assert!(matches(b"dir/*.c\0", b"dir/main.c\0", flags));
+        assert!(!matches(b"dir/*.c\0", b"dir/.hidden.c\0", flags));
+        assert!(!matches(b"*\0", b"a/b\0", flags));
+        // Backslash is literal in pattern when NOESCAPE.
+        assert!(matches(b"a\\b\0", b"a\\b\0", flags));
+    }
+
+    #[test]
+    fn complex_nested_path_components() {
+        let flags = FNM_PATHNAME;
+        assert!(matches(b"a/*/c\0", b"a/b/c\0", flags));
+        assert!(!matches(b"a/*/c\0", b"a/b/d/c\0", flags));
+    }
+
+    #[test]
+    fn complex_star_at_path_boundary() {
+        let flags = FNM_PATHNAME;
+        assert!(matches(b"*/file\0", b"dir/file\0", flags));
+        assert!(!matches(b"*/file\0", b"dir/sub/file\0", flags));
+    }
+
+    #[test]
+    fn return_values() {
+        // fnmatch returns 0 on match, FNM_NOMATCH (1) on no-match.
+        let result = unsafe { fnmatch(b"abc\0".as_ptr(), b"abc\0".as_ptr(), 0) };
+        assert_eq!(result, 0);
+        let result = unsafe { fnmatch(b"abc\0".as_ptr(), b"xyz\0".as_ptr(), 0) };
+        assert_eq!(result, FNM_NOMATCH);
     }
 }

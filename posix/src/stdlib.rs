@@ -30,7 +30,7 @@
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn atoi(nptr: *const u8) -> i32 {
     unsafe { strtol(nptr, core::ptr::null_mut(), 10) as i32 }
 }
@@ -40,7 +40,7 @@ pub unsafe extern "C" fn atoi(nptr: *const u8) -> i32 {
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn atol(nptr: *const u8) -> i64 {
     unsafe { strtol(nptr, core::ptr::null_mut(), 10) }
 }
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn atol(nptr: *const u8) -> i64 {
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn atoll(nptr: *const u8) -> i64 {
     unsafe { strtoll(nptr, core::ptr::null_mut(), 10) }
 }
@@ -70,7 +70,7 @@ pub unsafe extern "C" fn atoll(nptr: *const u8) -> i64 {
 /// `nptr` must be a valid null-terminated string.
 /// `endptr` may be null; if non-null, it receives a pointer to the
 /// first character after the parsed number.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtol(
     nptr: *const u8,
     endptr: *mut *const u8,
@@ -221,7 +221,7 @@ pub unsafe extern "C" fn strtol(
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtoul(
     nptr: *const u8,
     endptr: *mut *const u8,
@@ -341,7 +341,7 @@ pub unsafe extern "C" fn strtoul(
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtoll(
     nptr: *const u8,
     endptr: *mut *const u8,
@@ -358,7 +358,7 @@ pub unsafe extern "C" fn strtoll(
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtoull(
     nptr: *const u8,
     endptr: *mut *const u8,
@@ -382,7 +382,7 @@ pub unsafe extern "C" fn strtoull(
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
 pub unsafe extern "C" fn strtod(
     nptr: *const u8,
@@ -552,7 +552,7 @@ pub unsafe extern "C" fn strtod(
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtof(
     nptr: *const u8,
     endptr: *mut *const u8,
@@ -579,7 +579,7 @@ pub unsafe extern "C" fn strtof(
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtold(
     nptr: *const u8,
     endptr: *mut *const u8,
@@ -593,7 +593,7 @@ pub unsafe extern "C" fn strtold(
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn atof(nptr: *const u8) -> f64 {
     unsafe { strtod(nptr, core::ptr::null_mut()) }
 }
@@ -631,13 +631,13 @@ fn pow10(mut exp: i32) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// Compute absolute value of an integer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn abs(j: i32) -> i32 {
     if j < 0 { j.saturating_neg() } else { j }
 }
 
 /// Compute absolute value of a long integer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn labs(j: i64) -> i64 {
     if j < 0 { j.saturating_neg() } else { j }
 }
@@ -645,7 +645,7 @@ pub extern "C" fn labs(j: i64) -> i64 {
 /// Compute absolute value of a long long integer.
 ///
 /// On our platform `long long` = `i64`, same as `labs`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn llabs(j: i64) -> i64 {
     if j < 0 { j.saturating_neg() } else { j }
 }
@@ -689,7 +689,7 @@ pub struct LldivT {
 /// Division by zero returns `{ 0, 0 }` (C UB — we choose a safe
 /// fallback).  `MIN / -1` returns `{ MIN, 0 }` (wrapping) instead of
 /// panicking, matching the behavior of C on two's-complement hardware.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn div(numer: i32, denom: i32) -> DivT {
     if denom == 0 {
         return DivT { quot: 0, rem: 0 };
@@ -706,7 +706,7 @@ pub extern "C" fn div(numer: i32, denom: i32) -> DivT {
 }
 
 /// Compute quotient and remainder for long integers.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ldiv(numer: i64, denom: i64) -> LdivT {
     if denom == 0 {
         return LdivT { quot: 0, rem: 0 };
@@ -722,7 +722,7 @@ pub extern "C" fn ldiv(numer: i64, denom: i64) -> LdivT {
 }
 
 /// Compute quotient and remainder for long long integers.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lldiv(numer: i64, denom: i64) -> LldivT {
     if denom == 0 {
         return LldivT { quot: 0, rem: 0 };
@@ -750,7 +750,7 @@ pub extern "C" fn lldiv(numer: i64, denom: i64) -> LldivT {
 ///
 /// `base` must point to an array of at least `nmemb` elements, each
 /// of `size` bytes.  `compar` must be a valid comparison function.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn qsort(
     base: *mut u8,
     nmemb: usize,
@@ -822,7 +822,7 @@ pub unsafe extern "C" fn qsort(
 ///
 /// `base` must point to a sorted array of at least `nmemb` elements,
 /// each of `size` bytes.  `compar` must be a valid comparison function.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn bsearch(
     key: *const u8,
     base: *const u8,
@@ -861,7 +861,7 @@ pub unsafe extern "C" fn bsearch(
 static mut RAND_STATE: u64 = 1;
 
 /// Seed the random number generator.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn srand(seed: u32) {
     // SAFETY: Single-threaded userspace. Using addr_of_mut for Rust 2024.
     unsafe { core::ptr::addr_of_mut!(RAND_STATE).write(u64::from(seed)); }
@@ -871,7 +871,7 @@ pub extern "C" fn srand(seed: u32) {
 ///
 /// Uses the glibc LCG: state = state * 6364136223846793005 + 1.
 /// Returns the upper 31 bits.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn rand() -> i32 {
     // SAFETY: Single-threaded access.
     let state = unsafe { core::ptr::addr_of_mut!(RAND_STATE).read() };
@@ -891,7 +891,7 @@ pub extern "C" fn rand() -> i32 {
 /// # Safety
 ///
 /// `seed` must point to a valid `u32`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn rand_r(seed: *mut u32) -> i32 {
     if seed.is_null() {
         return 0;
@@ -905,7 +905,7 @@ pub unsafe extern "C" fn rand_r(seed: *mut u32) -> i32 {
 }
 
 /// Maximum value returned by rand().
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static RAND_MAX: i32 = 0x7FFF_FFFF;
 
 /// POSIX: Seed the better random number generator.
@@ -913,7 +913,7 @@ pub static RAND_MAX: i32 = 0x7FFF_FFFF;
 /// For our purposes, this is identical to `srand`.  POSIX specifies
 /// `random()`/`srandom()` as a better-quality RNG than `rand()`/`srand()`,
 /// but our implementation uses the same LCG for both.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn srandom(seed: u32) {
     srand(seed);
 }
@@ -922,7 +922,7 @@ pub extern "C" fn srandom(seed: u32) {
 ///
 /// Better-quality RNG than `rand()` per POSIX, but our implementation
 /// delegates to the same LCG.  Returns a `i64` (`long`) per POSIX.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn random() -> i64 {
     i64::from(rand())
 }
@@ -934,7 +934,7 @@ pub extern "C" fn random() -> i64 {
 /// # Safety
 ///
 /// `statebuf` must be a valid pointer to at least 8 bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn initstate(seed: u32, statebuf: *mut u8, n: usize) -> *mut u8 {
     if statebuf.is_null() || n < 8 {
         return core::ptr::null_mut();
@@ -950,7 +950,7 @@ pub unsafe extern "C" fn initstate(seed: u32, statebuf: *mut u8, n: usize) -> *m
 /// # Safety
 ///
 /// `statebuf` must have been returned by a prior `initstate` call.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn setstate(statebuf: *mut u8) -> *mut u8 {
     // No-op: we use a global state regardless.
     statebuf
@@ -973,7 +973,7 @@ pub unsafe extern "C" fn setstate(statebuf: *mut u8) -> *mut u8 {
 ///
 /// `template` must be a writable null-terminated string with at least
 /// 6 trailing 'X' characters.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
     if template.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
@@ -1053,7 +1053,7 @@ pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
 ///
 /// `template` must be a writable null-terminated string with at least
 /// 6 trailing 'X' characters.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mktemp(template: *mut u8) -> *mut u8 {
     if template.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
@@ -1108,7 +1108,7 @@ pub unsafe extern "C" fn mktemp(template: *mut u8) -> *mut u8 {
 ///
 /// Note: Automatic deletion is not implemented (no unlink-on-close
 /// support yet).  The file persists until manually removed.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tmpfile() -> *mut u8 {
     let mut template: [u8; 20] = *b"/tmp/tmpXXXXXX\0\0\0\0\0\0";
     let fd = unsafe { mkstemp(template.as_mut_ptr()) };
@@ -1133,7 +1133,7 @@ pub extern "C" fn tmpfile() -> *mut u8 {
 ///
 /// `template` must be a writable null-terminated string with at least
 /// 6 trailing 'X' characters.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
     if template.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
@@ -1213,7 +1213,7 @@ pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
 ///
 /// `template` must be a writable null-terminated string with at least
 /// 6 trailing 'X' characters.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
     if template.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
@@ -1293,7 +1293,7 @@ pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
 /// # Safety
 ///
 /// `command` must be a valid null-terminated string (or NULL).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn system(command: *const u8) -> i32 {
     if command.is_null() {
         // POSIX: return non-zero if a command processor is available.
@@ -1398,7 +1398,7 @@ fn rand48_step() -> u64 {
 /// Return a non-negative `f64` in [0.0, 1.0).
 ///
 /// Uses the full 48-bit state scaled to a double.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
 pub extern "C" fn drand48() -> f64 {
     let state = rand48_step();
@@ -1407,14 +1407,14 @@ pub extern "C" fn drand48() -> f64 {
 }
 
 /// Return a non-negative `i64` in [0, 2^31).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lrand48() -> i64 {
     let state = rand48_step();
     (state >> 17) as i64 // Upper 31 bits.
 }
 
 /// Return a signed `i64` in [-2^31, 2^31).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mrand48() -> i64 {
     let state = rand48_step();
     // Interpret upper 32 bits as signed.
@@ -1425,7 +1425,7 @@ pub extern "C" fn mrand48() -> i64 {
 ///
 /// Sets the upper 32 bits of state; lower 16 bits are set to 0x330E
 /// (POSIX default).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn srand48(seedval: i64) {
     let hi = (seedval as u64) << 16;
     let state = (hi | 0x330E) & RAND48_MASK;
@@ -1440,7 +1440,7 @@ pub extern "C" fn srand48(seedval: i64) {
 /// # Safety
 ///
 /// `seed16v` must point to at least 3 `u16` values.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn seed48(seed16v: *const u16) -> *const u16 {
     static mut OLD_SEED: [u16; 3] = [0; 3];
 
@@ -1478,7 +1478,7 @@ pub extern "C" fn seed48(seed16v: *const u16) -> *const u16 {
 ///
 /// `xsubi` must point to an array of 3 `u16` values that the
 /// function will read and update.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn nrand48(xsubi: *mut u16) -> i64 {
     if xsubi.is_null() {
@@ -1509,7 +1509,7 @@ pub extern "C" fn nrand48(xsubi: *mut u16) -> i64 {
 /// # Safety
 ///
 /// `xsubi` must point to an array of 3 `u16` values.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
 pub extern "C" fn erand48(xsubi: *mut u16) -> f64 {
     if xsubi.is_null() {
@@ -1538,7 +1538,7 @@ pub extern "C" fn erand48(xsubi: *mut u16) -> f64 {
 /// # Safety
 ///
 /// `xsubi` must point to an array of 3 `u16` values.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn jrand48(xsubi: *mut u16) -> i64 {
     if xsubi.is_null() {
@@ -1577,7 +1577,7 @@ pub extern "C" fn jrand48(xsubi: *mut u16) -> i64 {
 /// `optionp` must point to a valid `*mut u8` pointing into a
 /// modifiable string.  `tokens` must be a null-terminated array of
 /// null-terminated C strings.  `valuep` must be a valid pointer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getsubopt(
     optionp: *mut *mut u8,
     tokens: *const *const u8,
@@ -1671,4 +1671,347 @@ pub unsafe extern "C" fn getsubopt(
     unsafe { *opt.add(key_len) = 0; }
 
     -1
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- atoi / atol / atoll tests --
+
+    #[test]
+    fn test_atoi_basic() {
+        assert_eq!(unsafe { atoi(b"42\0".as_ptr()) }, 42);
+        assert_eq!(unsafe { atoi(b"-7\0".as_ptr()) }, -7);
+        assert_eq!(unsafe { atoi(b"0\0".as_ptr()) }, 0);
+        assert_eq!(unsafe { atoi(b"  123\0".as_ptr()) }, 123);
+    }
+
+    #[test]
+    fn test_atoi_stops_at_nondigit() {
+        assert_eq!(unsafe { atoi(b"123abc\0".as_ptr()) }, 123);
+        assert_eq!(unsafe { atoi(b"abc\0".as_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_atol_basic() {
+        assert_eq!(unsafe { atol(b"1000000\0".as_ptr()) }, 1_000_000);
+        assert_eq!(unsafe { atol(b"-999\0".as_ptr()) }, -999);
+    }
+
+    // -- strtol tests --
+
+    #[test]
+    fn test_strtol_decimal() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(b"  -42xyz\0".as_ptr(), &mut endptr, 10) };
+        assert_eq!(val, -42);
+        assert!(!endptr.is_null());
+        assert_eq!(unsafe { *endptr }, b'x');
+    }
+
+    #[test]
+    fn test_strtol_hex() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(b"0xff\0".as_ptr(), &mut endptr, 16) };
+        assert_eq!(val, 255);
+    }
+
+    #[test]
+    fn test_strtol_hex_auto() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(b"0x1A\0".as_ptr(), &mut endptr, 0) };
+        assert_eq!(val, 26);
+    }
+
+    #[test]
+    fn test_strtol_octal_auto() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(b"0755\0".as_ptr(), &mut endptr, 0) };
+        assert_eq!(val, 493); // 0o755 = 493
+    }
+
+
+
+    #[test]
+    fn test_strtol_empty_string() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(b"\0".as_ptr(), &mut endptr, 10) };
+        assert_eq!(val, 0);
+    }
+
+    // -- strtoul tests --
+
+    #[test]
+    fn test_strtoul_basic() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtoul(b"12345\0".as_ptr(), &mut endptr, 10) };
+        assert_eq!(val, 12345);
+    }
+
+    #[test]
+    fn test_strtoul_hex() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtoul(b"0xDEAD\0".as_ptr(), &mut endptr, 0) };
+        assert_eq!(val, 0xDEAD);
+    }
+
+    // -- strtod tests --
+
+    #[test]
+    fn test_strtod_basic() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(b"3.14\0".as_ptr(), &mut endptr) };
+        assert!((val - 3.14).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_strtod_negative() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(b"-2.5\0".as_ptr(), &mut endptr) };
+        assert!((val - (-2.5)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_strtod_scientific() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(b"1.5e3\0".as_ptr(), &mut endptr) };
+        assert!((val - 1500.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_strtod_integer() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(b"42\0".as_ptr(), &mut endptr) };
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(val, 42.0);
+        }
+    }
+
+    #[test]
+    fn test_strtod_leading_whitespace() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(b"  3.0\0".as_ptr(), &mut endptr) };
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(val, 3.0);
+        }
+    }
+
+    // -- abs / labs / llabs tests --
+
+    #[test]
+    fn test_abs_basic() {
+        assert_eq!(abs(42), 42);
+        assert_eq!(abs(-42), 42);
+        assert_eq!(abs(0), 0);
+    }
+
+    #[test]
+    fn test_labs_basic() {
+        assert_eq!(labs(100_000), 100_000);
+        assert_eq!(labs(-100_000), 100_000);
+    }
+
+    // -- div / ldiv tests --
+
+    #[test]
+    fn test_div_basic() {
+        let r = div(17, 5);
+        assert_eq!(r.quot, 3);
+        assert_eq!(r.rem, 2);
+    }
+
+    #[test]
+    fn test_div_negative() {
+        let r = div(-17, 5);
+        assert_eq!(r.quot, -3);
+        assert_eq!(r.rem, -2);
+    }
+
+    #[test]
+    fn test_ldiv_basic() {
+        let r = ldiv(100, 7);
+        assert_eq!(r.quot, 14);
+        assert_eq!(r.rem, 2);
+    }
+
+    // -- qsort tests --
+
+    extern "C" fn cmp_i32(a: *const u8, b: *const u8) -> i32 {
+        let a_val = unsafe { *(a as *const i32) };
+        let b_val = unsafe { *(b as *const i32) };
+        a_val.wrapping_sub(b_val)
+    }
+
+    #[test]
+    fn test_qsort_basic() {
+        let mut arr: [i32; 5] = [5, 3, 1, 4, 2];
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                5,
+                core::mem::size_of::<i32>(),
+                cmp_i32,
+            );
+        }
+        assert_eq!(arr, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_qsort_already_sorted() {
+        let mut arr: [i32; 4] = [1, 2, 3, 4];
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                4,
+                core::mem::size_of::<i32>(),
+                cmp_i32,
+            );
+        }
+        assert_eq!(arr, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_qsort_reverse() {
+        let mut arr: [i32; 4] = [4, 3, 2, 1];
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                4,
+                core::mem::size_of::<i32>(),
+                cmp_i32,
+            );
+        }
+        assert_eq!(arr, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_qsort_single_element() {
+        let mut arr: [i32; 1] = [42];
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                1,
+                core::mem::size_of::<i32>(),
+                cmp_i32,
+            );
+        }
+        assert_eq!(arr, [42]);
+    }
+
+    #[test]
+    fn test_qsort_empty() {
+        let mut arr: [i32; 0] = [];
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                0,
+                core::mem::size_of::<i32>(),
+                cmp_i32,
+            );
+        }
+        // Should not crash.
+    }
+
+    // -- bsearch tests --
+
+    #[test]
+    fn test_bsearch_found() {
+        let arr: [i32; 5] = [1, 3, 5, 7, 9];
+        let key: i32 = 5;
+        let p = unsafe {
+            bsearch(
+                (&key as *const i32).cast(),
+                arr.as_ptr().cast(),
+                5,
+                core::mem::size_of::<i32>(),
+                cmp_i32,
+            )
+        };
+        assert!(!p.is_null());
+        assert_eq!(unsafe { *(p as *const i32) }, 5);
+    }
+
+    #[test]
+    fn test_bsearch_not_found() {
+        let arr: [i32; 5] = [1, 3, 5, 7, 9];
+        let key: i32 = 4;
+        let p = unsafe {
+            bsearch(
+                (&key as *const i32).cast(),
+                arr.as_ptr().cast(),
+                5,
+                core::mem::size_of::<i32>(),
+                cmp_i32,
+            )
+        };
+        assert!(p.is_null());
+    }
+
+    // -- rand / srand tests --
+
+    #[test]
+    fn test_srand_rand_deterministic() {
+        srand(12345);
+        let a = rand();
+        srand(12345);
+        let b = rand();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_rand_nonnegative() {
+        srand(42);
+        for _ in 0..100 {
+            assert!(rand() >= 0);
+        }
+    }
+
+    // -- getsubopt tests --
+
+    #[test]
+    fn test_getsubopt_match() {
+        // Tokens: "ro", "rw", "size"
+        let tok0: *const u8 = b"ro\0".as_ptr();
+        let tok1: *const u8 = b"rw\0".as_ptr();
+        let tok2: *const u8 = b"size\0".as_ptr();
+        let tokens: [*const u8; 4] = [
+            tok0,
+            tok1,
+            tok2,
+            core::ptr::null(),
+        ];
+
+        let mut input = *b"rw,size=100\0";
+        let mut optionp: *mut u8 = input.as_mut_ptr();
+        let mut valuep: *mut u8 = core::ptr::null_mut();
+
+        // First suboption: "rw"
+        let idx = unsafe {
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
+        };
+        assert_eq!(idx, 1); // matches "rw"
+        assert!(valuep.is_null()); // no value
+
+        // Second suboption: "size=100"
+        let idx = unsafe {
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
+        };
+        assert_eq!(idx, 2); // matches "size"
+        assert!(!valuep.is_null()); // has value "100"
+    }
 }

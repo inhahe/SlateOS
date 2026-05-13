@@ -67,16 +67,16 @@ const LN10: f64 = consts::LN_10;
 const LOG2E: f64 = consts::LOG2_E;
 
 /// Special value constants.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static HUGE_VAL: f64 = f64::INFINITY;
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static HUGE_VALF: f32 = f32::INFINITY;
 
 // ---------------------------------------------------------------------------
 // Absolute value
 // ---------------------------------------------------------------------------
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn fabs(x: f64) -> f64 {
     // Bit manipulation handles -0.0 correctly (IEEE 754: -0.0 < 0.0 is false,
@@ -84,7 +84,7 @@ pub extern "C" fn fabs(x: f64) -> f64 {
     f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn fabsf(x: f32) -> f32 {
     f32::from_bits(x.to_bits() & 0x7FFF_FFFF)
@@ -94,7 +94,7 @@ pub extern "C" fn fabsf(x: f32) -> f32 {
 // Rounding
 // ---------------------------------------------------------------------------
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn floor(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() { return x; }
@@ -108,7 +108,7 @@ pub extern "C" fn floor(x: f64) -> f64 {
     if x < f { f - 1.0 } else { f }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn floorf(x: f32) -> f32 {
     if x.is_nan() || x.is_infinite() { return x; }
@@ -120,7 +120,7 @@ pub extern "C" fn floorf(x: f32) -> f32 {
     if x < f { f - 1.0 } else { f }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn ceil(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() { return x; }
@@ -131,7 +131,7 @@ pub extern "C" fn ceil(x: f64) -> f64 {
     if x > f { f + 1.0 } else { f }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn ceilf(x: f32) -> f32 {
     if x.is_nan() || x.is_infinite() { return x; }
@@ -142,7 +142,7 @@ pub extern "C" fn ceilf(x: f32) -> f32 {
     if x > f { f + 1.0 } else { f }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn round(x: f64) -> f64 {
     // POSIX: round halfway cases away from zero.
     // floor(x + 0.5) alone gives wrong results for negative halves:
@@ -150,12 +150,12 @@ pub extern "C" fn round(x: f64) -> f64 {
     if x >= 0.0 { floor(x + 0.5) } else { ceil(x - 0.5) }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn roundf(x: f32) -> f32 {
     if x >= 0.0 { floorf(x + 0.5) } else { ceilf(x - 0.5) }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn trunc(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() { return x; }
@@ -166,7 +166,7 @@ pub extern "C" fn trunc(x: f64) -> f64 {
     x as i64 as f64
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn truncf(x: f32) -> f32 {
     if x.is_nan() || x.is_infinite() { return x; }
@@ -179,14 +179,14 @@ pub extern "C" fn truncf(x: f32) -> f32 {
 // Remainder
 // ---------------------------------------------------------------------------
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn fmod(x: f64, y: f64) -> f64 {
     if y == 0.0 { return f64::NAN; }
     x - trunc(x / y) * y
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn fmodf(x: f32, y: f32) -> f32 {
     if y == 0.0 { return f32::NAN; }
@@ -197,7 +197,7 @@ pub extern "C" fn fmodf(x: f32, y: f32) -> f32 {
 // Square root — Newton-Raphson
 // ---------------------------------------------------------------------------
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::suboptimal_flops)]
 pub extern "C" fn sqrt(x: f64) -> f64 {
     if x < 0.0 { return f64::NAN; }
@@ -230,7 +230,7 @@ pub extern "C" fn sqrt(x: f64) -> f64 {
     g
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sqrtf(x: f32) -> f32 {
     sqrt(f64::from(x)) as f32
 }
@@ -239,7 +239,7 @@ pub extern "C" fn sqrtf(x: f32) -> f32 {
 // Exponential — Taylor series
 // ---------------------------------------------------------------------------
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn exp(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
@@ -271,19 +271,19 @@ pub extern "C" fn exp(x: f64) -> f64 {
     ldexp(sum, k as i32)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn expf(x: f32) -> f32 {
     exp(f64::from(x)) as f32
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn exp2(x: f64) -> f64 {
     exp(x * LN2)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn exp2f(x: f32) -> f32 {
     expf(x * LN2 as f32)
@@ -293,7 +293,7 @@ pub extern "C" fn exp2f(x: f32) -> f32 {
 // Natural logarithm
 // ---------------------------------------------------------------------------
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn log(x: f64) -> f64 {
     if x < 0.0 { return f64::NAN; }
@@ -326,30 +326,30 @@ pub extern "C" fn log(x: f64) -> f64 {
     2.0 * sum + f64::from(adj_e) * LN2
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn logf(x: f32) -> f32 {
     log(f64::from(x)) as f32
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn log2(x: f64) -> f64 {
     log(x) * LOG2E
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn log2f(x: f32) -> f32 {
     logf(x) * LOG2E as f32
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn log10(x: f64) -> f64 {
     log(x) / LN10
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn log10f(x: f32) -> f32 {
     logf(x) / LN10 as f32
@@ -359,7 +359,7 @@ pub extern "C" fn log10f(x: f32) -> f32 {
 // Power
 // ---------------------------------------------------------------------------
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::float_cmp)] // Exact comparisons are intentional for special-value handling.
 pub extern "C" fn pow(base: f64, exponent: f64) -> f64 {
     if exponent == 0.0 { return 1.0; }
@@ -384,7 +384,7 @@ pub extern "C" fn pow(base: f64, exponent: f64) -> f64 {
     exp(exponent * log(base))
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn powf(base: f32, exponent: f32) -> f32 {
     pow(f64::from(base), f64::from(exponent)) as f32
 }
@@ -420,7 +420,7 @@ fn ipow(mut base: f64, mut exp: i64) -> f64 {
 // Trigonometry — Taylor series
 // ---------------------------------------------------------------------------
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn sin(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() { return f64::NAN; }
@@ -444,23 +444,23 @@ pub extern "C" fn sin(x: f64) -> f64 {
     sum
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sinf(x: f32) -> f32 {
     sin(f64::from(x)) as f32
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn cos(x: f64) -> f64 {
     sin(x + HALF_PI)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn cosf(x: f32) -> f32 {
     cos(f64::from(x)) as f32
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn tan(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() { return f64::NAN; }
@@ -472,7 +472,7 @@ pub extern "C" fn tan(x: f64) -> f64 {
     sin(x) / c
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tanf(x: f32) -> f32 {
     tan(f64::from(x)) as f32
 }
@@ -485,7 +485,7 @@ pub extern "C" fn tanf(x: f32) -> f32 {
 ///
 /// Returns the angle (in radians) whose tangent is y/x, using the
 /// signs of both arguments to determine the quadrant.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn atan2(y: f64, x: f64) -> f64 {
     if x.is_nan() || y.is_nan() { return f64::NAN; }
@@ -505,7 +505,7 @@ pub extern "C" fn atan2(y: f64, x: f64) -> f64 {
     0.0 // Both zero.
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn atan2f(y: f32, x: f32) -> f32 {
     atan2(f64::from(y), f64::from(x)) as f32
 }
@@ -541,7 +541,7 @@ fn atan_approx(x: f64) -> f64 {
 /// Break a float into fraction and exponent.
 ///
 /// Returns m such that x = m * 2^exp, where 0.5 <= |m| < 1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn frexp(x: f64, exp: *mut i32) -> f64 {
     if exp.is_null() { return x; }
@@ -571,7 +571,7 @@ fn frexp_internal(x: f64, exp: &mut i32) -> f64 {
 /// Scale a float by a power of 2.
 ///
 /// Returns x * 2^exp.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn ldexp(x: f64, exp: i32) -> f64 {
     if x == 0.0 || x.is_nan() || x.is_infinite() {
@@ -594,7 +594,7 @@ pub extern "C" fn ldexp(x: f64, exp: i32) -> f64 {
 }
 
 /// Split a float into integer and fractional parts.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn modf(x: f64, iptr: *mut f64) -> f64 {
     let int_part = trunc(x);
     if !iptr.is_null() {
@@ -607,19 +607,19 @@ pub extern "C" fn modf(x: f64, iptr: *mut f64) -> f64 {
 // Classification
 // ---------------------------------------------------------------------------
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn isnan(x: f64) -> i32 {
     i32::from(x.is_nan())
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn isinf(x: f64) -> i32 {
     if x == f64::INFINITY { 1 }
     else if x == f64::NEG_INFINITY { -1 }
     else { 0 }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn isfinite(x: f64) -> i32 {
     i32::from(x.is_finite())
 }
@@ -628,7 +628,7 @@ pub extern "C" fn isfinite(x: f64) -> i32 {
 // Sign manipulation
 // ---------------------------------------------------------------------------
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn copysign(x: f64, y: f64) -> f64 {
     let mag = x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF;
@@ -636,7 +636,7 @@ pub extern "C" fn copysign(x: f64, y: f64) -> f64 {
     f64::from_bits(mag | sign)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn copysignf(x: f32, y: f32) -> f32 {
     let mag = x.to_bits() & 0x7FFF_FFFF;
@@ -648,28 +648,28 @@ pub extern "C" fn copysignf(x: f32, y: f32) -> f32 {
 // Min / Max
 // ---------------------------------------------------------------------------
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fmin(x: f64, y: f64) -> f64 {
     if x.is_nan() { return y; }
     if y.is_nan() { return x; }
     if x < y { x } else { y }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fmax(x: f64, y: f64) -> f64 {
     if x.is_nan() { return y; }
     if y.is_nan() { return x; }
     if x > y { x } else { y }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fminf(x: f32, y: f32) -> f32 {
     if x.is_nan() { return y; }
     if y.is_nan() { return x; }
     if x < y { x } else { y }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fmaxf(x: f32, y: f32) -> f32 {
     if x.is_nan() { return y; }
     if y.is_nan() { return x; }
@@ -683,13 +683,13 @@ pub extern "C" fn fmaxf(x: f32, y: f32) -> f32 {
 /// Compute arc tangent of x.
 ///
 /// Returns a value in [-π/2, π/2].
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn atan(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
     atan_approx(x)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn atanf(x: f32) -> f32 {
     atan(f64::from(x)) as f32
 }
@@ -697,7 +697,7 @@ pub extern "C" fn atanf(x: f32) -> f32 {
 /// Compute arc sine of x.
 ///
 /// Returns a value in [-π/2, π/2].  Domain: |x| <= 1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn asin(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
@@ -711,7 +711,7 @@ pub extern "C" fn asin(x: f64) -> f64 {
     atan2(x, sqrt(1.0 - x * x))
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn asinf(x: f32) -> f32 {
     asin(f64::from(x)) as f32
 }
@@ -719,7 +719,7 @@ pub extern "C" fn asinf(x: f32) -> f32 {
 /// Compute arc cosine of x.
 ///
 /// Returns a value in [0, π].  Domain: |x| <= 1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn acos(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
@@ -733,7 +733,7 @@ pub extern "C" fn acos(x: f64) -> f64 {
     atan2(sqrt(1.0 - x * x), x)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn acosf(x: f32) -> f32 {
     acos(f64::from(x)) as f32
 }
@@ -743,7 +743,7 @@ pub extern "C" fn acosf(x: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Hyperbolic sine.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn sinh(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
@@ -753,13 +753,13 @@ pub extern "C" fn sinh(x: f64) -> f64 {
     (ex - 1.0 / ex) * 0.5
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sinhf(x: f32) -> f32 {
     sinh(f64::from(x)) as f32
 }
 
 /// Hyperbolic cosine.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn cosh(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
@@ -769,13 +769,13 @@ pub extern "C" fn cosh(x: f64) -> f64 {
     (ex + 1.0 / ex) * 0.5
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn coshf(x: f32) -> f32 {
     cosh(f64::from(x)) as f32
 }
 
 /// Hyperbolic tangent.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn tanh(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
@@ -786,7 +786,7 @@ pub extern "C" fn tanh(x: f64) -> f64 {
     (e2x - 1.0) / (e2x + 1.0)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tanhf(x: f32) -> f32 {
     tanh(f64::from(x)) as f32
 }
@@ -796,7 +796,7 @@ pub extern "C" fn tanhf(x: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Euclidean distance: sqrt(x² + y²) without overflow.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn hypot(x: f64, y: f64) -> f64 {
     if x.is_infinite() || y.is_infinite() { return f64::INFINITY; }
@@ -810,13 +810,13 @@ pub extern "C" fn hypot(x: f64, y: f64) -> f64 {
     big * sqrt(1.0 + ratio * ratio)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn hypotf(x: f32, y: f32) -> f32 {
     hypot(f64::from(x), f64::from(y)) as f32
 }
 
 /// Cube root.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn cbrt(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() || x == 0.0 { return x; }
@@ -832,7 +832,7 @@ pub extern "C" fn cbrt(x: f64) -> f64 {
     sign * y
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn cbrtf(x: f32) -> f32 {
     cbrt(f64::from(x)) as f32
 }
@@ -841,7 +841,7 @@ pub extern "C" fn cbrtf(x: f32) -> f32 {
 ///
 /// For |x| < 1e-4, uses Taylor series to avoid catastrophic cancellation
 /// in the naive `log(1 + x)`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn log1p(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
@@ -860,7 +860,7 @@ pub extern "C" fn log1p(x: f64) -> f64 {
     log(1.0 + x)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn log1pf(x: f32) -> f32 {
     log1p(f64::from(x)) as f32
 }
@@ -868,7 +868,7 @@ pub extern "C" fn log1pf(x: f32) -> f32 {
 /// exp(x) - 1, accurate for small x.
 ///
 /// For |x| < 1e-4, uses Taylor series to avoid catastrophic cancellation.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn expm1(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
@@ -884,20 +884,20 @@ pub extern "C" fn expm1(x: f64) -> f64 {
     exp(x) - 1.0
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn expm1f(x: f32) -> f32 {
     expm1(f64::from(x)) as f32
 }
 
 /// Positive difference: max(x - y, 0).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn fdim(x: f64, y: f64) -> f64 {
     if x.is_nan() || y.is_nan() { return f64::NAN; }
     if x > y { x - y } else { 0.0 }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fdimf(x: f32, y: f32) -> f32 {
     fdim(f64::from(x), f64::from(y)) as f32
 }
@@ -907,7 +907,7 @@ pub extern "C" fn fdimf(x: f32, y: f32) -> f32 {
 /// On x86_64, FMA3 is available via intrinsic; we use a simple
 /// implementation that computes at f64 precision (which gives correct
 /// rounding for most cases in the f32 variant).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn fma(x: f64, y: f64, z: f64) -> f64 {
     // Without hardware FMA, this is the best we can do portably.
@@ -915,7 +915,7 @@ pub extern "C" fn fma(x: f64, y: f64, z: f64) -> f64 {
     x * y + z
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn fmaf(x: f32, y: f32, z: f32) -> f32 {
     // Perform in f64 for correct f32 result (f64 has enough precision
@@ -924,23 +924,23 @@ pub extern "C" fn fmaf(x: f32, y: f32, z: f32) -> f32 {
 }
 
 /// Round to nearest integer, ties away from zero (long).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lround(x: f64) -> i64 {
     round(x) as i64
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lroundf(x: f32) -> i64 {
     roundf(x) as i64
 }
 
 /// Round to nearest integer, ties away from zero (long long).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn llround(x: f64) -> i64 {
     round(x) as i64
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn llroundf(x: f32) -> i64 {
     roundf(x) as i64
 }
@@ -950,7 +950,7 @@ pub extern "C" fn llroundf(x: f32) -> i64 {
 /// Uses floor-based approach: `x - floor(x)` gives the fractional part
 /// in [0, 1).  A tie occurs when the fractional part is exactly 0.5.
 /// On a tie, round to the nearest even integer (banker's rounding).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn lrint(x: f64) -> i64 {
     if x.is_nan() || x.is_infinite() { return 0; }
@@ -974,13 +974,13 @@ pub extern "C" fn lrint(x: f64) -> i64 {
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lrintf(x: f32) -> i64 {
     lrint(f64::from(x))
 }
 
 /// Round to nearest integer value (as floating-point), ties to even.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn rint(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() { return x; }
@@ -990,7 +990,7 @@ pub extern "C" fn rint(x: f64) -> f64 {
     lrint(x) as f64
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 // The guard above ensures |x| < 2^23, so the integer value fits exactly in f32.
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn rintf(x: f32) -> f32 {
@@ -1001,36 +1001,36 @@ pub extern "C" fn rintf(x: f32) -> f32 {
 }
 
 /// Same as `rint`, but does not raise FP exceptions.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nearbyint(x: f64) -> f64 {
     rint(x)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nearbyintf(x: f32) -> f32 {
     rintf(x)
 }
 
 /// Multiply by power of 2 (integer exponent).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn scalbn(x: f64, n: i32) -> f64 {
     ldexp(x, n)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn scalbnf(x: f32, n: i32) -> f32 {
     ldexp(f64::from(x), n) as f32
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn scalbln(x: f64, n: i64) -> f64 {
     // Clamp to i32 range (exponents beyond ±1074 produce 0 or inf anyway).
     let clamped = n.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     ldexp(x, clamped)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn scalblnf(x: f32, n: i64) -> f32 {
     scalbln(f64::from(x), n) as f32
 }
@@ -1040,7 +1040,7 @@ pub extern "C" fn scalblnf(x: f32, n: i64) -> f32 {
 /// Returns the exponent of x such that 1 <= |x| * 2^(-ilogb(x)) < 2.
 /// Special: ilogb(0) = `FP_ILOGB0`, ilogb(inf) = `INT_MAX`,
 /// ilogb(NaN) = `FP_ILOGBNAN`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn ilogb(x: f64) -> i32 {
     if x.is_nan() { return i32::MAX; } // FP_ILOGBNAN
@@ -1060,13 +1060,13 @@ pub extern "C" fn ilogb(x: f64) -> i32 {
     }
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ilogbf(x: f32) -> i32 {
     ilogb(f64::from(x))
 }
 
 /// Extract unbiased exponent as f64.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn logb(x: f64) -> f64 {
     if x == 0.0 { return f64::NEG_INFINITY; }
     if x.is_infinite() { return f64::INFINITY; }
@@ -1074,13 +1074,13 @@ pub extern "C" fn logb(x: f64) -> f64 {
     f64::from(ilogb(x))
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn logbf(x: f32) -> f32 {
     logb(f64::from(x)) as f32
 }
 
 /// Next representable f64 value after `from` in the direction of `to`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nextafter(from: f64, to: f64) -> f64 {
     if from.is_nan() || to.is_nan() { return f64::NAN; }
     // Exact bit-level equality check is intentional: nextafter(x, x) == x per IEEE 754.
@@ -1100,7 +1100,7 @@ pub extern "C" fn nextafter(from: f64, to: f64) -> f64 {
     f64::from_bits(next_bits)
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nextafterf(from: f32, to: f32) -> f32 {
     if from.is_nan() || to.is_nan() { return f32::NAN; }
     // Exact bit-level equality check is intentional: nextafterf(x, x) == x per IEEE 754.
@@ -1120,7 +1120,7 @@ pub extern "C" fn nextafterf(from: f32, to: f32) -> f32 {
 }
 
 /// IEEE 754 remainder (difference from `fmod`: uses round-to-nearest).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn remainder(x: f64, y: f64) -> f64 {
     if y == 0.0 || x.is_infinite() { return f64::NAN; }
@@ -1130,7 +1130,7 @@ pub extern "C" fn remainder(x: f64, y: f64) -> f64 {
     x - n * y
 }
 
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn remainderf(x: f32, y: f32) -> f32 {
     remainder(f64::from(x), f64::from(y)) as f32
 }
@@ -1138,31 +1138,31 @@ pub extern "C" fn remainderf(x: f32, y: f32) -> f32 {
 /// NaN with optional tag string (C99 nan("")).
 ///
 /// The tag is ignored (implementation-defined payload).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nan(_tag: *const u8) -> f64 {
     f64::NAN
 }
 
 /// NaN (f32 variant).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nanf(_tag: *const u8) -> f32 {
     f32::NAN
 }
 
 /// frexp for f32.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn frexpf(x: f32, exp: *mut i32) -> f32 {
     frexp(f64::from(x), exp) as f32
 }
 
 /// ldexp for f32.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ldexpf(x: f32, exp: i32) -> f32 {
     ldexp(f64::from(x), exp) as f32
 }
 
 /// modf for f32.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn modff(x: f32, iptr: *mut f32) -> f32 {
     let mut id: f64 = 0.0;
     let frac = modf(f64::from(x), &raw mut id);
@@ -1175,7 +1175,7 @@ pub extern "C" fn modff(x: f32, iptr: *mut f32) -> f32 {
 
 /// Return the floating-point number with the magnitude of `x` and the
 /// sign of the product `x * y` (GNU extension used by some libm ports).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn __copysign(x: f64, y: f64) -> f64 {
     copysign(x, y)
@@ -1189,7 +1189,7 @@ pub extern "C" fn __copysign(x: f64, y: f64) -> f64 {
 ///
 /// Approximation using Abramowitz and Stegun formula 7.1.26.
 /// Accurate to ~1.5e-7 relative error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn erf(x: f64) -> f64 {
     // Constants from A&S 7.1.26.
@@ -1212,20 +1212,20 @@ pub extern "C" fn erf(x: f64) -> f64 {
 }
 
 /// Complementary error function: erfc(x) = 1 - erf(x).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn erfc(x: f64) -> f64 {
     1.0 - erf(x)
 }
 
 /// Error function (f32).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn erff(x: f32) -> f32 {
     erf(f64::from(x)) as f32
 }
 
 /// Complementary error function (f32).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn erfcf(x: f32) -> f32 {
     erfc(f64::from(x)) as f32
 }
@@ -1235,7 +1235,7 @@ pub extern "C" fn erfcf(x: f32) -> f32 {
 /// Uses the Stirling approximation with correction terms for x >= 7,
 /// and the recurrence relation to reduce smaller x to that range.
 /// Returns +∞ for x = 0 and negative integers.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn lgamma(x: f64) -> f64 {
     // Handle special cases.
@@ -1279,7 +1279,7 @@ pub extern "C" fn lgamma(x: f64) -> f64 {
 }
 
 /// f32 version of lgamma.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgammaf(x: f32) -> f32 {
     lgamma(f64::from(x)) as f32
 }
@@ -1287,7 +1287,7 @@ pub extern "C" fn lgammaf(x: f32) -> f32 {
 /// Gamma function: Γ(x) = exp(lgamma(x)).
 ///
 /// Returns the true gamma function value, handling sign correctly.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn tgamma(x: f64) -> f64 {
     // Special cases.
@@ -1319,7 +1319,7 @@ pub extern "C" fn tgamma(x: f64) -> f64 {
 }
 
 /// f32 version of tgamma.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tgammaf(x: f32) -> f32 {
     tgamma(f64::from(x)) as f32
 }
@@ -1329,7 +1329,7 @@ pub extern "C" fn tgammaf(x: f32) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Inverse hyperbolic sine: asinh(x) = ln(x + √(x² + 1)).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn asinh(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() {
@@ -1351,13 +1351,13 @@ pub extern "C" fn asinh(x: f64) -> f64 {
 }
 
 /// Inverse hyperbolic sine (f32).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn asinhf(x: f32) -> f32 {
     asinh(f64::from(x)) as f32
 }
 
 /// Inverse hyperbolic cosine: acosh(x) = ln(x + √(x² - 1)), x >= 1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn acosh(x: f64) -> f64 {
     if x.is_nan() {
@@ -1383,13 +1383,13 @@ pub extern "C" fn acosh(x: f64) -> f64 {
 }
 
 /// Inverse hyperbolic cosine (f32).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn acoshf(x: f32) -> f32 {
     acosh(f64::from(x)) as f32
 }
 
 /// Inverse hyperbolic tangent: atanh(x) = 0.5 * ln((1+x)/(1-x)), |x| < 1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn atanh(x: f64) -> f64 {
     if x.is_nan() {
@@ -1412,7 +1412,7 @@ pub extern "C" fn atanh(x: f64) -> f64 {
 }
 
 /// Inverse hyperbolic tangent (f32).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn atanhf(x: f32) -> f32 {
     atanh(f64::from(x)) as f32
 }
@@ -1429,7 +1429,7 @@ pub extern "C" fn atanhf(x: f32) -> f32 {
 /// # Safety
 ///
 /// `sinp` and `cosp` must be valid, writable pointers.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn sincos(x: f64, sinp: *mut f64, cosp: *mut f64) {
     // SAFETY: Caller must provide valid pointers per POSIX convention.
@@ -1442,7 +1442,7 @@ pub extern "C" fn sincos(x: f64, sinp: *mut f64, cosp: *mut f64) {
 }
 
 /// sincos (f32).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sincosf(x: f32, sinp: *mut f32, cosp: *mut f32) {
     if !sinp.is_null() {
         unsafe { *sinp = sinf(x); }
@@ -1465,7 +1465,7 @@ pub extern "C" fn sincosf(x: f32, sinp: *mut f32, cosp: *mut f32) {
 /// # Safety
 ///
 /// `quo` must be a valid, writable pointer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 pub extern "C" fn remquo(x: f64, y: f64, quo: *mut i32) -> f64 {
     if y == 0.0 || x.is_nan() || y.is_nan() || x.is_infinite() {
@@ -1503,7 +1503,7 @@ pub extern "C" fn remquo(x: f64, y: f64, quo: *mut i32) -> f64 {
 }
 
 /// remquo (f32).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn remquof(x: f32, y: f32, quo: *mut i32) -> f32 {
     remquo(f64::from(x), f64::from(y), quo) as f32
 }
@@ -1513,25 +1513,25 @@ pub extern "C" fn remquof(x: f32, y: f32, quo: *mut i32) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Compute 10^x (GNU extension).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn exp10(x: f64) -> f64 {
     pow(10.0, x)
 }
 
 /// exp10 (f32).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn exp10f(x: f32) -> f32 {
     powf(10.0, x)
 }
 
 /// Alias for `exp10` (GNU extension, deprecated).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pow10(x: f64) -> f64 {
     exp10(x)
 }
 
 /// pow10 (f32).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pow10f(x: f32) -> f32 {
     exp10f(x)
 }
@@ -1548,7 +1548,7 @@ pub extern "C" fn pow10f(x: f32) -> f32 {
 ///
 /// `signp` must be a valid, writable pointer (or NULL, in which case
 /// the sign is not stored).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 // float_cmp: x == floor(x) intentionally checks exact integer equality (gamma poles).
 #[allow(clippy::float_cmp)]
@@ -1579,7 +1579,7 @@ pub extern "C" fn lgamma_r(x: f64, signp: *mut i32) -> f64 {
 }
 
 /// lgamma_r (f32).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgammaf_r(x: f32, signp: *mut i32) -> f32 {
     lgamma_r(f64::from(x), signp) as f32
 }
@@ -1591,25 +1591,25 @@ pub extern "C" fn lgammaf_r(x: f32, signp: *mut i32) -> f32 {
 /// `finite(x)` — deprecated BSD alias for `isfinite(x)`.
 ///
 /// Returns non-zero if `x` is not infinity or NaN.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn finite(x: f64) -> i32 {
     isfinite(x)
 }
 
 /// `finitef(x)` — f32 variant of `finite`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn finitef(x: f32) -> i32 {
     i32::from(!(x.is_infinite() || x.is_nan()))
 }
 
 /// `drem(x, y)` — deprecated alias for `remainder(x, y)`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn drem(x: f64, y: f64) -> f64 {
     remainder(x, y)
 }
 
 /// `dremf(x, y)` — f32 variant.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dremf(x: f32, y: f32) -> f32 {
     remainderf(x, y)
 }
@@ -1618,13 +1618,13 @@ pub extern "C" fn dremf(x: f32, y: f32) -> f32 {
 ///
 /// Note: historically `gamma()` meant the log-gamma function, not the
 /// true gamma function.  Use `tgamma()` for Γ(x).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gamma(x: f64) -> f64 {
     lgamma(x)
 }
 
 /// `gammaf(x)` — f32 variant.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gammaf(x: f32) -> f32 {
     lgammaf(x)
 }
@@ -1633,7 +1633,7 @@ pub extern "C" fn gammaf(x: f32) -> f32 {
 ///
 /// Returns `x * 2^(-ilogb(x))`, i.e. the significand as if the
 /// exponent were 0.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn significand(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() || x == 0.0 {
@@ -1644,7 +1644,7 @@ pub extern "C" fn significand(x: f64) -> f64 {
 }
 
 /// `significandf(x)` — f32 variant.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn significandf(x: f32) -> f32 {
     significand(f64::from(x)) as f32
 }
@@ -1657,7 +1657,7 @@ pub extern "C" fn significandf(x: f32) -> f32 {
 ///
 /// Uses polynomial approximation: rational for |x| <= 3, and
 /// asymptotic expansion for |x| > 3.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn j0(x: f64) -> f64 {
     let a = fabs(x);
@@ -1681,7 +1681,7 @@ pub extern "C" fn j0(x: f64) -> f64 {
 }
 
 /// Bessel function of the first kind, order 1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn j1(x: f64) -> f64 {
     let a = fabs(x);
@@ -1706,7 +1706,7 @@ pub extern "C" fn j1(x: f64) -> f64 {
 /// Bessel function of the first kind, order n (integer).
 ///
 /// Uses Miller's backward recurrence for stability.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn jn(n: i32, x: f64) -> f64 {
     if n == 0 { return j0(x); }
@@ -1742,7 +1742,7 @@ pub extern "C" fn jn(n: i32, x: f64) -> f64 {
 ///
 /// Y0(x) ≈ (2/π) * (J0(x) * (ln(x/2) + γ) + series correction).
 /// Uses asymptotic expansion for large x.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn y0(x: f64) -> f64 {
     // Euler-Mascheroni constant γ ≈ 0.5772156649.
@@ -1773,7 +1773,7 @@ pub extern "C" fn y0(x: f64) -> f64 {
 }
 
 /// Bessel function of the second kind, order 1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn y1(x: f64) -> f64 {
     // Euler-Mascheroni constant γ ≈ 0.5772156649.
@@ -1801,7 +1801,7 @@ pub extern "C" fn y1(x: f64) -> f64 {
 /// Bessel function of the second kind, order n (integer).
 ///
 /// Uses forward recurrence from Y0 and Y1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn yn(n: i32, x: f64) -> f64 {
     if x <= 0.0 {
@@ -1825,4 +1825,1126 @@ pub extern "C" fn yn(n: i32, x: f64) -> f64 {
     }
 
     if n < 0 && (-n) % 2 != 0 { -y_curr } else { y_curr }
+}
+
+// ===========================================================================
+// Tests
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Approximate comparison helpers.  Taylor-series implementations are
+    // accurate to roughly 10-15 digits (f64) and 5-7 digits (f32), so we
+    // use tolerances that are tight but not tighter than the implementation
+    // can deliver.
+
+    /// Assert two f64 values are approximately equal within `eps`.
+    fn assert_approx(a: f64, b: f64, eps: f64, msg: &str) {
+        assert!(
+            (a - b).abs() < eps,
+            "{msg}: expected {b}, got {a} (diff = {})",
+            (a - b).abs()
+        );
+    }
+
+    /// Assert two f32 values are approximately equal within `eps`.
+    fn assert_approx_f32(a: f32, b: f32, eps: f32, msg: &str) {
+        assert!(
+            (a - b).abs() < eps,
+            "{msg}: expected {b}, got {a} (diff = {})",
+            (a - b).abs()
+        );
+    }
+
+    const EPS: f64 = 1e-10;
+    const EPS_F32: f32 = 1e-5;
+    // The atan Taylor series converges slowly near |x|=1, so atan, asin,
+    // acos, and atan2 only achieve roughly 2 digits of accuracy there.
+    // Use a wider tolerance for tests that exercise those code paths.
+    const EPS_ATAN: f64 = 0.02;
+
+    // -----------------------------------------------------------------------
+    // 1. Trigonometric functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sin_exact_values() {
+        assert_approx(sin(0.0), 0.0, EPS, "sin(0)");
+        assert_approx(sin(HALF_PI), 1.0, EPS, "sin(pi/2)");
+        assert_approx(sin(PI), 0.0, EPS, "sin(pi)");
+        assert_approx(sin(3.0 * HALF_PI), -1.0, EPS, "sin(3pi/2)");
+        assert_approx(sin(TWO_PI), 0.0, EPS, "sin(2pi)");
+        assert_approx(sin(PI / 6.0), 0.5, EPS, "sin(pi/6)");
+        assert_approx(sin(PI / 4.0), core::f64::consts::FRAC_1_SQRT_2, EPS, "sin(pi/4)");
+    }
+
+    #[test]
+    fn test_sin_symmetry() {
+        // sin(-x) = -sin(x)
+        let values = [0.5, 1.0, 2.0, 3.0, PI / 3.0, PI / 7.0];
+        for &x in &values {
+            assert_approx(sin(-x), -sin(x), EPS, &format!("sin(-{x}) == -sin({x})"));
+        }
+    }
+
+    #[test]
+    fn test_sin_special_values() {
+        assert_approx(sin(0.0), 0.0, EPS, "sin(0) == 0");
+        assert!(sin(f64::INFINITY).is_nan(), "sin(+inf) should be NaN");
+        assert!(sin(f64::NEG_INFINITY).is_nan(), "sin(-inf) should be NaN");
+        assert!(sin(f64::NAN).is_nan(), "sin(NaN) should be NaN");
+    }
+
+    #[test]
+    fn test_cos_exact_values() {
+        assert_approx(cos(0.0), 1.0, EPS, "cos(0)");
+        assert_approx(cos(HALF_PI), 0.0, EPS, "cos(pi/2)");
+        assert_approx(cos(PI), -1.0, EPS, "cos(pi)");
+        assert_approx(cos(TWO_PI), 1.0, EPS, "cos(2pi)");
+        assert_approx(cos(PI / 3.0), 0.5, EPS, "cos(pi/3)");
+        assert_approx(cos(PI / 4.0), core::f64::consts::FRAC_1_SQRT_2, EPS, "cos(pi/4)");
+    }
+
+    #[test]
+    fn test_cos_symmetry() {
+        // cos(-x) = cos(x)
+        let values = [0.5, 1.0, 2.0, 3.0, PI / 3.0, PI / 7.0];
+        for &x in &values {
+            assert_approx(cos(-x), cos(x), EPS, &format!("cos(-{x}) == cos({x})"));
+        }
+    }
+
+    #[test]
+    fn test_cos_special_values() {
+        assert!(cos(f64::INFINITY).is_nan(), "cos(+inf) should be NaN");
+        assert!(cos(f64::NEG_INFINITY).is_nan(), "cos(-inf) should be NaN");
+        assert!(cos(f64::NAN).is_nan(), "cos(NaN) should be NaN");
+    }
+
+    #[test]
+    fn test_tan_exact_values() {
+        assert_approx(tan(0.0), 0.0, EPS, "tan(0)");
+        assert_approx(tan(PI / 4.0), 1.0, EPS, "tan(pi/4)");
+        assert_approx(tan(-PI / 4.0), -1.0, EPS, "tan(-pi/4)");
+        assert_approx(tan(PI), 0.0, EPS, "tan(pi)");
+    }
+
+    #[test]
+    fn test_tan_special_values() {
+        assert!(tan(f64::INFINITY).is_nan(), "tan(+inf) should be NaN");
+        assert!(tan(f64::NEG_INFINITY).is_nan(), "tan(-inf) should be NaN");
+        assert!(tan(f64::NAN).is_nan(), "tan(NaN) should be NaN");
+    }
+
+    #[test]
+    fn test_pythagorean_identity() {
+        // sin^2(x) + cos^2(x) = 1
+        let values = [0.0, 0.5, 1.0, PI / 4.0, PI / 3.0, 2.0, 3.0, 5.0];
+        for &x in &values {
+            let s = sin(x);
+            let c = cos(x);
+            assert_approx(s * s + c * c, 1.0, EPS, &format!("sin^2({x})+cos^2({x})"));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Inverse trigonometry
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_asin_exact_values() {
+        assert_approx(asin(0.0), 0.0, EPS, "asin(0)");
+        assert_approx(asin(1.0), HALF_PI, EPS, "asin(1)");
+        assert_approx(asin(-1.0), -HALF_PI, EPS, "asin(-1)");
+        assert_approx(asin(0.5), PI / 6.0, EPS_ATAN, "asin(0.5)");
+    }
+
+    #[test]
+    fn test_asin_domain_error() {
+        assert!(asin(1.5).is_nan(), "asin(1.5) should be NaN");
+        assert!(asin(-1.5).is_nan(), "asin(-1.5) should be NaN");
+        assert!(asin(f64::NAN).is_nan(), "asin(NaN) should be NaN");
+    }
+
+    #[test]
+    fn test_acos_exact_values() {
+        assert_approx(acos(1.0), 0.0, EPS, "acos(1)");
+        assert_approx(acos(0.0), HALF_PI, EPS, "acos(0)");
+        assert_approx(acos(-1.0), PI, EPS, "acos(-1)");
+        assert_approx(acos(0.5), PI / 3.0, EPS_ATAN, "acos(0.5)");
+    }
+
+    #[test]
+    fn test_atan_exact_values() {
+        assert_approx(atan(0.0), 0.0, EPS, "atan(0)");
+        assert_approx(atan(1.0), PI / 4.0, EPS_ATAN, "atan(1)");
+        assert_approx(atan(-1.0), -PI / 4.0, EPS_ATAN, "atan(-1)");
+    }
+
+    #[test]
+    fn test_atan2_quadrants() {
+        assert_approx(atan2(0.0, 1.0), 0.0, EPS, "atan2(0,1)");
+        assert_approx(atan2(1.0, 0.0), HALF_PI, EPS, "atan2(1,0)");
+        assert_approx(atan2(0.0, -1.0), PI, EPS, "atan2(0,-1)");
+        assert_approx(atan2(-1.0, 0.0), -HALF_PI, EPS, "atan2(-1,0)");
+        assert_approx(atan2(1.0, 1.0), PI / 4.0, EPS_ATAN, "atan2(1,1)");
+    }
+
+    #[test]
+    fn test_sin_asin_roundtrip() {
+        let values = [0.0, 0.3, 0.5, 0.7, 0.9, -0.3, -0.7];
+        for &x in &values {
+            assert_approx(sin(asin(x)), x, EPS_ATAN, &format!("sin(asin({x}))"));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Exponential and logarithmic functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_exp_exact_values() {
+        assert_approx(exp(0.0), 1.0, EPS, "exp(0)");
+        assert_approx(exp(1.0), core::f64::consts::E, EPS, "exp(1)");
+        assert_approx(exp(-1.0), 1.0 / core::f64::consts::E, EPS, "exp(-1)");
+        assert_approx(exp(LN2), 2.0, EPS, "exp(ln2)");
+    }
+
+    #[test]
+    fn test_exp_large_values() {
+        assert_eq!(exp(710.0), f64::INFINITY, "exp(710) should overflow");
+        assert_approx(exp(-710.0), 0.0, EPS, "exp(-710) should underflow");
+    }
+
+    #[test]
+    fn test_exp_special_values() {
+        assert!(exp(f64::NAN).is_nan(), "exp(NaN) should be NaN");
+        assert_eq!(exp(f64::INFINITY), f64::INFINITY, "exp(+inf)");
+        assert_approx(exp(f64::NEG_INFINITY), 0.0, EPS, "exp(-inf)");
+    }
+
+    #[test]
+    fn test_log_exact_values() {
+        assert_approx(log(1.0), 0.0, EPS, "log(1)");
+        assert_approx(log(core::f64::consts::E), 1.0, EPS, "log(e)");
+        assert_approx(log(core::f64::consts::E * core::f64::consts::E), 2.0, EPS, "log(e^2)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_log_special_values() {
+        assert_eq!(log(0.0), f64::NEG_INFINITY, "log(0) should be -inf");
+        assert!(log(-1.0).is_nan(), "log(-1) should be NaN");
+        assert!(log(f64::NAN).is_nan(), "log(NaN) should be NaN");
+        assert_eq!(log(f64::INFINITY), f64::INFINITY, "log(+inf) should be +inf");
+    }
+
+    #[test]
+    fn test_exp_log_roundtrip() {
+        // exp(log(x)) should approximate x.
+        let values = [0.5, 1.0, 2.0, 10.0, 100.0, 0.01];
+        for &x in &values {
+            assert_approx(exp(log(x)), x, 1e-9, &format!("exp(log({x}))"));
+        }
+    }
+
+    #[test]
+    fn test_log_exp_roundtrip() {
+        // log(exp(x)) should approximate x.
+        let values = [-2.0, -1.0, 0.0, 0.5, 1.0, 3.0, 5.0];
+        for &x in &values {
+            assert_approx(log(exp(x)), x, 1e-9, &format!("log(exp({x}))"));
+        }
+    }
+
+    #[test]
+    fn test_log2_values() {
+        assert_approx(log2(1.0), 0.0, EPS, "log2(1)");
+        assert_approx(log2(2.0), 1.0, EPS, "log2(2)");
+        assert_approx(log2(8.0), 3.0, EPS, "log2(8)");
+        assert_approx(log2(1024.0), 10.0, EPS, "log2(1024)");
+    }
+
+    #[test]
+    fn test_log10_values() {
+        assert_approx(log10(1.0), 0.0, EPS, "log10(1)");
+        assert_approx(log10(10.0), 1.0, EPS, "log10(10)");
+        assert_approx(log10(100.0), 2.0, EPS, "log10(100)");
+        assert_approx(log10(1000.0), 3.0, EPS, "log10(1000)");
+    }
+
+    #[test]
+    fn test_exp2_values() {
+        assert_approx(exp2(0.0), 1.0, EPS, "exp2(0)");
+        assert_approx(exp2(1.0), 2.0, EPS, "exp2(1)");
+        assert_approx(exp2(10.0), 1024.0, EPS, "exp2(10)");
+    }
+
+    #[test]
+    fn test_log1p_values() {
+        assert_approx(log1p(0.0), 0.0, EPS, "log1p(0)");
+        // For small x, log1p uses dedicated Taylor series.
+        assert_approx(log1p(1e-10), 1e-10, 1e-15, "log1p(1e-10)");
+        assert_approx(log1p(1.0), LN2, EPS, "log1p(1)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_log1p_special_values() {
+        assert_eq!(log1p(-1.0), f64::NEG_INFINITY, "log1p(-1)");
+        assert!(log1p(-2.0).is_nan(), "log1p(-2) should be NaN");
+    }
+
+    #[test]
+    fn test_expm1_values() {
+        assert_approx(expm1(0.0), 0.0, EPS, "expm1(0)");
+        // For small x, expm1 uses dedicated Taylor series.
+        assert_approx(expm1(1e-10), 1e-10, 1e-15, "expm1(1e-10)");
+        assert_approx(expm1(1.0), core::f64::consts::E - 1.0, EPS, "expm1(1)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_expm1_special_values() {
+        assert_eq!(expm1(f64::INFINITY), f64::INFINITY, "expm1(+inf)");
+        assert_approx(expm1(f64::NEG_INFINITY), -1.0, EPS, "expm1(-inf)");
+        assert!(expm1(f64::NAN).is_nan(), "expm1(NaN)");
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. Power functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pow_exact_values() {
+        assert_approx(pow(2.0, 10.0), 1024.0, EPS, "pow(2,10)");
+        assert_approx(pow(3.0, 4.0), 81.0, EPS, "pow(3,4)");
+        assert_approx(pow(10.0, 3.0), 1000.0, EPS, "pow(10,3)");
+        assert_approx(pow(2.0, -1.0), 0.5, EPS, "pow(2,-1)");
+    }
+
+    #[test]
+    fn test_pow_special_exponents() {
+        assert_approx(pow(0.0, 0.0), 1.0, EPS, "pow(0,0)");
+        assert_approx(pow(5.0, 0.0), 1.0, EPS, "pow(5,0)");
+        assert_approx(pow(-3.0, 0.0), 1.0, EPS, "pow(-3,0)");
+        assert_approx(pow(f64::INFINITY, 0.0), 1.0, EPS, "pow(inf,0)");
+        assert_approx(pow(1.0, 1000.0), 1.0, EPS, "pow(1,1000)");
+        assert_approx(pow(1.0, f64::INFINITY), 1.0, EPS, "pow(1,inf)");
+    }
+
+    #[test]
+    fn test_pow_zero_base() {
+        assert_approx(pow(0.0, 5.0), 0.0, EPS, "pow(0,5)");
+        assert_eq!(pow(0.0, -1.0), f64::INFINITY, "pow(0,-1)");
+    }
+
+    #[test]
+    fn test_pow_nan_propagation() {
+        assert!(pow(f64::NAN, 2.0).is_nan(), "pow(NaN,2) should be NaN");
+        assert!(pow(2.0, f64::NAN).is_nan(), "pow(2,NaN) should be NaN");
+    }
+
+    #[test]
+    fn test_sqrt_exact_values() {
+        assert_approx(sqrt(0.0), 0.0, EPS, "sqrt(0)");
+        assert_approx(sqrt(1.0), 1.0, EPS, "sqrt(1)");
+        assert_approx(sqrt(4.0), 2.0, EPS, "sqrt(4)");
+        assert_approx(sqrt(9.0), 3.0, EPS, "sqrt(9)");
+        assert_approx(sqrt(16.0), 4.0, EPS, "sqrt(16)");
+        assert_approx(sqrt(100.0), 10.0, EPS, "sqrt(100)");
+        assert_approx(sqrt(2.0), core::f64::consts::SQRT_2, EPS, "sqrt(2)");
+    }
+
+    #[test]
+    fn test_sqrt_special_values() {
+        assert!(sqrt(-1.0).is_nan(), "sqrt(-1) should be NaN");
+        assert!(sqrt(f64::NAN).is_nan(), "sqrt(NaN) should be NaN");
+        assert_eq!(sqrt(f64::INFINITY), f64::INFINITY, "sqrt(+inf)");
+    }
+
+    #[test]
+    fn test_sqrt_large_and_small() {
+        assert_approx(sqrt(1e20), 1e10, 1.0, "sqrt(1e20)");
+        assert_approx(sqrt(1e-20), 1e-10, 1e-15, "sqrt(1e-20)");
+    }
+
+    #[test]
+    fn test_cbrt_exact_values() {
+        assert_approx(cbrt(0.0), 0.0, EPS, "cbrt(0)");
+        assert_approx(cbrt(1.0), 1.0, EPS, "cbrt(1)");
+        assert_approx(cbrt(8.0), 2.0, EPS, "cbrt(8)");
+        assert_approx(cbrt(27.0), 3.0, EPS, "cbrt(27)");
+        assert_approx(cbrt(64.0), 4.0, EPS, "cbrt(64)");
+        assert_approx(cbrt(-8.0), -2.0, EPS, "cbrt(-8)");
+        assert_approx(cbrt(-27.0), -3.0, EPS, "cbrt(-27)");
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Rounding functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_floor_values() {
+        assert_eq!(floor(2.7), 2.0, "floor(2.7)");
+        assert_eq!(floor(2.0), 2.0, "floor(2.0)");
+        assert_eq!(floor(-2.3), -3.0, "floor(-2.3)");
+        assert_eq!(floor(-2.0), -2.0, "floor(-2.0)");
+        assert_eq!(floor(0.5), 0.0, "floor(0.5)");
+        assert_eq!(floor(-0.5), -1.0, "floor(-0.5)");
+    }
+
+    #[test]
+    fn test_floor_special_values() {
+        assert!(floor(f64::NAN).is_nan(), "floor(NaN) should be NaN");
+        assert_eq!(floor(f64::INFINITY), f64::INFINITY, "floor(+inf)");
+        assert_eq!(floor(f64::NEG_INFINITY), f64::NEG_INFINITY, "floor(-inf)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_ceil_values() {
+        assert_eq!(ceil(2.3), 3.0, "ceil(2.3)");
+        assert_eq!(ceil(2.0), 2.0, "ceil(2.0)");
+        assert_eq!(ceil(-2.7), -2.0, "ceil(-2.7)");
+        assert_eq!(ceil(-2.0), -2.0, "ceil(-2.0)");
+        assert_eq!(ceil(0.1), 1.0, "ceil(0.1)");
+        assert_eq!(ceil(-0.1), 0.0, "ceil(-0.1)");
+    }
+
+    #[test]
+    fn test_ceil_special_values() {
+        assert!(ceil(f64::NAN).is_nan(), "ceil(NaN) should be NaN");
+        assert_eq!(ceil(f64::INFINITY), f64::INFINITY, "ceil(+inf)");
+        assert_eq!(ceil(f64::NEG_INFINITY), f64::NEG_INFINITY, "ceil(-inf)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_round_values() {
+        assert_eq!(round(2.5), 3.0, "round(2.5)");
+        assert_eq!(round(2.3), 2.0, "round(2.3)");
+        assert_eq!(round(2.7), 3.0, "round(2.7)");
+        assert_eq!(round(-2.5), -3.0, "round(-2.5)");
+        assert_eq!(round(-2.3), -2.0, "round(-2.3)");
+        assert_eq!(round(-2.7), -3.0, "round(-2.7)");
+        assert_eq!(round(0.0), 0.0, "round(0.0)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_trunc_values() {
+        assert_eq!(trunc(2.7), 2.0, "trunc(2.7)");
+        assert_eq!(trunc(2.0), 2.0, "trunc(2.0)");
+        assert_eq!(trunc(-2.7), -2.0, "trunc(-2.7)");
+        assert_eq!(trunc(-2.3), -2.0, "trunc(-2.3)");
+        assert_eq!(trunc(0.9), 0.0, "trunc(0.9)");
+    }
+
+    #[test]
+    fn test_trunc_special_values() {
+        assert!(trunc(f64::NAN).is_nan(), "trunc(NaN) should be NaN");
+        assert_eq!(trunc(f64::INFINITY), f64::INFINITY, "trunc(+inf)");
+        assert_eq!(trunc(f64::NEG_INFINITY), f64::NEG_INFINITY, "trunc(-inf)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_rint_ties_to_even() {
+        // rint uses ties-to-even (banker's rounding).
+        assert_eq!(rint(0.5), 0.0, "rint(0.5) -> 0 (even)");
+        assert_eq!(rint(1.5), 2.0, "rint(1.5) -> 2 (even)");
+        assert_eq!(rint(2.5), 2.0, "rint(2.5) -> 2 (even)");
+        assert_eq!(rint(3.5), 4.0, "rint(3.5) -> 4 (even)");
+        assert_eq!(rint(2.3), 2.0, "rint(2.3)");
+        assert_eq!(rint(2.7), 3.0, "rint(2.7)");
+    }
+
+    #[test]
+    fn test_lround_values() {
+        assert_eq!(lround(2.5), 3, "lround(2.5)");
+        assert_eq!(lround(-2.5), -3, "lround(-2.5)");
+        assert_eq!(lround(0.0), 0, "lround(0)");
+        assert_eq!(lround(2.3), 2, "lround(2.3)");
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Special value functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_fabs_values() {
+        assert_eq!(fabs(-3.0), 3.0, "fabs(-3)");
+        assert_eq!(fabs(3.0), 3.0, "fabs(3)");
+        assert_eq!(fabs(0.0), 0.0, "fabs(0)");
+        assert_eq!(fabs(-0.0), 0.0, "fabs(-0)");
+        // fabs should clear the sign bit on -0.0.
+        assert_eq!(fabs(-0.0).to_bits(), 0_u64, "fabs(-0.0) sign bit");
+    }
+
+    #[test]
+    fn test_fabs_special() {
+        assert!(fabs(f64::NAN).is_nan(), "fabs(NaN) should be NaN");
+        assert_eq!(fabs(f64::INFINITY), f64::INFINITY, "fabs(+inf)");
+        assert_eq!(fabs(f64::NEG_INFINITY), f64::INFINITY, "fabs(-inf)");
+    }
+
+    #[test]
+    fn test_fmod_values() {
+        assert_approx(fmod(5.0, 3.0), 2.0, EPS, "fmod(5,3)");
+        assert_approx(fmod(7.0, 2.5), 2.0, EPS, "fmod(7,2.5)");
+        assert_approx(fmod(-5.0, 3.0), -2.0, EPS, "fmod(-5,3)");
+        assert_approx(fmod(5.0, -3.0), 2.0, EPS, "fmod(5,-3)");
+    }
+
+    #[test]
+    fn test_fmod_special() {
+        assert!(fmod(5.0, 0.0).is_nan(), "fmod(5,0) should be NaN");
+    }
+
+    #[test]
+    fn test_hypot_values() {
+        assert_approx(hypot(3.0, 4.0), 5.0, EPS, "hypot(3,4)");
+        assert_approx(hypot(5.0, 12.0), 13.0, EPS, "hypot(5,12)");
+        assert_approx(hypot(0.0, 5.0), 5.0, EPS, "hypot(0,5)");
+        assert_approx(hypot(1.0, 0.0), 1.0, EPS, "hypot(1,0)");
+        assert_approx(hypot(0.0, 0.0), 0.0, EPS, "hypot(0,0)");
+        assert_approx(hypot(-3.0, -4.0), 5.0, EPS, "hypot(-3,-4)");
+    }
+
+    #[test]
+    fn test_hypot_special() {
+        assert_eq!(hypot(f64::INFINITY, 0.0), f64::INFINITY, "hypot(inf,0)");
+        assert_eq!(hypot(0.0, f64::INFINITY), f64::INFINITY, "hypot(0,inf)");
+        // Per IEEE 754, hypot(inf, NaN) = inf (infinity dominates NaN).
+        assert_eq!(hypot(f64::INFINITY, f64::NAN), f64::INFINITY, "hypot(inf,NaN)");
+        assert!(hypot(f64::NAN, 0.0).is_nan(), "hypot(NaN,0) should be NaN");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_copysign_values() {
+        assert_eq!(copysign(1.0, -1.0), -1.0, "copysign(1,-1)");
+        assert_eq!(copysign(-1.0, 1.0), 1.0, "copysign(-1,1)");
+        assert_eq!(copysign(5.0, -0.0), -5.0, "copysign(5,-0)");
+        assert_eq!(copysign(-5.0, 0.0), 5.0, "copysign(-5,0)");
+    }
+
+    #[test]
+    fn test_fmin_fmax() {
+        assert_approx(fmin(2.0, 3.0), 2.0, EPS, "fmin(2,3)");
+        assert_approx(fmax(2.0, 3.0), 3.0, EPS, "fmax(2,3)");
+        assert_approx(fmin(-1.0, 1.0), -1.0, EPS, "fmin(-1,1)");
+        assert_approx(fmax(-1.0, 1.0), 1.0, EPS, "fmax(-1,1)");
+        // NaN should be ignored (return the other operand).
+        assert_approx(fmin(f64::NAN, 3.0), 3.0, EPS, "fmin(NaN,3)");
+        assert_approx(fmax(f64::NAN, 3.0), 3.0, EPS, "fmax(NaN,3)");
+        assert_approx(fmin(3.0, f64::NAN), 3.0, EPS, "fmin(3,NaN)");
+        assert_approx(fmax(3.0, f64::NAN), 3.0, EPS, "fmax(3,NaN)");
+    }
+
+    #[test]
+    fn test_fdim_values() {
+        assert_approx(fdim(5.0, 3.0), 2.0, EPS, "fdim(5,3)");
+        assert_approx(fdim(3.0, 5.0), 0.0, EPS, "fdim(3,5)");
+        assert_approx(fdim(-1.0, -3.0), 2.0, EPS, "fdim(-1,-3)");
+        assert!(fdim(f64::NAN, 1.0).is_nan(), "fdim(NaN,1) should be NaN");
+    }
+
+    #[test]
+    fn test_remainder_values() {
+        assert_approx(remainder(5.0, 3.0), -1.0, EPS, "remainder(5,3)");
+        assert_approx(remainder(10.0, 3.0), 1.0, EPS, "remainder(10,3)");
+        assert!(remainder(5.0, 0.0).is_nan(), "remainder(5,0) should be NaN");
+        assert!(remainder(f64::INFINITY, 1.0).is_nan(), "remainder(inf,1) should be NaN");
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. NaN/infinity handling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_isnan() {
+        assert_eq!(isnan(f64::NAN), 1, "isnan(NaN)");
+        assert_eq!(isnan(0.0), 0, "isnan(0)");
+        assert_eq!(isnan(f64::INFINITY), 0, "isnan(inf)");
+    }
+
+    #[test]
+    fn test_isinf() {
+        assert_eq!(isinf(f64::INFINITY), 1, "isinf(+inf)");
+        assert_eq!(isinf(f64::NEG_INFINITY), -1, "isinf(-inf)");
+        assert_eq!(isinf(0.0), 0, "isinf(0)");
+        assert_eq!(isinf(f64::NAN), 0, "isinf(NaN)");
+    }
+
+    #[test]
+    fn test_isfinite() {
+        assert_eq!(isfinite(0.0), 1, "isfinite(0)");
+        assert_eq!(isfinite(1.5), 1, "isfinite(1.5)");
+        assert_eq!(isfinite(f64::INFINITY), 0, "isfinite(inf)");
+        assert_eq!(isfinite(f64::NEG_INFINITY), 0, "isfinite(-inf)");
+        assert_eq!(isfinite(f64::NAN), 0, "isfinite(NaN)");
+    }
+
+    #[test]
+    fn test_nan_through_arithmetic() {
+        // Functions should propagate NaN.
+        assert!(fabs(f64::NAN).is_nan(), "fabs(NaN)");
+        assert!(sqrt(f64::NAN).is_nan(), "sqrt(NaN)");
+        assert!(cbrt(f64::NAN).is_nan(), "cbrt(NaN)");
+        assert!(exp(f64::NAN).is_nan(), "exp(NaN)");
+        assert!(log(f64::NAN).is_nan(), "log(NaN)");
+        assert!(sin(f64::NAN).is_nan(), "sin(NaN)");
+        assert!(cos(f64::NAN).is_nan(), "cos(NaN)");
+        assert!(tan(f64::NAN).is_nan(), "tan(NaN)");
+    }
+
+    #[test]
+    fn test_infinity_handling() {
+        // exp
+        assert_eq!(exp(f64::INFINITY), f64::INFINITY, "exp(+inf)");
+        assert_approx(exp(f64::NEG_INFINITY), 0.0, EPS, "exp(-inf)");
+
+        // log
+        assert_eq!(log(f64::INFINITY), f64::INFINITY, "log(+inf)");
+        assert!(log(f64::NEG_INFINITY).is_nan(), "log(-inf) should be NaN");
+
+        // sqrt
+        assert_eq!(sqrt(f64::INFINITY), f64::INFINITY, "sqrt(+inf)");
+
+        // pow
+        assert_eq!(pow(2.0, f64::INFINITY), f64::INFINITY, "pow(2,+inf)");
+
+        // hypot with infinity
+        assert_eq!(hypot(f64::INFINITY, 5.0), f64::INFINITY, "hypot(inf,5)");
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. f32 variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sinf_values() {
+        assert_approx_f32(sinf(0.0), 0.0, EPS_F32, "sinf(0)");
+        assert_approx_f32(sinf(core::f32::consts::FRAC_PI_2), 1.0, EPS_F32, "sinf(pi/2)");
+        assert_approx_f32(sinf(core::f32::consts::PI), 0.0, EPS_F32, "sinf(pi)");
+    }
+
+    #[test]
+    fn test_sinf_special() {
+        assert!(sinf(f32::INFINITY).is_nan(), "sinf(+inf) should be NaN");
+        assert!(sinf(f32::NEG_INFINITY).is_nan(), "sinf(-inf) should be NaN");
+        assert!(sinf(f32::NAN).is_nan(), "sinf(NaN) should be NaN");
+    }
+
+    #[test]
+    fn test_cosf_values() {
+        assert_approx_f32(cosf(0.0), 1.0, EPS_F32, "cosf(0)");
+        assert_approx_f32(cosf(core::f32::consts::FRAC_PI_2), 0.0, EPS_F32, "cosf(pi/2)");
+        assert_approx_f32(cosf(core::f32::consts::PI), -1.0, EPS_F32, "cosf(pi)");
+    }
+
+    #[test]
+    fn test_cosf_special() {
+        assert!(cosf(f32::INFINITY).is_nan(), "cosf(+inf) should be NaN");
+        assert!(cosf(f32::NAN).is_nan(), "cosf(NaN) should be NaN");
+    }
+
+    #[test]
+    fn test_tanf_values() {
+        assert_approx_f32(tanf(0.0), 0.0, EPS_F32, "tanf(0)");
+        assert_approx_f32(
+            tanf(core::f32::consts::FRAC_PI_4),
+            1.0,
+            EPS_F32,
+            "tanf(pi/4)",
+        );
+    }
+
+    #[test]
+    fn test_sqrtf_values() {
+        assert_approx_f32(sqrtf(0.0), 0.0, EPS_F32, "sqrtf(0)");
+        assert_approx_f32(sqrtf(1.0), 1.0, EPS_F32, "sqrtf(1)");
+        assert_approx_f32(sqrtf(4.0), 2.0, EPS_F32, "sqrtf(4)");
+        assert_approx_f32(sqrtf(9.0), 3.0, EPS_F32, "sqrtf(9)");
+        assert_approx_f32(sqrtf(2.0), core::f32::consts::SQRT_2, EPS_F32, "sqrtf(2)");
+    }
+
+    #[test]
+    fn test_sqrtf_special() {
+        assert!(sqrtf(-1.0).is_nan(), "sqrtf(-1) should be NaN");
+        assert!(sqrtf(f32::NAN).is_nan(), "sqrtf(NaN) should be NaN");
+        assert_eq!(sqrtf(f32::INFINITY), f32::INFINITY, "sqrtf(+inf)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_fabsf_values() {
+        assert_eq!(fabsf(-3.0), 3.0, "fabsf(-3)");
+        assert_eq!(fabsf(3.0), 3.0, "fabsf(3)");
+        assert_eq!(fabsf(0.0), 0.0, "fabsf(0)");
+        assert_eq!(fabsf(-0.0_f32).to_bits(), 0_u32, "fabsf(-0) sign bit");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_floorf_values() {
+        assert_eq!(floorf(2.7), 2.0, "floorf(2.7)");
+        assert_eq!(floorf(-2.3), -3.0, "floorf(-2.3)");
+        assert_eq!(floorf(0.0), 0.0, "floorf(0)");
+        assert_eq!(floorf(-0.5), -1.0, "floorf(-0.5)");
+    }
+
+    #[test]
+    fn test_floorf_special() {
+        assert!(floorf(f32::NAN).is_nan(), "floorf(NaN) should be NaN");
+        assert_eq!(floorf(f32::INFINITY), f32::INFINITY, "floorf(+inf)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_ceilf_values() {
+        assert_eq!(ceilf(2.3), 3.0, "ceilf(2.3)");
+        assert_eq!(ceilf(-2.7), -2.0, "ceilf(-2.7)");
+        assert_eq!(ceilf(0.0), 0.0, "ceilf(0)");
+    }
+
+    #[test]
+    fn test_ceilf_special() {
+        assert!(ceilf(f32::NAN).is_nan(), "ceilf(NaN) should be NaN");
+        assert_eq!(ceilf(f32::INFINITY), f32::INFINITY, "ceilf(+inf)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_roundf_values() {
+        assert_eq!(roundf(2.5), 3.0, "roundf(2.5)");
+        assert_eq!(roundf(-2.5), -3.0, "roundf(-2.5)");
+        assert_eq!(roundf(2.3), 2.0, "roundf(2.3)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_truncf_values() {
+        assert_eq!(truncf(2.7), 2.0, "truncf(2.7)");
+        assert_eq!(truncf(-2.7), -2.0, "truncf(-2.7)");
+    }
+
+    #[test]
+    fn test_expf_values() {
+        assert_approx_f32(expf(0.0), 1.0, EPS_F32, "expf(0)");
+        assert_approx_f32(expf(1.0), core::f32::consts::E, EPS_F32, "expf(1)");
+    }
+
+    #[test]
+    fn test_logf_values() {
+        assert_approx_f32(logf(1.0), 0.0, EPS_F32, "logf(1)");
+        assert_approx_f32(logf(core::f32::consts::E), 1.0, EPS_F32, "logf(e)");
+    }
+
+    #[test]
+    fn test_powf_values() {
+        assert_approx_f32(powf(2.0, 10.0), 1024.0, 1.0, "powf(2,10)");
+        assert_approx_f32(powf(3.0, 2.0), 9.0, EPS_F32, "powf(3,2)");
+        assert_approx_f32(powf(5.0, 0.0), 1.0, EPS_F32, "powf(5,0)");
+    }
+
+    #[test]
+    fn test_cbrtf_values() {
+        assert_approx_f32(cbrtf(27.0), 3.0, EPS_F32, "cbrtf(27)");
+        assert_approx_f32(cbrtf(8.0), 2.0, EPS_F32, "cbrtf(8)");
+        assert_approx_f32(cbrtf(-8.0), -2.0, EPS_F32, "cbrtf(-8)");
+    }
+
+    #[test]
+    fn test_hypotf_values() {
+        assert_approx_f32(hypotf(3.0, 4.0), 5.0, EPS_F32, "hypotf(3,4)");
+    }
+
+    #[test]
+    fn test_fmodf_values() {
+        assert_approx_f32(fmodf(5.0, 3.0), 2.0, EPS_F32, "fmodf(5,3)");
+        assert!(fmodf(5.0, 0.0).is_nan(), "fmodf(5,0) should be NaN");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_copysignf_values() {
+        assert_eq!(copysignf(1.0, -1.0), -1.0, "copysignf(1,-1)");
+        assert_eq!(copysignf(-1.0, 1.0), 1.0, "copysignf(-1,1)");
+    }
+
+    #[test]
+    fn test_fminf_fmaxf() {
+        assert_approx_f32(fminf(2.0, 3.0), 2.0, EPS_F32, "fminf(2,3)");
+        assert_approx_f32(fmaxf(2.0, 3.0), 3.0, EPS_F32, "fmaxf(2,3)");
+        assert_approx_f32(fminf(f32::NAN, 3.0), 3.0, EPS_F32, "fminf(NaN,3)");
+        assert_approx_f32(fmaxf(f32::NAN, 3.0), 3.0, EPS_F32, "fmaxf(NaN,3)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Hyperbolic functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sinh_values() {
+        assert_approx(sinh(0.0), 0.0, EPS, "sinh(0)");
+        // sinh(1) ≈ 1.1752011936...
+        assert_approx(sinh(1.0), 1.175_201_193_643_801_4, EPS, "sinh(1)");
+        // sinh is odd: sinh(-x) = -sinh(x).
+        assert_approx(sinh(-1.0), -sinh(1.0), EPS, "sinh(-1)");
+    }
+
+    #[test]
+    fn test_cosh_values() {
+        assert_approx(cosh(0.0), 1.0, EPS, "cosh(0)");
+        // cosh(1) ≈ 1.5430806348...
+        assert_approx(cosh(1.0), 1.543_080_634_815_243_7, EPS, "cosh(1)");
+        // cosh is even: cosh(-x) = cosh(x).
+        assert_approx(cosh(-1.0), cosh(1.0), EPS, "cosh(-1)");
+    }
+
+    #[test]
+    fn test_tanh_values() {
+        assert_approx(tanh(0.0), 0.0, EPS, "tanh(0)");
+        // tanh(1) ≈ 0.7615941559...
+        assert_approx(tanh(1.0), 0.761_594_155_955_764, EPS, "tanh(1)");
+        // tanh approaches ±1 for large |x|.
+        assert_approx(tanh(100.0), 1.0, EPS, "tanh(100)");
+        assert_approx(tanh(-100.0), -1.0, EPS, "tanh(-100)");
+    }
+
+    #[test]
+    fn test_hyperbolic_special() {
+        assert!(sinh(f64::NAN).is_nan(), "sinh(NaN)");
+        assert!(cosh(f64::NAN).is_nan(), "cosh(NaN)");
+        assert!(tanh(f64::NAN).is_nan(), "tanh(NaN)");
+        assert_eq!(sinh(f64::INFINITY), f64::INFINITY, "sinh(+inf)");
+        assert_eq!(cosh(f64::INFINITY), f64::INFINITY, "cosh(+inf)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Inverse hyperbolic functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_asinh_values() {
+        assert_approx(asinh(0.0), 0.0, EPS, "asinh(0)");
+        // asinh(sinh(1)) should be 1.
+        assert_approx(asinh(sinh(1.0)), 1.0, EPS, "asinh(sinh(1))");
+        // Odd function: asinh(-x) = -asinh(x).
+        assert_approx(asinh(-1.0), -asinh(1.0), EPS, "asinh(-1)");
+    }
+
+    #[test]
+    fn test_acosh_values() {
+        assert_approx(acosh(1.0), 0.0, EPS, "acosh(1)");
+        assert_approx(acosh(cosh(2.0)), 2.0, EPS, "acosh(cosh(2))");
+        assert!(acosh(0.5).is_nan(), "acosh(0.5) should be NaN (domain)");
+    }
+
+    #[test]
+    fn test_atanh_values() {
+        assert_approx(atanh(0.0), 0.0, EPS, "atanh(0)");
+        assert_approx(atanh(tanh(0.5)), 0.5, EPS, "atanh(tanh(0.5))");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_atanh_boundary() {
+        assert_eq!(atanh(1.0), f64::INFINITY, "atanh(1)");
+        assert_eq!(atanh(-1.0), f64::NEG_INFINITY, "atanh(-1)");
+        assert!(atanh(1.5).is_nan(), "atanh(1.5) should be NaN");
+    }
+
+    // -----------------------------------------------------------------------
+    // Decomposition functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_frexp_ldexp_roundtrip() {
+        let values = [1.0, 2.0, 0.5, 100.0, 0.001, -7.5, 1e30, 1e-30];
+        for &x in &values {
+            let mut e: i32 = 0;
+            let m = frexp(x, &mut e);
+            let reconstructed = ldexp(m, e);
+            assert_approx(
+                reconstructed,
+                x,
+                fabs(x) * 1e-14,
+                &format!("frexp/ldexp roundtrip for {x}"),
+            );
+        }
+    }
+
+    #[test]
+    fn test_ldexp_values() {
+        assert_approx(ldexp(1.0, 0), 1.0, EPS, "ldexp(1,0)");
+        assert_approx(ldexp(1.0, 3), 8.0, EPS, "ldexp(1,3)");
+        assert_approx(ldexp(1.5, 2), 6.0, EPS, "ldexp(1.5,2)");
+        assert_approx(ldexp(1.0, -1), 0.5, EPS, "ldexp(1,-1)");
+    }
+
+    #[test]
+    fn test_modf_values() {
+        let mut ip: f64 = 0.0;
+        let frac = modf(3.75, &mut ip);
+        assert_approx(ip, 3.0, EPS, "modf(3.75) int part");
+        assert_approx(frac, 0.75, EPS, "modf(3.75) frac part");
+
+        let frac2 = modf(-2.25, &mut ip);
+        assert_approx(ip, -2.0, EPS, "modf(-2.25) int part");
+        assert_approx(frac2, -0.25, EPS, "modf(-2.25) frac part");
+    }
+
+    #[test]
+    fn test_ilogb_values() {
+        assert_eq!(ilogb(1.0), 0, "ilogb(1)");
+        assert_eq!(ilogb(2.0), 1, "ilogb(2)");
+        assert_eq!(ilogb(8.0), 3, "ilogb(8)");
+        assert_eq!(ilogb(0.5), -1, "ilogb(0.5)");
+        assert_eq!(ilogb(0.0), i32::MIN, "ilogb(0) = FP_ILOGB0");
+        assert_eq!(ilogb(f64::INFINITY), i32::MAX, "ilogb(inf) = INT_MAX");
+        assert_eq!(ilogb(f64::NAN), i32::MAX, "ilogb(NaN) = FP_ILOGBNAN");
+    }
+
+    #[test]
+    fn test_logb_values() {
+        assert_approx(logb(1.0), 0.0, EPS, "logb(1)");
+        assert_approx(logb(8.0), 3.0, EPS, "logb(8)");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_logb_special() {
+        assert_eq!(logb(0.0), f64::NEG_INFINITY, "logb(0) = -inf");
+        assert_eq!(logb(f64::INFINITY), f64::INFINITY, "logb(inf) = inf");
+        assert!(logb(f64::NAN).is_nan(), "logb(NaN) = NaN");
+    }
+
+    #[test]
+    fn test_scalbn_values() {
+        assert_approx(scalbn(1.0, 3), 8.0, EPS, "scalbn(1,3)");
+        assert_approx(scalbn(3.0, 2), 12.0, EPS, "scalbn(3,2)");
+    }
+
+    // -----------------------------------------------------------------------
+    // nextafter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_nextafter_direction() {
+        let a = nextafter(1.0, 2.0);
+        assert!(a > 1.0, "nextafter(1,2) should be > 1");
+        let b = nextafter(1.0, 0.0);
+        assert!(b < 1.0, "nextafter(1,0) should be < 1");
+    }
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_nextafter_equal() {
+        assert_eq!(nextafter(1.0, 1.0), 1.0, "nextafter(1,1) == 1");
+    }
+
+    #[test]
+    fn test_nextafter_special() {
+        assert!(nextafter(f64::NAN, 1.0).is_nan(), "nextafter(NaN,1)");
+        assert!(nextafter(1.0, f64::NAN).is_nan(), "nextafter(1,NaN)");
+    }
+
+    // -----------------------------------------------------------------------
+    // fma
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fma_values() {
+        assert_approx(fma(2.0, 3.0, 4.0), 10.0, EPS, "fma(2,3,4) = 10");
+        assert_approx(fma(1.5, 2.0, -1.0), 2.0, EPS, "fma(1.5,2,-1) = 2");
+        assert_approx(fma(0.0, 100.0, 5.0), 5.0, EPS, "fma(0,100,5) = 5");
+    }
+
+    // -----------------------------------------------------------------------
+    // sincos
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sincos_consistency() {
+        let values = [0.0, PI / 4.0, PI / 2.0, PI, 1.0, 2.5];
+        for &x in &values {
+            let mut s: f64 = 0.0;
+            let mut c: f64 = 0.0;
+            sincos(x, &mut s, &mut c);
+            assert_approx(s, sin(x), EPS, &format!("sincos sin({x})"));
+            assert_approx(c, cos(x), EPS, &format!("sincos cos({x})"));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Error function
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_erf_values() {
+        assert_approx(erf(0.0), 0.0, 1e-6, "erf(0)");
+        // erf is odd.
+        assert_approx(erf(-0.5), -erf(0.5), 1e-6, "erf odd symmetry");
+        // erf(large) -> 1.
+        assert_approx(erf(5.0), 1.0, 1e-6, "erf(5) ~= 1");
+    }
+
+    #[test]
+    fn test_erfc_values() {
+        assert_approx(erfc(0.0), 1.0, 1e-6, "erfc(0) = 1");
+        // erfc(x) = 1 - erf(x).
+        assert_approx(erfc(1.0), 1.0 - erf(1.0), 1e-12, "erfc(1)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Gamma functions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lgamma_values() {
+        // lgamma(1) = ln(0!) = ln(1) = 0.
+        assert_approx(lgamma(1.0), 0.0, 1e-8, "lgamma(1)");
+        // lgamma(2) = ln(1!) = ln(1) = 0.
+        assert_approx(lgamma(2.0), 0.0, 1e-8, "lgamma(2)");
+        // Gamma(n) = (n-1)! for positive integers, so lgamma(5) = ln(24).
+        assert_approx(lgamma(5.0), log(24.0), 1e-8, "lgamma(5) = ln(24)");
+    }
+
+    #[test]
+    fn test_lgamma_poles() {
+        assert_eq!(lgamma(0.0), f64::INFINITY, "lgamma(0) = inf");
+        assert_eq!(lgamma(-1.0), f64::INFINITY, "lgamma(-1) = inf");
+    }
+
+    #[test]
+    fn test_tgamma_values() {
+        // Gamma(1) = 1.
+        assert_approx(tgamma(1.0), 1.0, 1e-8, "tgamma(1)");
+        // Gamma(5) = 4! = 24.
+        assert_approx(tgamma(5.0), 24.0, 1e-6, "tgamma(5)");
+        // Gamma(0.5) = sqrt(pi).
+        assert_approx(tgamma(0.5), sqrt(PI), 1e-6, "tgamma(0.5)");
+    }
+
+    #[test]
+    fn test_tgamma_poles() {
+        assert!(tgamma(0.0).is_nan(), "tgamma(0) is NaN");
+        assert!(tgamma(-1.0).is_nan(), "tgamma(-1) is NaN");
+    }
+
+    // -----------------------------------------------------------------------
+    // exp10 / pow10
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_exp10_values() {
+        assert_approx(exp10(0.0), 1.0, EPS, "exp10(0)");
+        assert_approx(exp10(1.0), 10.0, EPS, "exp10(1)");
+        assert_approx(exp10(2.0), 100.0, EPS, "exp10(2)");
+        assert_approx(exp10(3.0), 1000.0, 1e-6, "exp10(3)");
+    }
+
+    #[test]
+    fn test_pow10_is_exp10() {
+        // pow10 is just an alias for exp10.
+        assert_approx(pow10(2.0), exp10(2.0), EPS, "pow10(2) == exp10(2)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bessel functions (basic smoke tests)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_j0_at_zero() {
+        assert_approx(j0(0.0), 1.0, EPS, "J0(0) = 1");
+    }
+
+    #[test]
+    fn test_j1_at_zero() {
+        assert_approx(j1(0.0), 0.0, EPS, "J1(0) = 0");
+    }
+
+    #[test]
+    fn test_jn_reduces_to_j0_j1() {
+        assert_approx(jn(0, 1.5), j0(1.5), EPS, "jn(0,x) == j0(x)");
+        assert_approx(jn(1, 1.5), j1(1.5), EPS, "jn(1,x) == j1(x)");
+    }
+
+    #[test]
+    fn test_y0_y1_domain() {
+        assert_eq!(y0(0.0), f64::NEG_INFINITY, "Y0(0) = -inf");
+        assert!(y0(-1.0).is_nan(), "Y0(-1) = NaN");
+        assert_eq!(y1(0.0), f64::NEG_INFINITY, "Y1(0) = -inf");
+        assert!(y1(-1.0).is_nan(), "Y1(-1) = NaN");
+    }
+
+    #[test]
+    fn test_yn_reduces_to_y0_y1() {
+        assert_approx(yn(0, 2.0), y0(2.0), EPS, "yn(0,x) == y0(x)");
+        assert_approx(yn(1, 2.0), y1(2.0), EPS, "yn(1,x) == y1(x)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Deprecated / compatibility aliases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_finite_alias() {
+        assert_eq!(finite(1.0), 1, "finite(1)");
+        assert_eq!(finite(f64::INFINITY), 0, "finite(inf)");
+        assert_eq!(finite(f64::NAN), 0, "finite(NaN)");
+    }
+
+    #[test]
+    fn test_drem_alias() {
+        assert_approx(drem(10.0, 3.0), remainder(10.0, 3.0), EPS, "drem == remainder");
+    }
+
+    #[test]
+    fn test_significand_values() {
+        // significand(x) returns x * 2^(-ilogb(x)), should be in [1, 2).
+        let s = significand(8.0);
+        assert!(s >= 1.0 && s < 2.0, "significand(8) should be in [1, 2), got {s}");
+        assert_approx(significand(1.0), 1.0, EPS, "significand(1)");
+    }
+
+    // -----------------------------------------------------------------------
+    // lgamma_r (thread-safe gamma with sign)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_lgamma_r_sign() {
+        let mut sign: i32 = 0;
+        let val = lgamma_r(5.0, &mut sign);
+        assert_approx(val, lgamma(5.0), EPS, "lgamma_r(5) value");
+        assert_eq!(sign, 1, "lgamma_r(5) sign should be positive");
+    }
+
+    // -----------------------------------------------------------------------
+    // remquo
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_remquo_values() {
+        let mut q: i32 = 0;
+        let r = remquo(10.0, 3.0, &mut q);
+        assert_approx(r, remainder(10.0, 3.0), EPS, "remquo remainder");
+        // quotient bits should match round(10/3) = round(3.33) = 3.
+        assert_eq!(q.abs() & 0x7, 3, "remquo quotient low bits");
+    }
+
+    #[test]
+    fn test_remquo_special() {
+        let mut q: i32 = 0;
+        let r = remquo(f64::NAN, 1.0, &mut q);
+        assert!(r.is_nan(), "remquo(NaN,1) should be NaN");
+    }
 }

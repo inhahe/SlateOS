@@ -289,6 +289,10 @@ pub(crate) struct SocketMeta {
     pub(crate) udp_shut_rd: bool,
     /// UDP shutdown state: SHUT_WR called (disables send).
     pub(crate) udp_shut_wr: bool,
+    /// SO_RCVTIMEO: receive timeout in milliseconds (0 = no timeout).
+    rcvtimeo_ms: u64,
+    /// SO_SNDTIMEO: send timeout in milliseconds (0 = no timeout).
+    sndtimeo_ms: u64,
 }
 
 /// Per-fd socket metadata table.
@@ -1042,6 +1046,8 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
         keepcnt: 9,
         udp_shut_rd: false,
         udp_shut_wr: false,
+        rcvtimeo_ms: 0,
+        sndtimeo_ms: 0,
     });
 
     fd
@@ -1155,6 +1161,8 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 keepcnt: meta.keepcnt,
                 udp_shut_rd: false,
                 udp_shut_wr: false,
+                rcvtimeo_ms: meta.rcvtimeo_ms,
+                sndtimeo_ms: meta.sndtimeo_ms,
             });
 
             if in_progress {
@@ -1448,6 +1456,8 @@ pub unsafe extern "C" fn accept(
         keepcnt: 9,
         udp_shut_rd: false,
         udp_shut_wr: false,
+        rcvtimeo_ms: 0,
+        sndtimeo_ms: 0,
     });
 
     // Fill in the peer address if requested.
@@ -1664,15 +1674,77 @@ pub unsafe extern "C" fn recv(
                 src_info.as_mut_ptr() as u64,
                 u64::from(kern_flags),
             );
-            if ret < 0 {
-                errno::set_errno(translate_net_error(ret));
-                return -1;
+            if ret >= 0 {
+                return ret as isize;
             }
-            ret as isize
+            // WouldBlock: if non-blocking or MSG_DONTWAIT, return EAGAIN.
+            let err = translate_net_error(ret);
+            if err == errno::EAGAIN || err == errno::EWOULDBLOCK {
+                let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
+                if is_nb {
+                    errno::set_errno(errno::EAGAIN);
+                    return -1;
+                }
+                // Blocking mode: poll-wait with SO_RCVTIMEO.
+                let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
+                let waited = udp_recv_wait(
+                    entry.handle, buf, len, &mut src_info, kern_flags, timeout_ms,
+                );
+                return waited;
+            }
+            errno::set_errno(err);
+            -1
         }
         _ => {
             errno::set_errno(errno::ENOTSOCK);
             -1
+        }
+    }
+}
+
+/// Poll-wait for a UDP datagram with timeout (SO_RCVTIMEO support).
+///
+/// Retries `SYS_UDP_RECV` in a loop with 10ms sleeps until data arrives
+/// or the timeout expires.  `timeout_ms == 0` means wait indefinitely.
+/// Returns bytes received or -1 (with errno set).
+fn udp_recv_wait(
+    handle: u64,
+    buf: *mut u8,
+    len: usize,
+    src_info: &mut [u8; 6],
+    kern_flags: u32,
+    timeout_ms: u64,
+) -> isize {
+    const POLL_NS: u64 = 10_000_000; // 10ms
+
+    let deadline = if timeout_ms > 0 {
+        let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+        now.saturating_add(timeout_ms.saturating_mul(1_000_000))
+    } else {
+        u64::MAX // No deadline — wait indefinitely.
+    };
+
+    loop {
+        let _ = syscall1(SYS_SLEEP, POLL_NS);
+
+        let ret = syscall5(
+            SYS_UDP_RECV,
+            handle,
+            buf as u64,
+            len as u64,
+            src_info.as_mut_ptr() as u64,
+            u64::from(kern_flags),
+        );
+        if ret >= 0 {
+            return ret as isize;
+        }
+        // Still no data — check timeout.
+        if deadline != u64::MAX {
+            let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+            if now >= deadline {
+                errno::set_errno(errno::EAGAIN);
+                return -1;
+            }
         }
     }
 }
@@ -2087,9 +2159,42 @@ pub extern "C" fn setsockopt(
                     meta.linger_secs = val;
                 }
             }
-            (SOL_SOCKET, SO_REUSEPORT | SO_RCVTIMEO | SO_SNDTIMEO) => {
-                // Accept silently — these are common options that programs
-                // set but we don't implement at the kernel level yet.
+            (SOL_SOCKET, SO_REUSEPORT) => {
+                // Accept silently — reuseport is not meaningful with our
+                // single-socket-per-port kernel model.
+            }
+            (SOL_SOCKET, SO_RCVTIMEO) => {
+                // Timeout is a timeval struct: {tv_sec, tv_usec}.
+                // If optlen is >= 16 (sizeof timeval), parse as timeval.
+                // Otherwise treat val as milliseconds for compatibility.
+                let ms = if optlen as usize >= 16 {
+                    let tv_sec = unsafe {
+                        core::ptr::read_unaligned(optval.cast::<i64>())
+                    };
+                    let tv_usec = unsafe {
+                        core::ptr::read_unaligned(optval.add(8).cast::<i64>())
+                    };
+                    (tv_sec.max(0) as u64).saturating_mul(1000)
+                        .saturating_add((tv_usec.max(0) as u64) / 1000)
+                } else {
+                    val.max(0) as u64
+                };
+                meta.rcvtimeo_ms = ms;
+            }
+            (SOL_SOCKET, SO_SNDTIMEO) => {
+                let ms = if optlen as usize >= 16 {
+                    let tv_sec = unsafe {
+                        core::ptr::read_unaligned(optval.cast::<i64>())
+                    };
+                    let tv_usec = unsafe {
+                        core::ptr::read_unaligned(optval.add(8).cast::<i64>())
+                    };
+                    (tv_sec.max(0) as u64).saturating_mul(1000)
+                        .saturating_add((tv_usec.max(0) as u64) / 1000)
+                } else {
+                    val.max(0) as u64
+                };
+                meta.sndtimeo_ms = ms;
             }
             (SOL_TCP, TCP_NODELAY) => {
                 meta.nodelay = val != 0;
@@ -2287,7 +2392,40 @@ pub unsafe extern "C" fn getsockopt(
                 // Fall back to just returning l_onoff as int.
                 meta.map_or(0, |m| i32::from(m.linger_onoff))
             }
-            (SOL_SOCKET, SO_RCVTIMEO | SO_SNDTIMEO) => 0, // No timeout.
+            (SOL_SOCKET, SO_RCVTIMEO) => {
+                // Return as timeval if buffer is big enough.
+                let ms = meta.map_or(0u64, |m| m.rcvtimeo_ms);
+                if available >= 16 {
+                    let tv_sec = (ms / 1000) as i64;
+                    let tv_usec = ((ms % 1000) * 1000) as i64;
+                    core::ptr::copy_nonoverlapping(
+                        (&raw const tv_sec).cast::<u8>(), optval, 8,
+                    );
+                    core::ptr::copy_nonoverlapping(
+                        (&raw const tv_usec).cast::<u8>(), optval.add(8), 8,
+                    );
+                    *optlen = 16;
+                    return 0;
+                }
+                // Fallback: return as seconds (integer).
+                (ms / 1000) as i32
+            }
+            (SOL_SOCKET, SO_SNDTIMEO) => {
+                let ms = meta.map_or(0u64, |m| m.sndtimeo_ms);
+                if available >= 16 {
+                    let tv_sec = (ms / 1000) as i64;
+                    let tv_usec = ((ms % 1000) * 1000) as i64;
+                    core::ptr::copy_nonoverlapping(
+                        (&raw const tv_sec).cast::<u8>(), optval, 8,
+                    );
+                    core::ptr::copy_nonoverlapping(
+                        (&raw const tv_usec).cast::<u8>(), optval.add(8), 8,
+                    );
+                    *optlen = 16;
+                    return 0;
+                }
+                (ms / 1000) as i32
+            }
             (SOL_SOCKET, SO_ACCEPTCONN) => i32::from(entry.kind == HandleKind::TcpListener),
             (SOL_SOCKET, SO_DOMAIN) => AF_INET,
             (SOL_SOCKET, SO_PROTOCOL) => match entry.kind {

@@ -15,8 +15,11 @@
 //! - `%p` — pointer (prints as `0x` + hex)
 //! - `%%` — literal percent
 //! - `%ld`, `%li`, `%lu`, `%lx`, `%lX`, `%lo` — long variants (same as base on LP64)
+//! - `%f`, `%F` — fixed-point decimal (e.g. `3.140000`)
+//! - `%e`, `%E` — scientific notation (e.g. `3.140000e+00`)
+//! - `%g`, `%G` — auto (%e or %f, whichever is shorter)
 //! - Width and precision: `%10d`, `%-10s`, `%08x`, `%.5s`, `%*d`
-//! - Flags: `-` (left-align), `0` (zero-pad), `+` (sign), ` ` (space)
+//! - Flags: `-` (left-align), `0` (zero-pad), `+` (sign), ` ` (space), `#` (alt form)
 //!
 //! ## Architecture
 //!
@@ -43,133 +46,180 @@
 
 #[cfg(not(test))]
 core::arch::global_asm!(
-    // printf(fmt, ...) → _printf_impl(fmt, args_ptr)
+    // printf(fmt, ...) → _printf_impl(fmt, int_args, float_args)
     ".global printf",
     ".type printf, @function",
     "printf:",
     "push rbp",
     "mov rbp, rsp",
-    "sub rsp, 64",           // 8 * 8 bytes for args
-    "mov [rsp], rsi",        // vararg 0
-    "mov [rsp+8], rdx",      // vararg 1
-    "mov [rsp+16], rcx",     // vararg 2
-    "mov [rsp+24], r8",      // vararg 3
-    "mov [rsp+32], r9",      // vararg 4
-    "mov rax, [rbp+16]",     // vararg 5 (stack)
+    "sub rsp, 128",          // 64 bytes int args + 64 bytes float args
+    // Save integer varargs (rsi-r9 = 5, plus 3 from stack = 8).
+    "mov [rsp], rsi",        // int vararg 0
+    "mov [rsp+8], rdx",      // int vararg 1
+    "mov [rsp+16], rcx",     // int vararg 2
+    "mov [rsp+24], r8",      // int vararg 3
+    "mov [rsp+32], r9",      // int vararg 4
+    "mov rax, [rbp+16]",     // int vararg 5 (stack)
     "mov [rsp+40], rax",
-    "mov rax, [rbp+24]",     // vararg 6
+    "mov rax, [rbp+24]",     // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+32]",     // vararg 7
+    "mov rax, [rbp+32]",     // int vararg 7
     "mov [rsp+56], rax",
+    // Save XMM varargs (xmm0-xmm7 = 8 doubles).
+    "movsd [rsp+64], xmm0",
+    "movsd [rsp+72], xmm1",
+    "movsd [rsp+80], xmm2",
+    "movsd [rsp+88], xmm3",
+    "movsd [rsp+96], xmm4",
+    "movsd [rsp+104], xmm5",
+    "movsd [rsp+112], xmm6",
+    "movsd [rsp+120], xmm7",
     // rdi = fmt (already set)
-    "mov rsi, rsp",          // args array
+    "mov rsi, rsp",          // int_args array
+    "lea rdx, [rsp+64]",    // float_args array
     "call _printf_impl",
-    "add rsp, 64",
+    "add rsp, 128",
     "pop rbp",
     "ret",
 
-    // fprintf(stream, fmt, ...) → _fprintf_impl(stream, fmt, args_ptr)
+    // fprintf(stream, fmt, ...) → _fprintf_impl(stream, fmt, int_args, float_args)
     ".global fprintf",
     ".type fprintf, @function",
     "fprintf:",
     "push rbp",
     "mov rbp, rsp",
-    "sub rsp, 64",
-    "mov [rsp], rdx",        // vararg 0
-    "mov [rsp+8], rcx",      // vararg 1
-    "mov [rsp+16], r8",      // vararg 2
-    "mov [rsp+24], r9",      // vararg 3
-    "mov rax, [rbp+16]",     // vararg 4 (stack)
+    "sub rsp, 128",
+    "mov [rsp], rdx",        // int vararg 0
+    "mov [rsp+8], rcx",      // int vararg 1
+    "mov [rsp+16], r8",      // int vararg 2
+    "mov [rsp+24], r9",      // int vararg 3
+    "mov rax, [rbp+16]",     // int vararg 4 (stack)
     "mov [rsp+32], rax",
-    "mov rax, [rbp+24]",     // vararg 5
+    "mov rax, [rbp+24]",     // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+32]",     // vararg 6
+    "mov rax, [rbp+32]",     // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+40]",     // vararg 7
+    "mov rax, [rbp+40]",     // int vararg 7
     "mov [rsp+56], rax",
+    "movsd [rsp+64], xmm0",
+    "movsd [rsp+72], xmm1",
+    "movsd [rsp+80], xmm2",
+    "movsd [rsp+88], xmm3",
+    "movsd [rsp+96], xmm4",
+    "movsd [rsp+104], xmm5",
+    "movsd [rsp+112], xmm6",
+    "movsd [rsp+120], xmm7",
     // rdi = stream, rsi = fmt (already set)
-    "mov rdx, rsp",          // args array
+    "mov rdx, rsp",          // int_args array
+    "lea rcx, [rsp+64]",    // float_args array
     "call _fprintf_impl",
-    "add rsp, 64",
+    "add rsp, 128",
     "pop rbp",
     "ret",
 
-    // dprintf(fd, fmt, ...) → _dprintf_impl(fd, fmt, args_ptr)
+    // dprintf(fd, fmt, ...) → _dprintf_impl(fd, fmt, int_args, float_args)
     ".global dprintf",
     ".type dprintf, @function",
     "dprintf:",
     "push rbp",
     "mov rbp, rsp",
-    "sub rsp, 64",
-    "mov [rsp], rdx",        // vararg 0
-    "mov [rsp+8], rcx",      // vararg 1
-    "mov [rsp+16], r8",      // vararg 2
-    "mov [rsp+24], r9",      // vararg 3
-    "mov rax, [rbp+16]",     // vararg 4 (stack)
+    "sub rsp, 128",
+    "mov [rsp], rdx",        // int vararg 0
+    "mov [rsp+8], rcx",      // int vararg 1
+    "mov [rsp+16], r8",      // int vararg 2
+    "mov [rsp+24], r9",      // int vararg 3
+    "mov rax, [rbp+16]",     // int vararg 4 (stack)
     "mov [rsp+32], rax",
-    "mov rax, [rbp+24]",     // vararg 5
+    "mov rax, [rbp+24]",     // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+32]",     // vararg 6
+    "mov rax, [rbp+32]",     // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+40]",     // vararg 7
+    "mov rax, [rbp+40]",     // int vararg 7
     "mov [rsp+56], rax",
+    "movsd [rsp+64], xmm0",
+    "movsd [rsp+72], xmm1",
+    "movsd [rsp+80], xmm2",
+    "movsd [rsp+88], xmm3",
+    "movsd [rsp+96], xmm4",
+    "movsd [rsp+104], xmm5",
+    "movsd [rsp+112], xmm6",
+    "movsd [rsp+120], xmm7",
     // rdi = fd, rsi = fmt (already set)
-    "mov rdx, rsp",          // args array
+    "mov rdx, rsp",          // int_args array
+    "lea rcx, [rsp+64]",    // float_args array
     "call _dprintf_impl",
-    "add rsp, 64",
+    "add rsp, 128",
     "pop rbp",
     "ret",
 
-    // snprintf(buf, size, fmt, ...) → _snprintf_impl(buf, size, fmt, args_ptr)
+    // snprintf(buf, size, fmt, ...) → _snprintf_impl(buf, size, fmt, int_args, float_args)
     ".global snprintf",
     ".type snprintf, @function",
     "snprintf:",
     "push rbp",
     "mov rbp, rsp",
-    "sub rsp, 64",
-    "mov [rsp], rcx",        // vararg 0
-    "mov [rsp+8], r8",       // vararg 1
-    "mov [rsp+16], r9",      // vararg 2
-    "mov rax, [rbp+16]",     // vararg 3 (stack)
+    "sub rsp, 128",
+    "mov [rsp], rcx",        // int vararg 0
+    "mov [rsp+8], r8",       // int vararg 1
+    "mov [rsp+16], r9",      // int vararg 2
+    "mov rax, [rbp+16]",     // int vararg 3 (stack)
     "mov [rsp+24], rax",
-    "mov rax, [rbp+24]",     // vararg 4
+    "mov rax, [rbp+24]",     // int vararg 4
     "mov [rsp+32], rax",
-    "mov rax, [rbp+32]",     // vararg 5
+    "mov rax, [rbp+32]",     // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+40]",     // vararg 6
+    "mov rax, [rbp+40]",     // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+48]",     // vararg 7
+    "mov rax, [rbp+48]",     // int vararg 7
     "mov [rsp+56], rax",
+    "movsd [rsp+64], xmm0",
+    "movsd [rsp+72], xmm1",
+    "movsd [rsp+80], xmm2",
+    "movsd [rsp+88], xmm3",
+    "movsd [rsp+96], xmm4",
+    "movsd [rsp+104], xmm5",
+    "movsd [rsp+112], xmm6",
+    "movsd [rsp+120], xmm7",
     // rdi = buf, rsi = size, rdx = fmt (already set)
-    "mov rcx, rsp",          // args array
+    "mov rcx, rsp",          // int_args array
+    "lea r8, [rsp+64]",     // float_args array
     "call _snprintf_impl",
-    "add rsp, 64",
+    "add rsp, 128",
     "pop rbp",
     "ret",
 
-    // sprintf(buf, fmt, ...) → _sprintf_impl(buf, fmt, args_ptr)
+    // sprintf(buf, fmt, ...) → _sprintf_impl(buf, fmt, int_args, float_args)
     ".global sprintf",
     ".type sprintf, @function",
     "sprintf:",
     "push rbp",
     "mov rbp, rsp",
-    "sub rsp, 64",
-    "mov [rsp], rdx",        // vararg 0
-    "mov [rsp+8], rcx",      // vararg 1
-    "mov [rsp+16], r8",      // vararg 2
-    "mov [rsp+24], r9",      // vararg 3
-    "mov rax, [rbp+16]",     // vararg 4 (stack)
+    "sub rsp, 128",
+    "mov [rsp], rdx",        // int vararg 0
+    "mov [rsp+8], rcx",      // int vararg 1
+    "mov [rsp+16], r8",      // int vararg 2
+    "mov [rsp+24], r9",      // int vararg 3
+    "mov rax, [rbp+16]",     // int vararg 4 (stack)
     "mov [rsp+32], rax",
-    "mov rax, [rbp+24]",     // vararg 5
+    "mov rax, [rbp+24]",     // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+32]",     // vararg 6
+    "mov rax, [rbp+32]",     // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+40]",     // vararg 7
+    "mov rax, [rbp+40]",     // int vararg 7
     "mov [rsp+56], rax",
+    "movsd [rsp+64], xmm0",
+    "movsd [rsp+72], xmm1",
+    "movsd [rsp+80], xmm2",
+    "movsd [rsp+88], xmm3",
+    "movsd [rsp+96], xmm4",
+    "movsd [rsp+104], xmm5",
+    "movsd [rsp+112], xmm6",
+    "movsd [rsp+120], xmm7",
     // rdi = buf, rsi = fmt (already set)
-    "mov rdx, rsp",          // args array
+    "mov rdx, rsp",          // int_args array
+    "lea rcx, [rsp+64]",    // float_args array
     "call _sprintf_impl",
-    "add rsp, 64",
+    "add rsp, 128",
     "pop rbp",
     "ret",
 );
@@ -186,9 +236,9 @@ const PRINTF_BUF_SIZE: usize = 4096;
 /// Output goes through the stdio buffer (line-buffered on stdout) so
 /// printf output is properly coalesced with other stdout writes.
 #[unsafe(no_mangle)]
-pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64) -> i32 {
+pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
+    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args, fargs);
     if n <= 0 {
         return n;
     }
@@ -202,9 +252,9 @@ pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64) -> i32 {
 /// Output goes through the stdio buffer so fprintf output is properly
 /// coalesced with other writes to the same stream.
 #[unsafe(no_mangle)]
-pub extern "C" fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: *const u64) -> i32 {
+pub extern "C" fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
+    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args, fargs);
     if n <= 0 {
         return n;
     }
@@ -218,9 +268,9 @@ pub extern "C" fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: *const u6
 /// Like `fprintf` but takes a raw fd (int) instead of a `FILE*`.
 /// Writes directly to the fd without stdio buffering.
 #[unsafe(no_mangle)]
-pub extern "C" fn _dprintf_impl(fd: i32, fmt: *const u8, args: *const u64) -> i32 {
+pub extern "C" fn _dprintf_impl(fd: i32, fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
-    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args);
+    let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args, fargs);
     if n <= 0 {
         return n;
     }
@@ -236,12 +286,13 @@ pub extern "C" fn _snprintf_impl(
     size: usize,
     fmt: *const u8,
     args: *const u64,
+    fargs: *const u64,
 ) -> i32 {
     if buf.is_null() || size == 0 {
         // Still count characters.
-        return format_core(core::ptr::null_mut(), 0, fmt, args);
+        return format_core(core::ptr::null_mut(), 0, fmt, args, fargs);
     }
-    let n = format_core(buf, size, fmt, args);
+    let n = format_core(buf, size, fmt, args, fargs);
     // Null-terminate (snprintf guarantees this if size > 0).
     let term_pos = if n >= 0 && (n as usize) < size {
         n as usize
@@ -255,9 +306,9 @@ pub extern "C" fn _snprintf_impl(
 
 /// `sprintf(buf, fmt, ...)` — write formatted output to a buffer (no limit).
 #[unsafe(no_mangle)]
-pub extern "C" fn _sprintf_impl(buf: *mut u8, fmt: *const u8, args: *const u64) -> i32 {
+pub extern "C" fn _sprintf_impl(buf: *mut u8, fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
     // No size limit — dangerous but matches C semantics.
-    format_core(buf, usize::MAX, fmt, args)
+    format_core(buf, usize::MAX, fmt, args, fargs)
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +443,8 @@ fn dispatch_spec(
     spec: &FormatSpec,
     args: *const u64,
     arg_idx: &mut usize,
+    fargs: *const u64,
+    farg_idx: &mut usize,
 ) -> usize {
     let ch = unsafe { *fmt.add(fpos) };
     let next = fpos.wrapping_add(1);
@@ -455,6 +508,28 @@ fn dispatch_spec(
             }
         }
 
+        // Floating-point specifiers: consume from the float args array.
+        b'f' | b'F' => {
+            let bits = consume_arg(fargs, farg_idx);
+            let val = f64::from_bits(bits);
+            let prec = spec.precision.unwrap_or(6);
+            format_float_fixed(dst, val, ch == b'F', &spec.flags, spec.width, prec);
+        }
+
+        b'e' | b'E' => {
+            let bits = consume_arg(fargs, farg_idx);
+            let val = f64::from_bits(bits);
+            let prec = spec.precision.unwrap_or(6);
+            format_float_sci(dst, val, ch == b'E', &spec.flags, spec.width, prec);
+        }
+
+        b'g' | b'G' => {
+            let bits = consume_arg(fargs, farg_idx);
+            let val = f64::from_bits(bits);
+            let prec = if spec.precision == Some(0) { 1 } else { spec.precision.unwrap_or(6) };
+            format_float_general(dst, val, ch == b'G', &spec.flags, spec.width, prec);
+        }
+
         _ => {
             // Unknown specifier or premature end — emit raw.
             emit_byte(dst, b'%');
@@ -479,6 +554,7 @@ fn format_core(
     out_size: usize,
     fmt: *const u8,
     args: *const u64,
+    fargs: *const u64,
 ) -> i32 {
     if fmt.is_null() {
         return -1;
@@ -486,6 +562,7 @@ fn format_core(
 
     let mut dst = FmtOutput::new(out, out_size);
     let mut arg_idx: usize = 0;
+    let mut farg_idx: usize = 0;
     let mut fpos: usize = 0;
 
     loop {
@@ -509,7 +586,7 @@ fn format_core(
 
         let spec_start = fpos;
         let spec = parse_spec(fmt, &mut fpos, args, &mut arg_idx);
-        fpos = dispatch_spec(&mut dst, fmt, fpos, spec_start, &spec, args, &mut arg_idx);
+        fpos = dispatch_spec(&mut dst, fmt, fpos, spec_start, &spec, args, &mut arg_idx, fargs, &mut farg_idx);
     }
 
     dst.pos as i32
@@ -830,4 +907,426 @@ fn u64_to_base(mut val: u64, base: u32, upper: bool, buf: &mut [u8; NUM_BUF_SIZE
     }
 
     NUM_BUF_SIZE.wrapping_sub(pos)
+}
+
+// ---------------------------------------------------------------------------
+// Floating-point formatting
+// ---------------------------------------------------------------------------
+
+/// Format a floating-point value in fixed notation (%f/%F).
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+fn format_float_fixed(
+    dst: &mut FmtOutput,
+    val: f64,
+    upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+    precision: usize,
+) {
+    // Handle special values.
+    if val.is_nan() {
+        let s = if upper { b"NAN" } else { b"nan" };
+        format_float_special(dst, s, false, flags, width);
+        return;
+    }
+    let negative = val.is_sign_negative();
+    if val.is_infinite() {
+        let s = if upper { b"INF" } else { b"inf" };
+        format_float_special(dst, s, negative, flags, width);
+        return;
+    }
+
+    let abs_val = if negative { -val } else { val };
+
+    // Format into a temporary buffer.
+    let mut buf = [0u8; 350]; // Enough for DBL_MAX (~308 digits) + decimal + precision
+    let len = fmt_fixed(abs_val, precision, &mut buf);
+
+    emit_float_padded(dst, &buf, len, negative, flags, width);
+}
+
+/// Format a floating-point value in scientific notation (%e/%E).
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+fn format_float_sci(
+    dst: &mut FmtOutput,
+    val: f64,
+    upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+    precision: usize,
+) {
+    if val.is_nan() {
+        let s = if upper { b"NAN" } else { b"nan" };
+        format_float_special(dst, s, false, flags, width);
+        return;
+    }
+    let negative = val.is_sign_negative();
+    if val.is_infinite() {
+        let s = if upper { b"INF" } else { b"inf" };
+        format_float_special(dst, s, negative, flags, width);
+        return;
+    }
+
+    let abs_val = if negative { -val } else { val };
+
+    let mut buf = [0u8; 350];
+    let len = fmt_scientific(abs_val, precision, upper, &mut buf);
+
+    emit_float_padded(dst, &buf, len, negative, flags, width);
+}
+
+/// Format a floating-point value in %g/%G notation.
+///
+/// Uses %e if exponent < -4 or >= precision, else %f.
+/// Trailing zeros are removed unless `#` flag is set.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_arguments)]
+fn format_float_general(
+    dst: &mut FmtOutput,
+    val: f64,
+    upper: bool,
+    flags: &FormatFlags,
+    width: usize,
+    precision: usize,
+) {
+    if val.is_nan() {
+        let s = if upper { b"NAN" } else { b"nan" };
+        format_float_special(dst, s, false, flags, width);
+        return;
+    }
+    let negative = val.is_sign_negative();
+    if val.is_infinite() {
+        let s = if upper { b"INF" } else { b"inf" };
+        format_float_special(dst, s, negative, flags, width);
+        return;
+    }
+
+    let abs_val = if negative { -val } else { val };
+
+    // Determine exponent for the choice.
+    let exp = if abs_val == 0.0 { 0 } else { crate::math::ilogb(abs_val) };
+    let p = precision as i32;
+
+    let mut buf = [0u8; 350];
+    let mut len;
+
+    if exp < -4 || exp >= p {
+        // Use scientific, but with (precision - 1) digits after '.'.
+        let sci_prec = if precision > 0 { precision.wrapping_sub(1) } else { 0 };
+        len = fmt_scientific(abs_val, sci_prec, upper, &mut buf);
+    } else {
+        // Use fixed, with (precision - 1 - exp) digits after '.'.
+        let fix_prec = if (p - 1 - exp) > 0 { (p - 1 - exp) as usize } else { 0 };
+        len = fmt_fixed(abs_val, fix_prec, &mut buf);
+    }
+
+    // Remove trailing zeros (unless # flag).
+    if !flags.alt_form {
+        len = trim_trailing_zeros(&mut buf, len);
+    }
+
+    emit_float_padded(dst, &buf, len, negative, flags, width);
+}
+
+/// Emit special float strings (nan, inf) with sign and padding.
+fn format_float_special(
+    dst: &mut FmtOutput,
+    text: &[u8],
+    negative: bool,
+    flags: &FormatFlags,
+    width: usize,
+) {
+    let sign: Option<u8> = if negative {
+        Some(b'-')
+    } else if flags.force_sign {
+        Some(b'+')
+    } else if flags.space_sign {
+        Some(b' ')
+    } else {
+        None
+    };
+    let total = text.len().wrapping_add(usize::from(sign.is_some()));
+
+    if !flags.left_align && width > total {
+        emit_padding(dst, b' ', width.wrapping_sub(total));
+    }
+    if let Some(s) = sign { emit_byte(dst, s); }
+    emit_bytes(dst, text);
+    if flags.left_align && width > total {
+        emit_padding(dst, b' ', width.wrapping_sub(total));
+    }
+}
+
+/// Emit a formatted float with sign, padding, and alignment.
+#[allow(clippy::arithmetic_side_effects)]
+fn emit_float_padded(
+    dst: &mut FmtOutput,
+    buf: &[u8],
+    len: usize,
+    negative: bool,
+    flags: &FormatFlags,
+    width: usize,
+) {
+    let sign: Option<u8> = if negative {
+        Some(b'-')
+    } else if flags.force_sign {
+        Some(b'+')
+    } else if flags.space_sign {
+        Some(b' ')
+    } else {
+        None
+    };
+    let sign_len = usize::from(sign.is_some());
+    let total = sign_len + len;
+
+    let pad_char = if flags.zero_pad && !flags.left_align { b'0' } else { b' ' };
+
+    if !flags.left_align && width > total && pad_char == b' ' {
+        emit_padding(dst, b' ', width.wrapping_sub(total));
+    }
+    if let Some(s) = sign { emit_byte(dst, s); }
+    if !flags.left_align && width > total && pad_char == b'0' {
+        emit_padding(dst, b'0', width.wrapping_sub(total));
+    }
+    // Emit the formatted number from buf.
+    let mut i = 0;
+    while i < len {
+        if let Some(&b) = buf.get(i) {
+            emit_byte(dst, b);
+        }
+        i = i.wrapping_add(1);
+    }
+    if flags.left_align && width > total {
+        emit_padding(dst, b' ', width.wrapping_sub(total));
+    }
+}
+
+/// Format a non-negative f64 in fixed notation into buf.
+/// Returns number of bytes written.
+#[allow(clippy::arithmetic_side_effects)]
+fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
+    // Separate integer and fractional parts.
+    let int_part = val as u64;
+    let frac = val - (int_part as f64);
+
+    let mut pos: usize = 0;
+
+    // Write integer part.
+    if int_part == 0 {
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+        pos = pos.wrapping_add(1);
+    } else {
+        // Write digits of integer part (reversed).
+        let mut digits = [0u8; 20];
+        let mut dlen: usize = 0;
+        let mut n = int_part;
+        while n > 0 {
+            if let Some(slot) = digits.get_mut(dlen) {
+                *slot = b'0'.wrapping_add((n % 10) as u8);
+            }
+            dlen = dlen.wrapping_add(1);
+            n /= 10;
+        }
+        // Reverse into buf.
+        let mut k = dlen;
+        while k > 0 {
+            k = k.wrapping_sub(1);
+            if let (Some(slot), Some(&d)) = (buf.get_mut(pos), digits.get(k)) {
+                *slot = d;
+            }
+            pos = pos.wrapping_add(1);
+        }
+    }
+
+    // Decimal point and fractional part.
+    if precision > 0 {
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'.'; }
+        pos = pos.wrapping_add(1);
+
+        let mut f = frac;
+        let mut p = precision;
+        while p > 0 {
+            f *= 10.0;
+            let digit = f as u8;
+            if let Some(slot) = buf.get_mut(pos) {
+                *slot = b'0'.wrapping_add(digit);
+            }
+            f -= f64::from(digit);
+            pos = pos.wrapping_add(1);
+            p = p.wrapping_sub(1);
+        }
+
+        // Round the last digit.
+        if f >= 0.5 {
+            // Propagate rounding.
+            let mut rp = pos.wrapping_sub(1);
+            loop {
+                if let Some(slot) = buf.get_mut(rp) {
+                    if *slot == b'.' {
+                        if rp == 0 { break; }
+                        rp = rp.wrapping_sub(1);
+                        continue;
+                    }
+                    if *slot < b'9' {
+                        *slot = slot.wrapping_add(1);
+                        break;
+                    }
+                    *slot = b'0';
+                }
+                if rp == 0 {
+                    // Need to insert a '1' at the front.  Shift everything right.
+                    let mut j = pos;
+                    while j > 0 {
+                        if let (Some(src), Some(dst_slot)) = (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j)) {
+                            *dst_slot = src;
+                        }
+                        j = j.wrapping_sub(1);
+                    }
+                    if let Some(slot) = buf.get_mut(0) { *slot = b'1'; }
+                    pos = pos.wrapping_add(1);
+                    break;
+                }
+                rp = rp.wrapping_sub(1);
+            }
+        }
+    }
+
+    pos
+}
+
+/// Format a non-negative f64 in scientific notation into buf.
+/// Returns number of bytes written.
+#[allow(clippy::arithmetic_side_effects)]
+fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> usize {
+    if val == 0.0 {
+        let mut pos: usize = 0;
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+        pos = pos.wrapping_add(1);
+        if precision > 0 {
+            if let Some(slot) = buf.get_mut(pos) { *slot = b'.'; }
+            pos = pos.wrapping_add(1);
+            let mut p = precision;
+            while p > 0 {
+                if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+                pos = pos.wrapping_add(1);
+                p = p.wrapping_sub(1);
+            }
+        }
+        if let Some(slot) = buf.get_mut(pos) { *slot = if upper { b'E' } else { b'e' }; }
+        pos = pos.wrapping_add(1);
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'+'; }
+        pos = pos.wrapping_add(1);
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+        pos = pos.wrapping_add(1);
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+        pos = pos.wrapping_add(1);
+        return pos;
+    }
+
+    // Find exponent.
+    let mut exp: i32 = crate::math::ilogb(val);
+    let mut mantissa = val / crate::math::pow(10.0, f64::from(exp));
+    // Normalize: 1 <= mantissa < 10.
+    if mantissa >= 10.0 { mantissa /= 10.0; exp += 1; }
+    if mantissa < 1.0 && mantissa > 0.0 { mantissa *= 10.0; exp -= 1; }
+
+    // Format mantissa as fixed point with `precision` decimal places.
+    let mut pos = fmt_fixed(mantissa, precision, buf);
+
+    // Exponent.
+    if let Some(slot) = buf.get_mut(pos) { *slot = if upper { b'E' } else { b'e' }; }
+    pos = pos.wrapping_add(1);
+    if let Some(slot) = buf.get_mut(pos) { *slot = if exp < 0 { b'-' } else { b'+' }; }
+    pos = pos.wrapping_add(1);
+
+    let abs_exp = if exp < 0 { (-exp) as u32 } else { exp as u32 };
+    // At least 2 digits for exponent.
+    if abs_exp < 10 {
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+        pos = pos.wrapping_add(1);
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add(abs_exp as u8); }
+        pos = pos.wrapping_add(1);
+    } else if abs_exp < 100 {
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add((abs_exp / 10) as u8); }
+        pos = pos.wrapping_add(1);
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add((abs_exp % 10) as u8); }
+        pos = pos.wrapping_add(1);
+    } else {
+        // 3-digit exponent (values > 1e99).
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add((abs_exp / 100) as u8); }
+        pos = pos.wrapping_add(1);
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add(((abs_exp / 10) % 10) as u8); }
+        pos = pos.wrapping_add(1);
+        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add((abs_exp % 10) as u8); }
+        pos = pos.wrapping_add(1);
+    }
+
+    pos
+}
+
+/// Remove trailing zeros after the decimal point in a formatted float.
+/// Also removes the '.' if no fractional digits remain.
+/// Returns new length.
+fn trim_trailing_zeros(buf: &mut [u8], len: usize) -> usize {
+    // Find the position of 'e'/'E' (if scientific notation).
+    let mut exp_pos = len;
+    let mut i = 0;
+    while i < len {
+        if let Some(&b) = buf.get(i) {
+            if b == b'e' || b == b'E' {
+                exp_pos = i;
+                break;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+
+    // Find decimal point.
+    let mut dot_pos = exp_pos;
+    i = 0;
+    while i < exp_pos {
+        if let Some(&b) = buf.get(i) {
+            if b == b'.' {
+                dot_pos = i;
+                break;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+
+    if dot_pos == exp_pos {
+        return len; // No decimal point — nothing to trim.
+    }
+
+    // Trim trailing zeros between dot and exp.
+    let mut trim_end = exp_pos;
+    while trim_end > dot_pos.wrapping_add(1) {
+        if let Some(&b) = buf.get(trim_end.wrapping_sub(1)) {
+            if b != b'0' { break; }
+        }
+        trim_end = trim_end.wrapping_sub(1);
+    }
+
+    // Remove dot if nothing after it.
+    if trim_end == dot_pos.wrapping_add(1) {
+        trim_end = dot_pos;
+    }
+
+    // Move exponent part (if any) up.
+    if exp_pos < len {
+        let exp_len = len.wrapping_sub(exp_pos);
+        let mut k = 0;
+        while k < exp_len {
+            let src_idx = exp_pos.wrapping_add(k);
+            let dst_idx = trim_end.wrapping_add(k);
+            if let Some(&src) = buf.get(src_idx) {
+                if let Some(dst_slot) = buf.get_mut(dst_idx) {
+                    *dst_slot = src;
+                }
+            }
+            k = k.wrapping_add(1);
+        }
+        trim_end = trim_end.wrapping_add(exp_len);
+    }
+
+    trim_end
 }

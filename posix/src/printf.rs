@@ -2241,4 +2241,333 @@ mod tests {
         let (s, _) = snprintf_str(b"%.0d\0", &[5], &[]);
         assert_eq!(s, "5");
     }
+
+    // -----------------------------------------------------------------------
+    // 21. %g general floating point
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_g_basic() {
+        // %g with default precision 6: 3.14 → "3.14" (trailing zeros removed)
+        let val = 3.14f64;
+        let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "3.14", "got: {s}");
+    }
+
+    #[test]
+    fn fmt_g_zero() {
+        let val = 0.0f64;
+        let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "0", "got: {s}");
+    }
+
+    #[test]
+    fn fmt_g_integer_value() {
+        // 100.0 → "100" (no fractional part needed)
+        let val = 100.0f64;
+        let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "100", "got: {s}");
+    }
+
+    #[test]
+    fn fmt_g_small_value_switches_to_sci() {
+        // exponent < -4 → uses scientific notation
+        let val = 0.000012345f64;
+        let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
+        assert!(s.contains('e'), "%g should use scientific for small values: {s}");
+    }
+
+    #[test]
+    fn fmt_g_large_value_switches_to_sci() {
+        // exponent >= precision → uses scientific notation
+        let val = 1234567.0f64;
+        let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
+        assert!(s.contains('e'), "%g should use scientific for large values: {s}");
+    }
+
+    #[test]
+    fn fmt_g_negative() {
+        let val = (-2.5f64);
+        let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "-2.5", "got: {s}");
+    }
+
+    #[test]
+    fn fmt_g_uppercase() {
+        // %G should use uppercase E in scientific notation
+        let val = 0.000012345f64;
+        let (s, _) = snprintf_str(b"%G\0", &[], &[val.to_bits()]);
+        assert!(s.contains('E'), "%G should use uppercase E: {s}");
+    }
+
+    #[test]
+    fn fmt_g_nan() {
+        let val = f64::NAN;
+        let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "nan");
+    }
+
+    #[test]
+    fn fmt_g_inf() {
+        let val = f64::INFINITY;
+        let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "inf");
+    }
+
+    #[test]
+    fn fmt_g_neg_inf() {
+        let val = f64::NEG_INFINITY;
+        let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "-inf");
+    }
+
+    #[test]
+    fn fmt_g_precision() {
+        // %.2g with 3.14159 → uses 2 significant digits
+        let val = 3.14159f64;
+        let (s, _) = snprintf_str(b"%.2g\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "3.1", "got: {s}");
+    }
+
+    #[test]
+    fn fmt_g_precision_zero() {
+        // C99: %g with precision 0 is treated as precision 1
+        let val = 3.14f64;
+        let (s, _) = snprintf_str(b"%.0g\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "3", "got: {s}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 22. %n format — write count of characters written so far
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_n_basic() {
+        let mut count: i32 = -1;
+        let count_ptr = &raw mut count as u64;
+        let (s, _) = snprintf_str(b"hello%n world\0", &[count_ptr], &[]);
+        assert_eq!(s, "hello world");
+        assert_eq!(count, 5, "%%n should record 5 chars written before it");
+    }
+
+    // -----------------------------------------------------------------------
+    // 23. Star width and precision
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_star_width() {
+        // %*d with width=8, value=42
+        let (s, _) = snprintf_str(b"%*d\0", &[8, 42], &[]);
+        assert_eq!(s, "      42");
+    }
+
+    #[test]
+    fn fmt_star_width_negative() {
+        // Negative star-width → left-align
+        let neg8 = (-8i64) as u64;
+        let (s, _) = snprintf_str(b"%*d\0", &[neg8, 42], &[]);
+        assert_eq!(s, "42      ");
+    }
+
+    #[test]
+    fn fmt_star_precision() {
+        // %.*d with precision=5, value=42
+        let (s, _) = snprintf_str(b"%.*d\0", &[5, 42], &[]);
+        assert_eq!(s, "00042");
+    }
+
+    #[test]
+    fn fmt_star_precision_negative() {
+        // Negative star-precision is ignored (treated as no precision)
+        let neg = (-1i64) as u64;
+        let (s, _) = snprintf_str(b"%.*d\0", &[neg, 42], &[]);
+        assert_eq!(s, "42");
+    }
+
+    // -----------------------------------------------------------------------
+    // 24. Unknown and edge-case specifiers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_unknown_specifier() {
+        // Unknown specifier should be emitted raw
+        let (s, _) = snprintf_str(b"%q\0", &[42], &[]);
+        // Should emit "%q" raw
+        assert!(s.contains("%q"), "unknown specifier should be emitted raw: {s}");
+    }
+
+    #[test]
+    fn fmt_trailing_percent() {
+        // "%" at end of string (premature end)
+        let (s, _) = snprintf_str(b"test%\0", &[], &[]);
+        assert_eq!(s, "test");
+    }
+
+    // -----------------------------------------------------------------------
+    // 25. %u edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_u_max() {
+        let val = u32::MAX as u64;
+        let (s, _) = snprintf_str(b"%u\0", &[val], &[]);
+        assert_eq!(s, "4294967295");
+    }
+
+    #[test]
+    fn fmt_u_zero() {
+        let (s, _) = snprintf_str(b"%u\0", &[0], &[]);
+        assert_eq!(s, "0");
+    }
+
+    // -----------------------------------------------------------------------
+    // 26. %i is alias for %d
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_i_basic() {
+        let val = (-42i64) as u64;
+        let (s, _) = snprintf_str(b"%i\0", &[val], &[]);
+        assert_eq!(s, "-42");
+    }
+
+    // -----------------------------------------------------------------------
+    // 27. %s precision truncation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_s_precision_truncation() {
+        let text = b"hello world\0";
+        let (s, _) = snprintf_str(b"%.5s\0", &[text.as_ptr() as u64], &[]);
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn fmt_s_precision_longer_than_string() {
+        let text = b"hi\0";
+        let (s, _) = snprintf_str(b"%.10s\0", &[text.as_ptr() as u64], &[]);
+        assert_eq!(s, "hi");
+    }
+
+    // -----------------------------------------------------------------------
+    // 28. %x/#o precision edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_x_precision_pads() {
+        let (s, _) = snprintf_str(b"%.8x\0", &[0xABCu64], &[]);
+        assert_eq!(s, "00000abc");
+    }
+
+    #[test]
+    fn fmt_o_precision_pads() {
+        let (s, _) = snprintf_str(b"%.6o\0", &[8u64], &[]);
+        assert_eq!(s, "000010");
+    }
+
+    // -----------------------------------------------------------------------
+    // 29. %d with space flag
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_space_flag_positive() {
+        let (s, _) = snprintf_str(b"% d\0", &[42], &[]);
+        assert_eq!(s, " 42");
+    }
+
+    #[test]
+    fn fmt_space_flag_negative() {
+        let val = (-42i64) as u64;
+        let (s, _) = snprintf_str(b"% d\0", &[val], &[]);
+        assert_eq!(s, "-42");
+    }
+
+    // -----------------------------------------------------------------------
+    // 30. Multiple format specs in one string
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_three_ints() {
+        let (s, _) = snprintf_str(b"%d %d %d\0", &[1, 2, 3], &[]);
+        assert_eq!(s, "1 2 3");
+    }
+
+    #[test]
+    fn fmt_int_and_hex() {
+        let (s, _) = snprintf_str(b"%d 0x%x\0", &[255, 255], &[]);
+        assert_eq!(s, "255 0xff");
+    }
+
+    // -----------------------------------------------------------------------
+    // 31. %f edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_f_large_integer() {
+        let val = 99999.0f64;
+        let (s, _) = snprintf_str(b"%.0f\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "99999");
+    }
+
+    #[test]
+    fn fmt_f_half_rounds() {
+        // %.0f with 3.7 should round to 4
+        let val = 3.7f64;
+        let (s, _) = snprintf_str(b"%.0f\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "4");
+    }
+
+    // -----------------------------------------------------------------------
+    // 32. %e edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_e_negative() {
+        let val = (-1.5f64);
+        let (s, _) = snprintf_str(b"%e\0", &[], &[val.to_bits()]);
+        assert!(s.starts_with("-1.5"), "got: {s}");
+    }
+
+    #[test]
+    fn fmt_e_uppercase() {
+        let val = 1.0f64;
+        let (s, _) = snprintf_str(b"%E\0", &[], &[val.to_bits()]);
+        assert!(s.contains('E'), "%E should use uppercase E: {s}");
+    }
+
+    #[test]
+    fn fmt_e_precision() {
+        let val = 3.14159f64;
+        let (s, _) = snprintf_str(b"%.2e\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "3.14e+00", "got: {s}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 33. %c edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_c_null_char() {
+        // %c with NUL byte — should write a NUL into the output
+        let (_, n) = snprintf_str(b"a%cb\0", &[0], &[]);
+        // Total length should be 3 (a + NUL + b)
+        assert_eq!(n, 3);
+    }
+
+    #[test]
+    fn fmt_c_left_aligned() {
+        let (s, _) = snprintf_str(b"%-5c\0", &[b'X' as u64], &[]);
+        assert_eq!(s, "X    ");
+    }
+
+    // -----------------------------------------------------------------------
+    // 34. %p edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_p_width() {
+        let (s, _) = snprintf_str(b"%20p\0", &[0xFF], &[]);
+        assert_eq!(s.len(), 20, "should be padded to width 20: '{s}'");
+        assert!(s.contains("0xff"), "should contain 0xff: '{s}'");
+    }
 }

@@ -130,11 +130,21 @@ pub unsafe extern "C" fn wcstoimax(
         if unsafe { *nptr.add(i) } == 0x30 { // '0'
             let next = unsafe { *nptr.add(i.wrapping_add(1)) };
             if next == 0x78 || next == 0x58 { // 'x' or 'X'
-                base = 16;
-                i = i.wrapping_add(2);
+                // Only commit to hex if a valid hex digit follows "0x".
+                let after_x = unsafe { *nptr.add(i.wrapping_add(2)) };
+                if wc_digit(after_x, 16) >= 0 {
+                    base = 16;
+                    i = i.wrapping_add(2);
+                } else {
+                    // "0x" with no hex digit: parse "0" as octal.
+                    base = 8;
+                    // Don't advance i — let the digit loop consume '0'.
+                }
             } else {
                 base = 8;
-                i = i.wrapping_add(1);
+                // Don't advance i — let the digit loop consume '0'
+                // so it counts as a parsed digit (strtol("09", &e, 0)
+                // should return 0 with e pointing to "9").
             }
         } else {
             base = 10;
@@ -142,7 +152,11 @@ pub unsafe extern "C" fn wcstoimax(
     } else if base == 16 && unsafe { *nptr.add(i) } == 0x30 {
         let next = unsafe { *nptr.add(i.wrapping_add(1)) };
         if next == 0x78 || next == 0x58 {
-            i = i.wrapping_add(2);
+            // Only skip "0x" if a hex digit follows (glibc compat).
+            let after_x = unsafe { *nptr.add(i.wrapping_add(2)) };
+            if wc_digit(after_x, 16) >= 0 {
+                i = i.wrapping_add(2);
+            }
         }
     }
 
@@ -214,11 +228,17 @@ pub unsafe extern "C" fn wcstoumax(
         if unsafe { *nptr.add(i) } == 0x30 {
             let next = unsafe { *nptr.add(i.wrapping_add(1)) };
             if next == 0x78 || next == 0x58 {
-                base = 16;
-                i = i.wrapping_add(2);
+                // Only commit to hex if a valid hex digit follows "0x".
+                let after_x = unsafe { *nptr.add(i.wrapping_add(2)) };
+                if wc_digit(after_x, 16) >= 0 {
+                    base = 16;
+                    i = i.wrapping_add(2);
+                } else {
+                    base = 8;
+                }
             } else {
                 base = 8;
-                i = i.wrapping_add(1);
+                // Don't advance i — let the digit loop consume '0'.
             }
         } else {
             base = 10;
@@ -226,7 +246,10 @@ pub unsafe extern "C" fn wcstoumax(
     } else if base == 16 && unsafe { *nptr.add(i) } == 0x30 {
         let next = unsafe { *nptr.add(i.wrapping_add(1)) };
         if next == 0x78 || next == 0x58 {
-            i = i.wrapping_add(2);
+            let after_x = unsafe { *nptr.add(i.wrapping_add(2)) };
+            if wc_digit(after_x, 16) >= 0 {
+                i = i.wrapping_add(2);
+            }
         }
     }
 

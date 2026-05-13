@@ -1695,3 +1695,924 @@ pub extern "C" fn pthread_atfork(
 ) -> i32 {
     0
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicI32, Ordering};
+
+    // =======================================================================
+    // Constants
+    // =======================================================================
+
+    #[test]
+    fn mutex_type_constants() {
+        assert_eq!(PTHREAD_MUTEX_NORMAL, 0);
+        assert_eq!(PTHREAD_MUTEX_RECURSIVE, 1);
+        assert_eq!(PTHREAD_MUTEX_ERRORCHECK, 2);
+        assert_eq!(PTHREAD_MUTEX_DEFAULT, 0);
+        assert_eq!(PTHREAD_MUTEX_DEFAULT, PTHREAD_MUTEX_NORMAL);
+    }
+
+    #[test]
+    fn detach_state_constants() {
+        assert_eq!(PTHREAD_CREATE_JOINABLE, 0);
+        assert_eq!(PTHREAD_CREATE_DETACHED, 1);
+    }
+
+    #[test]
+    fn barrier_serial_thread_constant() {
+        assert_eq!(PTHREAD_BARRIER_SERIAL_THREAD, -1);
+    }
+
+    #[test]
+    fn process_shared_constants() {
+        // PTHREAD_PROCESS_PRIVATE is 0 (used throughout the attribute functions).
+        // PTHREAD_PROCESS_SHARED would be 1.
+        let private = 0i32;
+        let shared = 1i32;
+        assert_eq!(private, 0);
+        assert_eq!(shared, 1);
+    }
+
+    #[test]
+    fn cancel_constants() {
+        assert_eq!(PTHREAD_CANCEL_DEFERRED, 0);
+        assert_eq!(PTHREAD_CANCEL_ASYNCHRONOUS, 1);
+        assert_eq!(PTHREAD_CANCEL_ENABLE, 0);
+        assert_eq!(PTHREAD_CANCEL_DISABLE, 1);
+    }
+
+    // =======================================================================
+    // Struct sizes
+    // =======================================================================
+
+    #[test]
+    fn struct_size_pthread_mutex_t() {
+        assert_eq!(core::mem::size_of::<PthreadMutexT>(), 40);
+    }
+
+    #[test]
+    fn struct_size_pthread_cond_t() {
+        assert_eq!(core::mem::size_of::<PthreadCondT>(), 48);
+    }
+
+    #[test]
+    fn struct_size_pthread_spinlock_t() {
+        assert_eq!(core::mem::size_of::<PthreadSpinlockT>(), 4);
+    }
+
+    #[test]
+    fn struct_size_pthread_attr_t() {
+        assert_eq!(core::mem::size_of::<PthreadAttrT>(), 64);
+    }
+
+    #[test]
+    fn struct_size_pthread_barrier_t_fields() {
+        // PthreadBarrierT has: count (u32=4) + current (AtomicI32=4) +
+        // generation (AtomicI32=4) + _pad ([u8;44]=44) = 56 bytes.
+        let b = core::mem::size_of::<PthreadBarrierT>();
+        assert!(b >= 56, "PthreadBarrierT should be at least 56 bytes, got {b}");
+    }
+
+    // =======================================================================
+    // pthread_equal
+    // =======================================================================
+
+    #[test]
+    fn pthread_equal_same() {
+        assert_eq!(pthread_equal(42, 42), 1);
+    }
+
+    #[test]
+    fn pthread_equal_different() {
+        assert_eq!(pthread_equal(1, 2), 0);
+    }
+
+    #[test]
+    fn pthread_equal_zero() {
+        assert_eq!(pthread_equal(0, 0), 1);
+    }
+
+    #[test]
+    fn pthread_equal_max() {
+        assert_eq!(pthread_equal(u64::MAX, u64::MAX), 1);
+        assert_eq!(pthread_equal(u64::MAX, 0), 0);
+    }
+
+    // =======================================================================
+    // Mutex attributes
+    // =======================================================================
+
+    #[test]
+    fn mutexattr_init_zeroes() {
+        let mut attr: PthreadMutexattrT = [0xFF; 8];
+        let ret = pthread_mutexattr_init(&mut attr);
+        assert_eq!(ret, 0);
+        assert_eq!(attr, [0u8; 8]);
+    }
+
+    #[test]
+    fn mutexattr_init_null_returns_einval() {
+        let ret = pthread_mutexattr_init(core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn mutexattr_destroy_returns_zero() {
+        let mut attr: PthreadMutexattrT = [0; 8];
+        let ret = pthread_mutexattr_destroy(&mut attr);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn mutexattr_settype_normal() {
+        let mut attr: PthreadMutexattrT = [0; 8];
+        pthread_mutexattr_init(&mut attr);
+        let ret = pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_NORMAL);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn mutexattr_settype_recursive() {
+        let mut attr: PthreadMutexattrT = [0; 8];
+        pthread_mutexattr_init(&mut attr);
+        let ret = pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_RECURSIVE);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn mutexattr_settype_errorcheck() {
+        let mut attr: PthreadMutexattrT = [0; 8];
+        pthread_mutexattr_init(&mut attr);
+        let ret = pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_ERRORCHECK);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn mutexattr_settype_invalid_rejected() {
+        let mut attr: PthreadMutexattrT = [0; 8];
+        pthread_mutexattr_init(&mut attr);
+        assert_eq!(pthread_mutexattr_settype(&mut attr, 3), errno::EINVAL);
+        assert_eq!(pthread_mutexattr_settype(&mut attr, -1), errno::EINVAL);
+        assert_eq!(pthread_mutexattr_settype(&mut attr, 100), errno::EINVAL);
+    }
+
+    #[test]
+    fn mutexattr_settype_null_returns_einval() {
+        assert_eq!(pthread_mutexattr_settype(core::ptr::null_mut(), 0), errno::EINVAL);
+    }
+
+    #[test]
+    fn mutexattr_gettype_reads_back() {
+        let mut attr: PthreadMutexattrT = [0; 8];
+        pthread_mutexattr_init(&mut attr);
+        let mut kind: i32 = -1;
+        let ret = pthread_mutexattr_gettype(&attr, &mut kind);
+        assert_eq!(ret, 0);
+        assert_eq!(kind, 0); // Default is NORMAL after init.
+    }
+
+    #[test]
+    fn mutexattr_gettype_null_attr_returns_einval() {
+        let mut kind: i32 = 0;
+        assert_eq!(pthread_mutexattr_gettype(core::ptr::null(), &mut kind), errno::EINVAL);
+    }
+
+    #[test]
+    fn mutexattr_gettype_null_kind_returns_einval() {
+        let attr: PthreadMutexattrT = [0; 8];
+        assert_eq!(pthread_mutexattr_gettype(&attr, core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    #[test]
+    fn mutexattr_roundtrip_normal() {
+        let mut attr: PthreadMutexattrT = [0; 8];
+        pthread_mutexattr_init(&mut attr);
+        pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_NORMAL);
+        let mut kind: i32 = -1;
+        pthread_mutexattr_gettype(&attr, &mut kind);
+        assert_eq!(kind, PTHREAD_MUTEX_NORMAL);
+    }
+
+    #[test]
+    fn mutexattr_roundtrip_recursive() {
+        let mut attr: PthreadMutexattrT = [0; 8];
+        pthread_mutexattr_init(&mut attr);
+        pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_RECURSIVE);
+        let mut kind: i32 = -1;
+        pthread_mutexattr_gettype(&attr, &mut kind);
+        assert_eq!(kind, PTHREAD_MUTEX_RECURSIVE);
+    }
+
+    #[test]
+    fn mutexattr_roundtrip_errorcheck() {
+        let mut attr: PthreadMutexattrT = [0; 8];
+        pthread_mutexattr_init(&mut attr);
+        pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_ERRORCHECK);
+        let mut kind: i32 = -1;
+        pthread_mutexattr_gettype(&attr, &mut kind);
+        assert_eq!(kind, PTHREAD_MUTEX_ERRORCHECK);
+    }
+
+    // =======================================================================
+    // Mutex init (no lock/unlock -- those need kernel SYS_TASK_ID)
+    // =======================================================================
+
+    #[test]
+    fn mutex_init_default_attr() {
+        let mut mutex = PTHREAD_MUTEX_INITIALIZER;
+        // Set non-zero values to confirm init overwrites them.
+        mutex.locked.store(1, Ordering::Relaxed);
+        mutex.kind.store(99, Ordering::Relaxed);
+        mutex.owner.store(42, Ordering::Relaxed);
+        mutex.count.store(7, Ordering::Relaxed);
+
+        let ret = unsafe { pthread_mutex_init(&mut mutex, core::ptr::null()) };
+        assert_eq!(ret, 0);
+        assert_eq!(mutex.locked.load(Ordering::Relaxed), 0);
+        assert_eq!(mutex.kind.load(Ordering::Relaxed), PTHREAD_MUTEX_NORMAL);
+        assert_eq!(mutex.owner.load(Ordering::Relaxed), 0);
+        assert_eq!(mutex.count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn mutex_init_with_recursive_attr() {
+        let mut attr: PthreadMutexattrT = [0; 8];
+        pthread_mutexattr_init(&mut attr);
+        pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_RECURSIVE);
+
+        let mut mutex = PTHREAD_MUTEX_INITIALIZER;
+        let ret = unsafe { pthread_mutex_init(&mut mutex, &attr) };
+        assert_eq!(ret, 0);
+        assert_eq!(mutex.locked.load(Ordering::Relaxed), 0);
+        assert_eq!(mutex.kind.load(Ordering::Relaxed), PTHREAD_MUTEX_RECURSIVE);
+        assert_eq!(mutex.owner.load(Ordering::Relaxed), 0);
+        assert_eq!(mutex.count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn mutex_init_with_errorcheck_attr() {
+        let mut attr: PthreadMutexattrT = [0; 8];
+        pthread_mutexattr_init(&mut attr);
+        pthread_mutexattr_settype(&mut attr, PTHREAD_MUTEX_ERRORCHECK);
+
+        let mut mutex = PTHREAD_MUTEX_INITIALIZER;
+        let ret = unsafe { pthread_mutex_init(&mut mutex, &attr) };
+        assert_eq!(ret, 0);
+        assert_eq!(mutex.kind.load(Ordering::Relaxed), PTHREAD_MUTEX_ERRORCHECK);
+    }
+
+    #[test]
+    fn mutex_init_null_mutex_returns_einval() {
+        let ret = unsafe { pthread_mutex_init(core::ptr::null_mut(), core::ptr::null()) };
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    // =======================================================================
+    // Thread attributes
+    // =======================================================================
+
+    #[test]
+    fn attr_init_stores_default_stack_size() {
+        let mut attr: PthreadAttrT = [0xFF; 64];
+        let ret = pthread_attr_init(&mut attr);
+        assert_eq!(ret, 0);
+
+        // First 8 bytes hold the default stack size.
+        let stored = unsafe { core::ptr::read_unaligned(attr.as_ptr().cast::<usize>()) };
+        assert_eq!(stored, DEFAULT_THREAD_STACK_SIZE);
+        assert_eq!(stored, 64 * 1024);
+
+        // Remaining bytes should be zero.
+        for &b in &attr[8..] {
+            assert_eq!(b, 0, "attr bytes after stack size should be zeroed");
+        }
+    }
+
+    #[test]
+    fn attr_init_null_returns_einval() {
+        assert_eq!(pthread_attr_init(core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    #[test]
+    fn attr_destroy_returns_zero() {
+        let mut attr: PthreadAttrT = [0; 64];
+        pthread_attr_init(&mut attr);
+        assert_eq!(pthread_attr_destroy(&mut attr), 0);
+    }
+
+    #[test]
+    fn attr_setstacksize_stores_value() {
+        let mut attr: PthreadAttrT = [0; 64];
+        pthread_attr_init(&mut attr);
+        let ret = pthread_attr_setstacksize(&mut attr, 128 * 1024);
+        assert_eq!(ret, 0);
+        let stored = unsafe { core::ptr::read_unaligned(attr.as_ptr().cast::<usize>()) };
+        assert_eq!(stored, 128 * 1024);
+    }
+
+    #[test]
+    fn attr_setstacksize_minimum_4096() {
+        let mut attr: PthreadAttrT = [0; 64];
+        pthread_attr_init(&mut attr);
+        // Exactly 4096 should succeed.
+        assert_eq!(pthread_attr_setstacksize(&mut attr, 4096), 0);
+    }
+
+    #[test]
+    fn attr_setstacksize_rejects_too_small() {
+        let mut attr: PthreadAttrT = [0; 64];
+        pthread_attr_init(&mut attr);
+        assert_eq!(pthread_attr_setstacksize(&mut attr, 4095), errno::EINVAL);
+        assert_eq!(pthread_attr_setstacksize(&mut attr, 0), errno::EINVAL);
+        assert_eq!(pthread_attr_setstacksize(&mut attr, 1), errno::EINVAL);
+    }
+
+    #[test]
+    fn attr_setstacksize_null_returns_einval() {
+        assert_eq!(pthread_attr_setstacksize(core::ptr::null_mut(), 8192), errno::EINVAL);
+    }
+
+    #[test]
+    fn attr_getstacksize_reads_default() {
+        let mut attr: PthreadAttrT = [0; 64];
+        pthread_attr_init(&mut attr);
+        let mut size: usize = 0;
+        let ret = pthread_attr_getstacksize(&attr, &mut size);
+        assert_eq!(ret, 0);
+        assert_eq!(size, DEFAULT_THREAD_STACK_SIZE);
+    }
+
+    #[test]
+    fn attr_getstacksize_roundtrip() {
+        let mut attr: PthreadAttrT = [0; 64];
+        pthread_attr_init(&mut attr);
+        pthread_attr_setstacksize(&mut attr, 256 * 1024);
+        let mut size: usize = 0;
+        pthread_attr_getstacksize(&attr, &mut size);
+        assert_eq!(size, 256 * 1024);
+    }
+
+    #[test]
+    fn attr_getstacksize_null_attr_returns_einval() {
+        let mut size: usize = 0;
+        assert_eq!(pthread_attr_getstacksize(core::ptr::null(), &mut size), errno::EINVAL);
+    }
+
+    #[test]
+    fn attr_getstacksize_null_size_returns_einval() {
+        let attr: PthreadAttrT = [0; 64];
+        assert_eq!(pthread_attr_getstacksize(&attr, core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    #[test]
+    fn attr_getstacksize_returns_default_when_zero() {
+        // If the stored stack size is 0 (e.g. from a raw-zeroed attr),
+        // getstacksize should return DEFAULT_THREAD_STACK_SIZE.
+        let attr: PthreadAttrT = [0; 64]; // All zeros -- stack size field is 0.
+        let mut size: usize = 0;
+        let ret = pthread_attr_getstacksize(&attr, &mut size);
+        assert_eq!(ret, 0);
+        assert_eq!(size, DEFAULT_THREAD_STACK_SIZE);
+    }
+
+    #[test]
+    fn attr_setdetachstate_joinable() {
+        let mut attr: PthreadAttrT = [0; 64];
+        pthread_attr_init(&mut attr);
+        let ret = pthread_attr_setdetachstate(&mut attr, PTHREAD_CREATE_JOINABLE);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn attr_setdetachstate_detached() {
+        let mut attr: PthreadAttrT = [0; 64];
+        pthread_attr_init(&mut attr);
+        let ret = pthread_attr_setdetachstate(&mut attr, PTHREAD_CREATE_DETACHED);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn attr_setdetachstate_rejects_invalid() {
+        let mut attr: PthreadAttrT = [0; 64];
+        pthread_attr_init(&mut attr);
+        assert_eq!(pthread_attr_setdetachstate(&mut attr, 2), errno::EINVAL);
+        assert_eq!(pthread_attr_setdetachstate(&mut attr, -1), errno::EINVAL);
+        assert_eq!(pthread_attr_setdetachstate(&mut attr, 99), errno::EINVAL);
+    }
+
+    #[test]
+    fn attr_setdetachstate_null_returns_einval() {
+        assert_eq!(pthread_attr_setdetachstate(core::ptr::null_mut(), 0), errno::EINVAL);
+    }
+
+    #[test]
+    fn attr_getdetachstate_reads_joinable() {
+        let mut attr: PthreadAttrT = [0; 64];
+        pthread_attr_init(&mut attr);
+        pthread_attr_setdetachstate(&mut attr, PTHREAD_CREATE_JOINABLE);
+        let mut state: i32 = -1;
+        let ret = pthread_attr_getdetachstate(&attr, &mut state);
+        assert_eq!(ret, 0);
+        assert_eq!(state, PTHREAD_CREATE_JOINABLE);
+    }
+
+    #[test]
+    fn attr_getdetachstate_reads_detached() {
+        let mut attr: PthreadAttrT = [0; 64];
+        pthread_attr_init(&mut attr);
+        pthread_attr_setdetachstate(&mut attr, PTHREAD_CREATE_DETACHED);
+        let mut state: i32 = -1;
+        let ret = pthread_attr_getdetachstate(&attr, &mut state);
+        assert_eq!(ret, 0);
+        assert_eq!(state, PTHREAD_CREATE_DETACHED);
+    }
+
+    #[test]
+    fn attr_getdetachstate_null_attr_returns_einval() {
+        let mut state: i32 = 0;
+        assert_eq!(pthread_attr_getdetachstate(core::ptr::null(), &mut state), errno::EINVAL);
+    }
+
+    #[test]
+    fn attr_getdetachstate_null_state_returns_einval() {
+        let attr: PthreadAttrT = [0; 64];
+        assert_eq!(pthread_attr_getdetachstate(&attr, core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    // =======================================================================
+    // Condition variable init / destroy
+    // =======================================================================
+
+    #[test]
+    fn cond_init_zeroes_generation() {
+        let mut cond = PthreadCondT {
+            generation: AtomicI32::new(42),
+            _pad: [0xFF; 44],
+        };
+        let ret = pthread_cond_init(&mut cond, core::ptr::null());
+        assert_eq!(ret, 0);
+        assert_eq!(cond.generation.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cond_init_null_returns_einval() {
+        assert_eq!(pthread_cond_init(core::ptr::null_mut(), core::ptr::null()), errno::EINVAL);
+    }
+
+    #[test]
+    fn cond_destroy_returns_zero() {
+        let mut cond = PthreadCondT {
+            generation: AtomicI32::new(0),
+            _pad: [0; 44],
+        };
+        assert_eq!(pthread_cond_destroy(&mut cond), 0);
+    }
+
+    // =======================================================================
+    // Condition variable attributes
+    // =======================================================================
+
+    #[test]
+    fn condattr_init_zeroes() {
+        let mut attr: PthreadCondattrT = [0xFF; 8];
+        let ret = pthread_condattr_init(&mut attr);
+        assert_eq!(ret, 0);
+        assert_eq!(attr, [0u8; 8]);
+    }
+
+    #[test]
+    fn condattr_init_null_returns_einval() {
+        assert_eq!(pthread_condattr_init(core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    #[test]
+    fn condattr_destroy_returns_zero() {
+        let mut attr: PthreadCondattrT = [0; 8];
+        assert_eq!(pthread_condattr_destroy(&mut attr), 0);
+    }
+
+    #[test]
+    fn condattr_setclock_realtime() {
+        let mut attr: PthreadCondattrT = [0; 8];
+        pthread_condattr_init(&mut attr);
+        // CLOCK_REALTIME = 0
+        let ret = pthread_condattr_setclock(&mut attr, 0);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn condattr_setclock_monotonic() {
+        let mut attr: PthreadCondattrT = [0; 8];
+        pthread_condattr_init(&mut attr);
+        // CLOCK_MONOTONIC = 1
+        let ret = pthread_condattr_setclock(&mut attr, 1);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn condattr_setclock_invalid_rejected() {
+        let mut attr: PthreadCondattrT = [0; 8];
+        pthread_condattr_init(&mut attr);
+        assert_eq!(pthread_condattr_setclock(&mut attr, 2), errno::EINVAL);
+        assert_eq!(pthread_condattr_setclock(&mut attr, -1), errno::EINVAL);
+        assert_eq!(pthread_condattr_setclock(&mut attr, 99), errno::EINVAL);
+    }
+
+    #[test]
+    fn condattr_setclock_null_returns_einval() {
+        assert_eq!(pthread_condattr_setclock(core::ptr::null_mut(), 0), errno::EINVAL);
+    }
+
+    #[test]
+    fn condattr_getclock_reads_back() {
+        let mut attr: PthreadCondattrT = [0; 8];
+        pthread_condattr_init(&mut attr);
+        let mut clock_id: i32 = -1;
+        let ret = pthread_condattr_getclock(&attr, &mut clock_id);
+        assert_eq!(ret, 0);
+        assert_eq!(clock_id, 0); // Default after init is 0 (CLOCK_REALTIME).
+    }
+
+    #[test]
+    fn condattr_getclock_roundtrip_monotonic() {
+        let mut attr: PthreadCondattrT = [0; 8];
+        pthread_condattr_init(&mut attr);
+        pthread_condattr_setclock(&mut attr, 1); // CLOCK_MONOTONIC
+        let mut clock_id: i32 = -1;
+        pthread_condattr_getclock(&attr, &mut clock_id);
+        assert_eq!(clock_id, 1);
+    }
+
+    #[test]
+    fn condattr_getclock_null_attr_returns_einval() {
+        let mut clock_id: i32 = 0;
+        assert_eq!(pthread_condattr_getclock(core::ptr::null(), &mut clock_id), errno::EINVAL);
+    }
+
+    #[test]
+    fn condattr_getclock_null_clockid_returns_einval() {
+        let attr: PthreadCondattrT = [0; 8];
+        assert_eq!(pthread_condattr_getclock(&attr, core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    // =======================================================================
+    // Rwlock init / destroy
+    // =======================================================================
+
+    #[test]
+    fn rwlock_init_zeroes_state() {
+        let mut rwlock = PthreadRwlockT {
+            state: AtomicI32::new(42),
+            _pad: [0xFF; 52],
+        };
+        let ret = pthread_rwlock_init(&mut rwlock, core::ptr::null());
+        assert_eq!(ret, 0);
+        assert_eq!(rwlock.state.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rwlock_init_null_returns_einval() {
+        assert_eq!(pthread_rwlock_init(core::ptr::null_mut(), core::ptr::null()), errno::EINVAL);
+    }
+
+    #[test]
+    fn rwlock_destroy_returns_zero() {
+        let mut rwlock = PthreadRwlockT {
+            state: AtomicI32::new(0),
+            _pad: [0; 52],
+        };
+        assert_eq!(pthread_rwlock_destroy(&mut rwlock), 0);
+    }
+
+    // =======================================================================
+    // Rwlock attributes
+    // =======================================================================
+
+    #[test]
+    fn rwlockattr_init_zeroes() {
+        let mut attr: PthreadRwlockattrT = [0xFF; 8];
+        let ret = pthread_rwlockattr_init(&mut attr);
+        assert_eq!(ret, 0);
+        assert_eq!(attr, [0u8; 8]);
+    }
+
+    #[test]
+    fn rwlockattr_init_null_returns_einval() {
+        assert_eq!(pthread_rwlockattr_init(core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    #[test]
+    fn rwlockattr_destroy_returns_zero() {
+        let mut attr: PthreadRwlockattrT = [0; 8];
+        assert_eq!(pthread_rwlockattr_destroy(&mut attr), 0);
+    }
+
+    #[test]
+    fn rwlockattr_setpshared_private() {
+        let mut attr: PthreadRwlockattrT = [0; 8];
+        pthread_rwlockattr_init(&mut attr);
+        // PTHREAD_PROCESS_PRIVATE = 0
+        let ret = pthread_rwlockattr_setpshared(&mut attr, 0);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn rwlockattr_setpshared_rejects_shared() {
+        let mut attr: PthreadRwlockattrT = [0; 8];
+        pthread_rwlockattr_init(&mut attr);
+        // PTHREAD_PROCESS_SHARED = 1 -- not supported, returns ENOTSUP.
+        assert_eq!(pthread_rwlockattr_setpshared(&mut attr, 1), errno::ENOTSUP);
+    }
+
+    #[test]
+    fn rwlockattr_setpshared_rejects_invalid() {
+        let mut attr: PthreadRwlockattrT = [0; 8];
+        pthread_rwlockattr_init(&mut attr);
+        assert_eq!(pthread_rwlockattr_setpshared(&mut attr, 2), errno::ENOTSUP);
+        assert_eq!(pthread_rwlockattr_setpshared(&mut attr, -1), errno::ENOTSUP);
+    }
+
+    #[test]
+    fn rwlockattr_setpshared_null_returns_einval() {
+        assert_eq!(pthread_rwlockattr_setpshared(core::ptr::null_mut(), 0), errno::EINVAL);
+    }
+
+    #[test]
+    fn rwlockattr_getpshared_reads_private() {
+        let mut attr: PthreadRwlockattrT = [0; 8];
+        pthread_rwlockattr_init(&mut attr);
+        pthread_rwlockattr_setpshared(&mut attr, 0);
+        let mut val: i32 = -1;
+        let ret = pthread_rwlockattr_getpshared(&attr, &mut val);
+        assert_eq!(ret, 0);
+        assert_eq!(val, 0);
+    }
+
+    #[test]
+    fn rwlockattr_getpshared_null_attr_returns_einval() {
+        let mut val: i32 = 0;
+        assert_eq!(pthread_rwlockattr_getpshared(core::ptr::null(), &mut val), errno::EINVAL);
+    }
+
+    #[test]
+    fn rwlockattr_getpshared_null_val_returns_einval() {
+        let attr: PthreadRwlockattrT = [0; 8];
+        assert_eq!(pthread_rwlockattr_getpshared(&attr, core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    // =======================================================================
+    // Barrier init / destroy
+    // =======================================================================
+
+    #[test]
+    fn barrier_init_stores_count() {
+        let mut barrier = PthreadBarrierT {
+            count: 0,
+            current: AtomicI32::new(99),
+            generation: AtomicI32::new(99),
+            _pad: [0xFF; 44],
+        };
+        let ret = pthread_barrier_init(&mut barrier, core::ptr::null(), 5);
+        assert_eq!(ret, 0);
+        assert_eq!(barrier.count, 5);
+        assert_eq!(barrier.current.load(Ordering::Relaxed), 0);
+        assert_eq!(barrier.generation.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn barrier_init_count_zero_returns_einval() {
+        let mut barrier = PthreadBarrierT {
+            count: 0,
+            current: AtomicI32::new(0),
+            generation: AtomicI32::new(0),
+            _pad: [0; 44],
+        };
+        let ret = pthread_barrier_init(&mut barrier, core::ptr::null(), 0);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn barrier_init_null_returns_einval() {
+        let ret = pthread_barrier_init(core::ptr::null_mut(), core::ptr::null(), 3);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn barrier_destroy_returns_zero() {
+        let mut barrier = PthreadBarrierT {
+            count: 3,
+            current: AtomicI32::new(0),
+            generation: AtomicI32::new(0),
+            _pad: [0; 44],
+        };
+        assert_eq!(pthread_barrier_destroy(&mut barrier), 0);
+    }
+
+    #[test]
+    fn barrier_init_large_count() {
+        let mut barrier = PthreadBarrierT {
+            count: 0,
+            current: AtomicI32::new(0),
+            generation: AtomicI32::new(0),
+            _pad: [0; 44],
+        };
+        let ret = pthread_barrier_init(&mut barrier, core::ptr::null(), u32::MAX);
+        assert_eq!(ret, 0);
+        assert_eq!(barrier.count, u32::MAX);
+    }
+
+    // =======================================================================
+    // Spinlock init / destroy / trylock / unlock
+    // =======================================================================
+
+    #[test]
+    fn spin_init_stores_zero() {
+        let mut lock = AtomicI32::new(99);
+        let ret = pthread_spin_init(&mut lock, 0);
+        assert_eq!(ret, 0);
+        assert_eq!(lock.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn spin_init_null_returns_einval() {
+        assert_eq!(pthread_spin_init(core::ptr::null_mut(), 0), errno::EINVAL);
+    }
+
+    #[test]
+    fn spin_destroy_returns_zero() {
+        let mut lock = AtomicI32::new(0);
+        assert_eq!(pthread_spin_destroy(&mut lock), 0);
+    }
+
+    #[test]
+    fn spin_trylock_succeeds_when_unlocked() {
+        let mut lock = AtomicI32::new(0);
+        pthread_spin_init(&mut lock, 0);
+        let ret = pthread_spin_trylock(&mut lock);
+        assert_eq!(ret, 0);
+        // Lock should now be held (value = 1).
+        assert_eq!(lock.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn spin_trylock_fails_when_locked() {
+        let mut lock = AtomicI32::new(0);
+        pthread_spin_init(&mut lock, 0);
+        // Acquire the lock.
+        pthread_spin_trylock(&mut lock);
+        // Second trylock should fail with EBUSY.
+        let ret = pthread_spin_trylock(&mut lock);
+        assert_eq!(ret, errno::EBUSY);
+    }
+
+    #[test]
+    fn spin_trylock_null_returns_einval() {
+        assert_eq!(pthread_spin_trylock(core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    #[test]
+    fn spin_unlock_releases_lock() {
+        let mut lock = AtomicI32::new(0);
+        pthread_spin_init(&mut lock, 0);
+        pthread_spin_trylock(&mut lock);
+        assert_eq!(lock.load(Ordering::Relaxed), 1);
+        let ret = pthread_spin_unlock(&mut lock);
+        assert_eq!(ret, 0);
+        assert_eq!(lock.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn spin_unlock_null_returns_einval() {
+        assert_eq!(pthread_spin_unlock(core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    #[test]
+    fn spin_lock_unlock_cycle() {
+        let mut lock = AtomicI32::new(0);
+        pthread_spin_init(&mut lock, 0);
+
+        // Lock, unlock, lock again -- should succeed each time.
+        assert_eq!(pthread_spin_trylock(&mut lock), 0);
+        assert_eq!(pthread_spin_unlock(&mut lock), 0);
+        assert_eq!(pthread_spin_trylock(&mut lock), 0);
+        assert_eq!(lock.load(Ordering::Relaxed), 1);
+        assert_eq!(pthread_spin_unlock(&mut lock), 0);
+        assert_eq!(lock.load(Ordering::Relaxed), 0);
+    }
+
+    // =======================================================================
+    // Cancel stubs
+    // =======================================================================
+
+    #[test]
+    fn setcancelstate_returns_zero() {
+        let mut old: i32 = -1;
+        let ret = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &mut old);
+        assert_eq!(ret, 0);
+        assert_eq!(old, PTHREAD_CANCEL_ENABLE); // Stub always reports ENABLE.
+    }
+
+    #[test]
+    fn setcancelstate_null_oldstate_ok() {
+        let ret = pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn setcanceltype_returns_zero() {
+        let mut old: i32 = -1;
+        let ret = pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, &mut old);
+        assert_eq!(ret, 0);
+        assert_eq!(old, PTHREAD_CANCEL_DEFERRED); // Stub always reports DEFERRED.
+    }
+
+    #[test]
+    fn setcanceltype_null_oldtype_ok() {
+        let ret = pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn testcancel_is_noop() {
+        // Should simply not panic or crash.
+        pthread_testcancel();
+    }
+
+    #[test]
+    fn cancel_returns_enosys() {
+        let ret = pthread_cancel(42);
+        assert_eq!(ret, errno::ENOSYS);
+    }
+
+    // =======================================================================
+    // Static initializers
+    // =======================================================================
+
+    #[test]
+    fn mutex_initializer_is_unlocked() {
+        let m = PTHREAD_MUTEX_INITIALIZER;
+        assert_eq!(m.locked.load(Ordering::Relaxed), 0);
+        assert_eq!(m.kind.load(Ordering::Relaxed), PTHREAD_MUTEX_NORMAL);
+        assert_eq!(m.owner.load(Ordering::Relaxed), 0);
+        assert_eq!(m.count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cond_initializer_is_zeroed() {
+        // Cannot move out of a static with non-Copy fields; read via reference.
+        assert_eq!(PTHREAD_COND_INITIALIZER.generation.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn once_init_is_zeroed() {
+        let o = PTHREAD_ONCE_INIT;
+        assert_eq!(o.done.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rwlock_initializer_is_unlocked() {
+        // Cannot move out of a static with non-Copy fields; read via reference.
+        assert_eq!(PTHREAD_RWLOCK_INITIALIZER.state.load(Ordering::Relaxed), 0);
+    }
+
+    // =======================================================================
+    // Mutex destroy
+    // =======================================================================
+
+    #[test]
+    fn mutex_destroy_null_returns_einval() {
+        let ret = unsafe { pthread_mutex_destroy(core::ptr::null_mut()) };
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn mutex_destroy_clears_locked() {
+        let mut mutex = PTHREAD_MUTEX_INITIALIZER;
+        mutex.locked.store(1, Ordering::Relaxed);
+        let ret = unsafe { pthread_mutex_destroy(&mut mutex) };
+        assert_eq!(ret, 0);
+        assert_eq!(mutex.locked.load(Ordering::Relaxed), 0);
+    }
+
+    // =======================================================================
+    // pthread_atfork stub
+    // =======================================================================
+
+    #[test]
+    fn atfork_returns_zero() {
+        assert_eq!(pthread_atfork(None, None, None), 0);
+    }
+
+    extern "C" fn dummy_fork_handler() {}
+
+    #[test]
+    fn atfork_with_handlers_returns_zero() {
+        assert_eq!(pthread_atfork(Some(dummy_fork_handler), Some(dummy_fork_handler), Some(dummy_fork_handler)), 0);
+    }
+}

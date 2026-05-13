@@ -26,6 +26,7 @@ pub mod icmp;
 pub mod mdns;
 pub mod ntp;
 pub mod telnet;
+pub mod tftp;
 pub mod interface;
 pub mod ipv4;
 pub mod tcp;
@@ -89,6 +90,7 @@ pub fn poll() {
         ntp::tick();
         mdns::tick();
         telnet::tick();
+        tftp::tick();
     }
 }
 

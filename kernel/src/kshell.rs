@@ -3538,6 +3538,7 @@ const COMMANDS: &[&str] = &[
     "ntp", "ntpdate",
     "mdns", "dnssd",
     "telnetd", "telnet",
+    "tftp", "tftpd",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4730,6 +4731,7 @@ fn dispatch(line: &str) {
         "ntp" | "ntpdate" => cmd_ntp(args),
         "mdns" | "dnssd" => cmd_mdns(args),
         "telnetd" | "telnet" => cmd_telnetd(args),
+        "tftp" | "tftpd" => cmd_tftp(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -34858,6 +34860,119 @@ fn cmd_telnetd(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'telnetd help'.", sub);
+        }
+    }
+}
+
+/// `tftp` / `tftpd` — TFTP client and server.
+fn cmd_tftp(args: &str) {
+    use crate::net::tftp;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", tftp::procfs_content());
+        }
+        "status" | "stats" => {
+            let s = tftp::stats();
+            shell_println!("TFTP Client/Server");
+            shell_println!("  Client: {} gets, {} puts, {} errors, {} timeouts",
+                s.client_gets, s.client_puts, s.client_errors, s.client_timeouts);
+            shell_println!("  Server: {}",
+                if s.server_enabled { "running" } else { "stopped" });
+            if s.server_enabled {
+                shell_println!("  Root:   {}", s.server_root);
+                shell_println!("  Active: {}/4 transfers", s.active_transfers);
+            }
+            shell_println!("  Requests: {}, completed: {}, errors: {}",
+                s.server_requests, s.server_completed, s.server_errors);
+        }
+        "get" => {
+            // tftp get <ip> <filename>
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            let filename = parts.get(2).copied().unwrap_or("");
+            if ip_str.is_empty() || filename.is_empty() {
+                shell_println!("Usage: tftp get <server-ip> <filename>");
+                return;
+            }
+            let ip = match parse_ipv4(ip_str) {
+                Some(ip) => ip,
+                None => {
+                    shell_println!("Invalid IP: {}", ip_str);
+                    return;
+                }
+            };
+            shell_println!("Downloading {} from {} ...", filename, ip);
+            match tftp::get(ip, filename) {
+                Ok(data) => {
+                    shell_println!("Received {} bytes", data.len());
+                    // Save to local filesystem.
+                    let local_path = alloc::format!("/{}", filename);
+                    match crate::fs::vfs::Vfs::write_file(&local_path, &data) {
+                        Ok(()) => shell_println!("Saved to {}", local_path),
+                        Err(e) => shell_println!("Save failed: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Download failed: {:?}", e),
+            }
+        }
+        "put" => {
+            // tftp put <ip> <filename>
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            let filename = parts.get(2).copied().unwrap_or("");
+            if ip_str.is_empty() || filename.is_empty() {
+                shell_println!("Usage: tftp put <server-ip> <filename>");
+                return;
+            }
+            let ip = match parse_ipv4(ip_str) {
+                Some(ip) => ip,
+                None => {
+                    shell_println!("Invalid IP: {}", ip_str);
+                    return;
+                }
+            };
+            // Read local file.
+            let path = resolve_path(filename);
+            match crate::fs::vfs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    shell_println!("Uploading {} ({} bytes) to {} ...", filename, data.len(), ip);
+                    match tftp::put(ip, filename, &data) {
+                        Ok(()) => shell_println!("Upload complete"),
+                        Err(e) => shell_println!("Upload failed: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Cannot read {}: {:?}", filename, e),
+            }
+        }
+        "serve" | "start" => {
+            let root = parts.get(1).copied().unwrap_or("/");
+            match tftp::start_server(root) {
+                Ok(()) => shell_println!("TFTP server started (root={})", root),
+                Err(e) => shell_println!("Failed to start: {:?}", e),
+            }
+        }
+        "stop" => {
+            tftp::stop_server();
+            shell_println!("TFTP server stopped");
+        }
+        "test" => {
+            match tftp::self_test() {
+                Ok(()) => shell_println!("TFTP self-test: PASSED"),
+                Err(e) => shell_println!("TFTP self-test FAILED: {:?}", e),
+            }
+        }
+        "help" => {
+            shell_println!("tftp — Trivial File Transfer Protocol");
+            shell_println!("  show                Full status overview");
+            shell_println!("  status              Summary statistics");
+            shell_println!("  get <ip> <file>     Download file from server");
+            shell_println!("  put <ip> <file>     Upload file to server");
+            shell_println!("  serve [root]        Start TFTP server (default root: /)");
+            shell_println!("  stop                Stop TFTP server");
+            shell_println!("  test                Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'tftp help'.", sub);
         }
     }
 }
@@ -65316,7 +65431,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

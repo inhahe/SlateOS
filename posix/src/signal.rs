@@ -37,6 +37,30 @@ pub const SIGCHLD: i32 = 17;
 pub const SIGCONT: i32 = 18;
 pub const SIGSTOP: i32 = 19;
 pub const SIGTSTP: i32 = 20;
+/// Terminal input for background process.
+pub const SIGTTIN: i32 = 21;
+/// Terminal output for background process.
+pub const SIGTTOU: i32 = 22;
+/// Urgent condition on socket.
+pub const SIGURG: i32 = 23;
+/// CPU time limit exceeded.
+pub const SIGXCPU: i32 = 24;
+/// File size limit exceeded.
+pub const SIGXFSZ: i32 = 25;
+/// Virtual timer expired.
+pub const SIGVTALRM: i32 = 26;
+/// Profiling timer expired.
+pub const SIGPROF: i32 = 27;
+/// Window size change.
+pub const SIGWINCH: i32 = 28;
+/// I/O possible (same as SIGPOLL on Linux).
+pub const SIGIO: i32 = 29;
+/// Synonymous with SIGIO.
+pub const SIGPOLL: i32 = 29;
+/// Power failure.
+pub const SIGPWR: i32 = 30;
+/// Bad system call.
+pub const SIGSYS: i32 = 31;
 
 /// Number of signals (for sigset_t sizing).
 pub const NSIG: i32 = 65;
@@ -62,9 +86,9 @@ pub const SIG_ERR: SighandlerT = usize::MAX;
 /// Default sigaction (SIG_DFL, no flags, empty mask).
 const DEFAULT_SIGACTION: Sigaction = Sigaction {
     sa_handler: SIG_DFL,
-    sa_mask: 0,
     sa_flags: 0,
     sa_restorer: 0,
+    sa_mask: SigsetT::EMPTY,
 };
 
 /// Registered signal actions.
@@ -102,32 +126,63 @@ pub extern "C" fn signal(signum: i32, handler: SighandlerT) -> SighandlerT {
     };
     let old = slot.sa_handler;
     slot.sa_handler = handler;
-    slot.sa_mask = 0;
     slot.sa_flags = 0;
     slot.sa_restorer = 0;
+    slot.sa_mask = SigsetT::EMPTY;
     old
 }
 
+// ---------------------------------------------------------------------------
+// sigset_t — signal set (128 bytes to match glibc x86_64)
+// ---------------------------------------------------------------------------
+
+/// Signal set type (matches glibc `sigset_t` = 128 bytes = 1024 bits).
+///
+/// Each bit represents one signal: signal N is at
+/// `bits[(N-1)/64]`, bit `(N-1) % 64`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SigsetT {
+    /// Bitmask storage.
+    pub bits: [u64; 16],
+}
+
+impl SigsetT {
+    /// Empty signal set.
+    pub const EMPTY: Self = Self { bits: [0; 16] };
+}
+
+// ---------------------------------------------------------------------------
+// sigaction structure (must match glibc x86_64 layout: 152 bytes)
+// ---------------------------------------------------------------------------
+
 /// `sigaction` structure for `sigaction()`.
+///
+/// Field order matches glibc x86_64 (`struct sigaction`):
+///   sa_handler (8) + sa_flags (8) + sa_restorer (8) + sa_mask (128) = 152 bytes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Sigaction {
     /// Signal handler (sa_handler or sa_sigaction).
     pub sa_handler: SighandlerT,
-    /// Additional signals to block during handler.
-    pub sa_mask: u64,
     /// Flags (SA_RESTART, SA_NOCLDSTOP, etc.).
-    pub sa_flags: i32,
-    /// Restore handler (unused).
+    ///
+    /// glibc uses `unsigned long` (u64 on x86_64).
+    pub sa_flags: u64,
+    /// Restore handler (used by the kernel's signal trampoline).
     pub sa_restorer: usize,
+    /// Additional signals to block during handler execution.
+    pub sa_mask: SigsetT,
 }
 
-/// Flags for sigaction.
-pub const SA_NOCLDSTOP: i32 = 1;
-pub const SA_NOCLDWAIT: i32 = 2;
-pub const SA_SIGINFO: i32 = 4;
-pub const SA_RESTART: i32 = 0x1000_0000;
-pub const SA_NODEFER: i32 = 0x4000_0000;
+/// Flags for sigaction (type u64 to match `unsigned long` sa_flags).
+pub const SA_NOCLDSTOP: u64 = 1;
+pub const SA_NOCLDWAIT: u64 = 2;
+pub const SA_SIGINFO: u64 = 4;
+pub const SA_ONSTACK: u64 = 0x0800_0000;
+pub const SA_RESTART: u64 = 0x1000_0000;
+pub const SA_NODEFER: u64 = 0x4000_0000;
+pub const SA_RESETHAND: u64 = 0x8000_0000;
 
 /// Examine and change a signal action.
 ///
@@ -208,12 +263,12 @@ pub extern "C" fn raise(sig: i32) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigprocmask(
     _how: i32,
-    _set: *const u64,
-    oldset: *mut u64,
+    _set: *const SigsetT,
+    oldset: *mut SigsetT,
 ) -> i32 {
     // Return empty old set if requested.
     if !oldset.is_null() {
-        unsafe { *oldset = 0; }
+        unsafe { *oldset = SigsetT::EMPTY; }
     }
     0 // Succeed silently.
 }
@@ -223,7 +278,7 @@ pub extern "C" fn sigprocmask(
 /// Stub: sets errno to EINTR and returns -1 (POSIX specifies
 /// sigsuspend always returns -1 with errno=EINTR).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sigsuspend(_mask: *const u64) -> i32 {
+pub extern "C" fn sigsuspend(_mask: *const SigsetT) -> i32 {
     errno::set_errno(errno::EINTR);
     -1
 }
@@ -232,72 +287,80 @@ pub extern "C" fn sigsuspend(_mask: *const u64) -> i32 {
 ///
 /// Stub: returns empty set (no signals pending).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn sigpending(set: *mut u64) -> i32 {
+pub unsafe extern "C" fn sigpending(set: *mut SigsetT) -> i32 {
     if set.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    unsafe { *set = 0; }
+    unsafe { *set = SigsetT::EMPTY; }
     0
 }
 
 /// Initialize a signal set to empty.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn sigemptyset(set: *mut u64) -> i32 {
+pub unsafe extern "C" fn sigemptyset(set: *mut SigsetT) -> i32 {
     if set.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    unsafe { *set = 0; }
+    unsafe { *set = SigsetT::EMPTY; }
     0
 }
 
 /// Initialize a signal set to full.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn sigfillset(set: *mut u64) -> i32 {
+pub unsafe extern "C" fn sigfillset(set: *mut SigsetT) -> i32 {
     if set.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    unsafe { *set = u64::MAX; }
+    unsafe { (*set).bits = [u64::MAX; 16]; }
     0
 }
 
 /// Add a signal to a signal set.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn sigaddset(set: *mut u64, signum: i32) -> i32 {
+pub unsafe extern "C" fn sigaddset(set: *mut SigsetT, signum: i32) -> i32 {
     if set.is_null() || !(1..NSIG).contains(&signum) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // SAFETY: set is non-null (checked above). signum is in [1, NSIG),
-    // so signum-1 is in [0, 63], which is a valid u64 shift amount.
-    unsafe { *set |= 1u64 << (signum.wrapping_sub(1) as u32); }
+    let idx = (signum - 1) as usize;
+    let word = idx / 64;
+    let bit = idx % 64;
+    // SAFETY: set is non-null, word < 1 for standard signals (< 65).
+    unsafe { (*set).bits[word] |= 1u64 << bit; }
     0
 }
 
 /// Remove a signal from a signal set.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn sigdelset(set: *mut u64, signum: i32) -> i32 {
+pub unsafe extern "C" fn sigdelset(set: *mut SigsetT, signum: i32) -> i32 {
     if set.is_null() || !(1..NSIG).contains(&signum) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // SAFETY: set is non-null; shift amount is [0, 63] per range check.
-    unsafe { *set &= !(1u64 << (signum.wrapping_sub(1) as u32)); }
+    let idx = (signum - 1) as usize;
+    let word = idx / 64;
+    let bit = idx % 64;
+    // SAFETY: set is non-null.
+    unsafe { (*set).bits[word] &= !(1u64 << bit); }
     0
 }
 
 /// Test whether a signal is in a signal set.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn sigismember(set: *const u64, signum: i32) -> i32 {
+pub unsafe extern "C" fn sigismember(set: *const SigsetT, signum: i32) -> i32 {
     if set.is_null() || !(1..NSIG).contains(&signum) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // SAFETY: set is non-null; shift amount is [0, 63] per range check.
-    let val = unsafe { *set };
-    i32::from(val & (1u64 << (signum.wrapping_sub(1) as u32)) != 0)
+    let idx = (signum - 1) as usize;
+    let word = idx / 64;
+    let bit = idx % 64;
+    // SAFETY: set is non-null.
+    let val = unsafe { (*set).bits[word] };
+    i32::from(val & (1u64 << bit) != 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +451,7 @@ pub extern "C" fn siginterrupt(_sig: i32, _flag: i32) -> i32 {
 /// Signal name table.
 ///
 /// Index by signal number.  Covers the standard Linux x86_64 signals.
-static SIGNAL_NAMES: [&[u8]; 21] = [
+static SIGNAL_NAMES: [&[u8]; 32] = [
     b"Unknown signal 0\0",  // 0
     b"Hangup\0",            // 1  SIGHUP
     b"Interrupt\0",         // 2  SIGINT
@@ -405,11 +468,22 @@ static SIGNAL_NAMES: [&[u8]; 21] = [
     b"Broken pipe\0",       // 13 SIGPIPE
     b"Alarm clock\0",       // 14 SIGALRM
     b"Terminated\0",        // 15 SIGTERM
-    b"Unknown signal 16\0", // 16 (unused on Linux x86_64)
+    b"Stack fault\0",       // 16 SIGSTKFLT (unused on modern Linux x86_64)
     b"Child exited\0",      // 17 SIGCHLD
     b"Continued\0",         // 18 SIGCONT
     b"Stopped (signal)\0",  // 19 SIGSTOP
     b"Stopped\0",           // 20 SIGTSTP
+    b"Stopped (tty input)\0",  // 21 SIGTTIN
+    b"Stopped (tty output)\0", // 22 SIGTTOU
+    b"Urgent I/O condition\0", // 23 SIGURG
+    b"CPU time limit exceeded\0", // 24 SIGXCPU
+    b"File size limit exceeded\0", // 25 SIGXFSZ
+    b"Virtual timer expired\0",   // 26 SIGVTALRM
+    b"Profiling timer expired\0", // 27 SIGPROF
+    b"Window changed\0",    // 28 SIGWINCH
+    b"I/O possible\0",      // 29 SIGIO/SIGPOLL
+    b"Power failure\0",     // 30 SIGPWR
+    b"Bad system call\0",   // 31 SIGSYS
 ];
 
 /// Unknown signal message buffer.
@@ -459,25 +533,26 @@ pub unsafe extern "C" fn psignal(signum: i32, s: *const u8) {
 /// Wait for a signal from a set.
 ///
 /// Stub: our OS doesn't deliver signals.  Sleeps for 1 second then
-/// returns `EAGAIN` (no signal delivered).
+/// returns `EINTR` (wait interrupted, no signal delivered).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sigwait(_set: *const u64, sig: *mut i32) -> i32 {
+pub extern "C" fn sigwait(_set: *const SigsetT, sig: *mut i32) -> i32 {
     // Sleep briefly so callers in a loop don't spin.
     let _ = crate::syscall::syscall1(crate::syscall::SYS_SLEEP, 1_000_000_000_u64);
     if !sig.is_null() {
         // SAFETY: sig is valid if non-null (caller contract).
         unsafe { *sig = 0; }
     }
-    crate::errno::EAGAIN
+    crate::errno::EINTR
 }
 
 /// Wait for a signal with a timeout.
 ///
-/// Stub: returns -1 with `EAGAIN`.  The `timeout` parameter is ignored
-/// since we don't have signal delivery.
+/// Stub: returns -1 with `EAGAIN` (timeout expired, no signal
+/// delivered).  The `timeout` parameter is ignored since we don't
+/// have signal delivery.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigtimedwait(
-    _set: *const u64,
+    _set: *const SigsetT,
     _info: *mut core::ffi::c_void,
     _timeout: *const crate::stat::Timespec,
 ) -> i32 {
@@ -548,8 +623,48 @@ mod tests {
     }
 
     #[test]
+    fn test_signal_number_values_extended() {
+        assert_eq!(SIGTTIN, 21);
+        assert_eq!(SIGTTOU, 22);
+        assert_eq!(SIGURG, 23);
+        assert_eq!(SIGXCPU, 24);
+        assert_eq!(SIGXFSZ, 25);
+        assert_eq!(SIGVTALRM, 26);
+        assert_eq!(SIGPROF, 27);
+        assert_eq!(SIGWINCH, 28);
+        assert_eq!(SIGIO, 29);
+        assert_eq!(SIGPOLL, 29); // synonym for SIGIO
+        assert_eq!(SIGPWR, 30);
+        assert_eq!(SIGSYS, 31);
+    }
+
+    #[test]
     fn test_nsig() {
         assert_eq!(NSIG, 65);
+    }
+
+    // -- Struct layout tests (binary compatibility with glibc x86_64) --
+
+    #[test]
+    fn test_sigset_t_layout() {
+        assert_eq!(core::mem::size_of::<SigsetT>(), 128);
+        assert_eq!(core::mem::align_of::<SigsetT>(), 8);
+    }
+
+    #[test]
+    fn test_sigaction_layout() {
+        // glibc x86_64: sa_handler(8) + sa_flags(8) + sa_restorer(8) + sa_mask(128) = 152
+        assert_eq!(core::mem::size_of::<Sigaction>(), 152);
+        assert_eq!(core::mem::offset_of!(Sigaction, sa_handler), 0);
+        assert_eq!(core::mem::offset_of!(Sigaction, sa_flags), 8);
+        assert_eq!(core::mem::offset_of!(Sigaction, sa_restorer), 16);
+        assert_eq!(core::mem::offset_of!(Sigaction, sa_mask), 24);
+    }
+
+    #[test]
+    fn test_stack_t_layout() {
+        // Linux x86_64: ss_sp(8) + ss_flags(4) + padding(4) + ss_size(8) = 24
+        assert_eq!(core::mem::size_of::<StackT>(), 24);
     }
 
     // -- Signal handler constants --
@@ -568,8 +683,10 @@ mod tests {
         assert_eq!(SA_NOCLDSTOP, 1);
         assert_eq!(SA_NOCLDWAIT, 2);
         assert_eq!(SA_SIGINFO, 4);
+        assert_eq!(SA_ONSTACK, 0x0800_0000);
         assert_eq!(SA_RESTART, 0x1000_0000);
         assert_eq!(SA_NODEFER, 0x4000_0000);
+        assert_eq!(SA_RESETHAND, 0x8000_0000);
     }
 
     // -- sigaltstack constants --
@@ -586,10 +703,10 @@ mod tests {
 
     #[test]
     fn test_sigemptyset_basic() {
-        let mut set: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+        let mut set = SigsetT { bits: [0xFFFF_FFFF_FFFF_FFFF; 16] };
         let ret = unsafe { sigemptyset(&raw mut set) };
         assert_eq!(ret, 0);
-        assert_eq!(set, 0);
+        assert!(set.bits.iter().all(|&w| w == 0));
     }
 
     #[test]
@@ -602,10 +719,10 @@ mod tests {
 
     #[test]
     fn test_sigfillset_basic() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         let ret = unsafe { sigfillset(&raw mut set) };
         assert_eq!(ret, 0);
-        assert_eq!(set, u64::MAX);
+        assert!(set.bits.iter().all(|&w| w == u64::MAX));
     }
 
     #[test]
@@ -618,26 +735,28 @@ mod tests {
 
     #[test]
     fn test_sigaddset_basic() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         let ret = unsafe { sigaddset(&raw mut set, SIGINT) };
         assert_eq!(ret, 0);
-        // SIGINT = 2 → bit 1 set
-        assert_eq!(set, 1u64 << 1);
+        // SIGINT = 2 → bit 1 in word 0
+        assert_eq!(set.bits[0], 1u64 << 1);
+        assert!(set.bits[1..].iter().all(|&w| w == 0));
     }
 
     #[test]
     fn test_sigaddset_multiple() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         unsafe {
             sigaddset(&raw mut set, SIGHUP);   // bit 0
             sigaddset(&raw mut set, SIGTERM);   // bit 14
             sigaddset(&raw mut set, SIGKILL);   // bit 8
         }
-        assert_ne!(set & (1u64 << 0), 0);   // SIGHUP
-        assert_ne!(set & (1u64 << 14), 0);  // SIGTERM
-        assert_ne!(set & (1u64 << 8), 0);   // SIGKILL
-        // Other bits should be 0
-        assert_eq!(set & !(1u64 << 0 | 1u64 << 14 | 1u64 << 8), 0);
+        assert_ne!(set.bits[0] & (1u64 << 0), 0);   // SIGHUP
+        assert_ne!(set.bits[0] & (1u64 << 14), 0);  // SIGTERM
+        assert_ne!(set.bits[0] & (1u64 << 8), 0);   // SIGKILL
+        // Only those three bits set in word 0
+        assert_eq!(set.bits[0] & !(1u64 << 0 | 1u64 << 14 | 1u64 << 8), 0);
+        assert!(set.bits[1..].iter().all(|&w| w == 0));
     }
 
     #[test]
@@ -648,57 +767,58 @@ mod tests {
 
     #[test]
     fn test_sigaddset_invalid_signum_zero() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         let ret = unsafe { sigaddset(&raw mut set, 0) };
         assert_eq!(ret, -1);
     }
 
     #[test]
     fn test_sigaddset_invalid_signum_too_large() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         let ret = unsafe { sigaddset(&raw mut set, NSIG) };
         assert_eq!(ret, -1);
     }
 
     #[test]
     fn test_sigaddset_invalid_signum_negative() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         let ret = unsafe { sigaddset(&raw mut set, -1) };
         assert_eq!(ret, -1);
     }
 
     #[test]
     fn test_sigaddset_boundary_signal_1() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         let ret = unsafe { sigaddset(&raw mut set, 1) };
         assert_eq!(ret, 0);
-        assert_eq!(set, 1u64 << 0); // signal 1 → bit 0
+        assert_eq!(set.bits[0], 1u64 << 0); // signal 1 → bit 0
     }
 
     #[test]
     fn test_sigaddset_boundary_signal_64() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         let ret = unsafe { sigaddset(&raw mut set, 64) };
         assert_eq!(ret, 0);
-        assert_eq!(set, 1u64 << 63); // signal 64 → bit 63
+        // signal 64 → idx 63 → word 0, bit 63
+        assert_eq!(set.bits[0], 1u64 << 63);
     }
 
     // -- sigdelset --
 
     #[test]
     fn test_sigdelset_basic() {
-        let mut set: u64 = u64::MAX;
+        let mut set = SigsetT { bits: [u64::MAX; 16] };
         let ret = unsafe { sigdelset(&raw mut set, SIGINT) };
         assert_eq!(ret, 0);
-        assert_eq!(set & (1u64 << 1), 0); // SIGINT bit cleared
+        assert_eq!(set.bits[0] & (1u64 << 1), 0); // SIGINT bit cleared
     }
 
     #[test]
     fn test_sigdelset_from_empty() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         let ret = unsafe { sigdelset(&raw mut set, SIGINT) };
         assert_eq!(ret, 0);
-        assert_eq!(set, 0); // Still empty
+        assert!(set.bits.iter().all(|&w| w == 0));
     }
 
     #[test]
@@ -709,7 +829,7 @@ mod tests {
 
     #[test]
     fn test_sigdelset_invalid() {
-        let mut set: u64 = u64::MAX;
+        let mut set = SigsetT { bits: [u64::MAX; 16] };
         let ret = unsafe { sigdelset(&raw mut set, 0) };
         assert_eq!(ret, -1);
     }
@@ -718,21 +838,22 @@ mod tests {
 
     #[test]
     fn test_sigismember_present() {
-        let set: u64 = 1u64 << 1; // SIGINT (signal 2 → bit 1)
+        let mut set = SigsetT::EMPTY;
+        set.bits[0] = 1u64 << 1; // SIGINT (signal 2 → bit 1)
         let ret = unsafe { sigismember(&raw const set, SIGINT) };
         assert_eq!(ret, 1);
     }
 
     #[test]
     fn test_sigismember_absent() {
-        let set: u64 = 0;
+        let set = SigsetT::EMPTY;
         let ret = unsafe { sigismember(&raw const set, SIGINT) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_sigismember_full_set() {
-        let set: u64 = u64::MAX;
+        let set = SigsetT { bits: [u64::MAX; 16] };
         for sig in 1..NSIG {
             let ret = unsafe { sigismember(&raw const set, sig) };
             assert_eq!(ret, 1, "signal {sig} should be in full set");
@@ -747,7 +868,7 @@ mod tests {
 
     #[test]
     fn test_sigismember_invalid() {
-        let set: u64 = u64::MAX;
+        let set = SigsetT { bits: [u64::MAX; 16] };
         let ret = unsafe { sigismember(&raw const set, 0) };
         assert_eq!(ret, -1);
     }
@@ -756,7 +877,7 @@ mod tests {
 
     #[test]
     fn test_sigaddset_then_sigismember() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         unsafe { sigemptyset(&raw mut set); }
 
         // Add SIGTERM, verify it's there
@@ -769,7 +890,7 @@ mod tests {
 
     #[test]
     fn test_sigaddset_sigdelset_round_trip() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         unsafe {
             sigemptyset(&raw mut set);
             sigaddset(&raw mut set, SIGINT);
@@ -786,7 +907,7 @@ mod tests {
 
     #[test]
     fn test_sigfillset_then_delset() {
-        let mut set: u64 = 0;
+        let mut set = SigsetT::EMPTY;
         unsafe {
             sigfillset(&raw mut set);
             sigdelset(&raw mut set, SIGKILL);
@@ -840,7 +961,8 @@ mod tests {
 
     #[test]
     fn test_sigaction_set_and_get() {
-        let mask = 1u64 << (SIGINT - 1) | 1u64 << (SIGQUIT - 1);
+        let mut mask = SigsetT::EMPTY;
+        mask.bits[0] = 1u64 << (SIGINT - 1) | 1u64 << (SIGQUIT - 1);
         let new_act = Sigaction {
             sa_handler: SIG_IGN,
             sa_mask: mask,
@@ -849,7 +971,7 @@ mod tests {
         };
         let mut old_act = Sigaction {
             sa_handler: 0,
-            sa_mask: 0,
+            sa_mask: SigsetT::EMPTY,
             sa_flags: 0,
             sa_restorer: 0,
         };
@@ -860,7 +982,7 @@ mod tests {
         // Now get it back — all fields must round-trip.
         let mut check_act = Sigaction {
             sa_handler: 0,
-            sa_mask: 0,
+            sa_mask: SigsetT::EMPTY,
             sa_flags: 0,
             sa_restorer: 0,
         };
@@ -878,7 +1000,7 @@ mod tests {
     fn test_sigaction_rejects_sigkill() {
         let act = Sigaction {
             sa_handler: SIG_IGN,
-            sa_mask: 0,
+            sa_mask: SigsetT::EMPTY,
             sa_flags: 0,
             sa_restorer: 0,
         };
@@ -890,7 +1012,7 @@ mod tests {
     fn test_sigaction_rejects_sigstop() {
         let act = Sigaction {
             sa_handler: SIG_IGN,
-            sa_mask: 0,
+            sa_mask: SigsetT::EMPTY,
             sa_flags: 0,
             sa_restorer: 0,
         };
@@ -909,7 +1031,8 @@ mod tests {
     fn test_sigaction_preserves_all_fields() {
         // Regression: previously only sa_handler was stored; sa_mask,
         // sa_flags, sa_restorer were always returned as zero.
-        let mask = 1u64 << (SIGPIPE - 1) | 1u64 << (SIGCHLD - 1);
+        let mut mask = SigsetT::EMPTY;
+        mask.bits[0] = 1u64 << (SIGPIPE - 1) | 1u64 << (SIGCHLD - 1);
         let act = Sigaction {
             sa_handler: SIG_IGN,
             sa_mask: mask,
@@ -917,12 +1040,22 @@ mod tests {
             sa_restorer: 0x1234_5678,
         };
         // Use SIGUSR1 to avoid interfering with other tests.
-        let mut old = Sigaction { sa_handler: 0, sa_mask: 0, sa_flags: 0, sa_restorer: 0 };
+        let mut old = Sigaction {
+            sa_handler: 0,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
         let ret = unsafe { sigaction(SIGUSR1, &raw const act, &raw mut old) };
         assert_eq!(ret, 0);
 
         // Query back.
-        let mut check = Sigaction { sa_handler: 0, sa_mask: 0, sa_flags: 0, sa_restorer: 0 };
+        let mut check = Sigaction {
+            sa_handler: 0,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
         let ret = unsafe { sigaction(SIGUSR1, core::ptr::null(), &raw mut check) };
         assert_eq!(ret, 0);
         assert_eq!(check.sa_handler, SIG_IGN);
@@ -937,9 +1070,11 @@ mod tests {
     #[test]
     fn test_signal_resets_sigaction_fields() {
         // After signal(), querying via sigaction should show sa_flags=0.
+        let mut mask = SigsetT::EMPTY;
+        mask.bits[0] = 0xFFFF;
         let act = Sigaction {
             sa_handler: SIG_IGN,
-            sa_mask: 0xFFFF,
+            sa_mask: mask,
             sa_flags: SA_RESTART,
             sa_restorer: 42,
         };
@@ -950,10 +1085,15 @@ mod tests {
         let prev = signal(SIGUSR2, SIG_DFL);
         assert_eq!(prev, SIG_IGN);
 
-        let mut check = Sigaction { sa_handler: 0, sa_mask: 0, sa_flags: 0, sa_restorer: 0 };
+        let mut check = Sigaction {
+            sa_handler: 0,
+            sa_mask: SigsetT::EMPTY,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
         unsafe { sigaction(SIGUSR2, core::ptr::null(), &raw mut check); }
         assert_eq!(check.sa_handler, SIG_DFL);
-        assert_eq!(check.sa_mask, 0);
+        assert_eq!(check.sa_mask, SigsetT::EMPTY);
         assert_eq!(check.sa_flags, 0);
         assert_eq!(check.sa_restorer, 0);
     }
@@ -962,10 +1102,10 @@ mod tests {
 
     #[test]
     fn test_sigprocmask_returns_empty_old_set() {
-        let mut oldset: u64 = 0xDEAD;
+        let mut oldset = SigsetT { bits: [0xDEAD; 16] };
         let ret = sigprocmask(0, core::ptr::null(), &raw mut oldset);
         assert_eq!(ret, 0);
-        assert_eq!(oldset, 0);
+        assert_eq!(oldset, SigsetT::EMPTY);
     }
 
     #[test]
@@ -978,7 +1118,7 @@ mod tests {
 
     #[test]
     fn test_sigsuspend_returns_eintr() {
-        let mask: u64 = 0;
+        let mask = SigsetT::EMPTY;
         let ret = sigsuspend(&raw const mask);
         assert_eq!(ret, -1);
         // POSIX: sigsuspend always returns -1 with EINTR
@@ -988,10 +1128,10 @@ mod tests {
 
     #[test]
     fn test_sigpending_returns_empty() {
-        let mut set: u64 = 0xFFFF;
+        let mut set = SigsetT { bits: [0xFFFF; 16] };
         let ret = unsafe { sigpending(&raw mut set) };
         assert_eq!(ret, 0);
-        assert_eq!(set, 0); // No signals pending
+        assert_eq!(set, SigsetT::EMPTY); // No signals pending
     }
 
     #[test]
@@ -1018,6 +1158,25 @@ mod tests {
 
         let ptr = strsignal(SIGTERM);
         assert_eq!(unsafe { *ptr }, b'T'); // "Terminated"
+    }
+
+    #[test]
+    fn test_strsignal_extended_signals() {
+        // Verify the newly-added signal names (21-31).
+        let ptr = strsignal(SIGTTIN);
+        assert_eq!(unsafe { *ptr }, b'S'); // "Stopped (tty input)"
+
+        let ptr = strsignal(SIGXCPU);
+        assert_eq!(unsafe { *ptr }, b'C'); // "CPU time limit exceeded"
+
+        let ptr = strsignal(SIGWINCH);
+        assert_eq!(unsafe { *ptr }, b'W'); // "Window changed"
+
+        let ptr = strsignal(SIGIO);
+        assert_eq!(unsafe { *ptr }, b'I'); // "I/O possible"
+
+        let ptr = strsignal(SIGSYS);
+        assert_eq!(unsafe { *ptr }, b'B'); // "Bad system call"
     }
 
     #[test]

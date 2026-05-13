@@ -538,18 +538,20 @@ pub unsafe extern "C" fn asctime_r(tm: *const Tm, buf: *mut u8) -> *mut u8 {
         return core::ptr::null_mut();
     }
     let t = unsafe { &*tm };
-    // Write directly into the user buffer (reinterpreted as [u8; 32]
-    // since format_asctime needs 26 bytes max — "Thu Jan  1 00:00:00 1970\n\0").
+    // Write into a local buffer then copy to user buf.
+    // format_asctime produces exactly 25 chars ("Thu Jan  1 00:00:00 1970\n")
+    // and null-terminates, so we copy at most 25 content bytes + 1 null = 26 bytes.
     let mut tmp = [0u8; 32];
     let len = format_asctime(t, &mut tmp);
-    // Copy to user buffer (len includes the \n but not the \0).
-    let copy_len = if len < 26 { len.wrapping_add(1) } else { 26 };
+    // Cap content to 25 bytes so that content + null fits in the
+    // 26-byte minimum buffer guaranteed by POSIX.
+    let copy_len = if len > 25 { 25 } else { len };
     let mut i: usize = 0;
     while i < copy_len {
         unsafe { *buf.add(i) = tmp[i]; }
         i = i.wrapping_add(1);
     }
-    // Null-terminate.
+    // Null-terminate (at most at index 25 = 26th byte).
     unsafe { *buf.add(i) = 0; }
     buf
 }

@@ -602,18 +602,24 @@ pub unsafe extern "C" fn atof(nptr: *const u8) -> f64 {
 ///
 /// Handles both positive and negative exponents.
 #[allow(clippy::arithmetic_side_effects)]
-fn pow10(mut exp: i32) -> f64 {
+fn pow10(exp: i32) -> f64 {
     if exp == 0 {
         return 1.0;
     }
     let neg = exp < 0;
-    if neg {
-        exp = exp.saturating_neg();
-    }
+    // Use u32 to hold the absolute value of the exponent.
+    // i32::MIN has no positive i32 counterpart (-2147483648 → 2147483648
+    // which overflows i32), but fits in u32.  Casting through i64 avoids
+    // the saturating_neg trap where i32::MIN.saturating_neg() == i32::MIN.
+    let abs_exp: u32 = if neg {
+        (-(exp as i64)) as u32
+    } else {
+        exp as u32
+    };
 
     let mut result: f64 = 1.0;
     let mut base: f64 = 10.0;
-    let mut e = exp;
+    let mut e = abs_exp;
     // Repeated squaring for efficiency.
     while e > 0 {
         if e & 1 == 1 {
@@ -2013,5 +2019,56 @@ mod tests {
         };
         assert_eq!(idx, 2); // matches "size"
         assert!(!valuep.is_null()); // has value "100"
+    }
+
+    // -- pow10 tests (internal helper) --
+
+    #[test]
+    fn test_pow10_zero() {
+        assert_eq!(pow10(0), 1.0);
+    }
+
+    #[test]
+    fn test_pow10_positive() {
+        assert_eq!(pow10(1), 10.0);
+        assert_eq!(pow10(2), 100.0);
+        assert_eq!(pow10(3), 1000.0);
+    }
+
+    #[test]
+    fn test_pow10_negative() {
+        assert!((pow10(-1) - 0.1).abs() < 1e-15);
+        assert!((pow10(-2) - 0.01).abs() < 1e-15);
+        assert!((pow10(-3) - 0.001).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_pow10_large_positive() {
+        // 10^308 is near f64::MAX (~1.8e308); should be finite.
+        assert!(pow10(308).is_finite());
+        // 10^309 overflows f64 → infinity.
+        assert!(pow10(309).is_infinite());
+    }
+
+    #[test]
+    fn test_pow10_large_negative() {
+        // 10^(-308) is near f64 min positive subnormal; should be > 0.
+        assert!(pow10(-308) > 0.0);
+        // Very large negative exponents should produce 0.0 or tiny subnormal.
+        assert!(pow10(-400) < 1e-300);
+    }
+
+    #[test]
+    fn test_pow10_i32_min() {
+        // This is the bug case: pow10(i32::MIN) must NOT return 1.0.
+        // 10^(-2147483648) is effectively 0.0 (way below f64 subnormal).
+        let result = pow10(i32::MIN);
+        assert_eq!(result, 0.0, "pow10(i32::MIN) should be 0.0, not 1.0");
+    }
+
+    #[test]
+    fn test_pow10_i32_max() {
+        // 10^(2147483647) overflows f64 → infinity.
+        assert!(pow10(i32::MAX).is_infinite());
     }
 }

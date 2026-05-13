@@ -1961,3 +1961,347 @@ pub extern "C" fn getitimer(which: i32, curr_value: *mut Itimerval) -> i32 {
     }
     0
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a zeroed Tm.
+    fn zero_tm() -> Tm {
+        Tm {
+            tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 0,
+            tm_mon: 0, tm_year: 0, tm_wday: 0, tm_yday: 0,
+            tm_isdst: 0,
+        }
+    }
+
+    // -- gmtime / secs_to_tm tests --
+
+    #[test]
+    fn test_gmtime_epoch() {
+        // 1970-01-01 00:00:00 UTC
+        let t: TimeT = 0;
+        let tm = gmtime(&t);
+        assert!(!tm.is_null());
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 70);   // 1970 - 1900
+        assert_eq!(tm.tm_mon, 0);     // January
+        assert_eq!(tm.tm_mday, 1);
+        assert_eq!(tm.tm_hour, 0);
+        assert_eq!(tm.tm_min, 0);
+        assert_eq!(tm.tm_sec, 0);
+        assert_eq!(tm.tm_wday, 4);    // Thursday
+        assert_eq!(tm.tm_yday, 0);
+    }
+
+    #[test]
+    fn test_gmtime_known_date() {
+        // 2000-01-01 00:00:00 UTC = 946684800
+        let t: TimeT = 946_684_800;
+        let tm = gmtime(&t);
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 100);  // 2000 - 1900
+        assert_eq!(tm.tm_mon, 0);     // January
+        assert_eq!(tm.tm_mday, 1);
+        assert_eq!(tm.tm_wday, 6);    // Saturday
+    }
+
+    #[test]
+    fn test_gmtime_leap_day() {
+        // 2000-02-29 12:00:00 UTC = 951825600
+        let t: TimeT = 951_825_600;
+        let tm = gmtime(&t);
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 100);
+        assert_eq!(tm.tm_mon, 1);     // February (0-indexed)
+        assert_eq!(tm.tm_mday, 29);
+        assert_eq!(tm.tm_hour, 12);
+    }
+
+    #[test]
+    fn test_gmtime_end_of_year() {
+        // 2023-12-31 23:59:59 UTC = 1704067199
+        let t: TimeT = 1_704_067_199;
+        let tm = gmtime(&t);
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 123);  // 2023 - 1900
+        assert_eq!(tm.tm_mon, 11);    // December
+        assert_eq!(tm.tm_mday, 31);
+        assert_eq!(tm.tm_hour, 23);
+        assert_eq!(tm.tm_min, 59);
+        assert_eq!(tm.tm_sec, 59);
+        assert_eq!(tm.tm_yday, 364);
+    }
+
+    #[test]
+    fn test_gmtime_pre_epoch() {
+        // 1969-12-31 23:59:59 UTC = -1
+        let t: TimeT = -1;
+        let tm = gmtime(&t);
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 69);   // 1969 - 1900
+        assert_eq!(tm.tm_mon, 11);    // December
+        assert_eq!(tm.tm_mday, 31);
+        assert_eq!(tm.tm_hour, 23);
+        assert_eq!(tm.tm_min, 59);
+        assert_eq!(tm.tm_sec, 59);
+    }
+
+    #[test]
+    fn test_gmtime_null() {
+        let tm = gmtime(core::ptr::null());
+        assert!(tm.is_null());
+    }
+
+    // -- mktime / tm_to_secs tests --
+
+    #[test]
+    fn test_mktime_epoch() {
+        let mut tm = zero_tm();
+        tm.tm_year = 70;
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        let t = mktime(&mut tm);
+        assert_eq!(t, 0);
+    }
+
+    #[test]
+    fn test_mktime_known_date() {
+        let mut tm = zero_tm();
+        tm.tm_year = 100; // 2000
+        tm.tm_mon = 0;    // January
+        tm.tm_mday = 1;
+        let t = mktime(&mut tm);
+        assert_eq!(t, 946_684_800);
+    }
+
+    #[test]
+    fn test_mktime_normalizes() {
+        // 2000-01-01 00:00:90 should normalize to 00:01:30
+        let mut tm = zero_tm();
+        tm.tm_year = 100;
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        tm.tm_sec = 90;
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_sec, 30);
+        assert_eq!(tm.tm_min, 1);
+    }
+
+    #[test]
+    fn test_mktime_month_overflow() {
+        // Month 12 (January of next year) should normalize.
+        let mut tm = zero_tm();
+        tm.tm_year = 100; // 2000
+        tm.tm_mon = 12;   // 13th month → January 2001
+        tm.tm_mday = 1;
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_year, 101); // 2001
+        assert_eq!(tm.tm_mon, 0);    // January
+    }
+
+    #[test]
+    fn test_mktime_sets_wday() {
+        // 2024-03-15 should be a Friday (wday=5).
+        let mut tm = zero_tm();
+        tm.tm_year = 124; // 2024
+        tm.tm_mon = 2;    // March
+        tm.tm_mday = 15;
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_wday, 5); // Friday
+    }
+
+    // -- gmtime / mktime roundtrip --
+
+    #[test]
+    fn test_gmtime_mktime_roundtrip() {
+        let timestamps: &[TimeT] = &[
+            0, 1, 86400, 946_684_800, 1_704_067_199, -1, -86400,
+        ];
+        for &t in timestamps {
+            let tm = gmtime(&t);
+            let tm = unsafe { &mut *tm };
+            let t2 = mktime(tm);
+            assert_eq!(t, t2, "roundtrip failed for timestamp {t}");
+        }
+    }
+
+    // -- difftime tests --
+
+    #[test]
+    fn test_difftime_basic() {
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(difftime(100, 50), 50.0);
+            assert_eq!(difftime(50, 100), -50.0);
+            assert_eq!(difftime(0, 0), 0.0);
+        }
+    }
+
+    // -- asctime tests --
+
+    #[test]
+    fn test_asctime_format() {
+        let mut tm = zero_tm();
+        tm.tm_year = 93;  // 1993
+        tm.tm_mon = 5;    // June (0-indexed)
+        tm.tm_mday = 30;
+        tm.tm_hour = 21;
+        tm.tm_min = 49;
+        tm.tm_sec = 8;
+        tm.tm_wday = 3;   // Wednesday
+
+        let s = asctime(&tm);
+        assert!(!s.is_null());
+        // Expected: "Wed Jun 30 21:49:08 1993\n\0"
+        let len = unsafe { crate::string::strlen(s) };
+        assert!(len > 20);
+        // Check that it starts with "Wed Jun"
+        assert_eq!(unsafe { *s }, b'W');
+        assert_eq!(unsafe { *s.add(1) }, b'e');
+        assert_eq!(unsafe { *s.add(2) }, b'd');
+    }
+
+    // -- strftime tests --
+
+    #[test]
+    fn test_strftime_year_month_day() {
+        let mut tm = zero_tm();
+        tm.tm_year = 124;  // 2024
+        tm.tm_mon = 2;     // March
+        tm.tm_mday = 15;
+        tm.tm_wday = 5;    // Friday
+
+        let mut buf = [0u8; 64];
+        let fmt = b"%Y-%m-%d\0";
+        let n = unsafe {
+            strftime(buf.as_mut_ptr(), 64, fmt.as_ptr(), &tm)
+        };
+        assert!(n > 0);
+        assert_eq!(&buf[..10], b"2024-03-15");
+    }
+
+    #[test]
+    fn test_strftime_time() {
+        let mut tm = zero_tm();
+        tm.tm_hour = 14;
+        tm.tm_min = 30;
+        tm.tm_sec = 45;
+
+        let mut buf = [0u8; 64];
+        let fmt = b"%H:%M:%S\0";
+        let n = unsafe {
+            strftime(buf.as_mut_ptr(), 64, fmt.as_ptr(), &tm)
+        };
+        assert!(n > 0);
+        assert_eq!(&buf[..8], b"14:30:45");
+    }
+
+    #[test]
+    fn test_strftime_percent_literal() {
+        let tm = zero_tm();
+        let mut buf = [0u8; 16];
+        let fmt = b"100%%\0";
+        let n = unsafe {
+            strftime(buf.as_mut_ptr(), 16, fmt.as_ptr(), &tm)
+        };
+        assert!(n > 0);
+        assert_eq!(&buf[..4], b"100%");
+    }
+
+    #[test]
+    fn test_strftime_buffer_too_small() {
+        let tm = zero_tm();
+        let mut buf = [0u8; 4];
+        let fmt = b"%Y-%m-%d\0";
+        let n = unsafe {
+            strftime(buf.as_mut_ptr(), 4, fmt.as_ptr(), &tm)
+        };
+        // Not enough space for "1900-01-00" (10 chars + null).
+        // strftime returns 0 when buffer is insufficient.
+        assert_eq!(n, 0);
+    }
+
+    // -- strptime tests --
+
+    #[test]
+    fn test_strptime_date() {
+        let mut tm = zero_tm();
+        let input = b"2024-03-15\0";
+        let fmt = b"%Y-%m-%d\0";
+        let result = unsafe {
+            strptime(input.as_ptr(), fmt.as_ptr(), &mut tm)
+        };
+        assert!(!result.is_null());
+        assert_eq!(tm.tm_year, 124);  // 2024 - 1900
+        assert_eq!(tm.tm_mon, 2);     // March (0-indexed)
+        assert_eq!(tm.tm_mday, 15);
+    }
+
+    #[test]
+    fn test_strptime_time() {
+        let mut tm = zero_tm();
+        let input = b"14:30:45\0";
+        let fmt = b"%H:%M:%S\0";
+        let result = unsafe {
+            strptime(input.as_ptr(), fmt.as_ptr(), &mut tm)
+        };
+        assert!(!result.is_null());
+        assert_eq!(tm.tm_hour, 14);
+        assert_eq!(tm.tm_min, 30);
+        assert_eq!(tm.tm_sec, 45);
+    }
+
+    // -- is_leap / days_in_month tests --
+
+    #[test]
+    fn test_leap_years() {
+        assert!(is_leap(2000)); // Divisible by 400.
+        assert!(!is_leap(1900)); // Divisible by 100 but not 400.
+        assert!(is_leap(2024)); // Divisible by 4 but not 100.
+        assert!(!is_leap(2023)); // Not divisible by 4.
+    }
+
+    #[test]
+    fn test_days_in_month_values() {
+        assert_eq!(days_in_month(0, 2023), 31);  // January
+        assert_eq!(days_in_month(1, 2023), 28);  // February (non-leap)
+        assert_eq!(days_in_month(1, 2024), 29);  // February (leap)
+        assert_eq!(days_in_month(3, 2023), 30);  // April
+        assert_eq!(days_in_month(11, 2023), 31); // December
+    }
+
+    // -- mktime null --
+
+    #[test]
+    fn test_mktime_null() {
+        assert_eq!(mktime(core::ptr::null_mut()), -1);
+    }
+
+    // -- timegm / timelocal identity --
+
+    #[test]
+    fn test_timegm_equals_mktime() {
+        let mut tm = zero_tm();
+        tm.tm_year = 100;
+        tm.tm_mon = 5;
+        tm.tm_mday = 15;
+        tm.tm_hour = 12;
+        let mut tm2 = tm;
+        assert_eq!(mktime(&mut tm), timegm(&mut tm2));
+    }
+
+    #[test]
+    fn test_timelocal_equals_mktime() {
+        let mut tm = zero_tm();
+        tm.tm_year = 124;
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        let mut tm2 = tm;
+        assert_eq!(mktime(&mut tm), timelocal(&mut tm2));
+    }
+}

@@ -3447,7 +3447,7 @@ const COMMANDS: &[&str] = &[
     "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
     "echo", "elog", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "filetype", "find", "findex", "finfo", "fops", "fsel", "ftype", "fold", "free",
     "firewall", "flock", "fontmgr", "fonts", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fstune", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
-    "id", "ifconfig", "installer", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
+    "id", "ifconfig", "installer", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "logpersist", "lpersist", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "notifcenter", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "printenv",
@@ -4701,6 +4701,7 @@ fn dispatch(line: &str) {
         "uptime" => cmd_uptime(),
         "dmesg" => cmd_dmesg(args),
         "elog" => cmd_elog(args),
+        "logpersist" | "lpersist" => cmd_logpersist(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -32752,6 +32753,130 @@ fn print_event(ev: &crate::eventlog::EventEntry) {
     // Show payload pairs if any.
     for (key, val) in ev.payload_iter() {
         shell_println!("           {}={}", key, val);
+    }
+}
+
+/// `logpersist` / `lpersist` — event log persistence to disk.
+///
+/// Flushes the in-memory event log ring buffer to JSON-lines files
+/// on disk, with configurable rotation and pruning.
+fn cmd_logpersist(args: &str) {
+    use crate::logpersist::{self, RotationMode};
+    use crate::eventlog::Severity;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let st = logpersist::stats();
+            shell_println!("=== Event Log Persistence ===");
+            shell_println!("  Enabled:        {}", st.enabled);
+            shell_println!("  Mode:           {}", match st.mode {
+                RotationMode::Combined => "combined",
+                RotationMode::PerNamespace => "per-namespace",
+            });
+            shell_println!("  Log dir:        {}", st.log_dir);
+            shell_println!("  Min severity:   {}", st.min_persist_severity.as_str());
+            shell_println!("  Max file size:  {} MiB", st.max_file_size / (1024 * 1024));
+            shell_println!("  Max rotated:    {}", st.max_rotated_files);
+            shell_println!("  Max total:      {} MiB", st.max_total_storage / (1024 * 1024));
+            shell_println!("  Total flushes:  {}", st.total_flushes);
+            shell_println!("  Total written:  {} bytes", st.total_bytes_written);
+            shell_println!("  Total pruned:   {} files", st.total_pruned);
+            shell_println!("  Last seq:       {}", st.global_last_flushed_seq);
+            if !st.cursors.is_empty() {
+                shell_println!();
+                shell_println!("  {:12} {:>8} {:>12} {:>6} {:>10}",
+                    "Namespace", "Events", "Bytes", "Rots", "CurSize");
+                for (name, events, bytes, rots, cur_size) in &st.cursors {
+                    shell_println!("  {:12} {:>8} {:>12} {:>6} {:>10}",
+                        name, events, bytes, rots, cur_size);
+                }
+            }
+        }
+        "flush" => {
+            match logpersist::flush() {
+                Ok(n) => shell_println!("Flushed {} events to disk", n),
+                Err(e) => shell_println!("Flush error: {:?}", e),
+            }
+        }
+        "prune" => {
+            let n = logpersist::prune();
+            shell_println!("Pruned {} old log files", n);
+        }
+        "init" => {
+            logpersist::init();
+            shell_println!("Log persistence initialized with default config");
+        }
+        "enable" => {
+            logpersist::set_enabled(true);
+            shell_println!("Log persistence enabled");
+        }
+        "disable" => {
+            logpersist::set_enabled(false);
+            shell_println!("Log persistence disabled");
+        }
+        "mode" => {
+            if let Some(m) = parts.get(1) {
+                match *m {
+                    "combined" => {
+                        logpersist::set_mode(RotationMode::Combined);
+                        shell_println!("Mode set to combined");
+                    }
+                    "per-namespace" | "perns" | "namespace" => {
+                        logpersist::set_mode(RotationMode::PerNamespace);
+                        shell_println!("Mode set to per-namespace");
+                    }
+                    _ => shell_println!("Unknown mode: {}. Use 'combined' or 'per-namespace'.", m),
+                }
+            } else {
+                let cfg = logpersist::config();
+                shell_println!("Current mode: {}", match cfg.mode {
+                    RotationMode::Combined => "combined",
+                    RotationMode::PerNamespace => "per-namespace",
+                });
+            }
+        }
+        "severity" | "sev" => {
+            if let Some(s) = parts.get(1) {
+                let sev = match *s {
+                    "debug" => Severity::Debug,
+                    "info" => Severity::Info,
+                    "notice" => Severity::Notice,
+                    "warning" | "warn" => Severity::Warning,
+                    "error" | "err" => Severity::Error,
+                    "critical" | "crit" => Severity::Critical,
+                    _ => {
+                        shell_println!("Unknown severity: {}", s);
+                        return;
+                    }
+                };
+                logpersist::set_min_severity(sev);
+                shell_println!("Minimum persist severity set to {}", sev.as_str());
+            } else {
+                let cfg = logpersist::config();
+                shell_println!("Minimum persist severity: {}", cfg.min_persist_severity.as_str());
+            }
+        }
+        "test" => {
+            match logpersist::self_test() {
+                Ok(()) => shell_println!("Log persistence self-test: PASSED"),
+                Err(e) => shell_println!("Log persistence self-test: FAILED ({:?})", e),
+            }
+        }
+        "help" => {
+            shell_println!("logpersist — event log persistence to disk");
+            shell_println!("  show               Status and statistics");
+            shell_println!("  flush              Flush new events to disk now");
+            shell_println!("  prune              Delete old rotated files exceeding cap");
+            shell_println!("  init               Initialize with default config");
+            shell_println!("  enable / disable   Toggle persistence");
+            shell_println!("  mode [combined|per-namespace]  Set/show rotation mode");
+            shell_println!("  severity [level]   Set/show min persist severity");
+            shell_println!("  test               Run self-test");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'logpersist help'.", sub);
+        }
     }
 }
 
@@ -63197,7 +63322,7 @@ fn cmd_type(args: &str) {
 fn is_builtin(name: &str) -> bool {
     matches!(name,
         "help" | "?" | "cd" | "meminfo" | "mem" | "ps" | "tasks" | "clear" | "cls"
-        | "uptime" | "dmesg" | "elog" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
+        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"

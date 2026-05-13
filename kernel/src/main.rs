@@ -110,6 +110,7 @@ mod loadavg;
 mod ktrace;
 mod limine;
 mod lockdep;
+mod logpersist;
 mod mm;
 mod msi;
 mod net;

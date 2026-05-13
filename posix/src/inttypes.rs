@@ -666,12 +666,9 @@ mod tests {
 
     #[test]
     fn test_wcstoimax_leading_whitespace() {
-        // "  \t42\0" — whitespace then digits.
-        let s: [i32; 5] = [0x20, 0x20, 0x09, 0x34, 0x00]; // ' ', ' ', '\t', '4', NUL
-        // Hmm, wait — this is "  \t4" but we need more digits.
-        // Let's use "  42\0":
-        let s2: [i32; 5] = [0x20, 0x20, 0x34, 0x32, 0x00]; // ' ', ' ', '4', '2', NUL
-        let v = unsafe { wcstoimax(s2.as_ptr(), core::ptr::null_mut(), 10) };
+        // "  42\0" — whitespace then digits.
+        let s: [i32; 5] = [0x20, 0x20, 0x34, 0x32, 0x00]; // ' ', ' ', '4', '2', NUL
+        let v = unsafe { wcstoimax(s.as_ptr(), core::ptr::null_mut(), 10) };
         assert_eq!(v, 42);
     }
 }

@@ -369,4 +369,48 @@ mod tests {
         // which has trailing slashes stripped down to "/usr".
         assert!(unsafe { cstr_eq(result, b"/usr") });
     }
+
+    // -----------------------------------------------------------------------
+    // Additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_basename_slash_then_name() {
+        // "/x" should return "x".
+        let mut buf = make_path("/x");
+        let result = basename(buf.as_mut_ptr());
+        assert!(unsafe { cstr_eq(result, b"x") });
+    }
+
+    #[test]
+    fn test_basename_redundant_slashes_middle() {
+        // "/a///b" should return "b".
+        let mut buf = make_path("/a///b");
+        let result = basename(buf.as_mut_ptr());
+        assert!(unsafe { cstr_eq(result, b"b") });
+    }
+
+    #[test]
+    fn test_dirname_dotdot_with_slash() {
+        // "a/.." dirname should be "a".
+        let mut buf = make_path("a/..");
+        let result = dirname(buf.as_mut_ptr());
+        assert!(unsafe { cstr_eq(result, b"a") });
+    }
+
+    #[test]
+    fn test_dirname_trailing_slash_single_component() {
+        // "foo/" dirname should be ".".
+        let mut buf = make_path("foo/");
+        let result = dirname(buf.as_mut_ptr());
+        assert!(unsafe { cstr_eq(result, b".") });
+    }
+
+    #[test]
+    fn test_basename_trailing_slash_single_component() {
+        // "foo/" basename should be "foo" (trailing slash stripped).
+        let mut buf = make_path("foo/");
+        let result = basename(buf.as_mut_ptr());
+        assert!(unsafe { cstr_eq(result, b"foo") });
+    }
 }

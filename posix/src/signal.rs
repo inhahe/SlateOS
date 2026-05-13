@@ -1267,6 +1267,35 @@ mod tests {
         assert_eq!(ret, -1);
     }
 
+    // -- kill errno verification --
+
+    #[test]
+    fn test_kill_sets_errno() {
+        crate::errno::set_errno(0);
+        let ret = kill(1, SIGTERM);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- sigtimedwait / sigqueue stubs --
+
+    #[test]
+    fn test_sigtimedwait_returns_eagain() {
+        crate::errno::set_errno(0);
+        let set = SigsetT { bits: [0; 16] };
+        let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAGAIN);
+    }
+
+    #[test]
+    fn test_sigqueue_returns_enosys() {
+        crate::errno::set_errno(0);
+        let ret = sigqueue(1, SIGTERM, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
     // -- realtime signal range --
 
     #[test]

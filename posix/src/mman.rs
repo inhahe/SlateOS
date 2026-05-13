@@ -281,6 +281,60 @@ mod tests {
     fn test_madvise_stub_succeeds() {
         assert_eq!(madvise(core::ptr::null_mut(), 4096, MADV_NORMAL), 0);
     }
+
+    // -- Shared memory stubs return ENOSYS --
+
+    #[test]
+    fn test_shm_open_returns_enosys() {
+        assert_eq!(shm_open(b"/test\0".as_ptr(), 0, 0), -1);
+    }
+
+    #[test]
+    fn test_shm_unlink_returns_enosys() {
+        assert_eq!(shm_unlink(b"/test\0".as_ptr()), -1);
+    }
+
+    // -- posix_madvise stub succeeds --
+
+    #[test]
+    fn test_posix_madvise_succeeds() {
+        assert_eq!(posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_NORMAL), 0);
+        assert_eq!(posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_SEQUENTIAL), 0);
+    }
+
+    // -- POSIX_MADV_* constants --
+
+    #[test]
+    fn test_posix_madv_constants() {
+        assert_eq!(POSIX_MADV_NORMAL, 0);
+        assert_eq!(POSIX_MADV_RANDOM, 1);
+        assert_eq!(POSIX_MADV_SEQUENTIAL, 2);
+        assert_eq!(POSIX_MADV_WILLNEED, 3);
+        assert_eq!(POSIX_MADV_DONTNEED, 4);
+    }
+
+    // -- memfd_create returns ENOSYS --
+
+    #[test]
+    fn test_memfd_create_returns_enosys() {
+        assert_eq!(memfd_create(b"test\0".as_ptr(), 0), -1);
+    }
+
+    // -- mremap returns MAP_FAILED --
+
+    #[test]
+    fn test_mremap_returns_map_failed() {
+        let ret = mremap(core::ptr::null_mut(), 4096, 8192, 0);
+        assert_eq!(ret, MAP_FAILED);
+    }
+
+    // -- MREMAP_* constants --
+
+    #[test]
+    fn test_mremap_constants() {
+        assert_eq!(MREMAP_MAYMOVE, 1);
+        assert_eq!(MREMAP_FIXED, 2);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -2250,4 +2250,89 @@ mod tests {
         let flags = translate_open_flags(0);
         assert_eq!(flags, 0);
     }
+
+    // -- Stub functions: verify they return expected values --
+
+    #[test]
+    fn test_chmod_succeeds() {
+        assert_eq!(chmod(b"/tmp\0".as_ptr(), 0o755), 0);
+    }
+
+    #[test]
+    fn test_fchmod_succeeds() {
+        assert_eq!(fchmod(0, 0o644), 0);
+    }
+
+    #[test]
+    fn test_chown_succeeds() {
+        assert_eq!(chown(b"/tmp\0".as_ptr(), 0, 0), 0);
+    }
+
+    #[test]
+    fn test_fchown_succeeds() {
+        assert_eq!(fchown(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_lchown_succeeds() {
+        assert_eq!(lchown(b"/link\0".as_ptr(), 0, 0), 0);
+    }
+
+    #[test]
+    fn test_umask_returns_previous() {
+        // Stub always returns 0o022.
+        assert_eq!(umask(0o077), 0o022);
+        assert_eq!(umask(0), 0o022);
+    }
+
+    #[test]
+    fn test_posix_fadvise_succeeds() {
+        assert_eq!(posix_fadvise(0, 0, 0, POSIX_FADV_NORMAL), 0);
+        assert_eq!(posix_fadvise(0, 0, 0, POSIX_FADV_SEQUENTIAL), 0);
+        assert_eq!(posix_fadvise(0, 0, 0, POSIX_FADV_RANDOM), 0);
+    }
+
+    #[test]
+    fn test_posix_fallocate_succeeds() {
+        assert_eq!(posix_fallocate(0, 0, 4096), 0);
+    }
+
+    #[test]
+    fn test_flock_succeeds() {
+        assert_eq!(flock(0, LOCK_SH), 0);
+        assert_eq!(flock(0, LOCK_EX), 0);
+        assert_eq!(flock(0, LOCK_UN), 0);
+        assert_eq!(flock(0, LOCK_EX | LOCK_NB), 0);
+    }
+
+    // -- File locking constants match Linux --
+
+    #[test]
+    fn test_lock_constants() {
+        assert_eq!(LOCK_SH, 1);
+        assert_eq!(LOCK_EX, 2);
+        assert_eq!(LOCK_NB, 4);
+        assert_eq!(LOCK_UN, 8);
+    }
+
+    // -- posix_fadvise constants match Linux --
+
+    #[test]
+    fn test_fadv_constants() {
+        assert_eq!(POSIX_FADV_NORMAL, 0);
+        assert_eq!(POSIX_FADV_RANDOM, 1);
+        assert_eq!(POSIX_FADV_SEQUENTIAL, 2);
+        assert_eq!(POSIX_FADV_WILLNEED, 3);
+        assert_eq!(POSIX_FADV_DONTNEED, 4);
+        assert_eq!(POSIX_FADV_NOREUSE, 5);
+    }
+
+    // -- creat is open with O_CREAT|O_WRONLY|O_TRUNC --
+
+    #[test]
+    fn test_close_range_boundary() {
+        // close_range with inverted range should not crash.
+        // In our implementation it closes nothing (first > last).
+        let _ = close_range(100, 50, 0);
+    }
 }

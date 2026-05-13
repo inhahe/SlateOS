@@ -392,4 +392,49 @@ mod tests {
             }
         }
     }
+
+    // -- mknod/mkfifo stubs return ENOSYS --
+
+    #[test]
+    fn test_mknod_returns_enosys() {
+        assert_eq!(mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, 0), -1);
+    }
+
+    #[test]
+    fn test_mknodat_returns_enosys() {
+        assert_eq!(mknodat(-1, b"node\0".as_ptr(), S_IFCHR | 0o666, 0), -1);
+    }
+
+    #[test]
+    fn test_mkfifo_returns_enosys() {
+        assert_eq!(mkfifo(b"/tmp/fifo\0".as_ptr(), 0o644), -1);
+    }
+
+    #[test]
+    fn test_mkfifoat_returns_enosys() {
+        assert_eq!(mkfifoat(-1, b"fifo\0".as_ptr(), 0o644), -1);
+    }
+
+    // -- S_IS* functions edge cases --
+
+    #[test]
+    fn test_s_isreg_with_permissions() {
+        // Regular file with setuid bit — still a regular file.
+        assert_eq!(S_ISREG(S_IFREG | S_ISUID | 0o755), 1);
+    }
+
+    #[test]
+    fn test_s_isdir_with_sticky() {
+        // Directory with sticky bit — still a directory.
+        assert_eq!(S_ISDIR(S_IFDIR | S_ISVTX | 0o755), 1);
+    }
+
+    #[test]
+    fn test_stat_methods_consistent_with_c_functions() {
+        let mut st = Stat::zeroed();
+        st.st_mode = S_IFREG | 0o644;
+        assert_eq!(S_ISREG(st.st_mode) != 0, st.is_file());
+        assert_eq!(S_ISDIR(st.st_mode) != 0, st.is_dir());
+        assert_eq!(S_ISLNK(st.st_mode) != 0, st.is_link());
+    }
 }

@@ -3615,4 +3615,169 @@ mod tests {
         assert_eq!(result.quot, i64::MIN);
         assert_eq!(result.rem, 0);
     }
+
+    // -------------------------------------------------------------------
+    // Stress tests — strtod endptr edge cases
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_strtod_dot_only() {
+        // Just "." — no digits. Should return 0, endptr at start.
+        let s = b".\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert_eq!(val, 0.0);
+        assert_eq!(end, s.as_ptr()); // no valid conversion
+    }
+
+    #[test]
+    fn test_strtod_stress_trailing_dot_endptr() {
+        // "5." — trailing dot is valid, result is 5.0.
+        let s = b"5.\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert!((val - 5.0).abs() < 1e-15);
+        // endptr should be past the dot.
+        let consumed = end as usize - s.as_ptr() as usize;
+        assert_eq!(consumed, 2);
+    }
+
+    #[test]
+    fn test_strtod_stress_e_rollback() {
+        // "3.14e" — 'e' without exponent digits is not consumed.
+        let s = b"3.14e\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert!((val - 3.14).abs() < 1e-10);
+        let consumed = end as usize - s.as_ptr() as usize;
+        assert_eq!(consumed, 4); // stops at 'e'
+    }
+
+    #[test]
+    fn test_strtod_e_plus_without_digits() {
+        // "3.14e+" — 'e+' without exponent digits is not consumed.
+        let s = b"3.14e+\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert!((val - 3.14).abs() < 1e-10);
+        let consumed = end as usize - s.as_ptr() as usize;
+        assert_eq!(consumed, 4); // stops at 'e'
+    }
+
+    #[test]
+    fn test_strtod_dot_then_e() {
+        // ".e5" — dot but no digits on either side. No valid conversion.
+        let s = b".e5\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert_eq!(val, 0.0);
+        assert_eq!(end, s.as_ptr()); // no valid conversion
+    }
+
+    #[test]
+    fn test_strtod_neg_infinity() {
+        let s = b"-inf\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert!(val.is_infinite() && val < 0.0);
+        let consumed = end as usize - s.as_ptr() as usize;
+        assert_eq!(consumed, 4);
+    }
+
+    #[test]
+    fn test_strtod_full_infinity() {
+        let s = b"INFINITY\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert!(val.is_infinite() && val > 0.0);
+        let consumed = end as usize - s.as_ptr() as usize;
+        assert_eq!(consumed, 8); // consumed all of "INFINITY"
+    }
+
+    #[test]
+    fn test_strtod_only_whitespace() {
+        let s = b"   \0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert_eq!(val, 0.0);
+        assert_eq!(end, s.as_ptr()); // no valid conversion
+    }
+
+    #[test]
+    fn test_strtod_zero_exponent() {
+        let s = b"5e0\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert!((val - 5.0).abs() < 1e-15);
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — strtoul boundary values
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_strtoul_max() {
+        let s = b"18446744073709551615\0"; // u64::MAX
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtoul(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, u64::MAX);
+    }
+
+    #[test]
+    fn test_strtoul_stress_overflow_by_one() {
+        let s = b"18446744073709551616\0"; // u64::MAX + 1
+        let mut end: *const u8 = core::ptr::null();
+        crate::errno::set_errno(0);
+        let val = unsafe { strtoul(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, u64::MAX);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_strtol_exact_min() {
+        let s = b"-9223372036854775808\0"; // i64::MIN
+        let mut end: *const u8 = core::ptr::null();
+        crate::errno::set_errno(0);
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, i64::MIN);
+        // Exact min is valid, should NOT set ERANGE.
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_strtol_exact_max() {
+        let s = b"9223372036854775807\0"; // i64::MAX
+        let mut end: *const u8 = core::ptr::null();
+        crate::errno::set_errno(0);
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, i64::MAX);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_strtol_stress_invalid_base_37() {
+        let s = b"42\0";
+        let mut end: *const u8 = core::ptr::null();
+        crate::errno::set_errno(0);
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 37) };
+        assert_eq!(val, 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_strtol_base2() {
+        let s = b"1010\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 2) };
+        assert_eq!(val, 10);
+    }
+
+    #[test]
+    fn test_strtol_base0_just_zero() {
+        // "0" in base 0 should parse as 0 (not octal prefix).
+        let s = b"0\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 0);
+    }
 }

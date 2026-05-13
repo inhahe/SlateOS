@@ -3549,6 +3549,7 @@ const COMMANDS: &[&str] = &[
     "ndisc", "arpscan",
     "nc", "netcat",
     "iperf",
+    "snmp",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4752,6 +4753,7 @@ fn dispatch(line: &str) {
         "ndisc" | "arpscan" => cmd_ndisc(args),
         "nc" | "netcat" => cmd_nc(args),
         "iperf" => cmd_iperf(args),
+        "snmp" => cmd_snmp(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35760,6 +35762,190 @@ fn cmd_ndisc(args: &str) {
     }
 }
 
+/// `snmp` — Simple Network Management Protocol client.
+fn cmd_snmp(args: &str) {
+    use alloc::format;
+    use alloc::vec::Vec;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("help");
+
+    match sub {
+        "get" | "g" => {
+            // snmp get <host> <oid> [community]
+            if parts.len() < 3 {
+                shell_println!("Usage: snmp get <host> <oid> [community]");
+                return;
+            }
+            let host_str = parts[1];
+            let oid_str = parts[2];
+            let community = parts.get(3).copied().unwrap_or("public");
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("snmp: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            let oid = match crate::net::snmp::Oid::parse(oid_str) {
+                Some(o) => o,
+                None => {
+                    shell_println!("snmp: invalid OID '{}'", oid_str);
+                    return;
+                }
+            };
+
+            let name = crate::net::snmp::oid_name(oid_str);
+            if !name.is_empty() {
+                shell_println!("Querying {} ({})...", oid_str, name);
+            } else {
+                shell_println!("Querying {}...", oid_str);
+            }
+
+            match crate::net::snmp::get(ip, &oid, community) {
+                Ok(vb) => {
+                    shell_println!("  {} = {}", vb.oid.to_string(), vb.value.display());
+                }
+                Err(e) => shell_println!("snmp: get failed: {:?}", e),
+            }
+        }
+
+        "walk" | "w" => {
+            // snmp walk <host> <oid> [community]
+            if parts.len() < 3 {
+                shell_println!("Usage: snmp walk <host> <oid> [community]");
+                return;
+            }
+            let host_str = parts[1];
+            let oid_str = parts[2];
+            let community = parts.get(3).copied().unwrap_or("public");
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("snmp: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            let oid = match crate::net::snmp::Oid::parse(oid_str) {
+                Some(o) => o,
+                None => {
+                    shell_println!("snmp: invalid OID '{}'", oid_str);
+                    return;
+                }
+            };
+
+            shell_println!("Walking subtree {}...", oid_str);
+            let results = crate::net::snmp::walk(ip, &oid, community);
+            if results.is_empty() {
+                shell_println!("  (no results — walk requires UDP receive support)");
+            } else {
+                for vb in &results {
+                    let name = crate::net::snmp::oid_name(&vb.oid.to_string());
+                    if !name.is_empty() {
+                        shell_println!("  {} ({}) = {}", vb.oid.to_string(), name, vb.value.display());
+                    } else {
+                        shell_println!("  {} = {}", vb.oid.to_string(), vb.value.display());
+                    }
+                }
+                shell_println!("{} entries", results.len());
+            }
+        }
+
+        "sysinfo" | "sys" => {
+            // snmp sysinfo <host> [community]
+            if parts.len() < 2 {
+                shell_println!("Usage: snmp sysinfo <host> [community]");
+                return;
+            }
+            let host_str = parts[1];
+            let community = parts.get(2).copied().unwrap_or("public");
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("snmp: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            shell_println!("Querying system info from {}...", ip);
+            let sys_oids = crate::net::snmp::system_oids();
+            for (oid_str, name) in &sys_oids {
+                if let Some(oid) = crate::net::snmp::Oid::parse(oid_str) {
+                    match crate::net::snmp::get(ip, &oid, community) {
+                        Ok(vb) => shell_println!("  {}: {}", name, vb.value.display()),
+                        Err(_) => shell_println!("  {}: (timeout)", name),
+                    }
+                }
+            }
+        }
+
+        "oids" => {
+            shell_println!("Well-known SNMP OIDs:");
+            shell_println!("  System:");
+            shell_println!("    1.3.6.1.2.1.1.1.0  sysDescr");
+            shell_println!("    1.3.6.1.2.1.1.3.0  sysUpTime");
+            shell_println!("    1.3.6.1.2.1.1.4.0  sysContact");
+            shell_println!("    1.3.6.1.2.1.1.5.0  sysName");
+            shell_println!("    1.3.6.1.2.1.1.6.0  sysLocation");
+            shell_println!("  Interfaces:");
+            shell_println!("    1.3.6.1.2.1.2.1.0  ifNumber");
+            shell_println!("    1.3.6.1.2.1.2.2    ifTable");
+            shell_println!("  TCP:");
+            shell_println!("    1.3.6.1.2.1.6.9.0  tcpCurrEstab");
+            shell_println!("    1.3.6.1.2.1.6.10.0 tcpInSegs");
+            shell_println!("    1.3.6.1.2.1.6.11.0 tcpOutSegs");
+            shell_println!("  UDP:");
+            shell_println!("    1.3.6.1.2.1.7.1.0  udpInDatagrams");
+            shell_println!("    1.3.6.1.2.1.7.4.0  udpOutDatagrams");
+        }
+
+        "status" | "stats" => {
+            let s = crate::net::snmp::stats();
+            shell_println!("SNMP statistics:");
+            shell_println!("  GET sent:           {}", s.gets_sent);
+            shell_println!("  GET-NEXT sent:      {}", s.get_nexts_sent);
+            shell_println!("  Walks done:         {}", s.walks_done);
+            shell_println!("  Responses received: {}", s.responses_received);
+            shell_println!("  Errors:             {}", s.errors_received);
+        }
+
+        "test" => {
+            match crate::net::snmp::self_test() {
+                Ok(()) => shell_println!("snmp: all self-tests passed"),
+                Err(e) => shell_println!("snmp: self-test failed: {:?}", e),
+            }
+        }
+
+        _ => {
+            shell_println!("snmp — Simple Network Management Protocol client");
+            shell_println!();
+            shell_println!("Usage:");
+            shell_println!("  snmp get <host> <oid> [community]     — GET single OID");
+            shell_println!("  snmp walk <host> <oid> [community]    — walk subtree");
+            shell_println!("  snmp sysinfo <host> [community]       — query system info");
+            shell_println!("  snmp oids                             — list well-known OIDs");
+            shell_println!("  snmp status                           — show statistics");
+            shell_println!("  snmp test                             — run self-tests");
+        }
+    }
+}
+
 /// `iperf` — network bandwidth measurement tool.
 fn cmd_iperf(args: &str) {
     use alloc::format;
@@ -66691,7 +66877,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

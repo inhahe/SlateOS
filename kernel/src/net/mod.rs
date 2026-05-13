@@ -31,6 +31,7 @@ pub mod netcat;
 pub mod netstat;
 pub mod mdns;
 pub mod ntp;
+pub mod snmp;
 pub mod syslog;
 pub mod telnet;
 pub mod tftp;

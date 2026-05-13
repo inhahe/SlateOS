@@ -445,9 +445,13 @@ pub extern "C" fn posix_spawn(
         return native_to_posix_err(ret);
     }
 
+    // Record the child PID for waitpid(-1, ...) to use later.
+    let child_pid = ret as PidT;
+    crate::process::record_child_pid(child_pid);
+
     // Store child PID if requested.
     if !pid.is_null() {
-        unsafe { *pid = ret as PidT; }
+        unsafe { *pid = child_pid; }
     }
 
     0

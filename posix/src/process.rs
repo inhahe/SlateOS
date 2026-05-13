@@ -18,6 +18,26 @@ use crate::syscall::*;
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
+// Child PID tracking
+// ---------------------------------------------------------------------------
+
+/// Most recently spawned child PID.
+///
+/// Updated by `posix_spawn`/`posix_spawnp` when a child is created.
+/// Used by `waitpid(-1, ...)` to return the correct child PID, since
+/// our kernel's `SYS_PROCESS_WAIT` returns the exit code rather than
+/// the child PID.
+static mut LAST_CHILD_PID: PidT = 0;
+
+/// Record a newly spawned child's PID.
+///
+/// Called from `posix_spawn` / `posix_spawnp` after a successful spawn.
+pub(crate) fn record_child_pid(pid: PidT) {
+    // SAFETY: Single-threaded access.
+    unsafe { LAST_CHILD_PID = pid; }
+}
+
+// ---------------------------------------------------------------------------
 // waitpid flags
 // ---------------------------------------------------------------------------
 
@@ -117,6 +137,11 @@ pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
     let ret = syscall1(sys_nr, pid as u64);
 
     if ret < 0 {
+        // POSIX: WNOHANG with no child state change returns 0, not -1.
+        // The kernel signals "nothing ready" with WouldBlock (-4).
+        if (options & WNOHANG) != 0 && ret == errno::native::WOULD_BLOCK {
+            return 0;
+        }
         return errno::translate(ret) as PidT;
     }
 
@@ -132,7 +157,17 @@ pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
         }
     }
 
-    pid
+    // The kernel returns the exit code, not the child PID.  For
+    // positive pid arguments, the caller already knows which child
+    // they waited for.  For pid < 0 (wait-for-any), use the most
+    // recently spawned child PID recorded by posix_spawn, or
+    // fallback to 1 if unknown.
+    if pid > 0 {
+        pid
+    } else {
+        let child = unsafe { LAST_CHILD_PID };
+        if child > 0 { child } else { 1 }
+    }
 }
 
 /// Wait for any child process (convenience wrapper).

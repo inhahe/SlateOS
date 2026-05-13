@@ -241,12 +241,18 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
             // Determine readiness based on handle kind.
             let (readable, writable, hangup, error) = check_readiness(entry.kind, entry.handle);
 
+            // Linux semantics: POLLHUP/POLLERR imply readability (so programs
+            // wake up and discover the condition via read()), and POLLERR also
+            // implies writability (so non-blocking connect failure is detected).
+            let eff_readable = readable || hangup || error;
+            let eff_writable = writable || error;
+
             let mut revents: i16 = 0;
-            if readable && (pfd.events & (POLLIN | POLLRDNORM) != 0) {
+            if eff_readable && (pfd.events & (POLLIN | POLLRDNORM) != 0) {
                 // Report whichever flags were requested.
                 revents |= pfd.events & (POLLIN | POLLRDNORM);
             }
-            if writable && (pfd.events & (POLLOUT | POLLWRNORM) != 0) {
+            if eff_writable && (pfd.events & (POLLOUT | POLLWRNORM) != 0) {
                 revents |= pfd.events & (POLLOUT | POLLWRNORM);
             }
             // POSIX: POLLHUP and POLLERR are always reported regardless of
@@ -526,20 +532,24 @@ pub unsafe extern "C" fn select(
                 return -1;
             };
 
-            let (readable, writable, _hangup, error) = check_readiness(entry.kind, entry.handle);
+            let (readable, writable, hangup, error) = check_readiness(entry.kind, entry.handle);
 
-            if check_read && readable {
+            // Linux select() semantics: POLLERR/POLLHUP imply readability
+            // (so programs wake and discover the error/EOF via read()),
+            // and POLLERR also implies writability (so non-blocking connect
+            // failure is detected via writefds).
+            let eff_readable = readable || hangup || error;
+            let eff_writable = writable || error;
+
+            if check_read && eff_readable {
                 fd_set_set(fd, readfds);
                 ready_count = ready_count.wrapping_add(1);
             }
-            if check_write && writable {
+            if check_write && eff_writable {
                 fd_set_set(fd, writefds);
                 ready_count = ready_count.wrapping_add(1);
             }
-            // POSIX: exceptfds reports "exceptional conditions" which includes
-            // socket errors (POLLERR equivalent).  Also report writable fds in
-            // exceptfds if they have errors — some applications use exceptfds
-            // for connect failure detection in select()-based event loops.
+            // exceptfds: report socket errors (POLLERR equivalent).
             if check_except && error {
                 fd_set_set(fd, exceptfds);
                 ready_count = ready_count.wrapping_add(1);

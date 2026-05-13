@@ -118,6 +118,10 @@ pub const SO_ACCEPTCONN: i32 = 30;
 pub const SO_DOMAIN: i32 = 39;
 /// Protocol of the socket.
 pub const SO_PROTOCOL: i32 = 38;
+/// Receive low watermark (minimum bytes for readability).
+pub const SO_RCVLOWAT: i32 = 18;
+/// Send low watermark (minimum space for writability).
+pub const SO_SNDLOWAT: i32 = 19;
 
 // TCP-level socket options (SOL_TCP).
 /// Disable Nagle's algorithm.
@@ -1488,8 +1492,6 @@ fn accept_wait(listener_handle: u64) -> i32 {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
     loop {
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
-
         let ret = syscall2(SYS_TCP_ACCEPT, listener_handle, 1);
         if ret >= 0 {
             return ret as i32;
@@ -1500,7 +1502,8 @@ fn accept_wait(listener_handle: u64) -> i32 {
             errno::set_errno(err);
             return -1;
         }
-        // Still no connection — keep polling.
+        // Still no connection — sleep then retry.
+        let _ = syscall1(SYS_SLEEP, POLL_NS);
     }
 }
 
@@ -1933,8 +1936,6 @@ fn udp_recv_wait(
     };
 
     loop {
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
-
         let ret = syscall5(
             SYS_UDP_RECV,
             handle,
@@ -1946,7 +1947,13 @@ fn udp_recv_wait(
         if ret >= 0 {
             return ret as isize;
         }
-        // Still no data — check timeout.
+        // Check for real errors (not just "no data yet").
+        let err = translate_net_error(ret);
+        if err != errno::EAGAIN && err != errno::EWOULDBLOCK {
+            errno::set_errno(err);
+            return -1;
+        }
+        // Still no data — check timeout before sleeping.
         if deadline != u64::MAX {
             let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
             if now >= deadline {
@@ -1954,6 +1961,7 @@ fn udp_recv_wait(
                 return -1;
             }
         }
+        let _ = syscall1(SYS_SLEEP, POLL_NS);
     }
 }
 
@@ -1983,8 +1991,6 @@ pub(crate) fn tcp_recv_wait(
     let flags_nb = kern_flags | MSG_DONTWAIT as u32;
 
     loop {
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
-
         let ret = syscall4(
             SYS_TCP_RECV, handle,
             buf as u64, len as u64, flags_nb as u64,
@@ -2003,7 +2009,7 @@ pub(crate) fn tcp_recv_wait(
             errno::set_errno(err);
             return -1;
         }
-        // Still no data — check timeout.
+        // Still no data — check timeout before sleeping.
         if deadline != u64::MAX {
             let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
             if now >= deadline {
@@ -2011,6 +2017,7 @@ pub(crate) fn tcp_recv_wait(
                 return -1;
             }
         }
+        let _ = syscall1(SYS_SLEEP, POLL_NS);
     }
 }
 
@@ -2110,8 +2117,6 @@ pub(crate) fn tcp_send_wait(
     };
 
     loop {
-        let _ = syscall1(SYS_SLEEP, POLL_NS);
-
         let ret = syscall3(SYS_TCP_SEND, handle, buf as u64, len as u64);
         if ret > 0 {
             return ret as isize;
@@ -2135,7 +2140,7 @@ pub(crate) fn tcp_send_wait(
             }
             return -1;
         }
-        // Still can't send — check timeout.
+        // Still can't send — check timeout before sleeping.
         if deadline != u64::MAX {
             let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
             if now >= deadline {
@@ -2143,6 +2148,7 @@ pub(crate) fn tcp_send_wait(
                 return -1;
             }
         }
+        let _ = syscall1(SYS_SLEEP, POLL_NS);
     }
 }
 
@@ -2647,6 +2653,11 @@ pub extern "C" fn setsockopt(
             }
             (SOL_SOCKET, SO_RCVBUF) => { meta.rcvbuf = val.max(1); }
             (SOL_SOCKET, SO_SNDBUF) => { meta.sndbuf = val.max(1); }
+            // RCVLOWAT/SNDLOWAT: accept silently. Linux also ignores
+            // SNDLOWAT (always 1) and clamps RCVLOWAT. We accept both as
+            // no-ops since our poll/select doesn't use per-socket watermarks.
+            (SOL_SOCKET, SO_RCVLOWAT) => {}
+            (SOL_SOCKET, SO_SNDLOWAT) => {}
             (SOL_SOCKET, SO_BROADCAST) => { meta.broadcast = val != 0; }
             (SOL_SOCKET, SO_LINGER) => {
                 // BSD struct linger { int l_onoff; int l_linger; } = 8 bytes.
@@ -2941,6 +2952,8 @@ pub unsafe extern "C" fn getsockopt(
                 }
                 (ms / 1000) as i32
             }
+            (SOL_SOCKET, SO_RCVLOWAT) => 1, // Default: readable when ≥1 byte available.
+            (SOL_SOCKET, SO_SNDLOWAT) => 1, // Default: writable when ≥1 byte of space.
             (SOL_SOCKET, SO_ACCEPTCONN) => i32::from(entry.kind == HandleKind::TcpListener),
             (SOL_SOCKET, SO_DOMAIN) => AF_INET,
             (SOL_SOCKET, SO_PROTOCOL) => match entry.kind {
@@ -4076,13 +4089,29 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
     }
 
     // Single iov — send directly without copying.
+    // Use sendto when msg_name is set (for UDP to specified destination).
     if m.msg_iovlen == 1 {
         let iov = unsafe { &*m.msg_iov };
+        if !m.msg_name.is_null() && m.msg_namelen > 0 {
+            return unsafe {
+                sendto(
+                    fd,
+                    iov.iov_base.cast::<u8>(),
+                    iov.iov_len,
+                    flags,
+                    m.msg_name.cast::<Sockaddr>().cast_const(),
+                    m.msg_namelen,
+                )
+            };
+        }
         return unsafe { send(fd, iov.iov_base, iov.iov_len, flags) };
     }
 
+    // Determine if we have a destination address for sendto.
+    let has_dest = !m.msg_name.is_null() && m.msg_namelen > 0;
+
     // If total fits in a stack buffer, concatenate for one send call.
-    // This produces a single TCP segment instead of multiple.
+    // This produces a single TCP segment / UDP datagram instead of multiple.
     const STACK_BUF: usize = 4096;
     if total <= STACK_BUF {
         let mut buf = [0u8; STACK_BUF];
@@ -4103,7 +4132,17 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
             }
             i = i.wrapping_add(1);
         }
-        return unsafe { send(fd, buf.as_ptr().cast(), pos, flags) };
+        return if has_dest {
+            unsafe {
+                sendto(
+                    fd, buf.as_ptr(), pos, flags,
+                    m.msg_name.cast::<Sockaddr>().cast_const(),
+                    m.msg_namelen,
+                )
+            }
+        } else {
+            unsafe { send(fd, buf.as_ptr().cast(), pos, flags) }
+        };
     }
 
     // Larger than stack buffer — send each iov individually.
@@ -4112,7 +4151,17 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
     while i < m.msg_iovlen {
         let iov = unsafe { &*m.msg_iov.add(i) };
         if iov.iov_len > 0 && !iov.iov_base.is_null() {
-            let n = unsafe { send(fd, iov.iov_base, iov.iov_len, flags) };
+            let n = if has_dest {
+                unsafe {
+                    sendto(
+                        fd, iov.iov_base.cast::<u8>(), iov.iov_len, flags,
+                        m.msg_name.cast::<Sockaddr>().cast_const(),
+                        m.msg_namelen,
+                    )
+                }
+            } else {
+                unsafe { send(fd, iov.iov_base, iov.iov_len, flags) }
+            };
             if n < 0 {
                 return if sent > 0 { sent } else { n };
             }
@@ -4149,9 +4198,27 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
     }
 
     // Single iov — receive directly without copying.
+    // Use recvfrom to populate msg_name (source address) if requested.
     if m.msg_iovlen == 1 {
         let iov = unsafe { &*m.msg_iov };
-        let ret = unsafe { recv(fd, iov.iov_base, iov.iov_len, flags) };
+        let ret = if !m.msg_name.is_null() && m.msg_namelen > 0 {
+            let mut addrlen = m.msg_namelen;
+            let r = unsafe {
+                recvfrom(
+                    fd,
+                    iov.iov_base.cast::<u8>(),
+                    iov.iov_len,
+                    flags,
+                    m.msg_name.cast::<Sockaddr>(),
+                    &mut addrlen,
+                )
+            };
+            m.msg_namelen = addrlen;
+            r
+        } else {
+            m.msg_namelen = 0;
+            unsafe { recv(fd, iov.iov_base, iov.iov_len, flags) }
+        };
         m.msg_flags = 0;
         m.msg_controllen = 0;
         return ret;
@@ -4180,12 +4247,34 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
         if let Some(entry) = fdtable::get_fd(fd) {
             if entry.kind == HandleKind::TcpStream {
                 let mut total_recv: isize = 0;
+                let want_name = !m.msg_name.is_null() && m.msg_namelen > 0;
+                let mut got_name = false;
                 i = 0;
                 while i < m.msg_iovlen {
                     // SAFETY: msg_iov is valid for msg_iovlen entries.
                     let iov = unsafe { &*m.msg_iov.add(i) };
                     if iov.iov_len > 0 && !iov.iov_base.is_null() {
-                        let n = unsafe { recv(fd, iov.iov_base, iov.iov_len, flags) };
+                        // Get source address from the first successful recv.
+                        let n = if want_name && !got_name {
+                            let mut addrlen = m.msg_namelen;
+                            let r = unsafe {
+                                recvfrom(
+                                    fd,
+                                    iov.iov_base.cast::<u8>(),
+                                    iov.iov_len,
+                                    flags,
+                                    m.msg_name.cast::<Sockaddr>(),
+                                    &mut addrlen,
+                                )
+                            };
+                            if r > 0 {
+                                m.msg_namelen = addrlen;
+                                got_name = true;
+                            }
+                            r
+                        } else {
+                            unsafe { recv(fd, iov.iov_base, iov.iov_len, flags) }
+                        };
                         if n < 0 {
                             // Error: return partial data if any, else propagate.
                             if total_recv > 0 {
@@ -4207,6 +4296,9 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
                     }
                     i = i.wrapping_add(1);
                 }
+                if !got_name {
+                    m.msg_namelen = 0;
+                }
                 m.msg_flags = 0;
                 m.msg_controllen = 0;
                 return total_recv;
@@ -4215,11 +4307,27 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
     }
 
     // Receive into a stack buffer, then distribute across iovs.
+    // Use recvfrom to populate msg_name (source address) if requested.
     const STACK_BUF: usize = 4096;
     let recv_cap = if total_cap < STACK_BUF { total_cap } else { STACK_BUF };
     let mut buf = [0u8; STACK_BUF];
-    let ret = unsafe {
-        recv(fd, buf.as_mut_ptr().cast(), recv_cap, flags)
+    let ret = if !m.msg_name.is_null() && m.msg_namelen > 0 {
+        let mut addrlen = m.msg_namelen;
+        let r = unsafe {
+            recvfrom(
+                fd,
+                buf.as_mut_ptr(),
+                recv_cap,
+                flags,
+                m.msg_name.cast::<Sockaddr>(),
+                &mut addrlen,
+            )
+        };
+        m.msg_namelen = addrlen;
+        r
+    } else {
+        m.msg_namelen = 0;
+        unsafe { recv(fd, buf.as_mut_ptr().cast(), recv_cap, flags) }
     };
     if ret <= 0 {
         m.msg_flags = 0;

@@ -424,6 +424,10 @@ const ROOT_FILES: &[&str] = &[
     "pagestat",
     "dmastat",
     "compstat",
+    "irqstat",
+    "epollstat",
+    "vmmap",
+    "softirq",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8263,6 +8267,75 @@ fn gen_compstat() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_irqstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (irqs, cpus, total, spurious, samples, ops) = crate::fs::irqstat::stats();
+    out.push_str(&format!("irq_lines: {}\n", irqs));
+    out.push_str(&format!("cpus: {}\n", cpus));
+    out.push_str(&format!("total_irqs: {}\n", total));
+    out.push_str(&format!("total_spurious: {}\n", spurious));
+    out.push_str(&format!("ops: {}\n", ops));
+    for line in crate::fs::irqstat::irq_lines() {
+        out.push_str(&format!("IRQ{}: {} ({}) count={} spurious={}\n",
+            line.irq_num, line.name, line.irq_type.label(), line.count, line.spurious));
+    }
+    for cs in crate::fs::irqstat::per_cpu() {
+        out.push_str(&format!("cpu{}: total={} ipi={} timer={} avg_lat={}ns max_lat={}ns\n",
+            cs.cpu_id, cs.total_irqs, cs.total_ipi, cs.total_timer, cs.avg_latency_ns, cs.max_latency_ns));
+    }
+    out.into_bytes()
+}
+
+fn gen_epollstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (count, creates, waits, events, timeouts, ops) = crate::fs::epollstat::stats();
+    out.push_str(&format!("instances: {}\n", count));
+    out.push_str(&format!("total_creates: {}\n", creates));
+    out.push_str(&format!("total_waits: {}\n", waits));
+    out.push_str(&format!("total_events: {}\n", events));
+    out.push_str(&format!("total_timeouts: {}\n", timeouts));
+    out.push_str(&format!("ops: {}\n", ops));
+    for inst in crate::fs::epollstat::list_instances() {
+        out.push_str(&format!("epoll#{}: pid={} fds={} waits={} events={}\n",
+            inst.id, inst.owner_pid, inst.registered_fds, inst.wait_calls, inst.events_delivered));
+    }
+    out.into_bytes()
+}
+
+fn gen_vmmap() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (procs, vmas, maps, unmaps, ops) = crate::fs::vmmap::stats();
+    out.push_str(&format!("processes: {}\n", procs));
+    out.push_str(&format!("total_vmas: {}\n", vmas));
+    out.push_str(&format!("total_maps: {}\n", maps));
+    out.push_str(&format!("total_unmaps: {}\n", unmaps));
+    out.push_str(&format!("ops: {}\n", ops));
+    for (pid, vma_count, mapped) in crate::fs::vmmap::list_processes() {
+        out.push_str(&format!("pid={}: vmas={} mapped={}\n", pid, vma_count, mapped));
+    }
+    out.into_bytes()
+}
+
+fn gen_softirq() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cpus, types, raised, executed, tasklets, ops) = crate::fs::softirq::stats();
+    out.push_str(&format!("cpus: {}\n", cpus));
+    out.push_str(&format!("types: {}\n", types));
+    out.push_str(&format!("total_raised: {}\n", raised));
+    out.push_str(&format!("total_executed: {}\n", executed));
+    out.push_str(&format!("total_tasklets: {}\n", tasklets));
+    out.push_str(&format!("ops: {}\n", ops));
+    for ts in crate::fs::softirq::type_stats() {
+        out.push_str(&format!("{}: raised={} executed={} total_ns={}\n",
+            ts.softirq_type.label(), ts.raised, ts.executed, ts.total_ns));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8852,6 +8925,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "pagestat" => Ok(gen_pagestat()),
         "dmastat" => Ok(gen_dmastat()),
         "compstat" => Ok(gen_compstat()),
+        "irqstat" => Ok(gen_irqstat()),
+        "epollstat" => Ok(gen_epollstat()),
+        "vmmap" => Ok(gen_vmmap()),
+        "softirq" => Ok(gen_softirq()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

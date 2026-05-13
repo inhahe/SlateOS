@@ -950,6 +950,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Page Stats (fs::pagestat): Page allocator monitoring with 5 zones, order histogram, huge page tracking, fragmentation metrics; `pagestat`/`pgstat` kshell command; /proc/pagestat; 8 self-tests
   - [x] DMA Stats (fs::dmastat): DMA/IOMMU monitoring with per-device map/unmap/transfer tracking, IOMMU fault log, device registration; `dmastat`/`dma` kshell command; /proc/dmastat; 8 self-tests
   - [x] Compaction Stats (fs::compstat): Memory compaction monitoring with per-zone attempts/success/failure, page migration tracking, stall accounting; `compstat`/`cstat` kshell command; /proc/compstat; 8 self-tests
+  - [x] IRQ Stats (fs::irqstat): Hardware interrupt monitoring with per-IRQ line/per-CPU counters, ISR latency tracking, spurious detection, IRQ registration; `irqstat`/`istat` kshell command; /proc/irqstat; 8 self-tests
+  - [x] Epoll Stats (fs::epollstat): Event polling infrastructure monitoring with instance create/destroy, FD registration, wait/deliver/timeout tracking; `epollstat`/`epoll` kshell command; /proc/epollstat; 8 self-tests
+  - [x] VM Map (fs::vmmap): Virtual memory area monitoring with per-process VMA tracking, mmap/munmap, 7 VMA types, permission labels, address space summary; `vmmap`/`vmap` kshell command; /proc/vmmap; 8 self-tests
+  - [x] Soft IRQ (fs::softirq): Deferred interrupt processing monitoring with 10 softirq types, per-CPU counters, tasklet tracking, ksoftirqd wakeups; `softirq`/`sirq` kshell command; /proc/softirq; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

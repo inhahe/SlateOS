@@ -738,6 +738,11 @@ fn compile_class(
         {
             let lo = ch;
             let hi = unsafe { *pat.add(pos.wrapping_add(2)) };
+            // POSIX: the range endpoint must satisfy lo <= hi.
+            // E.g. [z-a] is invalid and should fail compilation.
+            if lo > hi {
+                return REG_ERANGE;
+            }
             if prog.class_count >= MAX_CLASS_RANGES {
                 return REG_ESPACE;
             }
@@ -1864,5 +1869,37 @@ mod tests {
         let mut prog = new_program(REG_EXTENDED);
         let result = compile(&mut prog, b"[[:bogus:]]\0");
         assert_eq!(result, REG_ECTYPE);
+    }
+
+    // -- Invalid range [z-a] --
+
+    #[test]
+    fn invalid_range_rejected() {
+        // POSIX: [z-a] is invalid because lo > hi.
+        let mut prog = new_program(REG_EXTENDED);
+        let result = compile(&mut prog, b"[z-a]\0");
+        assert_eq!(result, REG_ERANGE, "[z-a] should fail with REG_ERANGE");
+    }
+
+    #[test]
+    fn valid_range_accepted() {
+        // [a-z] is valid (lo <= hi).
+        let mut prog = new_program(REG_EXTENDED);
+        let result = compile(&mut prog, b"[a-z]\0");
+        assert_eq!(result, 0, "[a-z] should compile successfully");
+    }
+
+    #[test]
+    fn equal_range_accepted() {
+        // [a-a] is valid (lo == hi, matches only 'a').
+        assert!(matches_ere(b"[a-a]\0", b"a\0"));
+        assert!(!matches_ere(b"[a-a]\0", b"b\0"));
+    }
+
+    #[test]
+    fn invalid_range_9_to_0() {
+        let mut prog = new_program(REG_EXTENDED);
+        let result = compile(&mut prog, b"[9-0]\0");
+        assert_eq!(result, REG_ERANGE);
     }
 }

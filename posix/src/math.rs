@@ -98,6 +98,8 @@ pub extern "C" fn fabsf(x: f32) -> f32 {
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn floor(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() { return x; }
+    // Preserve ±0.0 (IEEE 754 / POSIX: floor(-0.0) = -0.0).
+    if x == 0.0 { return x; }
     // All f64 values with |x| >= 2^52 are already exact integers;
     // casting them to i64 would saturate and corrupt the value.
     if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 { return x; }
@@ -110,6 +112,7 @@ pub extern "C" fn floor(x: f64) -> f64 {
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn floorf(x: f32) -> f32 {
     if x.is_nan() || x.is_infinite() { return x; }
+    if x == 0.0 { return x; }
     // All f32 values with |x| >= 2^23 are already exact integers.
     if x >= 8_388_608.0 || x <= -8_388_608.0 { return x; }
     let i = x as i32;
@@ -121,6 +124,7 @@ pub extern "C" fn floorf(x: f32) -> f32 {
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn ceil(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() { return x; }
+    if x == 0.0 { return x; }
     if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 { return x; }
     let i = x as i64;
     let f = i as f64;
@@ -131,6 +135,7 @@ pub extern "C" fn ceil(x: f64) -> f64 {
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn ceilf(x: f32) -> f32 {
     if x.is_nan() || x.is_infinite() { return x; }
+    if x == 0.0 { return x; }
     if x >= 8_388_608.0 || x <= -8_388_608.0 { return x; }
     let i = x as i32;
     let f = i as f32;
@@ -154,6 +159,8 @@ pub extern "C" fn roundf(x: f32) -> f32 {
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn trunc(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() { return x; }
+    // Preserve ±0.0 (IEEE 754 / POSIX: trunc(-0.0) = -0.0).
+    if x == 0.0 { return x; }
     // All f64 values with |x| >= 2^52 are already exact integers.
     if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 { return x; }
     x as i64 as f64
@@ -163,6 +170,7 @@ pub extern "C" fn trunc(x: f64) -> f64 {
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn truncf(x: f32) -> f32 {
     if x.is_nan() || x.is_infinite() { return x; }
+    if x == 0.0 { return x; }
     if x >= 8_388_608.0 || x <= -8_388_608.0 { return x; }
     x as i32 as f32
 }
@@ -441,8 +449,12 @@ pub extern "C" fn cosf(x: f32) -> f32 {
 #[unsafe(no_mangle)]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn tan(x: f64) -> f64 {
+    if x.is_nan() || x.is_infinite() { return f64::NAN; }
+    // IEEE 754 division handles near-zero cosine correctly: when cos(x)
+    // is very small, sin(x)/cos(x) produces a large value with the right
+    // sign.  An explicit guard (`if fabs(c) < eps { return INFINITY }`)
+    // would lose the sign, making tan wrong for x just above π/2.
     let c = cos(x);
-    if fabs(c) < 1e-15 { return f64::INFINITY; }
     sin(x) / c
 }
 
@@ -913,19 +925,29 @@ pub extern "C" fn llroundf(x: f32) -> i64 {
 
 /// Round to nearest integer, ties to even (long).
 ///
-/// Without FP environment control, we approximate with `round`.
+/// Uses floor-based approach: `x - floor(x)` gives the fractional part
+/// in [0, 1).  A tie occurs when the fractional part is exactly 0.5.
+/// On a tie, round to the nearest even integer (banker's rounding).
 #[unsafe(no_mangle)]
+#[allow(clippy::cast_precision_loss)]
 pub extern "C" fn lrint(x: f64) -> i64 {
-    // Banker's rounding: if exactly halfway, round to even.
-    let r = round(x);
-    let diff = x - r;
-    if diff == 0.5 || diff == -0.5 {
-        let ri = r as i64;
-        if ri & 1 != 0 {
-            return if diff > 0.0 { ri - 1 } else { ri + 1 };
-        }
+    if x.is_nan() || x.is_infinite() { return 0; }
+    // Large values are already integers; avoid i64 saturation.
+    if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 {
+        return x as i64;
     }
-    r as i64
+    let f = floor(x);
+    let frac = x - f;
+    let fi = f as i64;
+    if frac == 0.5 {
+        // Tie: round to nearest even.  floor(x) is the lower candidate,
+        // floor(x)+1 is the upper.  Pick whichever is even.
+        if fi & 1 == 0 { fi } else { fi.wrapping_add(1) }
+    } else {
+        // Not a tie: round to nearest (same as round-half-away-from-zero
+        // since only exact 0.5 is a tie).
+        round(x) as i64
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -933,14 +955,22 @@ pub extern "C" fn lrintf(x: f32) -> i64 {
     lrint(f64::from(x))
 }
 
-/// Round to nearest integer value (as floating-point).
+/// Round to nearest integer value (as floating-point), ties to even.
 #[unsafe(no_mangle)]
+#[allow(clippy::cast_precision_loss)]
 pub extern "C" fn rint(x: f64) -> f64 {
+    if x.is_nan() || x.is_infinite() { return x; }
+    if x == 0.0 { return x; } // Preserve ±0.0.
+    // Values with |x| >= 2^52 are already exact integers.
+    if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 { return x; }
     lrint(x) as f64
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rintf(x: f32) -> f32 {
+    if x.is_nan() || x.is_infinite() { return x; }
+    if x == 0.0 { return x; }
+    if x >= 8_388_608.0 || x <= -8_388_608.0 { return x; }
     lrintf(x) as f32
 }
 

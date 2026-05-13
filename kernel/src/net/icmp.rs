@@ -152,6 +152,222 @@ fn match_outstanding(seq: u16) -> Option<u64> {
 }
 
 // ---------------------------------------------------------------------------
+// Traceroute probe tracking
+// ---------------------------------------------------------------------------
+
+/// Maximum concurrent traceroute probes.
+const MAX_TRACEROUTE_PROBES: usize = 32;
+
+/// Traceroute probe identifier (distinct from PING_ID to avoid conflicts).
+const TRACEROUTE_ID: u16 = 0x5678;
+
+/// Traceroute probe next sequence number.
+static TRACE_SEQ: AtomicU16 = AtomicU16::new(1);
+
+/// A traceroute probe awaiting a Time Exceeded or Echo Reply.
+#[derive(Debug, Clone, Copy)]
+struct TraceProbe {
+    /// Whether this slot is in use.
+    active: bool,
+    /// Sequence number.
+    seq: u16,
+    /// Timestamp when sent (ns).
+    sent_ns: u64,
+    /// TTL (hop number) used for this probe.
+    ttl: u8,
+    /// Set when a reply (Time Exceeded or Echo Reply) is received.
+    reply_received: bool,
+    /// IP address of the replying router (or destination).
+    reply_ip: Ipv4Addr,
+    /// RTT in nanoseconds (set when reply received).
+    rtt_ns: u64,
+    /// True if we received an Echo Reply (reached destination).
+    reached_dst: bool,
+}
+
+impl TraceProbe {
+    const fn empty() -> Self {
+        Self {
+            active: false,
+            seq: 0,
+            sent_ns: 0,
+            ttl: 0,
+            reply_received: false,
+            reply_ip: Ipv4Addr::UNSPECIFIED,
+            rtt_ns: 0,
+            reached_dst: false,
+        }
+    }
+}
+
+/// Table of outstanding traceroute probes.
+static TRACE_PROBES: Mutex<[TraceProbe; MAX_TRACEROUTE_PROBES]> =
+    Mutex::new([TraceProbe::empty(); MAX_TRACEROUTE_PROBES]);
+
+/// Record an outstanding traceroute probe.
+pub fn record_trace_probe(seq: u16, ttl: u8) {
+    let now = crate::hrtimer::now_ns();
+    let mut table = TRACE_PROBES.lock();
+
+    for slot in table.iter_mut() {
+        if !slot.active {
+            *slot = TraceProbe {
+                active: true,
+                seq,
+                sent_ns: now,
+                ttl,
+                reply_received: false,
+                reply_ip: Ipv4Addr::UNSPECIFIED,
+                rtt_ns: 0,
+                reached_dst: false,
+            };
+            return;
+        }
+    }
+
+    // All full — evict oldest.
+    let mut oldest_idx = 0;
+    let mut oldest_time = u64::MAX;
+    for (i, slot) in table.iter().enumerate() {
+        if slot.sent_ns < oldest_time {
+            oldest_time = slot.sent_ns;
+            oldest_idx = i;
+        }
+    }
+    if let Some(slot) = table.get_mut(oldest_idx) {
+        *slot = TraceProbe {
+            active: true,
+            seq,
+            sent_ns: now,
+            ttl,
+            reply_received: false,
+            reply_ip: Ipv4Addr::UNSPECIFIED,
+            rtt_ns: 0,
+            reached_dst: false,
+        };
+    }
+}
+
+/// Check if a traceroute probe has received a reply.
+///
+/// Returns `Some((reply_ip, rtt_ns, reached_dst))` if a reply arrived.
+pub fn check_trace_reply(seq: u16) -> Option<(Ipv4Addr, u64, bool)> {
+    let mut table = TRACE_PROBES.lock();
+    for slot in table.iter_mut() {
+        if slot.active && slot.seq == seq && slot.reply_received {
+            let result = (slot.reply_ip, slot.rtt_ns, slot.reached_dst);
+            slot.active = false; // Consume the probe.
+            return Some(result);
+        }
+    }
+    None
+}
+
+/// Allocate a traceroute sequence number.
+pub fn next_trace_seq() -> u16 {
+    TRACE_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Get the traceroute probe ICMP identifier.
+pub fn trace_id() -> u16 {
+    TRACEROUTE_ID
+}
+
+/// Build an ICMP echo request for traceroute (uses TRACEROUTE_ID).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn build_trace_echo_request(seq: u16) -> Vec<u8> {
+    let payload = b"traceroute probe";
+    let total = ICMP_HEADER_SIZE + payload.len();
+    let mut pkt = Vec::with_capacity(total);
+
+    pkt.push(ICMP_ECHO_REQUEST);
+    pkt.push(0);
+    pkt.extend_from_slice(&[0, 0]); // Checksum placeholder.
+    pkt.extend_from_slice(&TRACEROUTE_ID.to_be_bytes());
+    pkt.extend_from_slice(&seq.to_be_bytes());
+    pkt.extend_from_slice(payload);
+
+    let checksum = ipv4::ip_checksum(&pkt);
+    pkt[2] = (checksum >> 8) as u8;
+    pkt[3] = checksum as u8;
+
+    pkt
+}
+
+/// Match a Time Exceeded ICMP error against our traceroute probes.
+///
+/// The ICMP error payload contains the original IP header + first 8 bytes
+/// of the original datagram.  For ICMP echo, bytes 4-5 are the ID and
+/// bytes 6-7 are the sequence number.
+fn match_trace_time_exceeded(icmp_data: &[u8], from_ip: Ipv4Addr) {
+    // ICMP header (8 bytes) + original IP header (≥20 bytes) + 8 bytes original payload.
+    if icmp_data.len() < ICMP_HEADER_SIZE + 20 + 8 {
+        return;
+    }
+
+    let orig_ip = &icmp_data[ICMP_HEADER_SIZE..];
+    let ihl = (orig_ip[0] & 0x0F) as usize;
+    if ihl < 5 {
+        return;
+    }
+
+    let proto = *orig_ip.get(9).unwrap_or(&0);
+    if proto != PROTO_ICMP {
+        return; // Not an ICMP probe.
+    }
+
+    // Original ICMP header starts after the IP header.
+    let icmp_off = ihl.saturating_mul(4);
+    let orig_icmp = match orig_ip.get(icmp_off..) {
+        Some(d) if d.len() >= 8 => d,
+        _ => return,
+    };
+
+    // Check type = Echo Request (8).
+    if orig_icmp[0] != ICMP_ECHO_REQUEST {
+        return;
+    }
+
+    let id = u16::from_be_bytes([orig_icmp[4], orig_icmp[5]]);
+    let seq = u16::from_be_bytes([orig_icmp[6], orig_icmp[7]]);
+
+    if id != TRACEROUTE_ID {
+        return; // Not our traceroute probe.
+    }
+
+    let now = crate::hrtimer::now_ns();
+    let mut table = TRACE_PROBES.lock();
+    for slot in table.iter_mut() {
+        if slot.active && slot.seq == seq && !slot.reply_received {
+            slot.reply_received = true;
+            slot.reply_ip = from_ip;
+            slot.rtt_ns = now.saturating_sub(slot.sent_ns);
+            slot.reached_dst = false;
+            return;
+        }
+    }
+}
+
+/// Match an Echo Reply against traceroute probes (destination reached).
+fn match_trace_echo_reply(from_ip: Ipv4Addr, id: u16, seq: u16) {
+    if id != TRACEROUTE_ID {
+        return;
+    }
+
+    let now = crate::hrtimer::now_ns();
+    let mut table = TRACE_PROBES.lock();
+    for slot in table.iter_mut() {
+        if slot.active && slot.seq == seq && !slot.reply_received {
+            slot.reply_received = true;
+            slot.reply_ip = from_ip;
+            slot.rtt_ns = now.saturating_sub(slot.sent_ns);
+            slot.reached_dst = true;
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ICMP packet building
 // ---------------------------------------------------------------------------
 
@@ -366,6 +582,9 @@ pub fn process_icmp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
             }
         }
         ICMP_TIME_EXCEEDED => {
+            // Check if this is a reply to a traceroute probe first.
+            match_trace_time_exceeded(data, ip_packet.src);
+
             crate::serial_println!(
                 "[icmp] Time exceeded from {}: {} (code {})",
                 ip_packet.src,
@@ -403,6 +622,12 @@ fn handle_echo_reply(ip_packet: &Ipv4Packet<'_>, data: &[u8]) {
 
     let id = u16::from_be_bytes([data[4], data[5]]);
     let seq = u16::from_be_bytes([data[6], data[7]]);
+
+    // Check if this is a traceroute probe reply (destination reached).
+    if id == TRACEROUTE_ID {
+        match_trace_echo_reply(ip_packet.src, id, seq);
+        return;
+    }
 
     if id != PING_ID {
         return; // Not our ping.

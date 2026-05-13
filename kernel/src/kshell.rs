@@ -3542,6 +3542,7 @@ const COMMANDS: &[&str] = &[
     "netsyslog", "rsyslog",
     "wol", "wakeonlan",
     "pcap", "tcpdump",
+    "traceroute", "tracert",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4738,6 +4739,7 @@ fn dispatch(line: &str) {
         "netsyslog" | "rsyslog" => cmd_netsyslog(args),
         "wol" | "wakeonlan" => cmd_wol(args),
         "pcap" | "tcpdump" => cmd_pcap(args),
+        "traceroute" | "tracert" => cmd_traceroute(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35284,6 +35286,115 @@ fn cmd_pcap(args: &str) {
     }
 }
 
+/// `traceroute` / `tracert` — Trace route to destination.
+fn cmd_traceroute(args: &str) {
+    use alloc::format;
+    use crate::net::traceroute;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("traceroute — trace the path to a network destination");
+            shell_println!("  traceroute <IP>              Trace route (default 30 hops, 3 probes)");
+            shell_println!("  traceroute <IP> -m <N>       Max N hops");
+            shell_println!("  traceroute <IP> -q <N>       N probes per hop");
+            shell_println!("  traceroute status            Show statistics");
+            shell_println!("  traceroute test              Run self-tests");
+        }
+        "status" | "stats" => {
+            let s = traceroute::stats();
+            shell_println!("Traceroute Statistics");
+            shell_println!("  Active:          {}", if s.active { "yes" } else { "no" });
+            shell_println!("  Total traces:    {}", s.total_traces);
+            shell_println!("  Probes sent:     {}", s.total_probes_sent);
+            shell_println!("  Probes timeout:  {}", s.total_probes_timeout);
+            shell_println!("  Last hop count:  {}", s.last_hops);
+        }
+        "test" => {
+            match traceroute::self_test() {
+                Ok(()) => shell_println!("traceroute self-test: PASSED"),
+                Err(e) => shell_println!("traceroute self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            // First arg is an IP address.
+            let dst = match parse_ipv4(sub) {
+                Some(ip) => ip,
+                None => {
+                    // Try DNS resolution.
+                    match crate::net::dns::resolve(sub) {
+                        Ok(ip) => {
+                            shell_println!("traceroute to {} ({})", sub, ip);
+                            ip
+                        }
+                        Err(_) => {
+                            shell_println!("Cannot resolve '{}' — use IP address", sub);
+                            return;
+                        }
+                    }
+                }
+            };
+
+            // Parse optional flags.
+            let mut max_hops: Option<u8> = None;
+            let mut probes: Option<u8> = None;
+            let mut i = 1;
+            while i < parts.len() {
+                match parts.get(i).copied() {
+                    Some("-m") => {
+                        max_hops = parts.get(i + 1).and_then(|s| s.parse::<u8>().ok());
+                        i += 2;
+                    }
+                    Some("-q") => {
+                        probes = parts.get(i + 1).and_then(|s| s.parse::<u8>().ok());
+                        i += 2;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+
+            shell_println!("traceroute to {} (max {} hops, {} probes/hop)",
+                dst,
+                max_hops.unwrap_or(30),
+                probes.unwrap_or(3),
+            );
+
+            match traceroute::trace(dst, max_hops, probes, None) {
+                Ok(result) => {
+                    // Print per-hop results.
+                    for hop in &result.hops {
+                        let mut line = format!("{:>2}  ", hop.hop);
+                        let mut last_ip = crate::net::interface::Ipv4Addr::UNSPECIFIED;
+                        for probe in &hop.probes {
+                            if probe.received {
+                                if probe.addr != last_ip {
+                                    if !last_ip.is_unspecified() {
+                                        line.push_str("  ");
+                                    }
+                                    line.push_str(&format!("{}", probe.addr));
+                                    last_ip = probe.addr;
+                                }
+                                line.push_str(&format!("  {}", traceroute::format_rtt(probe.rtt_ns)));
+                            } else {
+                                line.push_str("  *");
+                            }
+                        }
+                        shell_println!("{}", line);
+                    }
+                    if result.reached {
+                        shell_println!("\nDestination reached in {} hops", result.hops.len());
+                    } else {
+                        shell_println!("\nDestination NOT reached after {} hops", result.hops.len());
+                    }
+                }
+                Err(e) => {
+                    shell_println!("traceroute failed: {:?}", e);
+                }
+            }
+        }
+    }
+}
+
 /// `inputa11y` / `ia11y` — input accessibility features.
 fn cmd_inputa11y(args: &str) {
     use crate::fs::inputa11y;
@@ -65738,7 +65849,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

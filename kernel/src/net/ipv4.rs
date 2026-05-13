@@ -577,6 +577,88 @@ pub fn send(dst: Ipv4Addr, protocol: u8, payload: &[u8]) -> KernelResult<()> {
     send_ns(crate::netns::ROOT_NS, dst, protocol, payload)
 }
 
+/// Send an IPv4 packet with a custom TTL (for traceroute).
+///
+/// Like [`send`], but uses the given TTL instead of the default 64.
+pub fn send_with_ttl(dst: Ipv4Addr, protocol: u8, payload: &[u8], ttl: u8) -> KernelResult<()> {
+    // Namespace-aware firewall outbound check.
+    let ns_id = crate::netns::ROOT_NS;
+    if !super::firewall::check_outbound_ns(ns_id, protocol, dst, payload) {
+        return Err(KernelError::PermissionDenied);
+    }
+
+    let our_mac = interface::mac();
+    let our_ip = interface::ns_ip(ns_id);
+
+    // Build packet with custom TTL.
+    let ip_packet = build_packet_custom_ttl(our_ip, dst, protocol, payload, ttl);
+
+    // Determine the next-hop MAC address.
+    let iface_info = interface::info();
+    let dst_mac = if dst.is_broadcast()
+        || (!iface_info.subnet_mask.is_unspecified()
+            && is_subnet_broadcast(dst, iface_info.ip, iface_info.subnet_mask))
+    {
+        ethernet::BROADCAST_MAC
+    } else {
+        let next_hop = resolve_next_hop(ns_id, our_ip, dst);
+        super::arp::resolve(next_hop)?
+    };
+
+    let frame = ethernet::build_frame(&dst_mac, &our_mac, ETHERTYPE_IPV4, &ip_packet);
+    super::send_frame(&frame)?;
+
+    Ok(())
+}
+
+/// Build an IPv4 packet with a custom TTL.
+///
+/// Used by traceroute to send probes with increasing TTL values.
+fn build_packet_custom_ttl(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    protocol: u8,
+    payload: &[u8],
+    ttl: u8,
+) -> Vec<u8> {
+    let total_len = IPV4_HEADER_SIZE + payload.len();
+    let total_len_u16 = u16::try_from(total_len).unwrap_or(u16::MAX);
+
+    let mut pkt = Vec::with_capacity(total_len);
+
+    // Version (4) + IHL (5 = 20 bytes, no options).
+    pkt.push(0x45);
+    // DSCP (0) + ECN (Not-ECT).
+    pkt.push(0);
+    // Total length.
+    pkt.extend_from_slice(&total_len_u16.to_be_bytes());
+    // Identification (0 — no fragmentation).
+    pkt.extend_from_slice(&0u16.to_be_bytes());
+    // Flags (Don't Fragment) + Fragment Offset.
+    pkt.extend_from_slice(&0x4000u16.to_be_bytes()); // DF bit set.
+    // TTL (custom).
+    pkt.push(ttl);
+    // Protocol.
+    pkt.push(protocol);
+    // Checksum placeholder (2 bytes, will be filled in).
+    let checksum_offset = pkt.len();
+    pkt.extend_from_slice(&[0, 0]);
+    // Source address.
+    pkt.extend_from_slice(&src.0);
+    // Destination address.
+    pkt.extend_from_slice(&dst.0);
+
+    // Compute IP header checksum.
+    let checksum = ip_checksum(&pkt[..IPV4_HEADER_SIZE]);
+    if let Some(b) = pkt.get_mut(checksum_offset) { *b = (checksum >> 8) as u8; }
+    if let Some(b) = pkt.get_mut(checksum_offset + 1) { *b = checksum as u8; }
+
+    // Append payload.
+    pkt.extend_from_slice(payload);
+
+    pkt
+}
+
 /// Send an IPv4 packet with an explicit ECN codepoint in the IP header.
 ///
 /// Identical to [`send`] except the 2-bit ECN field is set to `ecn`

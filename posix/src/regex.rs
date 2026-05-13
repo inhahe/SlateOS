@@ -17,8 +17,8 @@
 //! - Maximum 9 sub-expressions (capturing groups).
 //! - No backreferences (`\1`-`\9`) in the pattern — only in
 //!   the match result (`pmatch[1..9]`).
-//! - No locale-specific character classes (`[:alpha:]`, etc.)
-//!   — only ASCII is supported.
+//! - POSIX character classes (`[:alpha:]`, `[:digit:]`, etc.) supported
+//!   in C/ASCII locale.
 
 use crate::malloc;
 use crate::string;
@@ -695,6 +695,36 @@ fn compile_class(
             return 0;
         }
 
+        // Check for POSIX character class [:classname:].
+        if ch == b'[' && pos.wrapping_add(1) < pat_len
+            && unsafe { *pat.add(pos.wrapping_add(1)) } == b':'
+        {
+            let class_start = pos.wrapping_add(2);
+            // Find the closing ":]".
+            let mut end = class_start;
+            while end.wrapping_add(1) < pat_len {
+                if unsafe { *pat.add(end) } == b':'
+                    && unsafe { *pat.add(end.wrapping_add(1)) } == b']'
+                {
+                    break;
+                }
+                end = end.wrapping_add(1);
+            }
+            if end.wrapping_add(1) < pat_len
+                && unsafe { *pat.add(end) } == b':'
+                && unsafe { *pat.add(end.wrapping_add(1)) } == b']'
+            {
+                let name_len = end.wrapping_sub(class_start);
+                let err = add_posix_class(prog, pat, class_start, name_len);
+                if err != 0 {
+                    return err;
+                }
+                *pos = end.wrapping_add(2); // Skip past ":]"
+                continue;
+            }
+            // Not a valid POSIX class — treat '[' as literal.
+        }
+
         // Check for range (a-z).
         if pos.wrapping_add(2) < pat_len
             && unsafe { *pat.add(pos.wrapping_add(1)) } == b'-'
@@ -723,6 +753,89 @@ fn compile_class(
     }
 
     REG_EBRACK // Unterminated class.
+}
+
+/// Add a single class range to the program.
+fn add_class_range(prog: &mut RegexProgram, lo: u8, hi: u8) -> bool {
+    if prog.class_count >= MAX_CLASS_RANGES {
+        return false;
+    }
+    if let Some(slot) = prog.classes.get_mut(prog.class_count) {
+        *slot = ClassRange { lo, hi };
+    }
+    prog.class_count = prog.class_count.wrapping_add(1);
+    true
+}
+
+/// Expand a POSIX character class name into ClassRange entries.
+///
+/// Recognizes: alpha, digit, alnum, space, upper, lower, punct,
+/// cntrl, print, graph, xdigit, blank.
+/// Returns 0 on success, REG_ECTYPE for unknown class, REG_ESPACE if full.
+fn add_posix_class(
+    prog: &mut RegexProgram,
+    pat: *const u8,
+    name_start: usize,
+    name_len: usize,
+) -> i32 {
+    // Compare the class name (case-sensitive per POSIX).
+    let name_matches = |expected: &[u8]| -> bool {
+        if name_len != expected.len() { return false; }
+        let mut k = 0;
+        while k < name_len {
+            if unsafe { *pat.add(name_start.wrapping_add(k)) } != expected[k] {
+                return false;
+            }
+            k = k.wrapping_add(1);
+        }
+        true
+    };
+
+    // Each POSIX class maps to one or more ranges in ASCII.
+    if name_matches(b"alpha") {
+        if !add_class_range(prog, b'A', b'Z') { return REG_ESPACE; }
+        if !add_class_range(prog, b'a', b'z') { return REG_ESPACE; }
+    } else if name_matches(b"digit") {
+        if !add_class_range(prog, b'0', b'9') { return REG_ESPACE; }
+    } else if name_matches(b"alnum") {
+        if !add_class_range(prog, b'A', b'Z') { return REG_ESPACE; }
+        if !add_class_range(prog, b'a', b'z') { return REG_ESPACE; }
+        if !add_class_range(prog, b'0', b'9') { return REG_ESPACE; }
+    } else if name_matches(b"space") {
+        // space, tab, newline, vertical tab, form feed, carriage return
+        if !add_class_range(prog, 0x09, 0x0D) { return REG_ESPACE; }
+        if !add_class_range(prog, b' ', b' ') { return REG_ESPACE; }
+    } else if name_matches(b"upper") {
+        if !add_class_range(prog, b'A', b'Z') { return REG_ESPACE; }
+    } else if name_matches(b"lower") {
+        if !add_class_range(prog, b'a', b'z') { return REG_ESPACE; }
+    } else if name_matches(b"punct") {
+        // Printable non-alnum, non-space: 33-47, 58-64, 91-96, 123-126
+        if !add_class_range(prog, 0x21, 0x2F) { return REG_ESPACE; }
+        if !add_class_range(prog, 0x3A, 0x40) { return REG_ESPACE; }
+        if !add_class_range(prog, 0x5B, 0x60) { return REG_ESPACE; }
+        if !add_class_range(prog, 0x7B, 0x7E) { return REG_ESPACE; }
+    } else if name_matches(b"cntrl") {
+        if !add_class_range(prog, 0x00, 0x1F) { return REG_ESPACE; }
+        if !add_class_range(prog, 0x7F, 0x7F) { return REG_ESPACE; }
+    } else if name_matches(b"print") {
+        // Printable: 0x20 - 0x7E
+        if !add_class_range(prog, 0x20, 0x7E) { return REG_ESPACE; }
+    } else if name_matches(b"graph") {
+        // Visible (printable minus space): 0x21 - 0x7E
+        if !add_class_range(prog, 0x21, 0x7E) { return REG_ESPACE; }
+    } else if name_matches(b"xdigit") {
+        if !add_class_range(prog, b'0', b'9') { return REG_ESPACE; }
+        if !add_class_range(prog, b'A', b'F') { return REG_ESPACE; }
+        if !add_class_range(prog, b'a', b'f') { return REG_ESPACE; }
+    } else if name_matches(b"blank") {
+        // Space and tab only.
+        if !add_class_range(prog, b' ', b' ') { return REG_ESPACE; }
+        if !add_class_range(prog, b'\t', b'\t') { return REG_ESPACE; }
+    } else {
+        return REG_ECTYPE;
+    }
+    0
 }
 
 /// Compile a group `(...)` or `\(...\)`.

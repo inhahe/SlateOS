@@ -861,21 +861,49 @@ fn format_unsigned(
 ) {
     let mut num_buf = [0u8; NUM_BUF_SIZE];
     let mut num_len = u64_to_base(val, base, upper, &mut num_buf);
-    // POSIX/C99: precision 0 with value 0 produces no digit output.
+
+    // POSIX/C99: precision 0 with value 0 produces no digit output …
+    // … UNLESS `%#o` which overrides this (see below).
     if precision == Some(0) && val == 0 {
         num_len = 0;
     }
-    let digits = if let Some(p) = precision {
+
+    let mut digits = if let Some(p) = precision {
         if p > num_len { p } else { num_len }
     } else {
         num_len
     };
 
-    // Alt form prefix.
-    let prefix_len: usize = if flags.alt_form && val != 0 {
+    // Alt form: %#o increases precision so the first output digit is '0'
+    // (C99 §7.19.6.1 ¶6).  For val==0 && precision==0, a single '0'
+    // must still appear.  This replaces the old prefix-based approach
+    // which emitted a separate '0' and produced too many leading zeros
+    // when precision already forced a leading zero.
+    //
+    // %#x/%#X uses a "0x"/"0X" prefix for nonzero values (different rule).
+    let prefix_len: usize = if flags.alt_form {
         match base {
-            16 => 2, // "0x" or "0X"
-            8 => 1,  // "0"
+            16 if val != 0 => 2, // "0x" or "0X"
+            8 => {
+                // C99: "increase precision to force first digit to be zero."
+                // "if the value and precision are both 0, a single 0 is printed."
+                if val == 0 && precision == Some(0) {
+                    // Override the "precision 0 + value 0 → no digits" rule.
+                    num_len = 1;
+                    digits = 1;
+                    // The digit '0' is still at the end of num_buf from u64_to_base.
+                } else if val != 0 && digits == num_len {
+                    // digits == num_len means no precision-padding will add a
+                    // leading zero, so the first output digit is the MSB of val
+                    // (which is nonzero).  Increase by 1 to force a leading '0'.
+                    // When val == 0, the first digit is already '0', so no
+                    // extra leading zero is needed.
+                    digits = digits.wrapping_add(1);
+                }
+                // Else: precision already >= num_len+1, so leading zeros exist;
+                // or val == 0 and the digit is already '0'.
+                0 // No separate prefix; the extra zero is part of `digits`.
+            }
             _ => 0,
         }
     } else {
@@ -894,12 +922,10 @@ fn format_unsigned(
         emit_padding(dst, b' ', width.wrapping_sub(total_len));
     }
 
-    // Prefix.
+    // Prefix (only for %#x / %#X).
     if prefix_len == 2 {
         emit_byte(dst, b'0');
         emit_byte(dst, if upper { b'X' } else { b'x' });
-    } else if prefix_len == 1 {
-        emit_byte(dst, b'0');
     }
 
     // Right-justify zero padding.
@@ -907,11 +933,9 @@ fn format_unsigned(
         emit_padding(dst, b'0', width.wrapping_sub(total_len));
     }
 
-    // Precision zero-padding.
-    if let Some(p) = precision
-        && p > num_len
-    {
-        emit_padding(dst, b'0', p.wrapping_sub(num_len));
+    // Precision / alt-form zero-padding.
+    if digits > num_len {
+        emit_padding(dst, b'0', digits.wrapping_sub(num_len));
     }
 
     // Digits.
@@ -1796,6 +1820,35 @@ mod tests {
     fn fmt_flag_hash_o() {
         let (s, _) = snprintf_str(b"%#o\0", &[8], &[]);
         assert_eq!(s, "010");
+    }
+
+    #[test]
+    fn fmt_flag_hash_o_zero() {
+        // %#o with value 0: output "0" (no prefix needed, first digit is already 0).
+        let (s, _) = snprintf_str(b"%#o\0", &[0], &[]);
+        assert_eq!(s, "0");
+    }
+
+    #[test]
+    fn fmt_flag_hash_o_prec0_val0() {
+        // C99 §7.19.6.1: "if the value and precision are both 0, a single 0 is printed"
+        let (s, _) = snprintf_str(b"%#.0o\0", &[0], &[]);
+        assert_eq!(s, "0");
+    }
+
+    #[test]
+    fn fmt_flag_hash_o_prec_already_has_leading_zero() {
+        // %#.5o with val=7: precision forces "00007" which already starts
+        // with '0', so # should not add another.
+        let (s, _) = snprintf_str(b"%#.5o\0", &[7], &[]);
+        assert_eq!(s, "00007");
+    }
+
+    #[test]
+    fn fmt_flag_hash_o_simple() {
+        // %#o with val=7: octal "7" → needs leading zero → "07"
+        let (s, _) = snprintf_str(b"%#o\0", &[7], &[]);
+        assert_eq!(s, "07");
     }
 
     // -----------------------------------------------------------------------

@@ -678,18 +678,106 @@ pub extern "C" fn wcwidth(wc: WcharT) -> i32 {
     if wc == 0 {
         return 0;
     }
-    if wc < 32 || wc == 0x7f {
-        return -1; // Control character.
+    // C0 and C1 control characters (0x00-0x1F, 0x7F, 0x80-0x9F).
+    if wc < 32 || wc == 0x7f || (wc >= 0x80 && wc <= 0x9f) {
+        return -1;
     }
-    // CJK Unified Ideographs and common fullwidth ranges.
+    // Zero-width characters: combining marks, joiners, soft hyphen, BOM, etc.
+    #[allow(clippy::manual_range_contains)]
+    if (wc >= 0x0300 && wc <= 0x036f)   // Combining Diacritical Marks
+        || (wc >= 0x0483 && wc <= 0x0489) // Cyrillic combining marks
+        || (wc >= 0x0591 && wc <= 0x05bd) // Hebrew combining marks
+        || wc == 0x05bf
+        || (wc >= 0x05c1 && wc <= 0x05c2)
+        || (wc >= 0x05c4 && wc <= 0x05c5)
+        || wc == 0x05c7
+        || (wc >= 0x0600 && wc <= 0x0605) // Arabic marks
+        || (wc >= 0x0610 && wc <= 0x061a)
+        || (wc >= 0x064b && wc <= 0x065f)
+        || wc == 0x0670
+        || (wc >= 0x06d6 && wc <= 0x06dd)
+        || (wc >= 0x06df && wc <= 0x06e4)
+        || (wc >= 0x06e7 && wc <= 0x06e8)
+        || (wc >= 0x06ea && wc <= 0x06ed)
+        || wc == 0x070f
+        || (wc >= 0x0730 && wc <= 0x074a)
+        || (wc >= 0x07a6 && wc <= 0x07b0)
+        || (wc >= 0x0900 && wc <= 0x0902) // Devanagari combining
+        || wc == 0x093c || wc == 0x0941
+        || (wc >= 0x0941 && wc <= 0x0948)
+        || wc == 0x094d
+        || (wc >= 0x0951 && wc <= 0x0957)
+        || (wc >= 0x0962 && wc <= 0x0963)
+        || (wc >= 0x1ab0 && wc <= 0x1aff) // Combining Diacritical Marks Extended
+        || (wc >= 0x1dc0 && wc <= 0x1dff) // Combining Diacritical Marks Supplement
+        || (wc >= 0x20d0 && wc <= 0x20ff) // Combining Marks for Symbols
+        || (wc >= 0xfe00 && wc <= 0xfe0f) // Variation Selectors
+        || (wc >= 0xfe20 && wc <= 0xfe2f) // Combining Half Marks
+        || wc == 0x00ad   // Soft hyphen (zero-width in most renderers)
+        || wc == 0x200b   // Zero-width space
+        || wc == 0x200c   // Zero-width non-joiner
+        || wc == 0x200d   // Zero-width joiner
+        || wc == 0x200e   // Left-to-right mark
+        || wc == 0x200f   // Right-to-left mark
+        || wc == 0x2028   // Line separator (format char)
+        || wc == 0x2029   // Paragraph separator (format char)
+        || (wc >= 0x202a && wc <= 0x202e) // Bidi formatting
+        || (wc >= 0x2060 && wc <= 0x2064) // Invisible operators
+        || (wc >= 0x2066 && wc <= 0x206f) // Bidi isolates
+        || wc == 0xfeff   // BOM / zero-width no-break space
+        || (wc >= 0xe0100 && wc <= 0xe01ef) // Variation Selectors Supplement
+    {
+        return 0;
+    }
+    // CJK Unified Ideographs and common fullwidth / wide ranges.
     #[allow(clippy::manual_range_contains)]
     if (wc >= 0x1100 && wc <= 0x115f)   // Hangul Jamo
+        || (wc >= 0x231a && wc <= 0x231b) // Watch, Hourglass (emoji)
+        || wc == 0x2329 || wc == 0x232a  // Angle brackets
+        || (wc >= 0x23e9 && wc <= 0x23ec) // Emoji
+        || wc == 0x23f0 || wc == 0x23f3
+        || (wc >= 0x25fd && wc <= 0x25fe) // Medium small squares
+        || (wc >= 0x2614 && wc <= 0x2615) // Umbrella, Hot beverage
+        || (wc >= 0x2648 && wc <= 0x2653) // Zodiac signs
+        || wc == 0x267f || wc == 0x2693
+        || wc == 0x26a1
+        || (wc >= 0x26aa && wc <= 0x26ab)
+        || (wc >= 0x26bd && wc <= 0x26be)
+        || (wc >= 0x26c4 && wc <= 0x26c5)
+        || wc == 0x26ce || wc == 0x26d4
+        || wc == 0x26ea
+        || (wc >= 0x26f2 && wc <= 0x26f3)
+        || wc == 0x26f5 || wc == 0x26fa
+        || wc == 0x26fd || wc == 0x2702
+        || wc == 0x2705
+        || (wc >= 0x2708 && wc <= 0x270d)
+        || wc == 0x270f
+        || (wc >= 0x2753 && wc <= 0x2755)
+        || wc == 0x2757
+        || (wc >= 0x2795 && wc <= 0x2797)
+        || wc == 0x27b0 || wc == 0x27bf
+        || (wc >= 0x2b1b && wc <= 0x2b1c)
+        || wc == 0x2b50 || wc == 0x2b55
         || (wc >= 0x2e80 && wc <= 0xa4cf && wc != 0x303f) // CJK
         || (wc >= 0xac00 && wc <= 0xd7a3) // Hangul Syllables
         || (wc >= 0xf900 && wc <= 0xfaff) // CJK Compat Ideographs
-        || (wc >= 0xfe10 && wc <= 0xfe6f) // CJK forms
+        || (wc >= 0xfe10 && wc <= 0xfe19) // CJK Vertical Forms
+        || (wc >= 0xfe30 && wc <= 0xfe6f) // CJK Compatibility Forms + Small Form Variants
         || (wc >= 0xff01 && wc <= 0xff60) // Fullwidth forms
         || (wc >= 0xffe0 && wc <= 0xffe6) // Fullwidth signs
+        || (wc >= 0x1f004 && wc <= 0x1f004) // Mahjong Tile
+        || wc == 0x1f0cf                 // Playing Card
+        || (wc >= 0x1f18e && wc <= 0x1f18e)
+        || (wc >= 0x1f191 && wc <= 0x1f19a)
+        || (wc >= 0x1f200 && wc <= 0x1f202)
+        || (wc >= 0x1f210 && wc <= 0x1f23b)
+        || (wc >= 0x1f240 && wc <= 0x1f248)
+        || (wc >= 0x1f250 && wc <= 0x1f251)
+        || (wc >= 0x1f300 && wc <= 0x1f64f) // Misc Symbols & Emoticons
+        || (wc >= 0x1f680 && wc <= 0x1f6ff) // Transport & Map Symbols
+        || (wc >= 0x1f900 && wc <= 0x1f9ff) // Supplemental Symbols
+        || (wc >= 0x1fa00 && wc <= 0x1fa6f)
+        || (wc >= 0x1fa70 && wc <= 0x1faff)
         || (wc >= 0x20000 && wc <= 0x2fffd) // CJK Extension B+
         || (wc >= 0x30000 && wc <= 0x3fffd) // CJK Extension G+
     {
@@ -763,15 +851,21 @@ pub extern "C" fn iswblank(wc: WcharT) -> i32 {
 }
 
 /// Check if wide character is printable.
+///
+/// Returns nonzero for printable characters (0x20-0x7E and above 0x9F).
+/// C1 control characters (0x80-0x9F) are NOT printable.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswprint(wc: WcharT) -> i32 {
-    i32::from(wc >= 0x20 && wc != 0x7f)
+    i32::from(wc >= 0x20 && wc != 0x7f && !(wc >= 0x80 && wc <= 0x9f))
 }
 
 /// Check if wide character is a control character.
+///
+/// Returns nonzero for C0 controls (0x00-0x1F), DEL (0x7F),
+/// and C1 controls (0x80-0x9F).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswcntrl(wc: WcharT) -> i32 {
-    i32::from(wc < 0x20 || wc == 0x7f)
+    i32::from(wc < 0x20 || wc == 0x7f || (wc >= 0x80 && wc <= 0x9f))
 }
 
 /// Check if wide character is uppercase.
@@ -2937,5 +3031,126 @@ mod tests {
         let val = unsafe { wcstol(s.as_ptr(), core::ptr::null_mut(), 37) };
         assert_eq!(val, 0);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // wcwidth
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcwidth_null() {
+        assert_eq!(wcwidth(0), 0);
+    }
+
+    #[test]
+    fn test_wcwidth_ascii_printable() {
+        assert_eq!(wcwidth(b'A' as i32), 1);
+        assert_eq!(wcwidth(b' ' as i32), 1);
+        assert_eq!(wcwidth(b'~' as i32), 1);
+    }
+
+    #[test]
+    fn test_wcwidth_c0_control() {
+        assert_eq!(wcwidth(0x01), -1); // SOH
+        assert_eq!(wcwidth(0x0a), -1); // LF
+        assert_eq!(wcwidth(0x1f), -1); // US
+        assert_eq!(wcwidth(0x7f), -1); // DEL
+    }
+
+    #[test]
+    fn test_wcwidth_c1_control() {
+        // C1 controls (0x80-0x9F) should return -1.
+        assert_eq!(wcwidth(0x80), -1);
+        assert_eq!(wcwidth(0x85), -1); // NEL
+        assert_eq!(wcwidth(0x9f), -1);
+    }
+
+    #[test]
+    fn test_wcwidth_cjk() {
+        // CJK ideograph — fullwidth, width 2.
+        assert_eq!(wcwidth(0x4e2d), 2); // 中
+        assert_eq!(wcwidth(0x6587), 2); // 文
+    }
+
+    #[test]
+    fn test_wcwidth_hangul() {
+        assert_eq!(wcwidth(0xac00), 2); // 가
+        assert_eq!(wcwidth(0xd7a3), 2); // Last Hangul syllable
+    }
+
+    #[test]
+    fn test_wcwidth_fullwidth_forms() {
+        assert_eq!(wcwidth(0xff01), 2); // ！ (fullwidth !)
+        assert_eq!(wcwidth(0xff21), 2); // Ａ (fullwidth A)
+    }
+
+    #[test]
+    fn test_wcwidth_combining_marks() {
+        // Combining diacritical marks have width 0.
+        assert_eq!(wcwidth(0x0300), 0); // Combining Grave Accent
+        assert_eq!(wcwidth(0x0301), 0); // Combining Acute Accent
+        assert_eq!(wcwidth(0x036f), 0); // End of combining marks block
+    }
+
+    #[test]
+    fn test_wcwidth_zero_width_chars() {
+        assert_eq!(wcwidth(0x200b), 0); // Zero-width space
+        assert_eq!(wcwidth(0x200d), 0); // Zero-width joiner (used in emoji sequences)
+        assert_eq!(wcwidth(0xfeff), 0); // BOM / ZWNBSP
+    }
+
+    #[test]
+    fn test_wcwidth_variation_selectors() {
+        assert_eq!(wcwidth(0xfe00), 0);  // VS1
+        assert_eq!(wcwidth(0xfe0f), 0);  // VS16 (emoji presentation)
+    }
+
+    #[test]
+    fn test_wcwidth_latin_above_c1() {
+        // Latin characters above C1 range should be width 1.
+        assert_eq!(wcwidth(0xa0), 1);  // NBSP
+        assert_eq!(wcwidth(0xc0), 1);  // À
+        assert_eq!(wcwidth(0xff), 1);  // ÿ
+    }
+
+    #[test]
+    fn test_wcwidth_emoji() {
+        // Emoji in SMP should be width 2.
+        assert_eq!(wcwidth(0x1f600), 2); // 😀
+        assert_eq!(wcwidth(0x1f680), 2); // 🚀
+    }
+
+    // -----------------------------------------------------------------------
+    // iswcntrl / iswprint — C1 control handling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_iswcntrl_c1_controls() {
+        // C1 controls (0x80-0x9F) should be classified as control chars.
+        assert_ne!(iswcntrl(0x80), 0);
+        assert_ne!(iswcntrl(0x85), 0); // NEL
+        assert_ne!(iswcntrl(0x9f), 0);
+    }
+
+    #[test]
+    fn test_iswcntrl_not_above_c1() {
+        // Characters at 0xA0 and above are NOT control characters.
+        assert_eq!(iswcntrl(0xa0), 0);  // NBSP
+        assert_eq!(iswcntrl(0xff), 0);  // ÿ
+    }
+
+    #[test]
+    fn test_iswprint_c1_controls() {
+        // C1 controls should NOT be printable.
+        assert_eq!(iswprint(0x80), 0);
+        assert_eq!(iswprint(0x85), 0);
+        assert_eq!(iswprint(0x9f), 0);
+    }
+
+    #[test]
+    fn test_iswprint_above_c1() {
+        // Characters at 0xA0 and above should be printable.
+        assert_ne!(iswprint(0xa0), 0);  // NBSP
+        assert_ne!(iswprint(0xc0), 0);  // À
     }
 }

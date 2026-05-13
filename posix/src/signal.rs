@@ -59,15 +59,29 @@ pub const SIG_ERR: SighandlerT = usize::MAX;
 // Signal functions (stubs)
 // ---------------------------------------------------------------------------
 
-/// Registered signal handlers.
+/// Default sigaction (SIG_DFL, no flags, empty mask).
+const DEFAULT_SIGACTION: Sigaction = Sigaction {
+    sa_handler: SIG_DFL,
+    sa_mask: 0,
+    sa_flags: 0,
+    sa_restorer: 0,
+};
+
+/// Registered signal actions.
 ///
 /// Index 0 unused (signals are 1-based).  Initialized to SIG_DFL.
-static mut HANDLERS: [SighandlerT; NSIG as usize] = [SIG_DFL; NSIG as usize];
+/// Stores the full `Sigaction` so that `sigaction(sig, NULL, &old)`
+/// returns the correct `sa_mask`, `sa_flags`, and `sa_restorer`.
+static mut ACTIONS: [Sigaction; NSIG as usize] = [DEFAULT_SIGACTION; NSIG as usize];
 
 /// Install a signal handler.
 ///
 /// Stores the handler and returns the previous one.  Handlers are
 /// never actually invoked since our OS doesn't deliver Unix signals.
+///
+/// POSIX: `signal()` is equivalent to `sigaction()` with
+/// implementation-defined `sa_flags`.  We reset `sa_mask` and
+/// `sa_flags` to zero (similar to BSD semantics without SA_RESTART).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn signal(signum: i32, handler: SighandlerT) -> SighandlerT {
     if !(1..NSIG).contains(&signum) || signum == SIGKILL || signum == SIGSTOP {
@@ -77,17 +91,20 @@ pub extern "C" fn signal(signum: i32, handler: SighandlerT) -> SighandlerT {
 
     // SAFETY: Single-threaded access. signum range checked above.
     let idx = signum as usize;
-    let handlers = unsafe { core::ptr::addr_of_mut!(HANDLERS).as_mut() };
-    let Some(handlers) = handlers else {
+    let actions = unsafe { core::ptr::addr_of_mut!(ACTIONS).as_mut() };
+    let Some(actions) = actions else {
         errno::set_errno(errno::EINVAL);
         return SIG_ERR;
     };
-    let Some(slot) = handlers.get_mut(idx) else {
+    let Some(slot) = actions.get_mut(idx) else {
         errno::set_errno(errno::EINVAL);
         return SIG_ERR;
     };
-    let old = *slot;
-    *slot = handler;
+    let old = slot.sa_handler;
+    slot.sa_handler = handler;
+    slot.sa_mask = 0;
+    slot.sa_flags = 0;
+    slot.sa_restorer = 0;
     old
 }
 
@@ -114,7 +131,8 @@ pub const SA_NODEFER: i32 = 0x4000_0000;
 
 /// Examine and change a signal action.
 ///
-/// Stores the new action (if provided) and returns the old action.
+/// Stores the new action (if provided) and returns the old action
+/// (including `sa_mask`, `sa_flags`, and `sa_restorer`).
 /// Handlers are never actually invoked.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigaction(
@@ -127,30 +145,32 @@ pub unsafe extern "C" fn sigaction(
         return -1;
     }
 
-    // Return old handler via oldact.
+    let idx = signum as usize;
+
+    // Return old action via oldact.
     if !oldact.is_null() {
-        let idx = signum as usize;
-        let handler = unsafe {
-            let handlers = core::ptr::addr_of!(HANDLERS);
-            (*handlers).get(idx).copied().unwrap_or(SIG_DFL)
+        // SAFETY: ACTIONS is single-threaded; idx in [1, NSIG).
+        let old = unsafe {
+            let actions = core::ptr::addr_of!(ACTIONS);
+            (*actions).get(idx).copied().unwrap_or(DEFAULT_SIGACTION)
         };
         unsafe {
-            (*oldact).sa_handler = handler;
-            (*oldact).sa_mask = 0;
-            (*oldact).sa_flags = 0;
-            (*oldact).sa_restorer = 0;
+            (*oldact).sa_handler = old.sa_handler;
+            (*oldact).sa_mask = old.sa_mask;
+            (*oldact).sa_flags = old.sa_flags;
+            (*oldact).sa_restorer = old.sa_restorer;
         }
     }
 
-    // Store new handler from act.
+    // Store new action from act.
     if !act.is_null() {
-        let new_handler = unsafe { (*act).sa_handler };
-        let idx = signum as usize;
-        let handlers = unsafe { core::ptr::addr_of_mut!(HANDLERS).as_mut() };
-        if let Some(handlers) = handlers
-            && let Some(slot) = handlers.get_mut(idx)
+        let new_act = unsafe { *act };
+        // SAFETY: ACTIONS is single-threaded; idx in [1, NSIG).
+        let actions = unsafe { core::ptr::addr_of_mut!(ACTIONS).as_mut() };
+        if let Some(actions) = actions
+            && let Some(slot) = actions.get_mut(idx)
         {
-            *slot = new_handler;
+            *slot = new_act;
         }
     }
 
@@ -820,9 +840,10 @@ mod tests {
 
     #[test]
     fn test_sigaction_set_and_get() {
+        let mask = 1u64 << (SIGINT - 1) | 1u64 << (SIGQUIT - 1);
         let new_act = Sigaction {
             sa_handler: SIG_IGN,
-            sa_mask: 0,
+            sa_mask: mask,
             sa_flags: SA_RESTART,
             sa_restorer: 0,
         };
@@ -836,7 +857,7 @@ mod tests {
         let ret = unsafe { sigaction(SIGTERM, &raw const new_act, &raw mut old_act) };
         assert_eq!(ret, 0);
 
-        // Now get it back
+        // Now get it back — all fields must round-trip.
         let mut check_act = Sigaction {
             sa_handler: 0,
             sa_mask: 0,
@@ -846,6 +867,8 @@ mod tests {
         let ret = unsafe { sigaction(SIGTERM, core::ptr::null(), &raw mut check_act) };
         assert_eq!(ret, 0);
         assert_eq!(check_act.sa_handler, SIG_IGN);
+        assert_eq!(check_act.sa_flags, SA_RESTART);
+        assert_eq!(check_act.sa_mask, mask);
 
         // Restore original
         unsafe { sigaction(SIGTERM, &raw const old_act, core::ptr::null_mut()); }
@@ -880,6 +903,59 @@ mod tests {
         // Both act and oldact null — should succeed (query nothing)
         let ret = unsafe { sigaction(SIGTERM, core::ptr::null(), core::ptr::null_mut()) };
         assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_sigaction_preserves_all_fields() {
+        // Regression: previously only sa_handler was stored; sa_mask,
+        // sa_flags, sa_restorer were always returned as zero.
+        let mask = 1u64 << (SIGPIPE - 1) | 1u64 << (SIGCHLD - 1);
+        let act = Sigaction {
+            sa_handler: SIG_IGN,
+            sa_mask: mask,
+            sa_flags: SA_RESTART | SA_NOCLDSTOP,
+            sa_restorer: 0x1234_5678,
+        };
+        // Use SIGUSR1 to avoid interfering with other tests.
+        let mut old = Sigaction { sa_handler: 0, sa_mask: 0, sa_flags: 0, sa_restorer: 0 };
+        let ret = unsafe { sigaction(SIGUSR1, &raw const act, &raw mut old) };
+        assert_eq!(ret, 0);
+
+        // Query back.
+        let mut check = Sigaction { sa_handler: 0, sa_mask: 0, sa_flags: 0, sa_restorer: 0 };
+        let ret = unsafe { sigaction(SIGUSR1, core::ptr::null(), &raw mut check) };
+        assert_eq!(ret, 0);
+        assert_eq!(check.sa_handler, SIG_IGN);
+        assert_eq!(check.sa_mask, mask);
+        assert_eq!(check.sa_flags, SA_RESTART | SA_NOCLDSTOP);
+        assert_eq!(check.sa_restorer, 0x1234_5678);
+
+        // Restore.
+        unsafe { sigaction(SIGUSR1, &raw const old, core::ptr::null_mut()); }
+    }
+
+    #[test]
+    fn test_signal_resets_sigaction_fields() {
+        // After signal(), querying via sigaction should show sa_flags=0.
+        let act = Sigaction {
+            sa_handler: SIG_IGN,
+            sa_mask: 0xFFFF,
+            sa_flags: SA_RESTART,
+            sa_restorer: 42,
+        };
+        unsafe { sigaction(SIGUSR2, &raw const act, core::ptr::null_mut()); }
+
+        // Now use signal() to change the handler — it should reset
+        // sa_mask/sa_flags/sa_restorer.
+        let prev = signal(SIGUSR2, SIG_DFL);
+        assert_eq!(prev, SIG_IGN);
+
+        let mut check = Sigaction { sa_handler: 0, sa_mask: 0, sa_flags: 0, sa_restorer: 0 };
+        unsafe { sigaction(SIGUSR2, core::ptr::null(), &raw mut check); }
+        assert_eq!(check.sa_handler, SIG_DFL);
+        assert_eq!(check.sa_mask, 0);
+        assert_eq!(check.sa_flags, 0);
+        assert_eq!(check.sa_restorer, 0);
     }
 
     // -- sigprocmask --

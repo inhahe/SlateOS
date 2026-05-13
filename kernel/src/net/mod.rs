@@ -23,6 +23,7 @@ pub mod firewall;
 pub mod frag;
 pub mod http;
 pub mod icmp;
+pub mod ntp;
 pub mod interface;
 pub mod ipv4;
 pub mod tcp;
@@ -83,6 +84,7 @@ pub fn poll() {
         dhcp::tick_renewal();
         frag::tick_expire();
         firewall::tick_conntrack_cleanup();
+        ntp::tick();
     }
 }
 

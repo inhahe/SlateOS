@@ -3535,6 +3535,7 @@ const COMMANDS: &[&str] = &[
     "pciids", "lspci",
     "upnp", "portfwd",
     "httpc", "curl",
+    "ntp", "ntpdate",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4724,6 +4725,7 @@ fn dispatch(line: &str) {
         "pciids" | "lspci" => cmd_pciids(args),
         "upnp" | "portfwd" => cmd_upnp(args),
         "httpc" | "curl" => cmd_httpc(args),
+        "ntp" | "ntpdate" => cmd_ntp(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -34462,6 +34464,129 @@ fn cmd_httpc(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'httpc help'.", sub);
+        }
+    }
+}
+
+/// `ntp` / `ntpdate` — NTP time synchronization.
+fn cmd_ntp(args: &str) {
+    use crate::net::ntp;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", ntp::procfs_content());
+        }
+        "status" | "stats" => {
+            let s = ntp::stats();
+            shell_println!("NTP Client");
+            shell_println!("  Enabled:       {}", s.enabled);
+            shell_println!("  Synchronized:  {}", s.synchronized);
+            shell_println!("  Offset:        {:+}ms", s.best_offset_ms);
+            shell_println!("  Interval:      {}s", s.sync_interval_secs);
+            if s.last_sync_ago_secs > 0 {
+                shell_println!("  Last sync:     {}s ago", s.last_sync_ago_secs);
+            } else {
+                shell_println!("  Last sync:     never");
+            }
+            shell_println!("  Queries:       {} sent, {} ok, {} bad, {} timeout",
+                s.queries_sent, s.responses_ok, s.responses_bad, s.timeouts);
+            if s.kod_received > 0 {
+                shell_println!("  KoD received:  {}", s.kod_received);
+            }
+        }
+        "sync" => {
+            shell_println!("Triggering NTP sync...");
+            if !ntp::is_enabled() {
+                ntp::init();
+            }
+            match ntp::sync_now() {
+                Ok(offset) => {
+                    shell_println!("Sync OK: offset = {:+}ms", offset / 1_000_000);
+                    let corrected = ntp::corrected_unix_secs();
+                    shell_println!("Corrected Unix time: {}", corrected);
+                }
+                Err(e) => shell_println!("Sync failed: {:?}", e),
+            }
+        }
+        "servers" => {
+            let servers = ntp::server_info();
+            if servers.is_empty() {
+                shell_println!("No NTP servers configured");
+            } else {
+                shell_println!("{:<4} {:<25} {:<16} {:<8} {:<10} {:<10} {}",
+                    "#", "Address", "IP", "Reach", "Offset", "Delay", "Str");
+                for s in &servers {
+                    let ip_str = match s.resolved_ip {
+                        Some(ip) => alloc::format!("{}", ip),
+                        None => String::from("-"),
+                    };
+                    shell_println!("{:<4} {:<25} {:<16} {:<8} {:+>8}ms {:<8}ms {}",
+                        s.index, s.address, ip_str,
+                        if s.reachable { "yes" } else { "no" },
+                        s.last_offset_ms, s.last_delay_ms, s.last_stratum);
+                }
+            }
+        }
+        "add" => {
+            let addr = parts.get(1).copied().unwrap_or("");
+            if addr.is_empty() {
+                shell_println!("Usage: ntp add <server>");
+                return;
+            }
+            if ntp::add_server(addr) {
+                shell_println!("Added NTP server: {}", addr);
+            } else {
+                shell_println!("Failed to add server (full or duplicate)");
+            }
+        }
+        "remove" | "rm" => {
+            let addr = parts.get(1).copied().unwrap_or("");
+            if addr.is_empty() {
+                shell_println!("Usage: ntp remove <server>");
+                return;
+            }
+            if ntp::remove_server(addr) {
+                shell_println!("Removed NTP server: {}", addr);
+            } else {
+                shell_println!("Server not found: {}", addr);
+            }
+        }
+        "enable" => {
+            ntp::set_enabled(true);
+            if !ntp::is_enabled() {
+                ntp::init();
+            }
+            shell_println!("NTP sync enabled");
+        }
+        "disable" => {
+            ntp::set_enabled(false);
+            shell_println!("NTP sync disabled");
+        }
+        "init" => {
+            ntp::init();
+            shell_println!("NTP initialized with default servers");
+        }
+        "test" => {
+            match ntp::self_test() {
+                Ok(()) => shell_println!("NTP self-test: PASSED"),
+                Err(e) => shell_println!("NTP self-test FAILED: {:?}", e),
+            }
+        }
+        "help" => {
+            shell_println!("ntp — NTP time synchronization");
+            shell_println!("  show            Full status overview");
+            shell_println!("  status          Summary statistics");
+            shell_println!("  sync            Trigger immediate sync");
+            shell_println!("  servers         List configured servers");
+            shell_println!("  add <server>    Add NTP server");
+            shell_println!("  remove <server> Remove NTP server");
+            shell_println!("  enable/disable  Toggle sync");
+            shell_println!("  init            Initialize with defaults");
+            shell_println!("  test            Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'ntp help'.", sub);
         }
     }
 }
@@ -64920,7 +65045,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

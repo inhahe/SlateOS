@@ -615,13 +615,13 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
 ### 2.6 Init / Service Manager
 
 - [ ] PID 1 init process
-- [ ] Dependency-based parallel service startup
-- [ ] Socket activation
-- [ ] Automatic crash restart with exponential backoff
+- [x] Dependency-based parallel service startup _(svcstart.rs: topological sort, start levels)_
+- [x] Socket activation _(sockact.rs: socket→service mapping, trigger/claim/release, idle-stop)_
+- [x] Automatic crash restart with exponential backoff _(svcstart.rs: 1s→60s cap, max 5 retries)_
 - [ ] Resource limits per service (cgroup-equivalent)
-- [ ] JSON-lines structured logging (text-based, NOT binary)
-  - [ ] Event logging service (system-wide event collection daemon)
-    - [ ] Hierarchical event namespace taxonomy (mirrors hook namespaces from Phase 6.5):
+- [x] JSON-lines structured logging (text-based, NOT binary) _(eventlog.rs + logpersist.rs)_
+  - [x] Event logging service (system-wide event collection daemon) _(eventlog.rs: 4096-entry ring buffer)_
+    - [x] Hierarchical event namespace taxonomy (mirrors hook namespaces from Phase 6.5):
       - `system.*` — boot, shutdown, sleep/wake, OOM, hardware errors, DPI changes
       - `process.*` — launch, exit (normal/crash with exit code), suspend/resume, priority change
       - `security.*` — login/logout, capability grant/revoke, user create/delete, auth failures
@@ -631,29 +631,29 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
       - `service.*` — service start/stop/crash/restart, dependency failures, socket activation
       - `driver.*` — driver load/unload, device attach/detach, driver errors
       - `application.*` — app-defined events via logging API (namespaced per app)
-    - [ ] Severity levels per event: debug, info, notice, warning, error, critical
-    - [ ] Structured fields: timestamp (ns), namespace, severity, source PID/service, source executable path, message, key-value payload
-    - [ ] Ring buffer in kernel for early-boot events (before logging service starts)
+    - [x] Severity levels per event: debug, info, notice, warning, error, critical
+    - [x] Structured fields: timestamp (ns), namespace, severity, source PID/service, source executable path, message, key-value payload
+    - [x] Ring buffer in kernel for early-boot events (before logging service starts)
     - [ ] Logging API for userspace services and applications (IPC channel to logging daemon)
-  - [ ] Log storage and rotation
-    - [ ] Configurable per-namespace log files (e.g., security.jsonl, network.jsonl, or single combined.jsonl)
-    - [ ] Rotation policies: by size (default 50 MB per file), by time (daily/weekly), by count (keep N rotated files)
+  - [x] Log storage and rotation _(logpersist.rs)_
+    - [x] Configurable per-namespace log files (e.g., security.jsonl, network.jsonl, or single combined.jsonl)
+    - [x] Rotation policies: by size (default 50 MB per file), by time (daily/weekly), by count (keep N rotated files)
     - [ ] Compression of rotated logs (zstd)
-    - [ ] Maximum total log storage cap (default 500 MB, configurable)
-    - [ ] Automatic pruning: oldest rotated logs deleted when cap exceeded
-    - [ ] Crash-safe writes: append + fsync, no partial JSON lines on power loss
-  - [ ] Log query API (for Event Viewer and CLI tools)
-    - [ ] Filter by namespace (prefix match: `security.*` gets all security events)
-    - [ ] Filter by severity range, time range, source PID/service name
-    - [ ] Full-text search within message and payload fields
-    - [ ] Streaming mode: tail new events matching a filter (like `journalctl -f`)
-- [ ] "Service ready" notification API (app tells OS "I'm fully loaded")
-- [ ] Startup app list (separate from service manager, simple sequential list)
-  - [ ] Disk-idle heuristic for "app is loaded, start next one" (2-3 sec timeout)
-  - [ ] Option to wait until previous app signals ready, or load immediately
+    - [x] Maximum total log storage cap (default 500 MB, configurable)
+    - [x] Automatic pruning: oldest rotated logs deleted when cap exceeded
+    - [x] Crash-safe writes: append + fsync, no partial JSON lines on power loss
+  - [x] Log query API (for Event Viewer and CLI tools) _(eventlog.rs: EventFilter + query())_
+    - [x] Filter by namespace (prefix match: `security.*` gets all security events)
+    - [x] Filter by severity range, time range, source PID/service name
+    - [x] Full-text search within message and payload fields
+    - [x] Streaming mode: tail new events matching a filter (like `journalctl -f`) _(elog tail command)_
+- [x] "Service ready" notification API (app tells OS "I'm fully loaded") _(svcstart::signal_ready)_
+- [x] Startup app list (separate from service manager, simple sequential list) _(svcstart.rs)_
+  - [x] Disk-idle heuristic for "app is loaded, start next one" (2-3 sec timeout) _(configurable timeout)_
+  - [x] Option to wait until previous app signals ready, or load immediately
 - [ ] Low-priority I/O for background service/library loading (don't obstruct user)
-- [ ] On-demand service loading with priority insertion into schedule
-- [ ] Only two ways to load programs on startup: service manager + startup app list
+- [x] On-demand service loading with priority insertion into schedule _(sockact.rs trigger)_
+- [x] Only two ways to load programs on startup: service manager + startup app list
 
 _Startup app list is a service manager config section (not a separate system). Entries: app path, arguments, whether to wait for readiness. Settings UI shows reorderable list with toggles. Entries can be shell commands for dynamic logic._
 

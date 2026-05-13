@@ -1,8 +1,12 @@
 //! IPv4 packet parsing and construction.
 //!
-//! Handles IPv4 packets (RFC 791) with fragmentation reassembly.
-//! Outgoing packets set the Don't Fragment (DF) bit; incoming
-//! fragmented packets are reassembled via the `frag` module.
+//! Handles IPv4 packets (RFC 791) with fragmentation.
+//!
+//! - **Incoming**: fragmented packets are reassembled via the `frag` module.
+//! - **Outgoing (TCP)**: always sets DF bit (TCP uses MSS to avoid
+//!   fragmentation, Path MTU Discovery relies on DF).
+//! - **Outgoing (UDP/other)**: uses `send_fragmentable()` which splits
+//!   oversized datagrams into properly sequenced fragments (RFC 791 §2.3).
 //!
 //! ## Namespace integration
 //!
@@ -35,11 +39,16 @@
 //! ```
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 
 use super::ethernet::{self, ETHERTYPE_IPV4};
 use super::interface::{self, Ipv4Addr};
+
+/// Global IP identification counter for fragmented packets.
+/// Incremented for each new datagram that requires fragmentation.
+static IP_ID_COUNTER: AtomicU16 = AtomicU16::new(1);
 
 // ---------------------------------------------------------------------------
 // Protocol numbers
@@ -57,6 +66,13 @@ const IPV4_HEADER_SIZE: usize = 20;
 
 /// Default TTL for outgoing packets.
 const DEFAULT_TTL: u8 = 64;
+
+/// Maximum Transmission Unit (Ethernet default).
+const MTU: usize = 1500;
+
+/// Maximum payload per IP fragment (must be multiple of 8).
+/// MTU (1500) - IP header (20) = 1480, which is divisible by 8.
+const MAX_FRAGMENT_PAYLOAD: usize = MTU - IPV4_HEADER_SIZE;
 
 // ---------------------------------------------------------------------------
 // IPv4 packet parsing
@@ -664,6 +680,170 @@ fn send_ns_ecn(
     super::send_frame(&frame)?;
 
     Ok(())
+}
+
+/// Send an IPv4 packet that may require fragmentation (no DF bit).
+///
+/// Used by UDP and other protocols that may produce payloads exceeding
+/// the interface MTU.  If the packet fits in one frame, it's sent as-is
+/// (without DF).  If it exceeds MTU, the payload is split into fragments
+/// per RFC 791 §2.3.
+///
+/// TCP uses `send_ns_ecn` which always sets DF (TCP relies on MSS
+/// to avoid fragmentation, and uses Path MTU Discovery).
+pub fn send_fragmentable(
+    dst: Ipv4Addr,
+    protocol: u8,
+    payload: &[u8],
+) -> KernelResult<()> {
+    send_fragmentable_ns(crate::netns::ROOT_NS, dst, protocol, payload)
+}
+
+/// Send a fragmentable IPv4 packet within a specific network namespace.
+#[allow(clippy::arithmetic_side_effects)]
+fn send_fragmentable_ns(
+    ns_id: crate::netns::NetNsId,
+    dst: Ipv4Addr,
+    protocol: u8,
+    payload: &[u8],
+) -> KernelResult<()> {
+    // Namespace-aware firewall outbound check.
+    if !super::firewall::check_outbound_ns(ns_id, protocol, dst, payload) {
+        return Err(KernelError::PermissionDenied);
+    }
+
+    let our_mac = interface::mac();
+    let our_ip = interface::ns_ip(ns_id);
+
+    // Resolve next-hop MAC address.
+    let iface_info = interface::info();
+    let dst_mac = if dst.is_broadcast()
+        || (!iface_info.subnet_mask.is_unspecified()
+            && is_subnet_broadcast(dst, iface_info.ip, iface_info.subnet_mask))
+    {
+        ethernet::BROADCAST_MAC
+    } else {
+        let next_hop = resolve_next_hop(ns_id, our_ip, dst);
+        super::arp::resolve(next_hop)?
+    };
+
+    let total_ip_len = IPV4_HEADER_SIZE + payload.len();
+
+    if total_ip_len <= MTU {
+        // Fits in one frame — send without DF (but no fragmentation needed).
+        let ip_packet = build_packet_no_df(our_ip, dst, protocol, payload, 0);
+        let frame = ethernet::build_frame(&dst_mac, &our_mac, ETHERTYPE_IPV4, &ip_packet);
+        return super::send_frame(&frame);
+    }
+
+    // Need fragmentation.  Allocate a unique IP identification.
+    let ip_id = IP_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let mut offset: usize = 0;
+    while offset < payload.len() {
+        let remaining = payload.len() - offset;
+        let is_last = remaining <= MAX_FRAGMENT_PAYLOAD;
+        let frag_len = if is_last { remaining } else { MAX_FRAGMENT_PAYLOAD };
+
+        let frag_payload = &payload[offset..offset + frag_len];
+        // Fragment offset is in 8-byte units.
+        let frag_offset_units = (offset / 8) as u16;
+        let more_fragments = !is_last;
+
+        let frag_packet = build_fragment(
+            our_ip, dst, protocol, frag_payload,
+            ip_id, frag_offset_units, more_fragments,
+        );
+        let frame = ethernet::build_frame(&dst_mac, &our_mac, ETHERTYPE_IPV4, &frag_packet);
+        super::send_frame(&frame)?;
+
+        offset += frag_len;
+    }
+
+    Ok(())
+}
+
+/// Build an IP packet without the DF (Don't Fragment) bit set.
+///
+/// Used for UDP datagrams that fit in one frame but shouldn't prevent
+/// intermediate routers from fragmenting if needed.
+#[allow(clippy::arithmetic_side_effects)]
+fn build_packet_no_df(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    protocol: u8,
+    payload: &[u8],
+    ecn: u8,
+) -> Vec<u8> {
+    let total_len = IPV4_HEADER_SIZE + payload.len();
+    let total_len_u16 = u16::try_from(total_len).unwrap_or(u16::MAX);
+    let ip_id = IP_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let mut pkt = Vec::with_capacity(total_len);
+    pkt.push(0x45); // Version 4, IHL 5
+    pkt.push(ecn & 0x03); // DSCP 0 + ECN
+    pkt.extend_from_slice(&total_len_u16.to_be_bytes());
+    pkt.extend_from_slice(&ip_id.to_be_bytes()); // Identification
+    pkt.extend_from_slice(&0x0000u16.to_be_bytes()); // Flags=0 (no DF), offset=0
+    pkt.push(DEFAULT_TTL);
+    pkt.push(protocol);
+    let cksum_off = pkt.len();
+    pkt.extend_from_slice(&[0, 0]); // Checksum placeholder
+    pkt.extend_from_slice(&src.0);
+    pkt.extend_from_slice(&dst.0);
+
+    let cksum = ip_checksum(&pkt[..IPV4_HEADER_SIZE]);
+    pkt[cksum_off] = (cksum >> 8) as u8;
+    pkt[cksum_off + 1] = cksum as u8;
+
+    pkt.extend_from_slice(payload);
+    pkt
+}
+
+/// Build a single IP fragment.
+///
+/// `frag_offset_units`: fragment offset in 8-byte units.
+/// `more_fragments`: true if this is not the last fragment.
+#[allow(clippy::arithmetic_side_effects)]
+fn build_fragment(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    protocol: u8,
+    payload: &[u8],
+    ip_id: u16,
+    frag_offset_units: u16,
+    more_fragments: bool,
+) -> Vec<u8> {
+    let total_len = IPV4_HEADER_SIZE + payload.len();
+    let total_len_u16 = u16::try_from(total_len).unwrap_or(u16::MAX);
+
+    // Flags + Fragment Offset (16-bit field):
+    //   bit 15: reserved (0)
+    //   bit 14: DF (0 for fragments)
+    //   bit 13: MF (More Fragments)
+    //   bits 12-0: fragment offset in 8-byte units
+    let mf_bit: u16 = if more_fragments { 0x2000 } else { 0 };
+    let flags_frag = mf_bit | (frag_offset_units & 0x1FFF);
+
+    let mut pkt = Vec::with_capacity(total_len);
+    pkt.push(0x45); // Version 4, IHL 5
+    pkt.push(0x00); // DSCP 0 + ECN 0
+    pkt.extend_from_slice(&total_len_u16.to_be_bytes());
+    pkt.extend_from_slice(&ip_id.to_be_bytes());
+    pkt.extend_from_slice(&flags_frag.to_be_bytes());
+    pkt.push(DEFAULT_TTL);
+    pkt.push(protocol);
+    let cksum_off = pkt.len();
+    pkt.extend_from_slice(&[0, 0]); // Checksum placeholder
+    pkt.extend_from_slice(&src.0);
+    pkt.extend_from_slice(&dst.0);
+
+    let cksum = ip_checksum(&pkt[..IPV4_HEADER_SIZE]);
+    pkt[cksum_off] = (cksum >> 8) as u8;
+    pkt[cksum_off + 1] = cksum as u8;
+
+    pkt.extend_from_slice(payload);
+    pkt
 }
 
 /// Determine the next-hop IP for a destination within a namespace.

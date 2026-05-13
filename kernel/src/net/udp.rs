@@ -489,8 +489,9 @@ pub fn send(src_port: u16, dst_ip: Ipv4Addr, dst_port: u16, data: &[u8]) -> Kern
     udp_packet[6] = (cksum >> 8) as u8;
     udp_packet[7] = cksum as u8;
 
-    // Send as an IPv4 packet.
-    ipv4::send(dst_ip, PROTO_UDP, &udp_packet)
+    // Send as an IPv4 packet.  Use the fragmentable path since UDP
+    // datagrams may exceed the interface MTU (unlike TCP which uses MSS).
+    ipv4::send_fragmentable(dst_ip, PROTO_UDP, &udp_packet)
 }
 
 // ---------------------------------------------------------------------------

@@ -3527,6 +3527,7 @@ const COMMANDS: &[&str] = &[
     "mousedev", "usbdev", "nslookup", "fw",
     "reslimit", "rlimit",
     "initproc",
+    "healthmon", "hmon",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4708,6 +4709,7 @@ fn dispatch(line: &str) {
         "drvmon" => cmd_drvmon(args),
         "reslimit" | "rlimit" => cmd_reslimit(args),
         "initproc" | "init" => cmd_initproc(args),
+        "healthmon" | "hmon" => cmd_healthmon(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -33635,6 +33637,89 @@ fn cmd_initproc(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'initproc help'.", sub);
+        }
+    }
+}
+
+/// `healthmon` / `hmon` — continuous system health monitoring.
+fn cmd_healthmon(args: &str) {
+    use crate::syshealth;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", syshealth::procfs_content());
+        }
+        "check" => {
+            let snap = syshealth::check();
+            shell_println!("Overall: {}", snap.overall.label());
+            for m in &snap.metrics {
+                let indicator = match m.level {
+                    syshealth::HealthLevel::Healthy => "[OK]",
+                    syshealth::HealthLevel::Warning => "[!!]",
+                    syshealth::HealthLevel::Critical => "[XX]",
+                    syshealth::HealthLevel::Unknown => "[??]",
+                };
+                shell_println!("  {} {}: {}", indicator, m.name, m.message);
+            }
+        }
+        "status" => {
+            shell_println!("System health: {}", syshealth::overall_health().label());
+        }
+        "history" => {
+            let hist = syshealth::history();
+            if hist.is_empty() {
+                shell_println!("No history available");
+            } else {
+                shell_println!("{:<12} {:<10} {}", "Time (s)", "Overall", "Metrics");
+                for snap in &hist {
+                    let ts_s = snap.timestamp_ns / 1_000_000_000;
+                    let metric_summary: Vec<&str> = snap.metrics.iter()
+                        .filter(|m| m.level != syshealth::HealthLevel::Healthy
+                            && m.level != syshealth::HealthLevel::Unknown)
+                        .map(|m| m.name.as_str())
+                        .collect();
+                    let issues = if metric_summary.is_empty() {
+                        alloc::string::String::from("all normal")
+                    } else {
+                        metric_summary.join(", ")
+                    };
+                    shell_println!("{:<12} {:<10} {}", ts_s, snap.overall.label(), issues);
+                }
+            }
+        }
+        "init" => {
+            syshealth::init();
+            shell_println!("System health monitor initialized");
+        }
+        "enable" => {
+            syshealth::set_enabled(true);
+            shell_println!("Health monitoring enabled");
+        }
+        "disable" => {
+            syshealth::set_enabled(false);
+            shell_println!("Health monitoring disabled");
+        }
+        "test" => {
+            let ok = syshealth::self_test();
+            if ok {
+                shell_println!("System health self-test: PASSED");
+            } else {
+                shell_println!("System health self-test: FAILED");
+            }
+        }
+        "help" => {
+            shell_println!("healthmon — continuous system health monitoring");
+            shell_println!("  show            Full status overview");
+            shell_println!("  check           Run health check now");
+            shell_println!("  status          One-word health status");
+            shell_println!("  history         Recent check history");
+            shell_println!("  init            Initialize monitor");
+            shell_println!("  enable/disable  Toggle monitoring");
+            shell_println!("  test            Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'syshealth help'.", sub);
         }
     }
 }
@@ -64081,7 +64166,7 @@ fn cmd_type(args: &str) {
 fn is_builtin(name: &str) -> bool {
     matches!(name,
         "help" | "?" | "cd" | "meminfo" | "mem" | "ps" | "tasks" | "clear" | "cls"
-        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "reslimit" | "rlimit" | "initproc" | "init" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
+        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "reslimit" | "rlimit" | "initproc" | "init" | "healthmon" | "hmon" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"

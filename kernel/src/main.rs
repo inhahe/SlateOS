@@ -151,6 +151,7 @@ mod svcstart;
 mod sync;
 mod syscall;
 mod sysctl;
+mod syshealth;
 mod thermal;
 mod timekeeping;
 mod tlb;

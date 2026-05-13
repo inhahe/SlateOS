@@ -1256,6 +1256,7 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         let conn = &mut conns[slot];
         conn.active = true;
         conn.state = TcpState::SynSent;
+        conn.last_error = TCP_ERR_NONE; // Clear any stale error from recycled slot.
         conn.local_port = local_port;
         conn.remote_ip = remote_ip;
         conn.remote_port = remote_port;
@@ -1368,6 +1369,7 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
 
     // All attempts exhausted — clean up.
     let mut conns = CONNECTIONS.lock();
+    conns[handle].last_error = TCP_ERR_TIMEDOUT;
     conns[handle].active = false;
     conns[handle].state = TcpState::Closed;
     Err(KernelError::TimedOut)
@@ -1428,6 +1430,7 @@ pub fn connect_start(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usiz
         let conn = &mut conns[slot];
         conn.active = true;
         conn.state = TcpState::SynSent;
+        conn.last_error = TCP_ERR_NONE; // Clear any stale error from recycled slot.
         conn.local_port = local_port;
         conn.remote_ip = remote_ip;
         conn.remote_port = remote_port;
@@ -3306,6 +3309,7 @@ fn handle_incoming_syn(
         let conn = &mut conns[slot];
         conn.active = true;
         conn.state = TcpState::SynReceived;
+        conn.last_error = TCP_ERR_NONE; // Server-side connections start clean.
         conn.local_port = local_port;
         conn.remote_ip = remote_ip;
         conn.remote_port = remote_port;

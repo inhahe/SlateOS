@@ -192,7 +192,7 @@ fn walk_directory(
 /// Callback type for `nftw`.
 ///
 /// Parameters: (pathname, stat_buf, typeflag, ftwbuf).
-pub type NftwFn = extern "C" fn(*const u8, *const Stat, i32, *const FTW) -> i32;
+pub type NftwFn = extern "C" fn(*const u8, *const Stat, i32, *mut FTW) -> i32;
 
 /// Walk a file tree with extended options.
 ///
@@ -228,24 +228,24 @@ fn nftw_recurse(
     let stat_result = crate::file::stat(path, &raw mut sb);
 
     let base_offset = find_basename_offset(path);
-    let ftw_info = FTW {
+    let mut ftw_info = FTW {
         base: base_offset,
         level: current_depth,
     };
 
     if stat_result < 0 {
-        return callback(path, &raw const sb, FTW_NS, &raw const ftw_info);
+        return callback(path, &raw const sb, FTW_NS, &raw mut ftw_info);
     }
 
     let is_dir = (sb.st_mode & S_IFMT) == S_IFDIR;
 
     if !is_dir {
-        return callback(path, &raw const sb, FTW_F, &raw const ftw_info);
+        return callback(path, &raw const sb, FTW_F, &raw mut ftw_info);
     }
 
     // Pre-order: call before children.
     if !depth_first {
-        let ret = callback(path, &raw const sb, FTW_D, &raw const ftw_info);
+        let ret = callback(path, &raw const sb, FTW_D, &raw mut ftw_info);
         if ret != 0 {
             return ret;
         }
@@ -263,11 +263,11 @@ fn nftw_recurse(
 
     // Post-order: call after children.
     if depth_first {
-        let dp_info = FTW {
+        let mut dp_info = FTW {
             base: base_offset,
             level: current_depth,
         };
-        return callback(path, &raw const sb, FTW_DP, &raw const dp_info);
+        return callback(path, &raw const sb, FTW_DP, &raw mut dp_info);
     }
 
     0
@@ -356,7 +356,10 @@ fn build_child_path(parent: *const u8, name: *const u8, buf: &mut [u8; PATH_MAX]
     // parent + "/" + name + NUL must fit.
     let needs_sep = parent_len > 0 && unsafe { *parent.add(parent_len.wrapping_sub(1)) } != b'/';
     let sep_len: usize = usize::from(needs_sep);
-    let total = parent_len.wrapping_add(sep_len).wrapping_add(name_len);
+    // Use checked_add to prevent usize overflow on adversarially long paths.
+    let Some(total) = parent_len.checked_add(sep_len).and_then(|s| s.checked_add(name_len)) else {
+        return 0;
+    };
 
     if total >= PATH_MAX {
         return 0;

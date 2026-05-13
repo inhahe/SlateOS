@@ -28,6 +28,8 @@ pub const SCHED_RR: i32 = 2;
 pub const SCHED_BATCH: i32 = 3;
 /// Idle scheduling policy (Linux extension).
 pub const SCHED_IDLE: i32 = 5;
+/// Deadline scheduling policy (Linux extension).
+pub const SCHED_DEADLINE: i32 = 6;
 
 // ---------------------------------------------------------------------------
 // sched_param
@@ -62,8 +64,12 @@ pub extern "C" fn sched_getscheduler(_pid: i32) -> i32 {
 pub extern "C" fn sched_setscheduler(
     _pid: i32,
     _policy: i32,
-    _param: *const SchedParam,
+    param: *const SchedParam,
 ) -> i32 {
+    if param.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
 }
 
@@ -88,8 +94,12 @@ pub extern "C" fn sched_getparam(pid: i32, param: *mut SchedParam) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setparam(
     _pid: i32,
-    _param: *const SchedParam,
+    param: *const SchedParam,
 ) -> i32 {
+    if param.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
 }
 
@@ -192,6 +202,83 @@ pub extern "C" fn sched_setaffinity(
     0
 }
 
+// ---------------------------------------------------------------------------
+// CPU set manipulation functions
+// ---------------------------------------------------------------------------
+//
+// glibc provides these as macros; we export them as `extern "C"` functions
+// for our libc.  Programs compiled against our headers will call these.
+
+/// Zero out a CPU set (clear all CPUs).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cpu_zero(set: *mut CpuSetT) {
+    if set.is_null() {
+        return;
+    }
+    // SAFETY: set is non-null.
+    unsafe {
+        let mut i: usize = 0;
+        while i < 16 {
+            (*set).bits[i] = 0;
+            i = i.wrapping_add(1);
+        }
+    }
+}
+
+/// Add a CPU to a CPU set.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cpu_set(cpu: i32, set: *mut CpuSetT) {
+    if set.is_null() || cpu < 0 || cpu as usize >= CPU_SETSIZE {
+        return;
+    }
+    let word = cpu as usize / 64;
+    let bit = cpu as usize % 64;
+    // SAFETY: set is non-null, word < 16 (cpu < 1024, 1024/64 = 16).
+    unsafe { (*set).bits[word] |= 1u64 << bit; }
+}
+
+/// Remove a CPU from a CPU set.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cpu_clr(cpu: i32, set: *mut CpuSetT) {
+    if set.is_null() || cpu < 0 || cpu as usize >= CPU_SETSIZE {
+        return;
+    }
+    let word = cpu as usize / 64;
+    let bit = cpu as usize % 64;
+    // SAFETY: set is non-null, word < 16.
+    unsafe { (*set).bits[word] &= !(1u64 << bit); }
+}
+
+/// Test if a CPU is in a CPU set.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cpu_isset(cpu: i32, set: *const CpuSetT) -> i32 {
+    if set.is_null() || cpu < 0 || cpu as usize >= CPU_SETSIZE {
+        return 0;
+    }
+    let word = cpu as usize / 64;
+    let bit = cpu as usize % 64;
+    // SAFETY: set is non-null, word < 16.
+    let val = unsafe { (*set).bits[word] };
+    if val & (1u64 << bit) != 0 { 1 } else { 0 }
+}
+
+/// Count the number of CPUs in a CPU set.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cpu_count(set: *const CpuSetT) -> i32 {
+    if set.is_null() {
+        return 0;
+    }
+    let mut count: u32 = 0;
+    let mut i: usize = 0;
+    // SAFETY: set is non-null.
+    while i < 16 {
+        let val = unsafe { (*set).bits[i] };
+        count = count.wrapping_add(val.count_ones());
+        i = i.wrapping_add(1);
+    }
+    count as i32
+}
+
 /// Get the CPU number on which the calling thread is running.
 ///
 /// Stub: always returns 0 (single-CPU assumption until SMP is
@@ -233,6 +320,7 @@ mod tests {
         assert_eq!(SCHED_RR, 2);
         assert_eq!(SCHED_BATCH, 3);
         assert_eq!(SCHED_IDLE, 5);
+        assert_eq!(SCHED_DEADLINE, 6);
     }
 
     // -- sched_getscheduler --
@@ -248,7 +336,18 @@ mod tests {
 
     #[test]
     fn test_sched_setscheduler_succeeds() {
-        assert_eq!(sched_setscheduler(0, SCHED_RR, core::ptr::null()), 0);
+        let param = SchedParam { sched_priority: 50 };
+        assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), 0);
+    }
+
+    #[test]
+    fn test_sched_setscheduler_null_param() {
+        assert_eq!(sched_setscheduler(0, SCHED_RR, core::ptr::null()), -1);
+    }
+
+    #[test]
+    fn test_sched_setparam_null_param() {
+        assert_eq!(sched_setparam(0, core::ptr::null()), -1);
     }
 
     // -- sched_getparam --
@@ -390,5 +489,70 @@ mod tests {
     #[test]
     fn test_sched_param_size() {
         assert_eq!(core::mem::size_of::<SchedParam>(), 4);
+    }
+
+    // -- CPU set manipulation --
+
+    #[test]
+    fn test_cpu_zero_clears_all() {
+        let mut set = CpuSetT { bits: [0xFFFF_FFFF_FFFF_FFFF; 16] };
+        cpu_zero(&raw mut set);
+        for i in 0..16 {
+            assert_eq!(set.bits[i], 0, "bits[{i}] not zeroed");
+        }
+    }
+
+    #[test]
+    fn test_cpu_set_and_isset() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        cpu_set(0, &raw mut set);
+        assert_eq!(cpu_isset(0, &raw const set), 1);
+        assert_eq!(cpu_isset(1, &raw const set), 0);
+
+        cpu_set(63, &raw mut set);
+        assert_eq!(cpu_isset(63, &raw const set), 1);
+        assert_eq!(cpu_isset(62, &raw const set), 0);
+
+        cpu_set(64, &raw mut set);
+        assert_eq!(cpu_isset(64, &raw const set), 1);
+        assert_eq!(set.bits[1], 1); // bit 0 of word 1
+    }
+
+    #[test]
+    fn test_cpu_clr() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        cpu_set(5, &raw mut set);
+        assert_eq!(cpu_isset(5, &raw const set), 1);
+        cpu_clr(5, &raw mut set);
+        assert_eq!(cpu_isset(5, &raw const set), 0);
+    }
+
+    #[test]
+    fn test_cpu_count() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        assert_eq!(cpu_count(&raw const set), 0);
+        cpu_set(0, &raw mut set);
+        assert_eq!(cpu_count(&raw const set), 1);
+        cpu_set(100, &raw mut set);
+        assert_eq!(cpu_count(&raw const set), 2);
+        cpu_set(1023, &raw mut set);
+        assert_eq!(cpu_count(&raw const set), 3);
+    }
+
+    #[test]
+    fn test_cpu_set_out_of_range() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        // These should be no-ops (not crash).
+        cpu_set(-1, &raw mut set);
+        cpu_set(1024, &raw mut set);
+        cpu_set(i32::MAX, &raw mut set);
+        assert_eq!(cpu_count(&raw const set), 0);
+    }
+
+    #[test]
+    fn test_cpu_isset_out_of_range() {
+        let set = CpuSetT { bits: [0xFF; 16] };
+        assert_eq!(cpu_isset(-1, &raw const set), 0);
+        assert_eq!(cpu_isset(1024, &raw const set), 0);
     }
 }

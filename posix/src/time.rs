@@ -2759,4 +2759,225 @@ mod tests {
         assert_eq!(CLOCK_REALTIME, 0);
         assert_eq!(CLOCK_MONOTONIC, 1);
     }
+
+    #[test]
+    fn test_timer_abstime_value() {
+        assert_eq!(TIMER_ABSTIME, 1);
+    }
+
+    #[test]
+    fn test_sigev_values_match_glibc() {
+        // glibc: SIGEV_SIGNAL=0, SIGEV_NONE=1, SIGEV_THREAD=2.
+        assert_eq!(SIGEV_SIGNAL, 0);
+        assert_eq!(SIGEV_NONE, 1);
+        assert_eq!(SIGEV_THREAD, 2);
+    }
+
+    #[test]
+    fn test_itimer_values_match_glibc() {
+        assert_eq!(ITIMER_REAL, 0);
+        assert_eq!(ITIMER_VIRTUAL, 1);
+        assert_eq!(ITIMER_PROF, 2);
+    }
+
+    // -- Struct layout tests --
+
+    #[test]
+    fn test_tm_struct_layout() {
+        // Tm has 9 i32 fields, repr(C) → 36 bytes, align 4.
+        assert_eq!(core::mem::size_of::<Tm>(), 36);
+        assert_eq!(core::mem::align_of::<Tm>(), 4);
+    }
+
+    #[test]
+    fn test_timeval_struct_layout() {
+        // Timeval = { tv_sec: i64, tv_usec: i64 } = 16 bytes.
+        assert_eq!(core::mem::size_of::<Timeval>(), 16);
+        assert_eq!(core::mem::align_of::<Timeval>(), 8);
+    }
+
+    #[test]
+    fn test_itimerspec_struct_layout() {
+        // Itimerspec = 2 × Timespec = 2 × 16 = 32 bytes.
+        assert_eq!(core::mem::size_of::<Itimerspec>(), 32);
+    }
+
+    #[test]
+    fn test_itimerval_struct_layout() {
+        // Itimerval = 2 × Timeval = 2 × 16 = 32 bytes.
+        assert_eq!(core::mem::size_of::<Itimerval>(), 32);
+    }
+
+    #[test]
+    fn test_sigevent_struct_layout() {
+        // Sigevent must be 64 bytes to match glibc x86_64.
+        assert_eq!(core::mem::size_of::<Sigevent>(), 64);
+    }
+
+    // -- Additional conversion edge cases --
+
+    #[test]
+    fn test_mktime_feb29_nonleap_normalizes() {
+        // Feb 29 in a non-leap year should normalize to March 1.
+        let mut tm = zero_tm();
+        tm.tm_year = 123; // 2023 (not a leap year)
+        tm.tm_mon = 1;    // February
+        tm.tm_mday = 29;
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_mon, 2);   // March
+        assert_eq!(tm.tm_mday, 1);
+    }
+
+    #[test]
+    fn test_mktime_mday_zero_borrows() {
+        // mday=0 should be last day of previous month.
+        let mut tm = zero_tm();
+        tm.tm_year = 124; // 2024 (leap year)
+        tm.tm_mon = 2;    // March
+        tm.tm_mday = 0;   // → Feb 29 (leap year)
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_mon, 1);   // February
+        assert_eq!(tm.tm_mday, 29); // Leap day
+    }
+
+    #[test]
+    fn test_mktime_negative_seconds() {
+        // -1 seconds should borrow: sec=59, min decremented.
+        let mut tm = zero_tm();
+        tm.tm_year = 124;
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        tm.tm_hour = 1;
+        tm.tm_min = 0;
+        tm.tm_sec = -1;
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_sec, 59);
+        assert_eq!(tm.tm_min, 59);
+        assert_eq!(tm.tm_hour, 0);
+    }
+
+    #[test]
+    fn test_gmtime_1900_jan1() {
+        // 1900-01-01 00:00:00 UTC = -2208988800
+        let t: TimeT = -2_208_988_800;
+        let tm = gmtime(&t);
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 0);    // 1900 - 1900
+        assert_eq!(tm.tm_mon, 0);     // January
+        assert_eq!(tm.tm_mday, 1);
+        assert_eq!(tm.tm_hour, 0);
+        assert_eq!(tm.tm_wday, 1);    // Monday
+        assert_eq!(tm.tm_yday, 0);
+    }
+
+    #[test]
+    fn test_gmtime_2038_boundary() {
+        // 2038-01-19 03:14:07 UTC = 2^31 - 1 (max 32-bit time_t).
+        let t: TimeT = 2_147_483_647;
+        let tm = gmtime(&t);
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 138);  // 2038 - 1900
+        assert_eq!(tm.tm_mon, 0);     // January
+        assert_eq!(tm.tm_mday, 19);
+        assert_eq!(tm.tm_hour, 3);
+        assert_eq!(tm.tm_min, 14);
+        assert_eq!(tm.tm_sec, 7);
+    }
+
+    #[test]
+    fn test_gmtime_mktime_roundtrip_leap_years() {
+        // Test roundtrip for several leap-year Feb 29 timestamps.
+        let leap_feb29_timestamps: &[TimeT] = &[
+            68169600,    // 1972-02-29 00:00:00 UTC
+            951782400,   // 2000-02-29 00:00:00 UTC (century leap)
+            1709164800,  // 2024-02-29 00:00:00 UTC
+        ];
+        for &t in leap_feb29_timestamps {
+            let tm = gmtime(&t);
+            let tm = unsafe { &mut *tm };
+            assert_eq!(tm.tm_mon, 1, "timestamp {t}: expected February");
+            assert_eq!(tm.tm_mday, 29, "timestamp {t}: expected 29th");
+            let t2 = mktime(tm);
+            assert_eq!(t, t2, "roundtrip failed for leap Feb 29 timestamp {t}");
+        }
+    }
+
+    // -- strftime week number tests --
+
+    #[test]
+    fn test_strftime_week_number_sunday() {
+        // 2023-01-01 is Sunday (wday=0, yday=0).
+        let mut tm = zero_tm();
+        tm.tm_year = 123;
+        tm.tm_wday = 0;
+        tm.tm_yday = 0;
+        // %U: Sunday starts the first week. Jan 1 Sunday → week 01.
+        assert_eq!(run_strftime(b"%U\0", &tm), b"01");
+
+        // 2024-01-01 is Monday (wday=1, yday=0).
+        tm.tm_year = 124;
+        tm.tm_wday = 1;
+        tm.tm_yday = 0;
+        // %U: before first Sunday → week 00.
+        assert_eq!(run_strftime(b"%U\0", &tm), b"00");
+    }
+
+    #[test]
+    fn test_strftime_week_number_monday() {
+        // 2024-01-01 is Monday (wday=1, yday=0).
+        let mut tm = zero_tm();
+        tm.tm_year = 124;
+        tm.tm_wday = 1;
+        tm.tm_yday = 0;
+        // %W: Monday starts the first week. Jan 1 Monday → week 01.
+        assert_eq!(run_strftime(b"%W\0", &tm), b"01");
+
+        // 2023-01-01 is Sunday (wday=0, yday=0).
+        tm.tm_year = 123;
+        tm.tm_wday = 0;
+        tm.tm_yday = 0;
+        // %W: before first Monday → week 00.
+        assert_eq!(run_strftime(b"%W\0", &tm), b"00");
+    }
+
+    #[test]
+    fn test_strftime_composite_c() {
+        // %c = asctime format: "Thu Jan  1 00:00:00 1970"
+        let mut tm = zero_tm();
+        tm.tm_year = 70;
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        tm.tm_wday = 4;
+        let result = run_strftime(b"%c\0", &tm);
+        assert_eq!(result, b"Thu Jan  1 00:00:00 1970");
+    }
+
+    #[test]
+    fn test_strftime_epoch_seconds() {
+        // %s = seconds since epoch (GNU extension).
+        let mut tm = zero_tm();
+        tm.tm_year = 70;
+        tm.tm_mon = 0;
+        tm.tm_mday = 2;   // 86400 seconds from epoch
+        let result = run_strftime(b"%s\0", &tm);
+        assert_eq!(result, b"86400");
+    }
+
+    #[test]
+    fn test_hour_12_all_values() {
+        assert_eq!(hour_12(0), 12);   // midnight
+        assert_eq!(hour_12(1), 1);
+        assert_eq!(hour_12(11), 11);
+        assert_eq!(hour_12(12), 12);  // noon
+        assert_eq!(hour_12(13), 1);
+        assert_eq!(hour_12(23), 11);
+    }
+
+    // -- CLOCKS_PER_SEC --
+
+    #[test]
+    fn test_clocks_per_sec() {
+        // POSIX requires CLOCKS_PER_SEC = 1_000_000.
+        assert_eq!(CLOCKS_PER_SEC, 1_000_000);
+    }
 }

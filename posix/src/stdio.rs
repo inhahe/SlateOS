@@ -204,9 +204,9 @@ fn free_file(file: *mut File) {
 /// contain these small integers.  `stream_to_file` maps them to the
 /// real static FILE objects.  All other `FILE*` values are real pointers
 /// into `FILE_POOL` (returned by `fopen` / `fdopen`).
-const STDIN_SENTINEL: usize = 0;
-const STDOUT_SENTINEL: usize = 1;
-const STDERR_SENTINEL: usize = 2;
+pub(crate) const STDIN_SENTINEL: usize = 0;
+pub(crate) const STDOUT_SENTINEL: usize = 1;
+pub(crate) const STDERR_SENTINEL: usize = 2;
 
 /// Convert a C `FILE*` to our internal `File` pointer.
 ///
@@ -1445,6 +1445,13 @@ pub extern "C" fn remove(path: *const u8) -> i32 {
 pub extern "C" fn stdio_rename(old: *const u8, new: *const u8) -> i32 {
     crate::file::rename(old, new)
 }
+
+/// Maximum length of a filename (including null).
+///
+/// glibc defines this as 4096.  Used by programs that allocate
+/// `char path[FILENAME_MAX]` buffers.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static FILENAME_MAX: i32 = 4096;
 
 /// Maximum length of a `tmpnam`-generated filename (including null).
 pub const L_TMPNAM: usize = 20;

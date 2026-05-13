@@ -2353,8 +2353,9 @@ pub unsafe extern "C" fn getwc(stream: *mut u8) -> WcharT {
 /// Write a wide character to stdout.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putwchar(wc: WcharT) -> WcharT {
-    // SAFETY: STDOUT_SENTINEL (1 as *mut u8) is the stdio convention.
-    unsafe { fputwc(wc, core::ptr::dangling_mut::<u8>()) }
+    // Use STDOUT_SENTINEL explicitly — dangling_mut::<u8>() happens to
+    // return the same value today but is not guaranteed to.
+    unsafe { fputwc(wc, crate::stdio::STDOUT_SENTINEL as *mut u8) }
 }
 
 /// Read a wide character from stdin.

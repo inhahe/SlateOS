@@ -280,7 +280,9 @@ pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64, fargs: *const u
         return n;
     }
     let write_len = if (n as usize) < PRINTF_BUF_SIZE { n as usize } else { PRINTF_BUF_SIZE };
-    let ret = crate::stdio::write_stream(core::ptr::dangling_mut::<u8>(), buf.as_ptr(), write_len);
+    // Use STDOUT_SENTINEL (1) explicitly — dangling_mut::<u8>() happens to
+    // return the same value today but is not guaranteed to.
+    let ret = crate::stdio::write_stream(crate::stdio::STDOUT_SENTINEL as *mut u8, buf.as_ptr(), write_len);
     if ret < 0 { ret as i32 } else { n }
 }
 

@@ -92,7 +92,7 @@ use super::number::{
     SYS_TCP_LIST, SYS_TCP_LISTENER_LIST, SYS_NET_IF_INFO,
     SYS_ARP_TABLE, SYS_DNS_CACHE_STATS,
     SYS_TCP_POLL_STATUS, SYS_TCP_LISTENER_READY, SYS_UDP_RX_READY,
-    SYS_TCP_SHUTDOWN,
+    SYS_TCP_SHUTDOWN, SYS_TCP_INFO,
     SYS_YIELD,
 };
 use super::handlers;
@@ -441,6 +441,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_TCP_LISTENER_READY as usize] = Some(handlers::sys_tcp_listener_ready);
     handlers[SYS_UDP_RX_READY as usize] = Some(handlers::sys_udp_rx_ready);
     handlers[SYS_TCP_SHUTDOWN as usize] = Some(handlers::sys_tcp_shutdown);
+    handlers[SYS_TCP_INFO as usize] = Some(handlers::sys_tcp_info);
 
     SyscallTable {
         handlers,

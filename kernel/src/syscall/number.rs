@@ -2231,6 +2231,33 @@ pub const SYS_UDP_RX_READY: u64 = 847;
 /// Returns: 0 on success, negative error code.
 pub const SYS_TCP_SHUTDOWN: u64 = 848;
 
+/// Query detailed TCP connection information (for getsockopt TCP_INFO).
+///
+/// `arg0`: connection handle.
+/// `arg1`: pointer to output buffer (at least 48 bytes).
+/// `arg2`: buffer length.
+///
+/// Writes a packed structure:
+/// ```text
+/// [0..1]   u8   state (TcpState discriminant)
+/// [1..2]   u8   flags (bit 0: keepalive, bit 1: nagle, bit 2: ecn,
+///                       bit 3: sack, bit 4: wscale, bit 5: timestamps)
+/// [2..4]   u16  effective MSS
+/// [4..8]   u32  SRTT (nanoseconds / 1000 → microseconds)
+/// [8..12]  u32  RTO (nanoseconds / 1000 → microseconds)
+/// [12..16] u32  cwnd (bytes)
+/// [16..20] u32  ssthresh (bytes)
+/// [20..24] u32  snd_wnd (bytes)
+/// [24..28] u32  rx_buffered (bytes)
+/// [28..32] u32  tx_buffered (bytes, unacknowledged)
+/// [32..36] u32  peer_mss
+/// [36..40] u32  reserved
+/// [40..48] u64  total_rx_bytes (0 for now)
+/// ```
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_TCP_INFO: u64 = 849;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

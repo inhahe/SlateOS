@@ -174,7 +174,15 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             1
         }
         HandleKind::TcpStream => {
-            syscall3(SYS_TCP_RECV, entry.handle, buf as u64, count as u64)
+            // Pass MSG_DONTWAIT if the fd has O_NONBLOCK set.
+            let flags: u64 = if fdtable::get_status_flags(fd).unwrap_or(0)
+                & crate::fcntl::O_NONBLOCK != 0
+            {
+                0x40 // MSG_DONTWAIT
+            } else {
+                0
+            };
+            syscall4(SYS_TCP_RECV, entry.handle, buf as u64, count as u64, flags)
         }
         HandleKind::TcpListener | HandleKind::UdpSocket => {
             // Listeners are not readable via read(); use accept().

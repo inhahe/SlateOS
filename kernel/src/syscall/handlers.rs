@@ -7103,6 +7103,94 @@ pub fn sys_udp_rx_ready(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(count as i64)
 }
 
+/// SYS_TCP_INFO — query detailed TCP connection information.
+///
+/// arg0: connection handle
+/// arg1: output buffer pointer
+/// arg2: buffer length (at least 48 bytes)
+///
+/// Returns 0 on success, writes 48-byte packed info struct.
+pub fn sys_tcp_info(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    let out_ptr = args.arg1 as usize;
+    let buf_len = args.arg2 as usize;
+
+    if out_ptr == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    const INFO_SIZE: usize = 48;
+    if buf_len < INFO_SIZE {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, INFO_SIZE) {
+        return SyscallResult::err(e);
+    }
+
+    let info = match crate::net::tcp::connection_info(handle) {
+        Some(i) => i,
+        None => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+
+    // Pack into a 48-byte buffer.
+    let mut buf = [0u8; INFO_SIZE];
+
+    // [0] state enum as u8.
+    buf[0] = match info.state {
+        crate::net::tcp::TcpState::Closed => 0,
+        crate::net::tcp::TcpState::Listen => 1,
+        crate::net::tcp::TcpState::SynSent => 2,
+        crate::net::tcp::TcpState::SynReceived => 3,
+        crate::net::tcp::TcpState::Established => 4,
+        crate::net::tcp::TcpState::FinWait1 => 5,
+        crate::net::tcp::TcpState::FinWait2 => 6,
+        crate::net::tcp::TcpState::TimeWait => 7,
+        crate::net::tcp::TcpState::CloseWait => 8,
+        crate::net::tcp::TcpState::LastAck => 9,
+    };
+
+    // [1] flags bitfield.
+    let mut flags: u8 = 0;
+    if info.keepalive { flags |= 1; }
+    if info.nagle     { flags |= 2; }
+    if info.ecn_ok    { flags |= 4; }
+    if info.sack_ok   { flags |= 8; }
+    if info.wscale_ok { flags |= 16; }
+    if info.ts_ok     { flags |= 32; }
+    buf[1] = flags;
+
+    // [2..4] effective MSS (u16 LE).
+    buf[2..4].copy_from_slice(&info.eff_mss.to_le_bytes());
+    // [4..8] SRTT in microseconds (u32 LE).
+    let srtt_us = (info.srtt_ns / 1000) as u32;
+    buf[4..8].copy_from_slice(&srtt_us.to_le_bytes());
+    // [8..12] RTO in microseconds (u32 LE).
+    let rto_us = (info.rto_ns / 1000) as u32;
+    buf[8..12].copy_from_slice(&rto_us.to_le_bytes());
+    // [12..16] cwnd (u32 LE).
+    buf[12..16].copy_from_slice(&info.cwnd.to_le_bytes());
+    // [16..20] ssthresh (u32 LE).
+    buf[16..20].copy_from_slice(&info.ssthresh.to_le_bytes());
+    // [20..24] snd_wnd (u32 LE).
+    buf[20..24].copy_from_slice(&info.snd_wnd.to_le_bytes());
+    // [24..28] rx_buffered (u32 LE).
+    buf[24..28].copy_from_slice(&(info.rx_buffered as u32).to_le_bytes());
+    // [28..32] tx_buffered (u32 LE).
+    buf[28..32].copy_from_slice(&(info.tx_buffered as u32).to_le_bytes());
+    // [32..36] peer_mss (u32 LE).
+    buf[32..36].copy_from_slice(&(info.peer_mss as u32).to_le_bytes());
+    // [36..48] reserved (zeros).
+
+    let dst = out_ptr as *mut u8;
+    // SAFETY: validated above — dst is in user space and writable.
+    unsafe {
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, INFO_SIZE);
+    }
+
+    SyscallResult::ok(0)
+}
+
 /// SYS_TCP_SHUTDOWN — half-close a TCP connection.
 ///
 /// arg0: connection handle

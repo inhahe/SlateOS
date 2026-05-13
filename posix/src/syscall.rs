@@ -115,6 +115,7 @@ pub const SYS_TCP_POLL_STATUS: u64 = 845;
 pub const SYS_TCP_LISTENER_READY: u64 = 846;
 pub const SYS_UDP_RX_READY: u64 = 847;
 pub const SYS_TCP_SHUTDOWN: u64 = 848;
+pub const SYS_TCP_INFO: u64 = 849;
 
 // ---------------------------------------------------------------------------
 // Inline syscall wrappers

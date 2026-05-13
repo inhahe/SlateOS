@@ -134,6 +134,8 @@ pub const TCP_MAXSEG: i32 = 2;
 pub const TCP_CORK: i32 = 3;
 /// User timeout (milliseconds) — time to wait for data ACK.
 pub const TCP_USER_TIMEOUT: i32 = 18;
+/// Detailed TCP connection information (Linux TCP_INFO).
+pub const TCP_INFO: i32 = 11;
 
 // IP-level socket options (IPPROTO_IP / SOL_IP).
 /// IP protocol level for setsockopt/getsockopt.
@@ -2036,6 +2038,28 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_TCP, TCP_MAXSEG) => 1460,   // Default MSS (Ethernet MTU - headers).
             (SOL_TCP, TCP_CORK) => 0,        // Not corked.
             (SOL_TCP, TCP_USER_TIMEOUT) => 0, // No user timeout.
+            (SOL_TCP, TCP_INFO) => {
+                // TCP_INFO returns a 48-byte struct with connection details.
+                // Query the kernel directly — this is a variable-size option.
+                if available < 48 {
+                    errno::set_errno(errno::EINVAL);
+                    return -1;
+                }
+                if entry.handle == 0 {
+                    errno::set_errno(errno::ENOTCONN);
+                    return -1;
+                }
+                let ret = syscall3(
+                    SYS_TCP_INFO, entry.handle,
+                    optval as u64, available as u64,
+                );
+                if ret < 0 {
+                    errno::set_errno(translate_net_error(ret));
+                    return -1;
+                }
+                *optlen = 48;
+                return 0;
+            }
             _ => {
                 errno::set_errno(errno::ENOPROTOOPT);
                 return -1;

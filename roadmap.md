@@ -1010,6 +1010,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TCP TIME_WAIT slot recycling: when connection table is full, oldest TIME_WAIT connection is evicted for new connects/accepts (matches Linux tcp_tw_reuse)
   - [x] TCP SYN retransmission: connect() retransmits SYN up to 4 times (1s/2s/4s/8s backoff) instead of single-shot with 5s timeout
   - [x] Enhanced net self-test: reports interface config, traffic stats, TCP/UDP state, DNS cache, ARP entries
+  - [x] TCP partial recv (read_up_to): reads at most N bytes from rx_buffer, remainder stays for next recv — fixes data loss bug where read_blocking drained entire buffer but syscall handler only copied buf_cap bytes
+  - [x] TCP MSG_PEEK: peek() copies data without consuming; wired through SYS_TCP_RECV arg3 flags
+  - [x] TCP MSG_DONTWAIT: non-blocking recv returns WouldBlock/EAGAIN immediately if no data; O_NONBLOCK on fd auto-adds MSG_DONTWAIT
+  - [x] TCP half-close (shutdown): SYS_TCP_SHUTDOWN (848) sends FIN for SHUT_WR, discards rx data for SHUT_RD; local_write_closed/local_read_closed flags; POSIX shutdown() delegates to kernel instead of close+mark
+  - [x] Poll readiness kernel queries: SYS_TCP_POLL_STATUS (845) returns actual POLLIN/POLLOUT/POLLHUP from rx_buffer state + send window + connection state; SYS_TCP_LISTENER_READY (846) checks accept backlog; SYS_UDP_RX_READY (847) returns queued datagram count
+  - [x] POSIX poll/select accuracy: check_readiness() queries kernel for TCP/UDP/listener state instead of always reporting ready
+  - [x] Error code translation fix: translate_net_error() now matches actual KernelError discriminant values (-4=WouldBlock→EAGAIN, -6=TimedOut→ETIMEDOUT, etc.) instead of fictional numbering
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close, abort, peer_addr (SYS_TCP_CONNECT through SYS_TCP_PEER_ADDR)
@@ -1212,6 +1219,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] getifaddrs real IP: queries SYS_NET_IF_INFO to populate eth0 address and netmask (was INADDR_ANY)
   - [x] getservbyname/getservbyport: built-in service database (27 entries: http, https, ssh, ftp, smtp, dns, mysql, postgresql, redis, etc.)
   - [x] getprotobyname/getprotobynumber: built-in protocol database (11 entries: ip, icmp, tcp, udp, gre, esp, ah, sctp, etc.)
+  - [x] poll/select kernel-queried readiness: check_readiness() queries SYS_TCP_POLL_STATUS/SYS_TCP_LISTENER_READY/SYS_UDP_RX_READY for actual socket state (was always-ready)
+  - [x] recv MSG_PEEK/MSG_DONTWAIT: flags passed through to kernel; O_NONBLOCK on fd auto-adds MSG_DONTWAIT
+  - [x] shutdown half-close: delegates to SYS_TCP_SHUTDOWN for proper SHUT_RD/SHUT_WR/SHUT_RDWR semantics
+  - [x] Error translation fix: translate_net_error() aligned to actual KernelError enum values
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

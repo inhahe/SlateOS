@@ -18,6 +18,7 @@ use crate::errno;
 /// - 3: UTF-8 → ASCII (lossy — non-ASCII bytes replaced with '?')
 /// - 4: Latin-1 → UTF-8 (0x00-0x7F passthrough, 0x80-0xFF → 2-byte UTF-8)
 /// - 5: UTF-8 → Latin-1 (code points > U+00FF set EILSEQ)
+/// - 6: Latin-1 → ASCII (lossy — 0x80-0xFF replaced with '?', one byte at a time)
 pub type IconvT = isize;
 
 /// Error return from `iconv_open`.
@@ -151,7 +152,7 @@ pub extern "C" fn iconv_open(tocode: *const u8, fromcode: *const u8) -> IconvT {
 
     // Latin-1 → ASCII (lossy — non-ASCII bytes replaced with '?').
     if from_latin1 && to_ascii {
-        return 3; // Reuse UTF-8→ASCII logic: both replace non-ASCII with '?'.
+        return 6;
     }
 
     // Unsupported encoding pair.
@@ -321,6 +322,25 @@ pub unsafe extern "C" fn iconv(
                     errno::set_errno(errno::EILSEQ);
                     return usize::MAX;
                 }
+            }
+        }
+        6 => {
+            // Latin-1 → ASCII (lossy): non-ASCII bytes replaced with
+            // '?', one byte at a time.  Unlike descriptor 3 (UTF-8→ASCII)
+            // which skips multi-byte sequences, Latin-1 is a single-byte
+            // encoding so each byte > 127 is an independent character.
+            while *in_left > 0 && *out_left > 0 {
+                let byte = unsafe { **in_ptr };
+                if byte > 127 {
+                    unsafe { **out_ptr = b'?'; }
+                    replacements = replacements.wrapping_add(1);
+                } else {
+                    unsafe { **out_ptr = byte; }
+                }
+                *in_ptr = unsafe { (*in_ptr).add(1) };
+                *out_ptr = unsafe { (*out_ptr).add(1) };
+                *in_left = in_left.wrapping_sub(1);
+                *out_left = out_left.wrapping_sub(1);
             }
         }
         _ => {
@@ -812,6 +832,15 @@ mod tests {
     }
 
     #[test]
+    fn test_open_latin1_to_ascii() {
+        let latin = cstr("LATIN1");
+        let ascii = cstr("ASCII");
+        let cd = iconv_open(ascii.as_ptr(), latin.as_ptr());
+        assert_ne!(cd, ICONV_OPEN_ERR, "Latin-1 → ASCII should be supported");
+        assert_eq!(cd, 6, "Latin-1 → ASCII should be descriptor 6");
+    }
+
+    #[test]
     fn test_latin1_not_ascii() {
         // Latin-1 must NOT match ASCII aliases.
         let v = cstr("LATIN1");
@@ -991,5 +1020,50 @@ mod tests {
         let input = &[0xC3u8];
         let result = convert(5, input);
         assert!(result.is_none(), "incomplete UTF-8 should fail");
+    }
+
+    // -----------------------------------------------------------------------
+    // Latin-1 → ASCII (descriptor 6)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_latin1_to_ascii_pure_ascii() {
+        let input = b"Hello";
+        let (output, replacements) = convert(6, input).expect("ASCII Latin-1 → ASCII");
+        assert_eq!(&output, b"Hello");
+        assert_eq!(replacements, 0);
+    }
+
+    #[test]
+    fn test_latin1_to_ascii_replaces_high_bytes() {
+        // Latin-1 "café": 0x63 0x61 0x66 0xE9
+        // Each byte > 127 is ONE character, replaced with ONE '?'.
+        let input = &[0x63u8, 0x61, 0x66, 0xE9];
+        let (output, replacements) = convert(6, input).expect("café Latin-1 → ASCII");
+        assert_eq!(&output, b"caf?");
+        assert_eq!(replacements, 1);
+    }
+
+    #[test]
+    fn test_latin1_to_ascii_all_high_bytes() {
+        // Three high bytes: each should produce exactly one '?'.
+        let input = &[0xE9u8, 0xF1, 0xFC]; // é, ñ, ü
+        let (output, replacements) = convert(6, input).expect("all-high Latin-1 → ASCII");
+        assert_eq!(&output, b"???");
+        assert_eq!(replacements, 3);
+        // Critical: input and output must be the same length for Latin-1.
+        // (UTF-8→ASCII would wrongly skip multi-byte sequences here.)
+        assert_eq!(output.len(), 3);
+    }
+
+    #[test]
+    fn test_latin1_to_ascii_byte_0xe9_not_treated_as_utf8() {
+        // Regression test: Latin-1 byte 0xE9 has the bit pattern 0xF0 == 0xE0
+        // which the UTF-8→ASCII converter would interpret as a 3-byte sequence
+        // leader, consuming 3 input bytes. Latin-1 → ASCII must consume only 1.
+        let input = &[0xE9u8, 0x41, 0x42]; // é, A, B in Latin-1
+        let (output, replacements) = convert(6, input).expect("0xE9 + AB");
+        assert_eq!(&output, b"?AB");
+        assert_eq!(replacements, 1);
     }
 }

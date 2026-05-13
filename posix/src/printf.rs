@@ -1439,12 +1439,14 @@ fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> us
         return pos;
     }
 
-    // Find exponent.
-    let mut exp: i32 = crate::math::ilogb(val);
+    // Find decimal exponent: floor(log10(|val|)).
+    // Previous code used ilogb (binary exponent) which is incorrect —
+    // e.g. ilogb(9.5)=3 but the decimal exponent is 0.
+    let mut exp: i32 = crate::math::floor(crate::math::log10(val)) as i32;
     let mut mantissa = val / crate::math::pow(10.0, f64::from(exp));
-    // Normalize: 1 <= mantissa < 10.
-    if mantissa >= 10.0 { mantissa /= 10.0; exp += 1; }
-    if mantissa < 1.0 && mantissa > 0.0 { mantissa *= 10.0; exp -= 1; }
+    // Normalize: 1 <= mantissa < 10 (handle floating-point imprecision).
+    while mantissa >= 10.0 { mantissa /= 10.0; exp += 1; }
+    while mantissa < 1.0 && mantissa > 0.0 { mantissa *= 10.0; exp -= 1; }
 
     // Pre-round mantissa to the requested precision and re-normalize.
     // Without this, rounding carry in fmt_fixed can push the integer part
@@ -1553,4 +1555,631 @@ fn trim_trailing_zeros(buf: &mut [u8], len: usize) -> usize {
     }
 
     trim_end
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    //
+    // `format_core` and `_snprintf_impl` are pure formatting functions that
+    // write to a caller-supplied buffer — no syscalls, no I/O — so they
+    // work on the host test target.
+    //
+    // Integer arguments are passed as a `&[u64]` array.  String pointer
+    // arguments are cast to `u64`.  Float arguments are passed as
+    // `f64::to_bits()` in a separate `&[u64]` array.
+    // -----------------------------------------------------------------------
+
+    /// Format via `_snprintf_impl` and return the output as a `String`.
+    fn snprintf_str(fmt: &[u8], args: &[u64], fargs: &[u64]) -> (String, i32) {
+        let mut buf = [0u8; 512];
+        let n = _snprintf_impl(
+            buf.as_mut_ptr(),
+            buf.len(),
+            fmt.as_ptr(),
+            args.as_ptr(),
+            fargs.as_ptr(),
+        );
+        let len = if n >= 0 && (n as usize) < buf.len() {
+            n as usize
+        } else {
+            buf.len().wrapping_sub(1)
+        };
+        let s = core::str::from_utf8(&buf[..len]).unwrap_or("<invalid utf8>").to_string();
+        (s, n)
+    }
+
+    /// Format via `format_core` and return the output as a `String`.
+    fn fmt_str(fmt: &[u8], args: &[u64], fargs: &[u64]) -> (String, i32) {
+        let mut buf = [0u8; 512];
+        let n = format_core(
+            buf.as_mut_ptr(),
+            buf.len(),
+            fmt.as_ptr(),
+            args.as_ptr(),
+            fargs.as_ptr(),
+        );
+        let len = if n >= 0 && (n as usize) < buf.len() {
+            n as usize
+        } else if n >= 0 {
+            buf.len()
+        } else {
+            0
+        };
+        let s = core::str::from_utf8(&buf[..len]).unwrap_or("<invalid utf8>").to_string();
+        (s, n)
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. %d formatting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_d_positive() {
+        let (s, n) = snprintf_str(b"%d\0", &[42], &[]);
+        assert_eq!(s, "42");
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn fmt_d_negative() {
+        let val = (-7i64) as u64;
+        let (s, _) = snprintf_str(b"%d\0", &[val], &[]);
+        assert_eq!(s, "-7");
+    }
+
+    #[test]
+    fn fmt_d_zero() {
+        let (s, _) = snprintf_str(b"%d\0", &[0], &[]);
+        assert_eq!(s, "0");
+    }
+
+    #[test]
+    fn fmt_d_large() {
+        let val = 1_000_000u64;
+        let (s, _) = snprintf_str(b"%d\0", &[val], &[]);
+        assert_eq!(s, "1000000");
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. %s string formatting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_s_basic() {
+        let text = b"hello\0";
+        let (s, _) = snprintf_str(b"%s\0", &[text.as_ptr() as u64], &[]);
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn fmt_s_null_pointer() {
+        let (s, _) = snprintf_str(b"%s\0", &[0u64], &[]);
+        assert_eq!(s, "(null)");
+    }
+
+    #[test]
+    fn fmt_s_empty() {
+        let text = b"\0";
+        let (s, _) = snprintf_str(b"%s\0", &[text.as_ptr() as u64], &[]);
+        assert_eq!(s, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. %x hex formatting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_x_basic() {
+        let (s, _) = snprintf_str(b"%x\0", &[255], &[]);
+        assert_eq!(s, "ff");
+    }
+
+    #[test]
+    fn fmt_x_upper() {
+        let (s, _) = snprintf_str(b"%X\0", &[255], &[]);
+        assert_eq!(s, "FF");
+    }
+
+    #[test]
+    fn fmt_x_zero() {
+        let (s, _) = snprintf_str(b"%x\0", &[0], &[]);
+        assert_eq!(s, "0");
+    }
+
+    #[test]
+    fn fmt_x_large() {
+        let (s, _) = snprintf_str(b"%x\0", &[0xDEAD_BEEFu64], &[]);
+        assert_eq!(s, "deadbeef");
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. Width and precision
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_width_d() {
+        let (s, _) = snprintf_str(b"%10d\0", &[42], &[]);
+        assert_eq!(s, "        42");
+    }
+
+    #[test]
+    fn fmt_width_d_left_align() {
+        let (s, _) = snprintf_str(b"%-10d\0", &[42], &[]);
+        assert_eq!(s, "42        ");
+    }
+
+    #[test]
+    fn fmt_precision_s() {
+        let text = b"hello world\0";
+        let (s, _) = snprintf_str(b"%.5s\0", &[text.as_ptr() as u64], &[]);
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn fmt_zero_pad_x() {
+        let (s, _) = snprintf_str(b"%08x\0", &[0xFF], &[]);
+        assert_eq!(s, "000000ff");
+    }
+
+    #[test]
+    fn fmt_width_s() {
+        let text = b"hi\0";
+        let (s, _) = snprintf_str(b"%10s\0", &[text.as_ptr() as u64], &[]);
+        assert_eq!(s, "        hi");
+    }
+
+    #[test]
+    fn fmt_precision_d() {
+        // Precision on integer: minimum digits.
+        let (s, _) = snprintf_str(b"%.5d\0", &[42], &[]);
+        assert_eq!(s, "00042");
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Flags
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_flag_minus() {
+        let (s, _) = snprintf_str(b"%-5d\0", &[42], &[]);
+        assert_eq!(s, "42   ");
+    }
+
+    #[test]
+    fn fmt_flag_zero() {
+        let (s, _) = snprintf_str(b"%05d\0", &[42], &[]);
+        assert_eq!(s, "00042");
+    }
+
+    #[test]
+    fn fmt_flag_plus_positive() {
+        let (s, _) = snprintf_str(b"%+d\0", &[42], &[]);
+        assert_eq!(s, "+42");
+    }
+
+    #[test]
+    fn fmt_flag_plus_negative() {
+        let val = (-42i64) as u64;
+        let (s, _) = snprintf_str(b"%+d\0", &[val], &[]);
+        assert_eq!(s, "-42");
+    }
+
+    #[test]
+    fn fmt_flag_space() {
+        let (s, _) = snprintf_str(b"% d\0", &[42], &[]);
+        assert_eq!(s, " 42");
+    }
+
+    #[test]
+    fn fmt_flag_hash_x() {
+        let (s, _) = snprintf_str(b"%#x\0", &[255], &[]);
+        assert_eq!(s, "0xff");
+    }
+
+    #[test]
+    fn fmt_flag_hash_x_zero() {
+        // # flag with value 0: no prefix (per C standard).
+        let (s, _) = snprintf_str(b"%#x\0", &[0], &[]);
+        assert_eq!(s, "0");
+    }
+
+    #[test]
+    fn fmt_flag_hash_o() {
+        let (s, _) = snprintf_str(b"%#o\0", &[8], &[]);
+        assert_eq!(s, "010");
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. %% literal percent
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_percent_literal() {
+        let (s, _) = snprintf_str(b"100%%\0", &[], &[]);
+        assert_eq!(s, "100%");
+    }
+
+    #[test]
+    fn fmt_percent_in_middle() {
+        let (s, _) = snprintf_str(b"a%%b%%c\0", &[], &[]);
+        assert_eq!(s, "a%b%c");
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Multiple format specs in one string
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_multiple_specs() {
+        let name = b"world\0";
+        let (s, _) = snprintf_str(
+            b"hello %s, num=%d, hex=%x\0",
+            &[name.as_ptr() as u64, 42, 0xFF],
+            &[],
+        );
+        assert_eq!(s, "hello world, num=42, hex=ff");
+    }
+
+    #[test]
+    fn fmt_multiple_strings() {
+        let a = b"foo\0";
+        let b_str = b"bar\0";
+        let (s, _) = snprintf_str(
+            b"%s and %s\0",
+            &[a.as_ptr() as u64, b_str.as_ptr() as u64],
+            &[],
+        );
+        assert_eq!(s, "foo and bar");
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. Buffer overflow protection (snprintf truncation)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn snprintf_truncation() {
+        let mut buf = [0xFFu8; 8];
+        let n = _snprintf_impl(
+            buf.as_mut_ptr(),
+            buf.len(),
+            b"hello world\0".as_ptr(),
+            [].as_ptr(),
+            [].as_ptr(),
+        );
+        // n should be 11 (total chars that would be written).
+        assert_eq!(n, 11);
+        // buf should be "hello w\0" (7 chars + NUL).
+        assert_eq!(&buf, b"hello w\0");
+    }
+
+    #[test]
+    fn snprintf_exact_fit() {
+        let mut buf = [0xFFu8; 6];
+        let n = _snprintf_impl(
+            buf.as_mut_ptr(),
+            buf.len(),
+            b"hello\0".as_ptr(),
+            [].as_ptr(),
+            [].as_ptr(),
+        );
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"hello\0");
+    }
+
+    #[test]
+    fn snprintf_size_one() {
+        let mut buf = [0xFFu8; 1];
+        let n = _snprintf_impl(
+            buf.as_mut_ptr(),
+            buf.len(),
+            b"hello\0".as_ptr(),
+            [].as_ptr(),
+            [].as_ptr(),
+        );
+        assert_eq!(n, 5);
+        // Only the NUL terminator should be written.
+        assert_eq!(buf[0], 0);
+    }
+
+    #[test]
+    fn snprintf_null_buf_returns_count() {
+        let n = _snprintf_impl(
+            core::ptr::null_mut(),
+            0,
+            b"hello %d\0".as_ptr(),
+            [42u64].as_ptr(),
+            [].as_ptr(),
+        );
+        // Should return the number of chars that would be written.
+        assert_eq!(n, 8); // "hello 42"
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. %p pointer formatting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_p_basic() {
+        let (s, _) = snprintf_str(b"%p\0", &[0x1234u64], &[]);
+        assert_eq!(s, "0x1234");
+    }
+
+    #[test]
+    fn fmt_p_zero() {
+        let (s, _) = snprintf_str(b"%p\0", &[0u64], &[]);
+        assert_eq!(s, "0x0");
+    }
+
+    #[test]
+    fn fmt_p_large() {
+        let (s, _) = snprintf_str(b"%p\0", &[0xDEAD_BEEF_CAFE_BABEu64], &[]);
+        assert_eq!(s, "0xdeadbeefcafebabe");
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. %f float formatting
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_f_basic() {
+        let val = 3.14f64;
+        let (s, _) = snprintf_str(b"%f\0", &[], &[val.to_bits()]);
+        // Default precision is 6.
+        assert_eq!(s, "3.140000");
+    }
+
+    #[test]
+    fn fmt_f_zero() {
+        let val = 0.0f64;
+        let (s, _) = snprintf_str(b"%f\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "0.000000");
+    }
+
+    #[test]
+    fn fmt_f_negative() {
+        let val = (-2.5f64);
+        let (s, _) = snprintf_str(b"%f\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "-2.500000");
+    }
+
+    #[test]
+    fn fmt_f_precision() {
+        let val = 3.14159f64;
+        let (s, _) = snprintf_str(b"%.2f\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "3.14");
+    }
+
+    #[test]
+    fn fmt_f_precision_zero() {
+        let val = 3.7f64;
+        let (s, _) = snprintf_str(b"%.0f\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "4"); // Rounds up.
+    }
+
+    #[test]
+    fn fmt_f_width() {
+        let val = 3.14f64;
+        let (s, _) = snprintf_str(b"%10.2f\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "      3.14");
+    }
+
+    #[test]
+    fn fmt_f_nan() {
+        let val = f64::NAN;
+        let (s, _) = snprintf_str(b"%f\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "nan");
+    }
+
+    #[test]
+    fn fmt_f_inf() {
+        let val = f64::INFINITY;
+        let (s, _) = snprintf_str(b"%f\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "inf");
+    }
+
+    #[test]
+    fn fmt_f_neg_inf() {
+        let val = f64::NEG_INFINITY;
+        let (s, _) = snprintf_str(b"%f\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "-inf");
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. %u unsigned
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_u_basic() {
+        let (s, _) = snprintf_str(b"%u\0", &[42], &[]);
+        assert_eq!(s, "42");
+    }
+
+    #[test]
+    fn fmt_u_large() {
+        let val = u64::MAX;
+        let (s, _) = snprintf_str(b"%u\0", &[val], &[]);
+        assert_eq!(s, "18446744073709551615");
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. %o octal
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_o_basic() {
+        let (s, _) = snprintf_str(b"%o\0", &[8], &[]);
+        assert_eq!(s, "10");
+    }
+
+    #[test]
+    fn fmt_o_zero() {
+        let (s, _) = snprintf_str(b"%o\0", &[0], &[]);
+        assert_eq!(s, "0");
+    }
+
+    // -----------------------------------------------------------------------
+    // 13. %c character
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_c_basic() {
+        let (s, _) = snprintf_str(b"%c\0", &[b'A' as u64], &[]);
+        assert_eq!(s, "A");
+    }
+
+    #[test]
+    fn fmt_c_with_width() {
+        let (s, _) = snprintf_str(b"%5c\0", &[b'X' as u64], &[]);
+        assert_eq!(s, "    X");
+    }
+
+    // -----------------------------------------------------------------------
+    // 14. Plain text (no format specs)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_plain_text() {
+        let (s, n) = snprintf_str(b"hello world\0", &[], &[]);
+        assert_eq!(s, "hello world");
+        assert_eq!(n, 11);
+    }
+
+    #[test]
+    fn fmt_empty() {
+        let (s, n) = snprintf_str(b"\0", &[], &[]);
+        assert_eq!(s, "");
+        assert_eq!(n, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // 15. format_core with null format
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_core_null_fmt() {
+        let n = format_core(
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null(),
+            [].as_ptr(),
+            [].as_ptr(),
+        );
+        assert_eq!(n, -1);
+    }
+
+    // -----------------------------------------------------------------------
+    // 16. Mixed integer and float args
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_mixed_int_and_float() {
+        let text = b"pi\0";
+        let pi = 3.14f64;
+        let (s, _) = snprintf_str(
+            b"%s is %.2f and %d is an int\0",
+            &[text.as_ptr() as u64, 42],
+            &[pi.to_bits()],
+        );
+        assert_eq!(s, "pi is 3.14 and 42 is an int");
+    }
+
+    // -----------------------------------------------------------------------
+    // 17. Width with zero-pad and sign flags combined
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_zero_pad_with_sign() {
+        let val = 42u64;
+        let (s, _) = snprintf_str(b"%+08d\0", &[val], &[]);
+        assert_eq!(s, "+0000042");
+    }
+
+    #[test]
+    fn fmt_zero_pad_negative() {
+        let val = (-42i64) as u64;
+        let (s, _) = snprintf_str(b"%08d\0", &[val], &[]);
+        assert_eq!(s, "-0000042");
+    }
+
+    // -----------------------------------------------------------------------
+    // 18. Long format specifiers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_ld() {
+        let val = 123456i64 as u64;
+        let (s, _) = snprintf_str(b"%ld\0", &[val], &[]);
+        assert_eq!(s, "123456");
+    }
+
+    #[test]
+    fn fmt_lx() {
+        let (s, _) = snprintf_str(b"%lx\0", &[0xABCDu64], &[]);
+        assert_eq!(s, "abcd");
+    }
+
+    // -----------------------------------------------------------------------
+    // 19. %e scientific notation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_e_basic() {
+        let val = 12345.0f64;
+        let (s, _) = snprintf_str(b"%e\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "1.234500e+04", "got: {s}");
+    }
+
+    #[test]
+    fn fmt_e_small() {
+        let val = 1.5f64;
+        let (s, _) = snprintf_str(b"%e\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "1.500000e+00", "got: {s}");
+    }
+
+    #[test]
+    fn fmt_e_nine_point_five() {
+        // Regression: ilogb(9.5)=3 but decimal exp=0.
+        let val = 9.5f64;
+        let (s, _) = snprintf_str(b"%e\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "9.500000e+00", "got: {s}");
+    }
+
+    #[test]
+    fn fmt_e_fraction() {
+        let val = 0.00123f64;
+        let (s, _) = snprintf_str(b"%e\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "1.230000e-03", "got: {s}");
+    }
+
+    #[test]
+    fn fmt_e_zero() {
+        let val = 0.0f64;
+        let (s, _) = snprintf_str(b"%e\0", &[], &[val.to_bits()]);
+        assert_eq!(s, "0.000000e+00", "got: {s}");
+    }
+
+    // -----------------------------------------------------------------------
+    // 20. Precision 0 with value 0
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmt_precision_zero_value_zero() {
+        // C99: %.0d with value 0 produces no digits.
+        let (s, _) = snprintf_str(b"%.0d\0", &[0], &[]);
+        assert_eq!(s, "");
+    }
+
+    #[test]
+    fn fmt_precision_zero_value_nonzero() {
+        let (s, _) = snprintf_str(b"%.0d\0", &[5], &[]);
+        assert_eq!(s, "5");
+    }
 }

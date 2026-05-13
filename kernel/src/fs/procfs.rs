@@ -452,6 +452,10 @@ const ROOT_FILES: &[&str] = &[
     "schedlat",
     "mempress",
     "cpucache",
+    "aiostat",
+    "kthread",
+    "mmapstat",
+    "rqstat",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8793,6 +8797,66 @@ fn gen_cpucache() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_aiostat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (rings, submitted, completed, overflows, ops) = super::aiostat::stats();
+    out.push_str(&format!("=== Async I/O Stats ===\n"));
+    out.push_str(&format!("Rings: {}  Submitted: {}  Completed: {}  Overflows: {}  Ops: {}\n\n", rings, submitted, completed, overflows, ops));
+    for r in super::aiostat::ring_stats() {
+        out.push_str(&format!("Ring {} (pid {})  SQ {}/{}  CQ pending {}  submitted {}  completed {}  overflows {}  sq_full {}\n",
+            r.ring_id, r.pid, r.sq_pending, r.sq_size, r.cq_pending,
+            r.submitted, r.completed, r.overflows, r.sq_full_count));
+    }
+    out.into_bytes()
+}
+
+fn gen_kthread() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (threads, created, exited, ops) = super::kthread::stats();
+    out.push_str(&format!("=== Kernel Thread Stats ===\n"));
+    out.push_str(&format!("Active: {}  Created: {}  Exited: {}  Ops: {}\n\n", threads, created, exited, ops));
+    for t in super::kthread::list() {
+        out.push_str(&format!("  [{}] {} cpu={} state={} cpu_time={}ns wakeups={}\n",
+            t.id, t.name, t.cpu, t.state.label(), t.cpu_time_ns, t.wakeups));
+    }
+    out.into_bytes()
+}
+
+fn gen_mmapstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (procs, maps, unmaps, protects, bytes, ops) = super::mmapstat::stats();
+    out.push_str(&format!("=== Mmap Stats ===\n"));
+    out.push_str(&format!("Processes: {}  Maps: {}  Unmaps: {}  Protects: {}  Bytes: {}  Ops: {}\n\n", procs, maps, unmaps, protects, bytes, ops));
+    out.push_str("Type breakdown:\n");
+    for (mt, count) in &super::mmapstat::type_breakdown() {
+        out.push_str(&format!("  {:<12} {}\n", mt.label(), count));
+    }
+    out.push_str("\nPer-process:\n");
+    for p in super::mmapstat::per_process() {
+        out.push_str(&format!("  pid={:<6} {:<12} regions={} bytes={} maps={} unmaps={} protects={}\n",
+            p.pid, p.name, p.regions, p.total_bytes, p.maps, p.unmaps, p.protects));
+    }
+    out.into_bytes()
+}
+
+fn gen_rqstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cpus, enqueues, dequeues, balances, ops) = super::rqstat::stats();
+    out.push_str(&format!("=== Runqueue Stats ===\n"));
+    out.push_str(&format!("CPUs: {}  Enqueues: {}  Dequeues: {}  Balances: {}  Ops: {}\n\n", cpus, enqueues, dequeues, balances, ops));
+    for c in super::rqstat::per_cpu() {
+        let avg_wait = if c.dequeues > 0 { c.total_wait_ns / c.dequeues } else { 0 };
+        out.push_str(&format!("  CPU {} depth={}/{} enq={} deq={} pull={} push={} avg_wait={}ns\n",
+            c.cpu_id, c.current_depth, c.max_depth, c.enqueues, c.dequeues,
+            c.balance_pulls, c.balance_pushes, avg_wait));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9410,6 +9474,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "schedlat" => Ok(gen_schedlat()),
         "mempress" => Ok(gen_mempress()),
         "cpucache" => Ok(gen_cpucache()),
+        "aiostat" => Ok(gen_aiostat()),
+        "kthread" => Ok(gen_kthread()),
+        "mmapstat" => Ok(gen_mmapstat()),
+        "rqstat" => Ok(gen_rqstat()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

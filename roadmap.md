@@ -978,6 +978,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Sched Latency (fs::schedlat): Scheduling latency with per-CPU wakeup/runqueue/preempt latency tracking, 8-bucket histograms, max latency detection; `schedlat`/`slat` kshell command; /proc/schedlat; 8 self-tests
   - [x] Memory Pressure (fs::mempress): PSI-like memory pressure monitoring with 5 pressure levels, stall/reclaim event tracking, OOM proximity indicator; `mempress`/`mpress` kshell command; /proc/mempress; 8 self-tests
   - [x] CPU Cache (fs::cpucache): CPU cache hierarchy monitoring with L1d/L1i/L2/L3 hit/miss/eviction stats, per-level and overall hit rates, topology info; `cpucache`/`ccache` kshell command; /proc/cpucache; 8 self-tests
+  - [x] Async I/O Stats (fs::aiostat): io_uring-style submission queue monitoring with per-ring SQ/CQ tracking, overflow events, sq_full counts; `aiostat`/`aio` kshell command; /proc/aiostat; 8 self-tests
+  - [x] Kernel Thread (fs::kthread): Kernel thread lifecycle monitoring with per-thread CPU time, wakeups, state tracking, per-CPU filtering; `kthread`/`kthr` kshell command; /proc/kthread; 8 self-tests
+  - [x] Mmap Stats (fs::mmapstat): Memory mapping operation monitoring with per-process region/bytes tracking, 6 map types, mprotect counts; `mmapstat`/`mmap` kshell command; /proc/mmapstat; 8 self-tests
+  - [x] Runqueue Stats (fs::rqstat): Per-CPU runqueue depth monitoring with enqueue/dequeue tracking, load balance events, wait time stats; `rqstat`/`runq` kshell command; /proc/rqstat; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

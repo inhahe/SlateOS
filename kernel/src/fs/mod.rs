@@ -27,6 +27,7 @@
 
 pub mod a11y;
 pub mod acl;
+pub mod aiostat;
 #[allow(dead_code)]
 pub mod ar;
 pub mod atime;
@@ -197,6 +198,7 @@ pub mod kbshortcuts;
 pub mod kconsole;
 pub mod kernlog;
 pub mod kprobes;
+pub mod kthread;
 pub mod kernparam;
 pub mod keylayout;
 pub mod langpack;
@@ -218,6 +220,7 @@ pub mod memfs;
 pub mod mempress;
 pub mod migstat;
 pub mod mime;
+pub mod mmapstat;
 pub mod mmtune;
 pub mod mobilelink;
 pub mod monitors;
@@ -292,6 +295,7 @@ pub mod quota;
 pub mod raidmgr;
 pub mod rcustat;
 pub mod readdir_plus;
+pub mod rqstat;
 pub mod recent;
 pub mod recentsearch;
 pub mod recoverypart;

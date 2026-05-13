@@ -3373,10 +3373,16 @@ pub const NI_DGRAM: i32 = 16;
 /// is set, returns `EAI_NONAME`.  Otherwise falls back to the numeric
 /// IP representation.
 ///
+/// ## Service Name Lookup
+///
+/// When `NI_NUMERICSERV` is *not* set, looks up the port in the
+/// well-known services table (`getservbyport`).  Uses the `NI_DGRAM`
+/// flag to select "udp" vs "tcp" protocol matching.  Falls back to
+/// numeric representation if the port isn't in the table.
+///
 /// ## Limitations
 ///
 /// - Only supports `AF_INET` (IPv4).
-/// - Service is always returned as the numeric port number.
 ///
 /// Returns 0 on success, or an EAI_* error code.
 #[unsafe(no_mangle)]
@@ -3468,25 +3474,56 @@ pub extern "C" fn getnameinfo(
     // Format the service/port.
     if !serv.is_null() && servlen > 0 {
         let port = u16::from_be(addr.sin_port);
-        // Convert port to decimal string.
-        let mut tmp = [0u8; 6]; // max "65535\0"
-        let mut pos: usize = 0;
-        write_u16_decimal(&mut tmp, &mut pos, port);
+        let mut used_name = false;
 
-        let needed = pos.wrapping_add(1);
-        if (servlen as usize) < needed {
-            return EAI_OVERFLOW;
+        // Try service name lookup unless NI_NUMERICSERV is set.
+        if (flags & NI_NUMERICSERV) == 0 && port > 0 {
+            let port_nbo = addr.sin_port as i32;
+            let proto = if (flags & NI_DGRAM) != 0 {
+                c"udp".as_ptr().cast::<u8>()
+            } else {
+                c"tcp".as_ptr().cast::<u8>()
+            };
+            let se = unsafe { getservbyport(port_nbo, proto) };
+            if !se.is_null() {
+                let s = unsafe { &*se };
+                if !s.s_name.is_null() {
+                    let name_len = unsafe { crate::string::strlen(s.s_name) };
+                    if name_len.wrapping_add(1) <= servlen as usize {
+                        // SAFETY: serv is valid for servlen bytes.
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                s.s_name, serv, name_len,
+                            );
+                            *serv.add(name_len) = 0;
+                        }
+                        used_name = true;
+                    }
+                }
+            }
         }
 
-        unsafe {
-            let mut j: usize = 0;
-            while j < pos {
-                if let Some(&b) = tmp.get(j) {
-                    *serv.add(j) = b;
-                }
-                j = j.wrapping_add(1);
+        if !used_name {
+            // Fall back to numeric port representation.
+            let mut tmp = [0u8; 6]; // max "65535\0"
+            let mut pos: usize = 0;
+            write_u16_decimal(&mut tmp, &mut pos, port);
+
+            let needed = pos.wrapping_add(1);
+            if (servlen as usize) < needed {
+                return EAI_OVERFLOW;
             }
-            *serv.add(pos) = 0;
+
+            unsafe {
+                let mut j: usize = 0;
+                while j < pos {
+                    if let Some(&b) = tmp.get(j) {
+                        *serv.add(j) = b;
+                    }
+                    j = j.wrapping_add(1);
+                }
+                *serv.add(pos) = 0;
+            }
         }
     }
 

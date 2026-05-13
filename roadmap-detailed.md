@@ -483,7 +483,7 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
   - [x] Driver crash detection and automatic restart _(drvmon.rs: heartbeat/process-alive health modes, exponential backoff restart, configurable policies)_
 - [ ] Ada/SPARK FFI bridge for kernel-space safety-critical drivers
 - [-] virtio drivers (disk, network, GPU) for VM development/testing — virtio-blk and virtio-net done (in-kernel, legacy PCI transport); GPU pending
-- [ ] VMware tools equivalent for VM-friendliness
+- [x] VMware tools equivalent for VM-friendliness _(vmguest.rs: hypervisor-specific feature activation for KVM/Hyper-V/VMware/VBox/Xen/QEMU-TCG, pvclock/refTSC/pseudo-TSC clock sources, balloon memory, display resize, heartbeat, guest info reporting, shutdown signaling, VMware backdoor)_
 
 ### 2.2 Essential Drivers
 

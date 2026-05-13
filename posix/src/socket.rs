@@ -1623,6 +1623,21 @@ pub unsafe extern "C" fn sendto(
         return -1;
     };
 
+    // TCP sendto: works like send() — destination addr is ignored
+    // (connection-oriented protocol already knows the peer).
+    if entry.kind == HandleKind::TcpStream {
+        if entry.handle == 0 {
+            errno::set_errno(errno::ENOTCONN);
+            return -1;
+        }
+        let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
+        if ret < 0 {
+            errno::set_errno(translate_net_error(ret));
+            return -1;
+        }
+        return ret as isize;
+    }
+
     if entry.kind != HandleKind::UdpSocket {
         errno::set_errno(errno::ENOTSOCK);
         return -1;
@@ -1706,64 +1721,114 @@ pub unsafe extern "C" fn recvfrom(
         return -1;
     };
 
-    if entry.kind != HandleKind::UdpSocket {
-        errno::set_errno(errno::ENOTSOCK);
-        return -1;
-    }
-
-    if entry.handle == 0 {
-        // Socket not bound yet — can't receive.
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    // The kernel returns the source address in a 6-byte buffer:
-    // bytes 0-3 = IPv4 address (network byte order)
-    // bytes 4-5 = port (little-endian u16)
-    let mut src_info = [0u8; 6];
-
-    // SYS_UDP_RECV: arg0=handle, arg1=buf, arg2=len, arg3=addr_out.
-    let ret = syscall4(
-        SYS_UDP_RECV,
-        entry.handle,
-        buf as u64,
-        len as u64,
-        src_info.as_mut_ptr() as u64,
-    );
-    if ret < 0 {
-        errno::set_errno(translate_net_error(ret));
-        return -1;
-    }
-
-    // Fill in the source address if requested.
-    if !src_addr.is_null() && !addrlen.is_null() {
-        // SAFETY: caller guarantees validity.
-        unsafe {
-            let available = *addrlen as usize;
-            if available >= core::mem::size_of::<SockaddrIn>() {
-                // Construct the sockaddr_in from the kernel's 6-byte response.
-                let ip = u32::from_ne_bytes([
-                    src_info[0], src_info[1], src_info[2], src_info[3],
-                ]);
-                let port_le = u16::from_le_bytes([src_info[4], src_info[5]]);
-
-                let sa = SockaddrIn {
-                    sin_family: AF_INET as u16,
-                    sin_port: port_le.to_be(), // convert to network byte order
-                    sin_addr: InAddr { s_addr: ip },
-                    sin_zero: [0u8; 8],
-                };
-                // Use write_unaligned: Sockaddr has weaker alignment than SockaddrIn.
-                core::ptr::write_unaligned(
-                    src_addr.cast::<SockaddrIn>(),
-                    sa,
-                );
+    match entry.kind {
+        HandleKind::TcpStream => {
+            // TCP recvfrom works like recv but fills in peer address.
+            if entry.handle == 0 {
+                errno::set_errno(errno::ENOTCONN);
+                return -1;
             }
-            *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
+
+            // Build kernel flags (MSG_PEEK, MSG_DONTWAIT).
+            let kern_flags = (_flags as u32)
+                & (MSG_PEEK as u32 | MSG_DONTWAIT as u32);
+            let kern_flags = if fdtable::get_status_flags(fd).unwrap_or(0)
+                & crate::fcntl::O_NONBLOCK != 0
+            {
+                kern_flags | (MSG_DONTWAIT as u32)
+            } else {
+                kern_flags
+            };
+
+            let ret = syscall4(
+                SYS_TCP_RECV, entry.handle,
+                buf as u64, len as u64, kern_flags as u64,
+            );
+            if ret < 0 {
+                errno::set_errno(translate_net_error(ret));
+                return -1;
+            }
+
+            // Fill in peer address if requested.
+            if !src_addr.is_null() && !addrlen.is_null() {
+                unsafe {
+                    let available = *addrlen as usize;
+                    if available >= core::mem::size_of::<SockaddrIn>() {
+                        let meta = get_meta(fd);
+                        let (ip, port) = meta.map_or((0u32, 0u16), |m| {
+                            (m.peer_addr, u16::from_be(m.peer_port))
+                        });
+                        let sa = SockaddrIn {
+                            sin_family: AF_INET as u16,
+                            sin_port: port.to_be(),
+                            sin_addr: InAddr { s_addr: ip },
+                            sin_zero: [0u8; 8],
+                        };
+                        core::ptr::write_unaligned(
+                            src_addr.cast::<SockaddrIn>(), sa,
+                        );
+                    }
+                    *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
+                }
+            }
+
+            ret as isize
+        }
+
+        HandleKind::UdpSocket => {
+            if entry.handle == 0 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+
+            // The kernel returns the source address in a 6-byte buffer:
+            // bytes 0-3 = IPv4 address (network byte order)
+            // bytes 4-5 = port (little-endian u16)
+            let mut src_info = [0u8; 6];
+
+            let ret = syscall4(
+                SYS_UDP_RECV,
+                entry.handle,
+                buf as u64,
+                len as u64,
+                src_info.as_mut_ptr() as u64,
+            );
+            if ret < 0 {
+                errno::set_errno(translate_net_error(ret));
+                return -1;
+            }
+
+            // Fill in the source address if requested.
+            if !src_addr.is_null() && !addrlen.is_null() {
+                unsafe {
+                    let available = *addrlen as usize;
+                    if available >= core::mem::size_of::<SockaddrIn>() {
+                        let ip = u32::from_ne_bytes([
+                            src_info[0], src_info[1], src_info[2], src_info[3],
+                        ]);
+                        let port_le = u16::from_le_bytes([src_info[4], src_info[5]]);
+                        let sa = SockaddrIn {
+                            sin_family: AF_INET as u16,
+                            sin_port: port_le.to_be(),
+                            sin_addr: InAddr { s_addr: ip },
+                            sin_zero: [0u8; 8],
+                        };
+                        core::ptr::write_unaligned(
+                            src_addr.cast::<SockaddrIn>(), sa,
+                        );
+                    }
+                    *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
+                }
+            }
+
+            ret as isize
+        }
+
+        _ => {
+            errno::set_errno(errno::ENOTSOCK);
+            -1
         }
     }
-
-    ret as isize
 }
 
 // ---------------------------------------------------------------------------

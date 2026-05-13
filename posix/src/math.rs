@@ -61,6 +61,7 @@ use core::f64::consts;
 
 const PI: f64 = consts::PI;
 const HALF_PI: f64 = consts::FRAC_PI_2;
+const QUARTER_PI: f64 = consts::FRAC_PI_4;
 const TWO_PI: f64 = consts::TAU;
 const LN2: f64 = consts::LN_2;
 const LN10: f64 = consts::LN_10;
@@ -517,17 +518,42 @@ pub extern "C" fn atan2f(y: f32, x: f32) -> f32 {
     atan2(f64::from(y), f64::from(x)) as f32
 }
 
-/// Arctangent approximation using a polynomial.
+/// Arctangent approximation using range reduction + Taylor series.
+///
+/// Uses three ranges for fast convergence:
+/// - |x| > 1: atan(x) = sign(x)*π/2 - atan(1/x)
+/// - |x| > 0.5: atan(x) = π/4 + atan((x-1)/(x+1))  [maps to |t| ≤ 1/3]
+/// - |x| ≤ 0.5: direct Taylor series (converges fast)
+///
+/// Accuracy: ~1e-15 relative error (near full f64 precision).
 #[allow(clippy::arithmetic_side_effects)]
 fn atan_approx(x: f64) -> f64 {
-    // Range reduction: for |x| > 1, use atan(x) = π/2 - atan(1/x).
+    // Range reduction for |x| > 1.
     if fabs(x) > 1.0 {
         let sign = if x > 0.0 { 1.0 } else { -1.0 };
         return sign * HALF_PI - atan_approx(1.0 / x);
     }
 
-    // Padé-like approximation for |x| <= 1.
-    // atan(x) ≈ x - x^3/3 + x^5/5 - x^7/7 + ...
+    // For |x| > 0.5, use the identity:
+    //   atan(x) = π/4 + atan((x - 1) / (x + 1))
+    // This maps (0.5, 1] to (-1/3, 0], where the Taylor series converges
+    // much faster than at x=1 (the series boundary).
+    if fabs(x) > 0.5 {
+        let sign = if x > 0.0 { 1.0 } else { -1.0 };
+        let a = fabs(x);
+        let t = (a - 1.0) / (a + 1.0);
+        return sign * (QUARTER_PI + atan_taylor(t));
+    }
+
+    // Direct Taylor series for |x| <= 0.5.
+    atan_taylor(x)
+}
+
+/// Taylor series for atan: x - x³/3 + x⁵/5 - x⁷/7 + ...
+///
+/// Assumes |x| <= 0.5 for rapid convergence (16 terms give ~1e-15 accuracy).
+#[allow(clippy::arithmetic_side_effects)]
+fn atan_taylor(x: f64) -> f64 {
     let x2 = x * x;
     let mut term = x;
     let mut sum = x;
@@ -1900,7 +1926,7 @@ mod tests {
     // The atan Taylor series converges slowly near |x|=1, so atan, asin,
     // acos, and atan2 only achieve roughly 2 digits of accuracy there.
     // Use a wider tolerance for tests that exercise those code paths.
-    const EPS_ATAN: f64 = 0.02;
+    const EPS_ATAN: f64 = 1e-10;
 
     // -----------------------------------------------------------------------
     // 1. Trigonometric functions
@@ -4076,22 +4102,20 @@ mod tests {
     #[test]
     fn atanf_values() {
         assert_approx(f64::from(atanf(0.0)), 0.0, 1e-6, "atanf(0)");
-        // Note: our Taylor-series atan has ~2% error at x=±1 (boundary of convergence).
-        assert_approx(f64::from(atanf(1.0)), core::f64::consts::FRAC_PI_4, 0.02, "atanf(1)");
-        assert_approx(f64::from(atanf(-1.0)), -core::f64::consts::FRAC_PI_4, 0.02, "atanf(-1)");
+        assert_approx(f64::from(atanf(1.0)), core::f64::consts::FRAC_PI_4, 1e-6, "atanf(1)");
+        assert_approx(f64::from(atanf(-1.0)), -core::f64::consts::FRAC_PI_4, 1e-6, "atanf(-1)");
     }
 
     #[test]
     fn atan2f_quadrants() {
-        // Note: our Taylor-series atan has ~2% error at |y/x|=1 (boundary of convergence).
         // atan2(1, 1) = π/4.
-        assert_approx(f64::from(atan2f(1.0, 1.0)), core::f64::consts::FRAC_PI_4, 0.02,
+        assert_approx(f64::from(atan2f(1.0, 1.0)), core::f64::consts::FRAC_PI_4, 1e-6,
             "atan2f(1, 1)");
         // atan2(1, -1) = 3π/4.
-        assert_approx(f64::from(atan2f(1.0, -1.0)), 3.0 * core::f64::consts::FRAC_PI_4, 0.02,
+        assert_approx(f64::from(atan2f(1.0, -1.0)), 3.0 * core::f64::consts::FRAC_PI_4, 1e-6,
             "atan2f(1, -1)");
         // atan2(-1, 1) = -π/4.
-        assert_approx(f64::from(atan2f(-1.0, 1.0)), -core::f64::consts::FRAC_PI_4, 0.02,
+        assert_approx(f64::from(atan2f(-1.0, 1.0)), -core::f64::consts::FRAC_PI_4, 1e-6,
             "atan2f(-1, 1)");
     }
 

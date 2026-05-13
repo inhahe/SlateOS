@@ -1167,9 +1167,19 @@ unsafe fn wc_skip_ws(nptr: *const WcharT, mut i: usize) -> usize {
 
 /// Detect base and skip prefix for wide integer parsing.
 ///
-/// Returns `(actual_base, new_index)`.
+/// Returns `(actual_base, new_index, before_prefix_index)`.
+///
+/// For octal (`"0..."` with base 0), the leading '0' is left as a
+/// parseable digit — it is NOT consumed as a prefix.  Only the `"0x"`
+/// / `"0X"` hex prefix is consumed.
+///
+/// `before_prefix_index` is the index before any prefix was consumed.
+/// The caller uses this to roll back if no digits follow a hex prefix
+/// (e.g., `"0x"` without any hex digits should parse as `0` with the
+/// leading '0' counted as a valid digit).
 #[allow(clippy::arithmetic_side_effects)]
-unsafe fn wc_detect_base(nptr: *const WcharT, mut i: usize, mut base: i32) -> (i32, usize) {
+unsafe fn wc_detect_base(nptr: *const WcharT, mut i: usize, mut base: i32) -> (i32, usize, usize) {
+    let before_prefix = i;
     if base == 0 {
         if unsafe { *nptr.add(i) } == 0x30 {
             let next = unsafe { *nptr.add(i.wrapping_add(1)) };
@@ -1177,8 +1187,9 @@ unsafe fn wc_detect_base(nptr: *const WcharT, mut i: usize, mut base: i32) -> (i
                 base = 16;
                 i = i.wrapping_add(2);
             } else {
+                // Octal: do NOT advance past the '0'.  It is a valid
+                // digit that the main loop will consume.
                 base = 8;
-                i = i.wrapping_add(1);
             }
         } else {
             base = 10;
@@ -1189,7 +1200,7 @@ unsafe fn wc_detect_base(nptr: *const WcharT, mut i: usize, mut base: i32) -> (i
             i = i.wrapping_add(2);
         }
     }
-    (base, i)
+    (base, i, before_prefix)
 }
 
 /// `wcstol` — convert a wide string to a `long` (`i64` on LP64).
@@ -1227,7 +1238,7 @@ pub unsafe extern "C" fn wcstol(
         i = i.wrapping_add(1);
     }
 
-    let (actual_base, new_i) = unsafe { wc_detect_base(nptr, i, base) };
+    let (actual_base, new_i, before_prefix) = unsafe { wc_detect_base(nptr, i, base) };
     i = new_i;
     let start = i;
 
@@ -1238,12 +1249,14 @@ pub unsafe extern "C" fn wcstol(
     let cutlim = -(i64::MIN % base64);    // Maximum digit before overflow after multiply.
     let mut acc: i64 = 0;
     let mut overflow = false;
+    let mut any_digits = false;
 
     loop {
         let wc = unsafe { *nptr.add(i) };
         if wc == 0 { break; }
         let d = wc_digit(wc, actual_base);
         if d < 0 { break; }
+        any_digits = true;
 
         // Check for overflow before accumulating.
         if acc < cutoff || (acc == cutoff && i64::from(d) > cutlim) {
@@ -1255,8 +1268,17 @@ pub unsafe extern "C" fn wcstol(
         i = i.wrapping_add(1);
     }
 
+    // If no digits were parsed after a "0x"/"0X" prefix, the leading
+    // '0' is still a valid digit (octal/hex zero).  Roll back to just
+    // past the '0' so endptr is correct.
+    if !any_digits && i != before_prefix {
+        i = before_prefix.wrapping_add(1);
+        any_digits = true;
+        // acc stays 0, result is 0.
+    }
+
     if !endptr.is_null() {
-        unsafe { *endptr = if i == start { nptr } else { nptr.add(i) }; }
+        unsafe { *endptr = if !any_digits { nptr } else { nptr.add(i) }; }
     }
 
     if overflow {
@@ -1303,7 +1325,7 @@ pub unsafe extern "C" fn wcstoul(
         i = i.wrapping_add(1);
     }
 
-    let (actual_base, new_i) = unsafe { wc_detect_base(nptr, i, base) };
+    let (actual_base, new_i, before_prefix) = unsafe { wc_detect_base(nptr, i, base) };
     i = new_i;
     let start = i;
     let mut result: u64 = 0;
@@ -1311,12 +1333,14 @@ pub unsafe extern "C" fn wcstoul(
     let cutoff = u64::MAX / base_u64;
     let cutlim = u64::MAX % base_u64;
     let mut overflow = false;
+    let mut any_digits = false;
 
     loop {
         let wc = unsafe { *nptr.add(i) };
         if wc == 0 { break; }
         let d = wc_digit(wc, actual_base);
         if d < 0 { break; }
+        any_digits = true;
         let d_u64 = d as u64;
 
         if result > cutoff || (result == cutoff && d_u64 > cutlim) {
@@ -1328,8 +1352,15 @@ pub unsafe extern "C" fn wcstoul(
         i = i.wrapping_add(1);
     }
 
+    // If no digits were parsed after a "0x"/"0X" prefix, the leading
+    // '0' is still a valid digit.  Roll back to just past the '0'.
+    if !any_digits && i != before_prefix {
+        i = before_prefix.wrapping_add(1);
+        any_digits = true;
+    }
+
     if !endptr.is_null() {
-        unsafe { *endptr = if i == start { nptr } else { nptr.add(i) }; }
+        unsafe { *endptr = if !any_digits { nptr } else { nptr.add(i) }; }
     }
 
     if overflow {
@@ -2786,5 +2817,125 @@ mod tests {
     fn test_towctrans_invalid() {
         // Invalid transform → return character unchanged.
         assert_eq!(towctrans(b'A' as WcharT, 0), b'A' as WcharT);
+    }
+
+    // -- wcstol base-detection bug regression tests --
+
+    /// Helper: build a null-terminated wide string from ASCII bytes.
+    fn wcs_from_ascii(s: &[u8]) -> [WcharT; 64] {
+        let mut buf = [0i32; 64];
+        for (i, &b) in s.iter().enumerate() {
+            if i >= 63 { break; }
+            buf[i] = b as WcharT;
+        }
+        buf
+    }
+
+    #[test]
+    fn test_wcstol_zero_base_auto() {
+        // wcstol(L"0", &end, 0) should return 0 with endptr past '0'.
+        let s = wcs_from_ascii(b"0\0");
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstol(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 0);
+        // endptr should point past the '0' (to the null terminator).
+        assert_eq!(end, unsafe { s.as_ptr().add(1) });
+    }
+
+    #[test]
+    fn test_wcstol_octal_leading_zero() {
+        // "077" in base 0 → octal 77 = decimal 63
+        let s = wcs_from_ascii(b"077\0");
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstol(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 63);
+        assert_eq!(end, unsafe { s.as_ptr().add(3) });
+    }
+
+    #[test]
+    fn test_wcstol_hex_prefix() {
+        let s = wcs_from_ascii(b"0xFF\0");
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstol(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 255);
+        assert_eq!(end, unsafe { s.as_ptr().add(4) });
+    }
+
+    #[test]
+    fn test_wcstol_hex_no_digits_after_0x() {
+        // "0x" with no hex digits: should parse "0" and endptr at '0'+1.
+        let s = wcs_from_ascii(b"0x\0");
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstol(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 0);
+        // endptr should point just past the '0', not past the 'x'.
+        assert_eq!(end, unsafe { s.as_ptr().add(1) });
+    }
+
+    #[test]
+    fn test_wcstol_hex_0x_then_non_hex() {
+        // "0xG" → parse "0", endptr past '0'.
+        let s = wcs_from_ascii(b"0xG\0");
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstol(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 0);
+        assert_eq!(end, unsafe { s.as_ptr().add(1) });
+    }
+
+    #[test]
+    fn test_wcstol_base10() {
+        let s = wcs_from_ascii(b"  -42\0");
+        let val = unsafe { wcstol(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(val, -42);
+    }
+
+    #[test]
+    fn test_wcstol_empty_string() {
+        let s = wcs_from_ascii(b"\0");
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstol(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, 0);
+        assert_eq!(end, s.as_ptr()); // No digits consumed.
+    }
+
+    #[test]
+    fn test_wcstoul_zero_base_auto() {
+        let s = wcs_from_ascii(b"0\0");
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstoul(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 0);
+        assert_eq!(end, unsafe { s.as_ptr().add(1) });
+    }
+
+    #[test]
+    fn test_wcstoul_hex_no_digits_after_0x() {
+        let s = wcs_from_ascii(b"0x\0");
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstoul(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 0);
+        assert_eq!(end, unsafe { s.as_ptr().add(1) });
+    }
+
+    #[test]
+    fn test_wcstol_negative_sign() {
+        let s = wcs_from_ascii(b"-123\0");
+        let val = unsafe { wcstol(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(val, -123);
+    }
+
+    #[test]
+    fn test_wcstol_positive_sign() {
+        let s = wcs_from_ascii(b"+456\0");
+        let val = unsafe { wcstol(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(val, 456);
+    }
+
+    #[test]
+    fn test_wcstol_invalid_base() {
+        let s = wcs_from_ascii(b"123\0");
+        crate::errno::set_errno(0);
+        let val = unsafe { wcstol(s.as_ptr(), core::ptr::null_mut(), 37) };
+        assert_eq!(val, 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 }

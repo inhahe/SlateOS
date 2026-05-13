@@ -456,6 +456,10 @@ const ROOT_FILES: &[&str] = &[
     "kthread",
     "mmapstat",
     "rqstat",
+    "thpstat",
+    "cgiostat",
+    "bpfstat",
+    "pgtable",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8857,6 +8861,74 @@ fn gen_rqstat() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_thpstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (promos, demos, scans, collapses, ops) = super::thpstat::stats();
+    out.push_str(&format!("=== Transparent Huge Pages Stats ===\n"));
+    out.push_str(&format!("Promotions: {}  Demotions: {}  Khugepaged scans: {}  Collapses: {}  Ops: {}\n\n", promos, demos, scans, collapses, ops));
+    out.push_str("Per-size:\n");
+    for s in super::thpstat::per_size() {
+        let success_rate = if s.alloc_attempts > 0 { s.promotions * 10000 / s.alloc_attempts } else { 0 };
+        out.push_str(&format!("  {:<6} promo={} demo={} split={} attempts={} failures={} success={}.{}%\n",
+            s.size.label(), s.promotions, s.demotions, s.splits,
+            s.alloc_attempts, s.alloc_failures, success_rate / 100, success_rate % 100));
+    }
+    let (cs, cf, cd, ck) = super::thpstat::compaction_stats();
+    out.push_str(&format!("\nCompaction: success={} failed={} deferred={} skipped={}\n", cs, cf, cd, ck));
+    out.into_bytes()
+}
+
+fn gen_cgiostat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cgs, rbytes, wbytes, throttles, ops) = super::cgiostat::stats();
+    out.push_str(&format!("=== Cgroup I/O Stats ===\n"));
+    out.push_str(&format!("Cgroups: {}  Read: {} bytes  Write: {} bytes  Throttles: {}  Ops: {}\n\n", cgs, rbytes, wbytes, throttles, ops));
+    for cg in super::cgiostat::per_cgroup() {
+        let bw = if cg.bw_limit_bps > 0 { alloc::format!("{}B/s", cg.bw_limit_bps) } else { String::from("unlimited") };
+        out.push_str(&format!("  [{}] {:<16} R: {} bytes ({} ios)  W: {} bytes ({} ios)  throttle={} bw={}\n",
+            cg.cg_id, cg.name, cg.read_bytes, cg.read_ios, cg.write_bytes, cg.write_ios, cg.throttle_count, bw));
+    }
+    out.into_bytes()
+}
+
+fn gen_bpfstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (progs, maps, loaded, runs, verr, ops) = super::bpfstat::stats();
+    out.push_str(&format!("=== BPF Stats ===\n"));
+    out.push_str(&format!("Programs: {}  Maps: {}  Total loaded: {}  Runs: {}  Verifier errors: {}  Ops: {}\n\n", progs, maps, loaded, runs, verr, ops));
+    out.push_str("Programs:\n");
+    for p in super::bpfstat::list_programs() {
+        let avg_ns = if p.run_count > 0 { p.run_time_ns / p.run_count } else { 0 };
+        out.push_str(&format!("  [{}] {:<20} type={:<14} insns={} runs={} avg={}ns maps={}\n",
+            p.id, p.name, p.prog_type.label(), p.insn_count, p.run_count, avg_ns, p.map_count));
+    }
+    out.push_str("\nMaps:\n");
+    for m in super::bpfstat::list_maps() {
+        out.push_str(&format!("  [{}] {:<24} entries={}/{} key={}B val={}B\n",
+            m.id, m.name, m.used_entries, m.max_entries, m.key_size, m.value_size));
+    }
+    out.into_bytes()
+}
+
+fn gen_pgtable() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (pages, walks, flushes, avg, ops) = super::pgtable::stats();
+    out.push_str(&format!("=== Page Table Stats ===\n"));
+    out.push_str(&format!("Pages used: {}  Walks: {}  TLB flushes: {}  Avg depth: {}.{}  Ops: {}\n\n", pages, walks, flushes, avg / 100, avg % 100, ops));
+    out.push_str("Per-level:\n");
+    for l in super::pgtable::per_level() {
+        out.push_str(&format!("  {:<6} alloc={} freed={} active={}\n",
+            l.level.label(), l.allocated, l.freed, l.active));
+    }
+    let (fs, fr, ff, fg) = super::pgtable::flush_stats();
+    out.push_str(&format!("\nTLB flushes: single={} range={} full={} global={}\n", fs, fr, ff, fg));
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9478,6 +9550,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "kthread" => Ok(gen_kthread()),
         "mmapstat" => Ok(gen_mmapstat()),
         "rqstat" => Ok(gen_rqstat()),
+        "thpstat" => Ok(gen_thpstat()),
+        "cgiostat" => Ok(gen_cgiostat()),
+        "bpfstat" => Ok(gen_bpfstat()),
+        "pgtable" => Ok(gen_pgtable()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

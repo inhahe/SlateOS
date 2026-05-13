@@ -982,6 +982,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kernel Thread (fs::kthread): Kernel thread lifecycle monitoring with per-thread CPU time, wakeups, state tracking, per-CPU filtering; `kthread`/`kthr` kshell command; /proc/kthread; 8 self-tests
   - [x] Mmap Stats (fs::mmapstat): Memory mapping operation monitoring with per-process region/bytes tracking, 6 map types, mprotect counts; `mmapstat`/`mmap` kshell command; /proc/mmapstat; 8 self-tests
   - [x] Runqueue Stats (fs::rqstat): Per-CPU runqueue depth monitoring with enqueue/dequeue tracking, load balance events, wait time stats; `rqstat`/`runq` kshell command; /proc/rqstat; 8 self-tests
+  - [x] THP Stats (fs::thpstat): Transparent huge page monitoring with PMD/PUD promotion/demotion/split tracking, compaction stats, khugepaged activity; `thpstat`/`thp` kshell command; /proc/thpstat; 8 self-tests
+  - [x] Cgroup I/O Stats (fs::cgiostat): Per-cgroup disk I/O accounting with read/write bytes/IOPS, bandwidth throttling, I/O wait time; `cgiostat`/`cgio` kshell command; /proc/cgiostat; 8 self-tests
+  - [x] BPF Stats (fs::bpfstat): eBPF program lifecycle monitoring with per-program run counts, verifier errors, map tracking; `bpfstat`/`bpf` kshell command; /proc/bpfstat; 8 self-tests
+  - [x] Page Table Stats (fs::pgtable): Page table allocation monitoring with per-level alloc/free, page walks, TLB flush tracking (single/range/full/global); `pgtable`/`pgtbl` kshell command; /proc/pgtable; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

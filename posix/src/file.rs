@@ -1544,6 +1544,15 @@ pub extern "C" fn fchown(_fd: Fd, _owner: UidT, _group: GidT) -> i32 {
     0
 }
 
+/// Change file owner and group (don't follow symlinks).
+///
+/// Like `chown`, but does not follow symbolic links — changes ownership
+/// of the link itself rather than its target.  Stub: accepts silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn lchown(_path: *const u8, _owner: UidT, _group: GidT) -> i32 {
+    0
+}
+
 /// Set file mode creation mask.
 ///
 /// Stub: returns 0o022 (previous mask) and ignores the new mask.

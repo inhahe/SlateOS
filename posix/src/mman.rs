@@ -243,3 +243,28 @@ pub extern "C" fn memfd_create(_name: *const u8, _flags: u32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
 }
+
+// ---------------------------------------------------------------------------
+// mremap (Linux extension)
+// ---------------------------------------------------------------------------
+
+/// Flags for `mremap`.
+pub const MREMAP_MAYMOVE: i32 = 1;
+/// Flag indicating a fixed new address was provided.
+pub const MREMAP_FIXED: i32 = 2;
+
+/// Remap a virtual memory region.
+///
+/// Stub: returns MAP_FAILED with ENOSYS.  A real implementation would
+/// grow/shrink/relocate an existing mmap region.  We don't support this
+/// because our simple allocator doesn't track mmap regions globally.
+#[unsafe(no_mangle)]
+pub extern "C" fn mremap(
+    _old_address: *mut core::ffi::c_void,
+    _old_size: SizeT,
+    _new_size: SizeT,
+    _flags: i32,
+) -> *mut core::ffi::c_void {
+    errno::set_errno(errno::ENOSYS);
+    MAP_FAILED
+}

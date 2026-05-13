@@ -1860,3 +1860,87 @@ pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
 pub extern "C" fn timer_getoverrun(_timerid: TimerT) -> i32 {
     0
 }
+
+// ---------------------------------------------------------------------------
+// setitimer / getitimer — interval timers (BSD/POSIX)
+// ---------------------------------------------------------------------------
+
+/// Interval timer value (for `setitimer`/`getitimer`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Itimerval {
+    /// Time until next expiration.
+    pub it_interval: Timeval,
+    /// Current value (time remaining).
+    pub it_value: Timeval,
+}
+
+/// Which timer to set/get.
+pub const ITIMER_REAL: i32 = 0;
+/// Virtual timer (user-mode CPU time).
+pub const ITIMER_VIRTUAL: i32 = 1;
+/// Profiling timer (user + system CPU time).
+pub const ITIMER_PROF: i32 = 2;
+
+/// Set an interval timer.
+///
+/// Stub: validates arguments and stores nothing.  Returns 0 (success)
+/// but the timer never fires because we don't have signal delivery.
+/// Programs that use `setitimer` for periodic alarms won't get
+/// SIGALRM/SIGVTALRM/SIGPROF, but at least they won't fail to link
+/// or get an error return.
+///
+/// # Safety
+///
+/// `new_value` must be a valid pointer.  `old_value` may be null.
+#[unsafe(no_mangle)]
+pub extern "C" fn setitimer(
+    which: i32,
+    new_value: *const Itimerval,
+    old_value: *mut Itimerval,
+) -> i32 {
+    if which != ITIMER_REAL && which != ITIMER_VIRTUAL && which != ITIMER_PROF {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if new_value.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // Return zeroed old value if requested (no timer was previously set).
+    if !old_value.is_null() {
+        // SAFETY: old_value verified non-null.
+        unsafe {
+            core::ptr::write_bytes(old_value, 0, 1);
+        }
+    }
+
+    // Silently accept — timer never fires.
+    0
+}
+
+/// Get the current value of an interval timer.
+///
+/// Stub: always returns a zeroed timer (no time remaining, no interval).
+///
+/// # Safety
+///
+/// `curr_value` must be a valid, writable pointer.
+#[unsafe(no_mangle)]
+pub extern "C" fn getitimer(which: i32, curr_value: *mut Itimerval) -> i32 {
+    if which != ITIMER_REAL && which != ITIMER_VIRTUAL && which != ITIMER_PROF {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if curr_value.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // SAFETY: curr_value verified non-null.
+    unsafe {
+        core::ptr::write_bytes(curr_value, 0, 1);
+    }
+    0
+}

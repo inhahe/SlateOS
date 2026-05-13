@@ -408,6 +408,19 @@ pub extern "C" fn chdir(path: *const u8) -> i32 {
     0
 }
 
+/// Change working directory by file descriptor.
+///
+/// Stub: returns -1 with ENOSYS.  Our CWD tracking uses path strings,
+/// and we don't have a kernel-level fd-to-path resolution mechanism.
+/// Implementing this properly would require either:
+/// - A kernel syscall to resolve an fd back to its path, or
+/// - Tracking the path that was used when each fd was opened.
+#[unsafe(no_mangle)]
+pub extern "C" fn fchdir(_fd: Fd) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
 // isatty() is defined in ioctl.rs — it checks the fd table's HandleKind
 // rather than hardcoding fd numbers, so it works for any Console fd.
 

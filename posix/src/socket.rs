@@ -3117,8 +3117,28 @@ static mut GAI_RESULT: Addrinfo = Addrinfo {
     ai_next: core::ptr::null_mut(),
 };
 
+/// Second result for returning both SOCK_STREAM and SOCK_DGRAM.
+static mut GAI_RESULT2: Addrinfo = Addrinfo {
+    ai_flags: 0,
+    ai_family: 0,
+    ai_socktype: 0,
+    ai_protocol: 0,
+    ai_addrlen: 0,
+    ai_canonname: core::ptr::null_mut(),
+    ai_addr: core::ptr::null_mut(),
+    ai_next: core::ptr::null_mut(),
+};
+
 /// Static storage for the sockaddr_in in the getaddrinfo result.
 static mut GAI_ADDR: SockaddrIn = SockaddrIn {
+    sin_family: 0,
+    sin_port: 0,
+    sin_addr: InAddr { s_addr: 0 },
+    sin_zero: [0u8; 8],
+};
+
+/// Second sockaddr_in for the second getaddrinfo result.
+static mut GAI_ADDR2: SockaddrIn = SockaddrIn {
     sin_family: 0,
     sin_port: 0,
     sin_addr: InAddr { s_addr: 0 },
@@ -3128,7 +3148,9 @@ static mut GAI_ADDR: SockaddrIn = SockaddrIn {
 /// Resolve a hostname and/or service to a list of socket addresses.
 ///
 /// This is the modern replacement for `gethostbyname()`.  We support
-/// only IPv4 (`AF_INET`) resolution and return at most one result.
+/// only IPv4 (`AF_INET`) resolution.  When `ai_socktype` is 0 in
+/// hints (or no hints), returns two results: SOCK_STREAM and
+/// SOCK_DGRAM.  When a specific type is requested, returns one result.
 ///
 /// Returns 0 on success, non-zero EAI_* error code on failure.
 ///
@@ -3206,38 +3228,71 @@ pub unsafe extern "C" fn getaddrinfo(
         parse_port_string(service)
     };
 
-    // Determine socket type and protocol.
-    let socktype = if want_socktype != 0 {
-        want_socktype
-    } else {
-        SOCK_STREAM // Default to TCP.
-    };
-    let protocol = match socktype {
-        SOCK_STREAM => IPPROTO_TCP,
-        SOCK_DGRAM => IPPROTO_UDP,
-        _ => 0,
-    };
+    // Determine socket type(s) and protocol.
+    // When ai_socktype=0 in hints (or no hints), return both SOCK_STREAM
+    // and SOCK_DGRAM results so callers can pick the one they need.
+    let family = if want_family != 0 { want_family } else { AF_INET };
+    let addr_size = core::mem::size_of::<SockaddrIn>() as SocklenT;
 
-    // Fill in the static result.
     // SAFETY: Single-threaded access; getaddrinfo is not re-entrant (per POSIX).
     unsafe {
-        let addr = core::ptr::addr_of_mut!(GAI_ADDR);
-        (*addr).sin_family = AF_INET as u16;
-        (*addr).sin_port = htons(port);
-        (*addr).sin_addr.s_addr = ip;
-        (*addr).sin_zero = [0u8; 8];
+        // Fill first address.
+        let addr1 = core::ptr::addr_of_mut!(GAI_ADDR);
+        (*addr1).sin_family = AF_INET as u16;
+        (*addr1).sin_port = htons(port);
+        (*addr1).sin_addr.s_addr = ip;
+        (*addr1).sin_zero = [0u8; 8];
 
-        let result = core::ptr::addr_of_mut!(GAI_RESULT);
-        (*result).ai_flags = 0;
-        (*result).ai_family = if want_family != 0 { want_family } else { AF_INET };
-        (*result).ai_socktype = socktype;
-        (*result).ai_protocol = protocol;
-        (*result).ai_addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
-        (*result).ai_canonname = core::ptr::null_mut();
-        (*result).ai_addr = addr.cast::<Sockaddr>();
-        (*result).ai_next = core::ptr::null_mut();
+        if want_socktype != 0 {
+            // Caller specified a socket type — return one result.
+            let protocol = match want_socktype {
+                SOCK_STREAM => IPPROTO_TCP,
+                SOCK_DGRAM => IPPROTO_UDP,
+                _ => 0,
+            };
+            let result = core::ptr::addr_of_mut!(GAI_RESULT);
+            (*result).ai_flags = 0;
+            (*result).ai_family = family;
+            (*result).ai_socktype = want_socktype;
+            (*result).ai_protocol = protocol;
+            (*result).ai_addrlen = addr_size;
+            (*result).ai_canonname = core::ptr::null_mut();
+            (*result).ai_addr = addr1.cast::<Sockaddr>();
+            (*result).ai_next = core::ptr::null_mut();
+            *res = result;
+        } else {
+            // No socket type specified — return TCP first, then UDP.
+            // This lets callers iterate the list to find either type.
+            let addr2 = core::ptr::addr_of_mut!(GAI_ADDR2);
+            (*addr2).sin_family = AF_INET as u16;
+            (*addr2).sin_port = htons(port);
+            (*addr2).sin_addr.s_addr = ip;
+            (*addr2).sin_zero = [0u8; 8];
 
-        *res = result;
+            // Second result: SOCK_DGRAM (UDP) — tail of the list.
+            let r2 = core::ptr::addr_of_mut!(GAI_RESULT2);
+            (*r2).ai_flags = 0;
+            (*r2).ai_family = family;
+            (*r2).ai_socktype = SOCK_DGRAM;
+            (*r2).ai_protocol = IPPROTO_UDP;
+            (*r2).ai_addrlen = addr_size;
+            (*r2).ai_canonname = core::ptr::null_mut();
+            (*r2).ai_addr = addr2.cast::<Sockaddr>();
+            (*r2).ai_next = core::ptr::null_mut();
+
+            // First result: SOCK_STREAM (TCP) — head of the list.
+            let r1 = core::ptr::addr_of_mut!(GAI_RESULT);
+            (*r1).ai_flags = 0;
+            (*r1).ai_family = family;
+            (*r1).ai_socktype = SOCK_STREAM;
+            (*r1).ai_protocol = IPPROTO_TCP;
+            (*r1).ai_addrlen = addr_size;
+            (*r1).ai_canonname = core::ptr::null_mut();
+            (*r1).ai_addr = addr1.cast::<Sockaddr>();
+            (*r1).ai_next = r2;
+
+            *res = r1;
+        }
     }
 
     0 // Success.

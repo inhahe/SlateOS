@@ -1756,15 +1756,17 @@ pub unsafe extern "C" fn send(
             // MSG_DONTWAIT (0x40) or O_NONBLOCK → non-blocking mode.
             let is_nb = (flags & MSG_DONTWAIT) != 0
                 || fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
+            if !is_nb {
+                // Blocking socket: use tcp_send_wait for full-write
+                // semantics.  Linux's blocking send() loops until ALL
+                // bytes are accepted.  Programs depend on this.
+                let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
+                return tcp_send_wait(entry.handle, buf, len, timeout_ms);
+            }
+            // Non-blocking: try once.
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
             if ret >= 0 {
                 return ret as isize;
-            }
-            // Check for WouldBlock on a blocking socket.
-            let is_would_block = ret == errno::native::WOULD_BLOCK;
-            if is_would_block && !is_nb {
-                let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-                return tcp_send_wait(entry.handle, buf, len, timeout_ms);
             }
             // ChannelClosed from send covers two distinct POSIX errors:
             // - EPIPE: local write side shut down (SHUT_WR sent FIN), or
@@ -2294,14 +2296,16 @@ pub unsafe extern "C" fn sendto(
         }
         let is_nb = (flags & MSG_DONTWAIT) != 0
             || fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
+        if !is_nb {
+            // Blocking socket: use tcp_send_wait for full-write
+            // semantics (same as send()).
+            let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
+            return tcp_send_wait(entry.handle, buf, len, timeout_ms);
+        }
+        // Non-blocking: try once.
         let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
         if ret >= 0 {
             return ret as isize;
-        }
-        // Check for WouldBlock on a blocking socket — wait with SO_SNDTIMEO.
-        if ret == errno::native::WOULD_BLOCK && !is_nb {
-            let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
-            return tcp_send_wait(entry.handle, buf, len, timeout_ms);
         }
         let posix_err = translate_net_error(ret);
         // Distinguish RST (ECONNRESET) from local shutdown (EPIPE).

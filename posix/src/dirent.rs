@@ -88,7 +88,13 @@ pub extern "C" fn opendir(name: *const u8) -> *mut Dir {
     // Resolve relative paths against CWD.
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     let Some(resolved_len) = (unsafe { crate::unistd::resolve_path(name, &mut resolved) }) else {
-        errno::set_errno(errno::ENAMETOOLONG);
+        // POSIX: empty path → ENOENT, too-long path → ENAMETOOLONG.
+        // SAFETY: name is non-null (checked above) and a valid C-string.
+        if unsafe { *name } == 0 {
+            errno::set_errno(errno::ENOENT);
+        } else {
+            errno::set_errno(errno::ENAMETOOLONG);
+        }
         return core::ptr::null_mut();
     };
 

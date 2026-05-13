@@ -746,7 +746,13 @@ pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
     // Resolve relative path against CWD and normalize.
     let mut resolved = [0u8; PATH_MAX];
     let Some(resolved_len) = (unsafe { resolve_path(path, &mut resolved) }) else {
-        errno::set_errno(errno::ENAMETOOLONG);
+        // POSIX: empty path → ENOENT; too-long → ENAMETOOLONG.
+        // SAFETY: path is non-null (checked above) and a valid C string.
+        if unsafe { *path } == 0 {
+            errno::set_errno(errno::ENOENT);
+        } else {
+            errno::set_errno(errno::ENAMETOOLONG);
+        }
         return core::ptr::null_mut();
     };
 

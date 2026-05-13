@@ -4405,7 +4405,16 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
             m.msg_namelen = 0;
             unsafe { recv(fd, iov.iov_base, iov.iov_len, flags) }
         };
-        m.msg_flags = 0;
+        // Detect truncation for datagram sockets: when MSG_TRUNC was passed,
+        // the kernel returns the real datagram size.  If ret > buffer size,
+        // the datagram was truncated.
+        let is_dgram = fdtable::get_fd(fd)
+            .is_some_and(|e| e.kind == HandleKind::UdpSocket);
+        m.msg_flags = if is_dgram && ret > 0 && (ret as usize) > iov.iov_len {
+            MSG_TRUNC
+        } else {
+            0
+        };
         m.msg_controllen = 0;
         return ret;
     }
@@ -4605,7 +4614,8 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
 
     // Set MSG_TRUNC if the receive buffer was full and smaller than total
     // capacity (indicating potential data truncation for datagrams).
-    m.msg_flags = if trunc_flag { MSG_TRUNC } else { 0 };
+    // TCP is a byte stream — short reads are normal, not truncation.
+    m.msg_flags = if trunc_flag && is_dgram { MSG_TRUNC } else { 0 };
     m.msg_controllen = 0;
 
     received

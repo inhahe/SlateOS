@@ -320,22 +320,24 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 errno::set_errno(errno::ENOTCONN);
                 return -1;
             }
-            let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64);
-            if ret >= 0 {
-                return ret as SsizeT;
-            }
-            // Check if WouldBlock on a blocking socket — retry with timeout.
-            let is_would_block = ret == errno::native::WOULD_BLOCK;
             let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
                 & crate::fcntl::O_NONBLOCK != 0;
-            if is_would_block && !is_nb {
+            if !is_nb {
+                // Blocking socket: use tcp_send_wait for full-write
+                // semantics.  Linux's blocking write() loops until ALL
+                // bytes are accepted; programs depend on this (same
+                // behavior as send() on a blocking socket).
                 let timeout_ms = crate::socket::get_meta(fd)
                     .map_or(0u64, |m| m.sndtimeo_ms);
                 return crate::socket::tcp_send_wait(
                     entry.handle, buf, count, timeout_ms,
                 );
             }
-            // Non-blocking or non-WouldBlock error.
+            // Non-blocking: try once.
+            let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64);
+            if ret >= 0 {
+                return ret as SsizeT;
+            }
             // ChannelClosed (-300) needs EPIPE/ECONNRESET distinction:
             // RST from peer → ECONNRESET; local shutdown/graceful close → EPIPE.
             if ret == errno::native::CHANNEL_CLOSED {
@@ -382,6 +384,15 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
 /// or -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
+    // POSIX: EINVAL if whence is not a valid value.
+    if whence != crate::fcntl::SEEK_SET
+        && whence != crate::fcntl::SEEK_CUR
+        && whence != crate::fcntl::SEEK_END
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     let Some(entry) = lookup_fd(fd) else { return -1; };
 
     match entry.kind {
@@ -1037,6 +1048,12 @@ pub extern "C" fn truncate(path: *const u8, length: OffT) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
+    // POSIX: "If length is negative, the function shall fail and the
+    // file size shall remain unchanged.  [EINVAL]."
+    if length < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
 
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
@@ -1055,6 +1072,13 @@ pub extern "C" fn truncate(path: *const u8, length: OffT) -> i32 {
 /// Truncate a file to a specified length (by fd).
 #[unsafe(no_mangle)]
 pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
+    // POSIX: "If length is negative, the function shall fail and the
+    // file size shall remain unchanged.  [EINVAL]."
+    if length < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     let Some(entry) = lookup_fd(fd) else { return -1; };
 
     match entry.kind {
@@ -1122,7 +1146,15 @@ fn resolve_or_err(
     if let Some(len) = unsafe { crate::unistd::resolve_path(path, resolved) } {
         Some(len)
     } else {
-        errno::set_errno(errno::ENAMETOOLONG);
+        // Distinguish empty path (ENOENT) from path-too-long (ENAMETOOLONG).
+        // POSIX: "If the value of path is an empty string, the function
+        // shall fail and report [ENOENT]."
+        // SAFETY: Callers guarantee path is non-null and a valid C string.
+        if unsafe { *path } == 0 {
+            errno::set_errno(errno::ENOENT);
+        } else {
+            errno::set_errno(errno::ENAMETOOLONG);
+        }
         None
     }
 }
@@ -1219,13 +1251,13 @@ pub extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
 /// Check file accessibility relative to a directory fd.
 ///
 /// `faccessat(AT_FDCWD, path, mode, 0)` is equivalent to `access(path, mode)`.
-/// Other `dirfd` values are not yet supported.
+///
+/// POSIX: if `path` is absolute, `dirfd` is ignored.
 ///
 /// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, _flags: i32) -> i32 {
-    // AT_FDCWD (-100): use current working directory.
-    if dirfd != -100 {
+    if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }
@@ -1233,12 +1265,24 @@ pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, _flags: i32)
 }
 
 // ---------------------------------------------------------------------------
-// *at() functions (AT_FDCWD stubs)
+// *at() functions
 // ---------------------------------------------------------------------------
 //
-// These delegate to the non-*at version when dirfd == AT_FDCWD (-100).
-// Other dirfd values return ENOSYS until we implement fchdir() or
-// kernel-level *at() support.
+// These delegate to the non-*at version when dirfd == AT_FDCWD (-100) or
+// when the path is absolute (POSIX: dirfd is ignored for absolute paths).
+// Other dirfd values with relative paths return ENOSYS until we implement
+// fchdir() or kernel-level *at() support.
+
+/// Returns `true` if the C-string `path` starts with `b'/'` (absolute).
+///
+/// Returns `false` for null or empty paths.
+#[inline]
+fn is_absolute_path(path: *const u8) -> bool {
+    // SAFETY: Callers guarantee `path` is either null or a valid C-string.
+    // We only read the first byte (if non-null), which is always safe for
+    // a valid C-string (it's either the first character or the null terminator).
+    !path.is_null() && unsafe { *path } == b'/'
+}
 
 /// AT_FDCWD: use the current working directory.
 pub const AT_FDCWD: i32 = -100;
@@ -1248,9 +1292,11 @@ pub const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 pub const AT_REMOVEDIR: i32 = 0x200;
 
 /// Open a file relative to a directory fd.
+///
+/// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[unsafe(no_mangle)]
 pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -> Fd {
-    if dirfd != AT_FDCWD {
+    if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }
@@ -1258,9 +1304,11 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
 }
 
 /// Get file status relative to a directory fd.
+///
+/// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[unsafe(no_mangle)]
 pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, _flags: i32) -> i32 {
-    if dirfd != AT_FDCWD {
+    if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }
@@ -1271,9 +1319,11 @@ pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, _flags: i
 ///
 /// When `flags` includes `AT_REMOVEDIR`, acts like rmdir.
 /// Otherwise acts like unlink.
+///
+/// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[unsafe(no_mangle)]
 pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
-    if dirfd != AT_FDCWD {
+    if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }
@@ -1285,6 +1335,8 @@ pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
 }
 
 /// Rename a file relative to directory fds.
+///
+/// POSIX: each `dirfd` is ignored when its corresponding path is absolute.
 #[unsafe(no_mangle)]
 pub extern "C" fn renameat(
     olddirfd: i32,
@@ -1292,7 +1344,9 @@ pub extern "C" fn renameat(
     newdirfd: i32,
     newpath: *const u8,
 ) -> i32 {
-    if olddirfd != AT_FDCWD || newdirfd != AT_FDCWD {
+    let old_needs_dirfd = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
+    let new_needs_dirfd = newdirfd != AT_FDCWD && !is_absolute_path(newpath);
+    if old_needs_dirfd || new_needs_dirfd {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }
@@ -1300,9 +1354,11 @@ pub extern "C" fn renameat(
 }
 
 /// Create a directory relative to a directory fd.
+///
+/// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[unsafe(no_mangle)]
 pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
-    if dirfd != AT_FDCWD {
+    if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }
@@ -1310,6 +1366,8 @@ pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
 }
 
 /// Read a symbolic link relative to a directory fd.
+///
+/// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[unsafe(no_mangle)]
 pub extern "C" fn readlinkat(
     dirfd: i32,
@@ -1317,7 +1375,7 @@ pub extern "C" fn readlinkat(
     buf: *mut u8,
     bufsiz: SizeT,
 ) -> SsizeT {
-    if dirfd != AT_FDCWD {
+    if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }
@@ -1325,9 +1383,13 @@ pub extern "C" fn readlinkat(
 }
 
 /// Create a symbolic link relative to a directory fd.
+///
+/// POSIX: if `linkpath` is absolute, `newdirfd` is ignored.
+/// Note: `target` is stored as-is (not resolved), so its absoluteness
+/// doesn't affect whether we need `newdirfd`.
 #[unsafe(no_mangle)]
 pub extern "C" fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u8) -> i32 {
-    if newdirfd != AT_FDCWD {
+    if newdirfd != AT_FDCWD && !is_absolute_path(linkpath) {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }
@@ -1335,6 +1397,8 @@ pub extern "C" fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u
 }
 
 /// Create a hard link relative to directory fds.
+///
+/// POSIX: each `dirfd` is ignored when its corresponding path is absolute.
 #[unsafe(no_mangle)]
 pub extern "C" fn linkat(
     olddirfd: i32,
@@ -1343,7 +1407,9 @@ pub extern "C" fn linkat(
     newpath: *const u8,
     _flags: i32,
 ) -> i32 {
-    if olddirfd != AT_FDCWD || newdirfd != AT_FDCWD {
+    let old_needs_dirfd = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
+    let new_needs_dirfd = newdirfd != AT_FDCWD && !is_absolute_path(newpath);
+    if old_needs_dirfd || new_needs_dirfd {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }
@@ -1353,9 +1419,11 @@ pub extern "C" fn linkat(
 /// Change file mode bits relative to a directory fd.
 ///
 /// Stub: accepts silently.
+///
+/// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[unsafe(no_mangle)]
 pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, _flags: i32) -> i32 {
-    if dirfd != AT_FDCWD {
+    if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }
@@ -1365,6 +1433,8 @@ pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, _flags: i32
 /// Change file owner/group relative to a directory fd.
 ///
 /// Stub: accepts silently.
+///
+/// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[unsafe(no_mangle)]
 pub extern "C" fn fchownat(
     dirfd: i32,
@@ -1373,7 +1443,7 @@ pub extern "C" fn fchownat(
     group: GidT,
     _flags: i32,
 ) -> i32 {
-    if dirfd != AT_FDCWD {
+    if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }

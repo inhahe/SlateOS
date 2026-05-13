@@ -1207,6 +1207,17 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
     }
 }
 
+/// Sync file data to disk (without metadata).
+///
+/// POSIX: like `fsync` but only syncs data, not metadata (atime,
+/// mtime, etc.).  Our kernel doesn't distinguish, so this delegates
+/// to `fsync`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fdatasync(fd: Fd) -> i32 {
+    // Our kernel has no separate data-only sync — delegate to fsync.
+    fsync(fd)
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -1381,6 +1392,10 @@ pub const AT_FDCWD: i32 = -100;
 pub const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 /// AT_REMOVEDIR: unlinkat should remove a directory.
 pub const AT_REMOVEDIR: i32 = 0x200;
+/// AT_EMPTY_PATH: operate on the fd itself (Linux 2.6.39+).
+pub const AT_EMPTY_PATH: i32 = 0x1000;
+/// AT_EACCESS: check using effective IDs in faccessat.
+pub const AT_EACCESS: i32 = 0x200;
 
 /// Open a file relative to a directory fd.
 ///
@@ -1397,13 +1412,19 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
 /// Get file status relative to a directory fd.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
+/// When `flags` includes `AT_SYMLINK_NOFOLLOW`, uses `lstat` (does
+/// not follow symlinks).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, _flags: i32) -> i32 {
+pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i32) -> i32 {
     if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
         return -1;
     }
-    stat(path, buf)
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        lstat(path, buf)
+    } else {
+        stat(path, buf)
+    }
 }
 
 /// Remove a file or directory relative to a directory fd.

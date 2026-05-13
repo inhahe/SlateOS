@@ -5628,6 +5628,9 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
     let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
     let src_ptr = args.arg3 as *mut u8;
+    // arg4: flags — bit 1 (0x02) = MSG_PEEK (peek without consuming).
+    let flags = args.arg4 as u32;
+    let peek = (flags & 0x02) != 0;
 
     if buf_ptr.is_null() && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -5645,7 +5648,14 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    match crate::net::udp::recv(handle) {
+    // Either peek (clone without removing) or consume the front datagram.
+    let datagram_opt = if peek {
+        crate::net::udp::peek(handle)
+    } else {
+        crate::net::udp::recv(handle)
+    };
+
+    match datagram_opt {
         Some(datagram) => {
             let copy_len = datagram.data.len().min(buf_cap);
             if copy_len > 0 && !buf_ptr.is_null() {
@@ -5701,6 +5711,32 @@ pub fn sys_udp_close(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0 as usize;
     crate::net::udp::close(handle);
     SyscallResult::ok(0)
+}
+
+/// `SYS_UDP_CONNECT` — set connected peer filter for a UDP socket.
+///
+/// `arg0`: socket handle.
+/// `arg1`: peer IPv4 address (u32, network byte order).
+/// `arg2`: peer port (u16, host byte order).
+///
+/// Pass ip=0, port=0 to disconnect.
+pub fn sys_udp_connect(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let handle = args.arg0 as usize;
+    let ip_nbo = args.arg1 as u32;
+    let port = args.arg2 as u16;
+
+    let peer_ip = crate::net::interface::Ipv4Addr(ip_nbo.to_be_bytes());
+    match crate::net::udp::connect(handle, peer_ip, port) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
 }
 
 /// `SYS_UDP_MCAST_JOIN` — join a multicast group on a UDP socket.

@@ -2036,6 +2036,18 @@ pub const SYS_UDP_MCAST_JOIN: u64 = 814;
 /// Returns: 0 on success, negative error on failure.
 pub const SYS_UDP_MCAST_LEAVE: u64 = 815;
 
+/// Set connected peer for a UDP socket (connected-mode filter).
+///
+/// `arg0`: socket handle.
+/// `arg1`: peer IPv4 address (u32, network byte order).
+/// `arg2`: peer port (u16, host byte order).
+///
+/// After connecting, recv/peek only return datagrams from this peer.
+/// Pass ip=0, port=0 to disconnect (remove the filter).
+///
+/// Returns: 0 on success, negative error on failure.
+pub const SYS_UDP_CONNECT: u64 = 816;
+
 /// Resolve a hostname to an IPv4 address via DNS.
 ///
 /// `arg0`: pointer to hostname string.

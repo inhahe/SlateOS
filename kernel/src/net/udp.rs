@@ -80,6 +80,11 @@ struct UdpSocket {
     port: u16,
     /// Whether this slot is in use.
     active: bool,
+    /// Connected peer address (0.0.0.0 = not connected / unfiltered).
+    /// When set, recv/peek only return datagrams from this peer.
+    peer_ip: Ipv4Addr,
+    /// Connected peer port (0 = not connected / unfiltered).
+    peer_port: u16,
     /// Received datagrams waiting to be read.
     rx_queue: Vec<Datagram>,
     /// Multicast groups this socket has joined.
@@ -94,10 +99,26 @@ impl UdpSocket {
         Self {
             port: 0,
             active: false,
+            peer_ip: Ipv4Addr::UNSPECIFIED,
+            peer_port: 0,
             rx_queue: Vec::new(),
             mcast_groups: [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET],
             mcast_count: 0,
         }
+    }
+
+    /// Whether this socket is in connected mode (has a peer filter).
+    fn is_connected(&self) -> bool {
+        !self.peer_ip.is_unspecified() || self.peer_port != 0
+    }
+
+    /// Whether a datagram matches the connected peer filter.
+    /// Returns true if not connected (accept all) or if source matches.
+    fn matches_peer(&self, src_ip: Ipv4Addr, src_port: u16) -> bool {
+        if !self.is_connected() {
+            return true;
+        }
+        self.peer_ip == src_ip && self.peer_port == src_port
     }
 }
 
@@ -229,6 +250,8 @@ pub fn close(handle: usize) {
         }
         sock.active = false;
         sock.port = 0;
+        sock.peer_ip = Ipv4Addr::UNSPECIFIED;
+        sock.peer_port = 0;
         sock.rx_queue.clear();
         sock.mcast_groups = [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET];
         sock.mcast_count = 0;
@@ -341,15 +364,74 @@ pub fn rx_ready(handle: usize) -> usize {
 
 /// Receive a datagram from a bound socket.
 ///
-/// Returns `None` if no datagrams are queued.
+/// If the socket is in connected mode, skips (discards) datagrams
+/// from non-matching sources and returns the first matching one.
+/// Returns `None` if no matching datagrams are queued.
 pub fn recv(handle: usize) -> Option<Datagram> {
     let mut sockets = SOCKETS.lock();
     let sock = sockets.get_mut(handle)?;
-    if !sock.active || sock.rx_queue.is_empty() {
+    if !sock.active {
         return None;
     }
-    // Remove from the front (FIFO order).
-    Some(sock.rx_queue.remove(0))
+
+    // In connected mode, discard datagrams that don't match the peer.
+    // This is FIFO: we remove from the front, skipping non-matching.
+    loop {
+        if sock.rx_queue.is_empty() {
+            return None;
+        }
+        // Check if front datagram matches the peer filter.
+        let front = &sock.rx_queue[0];
+        if sock.matches_peer(front.src_ip, front.src_port) {
+            return Some(sock.rx_queue.remove(0));
+        }
+        // Not from connected peer — discard and try next.
+        sock.rx_queue.remove(0);
+    }
+}
+
+/// Peek at the next datagram without removing it from the queue.
+///
+/// If the socket is in connected mode, returns the first datagram
+/// that matches the peer filter (discarding earlier non-matching ones,
+/// since they would never be delivered anyway).
+/// Returns `None` if no matching datagrams are queued.
+pub fn peek(handle: usize) -> Option<Datagram> {
+    let mut sockets = SOCKETS.lock();
+    let sock = sockets.get_mut(handle)?;
+    if !sock.active {
+        return None;
+    }
+
+    // Drain non-matching datagrams from the front (they'd be discarded
+    // on recv() anyway, so removing them during peek is correct).
+    loop {
+        if sock.rx_queue.is_empty() {
+            return None;
+        }
+        let front = &sock.rx_queue[0];
+        if sock.matches_peer(front.src_ip, front.src_port) {
+            return sock.rx_queue.first().cloned();
+        }
+        // Not from connected peer — discard.
+        sock.rx_queue.remove(0);
+    }
+}
+
+/// Set the connected peer for a UDP socket (connected-mode filter).
+///
+/// After calling this, recv/peek will only return datagrams from
+/// the specified peer.  Pass `Ipv4Addr::UNSPECIFIED` and port 0 to
+/// disconnect (remove filter).
+pub fn connect(handle: usize, peer_ip: Ipv4Addr, peer_port: u16) -> KernelResult<()> {
+    let mut sockets = SOCKETS.lock();
+    let sock = sockets.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    if !sock.active {
+        return Err(KernelError::InvalidArgument);
+    }
+    sock.peer_ip = peer_ip;
+    sock.peer_port = peer_port;
+    Ok(())
 }
 
 /// Send a UDP datagram.

@@ -1160,23 +1160,45 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
             0
         }
         SOCK_DGRAM => {
-            // UDP "connect" is purely a userspace operation — it stores
-            // the default peer address so send() works without sendto().
-            // No kernel call needed; the kernel handles each datagram
-            // independently.  Per POSIX, connect on DGRAM can be called
-            // multiple times (to change peer) or with AF_UNSPEC to
-            // disconnect.
+            // UDP "connect" stores the default peer for send() and also
+            // sets the kernel-side peer filter so recv/recvfrom only
+            // return datagrams from the connected peer.
+            // Per POSIX, connect on DGRAM can be called multiple times
+            // (to change peer) or with AF_UNSPEC to disconnect.
+            let entry = fdtable::get_fd(fd).unwrap_or(fdtable::FdEntry {
+                kind: HandleKind::UdpSocket,
+                handle: 0,
+                flags: 0,
+                status_flags: 0,
+            });
+
             if sin.sin_family == 0 {
-                // AF_UNSPEC → disconnect (clear stored peer).
+                // AF_UNSPEC → disconnect (clear stored peer + kernel filter).
                 meta.peer_addr = 0;
                 meta.peer_port = 0;
                 set_meta(fd, meta);
+                if entry.handle != 0 {
+                    let _ = syscall3(SYS_UDP_CONNECT, entry.handle, 0, 0);
+                }
                 return 0;
             }
 
             meta.peer_addr = sin.sin_addr.s_addr;
             meta.peer_port = sin.sin_port;
             set_meta(fd, meta);
+
+            // Tell the kernel to filter incoming datagrams by peer.
+            // Port is stored in network byte order in sin_port; kernel
+            // expects host byte order.
+            if entry.handle != 0 {
+                let port_host = u16::from_be(sin.sin_port);
+                let _ = syscall3(
+                    SYS_UDP_CONNECT,
+                    entry.handle,
+                    u64::from(sin.sin_addr.s_addr),
+                    u64::from(port_host),
+                );
+            }
             0
         }
         _ => {
@@ -1615,12 +1637,13 @@ pub unsafe extern "C" fn recv(
                 return -1;
             }
             let mut src_info = [0u8; 6];
-            let ret = syscall4(
+            let ret = syscall5(
                 SYS_UDP_RECV,
                 entry.handle,
                 buf as u64,
                 len as u64,
                 src_info.as_mut_ptr() as u64,
+                u64::from(kern_flags),
             );
             if ret < 0 {
                 errno::set_errno(translate_net_error(ret));
@@ -1752,7 +1775,7 @@ pub unsafe extern "C" fn recvfrom(
     fd: i32,
     buf: *mut u8,
     len: usize,
-    _flags: i32,
+    flags: i32,
     src_addr: *mut Sockaddr,
     addrlen: *mut SocklenT,
 ) -> isize {
@@ -1766,6 +1789,16 @@ pub unsafe extern "C" fn recvfrom(
         return -1;
     };
 
+    // Build kernel flags (MSG_PEEK=0x02, MSG_DONTWAIT=0x40).
+    let kern_flags = {
+        let f = (flags as u32) & (MSG_PEEK as u32 | MSG_DONTWAIT as u32);
+        if fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0 {
+            f | (MSG_DONTWAIT as u32)
+        } else {
+            f
+        }
+    };
+
     match entry.kind {
         HandleKind::TcpStream => {
             // TCP recvfrom works like recv but fills in peer address.
@@ -1773,17 +1806,6 @@ pub unsafe extern "C" fn recvfrom(
                 errno::set_errno(errno::ENOTCONN);
                 return -1;
             }
-
-            // Build kernel flags (MSG_PEEK, MSG_DONTWAIT).
-            let kern_flags = (_flags as u32)
-                & (MSG_PEEK as u32 | MSG_DONTWAIT as u32);
-            let kern_flags = if fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0
-            {
-                kern_flags | (MSG_DONTWAIT as u32)
-            } else {
-                kern_flags
-            };
 
             let ret = syscall4(
                 SYS_TCP_RECV, entry.handle,
@@ -1831,12 +1853,13 @@ pub unsafe extern "C" fn recvfrom(
             // bytes 4-5 = port (little-endian u16)
             let mut src_info = [0u8; 6];
 
-            let ret = syscall4(
+            let ret = syscall5(
                 SYS_UDP_RECV,
                 entry.handle,
                 buf as u64,
                 len as u64,
                 src_info.as_mut_ptr() as u64,
+                u64::from(kern_flags),
             );
             if ret < 0 {
                 errno::set_errno(translate_net_error(ret));

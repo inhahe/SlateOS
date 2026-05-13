@@ -6,9 +6,9 @@
 //!
 //! - **`TIOCGWINSZ`**: returns default terminal dimensions for Console fds.
 //! - **`TIOCSWINSZ`**: accepts (no-op) for Console fds.
-//! - **`FIONBIO`**: non-blocking mode flag — accepted silently (our kernel
-//!   I/O is currently all blocking).
-//! - **`FIONREAD`**: bytes available to read — returns 0.
+//! - **`FIONBIO`**: non-blocking mode flag — sets/clears `O_NONBLOCK` on
+//!   the fd (equivalent to `fcntl(fd, F_SETFL, ... | O_NONBLOCK)`).
+//! - **`FIONREAD`**: bytes available to read without blocking.
 //! - **`TCGETS`/`TCSETS`**: termios get/set — returns/accepts defaults for
 //!   Console fds.
 //! - All other requests return `ENOTTY`.
@@ -266,7 +266,7 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
     match request {
         TIOCGWINSZ => handle_tiocgwinsz(entry.kind, arg),
         TIOCSWINSZ => handle_tiocswinsz(entry.kind),
-        FIONBIO => handle_fionbio(arg),
+        FIONBIO => handle_fionbio(fd, arg),
         FIONREAD => handle_fionread(entry.kind, entry.handle, arg),
         TCGETS => handle_tcgets(entry.kind, arg),
         TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind),
@@ -310,17 +310,28 @@ fn handle_tiocswinsz(kind: HandleKind) -> i32 {
 
 /// FIONBIO — set/clear non-blocking I/O.
 ///
-/// Accepted as a no-op for all fds.  Our kernel I/O is currently
-/// all blocking; when non-blocking I/O is added, this will need
-/// to set a per-fd flag.
-fn handle_fionbio(arg: *mut u8) -> i32 {
+/// Sets or clears the `O_NONBLOCK` flag on the fd, equivalent to
+/// `fcntl(fd, F_SETFL, flags | O_NONBLOCK)`.  The argument is a
+/// pointer to an int: nonzero enables non-blocking, zero disables.
+fn handle_fionbio(fd: i32, arg: *mut u8) -> i32 {
     if arg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // Accept silently — non-blocking mode is not yet implemented.
-    // The argument is a pointer to an int (0 = blocking, nonzero = non-blocking).
-    0
+    // SAFETY: arg must be at least sizeof(i32), per POSIX ioctl(FIONBIO).
+    let enable = unsafe { core::ptr::read_unaligned(arg.cast::<i32>()) };
+    let current = fdtable::get_status_flags(fd).unwrap_or(0);
+    let new_flags = if enable != 0 {
+        current | crate::fcntl::O_NONBLOCK
+    } else {
+        current & !crate::fcntl::O_NONBLOCK
+    };
+    if fdtable::set_status_flags(fd, new_flags) {
+        0
+    } else {
+        errno::set_errno(errno::EBADF);
+        -1
+    }
 }
 
 /// FIONREAD — get number of bytes available to read.

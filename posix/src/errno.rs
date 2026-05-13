@@ -127,33 +127,60 @@ pub extern "C" fn __errno_location() -> *mut i32 {
 // Native error code → POSIX errno translation
 // ---------------------------------------------------------------------------
 
-/// Our kernel error codes (from kernel/src/error.rs).
+/// Our kernel error codes (from kernel/src/error.rs `KernelError` enum).
 ///
 /// These are the negative values returned by native syscalls.
+/// MUST stay in sync with kernel/src/error.rs — any mismatch causes
+/// wrong errno values throughout the entire POSIX layer.
 mod native {
-    pub const NOT_FOUND: i64 = -100;
-    pub const ALREADY_EXISTS: i64 = -101;
-    pub const INVALID_ARGUMENT: i64 = -102;
+    // --- General (0-99 range: -1 to -6) ---
+    pub const INTERNAL_ERROR: i64 = -1;
+    pub const NOT_SUPPORTED: i64 = -2;
+    pub const INVALID_ARGUMENT: i64 = -3;
+    pub const WOULD_BLOCK: i64 = -4;
+    pub const CANCELLED: i64 = -5;
+    pub const TIMED_OUT: i64 = -6;
+
+    // --- Memory (100 range: -100 to -103) ---
+    pub const OUT_OF_MEMORY: i64 = -100;
+    pub const INVALID_ADDRESS: i64 = -101;
+    // PageFault = -102 (not typically returned to userspace)
+    // BadAlignment = -103
+
+    // --- Process (200 range: -200 to -202) ---
+    pub const NO_SUCH_PROCESS: i64 = -200;
+    // InvalidExecutable = -201
+    // ProcessExited = -202
+
+    // --- IPC (300 range: -300 to -304) ---
+    pub const CHANNEL_CLOSED: i64 = -300;
+    pub const CHANNEL_FULL: i64 = -301;
+    // MessageTooLarge = -302
+    // Overflow = -303
+    pub const RESOURCE_EXHAUSTED: i64 = -304;
+
+    // --- Capability (400 range: -400 to -401) ---
     pub const PERMISSION_DENIED: i64 = -400;
-    pub const OUT_OF_MEMORY: i64 = -200;
-    pub const RESOURCE_BUSY: i64 = -201;
-    pub const WOULD_BLOCK: i64 = -202;
-    pub const NOT_SUPPORTED: i64 = -300;
-    pub const IO_ERROR: i64 = -301;
-    pub const TIMED_OUT: i64 = -302;
-    pub const INTERRUPTED: i64 = -303;
-    pub const NO_SUCH_PROCESS: i64 = -500;
-    pub const BAD_HANDLE: i64 = -103;
-    pub const BUFFER_TOO_SMALL: i64 = -104;
-    pub const NAME_TOO_LONG: i64 = -105;
-    pub const NOT_A_DIRECTORY: i64 = -106;
-    pub const IS_A_DIRECTORY: i64 = -107;
-    pub const DIRECTORY_NOT_EMPTY: i64 = -108;
-    pub const TOO_MANY_LINKS: i64 = -109;
-    pub const CROSS_DEVICE: i64 = -110;
-    pub const READ_ONLY_FS: i64 = -111;
-    pub const NO_SPACE: i64 = -112;
-    pub const FILE_TOO_LARGE: i64 = -113;
+    // InvalidCapability = -401
+
+    // --- Filesystem (500 range: -500 to -511) ---
+    pub const NOT_FOUND: i64 = -500;
+    pub const ALREADY_EXISTS: i64 = -501;
+    pub const NOT_A_DIRECTORY: i64 = -502;
+    pub const IS_A_DIRECTORY: i64 = -503;
+    pub const NO_SPACE: i64 = -504;
+    pub const BAD_HANDLE: i64 = -505;
+    pub const TOO_MANY_LINKS: i64 = -506;
+    pub const DIRECTORY_NOT_EMPTY: i64 = -507;
+    // CorruptedData = -508
+    pub const READ_ONLY_FS: i64 = -509;
+    pub const TOO_MANY_OPEN_FILES: i64 = -510;
+    pub const FILE_TOO_LARGE: i64 = -511;
+
+    // --- Device / I/O (600 range: -600 to -602) ---
+    pub const IO_ERROR: i64 = -600;
+    pub const NO_SUCH_DEVICE: i64 = -601;
+    pub const RESOURCE_BUSY: i64 = -602;
 }
 
 /// Translate a native syscall return value to POSIX convention.
@@ -167,31 +194,48 @@ pub fn translate(ret: i64) -> i64 {
         return ret;
     }
 
-    #[allow(clippy::match_same_arms)] // IO_ERROR maps to EIO like the fallback, but is explicit for clarity.
     let err = match ret {
+        // General errors
+        native::INTERNAL_ERROR => EIO,
+        native::NOT_SUPPORTED => ENOTSUP,
+        native::INVALID_ARGUMENT => EINVAL,
+        native::WOULD_BLOCK => EAGAIN,
+        native::CANCELLED => ECANCELED,
+        native::TIMED_OUT => ETIMEDOUT,
+
+        // Memory errors
+        native::OUT_OF_MEMORY => ENOMEM,
+        native::INVALID_ADDRESS => EFAULT,
+
+        // Process errors
+        native::NO_SUCH_PROCESS => ESRCH,
+
+        // IPC errors
+        native::CHANNEL_CLOSED => ECONNRESET,
+        native::CHANNEL_FULL => EAGAIN, // Send buffer full → try again.
+        native::RESOURCE_EXHAUSTED => ENOMEM,
+
+        // Capability / permission errors
+        native::PERMISSION_DENIED => EACCES,
+
+        // Filesystem errors
         native::NOT_FOUND => ENOENT,
         native::ALREADY_EXISTS => EEXIST,
-        native::INVALID_ARGUMENT => EINVAL,
-        native::PERMISSION_DENIED => EACCES,
-        native::OUT_OF_MEMORY => ENOMEM,
-        native::RESOURCE_BUSY => EBUSY,
-        native::WOULD_BLOCK => EAGAIN,
-        native::NOT_SUPPORTED => ENOTSUP,
-        native::IO_ERROR => EIO,
-        native::TIMED_OUT => ETIMEDOUT,
-        native::INTERRUPTED => EINTR,
-        native::NO_SUCH_PROCESS => ESRCH,
-        native::BAD_HANDLE => EBADF,
-        native::BUFFER_TOO_SMALL => ERANGE,
-        native::NAME_TOO_LONG => ENAMETOOLONG,
         native::NOT_A_DIRECTORY => ENOTDIR,
         native::IS_A_DIRECTORY => EISDIR,
-        native::DIRECTORY_NOT_EMPTY => ENOTEMPTY,
-        native::TOO_MANY_LINKS => ELOOP,
-        native::CROSS_DEVICE => EXDEV,
-        native::READ_ONLY_FS => EROFS,
         native::NO_SPACE => ENOSPC,
+        native::BAD_HANDLE => EBADF,
+        native::TOO_MANY_LINKS => ELOOP,
+        native::DIRECTORY_NOT_EMPTY => ENOTEMPTY,
+        native::READ_ONLY_FS => EROFS,
+        native::TOO_MANY_OPEN_FILES => EMFILE,
         native::FILE_TOO_LARGE => EFBIG,
+
+        // Device / I/O errors
+        native::IO_ERROR => EIO,
+        native::NO_SUCH_DEVICE => ENODEV,
+        native::RESOURCE_BUSY => EBUSY,
+
         _ => EIO, // Unknown error → generic I/O error.
     };
 

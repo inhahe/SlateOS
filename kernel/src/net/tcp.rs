@@ -1897,20 +1897,23 @@ fn ooo_deliver(conn: &mut TcpConnection) {
                 if raw_len == 0 {
                     break;
                 }
-                // When read side is shut down, still advance rcv_nxt
-                // (so ACKs are correct) but don't buffer the data.
-                let buffer_len = if conn.local_read_closed {
-                    0
+                // When read side is shut down, discard data but advance
+                // rcv_nxt by the full amount (protocol must keep moving
+                // so the connection can close gracefully).
+                // When buffer is full, only advance by what we stored —
+                // otherwise we'd ACK bytes the application never sees.
+                let deliver_len = if conn.local_read_closed {
+                    // Intentional discard — advance past all of it.
+                    raw_len
                 } else {
                     raw_len.min(MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len()))
                 };
 
-                if buffer_len > 0 {
-                    let actual_end = start_off.saturating_add(buffer_len);
+                if deliver_len > 0 && !conn.local_read_closed {
+                    let actual_end = start_off.saturating_add(deliver_len);
                     conn.rx_buffer.extend_from_slice(&conn.ooo_buf[start_off..actual_end]);
                 }
-                // Advance rcv_nxt for the full range regardless of buffering.
-                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(raw_len as u32);
+                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(deliver_len as u32);
                 found = true;
                 break; // Re-scan from the beginning (blocks may now be contiguous).
             }
@@ -3771,17 +3774,26 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     // In-order data — deliver to rx_buffer (unless read
                     // side is shut down, in which case ACK but discard).
                     let can_accept = if conn.local_read_closed {
-                        0
+                        // Read side shut down — discard data but still advance
+                        // rcv_nxt so the connection can close gracefully.
+                        // The application doesn't want this data.
+                        payload.len()
                     } else {
                         MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len())
                     };
                     let accept = payload.len().min(can_accept);
-                    if accept > 0 {
+                    if accept > 0 && !conn.local_read_closed {
                         conn.rx_buffer.extend_from_slice(&payload[..accept]);
                     }
-                    // Advance rcv_nxt for ALL received data (even discarded)
-                    // so we ACK correctly and the peer doesn't retransmit.
-                    let advance = payload.len() as u32;
+                    // Advance rcv_nxt only by the amount we actually consumed.
+                    // When local_read_closed: we accept (and discard) the full
+                    // payload to keep the protocol advancing.
+                    // When buffer full: advance only by what we stored.
+                    // Advancing past data we couldn't store would lie to the
+                    // peer (ACKing bytes the application will never see),
+                    // silently corrupting the TCP byte stream.  The shrunk
+                    // advertised window tells the peer to stop sending.
+                    let advance = accept as u32;
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(advance);
 
                     // Deliver contiguous OOO-buffered data now that the

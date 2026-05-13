@@ -1646,15 +1646,46 @@ pub unsafe extern "C" fn recv(
                 errno::set_errno(errno::ENOTCONN);
                 return -1;
             }
+            let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
+            let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
+
+            // First attempt: if non-blocking or we have SO_RCVTIMEO, always
+            // use MSG_DONTWAIT so we control the timeout ourselves.
+            let first_flags = if is_nb || timeout_ms > 0 {
+                kern_flags | MSG_DONTWAIT as u32
+            } else {
+                kern_flags
+            };
+
             let ret = syscall4(
                 SYS_TCP_RECV, entry.handle,
-                buf as u64, len as u64, kern_flags as u64,
+                buf as u64, len as u64, first_flags as u64,
             );
-            if ret < 0 {
-                errno::set_errno(translate_net_error(ret));
-                return -1;
+            if ret >= 0 {
+                return ret as isize;
             }
-            ret as isize
+
+            let err = translate_net_error(ret);
+            if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
+                // Blocking with SO_RCVTIMEO: poll-wait then retry.
+                if timeout_ms > 0 {
+                    return tcp_recv_wait(
+                        entry.handle, buf, len, kern_flags, timeout_ms,
+                    );
+                }
+                // No timeout set, use kernel's default blocking.
+                let retry = syscall4(
+                    SYS_TCP_RECV, entry.handle,
+                    buf as u64, len as u64, kern_flags as u64,
+                );
+                if retry < 0 {
+                    errno::set_errno(translate_net_error(retry));
+                    return -1;
+                }
+                return retry as isize;
+            }
+            errno::set_errno(err);
+            -1
         }
         HandleKind::UdpSocket => {
             if entry.handle == 0 {
@@ -1737,6 +1768,63 @@ fn udp_recv_wait(
         );
         if ret >= 0 {
             return ret as isize;
+        }
+        // Still no data — check timeout.
+        if deadline != u64::MAX {
+            let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+            if now >= deadline {
+                errno::set_errno(errno::EAGAIN);
+                return -1;
+            }
+        }
+    }
+}
+
+/// Poll-wait for TCP data with timeout (SO_RCVTIMEO support).
+///
+/// Uses MSG_DONTWAIT + polling loop to implement the POSIX timeout
+/// semantics.  `timeout_ms == 0` means wait indefinitely (shouldn't
+/// be called in that case, but handled for safety).
+/// Returns bytes received or -1 (with errno set).
+fn tcp_recv_wait(
+    handle: u64,
+    buf: *mut u8,
+    len: usize,
+    kern_flags: u32,
+    timeout_ms: u64,
+) -> isize {
+    const POLL_NS: u64 = 10_000_000; // 10ms
+
+    let deadline = if timeout_ms > 0 {
+        let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+        now.saturating_add(timeout_ms.saturating_mul(1_000_000))
+    } else {
+        u64::MAX
+    };
+
+    // Always use MSG_DONTWAIT so the kernel returns immediately.
+    let flags_nb = kern_flags | MSG_DONTWAIT as u32;
+
+    loop {
+        let _ = syscall1(SYS_SLEEP, POLL_NS);
+
+        let ret = syscall4(
+            SYS_TCP_RECV, handle,
+            buf as u64, len as u64, flags_nb as u64,
+        );
+        if ret > 0 {
+            return ret as isize;
+        }
+        if ret == 0 {
+            // 0 = EOF / connection closed — return it as-is.
+            return 0;
+        }
+        // Negative: check if it's just WouldBlock (no data yet).
+        let err = translate_net_error(ret);
+        if err != errno::EAGAIN && err != errno::EWOULDBLOCK {
+            // Real error (ECONNRESET, etc.)
+            errno::set_errno(err);
+            return -1;
         }
         // Still no data — check timeout.
         if deadline != u64::MAX {
@@ -1905,13 +1993,46 @@ pub unsafe extern "C" fn recvfrom(
                 return -1;
             }
 
+            let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
+            let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
+
+            // Use MSG_DONTWAIT if we have SO_RCVTIMEO so we control timeout.
+            let first_flags = if !is_nb && timeout_ms > 0 {
+                kern_flags | MSG_DONTWAIT as u32
+            } else {
+                kern_flags
+            };
+
             let ret = syscall4(
                 SYS_TCP_RECV, entry.handle,
-                buf as u64, len as u64, kern_flags as u64,
+                buf as u64, len as u64, first_flags as u64,
             );
-            if ret < 0 {
-                errno::set_errno(translate_net_error(ret));
-                return -1;
+
+            let recv_result = if ret >= 0 {
+                ret as isize
+            } else {
+                let err = translate_net_error(ret);
+                if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb && timeout_ms > 0 {
+                    tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms)
+                } else if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb && timeout_ms == 0 {
+                    // No timeout: let kernel handle blocking.
+                    let retry = syscall4(
+                        SYS_TCP_RECV, entry.handle,
+                        buf as u64, len as u64, kern_flags as u64,
+                    );
+                    if retry < 0 {
+                        errno::set_errno(translate_net_error(retry));
+                        return -1;
+                    }
+                    retry as isize
+                } else {
+                    errno::set_errno(err);
+                    return -1;
+                }
+            };
+
+            if recv_result < 0 {
+                return recv_result;
             }
 
             // Fill in peer address if requested.
@@ -1937,7 +2058,7 @@ pub unsafe extern "C" fn recvfrom(
                 }
             }
 
-            ret as isize
+            recv_result
         }
 
         HandleKind::UdpSocket => {

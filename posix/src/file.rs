@@ -118,7 +118,14 @@ pub extern "C" fn close(fd: Fd) -> i32 {
         HandleKind::Console => return 0, // Console fds don't need kernel close.
         HandleKind::TcpStream => {
             if entry.handle == 0 { return 0; } // Unconnected socket, nothing to close.
-            syscall1(SYS_TCP_CLOSE, entry.handle)
+            // SO_LINGER with timeout 0: send RST (abortive close).
+            let linger_abort = crate::socket::get_meta(fd)
+                .map_or(false, |m| m.linger_onoff && m.linger_secs == 0);
+            if linger_abort {
+                syscall1(SYS_TCP_ABORT, entry.handle)
+            } else {
+                syscall1(SYS_TCP_CLOSE, entry.handle)
+            }
         }
         HandleKind::TcpListener => {
             syscall1(SYS_TCP_CLOSE_LISTENER, entry.handle)

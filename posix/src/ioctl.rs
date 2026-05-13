@@ -267,7 +267,7 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
         TIOCGWINSZ => handle_tiocgwinsz(entry.kind, arg),
         TIOCSWINSZ => handle_tiocswinsz(entry.kind),
         FIONBIO => handle_fionbio(arg),
-        FIONREAD => handle_fionread(entry.kind, arg),
+        FIONREAD => handle_fionread(entry.kind, entry.handle, arg),
         TCGETS => handle_tcgets(entry.kind, arg),
         TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind),
         _ => {
@@ -328,7 +328,9 @@ fn handle_fionbio(arg: *mut u8) -> i32 {
 /// Returns 0 for Console fds (we don't buffer input), ENOTTY for
 /// non-terminal fds (files don't support FIONREAD via ioctl; use
 /// stat + seek instead).
-fn handle_fionread(kind: HandleKind, arg: *mut u8) -> i32 {
+fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
+    use crate::syscall::{syscall3, SYS_TCP_INFO};
+
     if arg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -343,9 +345,45 @@ fn handle_fionread(kind: HandleKind, arg: *mut u8) -> i32 {
             }
             0
         }
-        _ => {
+        HandleKind::File => {
             errno::set_errno(errno::ENOTTY);
             -1
+        }
+        HandleKind::TcpStream => {
+            if handle == 0 {
+                // SAFETY: arg must be at least sizeof(i32).
+                unsafe { core::ptr::write_unaligned(arg.cast::<i32>(), 0); }
+                return 0;
+            }
+            // Query TCP_INFO to get rx_buffered (bytes 24..28).
+            let mut info_buf = [0u8; 48];
+            let ret = syscall3(
+                SYS_TCP_INFO,
+                handle,
+                info_buf.as_mut_ptr() as u64,
+                48,
+            );
+            let available = if ret == 0 {
+                // rx_buffered is at offset 24, 4 bytes LE.
+                u32::from_le_bytes([info_buf[24], info_buf[25], info_buf[26], info_buf[27]])
+            } else {
+                0
+            };
+            // SAFETY: arg must be at least sizeof(i32).
+            unsafe {
+                core::ptr::write_unaligned(arg.cast::<i32>(), available as i32);
+            }
+            0
+        }
+        HandleKind::TcpListener | HandleKind::UdpSocket => {
+            // For listeners: number of pending connections (1 or 0).
+            // For UDP: number of queued datagrams.
+            // Both are simplistically reported as 0 for now.
+            // SAFETY: arg must be at least sizeof(i32).
+            unsafe {
+                core::ptr::write_unaligned(arg.cast::<i32>(), 0);
+            }
+            0
         }
     }
 }

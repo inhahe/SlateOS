@@ -2520,17 +2520,43 @@ pub fn read_blocking(handle: usize, timeout_polls: u32, max_bytes: usize) -> Ker
 }
 
 /// Close a TCP connection.
+///
+/// If `rst` is true, send RST instead of FIN (abortive close, e.g.,
+/// when SO_LINGER timeout is 0 or unread data exists in rx_buffer).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn close(handle: usize) -> KernelResult<()> {
-    let (local_port, remote_ip, remote_port, seq, ack, state) = {
+    let (local_port, remote_ip, remote_port, seq, ack, state, has_unread) = {
         let conns = CONNECTIONS.lock();
         let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
         if !conn.active {
             return Ok(());
         }
+        let unread = !conn.rx_buffer.is_empty() && !conn.local_read_closed;
         (conn.local_port, conn.remote_ip, conn.remote_port,
-         conn.snd_nxt, conn.rcv_nxt, conn.state)
+         conn.snd_nxt, conn.rcv_nxt, conn.state, unread)
     };
+
+    // RFC 1122 §4.2.2.13: if the receive buffer contains unread data
+    // when close is called, send RST instead of FIN to signal to the
+    // peer that the data was discarded (not consumed).
+    if has_unread && (state == TcpState::Established || state == TcpState::CloseWait) {
+        let _ = send_segment(
+            local_port, remote_ip, remote_port,
+            seq, ack, TCP_RST | TCP_ACK, &[],
+        );
+        crate::serial_println!(
+            "[tcp] RST close (unread data) on port {} → {}:{}",
+            local_port, remote_ip, remote_port
+        );
+        let mut conns = CONNECTIONS.lock();
+        conns[handle].active = false;
+        conns[handle].state = TcpState::Closed;
+        conns[handle].rx_buffer.clear();
+        conns[handle].tx_buffer.clear();
+        conns[handle].nagle_buf.clear();
+        conns[handle].ooo_buf.clear();
+        return Ok(());
+    }
 
     match state {
         TcpState::Established => {

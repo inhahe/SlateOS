@@ -251,9 +251,9 @@ const MAX_SOCKETS: usize = 64;
 /// Contains the socket type and any state needed between `socket()`
 /// and `connect()`/`bind()`.
 #[derive(Clone, Copy)]
-struct SocketMeta {
+pub(crate) struct SocketMeta {
     /// Socket type (`SOCK_STREAM` or `SOCK_DGRAM`).
-    sock_type: i32,
+    pub(crate) sock_type: i32,
     /// Port bound via `bind()` (deferred until `listen()` for TCP).
     /// Network byte order.  0 if not yet bound.
     bound_port: u16,
@@ -276,9 +276,9 @@ struct SocketMeta {
     /// SO_BROADCAST: permit sending to broadcast addresses.
     broadcast: bool,
     /// SO_LINGER: whether linger is enabled.
-    linger_onoff: bool,
+    pub(crate) linger_onoff: bool,
     /// SO_LINGER: linger time in seconds (meaningful only when linger_onoff is true).
-    linger_secs: i32,
+    pub(crate) linger_secs: i32,
     /// TCP_KEEPIDLE: idle time before first keepalive probe (seconds).
     keepidle: i32,
     /// TCP_KEEPINTVL: interval between keepalive probes (seconds).
@@ -312,7 +312,7 @@ fn set_meta(fd: i32, meta: SocketMeta) {
 }
 
 /// Get metadata for a socket fd.
-fn get_meta(fd: i32) -> Option<SocketMeta> {
+pub(crate) fn get_meta(fd: i32) -> Option<SocketMeta> {
     if fd < 0 || (fd as usize) >= MAX_SOCKETS {
         return None;
     }

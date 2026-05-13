@@ -2196,6 +2196,165 @@ pub unsafe extern "C" fn gethostbyname(name: *const u8) -> *const Hostent {
 }
 
 // ---------------------------------------------------------------------------
+// gethostbyaddr — reverse DNS lookup
+// ---------------------------------------------------------------------------
+
+/// Static storage for gethostbyaddr (separate from gethostbyname to allow
+/// interleaved usage, even though POSIX doesn't guarantee it).
+static mut HOSTENT_REV_NAME: [u8; 256] = [0u8; 256];
+static mut HOSTENT_REV_ADDR: [u8; 4] = [0u8; 4];
+static mut HOSTENT_REV_ADDR_PTR: [*const u8; 2] = [core::ptr::null(); 2];
+static mut HOSTENT_REV_ALIASES: [*const u8; 1] = [core::ptr::null()];
+static mut HOSTENT_REV_RESULT: Hostent = Hostent {
+    h_name: core::ptr::null(),
+    h_aliases: core::ptr::null(),
+    h_addrtype: 0,
+    h_length: 0,
+    h_addr_list: core::ptr::null(),
+};
+
+/// Reverse-resolve an IPv4 address to a hostname.
+///
+/// Given a network-byte-order IPv4 address (4 bytes at `*addr`),
+/// performs a DNS PTR lookup via `SYS_DNS_REVERSE_RESOLVE`.
+///
+/// Returns a pointer to a static `Hostent`, or NULL on failure.
+///
+/// # Safety
+///
+/// `addr` must point to at least `len` (4) bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gethostbyaddr(
+    addr: *const u8,
+    len: i32,
+    addr_type: i32,
+) -> *const Hostent {
+    if addr.is_null() || addr_type != AF_INET || len != 4 {
+        return core::ptr::null();
+    }
+
+    // Read the address bytes.
+    let mut ip_bytes = [0u8; 4];
+    unsafe {
+        ip_bytes[0] = *addr;
+        ip_bytes[1] = *addr.add(1);
+        ip_bytes[2] = *addr.add(2);
+        ip_bytes[3] = *addr.add(3);
+    }
+
+    // Convert to the u32 representation our kernel expects
+    // (network byte order = big-endian, same as sockaddr_in).
+    let ip_u32 = u32::from_ne_bytes(ip_bytes);
+
+    // Output buffer for the reverse-resolved hostname.
+    let mut name_buf = [0u8; 256];
+
+    // SYS_DNS_REVERSE_RESOLVE: arg0=ip (network order), arg1=output_ptr, arg2=output_len.
+    let ret = syscall3(
+        SYS_DNS_REVERSE_RESOLVE,
+        u64::from(ip_u32),
+        name_buf.as_mut_ptr() as u64,
+        name_buf.len() as u64,
+    );
+    if ret < 0 {
+        return core::ptr::null();
+    }
+
+    let name_len = ret as usize;
+    let copy_len = if name_len < 255 { name_len } else { 255 };
+
+    // SAFETY: Single-threaded access to static storage.
+    unsafe {
+        // Copy the resolved hostname into static storage.
+        let buf = core::ptr::addr_of_mut!(HOSTENT_REV_NAME);
+        core::ptr::copy_nonoverlapping(name_buf.as_ptr(), (*buf).as_mut_ptr(), copy_len);
+        if let Some(slot) = (*buf).get_mut(copy_len) {
+            *slot = 0;
+        }
+
+        // Store the address.
+        let stored_addr = core::ptr::addr_of_mut!(HOSTENT_REV_ADDR);
+        (*stored_addr) = ip_bytes;
+
+        // Set up address list: [&addr, NULL].
+        let addr_ptr = core::ptr::addr_of_mut!(HOSTENT_REV_ADDR_PTR);
+        (*addr_ptr)[0] = (*stored_addr).as_ptr();
+        (*addr_ptr)[1] = core::ptr::null();
+
+        // Empty alias list.
+        let aliases = core::ptr::addr_of_mut!(HOSTENT_REV_ALIASES);
+        (*aliases)[0] = core::ptr::null();
+
+        // Assemble the result.
+        let result = core::ptr::addr_of_mut!(HOSTENT_REV_RESULT);
+        (*result).h_name = (*buf).as_ptr();
+        (*result).h_aliases = (*aliases).as_ptr();
+        (*result).h_addrtype = AF_INET;
+        (*result).h_length = 4;
+        (*result).h_addr_list = (*addr_ptr).as_ptr();
+
+        result
+    }
+}
+
+// ---------------------------------------------------------------------------
+// h_errno / herror / hstrerror — legacy DNS error reporting
+// ---------------------------------------------------------------------------
+
+/// Resolver error: authoritative answer — host not found.
+pub const HOST_NOT_FOUND: i32 = 1;
+/// Resolver error: non-authoritative — try again later.
+pub const TRY_AGAIN: i32 = 2;
+/// Resolver error: non-recoverable error.
+pub const NO_RECOVERY: i32 = 3;
+/// Resolver error: valid name, no data record of requested type.
+pub const NO_DATA: i32 = 4;
+
+/// Thread-local (actually global — single-threaded) resolver error.
+static mut H_ERRNO: i32 = 0;
+
+/// Get a pointer to the resolver error variable.
+///
+/// Used by C code as `extern int h_errno;` via `*__h_errno_location()`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __h_errno_location() -> *mut i32 {
+    // SAFETY: single-threaded POSIX shim.
+    unsafe { core::ptr::addr_of_mut!(H_ERRNO) }
+}
+
+/// Return a string describing a resolver error code.
+#[unsafe(no_mangle)]
+pub extern "C" fn hstrerror(err: i32) -> *const u8 {
+    match err {
+        0 => b"Resolver Error 0 (no error)\0".as_ptr(),
+        HOST_NOT_FOUND => b"Host not found\0".as_ptr(),
+        TRY_AGAIN => b"Try again\0".as_ptr(),
+        NO_RECOVERY => b"Non-recoverable error\0".as_ptr(),
+        NO_DATA => b"No address associated with name\0".as_ptr(),
+        _ => b"Unknown resolver error\0".as_ptr(),
+    }
+}
+
+/// Print a resolver error message to stderr.
+#[unsafe(no_mangle)]
+pub extern "C" fn herror(s: *const u8) {
+    // SAFETY: s is null-terminated.
+    if !s.is_null() {
+        let slen = unsafe { crate::string::strlen(s) };
+        if slen > 0 {
+            let _ = syscall2(SYS_CONSOLE_WRITE, s as u64, slen as u64);
+            let _ = syscall2(SYS_CONSOLE_WRITE, b": ".as_ptr() as u64, 2);
+        }
+    }
+    // SAFETY: single-threaded access.
+    let err = unsafe { *core::ptr::addr_of!(H_ERRNO) };
+    let msg = hstrerror(err);
+    let msg_len = unsafe { crate::string::strlen(msg) };
+    let _ = syscall2(SYS_CONSOLE_WRITE, msg as u64, msg_len as u64);
+    let _ = syscall2(SYS_CONSOLE_WRITE, b"\n".as_ptr() as u64, 1);
+}
+
+// ---------------------------------------------------------------------------
 // getaddrinfo() / freeaddrinfo() — modern DNS resolution
 // ---------------------------------------------------------------------------
 
@@ -2938,6 +3097,167 @@ pub unsafe extern "C" fn if_indextoname(ifindex: u32, ifname: *mut u8) -> *mut u
 
 /// Maximum interface name length.
 pub const IF_NAMESIZE: usize = 16;
+
+// ---------------------------------------------------------------------------
+// getifaddrs / freeifaddrs — interface address enumeration
+// ---------------------------------------------------------------------------
+
+/// Linked list of network interface addresses (per POSIX/BSD).
+#[repr(C)]
+pub struct Ifaddrs {
+    /// Next entry in the linked list (NULL for last entry).
+    pub ifa_next: *mut Ifaddrs,
+    /// Interface name (null-terminated).
+    pub ifa_name: *const u8,
+    /// Interface flags (IFF_UP, IFF_LOOPBACK, etc.).
+    pub ifa_flags: u32,
+    /// Interface address.
+    pub ifa_addr: *const Sockaddr,
+    /// Network mask.
+    pub ifa_netmask: *const Sockaddr,
+    /// Broadcast/destination address (union in BSD; we use broadcast).
+    pub ifa_broadaddr: *const Sockaddr,
+    /// Interface-specific data (unused).
+    pub ifa_data: *const u8,
+}
+
+// Interface flags.
+/// Interface is up.
+pub const IFF_UP: u32 = 1;
+/// Interface is a loopback.
+pub const IFF_LOOPBACK: u32 = 8;
+/// Interface supports multicast.
+pub const IFF_MULTICAST: u32 = 0x1000;
+/// Interface is running.
+pub const IFF_RUNNING: u32 = 0x40;
+/// Interface supports broadcast.
+pub const IFF_BROADCAST: u32 = 2;
+
+/// Static storage for getifaddrs (single interface).
+///
+/// We have one physical interface ("eth0") whose address is obtained
+/// from `SYS_NET_STAT` (if configured) and a loopback ("lo").
+static mut IFADDRS_ETH0: Ifaddrs = Ifaddrs {
+    ifa_next: core::ptr::null_mut(),
+    ifa_name: core::ptr::null(),
+    ifa_flags: 0,
+    ifa_addr: core::ptr::null(),
+    ifa_netmask: core::ptr::null(),
+    ifa_broadaddr: core::ptr::null(),
+    ifa_data: core::ptr::null(),
+};
+static mut IFADDRS_LO: Ifaddrs = Ifaddrs {
+    ifa_next: core::ptr::null_mut(),
+    ifa_name: core::ptr::null(),
+    ifa_flags: 0,
+    ifa_addr: core::ptr::null(),
+    ifa_netmask: core::ptr::null(),
+    ifa_broadaddr: core::ptr::null(),
+    ifa_data: core::ptr::null(),
+};
+
+static mut IFADDRS_ETH0_NAME: [u8; 8] = *b"eth0\0\0\0\0";
+static mut IFADDRS_LO_NAME: [u8; 4] = *b"lo\0\0";
+static mut IFADDRS_ETH0_ADDR: SockaddrIn = SockaddrIn {
+    sin_family: AF_INET as u16, sin_port: 0,
+    sin_addr: InAddr { s_addr: 0 }, sin_zero: [0; 8],
+};
+static mut IFADDRS_ETH0_MASK: SockaddrIn = SockaddrIn {
+    sin_family: AF_INET as u16, sin_port: 0,
+    sin_addr: InAddr { s_addr: 0 }, sin_zero: [0; 8],
+};
+static mut IFADDRS_LO_ADDR: SockaddrIn = SockaddrIn {
+    sin_family: AF_INET as u16, sin_port: 0,
+    sin_addr: InAddr { s_addr: u32::to_be(INADDR_LOOPBACK) }, sin_zero: [0; 8],
+};
+static mut IFADDRS_LO_MASK: SockaddrIn = SockaddrIn {
+    sin_family: AF_INET as u16, sin_port: 0,
+    sin_addr: InAddr { s_addr: u32::to_be(0xFF00_0000) }, sin_zero: [0; 8],
+};
+
+/// Retrieve a linked list of network interface addresses.
+///
+/// Populates `*ifap` with a pointer to a linked list of `Ifaddrs`
+/// structures (one per interface).  Our OS exposes "eth0" (the primary
+/// NIC, configured via DHCP) and "lo" (loopback, always 127.0.0.1/8).
+///
+/// The returned data is in static storage — `freeifaddrs()` is a no-op.
+///
+/// # Safety
+///
+/// `ifap` must be a valid pointer to write the result.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32 {
+    if ifap.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // Query the kernel for the eth0 IP address.
+    // SYS_NET_STAT returns 48 bytes of interface statistics; we just
+    // need to know if the interface is configured.  We can get the IP
+    // from the first 4 bytes of the peer addr query — but actually,
+    // we don't have a direct "get interface IP" syscall.  We'll use
+    // a convention: if NET_STAT succeeds, the interface is up.
+    let mut stat_buf = [0u8; 48];
+    let net_up = syscall2(
+        SYS_NET_STAT,
+        stat_buf.as_mut_ptr() as u64,
+        stat_buf.len() as u64,
+    ) == 0;
+
+    // SAFETY: single-threaded, static storage.
+    unsafe {
+        // Set up loopback entry.
+        let lo = core::ptr::addr_of_mut!(IFADDRS_LO);
+        let lo_addr = core::ptr::addr_of_mut!(IFADDRS_LO_ADDR);
+        let lo_mask = core::ptr::addr_of_mut!(IFADDRS_LO_MASK);
+        let lo_name = core::ptr::addr_of_mut!(IFADDRS_LO_NAME);
+        (*lo_addr).sin_addr.s_addr = u32::to_be(INADDR_LOOPBACK);
+        (*lo_mask).sin_addr.s_addr = u32::to_be(0xFF00_0000); // 255.0.0.0
+        (*lo).ifa_name = (*lo_name).as_ptr();
+        (*lo).ifa_flags = IFF_UP | IFF_LOOPBACK | IFF_RUNNING;
+        (*lo).ifa_addr = lo_addr.cast();
+        (*lo).ifa_netmask = lo_mask.cast();
+        (*lo).ifa_broadaddr = core::ptr::null();
+        (*lo).ifa_data = core::ptr::null();
+        (*lo).ifa_next = core::ptr::null_mut();
+
+        if net_up {
+            // Set up eth0 entry.
+            let eth0 = core::ptr::addr_of_mut!(IFADDRS_ETH0);
+            let eth0_addr = core::ptr::addr_of_mut!(IFADDRS_ETH0_ADDR);
+            let eth0_mask = core::ptr::addr_of_mut!(IFADDRS_ETH0_MASK);
+            let eth0_name = core::ptr::addr_of_mut!(IFADDRS_ETH0_NAME);
+            // We don't have a direct way to query the interface IP from
+            // userspace, so set to 0.0.0.0 (INADDR_ANY) indicating it's
+            // configured but the IP is available via other means.
+            (*eth0_addr).sin_addr.s_addr = 0;
+            (*eth0_mask).sin_addr.s_addr = 0;
+            (*eth0).ifa_name = (*eth0_name).as_ptr();
+            (*eth0).ifa_flags = IFF_UP | IFF_RUNNING | IFF_MULTICAST | IFF_BROADCAST;
+            (*eth0).ifa_addr = eth0_addr.cast();
+            (*eth0).ifa_netmask = eth0_mask.cast();
+            (*eth0).ifa_broadaddr = core::ptr::null();
+            (*eth0).ifa_data = core::ptr::null();
+            (*eth0).ifa_next = lo; // eth0 → lo → NULL
+            *ifap = eth0;
+        } else {
+            // No network — just loopback.
+            *ifap = lo;
+        }
+    }
+
+    0
+}
+
+/// Free memory allocated by `getifaddrs()`.
+///
+/// No-op: our implementation uses static storage.
+#[unsafe(no_mangle)]
+pub extern "C" fn freeifaddrs(_ifa: *mut Ifaddrs) {
+    // Static storage — nothing to free.
+}
 
 // ---------------------------------------------------------------------------
 // Error translation

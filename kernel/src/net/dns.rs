@@ -58,12 +58,50 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
 use super::interface::{self, Ipv4Addr};
+
+// ---------------------------------------------------------------------------
+// DNS cache statistics (lock-free atomic counters)
+// ---------------------------------------------------------------------------
+
+/// Number of cache hits (both positive and negative).
+static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+/// Number of cache misses (queries sent to the network).
+static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+/// Number of cache evictions (when a slot is reused for a new entry).
+static CACHE_EVICTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// DNS cache statistics snapshot.
+#[derive(Debug, Clone, Copy)]
+pub struct DnsCacheStats {
+    /// Total cache hits (positive + negative).
+    pub hits: u64,
+    /// Total cache misses.
+    pub misses: u64,
+    /// Total evictions (replaced entries).
+    pub evictions: u64,
+    /// Current number of occupied cache slots.
+    pub entries: usize,
+    /// Maximum cache capacity.
+    pub capacity: usize,
+}
+
+/// Return a snapshot of DNS cache statistics.
+pub fn cache_stats() -> DnsCacheStats {
+    let entries = DNS_CACHE.lock().count;
+    DnsCacheStats {
+        hits: CACHE_HITS.load(Ordering::Relaxed),
+        misses: CACHE_MISSES.load(Ordering::Relaxed),
+        evictions: CACHE_EVICTIONS.load(Ordering::Relaxed),
+        entries,
+        capacity: CACHE_SIZE,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // DNS constants
@@ -260,6 +298,10 @@ impl DnsCache {
 
         // Write the new entry.
         if let Some(slot) = self.entries.get_mut(best_idx) {
+            // Track evictions: replacing a valid (non-empty, non-expired) entry.
+            if slot.name_len > 0 && slot.is_valid(now_ns) {
+                CACHE_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+            }
             slot.name = [0u8; MAX_NAME_LEN];
             let copy_len = name_bytes.len().min(MAX_NAME_LEN);
             slot.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
@@ -769,6 +811,7 @@ pub fn resolve(name: &str) -> KernelResult<Ipv4Addr> {
                     let now_ns = crate::hrtimer::now_ns();
                     match DNS_CACHE.lock().lookup(&target, now_ns) {
                         Some(Some(ip)) => {
+                            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
                             crate::serial_println!(
                                 "[dns] Cache hit for CNAME target: '{}' → {}",
                                 target, ip
@@ -779,10 +822,13 @@ pub fn resolve(name: &str) -> KernelResult<Ipv4Addr> {
                             return Ok(ip);
                         }
                         Some(None) => {
+                            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
                             // CNAME target is negatively cached — fail.
                             return Err(KernelError::NotFound);
                         }
-                        None => {} // Cache miss — will re-query.
+                        None => {
+                            CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     current_name = target;
                     continue;
@@ -823,15 +869,19 @@ fn resolve_single(name: &str) -> KernelResult<Ipv4Addr> {
     // Check cache first (positive and negative entries).
     match DNS_CACHE.lock().lookup(name, now_ns) {
         Some(Some(ip)) => {
+            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             crate::serial_println!("[dns] Cache hit: '{}' → {}", name, ip);
             return Ok(ip);
         }
         Some(None) => {
             // Negative cache hit — name was recently queried and not found.
+            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
             crate::serial_println!("[dns] Negative cache hit: '{}'", name);
             return Err(KernelError::NotFound);
         }
-        None => {} // Cache miss — proceed with query.
+        None => {
+            CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     let dns_server = interface::info().dns;

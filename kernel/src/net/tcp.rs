@@ -2113,6 +2113,112 @@ pub fn all_connections() -> Vec<TcpConnectionInfo> {
     result
 }
 
+/// Information about a TCP listener.
+#[derive(Debug, Clone, Copy)]
+pub struct TcpListenerInfo {
+    /// Listener table index.
+    pub handle: usize,
+    /// Local port being listened on.
+    pub port: u16,
+    /// Number of pending (accepted but not yet retrieved) connections.
+    pub backlog_used: usize,
+    /// Maximum backlog capacity.
+    pub backlog_max: usize,
+}
+
+/// Return information about all active TCP listeners.
+///
+/// Uses a fixed-size array to avoid heap allocation (suitable for
+/// syscall handlers and interrupt context).
+pub fn all_listeners() -> ([TcpListenerInfo; MAX_LISTENERS], usize) {
+    let listeners = LISTENERS.lock();
+    let mut result = [TcpListenerInfo {
+        handle: 0, port: 0, backlog_used: 0, backlog_max: MAX_BACKLOG,
+    }; MAX_LISTENERS];
+    let mut count = 0;
+    for (idx, listener) in listeners.iter().enumerate() {
+        if listener.active {
+            let used = listener.backlog.iter().filter(|p| p.active).count();
+            if let Some(slot) = result.get_mut(count) {
+                *slot = TcpListenerInfo {
+                    handle: idx,
+                    port: listener.port,
+                    backlog_used: used,
+                    backlog_max: MAX_BACKLOG,
+                };
+                count = count.wrapping_add(1);
+            }
+        }
+    }
+    (result, count)
+}
+
+/// Summary statistics about the TCP subsystem.
+#[derive(Debug, Clone, Copy)]
+pub struct TcpStats {
+    /// Number of active connections (any state except Closed).
+    pub active_connections: usize,
+    /// Number of connections in ESTABLISHED state.
+    pub established: usize,
+    /// Number of connections in SYN_SENT state.
+    pub syn_sent: usize,
+    /// Number of connections in TIME_WAIT state.
+    pub time_wait: usize,
+    /// Number of connections in CLOSE_WAIT state.
+    pub close_wait: usize,
+    /// Number of active listeners.
+    pub listeners: usize,
+    /// Total receive buffer bytes across all connections.
+    pub total_rx_bytes: usize,
+    /// Total transmit buffer bytes across all connections.
+    pub total_tx_bytes: usize,
+}
+
+/// Return summary statistics about the TCP subsystem.
+pub fn stats() -> TcpStats {
+    let conns = CONNECTIONS.lock();
+    let mut s = TcpStats {
+        active_connections: 0,
+        established: 0,
+        syn_sent: 0,
+        time_wait: 0,
+        close_wait: 0,
+        listeners: 0,
+        total_rx_bytes: 0,
+        total_tx_bytes: 0,
+    };
+    for conn in conns.iter() {
+        if conn.active {
+            s.active_connections = s.active_connections.wrapping_add(1);
+            match conn.state {
+                TcpState::Established => {
+                    s.established = s.established.wrapping_add(1);
+                }
+                TcpState::SynSent => {
+                    s.syn_sent = s.syn_sent.wrapping_add(1);
+                }
+                TcpState::TimeWait => {
+                    s.time_wait = s.time_wait.wrapping_add(1);
+                }
+                TcpState::CloseWait => {
+                    s.close_wait = s.close_wait.wrapping_add(1);
+                }
+                _ => {}
+            }
+            s.total_rx_bytes = s.total_rx_bytes.wrapping_add(conn.rx_buffer.len());
+            s.total_tx_bytes = s.total_tx_bytes.wrapping_add(conn.tx_buffer.len());
+        }
+    }
+    drop(conns);
+    let listeners = LISTENERS.lock();
+    for listener in listeners.iter() {
+        if listener.active {
+            s.listeners = s.listeners.wrapping_add(1);
+        }
+    }
+    s
+}
+
 /// Query the current smoothed RTT for a connection (nanoseconds).
 ///
 /// Returns 0 if no RTT samples have been collected yet.

@@ -904,8 +904,22 @@ fn format_string(
     precision: Option<usize>,
 ) {
     if s.is_null() {
-        let null_str = b"(null)";
-        emit_bytes(dst, null_str);
+        // glibc prints "(null)" for NULL, respecting width and precision.
+        let null_str: &[u8] = b"(null)";
+        let len = if let Some(p) = precision {
+            if p < 6 { p } else { 6 }
+        } else {
+            6
+        };
+        if !flags.left_align && width > len {
+            emit_padding(dst, b' ', width.wrapping_sub(len));
+        }
+        if let Some(slice) = null_str.get(..len) {
+            emit_bytes(dst, slice);
+        }
+        if flags.left_align && width > len {
+            emit_padding(dst, b' ', width.wrapping_sub(len));
+        }
         return;
     }
 

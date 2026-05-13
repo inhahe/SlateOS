@@ -36,25 +36,39 @@ fn write_cstr(s: *const u8) {
     let _ = crate::file::write(2, s, len);
 }
 
-/// Print the "prefix: msg: strerror(errno)\n" pattern to stderr.
+/// Print the "progname: msg: strerror(errno)\n" pattern to stderr.
 fn emit_warn(fmt: *const u8) {
-    // Print program name if we have one.
-    // We don't track __progname, so skip it.
+    // Print program name prefix.
+    // SAFETY: __progname is set by __libc_start_main; if not yet
+    // initialized it points to the static "unknown\0" string.
+    let prog = unsafe { core::ptr::addr_of!(crate::crt::__progname).read() };
+    if !prog.is_null() {
+        write_cstr(prog);
+        write_stderr(b": ");
+    }
 
     if !fmt.is_null() {
         write_cstr(fmt);
+        write_stderr(b": ");
     }
 
-    // Append ": <strerror>\n".
-    write_stderr(b": ");
+    // Append "<strerror>\n".
     let err = errno::get_errno();
     let msg = crate::string::strerror(err);
     write_cstr(msg);
     write_stderr(b"\n");
 }
 
-/// Print "msg\n" to stderr (no errno).
+/// Print "progname: msg\n" to stderr (no errno).
 fn emit_warnx(fmt: *const u8) {
+    // SAFETY: __progname is set by __libc_start_main; if not yet
+    // initialized it points to the static "unknown\0" string.
+    let prog = unsafe { core::ptr::addr_of!(crate::crt::__progname).read() };
+    if !prog.is_null() {
+        write_cstr(prog);
+        write_stderr(b": ");
+    }
+
     if !fmt.is_null() {
         write_cstr(fmt);
     }

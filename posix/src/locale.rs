@@ -157,6 +157,6 @@ pub const LC_COLLATE_MASK: i32 = 1 << LC_COLLATE;
 pub const LC_MONETARY_MASK: i32 = 1 << LC_MONETARY;
 /// Mask for `LC_MESSAGES`.
 pub const LC_MESSAGES_MASK: i32 = 1 << LC_MESSAGES;
-/// Mask for all categories.
+/// Mask for all categories (LC_CTYPE through LC_MESSAGES).
 #[allow(clippy::cast_possible_truncation)]
-pub const LC_ALL_MASK: i32 = (1 << (LC_ALL + 1)) - 1;
+pub const LC_ALL_MASK: i32 = (1 << LC_ALL) - 1;

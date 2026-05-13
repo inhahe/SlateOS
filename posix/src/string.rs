@@ -1945,3 +1945,39 @@ pub unsafe extern "C" fn __stpncpy_chk(
 ) -> *mut u8 {
     unsafe { stpncpy(dest, src, n) }
 }
+
+// ---------------------------------------------------------------------------
+// swab — byte pair swap
+// ---------------------------------------------------------------------------
+
+/// Copy `nbytes` bytes from `src` to `dest`, swapping adjacent byte pairs.
+///
+/// POSIX requires `nbytes` to be even.  If `nbytes` is odd, the last
+/// byte is silently ignored (not copied).  This matches glibc behavior.
+///
+/// # Safety
+///
+/// `src` and `dest` must point to valid memory of at least `nbytes`
+/// bytes.  The regions must not overlap.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn swab(
+    src: *const u8,
+    dest: *mut u8,
+    nbytes: isize,
+) {
+    if src.is_null() || dest.is_null() || nbytes <= 1 {
+        return;
+    }
+    // Process pairs.
+    let pairs = (nbytes as usize) / 2;
+    let mut i: usize = 0;
+    while i < pairs {
+        let off = i.wrapping_mul(2);
+        // SAFETY: off < nbytes (since i < pairs = nbytes/2, off = 2*i < nbytes).
+        let a = unsafe { *src.add(off) };
+        let b = unsafe { *src.add(off.wrapping_add(1)) };
+        unsafe { *dest.add(off) = b; }
+        unsafe { *dest.add(off.wrapping_add(1)) = a; }
+        i = i.wrapping_add(1);
+    }
+}

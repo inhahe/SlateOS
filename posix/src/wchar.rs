@@ -29,6 +29,7 @@
 //! - `fputwc`, `fgetwc`, `putwc`, `getwc`, `putwchar`, `getwchar` — wide char I/O
 //! - `fputws`, `fgetws` — wide string I/O
 //! - `ungetwc` — push back wide character (ASCII only; multi-byte is best-effort)
+//! - `wcsftime` — format date/time as wide string (delegates to narrow strftime)
 
 /// Wide character type (32-bit Unicode code point).
 pub type WcharT = i32;
@@ -2344,6 +2345,104 @@ pub unsafe extern "C" fn wmempcpy(
     }
     // SAFETY: dest + n is one past the last element written.
     unsafe { dest.add(n) }
+}
+
+// ---------------------------------------------------------------------------
+// Wide strftime
+// ---------------------------------------------------------------------------
+
+/// Format a date/time as a wide string.
+///
+/// Converts the wide format string to a narrow (UTF-8) format, calls
+/// `strftime`, then widens the result.  This works correctly because
+/// `strftime` format specifiers are all ASCII, and on our UTF-8 locale
+/// the output of `strftime` is valid UTF-8.
+///
+/// Returns the number of wide characters written (excluding the null
+/// terminator), or 0 if the result doesn't fit in `maxsize` wide
+/// characters.
+#[unsafe(no_mangle)]
+#[allow(clippy::indexing_slicing)]
+pub unsafe extern "C" fn wcsftime(
+    wcs: *mut WcharT,
+    maxsize: usize,
+    format: *const WcharT,
+    tm: *const crate::time::Tm,
+) -> usize {
+    const FMT_BUF_SIZE: usize = 256;
+    const OUT_BUF_SIZE: usize = 1024;
+
+    if wcs.is_null() || format.is_null() || tm.is_null() || maxsize == 0 {
+        return 0;
+    }
+
+    // Convert wide format to narrow.  strftime format specifiers are all
+    // ASCII (%Y, %m, %d, etc.) so this is a simple byte-truncation.
+    let mut fmt_buf = [0u8; FMT_BUF_SIZE];
+    let mut fi: usize = 0;
+    loop {
+        let wc = unsafe { *format.add(fi) };
+        if wc == 0 || fi >= FMT_BUF_SIZE.wrapping_sub(1) {
+            break;
+        }
+        // Truncate to byte — format specifiers are ASCII.
+        fmt_buf[fi] = (wc & 0x7F) as u8;
+        fi = fi.wrapping_add(1);
+    }
+    fmt_buf[fi] = 0;
+
+    // Call narrow strftime.  Use a buffer 4× maxsize since UTF-8 can
+    // use up to 4 bytes per character.
+    let mut out_buf = [0u8; OUT_BUF_SIZE];
+    let narrow_max = maxsize.wrapping_mul(4).min(OUT_BUF_SIZE);
+    let len = unsafe {
+        crate::time::strftime(
+            out_buf.as_mut_ptr(),
+            narrow_max,
+            fmt_buf.as_ptr(),
+            tm,
+        )
+    };
+
+    if len == 0 {
+        // strftime failed or result doesn't fit.
+        unsafe { *wcs = 0; }
+        return 0;
+    }
+
+    // Widen the narrow output to wide characters.  strftime output
+    // on our UTF-8 locale is valid UTF-8 (month/day names are ASCII).
+    let mut wi: usize = 0;
+    let mut bi: usize = 0;
+    let limit = maxsize.wrapping_sub(1); // Leave room for null terminator.
+    while bi < len && wi < limit {
+        let b = out_buf[bi];
+        // Determine UTF-8 sequence length from lead byte.
+        let seq_len = if b < 0x80 { 1_usize }
+            else if b & 0xE0 == 0xC0 { 2 }
+            else if b & 0xF0 == 0xE0 { 3 }
+            else if b & 0xF8 == 0xF0 { 4 }
+            else { 1 }; // Invalid lead → treat as single byte.
+
+        if bi.wrapping_add(seq_len) > len {
+            break; // Incomplete sequence at end.
+        }
+
+        if seq_len == 1 {
+            unsafe { *wcs.add(wi) = WcharT::from(b); }
+        } else if let Some(cp) = utf8_decode(&out_buf[bi..bi.wrapping_add(seq_len)], seq_len) {
+            unsafe { *wcs.add(wi) = cp as WcharT; }
+        } else {
+            // Invalid UTF-8 — emit replacement character.
+            unsafe { *wcs.add(wi) = 0xFFFD; }
+        }
+        bi = bi.wrapping_add(seq_len);
+        wi = wi.wrapping_add(1);
+    }
+
+    // Null-terminate.
+    unsafe { *wcs.add(wi) = 0; }
+    wi
 }
 
 // ---------------------------------------------------------------------------

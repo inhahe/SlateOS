@@ -420,3 +420,31 @@ fn find_basename_offset(path: *const u8) -> i32 {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// LFS64 aliases — our off_t is already 64-bit
+// ---------------------------------------------------------------------------
+
+/// `ftw64` — Large File Support alias for `ftw`.
+///
+/// On our OS, `off_t` is always 64-bit (LP64 data model), so
+/// `struct stat` and `ftw` already handle large files.
+#[unsafe(no_mangle)]
+pub extern "C" fn ftw64(
+    path: *const u8,
+    callback: FtwFn,
+    maxfds: i32,
+) -> i32 {
+    ftw(path, callback, maxfds)
+}
+
+/// `nftw64` — Large File Support alias for `nftw`.
+#[unsafe(no_mangle)]
+pub extern "C" fn nftw64(
+    path: *const u8,
+    callback: NftwFn,
+    maxfds: i32,
+    flags: i32,
+) -> i32 {
+    nftw(path, callback, maxfds, flags)
+}

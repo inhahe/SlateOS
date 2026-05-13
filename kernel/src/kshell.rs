@@ -3553,6 +3553,7 @@ const COMMANDS: &[&str] = &[
     "ftp",
     "smtp",
     "vlan",
+    "qos",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4760,6 +4761,7 @@ fn dispatch(line: &str) {
         "ftp" => cmd_ftp(args),
         "smtp" => cmd_smtp(args),
         "vlan" => cmd_vlan(args),
+        "qos" => cmd_qos(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35764,6 +35766,189 @@ fn cmd_ndisc(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'ndisc help'.", sub);
+        }
+    }
+}
+
+/// `qos` — Quality of Service traffic classification and rate limiting.
+fn cmd_qos(args: &str) {
+    use alloc::format;
+    use alloc::vec::Vec;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("help");
+
+    match sub {
+        "enable" | "on" => {
+            crate::net::qos::set_enabled(true);
+            shell_println!("QoS classification enabled");
+        }
+
+        "disable" | "off" => {
+            crate::net::qos::set_enabled(false);
+            shell_println!("QoS classification disabled");
+        }
+
+        "rule" | "add" => {
+            // qos rule port <port> <priority>
+            // qos rule proto <proto> <priority>
+            // qos rule dscp <dscp> <priority>
+            if parts.len() < 4 {
+                shell_println!("Usage: qos rule <port|proto|dscp> <value> <priority>");
+                return;
+            }
+            let kind = parts[1];
+            let value: u16 = match parts[2].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    shell_println!("qos: invalid value '{}'", parts[2]);
+                    return;
+                }
+            };
+            let priority: u8 = match parts[3].parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("qos: invalid priority '{}'", parts[3]);
+                    return;
+                }
+            };
+
+            let match_on = match kind {
+                "port" | "dport" => crate::net::qos::ClassifyMatch::DstPort(value),
+                "sport" => crate::net::qos::ClassifyMatch::SrcPort(value),
+                "proto" | "protocol" => crate::net::qos::ClassifyMatch::Protocol(value as u8),
+                "dscp" => crate::net::qos::ClassifyMatch::Dscp(value as u8),
+                _ => {
+                    shell_println!("qos: unknown match type '{}' (use port/proto/dscp)", kind);
+                    return;
+                }
+            };
+
+            match crate::net::qos::add_rule(match_on, priority) {
+                Ok(()) => shell_println!("Rule added: {} {} → priority {}", kind, value, priority),
+                Err(e) => shell_println!("qos: add rule failed: {:?}", e),
+            }
+        }
+
+        "clear" => {
+            crate::net::qos::clear_rules();
+            shell_println!("All classification rules cleared");
+        }
+
+        "rules" => {
+            let rules = crate::net::qos::list_rules();
+            if rules.is_empty() {
+                shell_println!("No classification rules configured");
+            } else {
+                shell_println!("Classification rules:");
+                for (match_on, priority) in &rules {
+                    let desc = match match_on {
+                        crate::net::qos::ClassifyMatch::Protocol(p) => format!("protocol {}", p),
+                        crate::net::qos::ClassifyMatch::DstPort(p) => format!("dst port {}", p),
+                        crate::net::qos::ClassifyMatch::SrcPort(p) => format!("src port {}", p),
+                        crate::net::qos::ClassifyMatch::Dscp(d) => format!("DSCP {}", d),
+                        crate::net::qos::ClassifyMatch::All => format!("all traffic"),
+                    };
+                    shell_println!("  {} → priority {}", desc, priority);
+                }
+            }
+        }
+
+        "limit" => {
+            // qos limit <priority> <rate_bps> <burst_bytes>
+            if parts.len() < 4 {
+                shell_println!("Usage: qos limit <priority> <rate_bps> <burst_bytes>");
+                return;
+            }
+            let prio: u8 = match parts[1].parse() {
+                Ok(p) => p,
+                Err(_) => { shell_println!("qos: invalid priority"); return; }
+            };
+            let rate: u64 = match parts[2].parse() {
+                Ok(r) => r,
+                Err(_) => { shell_println!("qos: invalid rate"); return; }
+            };
+            let burst: u64 = match parts[3].parse() {
+                Ok(b) => b,
+                Err(_) => { shell_println!("qos: invalid burst"); return; }
+            };
+
+            match crate::net::qos::add_rate_limit(prio, rate, burst) {
+                Ok(()) => shell_println!("Rate limit: priority {} = {} B/s (burst {})", prio, rate, burst),
+                Err(e) => shell_println!("qos: rate limit failed: {:?}", e),
+            }
+        }
+
+        "unlimit" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: qos unlimit <priority>");
+                return;
+            }
+            let prio: u8 = match parts[1].parse() {
+                Ok(p) => p,
+                Err(_) => { shell_println!("qos: invalid priority"); return; }
+            };
+            crate::net::qos::remove_rate_limit(prio);
+            shell_println!("Rate limit removed for priority {}", prio);
+        }
+
+        "classes" => {
+            let stats = crate::net::qos::class_stats();
+            shell_println!("Traffic classes:");
+            shell_println!("  {:>3}  {:20}  {:>10}  {:>12}  {:>8}", "Pri", "Name", "Packets", "Bytes", "Drops");
+            for c in &stats {
+                shell_println!("  {:>3}  {:20}  {:>10}  {:>12}  {:>8}", c.priority, c.name, c.packets, c.bytes, c.drops);
+            }
+        }
+
+        "dscp" => {
+            shell_println!("DSCP (DiffServ Code Point) values:");
+            let vals = [
+                (0, "BE"), (10, "AF11"), (12, "AF12"), (14, "AF13"),
+                (18, "AF21"), (20, "AF22"), (22, "AF23"),
+                (26, "AF31"), (28, "AF32"), (30, "AF33"),
+                (34, "AF41"), (36, "AF42"), (38, "AF43"),
+                (46, "EF"), (48, "CS6"), (56, "CS7"),
+            ];
+            for (val, name) in &vals {
+                shell_println!("  {:>3}  {}", val, name);
+            }
+        }
+
+        "status" | "stats" => {
+            let enabled = crate::net::qos::is_enabled();
+            shell_println!("QoS status: {}", if enabled { "enabled" } else { "disabled" });
+
+            let limiters = crate::net::qos::rate_limit_info();
+            if !limiters.is_empty() {
+                shell_println!("Rate limiters:");
+                for l in &limiters {
+                    shell_println!("  Priority {}: {} B/s (burst {}), passed {}, dropped {}",
+                        l.priority, l.rate_bps, l.burst_bytes, l.bytes_passed, l.bytes_dropped);
+                }
+            }
+        }
+
+        "test" => {
+            match crate::net::qos::self_test() {
+                Ok(()) => shell_println!("qos: all self-tests passed"),
+                Err(e) => shell_println!("qos: self-test failed: {:?}", e),
+            }
+        }
+
+        _ => {
+            shell_println!("qos — Quality of Service traffic management");
+            shell_println!();
+            shell_println!("Usage:");
+            shell_println!("  qos enable/disable                        — toggle QoS");
+            shell_println!("  qos rule <port|proto|dscp> <val> <pri>    — add rule");
+            shell_println!("  qos rules                                 — list rules");
+            shell_println!("  qos clear                                 — clear all rules");
+            shell_println!("  qos limit <priority> <rate> <burst>       — add rate limit");
+            shell_println!("  qos unlimit <priority>                    — remove limit");
+            shell_println!("  qos classes                               — show class stats");
+            shell_println!("  qos dscp                                  — show DSCP values");
+            shell_println!("  qos status                                — show status");
+            shell_println!("  qos test                                  — run self-tests");
         }
     }
 }
@@ -67242,7 +67427,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

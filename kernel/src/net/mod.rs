@@ -42,6 +42,7 @@ pub mod ipv4;
 pub mod tcp;
 pub mod udp;
 pub mod pcap;
+pub mod qos;
 pub mod traceroute;
 pub mod upnp;
 pub mod vlan;

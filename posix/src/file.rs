@@ -1727,6 +1727,11 @@ pub extern "C" fn sendfile(
         unsafe { *offset = cur_off; }
     } else {
         // No offset — read from current position (advances in_fd).
+        // Because read() advances in_fd's position by the number of
+        // bytes actually read, we must fully drain the buffer before
+        // reading again — otherwise a short write would discard the
+        // unwritten bytes (the file position has already moved past
+        // them and we can't seek back on non-seekable fds like pipes).
         while total < count {
             let remaining = count.wrapping_sub(total);
             let chunk = if remaining < buf.len() { remaining } else { buf.len() };
@@ -1738,13 +1743,27 @@ pub extern "C" fn sendfile(
             }
             if nr == 0 { break; }
 
-            let nw = write(out_fd, buf.as_ptr(), nr as usize);
-            if nw < 0 {
-                if total > 0 { break; }
-                return -1;
+            // Write all bytes that were read, retrying on short writes.
+            let mut written: usize = 0;
+            let to_write = nr as usize;
+            while written < to_write {
+                let nw = write(
+                    out_fd,
+                    unsafe { buf.as_ptr().add(written) },
+                    to_write.wrapping_sub(written),
+                );
+                if nw < 0 {
+                    if total > 0 || written > 0 {
+                        total = total.wrapping_add(written);
+                        return total as isize;
+                    }
+                    return -1;
+                }
+                if nw == 0 { break; } // Avoid infinite loop.
+                written = written.wrapping_add(nw as usize);
             }
 
-            total = total.wrapping_add(nw as usize);
+            total = total.wrapping_add(written);
         }
     }
 
@@ -1793,20 +1812,46 @@ pub extern "C" fn copy_file_range(
         };
         if nr <= 0 { break; }
 
-        // Write: use pwrite when off_out is provided, else normal write.
-        let nw = if !off_out.is_null() {
-            pwrite(fd_out, buf.as_ptr(), nr as usize, out_pos)
-        } else {
-            write(fd_out, buf.as_ptr(), nr as usize)
-        };
-        if nw < 0 {
-            if total > 0 { break; }
-            return -1;
+        // Write all bytes that were read, retrying on short writes.
+        // When off_in is null, read() has already advanced fd_in's
+        // position by nr bytes — those bytes exist only in buf and
+        // must be fully drained before reading again.
+        let mut written: usize = 0;
+        let to_write = nr as usize;
+        while written < to_write {
+            let nw = if !off_out.is_null() {
+                pwrite(
+                    fd_out,
+                    unsafe { buf.as_ptr().add(written) },
+                    to_write.wrapping_sub(written),
+                    out_pos.wrapping_add(written as i64),
+                )
+            } else {
+                write(
+                    fd_out,
+                    unsafe { buf.as_ptr().add(written) },
+                    to_write.wrapping_sub(written),
+                )
+            };
+            if nw < 0 {
+                if total > 0 || written > 0 {
+                    total = total.wrapping_add(written);
+                    // Update offsets for partial progress before returning.
+                    in_pos = in_pos.wrapping_add(written as i64);
+                    out_pos = out_pos.wrapping_add(written as i64);
+                    if !off_in.is_null() { unsafe { *off_in = in_pos; } }
+                    if !off_out.is_null() { unsafe { *off_out = out_pos; } }
+                    return total as isize;
+                }
+                return -1;
+            }
+            if nw == 0 { break; }
+            written = written.wrapping_add(nw as usize);
         }
 
-        total = total.wrapping_add(nw as usize);
-        in_pos = in_pos.wrapping_add(nw as i64);
-        out_pos = out_pos.wrapping_add(nw as i64);
+        total = total.wrapping_add(written);
+        in_pos = in_pos.wrapping_add(written as i64);
+        out_pos = out_pos.wrapping_add(written as i64);
     }
 
     // Update caller's offsets to reflect bytes transferred.

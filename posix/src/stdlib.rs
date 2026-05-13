@@ -1301,13 +1301,18 @@ pub extern "C" fn system(command: *const u8) -> i32 {
     }
 
     // Build argv: ["sh", "-c", command, NULL].
-    let sh_path: *const u8 = c"sh".as_ptr().cast::<u8>();
+    // POSIX: system() must use /bin/sh directly, NOT search PATH.
+    // Searching PATH is a security vulnerability: a malicious PATH
+    // entry could redirect "sh" to an attacker-controlled binary.
+    let sh_path: *const u8 = c"/bin/sh".as_ptr().cast::<u8>();
+    let sh_name: *const u8 = c"sh".as_ptr().cast::<u8>();
     let dash_c: *const u8 = c"-c".as_ptr().cast::<u8>();
-    let argv: [*const u8; 4] = [sh_path, dash_c, command, core::ptr::null()];
+    let argv: [*const u8; 4] = [sh_name, dash_c, command, core::ptr::null()];
 
     let mut pid: crate::types::PidT = 0;
 
-    let ret = crate::spawn::posix_spawnp(
+    // Use posix_spawn (not posix_spawnp) to avoid PATH search.
+    let ret = crate::spawn::posix_spawn(
         &raw mut pid,
         sh_path,
         core::ptr::null(),  // file_actions

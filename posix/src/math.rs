@@ -1119,14 +1119,18 @@ pub extern "C" fn nextafterf(from: f32, to: f32) -> f32 {
     f32::from_bits(next_bits)
 }
 
-/// IEEE 754 remainder (difference from `fmod`: uses round-to-nearest).
+/// IEEE 754 remainder (difference from `fmod`: uses round-to-nearest-even).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn remainder(x: f64, y: f64) -> f64 {
     if y == 0.0 || x.is_infinite() { return f64::NAN; }
     if y.is_nan() || x.is_nan() { return f64::NAN; }
     if y.is_infinite() { return x; }
-    let n = round(x / y);
+    // IEEE 754 remainder uses round-to-nearest-even (rint), NOT
+    // round-half-away-from-zero (round).  E.g. remainder(2.5, 1.0):
+    //   rint(2.5) = 2  →  2.5 - 2*1 =  0.5  (correct)
+    //   round(2.5) = 3 →  2.5 - 3*1 = -0.5  (wrong)
+    let n = rint(x / y);
     x - n * y
 }
 
@@ -1479,8 +1483,10 @@ pub extern "C" fn remquo(x: f64, y: f64, quo: *mut i32) -> f64 {
     }
 
     // Compute quotient and remainder.
+    // IEEE 754: remainder uses round-to-nearest-even (rint), not
+    // round-half-away-from-zero (round).
     let q_exact = x / y;
-    let q_rounded = round(q_exact);
+    let q_rounded = rint(q_exact);
     let rem = x - q_rounded * y;
 
     if !quo.is_null() {
@@ -2361,6 +2367,19 @@ mod tests {
         assert_approx(remainder(10.0, 3.0), 1.0, EPS, "remainder(10,3)");
         assert!(remainder(5.0, 0.0).is_nan(), "remainder(5,0) should be NaN");
         assert!(remainder(f64::INFINITY, 1.0).is_nan(), "remainder(inf,1) should be NaN");
+    }
+
+    #[test]
+    fn test_remainder_uses_round_to_even() {
+        // IEEE 754 remainder uses round-to-nearest-even, NOT half-away-from-zero.
+        // remainder(2.5, 1.0): rint(2.5)=2 (even) → 2.5 - 2*1 = 0.5
+        assert_approx(remainder(2.5, 1.0), 0.5, EPS, "remainder(2.5,1) round-to-even");
+        // remainder(3.5, 1.0): rint(3.5)=4 (even) → 3.5 - 4*1 = -0.5
+        assert_approx(remainder(3.5, 1.0), -0.5, EPS, "remainder(3.5,1) round-to-even");
+        // remainder(4.5, 1.0): rint(4.5)=4 (even) → 4.5 - 4*1 = 0.5
+        assert_approx(remainder(4.5, 1.0), 0.5, EPS, "remainder(4.5,1) round-to-even");
+        // remainder(5.5, 1.0): rint(5.5)=6 (even) → 5.5 - 6*1 = -0.5
+        assert_approx(remainder(5.5, 1.0), -0.5, EPS, "remainder(5.5,1) round-to-even");
     }
 
     // -----------------------------------------------------------------------

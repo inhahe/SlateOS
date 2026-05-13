@@ -32,10 +32,10 @@ use crate::string;
 pub const REG_EXTENDED: i32 = 1;
 /// Ignore case.
 pub const REG_ICASE: i32 = 2;
+/// Change `^`/`$`/`.` behaviour around `\n`.
+pub const REG_NEWLINE: i32 = 4;
 /// Report only success/fail, not match position.
-pub const REG_NOSUB: i32 = 4;
-/// Treat newline as ordinary character (no special `^`/`$` behaviour at `\n`).
-pub const REG_NEWLINE: i32 = 8;
+pub const REG_NOSUB: i32 = 8;
 /// Don't regard start of string as beginning of line.
 pub const REG_NOTBOL: i32 = 1;
 /// Don't regard end of string as end of line.
@@ -143,13 +143,15 @@ struct RegexProgram {
 // ---------------------------------------------------------------------------
 
 /// Match position for a sub-expression.
+///
+/// Layout matches glibc/musl `regmatch_t` (`regoff_t` = `int`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct RegMatch {
     /// Start of match (byte offset), or -1 if not matched.
-    pub rm_so: i64,
+    pub rm_so: i32,
     /// End of match (byte offset past last char), or -1 if not matched.
-    pub rm_eo: i64,
+    pub rm_eo: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +247,7 @@ pub unsafe extern "C" fn regexec(
         if try_match(compiled, string_arg, slen, pos, eflags, &mut groups) {
             // Store whole match.
             if let Some(g0) = groups.get_mut(0) {
-                g0.rm_so = pos as i64;
+                g0.rm_so = pos as i32;
                 // rm_eo was set by the match engine.
             }
 
@@ -960,7 +962,7 @@ fn exec_recursive(
             Inst::Match => {
                 // Set the end of group 0.
                 if let Some(g0) = groups.get_mut(0) {
-                    g0.rm_eo = cur_sp as i64;
+                    g0.rm_eo = cur_sp as i32;
                 }
                 return true;
             }
@@ -1018,14 +1020,14 @@ fn exec_recursive(
 
             Inst::GroupStart(gid) => {
                 if let Some(grp) = groups.get_mut(gid as usize) {
-                    grp.rm_so = cur_sp as i64;
+                    grp.rm_so = cur_sp as i32;
                 }
                 cur_pc = cur_pc.wrapping_add(1);
             }
 
             Inst::GroupEnd(gid) => {
                 if let Some(grp) = groups.get_mut(gid as usize) {
-                    grp.rm_eo = cur_sp as i64;
+                    grp.rm_eo = cur_sp as i32;
                 }
                 cur_pc = cur_pc.wrapping_add(1);
             }
@@ -1205,7 +1207,7 @@ mod tests {
             let mut groups = [RegMatch { rm_so: -1, rm_eo: -1 }; MAX_GROUPS];
             if try_match(prog, text.as_ptr(), slen, pos, eflags, &mut groups) {
                 if let Some(g0) = groups.get_mut(0) {
-                    g0.rm_so = pos as i64;
+                    g0.rm_so = pos as i32;
                 }
                 return Some(groups);
             }
@@ -1901,5 +1903,47 @@ mod tests {
         let mut prog = new_program(REG_EXTENDED);
         let result = compile(&mut prog, b"[9-0]\0");
         assert_eq!(result, REG_ERANGE);
+    }
+
+    // -----------------------------------------------------------------------
+    // 20. Binary compatibility — constant values must match glibc/musl
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cflags_match_glibc() {
+        // glibc/musl: REG_EXTENDED=1, REG_ICASE=2, REG_NEWLINE=4, REG_NOSUB=8
+        assert_eq!(REG_EXTENDED, 1);
+        assert_eq!(REG_ICASE, 2);
+        assert_eq!(REG_NEWLINE, 4);
+        assert_eq!(REG_NOSUB, 8);
+    }
+
+    #[test]
+    fn eflags_match_glibc() {
+        assert_eq!(REG_NOTBOL, 1);
+        assert_eq!(REG_NOTEOL, 2);
+    }
+
+    #[test]
+    fn error_codes_match_glibc() {
+        assert_eq!(REG_NOMATCH, 1);
+        assert_eq!(REG_BADPAT, 2);
+        assert_eq!(REG_ECOLLATE, 3);
+        assert_eq!(REG_ECTYPE, 4);
+        assert_eq!(REG_EESCAPE, 5);
+        assert_eq!(REG_ESUBREG, 6);
+        assert_eq!(REG_EBRACK, 7);
+        assert_eq!(REG_EPAREN, 8);
+        assert_eq!(REG_EBRACE, 9);
+        assert_eq!(REG_BADBR, 10);
+        assert_eq!(REG_ERANGE, 11);
+        assert_eq!(REG_ESPACE, 12);
+    }
+
+    #[test]
+    fn regmatch_layout() {
+        // glibc/musl: regoff_t is `int` (i32), so regmatch_t is 8 bytes.
+        assert_eq!(core::mem::size_of::<RegMatch>(), 8);
+        assert_eq!(core::mem::align_of::<RegMatch>(), 4);
     }
 }

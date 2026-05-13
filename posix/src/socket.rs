@@ -2435,6 +2435,14 @@ pub unsafe extern "C" fn recvfrom(
         return -1;
     }
 
+    // POSIX: recvfrom with len==0 succeeds immediately with 0 bytes.
+    // Without this, a zero-length TCP recv returns 0 from the kernel
+    // which would be incorrectly interpreted as EOF.  This matches
+    // recv()'s behavior and Linux's semantics.
+    if len == 0 {
+        return 0;
+    }
+
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -3714,9 +3722,16 @@ pub unsafe extern "C" fn getaddrinfo(
             htonl(INADDR_LOOPBACK)
         }
     } else {
-        // Try numeric parse first.
-        let numeric = unsafe { inet_addr(node) };
-        if numeric == 0xFFFF_FFFF {
+        // Try numeric parse first using inet_pton, which correctly
+        // distinguishes "255.255.255.255" (valid) from parse failure.
+        // inet_addr cannot do this because both cases return 0xFFFFFFFF.
+        let mut addr_nbo: u32 = 0;
+        let pton_ok = unsafe {
+            inet_pton(AF_INET, node, (&raw mut addr_nbo).cast::<u8>())
+        };
+        if pton_ok == 1 {
+            addr_nbo
+        } else {
             // Not numeric — AI_NUMERICHOST prohibits DNS resolution.
             if (want_flags & AI_NUMERICHOST) != 0 {
                 return EAI_NONAME;
@@ -3735,8 +3750,6 @@ pub unsafe extern "C" fn getaddrinfo(
                 // Read the 4-byte IPv4 address.
                 core::ptr::read_unaligned((*addr_list).cast::<u32>())
             }
-        } else {
-            numeric
         }
     };
 

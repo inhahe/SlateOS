@@ -423,6 +423,17 @@ pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> Ssi
         errno::set_errno(errno::EFAULT);
         return -1;
     }
+    // POSIX: "If nbyte is 0, read() will return 0 and have no other results."
+    if count == 0 {
+        return 0;
+    }
+    // POSIX: pread with negative offset shall fail with EINVAL.
+    // Without this check, a negative OffT cast to u64 becomes a huge
+    // positive seek position, causing spurious errors or wrong data.
+    if offset < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
 
     let Some(entry) = lookup_fd(fd) else { return -1; };
 
@@ -463,6 +474,16 @@ pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> Ssi
 pub extern "C" fn pwrite(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> SsizeT {
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // POSIX: "If nbyte is 0 and the file is a regular file, write() will
+    // return zero and have no other results."
+    if count == 0 {
+        return 0;
+    }
+    // POSIX: pwrite with negative offset shall fail with EINVAL.
+    if offset < 0 {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
 
@@ -704,16 +725,37 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
     if let Some(old) = fdtable::install_fd_with_flags(
         newfd, entry.kind, new_handle, entry.status_flags,
     ) {
-        // Clear socket metadata for the evicted fd.
-        match old.kind {
+        // Read socket metadata BEFORE clearing — SO_LINGER settings
+        // must be respected when closing the evicted handle, just like
+        // close() does.
+        let evicted_meta = match old.kind {
             HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+                let m = crate::socket::get_meta(newfd);
                 crate::socket::clear_meta(newfd);
+                m
             }
-            _ => {}
-        }
+            _ => None,
+        };
         // Only close the old kernel handle if no other fd still uses it.
         if !fdtable::is_handle_referenced(old.kind, old.handle) {
-            let _ = close_kernel_handle(old.kind, old.handle);
+            // For TCP streams: respect SO_LINGER on the evicted socket,
+            // matching close() behavior per POSIX dup2 spec ("closed first").
+            if old.kind == HandleKind::TcpStream && old.handle != 0 {
+                let (linger_on, linger_secs) = evicted_meta
+                    .map_or((false, 0i32), |m| (m.linger_onoff, m.linger_secs));
+                if linger_on && linger_secs == 0 {
+                    // Abortive close: send RST.
+                    let _ = syscall1(SYS_TCP_ABORT, old.handle);
+                } else {
+                    // Graceful close (default or linger with timeout).
+                    // Blocking linger wait is skipped for dup2 — programs
+                    // rarely set SO_LINGER(>0) on fds they then dup2 over,
+                    // and blocking in dup2 would be surprising.
+                    let _ = syscall1(SYS_TCP_CLOSE, old.handle);
+                }
+            } else {
+                let _ = close_kernel_handle(old.kind, old.handle);
+            }
         }
     }
 

@@ -27,6 +27,7 @@
 //! +-----------------------------------+
 //! ```
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -86,7 +87,7 @@ struct UdpSocket {
     /// Connected peer port (0 = not connected / unfiltered).
     peer_port: u16,
     /// Received datagrams waiting to be read.
-    rx_queue: Vec<Datagram>,
+    rx_queue: VecDeque<Datagram>,
     /// Multicast groups this socket has joined.
     /// Each entry is a multicast IPv4 address (224.0.0.0/4).
     mcast_groups: [Ipv4Addr; MAX_GROUPS_PER_SOCKET],
@@ -101,7 +102,7 @@ impl UdpSocket {
             active: false,
             peer_ip: Ipv4Addr::UNSPECIFIED,
             peer_port: 0,
-            rx_queue: Vec::new(),
+            rx_queue: VecDeque::new(),
             mcast_groups: [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET],
             mcast_count: 0,
         }
@@ -208,24 +209,49 @@ pub fn is_multicast_member(group: Ipv4Addr) -> bool {
 // Socket API
 // ---------------------------------------------------------------------------
 
+/// Start of IANA dynamic/private port range for ephemeral allocation.
+const EPHEMERAL_PORT_START: u16 = 49152;
+
+/// Allocate an ephemeral port in the IANA dynamic range (49152–65535).
+///
+/// Scans linearly from `EPHEMERAL_PORT_START`.  With `MAX_SOCKETS=32`,
+/// we can never have more than 32 active sockets, so a free port is
+/// always found within the first 33 candidates.
+fn allocate_ephemeral_port(sockets: &[UdpSocket; MAX_SOCKETS]) -> KernelResult<u16> {
+    for candidate in EPHEMERAL_PORT_START..=u16::MAX {
+        let in_use = sockets.iter().any(|s| s.active && s.port == candidate);
+        if !in_use {
+            return Ok(candidate);
+        }
+    }
+    Err(KernelError::OutOfMemory)
+}
+
 /// Bind a UDP socket to a local port.
 ///
-/// Returns a socket index (handle) on success.
+/// Pass port 0 to auto-assign an ephemeral port from the IANA
+/// dynamic range (49152–65535).  Returns a socket index (handle)
+/// on success.
 pub fn bind(port: u16) -> KernelResult<usize> {
     let mut sockets = SOCKETS.lock();
 
-    // Check for duplicate binding.
-    for sock in sockets.iter() {
-        if sock.active && sock.port == port {
-            return Err(KernelError::AlreadyExists);
+    let effective_port = if port == 0 {
+        allocate_ephemeral_port(&sockets)?
+    } else {
+        // Check for duplicate binding.
+        for sock in sockets.iter() {
+            if sock.active && sock.port == port {
+                return Err(KernelError::AlreadyExists);
+            }
         }
-    }
+        port
+    };
 
     // Find a free slot.
     for (i, sock) in sockets.iter_mut().enumerate() {
         if !sock.active {
             sock.active = true;
-            sock.port = port;
+            sock.port = effective_port;
             sock.rx_queue.clear();
             return Ok(i);
         }
@@ -239,22 +265,40 @@ pub fn bind(port: u16) -> KernelResult<usize> {
 ///
 /// Also leaves all multicast groups the socket had joined.
 pub fn close(handle: usize) {
-    let mut sockets = SOCKETS.lock();
-    if let Some(sock) = sockets.get_mut(handle) {
-        // Leave all multicast groups before closing.
-        for i in 0..sock.mcast_count as usize {
-            let group = sock.mcast_groups[i];
-            if !group.is_unspecified() {
-                mcast_global_leave(group);
+    // Collect multicast groups under the SOCKETS lock, then drop
+    // it before touching MCAST_GROUPS to maintain consistent lock
+    // ordering (join_group/leave_group drop SOCKETS before taking
+    // MCAST_GROUPS — close() must do the same).
+    let mut groups_to_leave: [Ipv4Addr; MAX_GROUPS_PER_SOCKET] =
+        [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET];
+    let mut group_count: usize = 0;
+
+    {
+        let mut sockets = SOCKETS.lock();
+        if let Some(sock) = sockets.get_mut(handle) {
+            // Snapshot multicast memberships before clearing.
+            group_count = sock.mcast_count as usize;
+            for i in 0..group_count {
+                if let Some(g) = sock.mcast_groups.get(i) {
+                    groups_to_leave[i] = *g;
+                }
             }
+            sock.active = false;
+            sock.port = 0;
+            sock.peer_ip = Ipv4Addr::UNSPECIFIED;
+            sock.peer_port = 0;
+            sock.rx_queue.clear();
+            sock.mcast_groups = [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET];
+            sock.mcast_count = 0;
         }
-        sock.active = false;
-        sock.port = 0;
-        sock.peer_ip = Ipv4Addr::UNSPECIFIED;
-        sock.peer_port = 0;
-        sock.rx_queue.clear();
-        sock.mcast_groups = [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET];
-        sock.mcast_count = 0;
+    }
+
+    // SOCKETS lock released — now safe to take MCAST_GROUPS.
+    for i in 0..group_count {
+        let group = groups_to_leave[i];
+        if !group.is_unspecified() {
+            mcast_global_leave(group);
+        }
     }
 }
 
@@ -405,10 +449,10 @@ pub fn recv(handle: usize) -> Option<Datagram> {
         // Check if front datagram matches the peer filter.
         let front = &sock.rx_queue[0];
         if sock.matches_peer(front.src_ip, front.src_port) {
-            return Some(sock.rx_queue.remove(0));
+            return sock.rx_queue.pop_front();
         }
         // Not from connected peer — discard and try next.
-        sock.rx_queue.remove(0);
+        sock.rx_queue.pop_front();
     }
 }
 
@@ -433,10 +477,10 @@ pub fn peek(handle: usize) -> Option<Datagram> {
         }
         let front = &sock.rx_queue[0];
         if sock.matches_peer(front.src_ip, front.src_port) {
-            return sock.rx_queue.first().cloned();
+            return sock.rx_queue.front().cloned();
         }
         // Not from connected peer — discard.
-        sock.rx_queue.remove(0);
+        sock.rx_queue.pop_front();
     }
 }
 
@@ -469,6 +513,14 @@ pub fn send(src_port: u16, dst_ip: Ipv4Addr, dst_port: u16, data: &[u8]) -> Kern
 
     // Build the UDP header + payload.
     let udp_len = UDP_HEADER_SIZE + data.len();
+
+    // UDP Length field is 16 bits; maximum datagram is 65535 bytes
+    // (8-byte header + 65527 payload).  Reject oversized payloads
+    // instead of silently truncating the length field.
+    if udp_len > u16::MAX as usize {
+        return Err(KernelError::InvalidArgument);
+    }
+
     let mut udp_packet = Vec::with_capacity(udp_len);
 
     // Source port.
@@ -521,9 +573,26 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
 
     let src_port = u16::from_be_bytes([data[0], data[1]]);
     let dst_port = u16::from_be_bytes([data[2], data[3]]);
-    let _length = u16::from_be_bytes([data[4], data[5]]);
+    let udp_length = u16::from_be_bytes([data[4], data[5]]) as usize;
 
-    let payload = &data[UDP_HEADER_SIZE..];
+    // Use the UDP Length field to determine actual payload size.
+    // This strips Ethernet minimum-frame padding that the IP layer
+    // may have passed through in its payload slice (RFC 768 §1).
+    let payload_end = if udp_length >= UDP_HEADER_SIZE && udp_length <= data.len() {
+        udp_length
+    } else if udp_length < UDP_HEADER_SIZE {
+        // Malformed length — less than the minimum 8-byte header.
+        crate::serial_println!(
+            "[udp] Dropped datagram from {} — malformed length {}",
+            ip_packet.src, udp_length
+        );
+        return Ok(());
+    } else {
+        // Length exceeds IP payload (truncated?) — use what we have.
+        data.len()
+    };
+
+    let payload = &data[UDP_HEADER_SIZE..payload_end];
 
     // First check DHCP (port 68 = DHCP client).
     if dst_port == 68 {
@@ -559,7 +628,7 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         }
 
         if sock.rx_queue.len() < MAX_QUEUED {
-            sock.rx_queue.push(Datagram {
+            sock.rx_queue.push_back(Datagram {
                 src_ip: ip_packet.src,
                 src_port,
                 data: Vec::from(payload),

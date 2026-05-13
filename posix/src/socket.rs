@@ -3554,14 +3554,18 @@ pub const NO_RECOVERY: i32 = 3;
 pub const NO_DATA: i32 = 4;
 
 /// Thread-local (actually global — single-threaded) resolver error.
-static mut H_ERRNO: i32 = 0;
+///
+/// Programs can access this as `extern int h_errno` or via
+/// `*__h_errno_location()`.  Both refer to the same storage.
+#[unsafe(no_mangle)]
+pub static mut h_errno: i32 = 0;
 
 /// Get a pointer to the resolver error variable.
 ///
 /// Used by C code as `extern int h_errno;` via `*__h_errno_location()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn __h_errno_location() -> *mut i32 {
-    core::ptr::addr_of_mut!(H_ERRNO)
+    core::ptr::addr_of_mut!(h_errno)
 }
 
 /// Return a string describing a resolver error code.
@@ -3589,7 +3593,7 @@ pub extern "C" fn herror(s: *const u8) {
         }
     }
     // SAFETY: single-threaded access.
-    let err = unsafe { *core::ptr::addr_of!(H_ERRNO) };
+    let err = unsafe { *core::ptr::addr_of!(h_errno) };
     let msg = hstrerror(err);
     let msg_len = unsafe { crate::string::strlen(msg) };
     let _ = syscall2(SYS_CONSOLE_WRITE, msg as u64, msg_len as u64);

@@ -481,3 +481,176 @@ pub extern "C" fn getauxval(typ: u64) -> u64 {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// __environ — glibc alias for environ
+// ---------------------------------------------------------------------------
+
+/// glibc internal name for the environment pointer.
+///
+/// Some programs reference `__environ` directly instead of `environ`.
+/// Must point to the same location as `crate::environ::environ`.
+// NOTE: This is a separate static that should ideally alias
+// `crate::environ::environ`, but Rust doesn't support symbol aliasing.
+// Programs that reference __environ will get this (initially null)
+// pointer.  `init_environ` in environ.rs sets the real `environ`.
+// For programs that need __environ, they should use `environ` instead.
+// This exists purely for link compatibility.
+#[unsafe(no_mangle)]
+pub static mut __environ: *mut *const u8 = core::ptr::null_mut();
+
+// ---------------------------------------------------------------------------
+// C++ ABI support — pure virtual calls
+// ---------------------------------------------------------------------------
+
+/// C++ ABI: Called when a pure virtual function is invoked.
+///
+/// This should never happen in correct code.  It means a base class
+/// constructor called a pure virtual method, or a dangling vtable
+/// reference was followed.
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_pure_virtual() -> ! {
+    let msg = b"pure virtual method called\n";
+    let _ = crate::file::write(2, msg.as_ptr(), msg.len());
+    crate::unistd::abort();
+}
+
+// ---------------------------------------------------------------------------
+// C++ ABI — static initialization guards
+// ---------------------------------------------------------------------------
+//
+// C++ static local variables with non-trivial constructors need
+// thread-safe one-time initialization.  The compiler emits a guard
+// variable and calls __cxa_guard_acquire before initialization,
+// __cxa_guard_release after success, and __cxa_guard_abort on
+// exception.
+//
+// Guard layout (Itanium C++ ABI):
+//   byte 0: 0 = uninitialized, 1 = initialized
+//   bytes 1-7: reserved (used for futex on some platforms)
+//
+// Since we're single-threaded (for now), these are simple flag checks.
+
+/// Acquire the initialization guard.
+///
+/// Returns 1 if the caller should perform initialization (guard was
+/// uninitialized), or 0 if initialization already completed.
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_guard_acquire(guard: *mut u64) -> i32 {
+    if guard.is_null() {
+        return 0;
+    }
+    // SAFETY: guard points to a compiler-generated static.
+    let byte0 = guard.cast::<u8>();
+    let val = unsafe { *byte0 };
+    if val != 0 {
+        0 // Already initialized.
+    } else {
+        1 // Caller should initialize.
+    }
+}
+
+/// Release the initialization guard (mark as initialized).
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_guard_release(guard: *mut u64) {
+    if guard.is_null() {
+        return;
+    }
+    // SAFETY: guard points to a compiler-generated static.
+    let byte0 = guard.cast::<u8>();
+    unsafe { *byte0 = 1; }
+}
+
+/// Abort initialization (exception during construction).
+///
+/// Resets the guard so a future attempt can retry.
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_guard_abort(guard: *mut u64) {
+    if guard.is_null() {
+        return;
+    }
+    // SAFETY: guard points to a compiler-generated static.
+    let byte0 = guard.cast::<u8>();
+    unsafe { *byte0 = 0; }
+}
+
+// ---------------------------------------------------------------------------
+// C++ exception handling stubs
+// ---------------------------------------------------------------------------
+//
+// We don't support C++ exceptions, but these symbols must exist for
+// link compatibility with C++ code compiled with exceptions enabled.
+// All exception-throwing paths will abort.
+
+/// C++ ABI: Allocate memory for an exception object.
+///
+/// Stub: always returns a pointer to a static buffer (only one
+/// exception can be in-flight at a time, but since we abort on throw
+/// this doesn't matter).
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_allocate_exception(_thrown_size: usize) -> *mut u8 {
+    static mut EXCEPTION_BUF: [u8; 128] = [0; 128];
+    // SAFETY: Single-threaded; exceptions abort anyway.
+    core::ptr::addr_of_mut!(EXCEPTION_BUF).cast::<u8>()
+}
+
+/// C++ ABI: Throw an exception.
+///
+/// Stub: aborts the process.  We don't support exception unwinding.
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_throw(
+    _thrown_exception: *mut u8,
+    _tinfo: *mut u8,
+    _dest: Option<extern "C" fn(*mut u8)>,
+) -> ! {
+    let msg = b"C++ exception thrown (not supported)\n";
+    let _ = crate::file::write(2, msg.as_ptr(), msg.len());
+    crate::unistd::abort();
+}
+
+/// C++ ABI: Begin catching an exception.
+///
+/// Stub: returns the exception object pointer (or null).
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_begin_catch(exception_object: *mut u8) -> *mut u8 {
+    exception_object
+}
+
+/// C++ ABI: End catching an exception.
+///
+/// Stub: no-op.
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_end_catch() {}
+
+/// GCC C++ personality routine for exception handling.
+///
+/// Stub: always returns `_URC_FATAL_PHASE1_ERROR` (8) to indicate
+/// we can't handle exceptions.
+#[unsafe(no_mangle)]
+pub extern "C" fn __gxx_personality_v0() -> i32 {
+    8 // _URC_FATAL_PHASE1_ERROR
+}
+
+/// Unwind library: Resume exception propagation.
+///
+/// Stub: aborts.  We don't support stack unwinding.
+#[unsafe(no_mangle)]
+pub extern "C" fn _Unwind_Resume(_exception_object: *mut u8) -> ! {
+    let msg = b"_Unwind_Resume called (not supported)\n";
+    let _ = crate::file::write(2, msg.as_ptr(), msg.len());
+    crate::unistd::abort();
+}
+
+// ---------------------------------------------------------------------------
+// __stack_chk_fail_local — local stack canary check
+// ---------------------------------------------------------------------------
+
+/// Local variant of `__stack_chk_fail`.
+///
+/// GCC's `-fstack-protector-strong` may emit calls to this symbol
+/// instead of `__stack_chk_fail` for functions with local visibility.
+/// Same behavior: stack is corrupt, abort immediately.
+#[unsafe(no_mangle)]
+pub extern "C" fn __stack_chk_fail_local() -> ! {
+    __stack_chk_fail()
+}

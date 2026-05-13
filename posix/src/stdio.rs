@@ -1652,6 +1652,23 @@ pub static stderr: usize = STDERR_SENTINEL;
 #[unsafe(no_mangle)]
 pub static stdin: usize = STDIN_SENTINEL;
 
+// glibc internal FILE* aliases — some programs reference these instead
+// of the standard names.
+/// glibc alias for `stdin`.
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+pub static _IO_stdin_: usize = STDIN_SENTINEL;
+
+/// glibc alias for `stdout`.
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+pub static _IO_stdout_: usize = STDOUT_SENTINEL;
+
+/// glibc alias for `stderr`.
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+pub static _IO_stderr_: usize = STDERR_SENTINEL;
+
 // ---------------------------------------------------------------------------
 // Internal helper
 // ---------------------------------------------------------------------------

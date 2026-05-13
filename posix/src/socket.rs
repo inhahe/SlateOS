@@ -285,6 +285,10 @@ pub(crate) struct SocketMeta {
     keepintvl: i32,
     /// TCP_KEEPCNT: max keepalive probes before declaring connection dead.
     keepcnt: i32,
+    /// UDP shutdown state: SHUT_RD called (disables recv).
+    pub(crate) udp_shut_rd: bool,
+    /// UDP shutdown state: SHUT_WR called (disables send).
+    pub(crate) udp_shut_wr: bool,
 }
 
 /// Per-fd socket metadata table.
@@ -1036,6 +1040,8 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
         keepidle: 75,
         keepintvl: 10,
         keepcnt: 9,
+        udp_shut_rd: false,
+        udp_shut_wr: false,
     });
 
     fd
@@ -1147,6 +1153,8 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 keepidle: meta.keepidle,
                 keepintvl: meta.keepintvl,
                 keepcnt: meta.keepcnt,
+                udp_shut_rd: false,
+                udp_shut_wr: false,
             });
 
             if in_progress {
@@ -1438,6 +1446,8 @@ pub unsafe extern "C" fn accept(
         keepidle: 75,
         keepintvl: 10,
         keepcnt: 9,
+        udp_shut_rd: false,
+        udp_shut_wr: false,
     });
 
     // Fill in the peer address if requested.
@@ -1550,6 +1560,11 @@ pub unsafe extern "C" fn send(
                 errno::set_errno(errno::ENOTSOCK);
                 return -1;
             };
+            // Enforce SHUT_WR: return EPIPE after shutdown(SHUT_WR).
+            if meta.udp_shut_wr {
+                errno::set_errno(errno::EPIPE);
+                return -1;
+            }
             if meta.peer_addr == 0 && meta.peer_port == 0 {
                 errno::set_errno(errno::EDESTADDRREQ);
                 return -1;
@@ -1632,10 +1647,13 @@ pub unsafe extern "C" fn recv(
             ret as isize
         }
         HandleKind::UdpSocket => {
-            // recv() on connected UDP — use recvfrom with no source addr.
             if entry.handle == 0 {
                 errno::set_errno(errno::EINVAL);
                 return -1;
+            }
+            // Enforce SHUT_RD: return 0 (EOF-like) after shutdown(SHUT_RD).
+            if get_meta(fd).is_some_and(|m| m.udp_shut_rd) {
+                return 0;
             }
             let mut src_info = [0u8; 6];
             let ret = syscall5(
@@ -1709,6 +1727,12 @@ pub unsafe extern "C" fn sendto(
 
     if entry.kind != HandleKind::UdpSocket {
         errno::set_errno(errno::ENOTSOCK);
+        return -1;
+    }
+
+    // Enforce SHUT_WR: return EPIPE after shutdown(SHUT_WR).
+    if get_meta(fd).is_some_and(|m| m.udp_shut_wr) {
+        errno::set_errno(errno::EPIPE);
         return -1;
     }
 
@@ -1849,6 +1873,10 @@ pub unsafe extern "C" fn recvfrom(
                 errno::set_errno(errno::EINVAL);
                 return -1;
             }
+            // Enforce SHUT_RD: return 0 (EOF-like) after shutdown(SHUT_RD).
+            if get_meta(fd).is_some_and(|m| m.udp_shut_rd) {
+                return 0;
+            }
 
             // The kernel returns the source address in a 6-byte buffer:
             // bytes 0-3 = IPv4 address (network byte order)
@@ -1925,31 +1953,54 @@ pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
         return -1;
     };
 
-    if entry.kind != HandleKind::TcpStream {
-        errno::set_errno(errno::ENOTSOCK);
-        return -1;
-    }
-    if entry.handle == 0 {
-        errno::set_errno(errno::ENOTCONN);
-        return -1;
-    }
+    match entry.kind {
+        HandleKind::TcpStream => {
+            if entry.handle == 0 {
+                errno::set_errno(errno::ENOTCONN);
+                return -1;
+            }
 
-    // Delegate to the kernel for proper half-close semantics.
-    // SYS_TCP_SHUTDOWN(handle, how) sends FIN for SHUT_WR,
-    // discards rx data for SHUT_RD, or both for SHUT_RDWR.
-    let ret = syscall2(SYS_TCP_SHUTDOWN, entry.handle, how as u64);
-    if ret < 0 {
-        errno::set_errno(translate_net_error(ret));
-        return -1;
-    }
+            // Delegate to the kernel for proper half-close semantics.
+            // SYS_TCP_SHUTDOWN(handle, how) sends FIN for SHUT_WR,
+            // discards rx data for SHUT_RD, or both for SHUT_RDWR.
+            let ret = syscall2(SYS_TCP_SHUTDOWN, entry.handle, how as u64);
+            if ret < 0 {
+                errno::set_errno(translate_net_error(ret));
+                return -1;
+            }
 
-    // For SHUT_RDWR, also mark the fd as disconnected so
-    // subsequent send/recv return ENOTCONN at the POSIX layer.
-    if how == SHUT_RDWR {
-        let _ = fdtable::install_fd(fd, HandleKind::TcpStream, 0);
-    }
+            // For SHUT_RDWR, also mark the fd as disconnected so
+            // subsequent send/recv return ENOTCONN at the POSIX layer.
+            if how == SHUT_RDWR {
+                let _ = fdtable::install_fd(fd, HandleKind::TcpStream, 0);
+            }
 
-    0
+            0
+        }
+        HandleKind::UdpSocket => {
+            // UDP shutdown is a local operation — it prevents further
+            // send/recv on the specified half without a kernel call.
+            // We don't have kernel-side shutdown for UDP; this is
+            // tracked in SocketMeta and enforced in send/recv.
+            if let Some(mut meta) = get_meta(fd) {
+                match how {
+                    SHUT_RD => meta.udp_shut_rd = true,
+                    SHUT_WR => meta.udp_shut_wr = true,
+                    SHUT_RDWR => {
+                        meta.udp_shut_rd = true;
+                        meta.udp_shut_wr = true;
+                    }
+                    _ => {}
+                }
+                set_meta(fd, meta);
+            }
+            0
+        }
+        _ => {
+            errno::set_errno(errno::ENOTSOCK);
+            -1
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

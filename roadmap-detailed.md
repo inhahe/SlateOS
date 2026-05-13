@@ -442,10 +442,10 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
 - [x] Process creation/destruction
 - [x] Thread creation/destruction
 - [x] posix_spawn-style process creation (avoid fork's problems)
-- [ ] exec equivalent
-- [ ] Hardware exceptions → language-level exceptions (SEH-style)
-  - [ ] Divide by zero, illegal instruction, genuine segfault → catchable exceptions
-  - [ ] Normal page faults handled by kernel, NOT exposed to application
+- [x] exec equivalent _(spawn.rs: exec_process() tears down old address space, loads new ELF, returns entry+rsp for IRETQ; capabilities survive exec)_
+- [x] Hardware exceptions → language-level exceptions (SEH-style) _(exception.rs: ExceptionCode enum, ExceptionContext struct, per-process handler registry; idt.rs: dispatch to userspace handler via modified IRETQ frame, context pushed on user stack, SysV ABI, SYS_EXCEPTION_RETURN to resume)_
+  - [x] Divide by zero, illegal instruction, genuine segfault → catchable exceptions
+  - [x] Normal page faults handled by kernel, NOT exposed to application
 - [ ] Structured shutdown via IPC message (not Unix signals)
 - [ ] Process credential / capability management
 - [ ] Unwind info in release builds for backtraces (< 2% perf impact)

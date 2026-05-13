@@ -2889,10 +2889,33 @@ pub unsafe extern "C" fn getsockname(
         return -1;
     };
 
+    // Determine the local port.  If the metadata has an explicit bound port
+    // (from bind()), use it.  Otherwise query the kernel for the ephemeral
+    // port assigned during connect().
+    let entry = fdtable::get_fd(fd).unwrap(); // Already validated above.
+    let local_port = if meta.bound_port != 0 {
+        meta.bound_port
+    } else if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
+        let port_raw = crate::syscall::syscall1(
+            crate::syscall::SYS_TCP_LOCAL_PORT, entry.handle,
+        );
+        if port_raw > 0 {
+            (port_raw as u16).to_be()
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    // Determine the local IP address.  Use stored metadata if set,
+    // otherwise fall back to 0.0.0.0 (INADDR_ANY).
+    let local_ip = meta.local_addr;
+
     let sin = SockaddrIn {
         sin_family: AF_INET as u16,
-        sin_port: meta.bound_port,
-        sin_addr: InAddr { s_addr: meta.local_addr },
+        sin_port: local_port,
+        sin_addr: InAddr { s_addr: local_ip },
         sin_zero: [0u8; 8],
     };
 

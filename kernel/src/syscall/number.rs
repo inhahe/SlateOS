@@ -2314,6 +2314,14 @@ pub const SYS_TCP_SET_KEEPALIVE_PARAMS: u64 = 852;
 /// `arg0`: connection handle.
 pub const SYS_TCP_LAST_ERROR: u64 = 853;
 
+/// `SYS_TCP_LOCAL_PORT` — query the local port of a TCP connection.
+///
+/// Returns the local port number (positive) on success, or a negative
+/// error code if the handle is invalid.
+///
+/// `arg0`: connection handle.
+pub const SYS_TCP_LOCAL_PORT: u64 = 854;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

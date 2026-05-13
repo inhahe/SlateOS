@@ -95,7 +95,7 @@ use super::number::{
     SYS_UDP_RX_READY, SYS_UDP_RX_FRONT_BYTES,
     SYS_TCP_SHUTDOWN, SYS_TCP_INFO,
     SYS_TCP_SET_NODELAY, SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS,
-    SYS_TCP_LAST_ERROR,
+    SYS_TCP_LAST_ERROR, SYS_TCP_LOCAL_PORT,
     SYS_YIELD,
 };
 use super::handlers;
@@ -451,6 +451,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_TCP_SET_KEEPALIVE as usize] = Some(handlers::sys_tcp_set_keepalive);
     handlers[SYS_TCP_SET_KEEPALIVE_PARAMS as usize] = Some(handlers::sys_tcp_set_keepalive_params);
     handlers[SYS_TCP_LAST_ERROR as usize] = Some(handlers::sys_tcp_last_error);
+    handlers[SYS_TCP_LOCAL_PORT as usize] = Some(handlers::sys_tcp_local_port);
 
     SyscallTable {
         handlers,

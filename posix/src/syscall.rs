@@ -122,6 +122,7 @@ pub const SYS_TCP_SET_NODELAY: u64 = 850;
 pub const SYS_TCP_SET_KEEPALIVE: u64 = 851;
 pub const SYS_TCP_SET_KEEPALIVE_PARAMS: u64 = 852;
 pub const SYS_TCP_LAST_ERROR: u64 = 853;
+pub const SYS_TCP_LOCAL_PORT: u64 = 854;
 
 // ---------------------------------------------------------------------------
 // Inline syscall wrappers

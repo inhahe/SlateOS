@@ -51,6 +51,10 @@ pub unsafe extern "C" fn atol(nptr: *const u8) -> i64 {
 /// supports bases 2-36.  Base 0 auto-detects: `0x` = hex, `0` = octal,
 /// else decimal.
 ///
+/// On overflow, sets errno to ERANGE and returns `i64::MAX` (positive
+/// overflow) or `i64::MIN` (negative overflow).  `endptr` still points
+/// past the last valid digit.
+///
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
@@ -63,6 +67,15 @@ pub unsafe extern "C" fn strtol(
     mut base: i32,
 ) -> i64 {
     if nptr.is_null() {
+        if !endptr.is_null() {
+            unsafe { *endptr = nptr; }
+        }
+        return 0;
+    }
+
+    // POSIX: base must be 0 or in [2, 36].
+    if base != 0 && (base < 2 || base > 36) {
+        crate::errno::set_errno(crate::errno::EINVAL);
         if !endptr.is_null() {
             unsafe { *endptr = nptr; }
         }
@@ -82,6 +95,9 @@ pub unsafe extern "C" fn strtol(
         i = i.wrapping_add(1);
     }
 
+    // Save position before prefix to restore if no digits follow "0x".
+    let before_prefix = i;
+
     // Auto-detect base.
     if base == 0 {
         if unsafe { *nptr.add(i) } == b'0' {
@@ -92,7 +108,6 @@ pub unsafe extern "C" fn strtol(
                 i = i.wrapping_add(2);
             } else {
                 base = 8;
-                i = i.wrapping_add(1);
             }
         } else {
             base = 10;
@@ -106,24 +121,82 @@ pub unsafe extern "C" fn strtol(
         i = i.wrapping_add(2);
     }
 
-    // Parse digits.
-    let mut result: i64 = 0;
+    // Parse digits, accumulating as u64 to handle the full signed range
+    // (i64::MIN's magnitude exceeds i64::MAX by 1).
+    let base_u = base as u64;
+    let mut result: u64 = 0;
+    let mut overflow = false;
+    let mut any_digits = false;
+
     loop {
         let c = unsafe { *nptr.add(i) };
         let digit = char_to_digit(c, base);
         if digit < 0 {
             break;
         }
-        // Saturating to avoid overflow UB.
-        result = result.saturating_mul(i64::from(base)).saturating_add(i64::from(digit));
+        any_digits = true;
+        // Detect overflow via checked arithmetic.
+        if let Some(r) = result.checked_mul(base_u) {
+            if let Some(r2) = r.checked_add(digit as u64) {
+                result = r2;
+            } else {
+                overflow = true;
+            }
+        } else {
+            overflow = true;
+        }
         i = i.wrapping_add(1);
     }
 
-    if !endptr.is_null() {
-        unsafe { *endptr = nptr.add(i); }
+    // If no digits were parsed after "0x" prefix, the "0" is still a
+    // valid digit (it's an octal/hex zero).  Set endptr past the "0"
+    // but don't consume the "x".
+    if !any_digits && i != before_prefix {
+        // before_prefix points at the '0'.  Advance 1 past it.
+        i = before_prefix.wrapping_add(1);
+        any_digits = true;
+        // result stays 0.
     }
 
-    if negative { result.saturating_neg() } else { result }
+    if !endptr.is_null() {
+        // POSIX: if no conversion performed, endptr = nptr.
+        if !any_digits {
+            unsafe { *endptr = nptr; }
+        } else {
+            unsafe { *endptr = nptr.add(i); }
+        }
+    }
+
+    if !any_digits {
+        return 0;
+    }
+
+    // Check range and apply sign.
+    // i64::MIN magnitude as u64 = 2^63 = (i64::MAX as u64) + 1.
+    const POS_MAX: u64 = i64::MAX as u64;
+    const NEG_MAX: u64 = POS_MAX.wrapping_add(1); // 2^63
+
+    if overflow {
+        crate::errno::set_errno(crate::errno::ERANGE);
+        return if negative { i64::MIN } else { i64::MAX };
+    }
+
+    if negative {
+        if result > NEG_MAX {
+            crate::errno::set_errno(crate::errno::ERANGE);
+            i64::MIN
+        } else if result == NEG_MAX {
+            i64::MIN
+        } else {
+            // SAFETY: result <= i64::MAX, so cast is safe; then negate.
+            -(result as i64)
+        }
+    } else if result > POS_MAX {
+        crate::errno::set_errno(crate::errno::ERANGE);
+        i64::MAX
+    } else {
+        result as i64
+    }
 }
 
 /// Convert a C string to an unsigned long integer.
@@ -131,6 +204,8 @@ pub unsafe extern "C" fn strtol(
 /// POSIX: if the subject sequence begins with a minus sign, the value
 /// resulting from the conversion is negated (wrapping to the unsigned
 /// range).  So `strtoul("-1", NULL, 10)` returns `ULONG_MAX`.
+///
+/// On overflow, sets errno to ERANGE and returns `u64::MAX`.
 ///
 /// # Safety
 ///
@@ -142,6 +217,15 @@ pub unsafe extern "C" fn strtoul(
     mut base: i32,
 ) -> u64 {
     if nptr.is_null() {
+        if !endptr.is_null() {
+            unsafe { *endptr = nptr; }
+        }
+        return 0;
+    }
+
+    // POSIX: base must be 0 or in [2, 36].
+    if base != 0 && (base < 2 || base > 36) {
+        crate::errno::set_errno(crate::errno::EINVAL);
         if !endptr.is_null() {
             unsafe { *endptr = nptr; }
         }
@@ -162,6 +246,8 @@ pub unsafe extern "C" fn strtoul(
         i = i.wrapping_add(1);
     }
 
+    let before_prefix = i;
+
     // Auto-detect base.
     if base == 0 {
         if unsafe { *nptr.add(i) } == b'0' {
@@ -172,7 +258,6 @@ pub unsafe extern "C" fn strtoul(
                 i = i.wrapping_add(2);
             } else {
                 base = 8;
-                i = i.wrapping_add(1);
             }
         } else {
             base = 10;
@@ -186,19 +271,51 @@ pub unsafe extern "C" fn strtoul(
     }
 
     // Parse digits.
+    let base_u = base as u64;
     let mut result: u64 = 0;
+    let mut overflow = false;
+    let mut any_digits = false;
+
     loop {
         let c = unsafe { *nptr.add(i) };
         let digit = char_to_digit(c, base);
         if digit < 0 {
             break;
         }
-        result = result.saturating_mul(base as u64).saturating_add(digit as u64);
+        any_digits = true;
+        if let Some(r) = result.checked_mul(base_u) {
+            if let Some(r2) = r.checked_add(digit as u64) {
+                result = r2;
+            } else {
+                overflow = true;
+            }
+        } else {
+            overflow = true;
+        }
         i = i.wrapping_add(1);
     }
 
+    // Same "0x" rollback as strtol: the "0" is a valid digit.
+    if !any_digits && i != before_prefix {
+        i = before_prefix.wrapping_add(1);
+        any_digits = true;
+    }
+
     if !endptr.is_null() {
-        unsafe { *endptr = nptr.add(i); }
+        if !any_digits {
+            unsafe { *endptr = nptr; }
+        } else {
+            unsafe { *endptr = nptr.add(i); }
+        }
+    }
+
+    if !any_digits {
+        return 0;
+    }
+
+    if overflow {
+        crate::errno::set_errno(crate::errno::ERANGE);
+        return u64::MAX;
     }
 
     // POSIX: negate in the unsigned domain for '-' prefix.
@@ -248,7 +365,8 @@ pub unsafe extern "C" fn strtoull(
 /// Parses decimal floating-point strings of the form:
 ///   `[whitespace][sign]digits[.digits][e[sign]digits]`
 ///
-/// Does NOT support hex floats, INF, or NAN literals.
+/// Also supports `INF`, `INFINITY`, and `NAN` (case-insensitive).
+/// Hex floats (`0x` prefix) are not currently supported.
 ///
 /// # Safety
 ///
@@ -357,35 +475,52 @@ pub unsafe extern "C" fn strtod(
 
     let mut result = int_part + frac_part;
 
-    // Exponent part.
+    // Exponent part.  Save position before 'e' so we can restore if no
+    // exponent digits follow (POSIX: 'e' without digits is not consumed).
     let c = unsafe { *nptr.add(i) };
     if c == b'e' || c == b'E' {
+        let before_exp = i;
         i = i.wrapping_add(1);
         let exp_neg = unsafe { *nptr.add(i) } == b'-';
         if exp_neg || unsafe { *nptr.add(i) } == b'+' {
             i = i.wrapping_add(1);
         }
 
-        let mut exp_val: i32 = 0;
-        while (unsafe { *nptr.add(i) }).is_ascii_digit() {
-            exp_val = exp_val
-                .saturating_mul(10)
-                .saturating_add(i32::from(unsafe { *nptr.add(i) }.wrapping_sub(b'0')));
-            i = i.wrapping_add(1);
-        }
+        if !(unsafe { *nptr.add(i) }).is_ascii_digit() {
+            // No exponent digits — roll back.
+            i = before_exp;
+        } else {
+            let mut exp_val: i32 = 0;
+            while (unsafe { *nptr.add(i) }).is_ascii_digit() {
+                exp_val = exp_val
+                    .saturating_mul(10)
+                    .saturating_add(i32::from(unsafe { *nptr.add(i) }.wrapping_sub(b'0')));
+                i = i.wrapping_add(1);
+            }
 
-        if exp_neg {
-            exp_val = exp_val.saturating_neg();
-        }
+            if exp_neg {
+                exp_val = exp_val.saturating_neg();
+            }
 
-        result *= pow10(exp_val);
+            result *= pow10(exp_val);
+        }
+    }
+
+    if negative {
+        result = -result;
+    }
+
+    // POSIX: set ERANGE on overflow (result is infinite) or underflow
+    // (result rounds to zero but input was nonzero).
+    if result.is_infinite() || (result == 0.0 && (int_part != 0.0 || frac_part != 0.0)) {
+        crate::errno::set_errno(crate::errno::ERANGE);
     }
 
     if !endptr.is_null() {
         unsafe { *endptr = nptr.add(i); }
     }
 
-    if negative { -result } else { result }
+    result
 }
 
 /// Convert a C string to a float (`strtof`).
@@ -398,7 +533,17 @@ pub unsafe extern "C" fn strtof(
     nptr: *const u8,
     endptr: *mut *const u8,
 ) -> f32 {
-    unsafe { strtod(nptr, endptr) as f32 }
+    let d = unsafe { strtod(nptr, endptr) };
+    let f = d as f32;
+    // POSIX: set ERANGE if the f32 result overflows or underflows.
+    // strtod already sets ERANGE for f64 overflow; we additionally check
+    // for values that fit in f64 but not f32.
+    if f.is_infinite() && !d.is_infinite() {
+        crate::errno::set_errno(crate::errno::ERANGE);
+    } else if f == 0.0 && d != 0.0 {
+        crate::errno::set_errno(crate::errno::ERANGE);
+    }
+    f
 }
 
 /// Convert a C string to a long double (`strtold`).

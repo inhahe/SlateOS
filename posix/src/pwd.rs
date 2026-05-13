@@ -1028,4 +1028,57 @@ mod tests {
         // 2 pointers (8 each) + 1 u32 + 4 padding + 1 pointer (8) = 32 bytes.
         assert_eq!(core::mem::size_of::<Group>(), 32);
     }
+
+    // -------------------------------------------------------------------
+    // Password database enumeration
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_setpwent_getpwent_endpwent() {
+        // Reset enumeration state.
+        setpwent();
+
+        // First call returns the root entry.
+        let p1 = getpwent();
+        assert!(!p1.is_null());
+        let uid = unsafe { (*p1).pw_uid };
+        assert_eq!(uid, 0); // root
+
+        // Second call returns null (only one entry).
+        let p2 = getpwent();
+        assert!(p2.is_null());
+
+        // Close and re-open: should get root again.
+        endpwent();
+        setpwent();
+        let p3 = getpwent();
+        assert!(!p3.is_null());
+        assert_eq!(unsafe { (*p3).pw_uid }, 0);
+
+        endpwent();
+    }
+
+    // -------------------------------------------------------------------
+    // Group database enumeration
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_setgrent_getgrent_endgrent() {
+        setgrent();
+
+        let g1 = getgrent();
+        assert!(!g1.is_null());
+        assert_eq!(unsafe { (*g1).gr_gid }, 0); // root
+
+        let g2 = getgrent();
+        assert!(g2.is_null());
+
+        endgrent();
+        setgrent();
+        let g3 = getgrent();
+        assert!(!g3.is_null());
+        assert_eq!(unsafe { (*g3).gr_gid }, 0);
+
+        endgrent();
+    }
 }

@@ -398,4 +398,46 @@ mod tests {
         assert_eq!(LOG_NDELAY, 0x08);
         assert_eq!(LOG_PERROR, 0x20);
     }
+
+    // -------------------------------------------------------------------
+    // openlog / closelog — state management
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_openlog_sets_ident() {
+        let ident = b"test_prog\0";
+        openlog(ident.as_ptr(), 0, LOG_USER);
+        // Verify ident was stored.
+        let stored = unsafe { *core::ptr::addr_of!(SYSLOG_IDENT) };
+        assert_eq!(stored, ident.as_ptr());
+        // Clean up.
+        closelog();
+    }
+
+    #[test]
+    fn test_openlog_sets_options() {
+        openlog(core::ptr::null(), LOG_PID | LOG_PERROR, LOG_DAEMON);
+        let stored = unsafe { *core::ptr::addr_of!(SYSLOG_OPTIONS) };
+        assert_eq!(stored, LOG_PID | LOG_PERROR);
+        closelog();
+    }
+
+    #[test]
+    fn test_closelog_clears_state() {
+        let ident = b"test\0";
+        openlog(ident.as_ptr(), LOG_PID, LOG_USER);
+        closelog();
+        let stored_ident = unsafe { *core::ptr::addr_of!(SYSLOG_IDENT) };
+        let stored_opts = unsafe { *core::ptr::addr_of!(SYSLOG_OPTIONS) };
+        assert!(stored_ident.is_null());
+        assert_eq!(stored_opts, 0);
+    }
+
+    #[test]
+    fn test_openlog_null_ident() {
+        openlog(core::ptr::null(), 0, 0);
+        let stored = unsafe { *core::ptr::addr_of!(SYSLOG_IDENT) };
+        assert!(stored.is_null());
+        closelog();
+    }
 }

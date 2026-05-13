@@ -3716,4 +3716,59 @@ mod tests {
         assert_eq!(timezone, 0);
         assert_eq!(daylight, 0);
     }
+
+    // -------------------------------------------------------------------
+    // clock_getres — pure logic (no syscalls)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_clock_getres_monotonic() {
+        let mut ts = Timespec { tv_sec: 99, tv_nsec: 99 };
+        let ret = clock_getres(CLOCK_MONOTONIC, &raw mut ts);
+        assert_eq!(ret, 0);
+        assert_eq!(ts.tv_sec, 0);
+        assert_eq!(ts.tv_nsec, 1); // 1ns resolution
+    }
+
+    #[test]
+    fn test_clock_getres_realtime() {
+        let mut ts = Timespec { tv_sec: 99, tv_nsec: 99 };
+        let ret = clock_getres(CLOCK_REALTIME, &raw mut ts);
+        assert_eq!(ret, 0);
+        assert_eq!(ts.tv_sec, 0);
+        assert_eq!(ts.tv_nsec, 1);
+    }
+
+    #[test]
+    fn test_clock_getres_null_res_ok() {
+        // Passing null for res is valid — just checks the clock_id.
+        let ret = clock_getres(CLOCK_MONOTONIC, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_clock_getres_invalid_clock() {
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        crate::errno::set_errno(0);
+        let ret = clock_getres(999, &raw mut ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clock_gettime_null_tp() {
+        crate::errno::set_errno(0);
+        let ret = clock_gettime(CLOCK_MONOTONIC, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_clock_gettime_invalid_clock() {
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        crate::errno::set_errno(0);
+        let ret = clock_gettime(999, &raw mut ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
 }

@@ -996,12 +996,18 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Path MTU Discovery (RFC 1191): ICMP "Fragmentation Needed" (type 3, code 4) carries next-hop MTU; icmp_error() reduces peer_mss to MTU-40; future segments automatically use reduced MSS via effective_mss()
   - [x] TCP timestamps (RFC 7323 §3-4): negotiated in SYN/SYN-ACK; every segment carries TSval (ms clock) + TSecr (echo); per-ACK RTT measurement via try_rtt_sample_ts(); PAWS drops old-duplicate segments with stale timestamps (24-day aging); when TS+SACK both active, SACK limited to 3 blocks (40-byte option space)
   - [x] Firewall periodic conntrack cleanup: tick_conntrack_cleanup() proactively expires stale entries in global and per-namespace tables; called from net::poll() 5-second tick
+  - [x] DNS reverse resolution (PTR records): reverse_resolve(ip) queries in-addr.arpa domain; build_ptr_query/parse_ptr_response; retry logic with backoff (1s/2s/4s)
+  - [x] TCP FIN_WAIT_2 timeout (60s): connections stuck waiting for peer's FIN are cleaned up after 60 seconds (matches Linux tcp_fin_timeout); prevents resource leak from crashed peers
+  - [x] ARP cache diagnostics: cache_entries() returns all valid entries with IP/MAC/TTL; flush_cache() invalidates all entries for forced re-resolution
+  - [x] UDP socket diagnostics: UdpSocketInfo struct + all_sockets() listing for netstat-style display
+  - [x] ICMP ping syscalls: SYS_ICMP_PING (830) sends echo request, SYS_ICMP_PING_WAIT (831) blocks until reply with RTT; enables userspace ping utilities
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)
   - [x] TCP server syscalls: bind, accept, close_listener (SYS_TCP_BIND 804, SYS_TCP_ACCEPT 805, SYS_TCP_CLOSE_LISTENER 806)
   - [x] UDP syscalls: bind, send, recv, close (SYS_UDP_BIND through SYS_UDP_CLOSE)
   - [x] DNS resolution syscall (SYS_DNS_RESOLVE)
+  - [x] DNS reverse resolution syscall (SYS_DNS_REVERSE_RESOLVE 821): PTR lookup exposed to userspace; getnameinfo() in POSIX layer wired to use it
 - [x] Firewall (basic packet filtering)
   - [x] Rule-based inbound/outbound filtering (allow/deny, protocol, IP/prefix, port, priority)
   - [x] Default policy (accept/drop), first-match-wins evaluation

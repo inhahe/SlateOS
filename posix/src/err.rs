@@ -83,7 +83,7 @@ fn emit_warnx(fmt: *const u8) {
 ///
 /// Prints `fmt: strerror(errno)\n` to stderr, then calls `exit(eval)`.
 /// The `fmt` string is printed as-is (no printf-style expansion).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn err(eval: i32, fmt: *const u8) -> ! {
     emit_warn(fmt);
     crate::crt::exit(eval);
@@ -92,7 +92,7 @@ pub extern "C" fn err(eval: i32, fmt: *const u8) -> ! {
 /// Print a warning message (no errno) and exit.
 ///
 /// Prints `fmt\n` to stderr, then calls `exit(eval)`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn errx(eval: i32, fmt: *const u8) -> ! {
     emit_warnx(fmt);
     crate::crt::exit(eval);
@@ -101,7 +101,7 @@ pub extern "C" fn errx(eval: i32, fmt: *const u8) -> ! {
 /// Print a warning message with errno description.
 ///
 /// Prints `fmt: strerror(errno)\n` to stderr.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn warn(fmt: *const u8) {
     emit_warn(fmt);
 }
@@ -109,7 +109,7 @@ pub extern "C" fn warn(fmt: *const u8) {
 /// Print a warning message (no errno).
 ///
 /// Prints `fmt\n` to stderr.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn warnx(fmt: *const u8) {
     emit_warnx(fmt);
 }
@@ -117,27 +117,27 @@ pub extern "C" fn warnx(fmt: *const u8) {
 /// Print a warning with errno using a pre-formatted message and exit.
 ///
 /// `msg` should be the result of formatting the original fmt string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn verr(eval: i32, msg: *const u8) -> ! {
     emit_warn(msg);
     crate::crt::exit(eval);
 }
 
 /// Print a warning (no errno) using a pre-formatted message and exit.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn verrx(eval: i32, msg: *const u8) -> ! {
     emit_warnx(msg);
     crate::crt::exit(eval);
 }
 
 /// Print a warning with errno using a pre-formatted message.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn vwarn(msg: *const u8) {
     emit_warn(msg);
 }
 
 /// Print a warning (no errno) using a pre-formatted message.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn vwarnx(msg: *const u8) {
     emit_warnx(msg);
 }

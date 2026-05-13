@@ -159,7 +159,7 @@ pub struct RegMatch {
 /// Compile a regular expression.
 ///
 /// Returns 0 on success, or an error code.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn regcomp(
     preg: *mut RegexT,
     pattern: *const u8,
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn regcomp(
 /// Execute a compiled regular expression against a string.
 ///
 /// Returns 0 if the string matches, `REG_NOMATCH` otherwise.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn regexec(
     preg: *const RegexT,
     string_arg: *const u8,
@@ -279,7 +279,7 @@ pub unsafe extern "C" fn regexec(
 // ---------------------------------------------------------------------------
 
 /// Free a compiled regular expression.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn regfree(preg: *mut RegexT) {
     if preg.is_null() {
         return;
@@ -301,7 +301,7 @@ pub unsafe extern "C" fn regfree(preg: *mut RegexT) {
 /// Get a description of a regex error code.
 ///
 /// Returns the number of bytes needed (including null terminator).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn regerror(
     errcode: i32,
     _preg: *const RegexT,

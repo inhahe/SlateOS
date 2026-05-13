@@ -140,7 +140,7 @@ static mut RLIMITS: [Rlimit; RLIMIT_NLIMITS] = {
 ///
 /// Stores the soft and hard limits for `resource` in `*rlp`.
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
     if rlp.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -176,7 +176,7 @@ pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
 ///
 /// Note: limits are stored but not enforced by the kernel.
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
     if rlp.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -220,7 +220,7 @@ pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
 /// Get resource usage.
 ///
 /// Returns zeroed usage data (no kernel accounting support yet).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getrusage(who: i32, usage: *mut Rusage) -> i32 {
     if usage.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -262,7 +262,7 @@ static mut NICE_VALUE: i32 = 0;
 ///
 /// Returns the new nice value on success.  Since our scheduler doesn't
 /// use nice values, this just stores the value locally.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn nice(inc: i32) -> i32 {
     // SAFETY: Single-threaded access.
@@ -278,7 +278,7 @@ pub extern "C" fn nice(inc: i32) -> i32 {
 /// Returns the nice value (which can be negative), so callers must
 /// clear errno before calling and check it after.  Returns 0 for
 /// all queries (no kernel support).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
     if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
         errno::set_errno(errno::EINVAL);
@@ -293,7 +293,7 @@ pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
 ///
 /// Stores the value locally but does not affect kernel scheduling.
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
     if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
         errno::set_errno(errno::EINVAL);
@@ -313,7 +313,7 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
 ///
 /// Since our kernel doesn't track per-process resource limits, this
 /// delegates to the global getrlimit/setrlimit.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn prlimit(
     _pid: i32,
     resource: i32,
@@ -337,7 +337,7 @@ pub extern "C" fn prlimit(
 }
 
 /// Alias: `prlimit64` — same as `prlimit` on 64-bit systems.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn prlimit64(
     pid: i32,
     resource: i32,

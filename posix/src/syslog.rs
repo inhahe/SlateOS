@@ -125,7 +125,7 @@ static mut SYSLOG_MASK: i32 = 0xFF;
 /// `ident` is prepended to each message.  `option` controls logging
 /// behavior (LOG_PID, LOG_PERROR, etc.).  `facility` is the default
 /// facility for subsequent syslog() calls.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn openlog(ident: *const u8, option: i32, _facility: i32) {
     // SAFETY: Single-threaded access to static state.
     unsafe {
@@ -142,7 +142,7 @@ pub extern "C" fn openlog(ident: *const u8, option: i32, _facility: i32) {
 /// Note: This does NOT support printf-style format strings in `msg`.
 /// The caller should format the message before calling syslog, or use
 /// our printf to format into a buffer first.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn syslog(priority: i32, msg: *const u8) {
     let pri = log_pri(priority);
 
@@ -203,7 +203,7 @@ pub extern "C" fn syslog(priority: i32, msg: *const u8) {
 }
 
 /// Close the connection to the system logger.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn closelog() {
     unsafe {
         core::ptr::addr_of_mut!(SYSLOG_IDENT).write(core::ptr::null());
@@ -215,7 +215,7 @@ pub extern "C" fn closelog() {
 ///
 /// Returns the previous mask value.  Only messages whose priority
 /// is set in the mask will be logged.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setlogmask(mask: i32) -> i32 {
     let old = unsafe { *core::ptr::addr_of!(SYSLOG_MASK) };
     if mask != 0 {

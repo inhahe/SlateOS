@@ -25,7 +25,7 @@ pub struct MqAttr {
 /// Open a message queue.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_open(
     _name: *const u8,
     _oflag: i32,
@@ -37,7 +37,7 @@ pub extern "C" fn mq_open(
 /// Close a message queue.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_close(_mqdes: MqdT) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
@@ -46,7 +46,7 @@ pub extern "C" fn mq_close(_mqdes: MqdT) -> i32 {
 /// Remove a message queue.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_unlink(_name: *const u8) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
@@ -55,7 +55,7 @@ pub extern "C" fn mq_unlink(_name: *const u8) -> i32 {
 /// Send a message to a queue.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_send(
     _mqdes: MqdT,
     _msg_ptr: *const u8,
@@ -69,7 +69,7 @@ pub extern "C" fn mq_send(
 /// Receive a message from a queue.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_receive(
     _mqdes: MqdT,
     _msg_ptr: *mut u8,
@@ -83,7 +83,7 @@ pub extern "C" fn mq_receive(
 /// Get message queue attributes.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_getattr(_mqdes: MqdT, _attr: *mut MqAttr) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
@@ -92,7 +92,7 @@ pub extern "C" fn mq_getattr(_mqdes: MqdT, _attr: *mut MqAttr) -> i32 {
 /// Set message queue attributes.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_setattr(
     _mqdes: MqdT,
     _newattr: *const MqAttr,
@@ -105,7 +105,7 @@ pub extern "C" fn mq_setattr(
 /// Send a message with a timeout.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_timedsend(
     _mqdes: MqdT,
     _msg_ptr: *const u8,
@@ -120,7 +120,7 @@ pub extern "C" fn mq_timedsend(
 /// Receive a message with a timeout.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_timedreceive(
     _mqdes: MqdT,
     _msg_ptr: *mut u8,
@@ -135,7 +135,7 @@ pub extern "C" fn mq_timedreceive(
 /// Request notification when a message arrives.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_notify(_mqdes: MqdT, _sevp: *const u8) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1

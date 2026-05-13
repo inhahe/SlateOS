@@ -53,7 +53,7 @@ fn fill_field(field: &mut [u8; UTSNAME_LEN], src: &[u8]) {
 /// about the operating system and hardware.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn uname(buf: *mut Utsname) -> i32 {
     if buf.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);

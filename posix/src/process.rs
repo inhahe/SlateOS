@@ -86,7 +86,7 @@ pub const fn wtermsig(status: i32) -> i32 {
 /// Terminate the calling process.
 ///
 /// This function does not return.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _exit(status: i32) -> ! {
     let _ = syscall1(SYS_EXIT, status as u64);
     // Should never reach here, but the kernel guarantees process death.
@@ -101,14 +101,14 @@ pub extern "C" fn _exit(status: i32) -> ! {
 /// C11 `_Exit` — immediate process termination (same as POSIX `_exit`).
 ///
 /// Unlike `exit()`, does not call atexit handlers or flush stdio buffers.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_snake_case, clippy::used_underscore_items)]
 pub extern "C" fn _Exit(status: i32) -> ! {
     _exit(status);
 }
 
 /// Get the process ID of the calling process.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpid() -> PidT {
     let ret = syscall0(SYS_PROCESS_ID);
     ret as PidT
@@ -118,7 +118,7 @@ pub extern "C" fn getpid() -> PidT {
 ///
 /// Note: Our kernel doesn't have a direct "get parent PID" syscall yet.
 /// Returns 1 (init) as a placeholder until implemented.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getppid() -> PidT {
     // TODO: Add SYS_PROCESS_PARENT_ID syscall.
     1
@@ -134,7 +134,7 @@ pub extern "C" fn getppid() -> PidT {
 ///
 /// Returns the PID of the child, 0 if WNOHANG and no child changed
 /// state, or -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
     // Use non-blocking or blocking wait based on options.
     let sys_nr = if options & WNOHANG != 0 {
@@ -180,7 +180,7 @@ pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
 }
 
 /// Wait for any child process (convenience wrapper).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wait(status: *mut i32) -> PidT {
     waitpid(-1, status, 0)
 }
@@ -189,7 +189,7 @@ pub extern "C" fn wait(status: *mut i32) -> PidT {
 ///
 /// Like `waitpid(-1, status, options)` but also fills `rusage` with
 /// resource usage data (zeroed — no kernel accounting yet).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wait3(
     status: *mut i32,
     options: i32,
@@ -206,7 +206,7 @@ pub extern "C" fn wait3(
 /// Wait for a specific child process with resource usage.
 ///
 /// Like `waitpid` but also fills `rusage`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wait4(
     pid: PidT,
     status: *mut i32,
@@ -235,7 +235,7 @@ pub const P_PGID: i32 = 2;
 ///
 /// Stub: delegates to `waitpid` internally.  The `infop` parameter
 /// is not filled in (would need `siginfo_t` support).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn waitid(
     idtype: i32,
     id: PidT,
@@ -270,7 +270,7 @@ pub extern "C" fn waitid(
 /// creation.  `fork()` here returns -1 with `ENOSYS` because a true fork
 /// (address space copy) is not yet implemented.  Use `posix_spawn()` or
 /// the native `SYS_PROCESS_SPAWN` instead.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fork() -> PidT {
     // True fork requires address space duplication, which is complex
     // and not yet implemented.  Return ENOSYS for now.
@@ -290,14 +290,14 @@ pub extern "C" fn fork() -> PidT {
 /// all, this has the same behavior as our `fork()` stub.
 ///
 /// Programs should use `posix_spawn()` instead.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn vfork() -> PidT {
     errno::set_errno(errno::ENOSYS);
     -1
 }
 
 /// Get the task/thread ID (Linux-specific, but commonly used).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gettid() -> PidT {
     let ret = syscall0(SYS_TASK_ID);
     ret as PidT
@@ -355,7 +355,7 @@ fn ensure_pg_init() {
 ///
 /// Returns the PGID set by `setpgid()` or `setpgrp()`, defaulting
 /// to our own PID (we are our own group leader at startup).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpgrp() -> PidT {
     ensure_pg_init();
     // SAFETY: initialized above.
@@ -367,7 +367,7 @@ pub extern "C" fn getpgrp() -> PidT {
 /// For `pid` == 0 or our own PID, returns the stored PGID.
 /// For other PIDs, returns the PID itself (no kernel visibility into
 /// other processes' groups).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpgid(pid: PidT) -> PidT {
     ensure_pg_init();
     let us = getpid();
@@ -387,7 +387,7 @@ pub extern "C" fn getpgid(pid: PidT) -> PidT {
 /// (no kernel support for modifying other processes).
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::similar_names)] // POSIX parameter names: pid and pgid.
 pub extern "C" fn setpgid(pid: PidT, pgid: PidT) -> i32 {
     ensure_pg_init();
@@ -407,7 +407,7 @@ pub extern "C" fn setpgid(pid: PidT, pgid: PidT) -> i32 {
 /// Set the process group ID of the calling process to its own PID.
 ///
 /// Equivalent to `setpgid(0, 0)`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setpgrp() -> i32 {
     setpgid(0, 0)
 }
@@ -416,7 +416,7 @@ pub extern "C" fn setpgrp() -> i32 {
 ///
 /// For `pid` == 0 or our own PID, returns the stored SID.
 /// For other PIDs, returns the PID itself.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getsid(pid: PidT) -> PidT {
     ensure_pg_init();
     let us = getpid();
@@ -435,7 +435,7 @@ pub extern "C" fn getsid(pid: PidT) -> PidT {
 /// POSIX requires the caller not be a process group leader already,
 /// but since we track only our own state and have no kernel enforcement,
 /// we always succeed.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setsid() -> PidT {
     let us = getpid();
     // SAFETY: single process.
@@ -451,7 +451,7 @@ pub extern "C" fn setsid() -> PidT {
 ///
 /// Returns the PGID last set by `tcsetpgrp()`, defaulting to our
 /// own PID.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcgetpgrp(_fd: crate::types::Fd) -> PidT {
     ensure_pg_init();
     // SAFETY: initialized.
@@ -461,7 +461,7 @@ pub extern "C" fn tcgetpgrp(_fd: crate::types::Fd) -> PidT {
 /// Set the foreground process group ID of a terminal.
 ///
 /// Stores the value for later retrieval by `tcgetpgrp()`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tcsetpgrp(_fd: crate::types::Fd, pgrp: PidT) -> i32 {
     ensure_pg_init();
     if pgrp <= 0 {
@@ -481,7 +481,7 @@ pub extern "C" fn tcsetpgrp(_fd: crate::types::Fd, pgrp: PidT) -> i32 {
 ///
 /// Stub: returns -1 with ENOSYS.  Our OS uses `posix_spawn` for
 /// process creation and doesn't support Linux-style clone flags.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clone(
     _fn_ptr: *const u8,
     _child_stack: *mut u8,
@@ -495,7 +495,7 @@ pub extern "C" fn clone(
 /// Linux `unshare` — disassociate parts of the execution context.
 ///
 /// Stub: returns -1 with ENOSYS (namespaces not implemented).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn unshare(_flags: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -504,7 +504,7 @@ pub extern "C" fn unshare(_flags: i32) -> i32 {
 /// Linux `setns` — reassociate a thread with a namespace.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setns(_fd: i32, _nstype: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -513,7 +513,7 @@ pub extern "C" fn setns(_fd: i32, _nstype: i32) -> i32 {
 /// Mount a filesystem.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mount(
     _source: *const u8,
     _target: *const u8,
@@ -528,7 +528,7 @@ pub extern "C" fn mount(
 /// Unmount a filesystem.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn umount(_target: *const u8) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -537,7 +537,7 @@ pub extern "C" fn umount(_target: *const u8) -> i32 {
 /// Unmount a filesystem with flags.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn umount2(_target: *const u8, _flags: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1

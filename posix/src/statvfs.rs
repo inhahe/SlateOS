@@ -61,7 +61,7 @@ pub const ST_NOSUID: u64 = 2;
 ///
 /// Returns 0 on success, -1 on error.
 /// Reports 1 GiB free space on a 10 GiB filesystem as defaults.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn statvfs(path: *const u8, buf: *mut Statvfs) -> i32 {
     if path.is_null() || buf.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -75,7 +75,7 @@ pub extern "C" fn statvfs(path: *const u8, buf: *mut Statvfs) -> i32 {
 /// Get filesystem statistics for an open file descriptor.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fstatvfs(_fd: i32, buf: *mut Statvfs) -> i32 {
     if buf.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -175,7 +175,7 @@ fn fill_statfs_defaults(buf: *mut Statfs) {
 /// Get filesystem statistics (Linux).
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn statfs(path: *const u8, buf: *mut Statfs) -> i32 {
     if path.is_null() || buf.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -188,7 +188,7 @@ pub extern "C" fn statfs(path: *const u8, buf: *mut Statfs) -> i32 {
 /// Get filesystem statistics for an fd (Linux).
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fstatfs(_fd: i32, buf: *mut Statfs) -> i32 {
     if buf.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -199,13 +199,13 @@ pub extern "C" fn fstatfs(_fd: i32, buf: *mut Statfs) -> i32 {
 }
 
 /// `statfs64` — LP64 alias (off_t already 64-bit).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn statfs64(path: *const u8, buf: *mut Statfs) -> i32 {
     statfs(path, buf)
 }
 
 /// `fstatfs64` — LP64 alias.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fstatfs64(fd: i32, buf: *mut Statfs) -> i32 {
     fstatfs(fd, buf)
 }

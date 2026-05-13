@@ -76,7 +76,7 @@ static C_LCONV: Lconv = Lconv {
 ///
 /// Always returns `"C"` — we only support the C locale.
 /// `locale` parameter is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setlocale(_category: i32, _locale: *const u8) -> *const u8 {
     c"C".as_ptr().cast::<u8>()
 }
@@ -84,7 +84,7 @@ pub extern "C" fn setlocale(_category: i32, _locale: *const u8) -> *const u8 {
 /// Get numeric formatting information.
 ///
 /// Always returns the C locale formatting.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn localeconv() -> *const Lconv {
     &raw const C_LCONV
 }
@@ -109,7 +109,7 @@ const C_LOCALE_TAG: LocaleT = 1;
 ///
 /// Always returns a handle for the C locale regardless of the
 /// `locale` string.  `base` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn newlocale(
     _category_mask: i32,
     _locale: *const u8,
@@ -121,7 +121,7 @@ pub extern "C" fn newlocale(
 /// Duplicate a locale object.
 ///
 /// Returns a handle to the C locale.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn duplocale(_locobj: LocaleT) -> LocaleT {
     C_LOCALE_TAG
 }
@@ -129,14 +129,14 @@ pub extern "C" fn duplocale(_locobj: LocaleT) -> LocaleT {
 /// Free a locale object.
 ///
 /// No-op — our locale objects are static tags with no heap allocation.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn freelocale(_locobj: LocaleT) {}
 
 /// Set the thread-local locale.
 ///
 /// Returns the previous locale.  Always returns the C locale
 /// (thread-local locale storage is not implemented).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn uselocale(_newloc: LocaleT) -> LocaleT {
     C_LOCALE_TAG
 }

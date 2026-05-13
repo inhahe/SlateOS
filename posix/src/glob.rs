@@ -330,7 +330,7 @@ fn assemble_results(
 ///
 /// `pattern` must be a valid null-terminated string.
 /// `pglob` must point to a valid `GlobT`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn glob(
     pattern: *const u8,
     flags: i32,
@@ -386,7 +386,7 @@ pub unsafe extern "C" fn glob(
 }
 
 /// Free memory allocated by `glob()`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn globfree(pglob: *mut GlobT) {
     if pglob.is_null() {
         return;

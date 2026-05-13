@@ -7,7 +7,7 @@
 //! Also provides `imaxabs`, `imaxdiv`, `wcstoimax`, and `wcstoumax`.
 
 /// Absolute value of an `intmax_t`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn imaxabs(j: i64) -> i64 {
     if j < 0 { j.wrapping_neg() } else { j }
 }
@@ -22,7 +22,7 @@ pub struct ImaxdivT {
 }
 
 /// Compute quotient and remainder of `numer / denom`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn imaxdiv(numer: i64, denom: i64) -> ImaxdivT {
     if denom == 0 {
         return ImaxdivT { quot: 0, rem: 0 };
@@ -41,7 +41,7 @@ pub extern "C" fn imaxdiv(numer: i64, denom: i64) -> ImaxdivT {
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtoimax(
     nptr: *const u8,
     endptr: *mut *const u8,
@@ -57,7 +57,7 @@ pub unsafe extern "C" fn strtoimax(
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtoumax(
     nptr: *const u8,
     endptr: *mut *const u8,
@@ -98,7 +98,7 @@ fn wc_digit(wc: i32, base: i32) -> i32 {
 /// # Safety
 ///
 /// `nptr` must point to a valid null-terminated wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn wcstoimax(
     nptr: *const i32,
@@ -195,7 +195,7 @@ pub unsafe extern "C" fn wcstoimax(
 /// # Safety
 ///
 /// `nptr` must point to a valid null-terminated wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn wcstoumax(
     nptr: *const i32,

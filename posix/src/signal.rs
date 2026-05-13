@@ -68,7 +68,7 @@ static mut HANDLERS: [SighandlerT; NSIG as usize] = [SIG_DFL; NSIG as usize];
 ///
 /// Stores the handler and returns the previous one.  Handlers are
 /// never actually invoked since our OS doesn't deliver Unix signals.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn signal(signum: i32, handler: SighandlerT) -> SighandlerT {
     if !(1..NSIG).contains(&signum) || signum == SIGKILL || signum == SIGSTOP {
         errno::set_errno(errno::EINVAL);
@@ -116,7 +116,7 @@ pub const SA_NODEFER: i32 = 0x4000_0000;
 ///
 /// Stores the new action (if provided) and returns the old action.
 /// Handlers are never actually invoked.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigaction(
     signum: i32,
     act: *const Sigaction,
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn sigaction(
 /// Send a signal to a process.
 ///
 /// Stub: always returns -1 and sets errno to ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     let _ = pid;
     let _ = sig;
@@ -171,7 +171,7 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
 /// Send a signal to the calling process.
 ///
 /// For SIGABRT, calls abort().  Otherwise returns -1/ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn raise(sig: i32) -> i32 {
     if sig == SIGABRT {
         crate::unistd::abort();
@@ -185,7 +185,7 @@ pub extern "C" fn raise(sig: i32) -> i32 {
 /// Stub: succeeds silently (stores nothing).  Many programs call
 /// `sigprocmask(SIG_BLOCK, &set, &oldset)` during initialization
 /// and expect success.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigprocmask(
     _how: i32,
     _set: *const u64,
@@ -202,7 +202,7 @@ pub extern "C" fn sigprocmask(
 ///
 /// Stub: sets errno to EINTR and returns -1 (POSIX specifies
 /// sigsuspend always returns -1 with errno=EINTR).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigsuspend(_mask: *const u64) -> i32 {
     errno::set_errno(errno::EINTR);
     -1
@@ -211,7 +211,7 @@ pub extern "C" fn sigsuspend(_mask: *const u64) -> i32 {
 /// Examine pending signals.
 ///
 /// Stub: returns empty set (no signals pending).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigpending(set: *mut u64) -> i32 {
     if set.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn sigpending(set: *mut u64) -> i32 {
 }
 
 /// Initialize a signal set to empty.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigemptyset(set: *mut u64) -> i32 {
     if set.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -233,7 +233,7 @@ pub unsafe extern "C" fn sigemptyset(set: *mut u64) -> i32 {
 }
 
 /// Initialize a signal set to full.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigfillset(set: *mut u64) -> i32 {
     if set.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -244,7 +244,7 @@ pub unsafe extern "C" fn sigfillset(set: *mut u64) -> i32 {
 }
 
 /// Add a signal to a signal set.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigaddset(set: *mut u64, signum: i32) -> i32 {
     if set.is_null() || !(1..NSIG).contains(&signum) {
         errno::set_errno(errno::EINVAL);
@@ -257,7 +257,7 @@ pub unsafe extern "C" fn sigaddset(set: *mut u64, signum: i32) -> i32 {
 }
 
 /// Remove a signal from a signal set.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigdelset(set: *mut u64, signum: i32) -> i32 {
     if set.is_null() || !(1..NSIG).contains(&signum) {
         errno::set_errno(errno::EINVAL);
@@ -269,7 +269,7 @@ pub unsafe extern "C" fn sigdelset(set: *mut u64, signum: i32) -> i32 {
 }
 
 /// Test whether a signal is in a signal set.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigismember(set: *const u64, signum: i32) -> i32 {
     if set.is_null() || !(1..NSIG).contains(&signum) {
         errno::set_errno(errno::EINVAL);
@@ -315,7 +315,7 @@ pub struct StackT {
 /// If `ss` is non-null, we accept the configuration silently.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
     // Return old stack state if requested.
     if !oss.is_null() {
@@ -355,7 +355,7 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
 /// there is no SA_RESTART behavior to toggle.  Programs that call
 /// `siginterrupt(SIGALRM, 1)` (common in timeout implementations)
 /// will succeed.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn siginterrupt(_sig: i32, _flag: i32) -> i32 {
     // No signal delivery — nothing to configure.
     0
@@ -402,7 +402,7 @@ static UNKNOWN_SIGNAL: [u8; 32] = *b"Unknown signal\0\0\0\0\0\0\0\0\0\0\0\0\0\0\
 ///
 /// The returned pointer is valid until the next call to `strsignal`.
 /// Not thread-safe (matches POSIX spec).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn strsignal(signum: i32) -> *const u8 {
     if signum >= 0
         && (signum as usize) < SIGNAL_NAMES.len()
@@ -416,7 +416,7 @@ pub extern "C" fn strsignal(signum: i32) -> *const u8 {
 /// Print a signal description to stderr.
 ///
 /// If `s` is non-null and non-empty, prints "s: signal_desc\n".
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn psignal(signum: i32, s: *const u8) {
     if !s.is_null() && unsafe { *s } != 0 {
         let slen = unsafe { crate::string::strlen(s) };
@@ -440,7 +440,7 @@ pub unsafe extern "C" fn psignal(signum: i32, s: *const u8) {
 ///
 /// Stub: our OS doesn't deliver signals.  Sleeps for 1 second then
 /// returns `EAGAIN` (no signal delivered).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigwait(_set: *const u64, sig: *mut i32) -> i32 {
     // Sleep briefly so callers in a loop don't spin.
     let _ = crate::syscall::syscall1(crate::syscall::SYS_SLEEP, 1_000_000_000_u64);
@@ -455,7 +455,7 @@ pub extern "C" fn sigwait(_set: *const u64, sig: *mut i32) -> i32 {
 ///
 /// Stub: returns -1 with `EAGAIN`.  The `timeout` parameter is ignored
 /// since we don't have signal delivery.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigtimedwait(
     _set: *const u64,
     _info: *mut core::ffi::c_void,
@@ -468,7 +468,7 @@ pub extern "C" fn sigtimedwait(
 /// Queue a signal to a process.
 ///
 /// Stub: returns -1 with `ENOSYS` (no signal delivery mechanism).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigqueue(_pid: crate::types::PidT, _sig: i32, _value: usize) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
@@ -483,13 +483,13 @@ pub extern "C" fn sigqueue(_pid: crate::types::PidT, _sig: i32, _value: usize) -
 /// SIGRTMIN is typically 32 on Linux (signals 32-64 are realtime).
 /// We don't support realtime signals, but programs that query the
 /// range need valid values.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __libc_current_sigrtmin() -> i32 {
     32
 }
 
 /// glibc: return the highest realtime signal number.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __libc_current_sigrtmax() -> i32 {
     64
 }

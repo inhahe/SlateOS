@@ -19,7 +19,7 @@ use crate::types::*;
 ///
 /// On success, `pipefd[0]` is the read end and `pipefd[1]` is the write end.
 /// Returns 0 on success, -1 on error (errno set).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pipe(pipefd: *mut Fd) -> i32 {
     pipe2(pipefd, 0)
 }
@@ -30,7 +30,7 @@ pub extern "C" fn pipe(pipefd: *mut Fd) -> i32 {
 /// enforced by the kernel).
 ///
 /// Returns 0 on success, -1 on error (errno set).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pipe2(pipefd: *mut Fd, flags: i32) -> i32 {
     if pipefd.is_null() {
         errno::set_errno(errno::EFAULT);

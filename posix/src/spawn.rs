@@ -135,7 +135,7 @@ impl FileActionSlot {
 }
 
 /// Initialize a file actions object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn_file_actions_init(
     acts: *mut PosixSpawnFileActionsT,
 ) -> i32 {
@@ -160,7 +160,7 @@ pub extern "C" fn posix_spawn_file_actions_init(
 /// Destroy a file actions object.
 ///
 /// No heap resources to free — just zeroes the count.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn_file_actions_destroy(
     acts: *mut PosixSpawnFileActionsT,
 ) -> i32 {
@@ -174,7 +174,7 @@ pub extern "C" fn posix_spawn_file_actions_destroy(
 /// Add a close action.
 ///
 /// The fd will be closed in the child before exec.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn_file_actions_addclose(
     acts: *mut PosixSpawnFileActionsT,
     fd: Fd,
@@ -197,7 +197,7 @@ pub extern "C" fn posix_spawn_file_actions_addclose(
 /// Add a dup2 action.
 ///
 /// In the child, `dup2(fd, newfd)` will be called before exec.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn_file_actions_adddup2(
     acts: *mut PosixSpawnFileActionsT,
     fd: Fd,
@@ -222,7 +222,7 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
 ///
 /// In the child, the file at `path` will be opened with `oflag`/`mode`
 /// and the resulting fd will be dup2'd to `fd`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn_file_actions_addopen(
     acts: *mut PosixSpawnFileActionsT,
     fd: Fd,
@@ -292,7 +292,7 @@ pub struct PosixSpawnattrT {
 }
 
 /// Initialize a spawn attributes object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnattr_init(
     attr: *mut PosixSpawnattrT,
 ) -> i32 {
@@ -308,7 +308,7 @@ pub extern "C" fn posix_spawnattr_init(
 }
 
 /// Destroy a spawn attributes object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnattr_destroy(
     _attr: *mut PosixSpawnattrT,
 ) -> i32 {
@@ -316,7 +316,7 @@ pub extern "C" fn posix_spawnattr_destroy(
 }
 
 /// Set flags on a spawn attributes object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnattr_setflags(
     attr: *mut PosixSpawnattrT,
     flags: i16,
@@ -330,7 +330,7 @@ pub extern "C" fn posix_spawnattr_setflags(
 }
 
 /// Get flags from a spawn attributes object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnattr_getflags(
     attr: *const PosixSpawnattrT,
     flags: *mut i16,
@@ -344,7 +344,7 @@ pub extern "C" fn posix_spawnattr_getflags(
 }
 
 /// Set the process group in a spawn attributes object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnattr_setpgroup(
     attr: *mut PosixSpawnattrT,
     pgroup: PidT,
@@ -358,7 +358,7 @@ pub extern "C" fn posix_spawnattr_setpgroup(
 }
 
 /// Get the process group from a spawn attributes object.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnattr_getpgroup(
     attr: *const PosixSpawnattrT,
     pgroup: *mut PidT,
@@ -395,7 +395,7 @@ pub extern "C" fn posix_spawnattr_getpgroup(
 /// Returns 0 on success, or an error number (NOT -1) on failure.
 /// This matches the POSIX spec: `posix_spawn` returns the error
 /// directly, not via errno.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawn(
     pid: *mut PidT,
     path: *const u8,
@@ -468,7 +468,7 @@ pub extern "C" fn posix_spawn(
 /// `/`, it is used directly without PATH search.
 ///
 /// Returns 0 on success, or an error number on failure.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnp(
     pid: *mut PidT,
     file: *const u8,
@@ -505,7 +505,7 @@ pub extern "C" fn posix_spawnp(
 /// Reads the ELF binary at `path` and calls `SYS_PROCESS_EXEC` to
 /// replace the current process.  On success, this function does not
 /// return.  On failure, returns -1 with errno set.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn execve(
     path: *const u8,
     _argv: *const *const u8,
@@ -559,7 +559,7 @@ pub extern "C" fn execve(
 /// is used directly without PATH search.
 ///
 /// On success, does not return.  On failure, returns -1 with errno set.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn execvp(
     file: *const u8,
     argv: *const *const u8,
@@ -597,7 +597,7 @@ pub extern "C" fn execvp(
 /// parameter is omitted).
 ///
 /// On success, does not return.  On failure, returns -1 with errno set.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn execv(
     path: *const u8,
     argv: *const *const u8,

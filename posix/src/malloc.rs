@@ -45,7 +45,7 @@ const HEADER_SIZE: usize = 16;
 ///
 /// Returns a pointer to at least `size` bytes of memory, or NULL
 /// on failure.  The memory is not initialized.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn malloc(size: usize) -> *mut u8 {
     if size == 0 {
         // POSIX: malloc(0) may return NULL or a unique pointer.
@@ -90,7 +90,7 @@ pub extern "C" fn malloc(size: usize) -> *mut u8 {
 /// Allocate and zero-initialize memory for `nmemb` elements of `size` bytes.
 ///
 /// Returns NULL on overflow or allocation failure.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn calloc(nmemb: usize, size: usize) -> *mut u8 {
     let Some(total_size) = nmemb.checked_mul(size) else {
         crate::errno::set_errno(crate::errno::ENOMEM);
@@ -114,7 +114,7 @@ pub extern "C" fn calloc(nmemb: usize, size: usize) -> *mut u8 {
 ///
 /// `ptr` must be NULL or a value previously returned by `malloc`,
 /// `calloc`, or `realloc` that has not been freed.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
     if ptr.is_null() {
         return malloc(size);
@@ -166,7 +166,7 @@ pub unsafe extern "C" fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
 ///
 /// `ptr` must be NULL or a value previously returned by `malloc`,
 /// `calloc`, or `realloc` that has not been freed.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn free(ptr: *mut u8) {
     if ptr.is_null() {
         return;
@@ -196,7 +196,7 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
 /// # Safety
 ///
 /// `ptr` must be NULL or a value returned by `malloc`/`calloc`/`realloc`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn malloc_usable_size(ptr: *mut u8) -> usize {
     if ptr.is_null() {
         return 0;
@@ -227,7 +227,7 @@ pub unsafe extern "C" fn malloc_usable_size(ptr: *mut u8) -> usize {
 /// # Safety
 ///
 /// `memptr` must be a valid, writable pointer to `*mut u8`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_memalign(memptr: *mut *mut u8, alignment: usize, size: usize) -> i32 {
     if memptr.is_null() {
         return crate::errno::EINVAL;
@@ -280,7 +280,7 @@ pub extern "C" fn posix_memalign(memptr: *mut *mut u8, alignment: usize, size: u
 /// this).
 ///
 /// Returns a pointer to aligned memory, or NULL on failure.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut u8 {
     if !alignment.is_power_of_two() || alignment == 0 {
         crate::errno::set_errno(crate::errno::EINVAL);
@@ -292,7 +292,7 @@ pub extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut u8 {
 /// Allocate page-aligned memory (obsolete but still used).
 ///
 /// The returned pointer can be passed to `free()`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn valloc(size: usize) -> *mut u8 {
     if size == 0 {
         return core::ptr::null_mut();
@@ -308,7 +308,7 @@ pub extern "C" fn valloc(size: usize) -> *mut u8 {
 /// Allocate aligned memory (obsolete but still used by some programs).
 ///
 /// `alignment` must be a power of two.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn memalign(alignment: usize, size: usize) -> *mut u8 {
     aligned_alloc(alignment, size)
 }
@@ -318,7 +318,7 @@ pub extern "C" fn memalign(alignment: usize, size: usize) -> *mut u8 {
 /// Allocates `nmemb * size` bytes, returning null with `ENOMEM` if the
 /// multiplication would overflow.  This is safer than `malloc(n * s)`
 /// where the multiplication can silently wrap.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn reallocarray(
     ptr: *mut u8,
     nmemb: usize,
@@ -404,7 +404,7 @@ fn aligned_alloc_impl(alignment: usize, size: usize) -> *mut u8 {
 // implementations.
 
 /// glibc internal: `__libc_malloc`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __libc_malloc(size: usize) -> *mut u8 {
     malloc(size)
 }
@@ -414,7 +414,7 @@ pub extern "C" fn __libc_malloc(size: usize) -> *mut u8 {
 /// # Safety
 ///
 /// Same requirements as `free`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __libc_free(ptr: *mut u8) {
     unsafe { free(ptr); }
 }
@@ -424,19 +424,19 @@ pub unsafe extern "C" fn __libc_free(ptr: *mut u8) {
 /// # Safety
 ///
 /// Same requirements as `realloc`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __libc_realloc(ptr: *mut u8, size: usize) -> *mut u8 {
     unsafe { realloc(ptr, size) }
 }
 
 /// glibc internal: `__libc_calloc`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __libc_calloc(nmemb: usize, size: usize) -> *mut u8 {
     calloc(nmemb, size)
 }
 
 /// glibc internal: `__libc_memalign`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __libc_memalign(alignment: usize, size: usize) -> *mut u8 {
     memalign(alignment, size)
 }

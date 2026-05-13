@@ -42,7 +42,7 @@ pub const SEM_FAILED: *mut SemT = core::ptr::null_mut();
 /// `value` is the initial semaphore count.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_init(sem: *mut SemT, _pshared: i32, value: u32) -> i32 {
     if sem.is_null() {
         errno::set_errno(errno::EINVAL);
@@ -68,7 +68,7 @@ pub extern "C" fn sem_init(sem: *mut SemT, _pshared: i32, value: u32) -> i32 {
 /// Destroy an unnamed semaphore.
 ///
 /// No-op in our implementation (no resources to free).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_destroy(_sem: *mut SemT) -> i32 {
     0
 }
@@ -76,7 +76,7 @@ pub extern "C" fn sem_destroy(_sem: *mut SemT) -> i32 {
 /// Lock (decrement) a semaphore, blocking if the value is zero.
 ///
 /// Uses spin-yield waiting (no kernel futex support yet).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_wait(sem: *mut SemT) -> i32 {
     if sem.is_null() {
         errno::set_errno(errno::EINVAL);
@@ -108,7 +108,7 @@ pub extern "C" fn sem_wait(sem: *mut SemT) -> i32 {
 ///
 /// Returns 0 if the semaphore was decremented, -1 with EAGAIN if
 /// the semaphore is already zero.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_trywait(sem: *mut SemT) -> i32 {
     if sem.is_null() {
         errno::set_errno(errno::EINVAL);
@@ -144,7 +144,7 @@ pub extern "C" fn sem_trywait(sem: *mut SemT) -> i32 {
 /// Unlock (increment) a semaphore.
 ///
 /// If threads are waiting, one will be woken.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
     if sem.is_null() {
         errno::set_errno(errno::EINVAL);
@@ -180,7 +180,7 @@ pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
 ///
 /// Like `sem_wait` but returns `ETIMEDOUT` if the absolute time
 /// `abstime` passes before the semaphore can be decremented.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Timespec) -> i32 {
     if sem.is_null() || abstime.is_null() {
         errno::set_errno(errno::EINVAL);
@@ -223,7 +223,7 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
 }
 
 /// Get the current value of a semaphore.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_getvalue(sem: *mut SemT, sval: *mut i32) -> i32 {
     if sem.is_null() || sval.is_null() {
         errno::set_errno(errno::EINVAL);
@@ -243,7 +243,7 @@ pub extern "C" fn sem_getvalue(sem: *mut SemT, sval: *mut i32) -> i32 {
 /// Open a named semaphore.
 ///
 /// Stub: returns `SEM_FAILED` (not supported).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_open(
     _name: *const u8,
     _oflag: i32,
@@ -255,7 +255,7 @@ pub extern "C" fn sem_open(
 /// Close a named semaphore.
 ///
 /// Stub: returns -1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_close(_sem: *mut SemT) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -264,7 +264,7 @@ pub extern "C" fn sem_close(_sem: *mut SemT) -> i32 {
 /// Remove a named semaphore.
 ///
 /// Stub: returns -1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_unlink(_name: *const u8) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1

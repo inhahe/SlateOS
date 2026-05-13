@@ -124,7 +124,7 @@ pub fn get_errno() -> i32 {
 ///
 /// Returns a pointer to the errno variable.  C programs access errno
 /// via `*__errno_location()`.  This is the glibc/musl convention.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __errno_location() -> *mut i32 {
     // SAFETY: AtomicI32 has the same layout as i32.
     // The pointer is valid for the lifetime of the program.

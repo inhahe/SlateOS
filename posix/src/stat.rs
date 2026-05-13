@@ -120,43 +120,43 @@ impl Stat {
 // some build systems or languages need them as linkable symbols.
 
 /// `S_ISREG(mode)` — test for regular file.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn S_ISREG(mode: u32) -> i32 {
     i32::from((mode & crate::fcntl::S_IFMT) == crate::fcntl::S_IFREG)
 }
 
 /// `S_ISDIR(mode)` — test for directory.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn S_ISDIR(mode: u32) -> i32 {
     i32::from((mode & crate::fcntl::S_IFMT) == crate::fcntl::S_IFDIR)
 }
 
 /// `S_ISLNK(mode)` — test for symbolic link.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn S_ISLNK(mode: u32) -> i32 {
     i32::from((mode & crate::fcntl::S_IFMT) == crate::fcntl::S_IFLNK)
 }
 
 /// `S_ISCHR(mode)` — test for character device.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn S_ISCHR(mode: u32) -> i32 {
     i32::from((mode & crate::fcntl::S_IFMT) == crate::fcntl::S_IFCHR)
 }
 
 /// `S_ISBLK(mode)` — test for block device.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn S_ISBLK(mode: u32) -> i32 {
     i32::from((mode & crate::fcntl::S_IFMT) == crate::fcntl::S_IFBLK)
 }
 
 /// `S_ISFIFO(mode)` — test for FIFO.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn S_ISFIFO(mode: u32) -> i32 {
     i32::from((mode & crate::fcntl::S_IFMT) == crate::fcntl::S_IFIFO)
 }
 
 /// `S_ISSOCK(mode)` — test for socket.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn S_ISSOCK(mode: u32) -> i32 {
     i32::from((mode & crate::fcntl::S_IFMT) == crate::fcntl::S_IFSOCK)
 }
@@ -169,7 +169,7 @@ pub extern "C" fn S_ISSOCK(mode: u32) -> i32 {
 ///
 /// Stub: returns -1 with ENOSYS.  Our filesystem doesn't support
 /// device nodes or special files yet.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mknod(_pathname: *const u8, _mode: u32, _dev: u64) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
@@ -178,7 +178,7 @@ pub extern "C" fn mknod(_pathname: *const u8, _mode: u32, _dev: u64) -> i32 {
 /// Create a special file relative to a directory fd.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mknodat(_dirfd: i32, _pathname: *const u8, _mode: u32, _dev: u64) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
@@ -188,7 +188,7 @@ pub extern "C" fn mknodat(_dirfd: i32, _pathname: *const u8, _mode: u32, _dev: u
 ///
 /// Stub: returns -1 with ENOSYS.  Named pipes require kernel support
 /// for special file types in the filesystem.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mkfifo(_pathname: *const u8, _mode: u32) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
@@ -197,7 +197,7 @@ pub extern "C" fn mkfifo(_pathname: *const u8, _mode: u32) -> i32 {
 /// Create a FIFO relative to a directory fd.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mkfifoat(_dirfd: i32, _pathname: *const u8, _mode: u32) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1

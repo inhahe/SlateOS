@@ -43,7 +43,7 @@ static mut ENVIRON_PTRS: [*const u8; MAX_ENV + 1] = [core::ptr::null(); MAX_ENV 
 /// lifetime of the process.  The cast from `*mut [*const u8; N]`
 /// to `*mut *const u8` is valid because arrays have the same
 /// alignment and layout as their element type.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static mut environ: *mut *const u8 = {
     // Initialize to point at ENVIRON_PTRS[0] (which is null, making
     // this a valid empty null-terminated array).
@@ -61,7 +61,7 @@ pub static mut environ: *mut *const u8 = {
 /// # Safety
 ///
 /// `name` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getenv(name: *const u8) -> *const u8 {
     if name.is_null() {
         return core::ptr::null();
@@ -100,7 +100,7 @@ pub unsafe extern "C" fn getenv(name: *const u8) -> *const u8 {
 /// # Safety
 ///
 /// `name` and `value` must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i32) -> i32 {
     if name.is_null() || value.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
@@ -177,7 +177,7 @@ pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i3
 /// # Safety
 ///
 /// `name` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
     if name.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
@@ -241,7 +241,7 @@ pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
 /// # Safety
 ///
 /// `string` must be a valid null-terminated C string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
     if string.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
@@ -321,7 +321,7 @@ pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
 /// Clear the entire environment.
 ///
 /// Removes all environment variables.  Returns 0 on success.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clearenv() -> i32 {
     // SAFETY: Single-threaded access.
     let store = unsafe { core::ptr::addr_of_mut!(ENV_STORE).as_mut() };
@@ -347,7 +347,7 @@ pub extern "C" fn clearenv() -> i32 {
 /// # Safety
 ///
 /// `name` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn secure_getenv(name: *const u8) -> *const u8 {
     // No privilege escalation in our OS — just delegate.
     unsafe { getenv(name) }

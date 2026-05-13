@@ -45,7 +45,7 @@ pub struct EpollEvent {
 /// Create an epoll file descriptor.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn epoll_create(_size: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -54,7 +54,7 @@ pub extern "C" fn epoll_create(_size: i32) -> i32 {
 /// Create an epoll file descriptor with flags.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn epoll_create1(_flags: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -63,7 +63,7 @@ pub extern "C" fn epoll_create1(_flags: i32) -> i32 {
 /// Control an epoll file descriptor.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn epoll_ctl(
     _epfd: i32,
     _op: i32,
@@ -77,7 +77,7 @@ pub extern "C" fn epoll_ctl(
 /// Wait for events on an epoll file descriptor.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn epoll_wait(
     _epfd: i32,
     _events: *mut EpollEvent,
@@ -91,7 +91,7 @@ pub extern "C" fn epoll_wait(
 /// Wait for events with a signal mask.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn epoll_pwait(
     _epfd: i32,
     _events: *mut EpollEvent,
@@ -117,7 +117,7 @@ pub const EFD_SEMAPHORE: i32 = 1;
 /// Create an eventfd file descriptor.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn eventfd(_initval: u32, _flags: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -126,7 +126,7 @@ pub extern "C" fn eventfd(_initval: u32, _flags: i32) -> i32 {
 /// Read from an eventfd (glibc convenience wrapper).
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn eventfd_read(_fd: i32, _value: *mut u64) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -135,7 +135,7 @@ pub extern "C" fn eventfd_read(_fd: i32, _value: *mut u64) -> i32 {
 /// Write to an eventfd (glibc convenience wrapper).
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn eventfd_write(_fd: i32, _value: u64) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -165,7 +165,7 @@ pub struct Itimerspec {
 /// Create a timerfd file descriptor.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timerfd_create(_clockid: i32, _flags: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -174,7 +174,7 @@ pub extern "C" fn timerfd_create(_clockid: i32, _flags: i32) -> i32 {
 /// Arm or disarm a timerfd.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timerfd_settime(
     _fd: i32,
     _flags: i32,
@@ -188,7 +188,7 @@ pub extern "C" fn timerfd_settime(
 /// Get the current setting of a timerfd.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timerfd_gettime(_fd: i32, _curr_value: *mut Itimerspec) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -201,7 +201,7 @@ pub extern "C" fn timerfd_gettime(_fd: i32, _curr_value: *mut Itimerspec) -> i32
 /// Create or modify a signalfd.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn signalfd(_fd: i32, _mask: *const u64, _flags: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -250,7 +250,7 @@ pub const IN_NONBLOCK: i32 = 0o4000;
 /// Initialize an inotify instance.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inotify_init() -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -259,7 +259,7 @@ pub extern "C" fn inotify_init() -> i32 {
 /// Initialize an inotify instance with flags.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inotify_init1(_flags: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -268,7 +268,7 @@ pub extern "C" fn inotify_init1(_flags: i32) -> i32 {
 /// Add a watch to an inotify instance.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inotify_add_watch(
     _fd: i32,
     _pathname: *const u8,
@@ -281,7 +281,7 @@ pub extern "C" fn inotify_add_watch(
 /// Remove a watch from an inotify instance.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inotify_rm_watch(_fd: i32, _wd: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1

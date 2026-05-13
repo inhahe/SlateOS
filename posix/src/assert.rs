@@ -16,7 +16,7 @@
 /// # Safety
 ///
 /// All pointer arguments must be valid null-terminated strings or NULL.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __assert_fail(
     assertion: *const u8,
     file: *const u8,

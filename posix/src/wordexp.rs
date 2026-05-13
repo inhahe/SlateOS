@@ -84,7 +84,7 @@ struct WordBound {
 /// environment, and returns the result in `pwordexp`.
 ///
 /// Returns 0 on success, or a `WRDE_*` error code.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wordexp(
     words: *const u8,
     pwordexp: *mut WordexpT,
@@ -139,7 +139,7 @@ pub extern "C" fn wordexp(
 }
 
 /// Free the result of a `wordexp` call.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wordfree(pwordexp: *mut WordexpT) {
     if pwordexp.is_null() {
         return;

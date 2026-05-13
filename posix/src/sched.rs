@@ -49,7 +49,7 @@ pub struct SchedParam {
 ///
 /// Returns `SCHED_OTHER` for all processes (our scheduler doesn't
 /// use POSIX policies).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getscheduler(_pid: i32) -> i32 {
     SCHED_OTHER
 }
@@ -58,7 +58,7 @@ pub extern "C" fn sched_getscheduler(_pid: i32) -> i32 {
 ///
 /// Stub: succeeds silently.  Our scheduler uses its own priority
 /// system via `SYS_SCHED_SET_PROFILE`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setscheduler(
     _pid: i32,
     _policy: i32,
@@ -70,7 +70,7 @@ pub extern "C" fn sched_setscheduler(
 /// Get the scheduling parameters of a process.
 ///
 /// Returns priority 0 (default).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getparam(pid: i32, param: *mut SchedParam) -> i32 {
     let _ = pid;
     if param.is_null() {
@@ -85,7 +85,7 @@ pub extern "C" fn sched_getparam(pid: i32, param: *mut SchedParam) -> i32 {
 /// Set the scheduling parameters of a process.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setparam(
     _pid: i32,
     _param: *const SchedParam,
@@ -96,7 +96,7 @@ pub extern "C" fn sched_setparam(
 /// Get the minimum priority for a scheduling policy.
 ///
 /// Returns 0 for all policies.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_get_priority_min(_policy: i32) -> i32 {
     0
 }
@@ -104,7 +104,7 @@ pub extern "C" fn sched_get_priority_min(_policy: i32) -> i32 {
 /// Get the maximum priority for a scheduling policy.
 ///
 /// Returns 99 for real-time policies, 0 for SCHED_OTHER.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_get_priority_max(policy: i32) -> i32 {
     match policy {
         SCHED_FIFO | SCHED_RR => 99,
@@ -115,7 +115,7 @@ pub extern "C" fn sched_get_priority_max(policy: i32) -> i32 {
 /// Get the round-robin time quantum.
 ///
 /// Returns 100ms (a typical default) for all processes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_rr_get_interval(
     _pid: i32,
     tp: *mut crate::stat::Timespec,
@@ -153,7 +153,7 @@ pub struct CpuSetT {
 /// Get the CPU affinity mask for a process.
 ///
 /// Stub: returns a mask with CPU 0 set (single-CPU assumption).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getaffinity(
     _pid: i32,
     cpusetsize: usize,
@@ -183,7 +183,7 @@ pub extern "C" fn sched_getaffinity(
 /// Set the CPU affinity mask for a process.
 ///
 /// Stub: always succeeds (ignores the mask).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setaffinity(
     _pid: i32,
     _cpusetsize: usize,
@@ -196,7 +196,7 @@ pub extern "C" fn sched_setaffinity(
 ///
 /// Stub: always returns 0 (single-CPU assumption until SMP is
 /// implemented in the kernel).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getcpu() -> i32 {
     0
 }
@@ -204,7 +204,7 @@ pub extern "C" fn sched_getcpu() -> i32 {
 /// Get CPU and NUMA node (Linux vDSO interface).
 ///
 /// Stub: returns 0 for both CPU and node.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getcpu(cpu: *mut u32, node: *mut u32) -> i32 {
     if !cpu.is_null() {
         // SAFETY: Caller guarantees pointer validity.

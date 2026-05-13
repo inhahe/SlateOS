@@ -81,7 +81,7 @@ pub type FtwFn = extern "C" fn(*const u8, *const Stat, i32) -> i32;
 ///
 /// Returns 0 on success, -1 on error, or the non-zero value
 /// returned by `callback`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ftw(
     dirpath: *const u8,
     callback: FtwFn,
@@ -198,7 +198,7 @@ pub type NftwFn = extern "C" fn(*const u8, *const Stat, i32, *const FTW) -> i32;
 ///
 /// Like `ftw` but supports flags (`FTW_DEPTH`, `FTW_PHYS`, etc.)
 /// and provides an `FTW` struct with base offset and depth level.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nftw(
     dirpath: *const u8,
     callback: NftwFn,
@@ -429,7 +429,7 @@ fn find_basename_offset(path: *const u8) -> i32 {
 ///
 /// On our OS, `off_t` is always 64-bit (LP64 data model), so
 /// `struct stat` and `ftw` already handle large files.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ftw64(
     path: *const u8,
     callback: FtwFn,
@@ -439,7 +439,7 @@ pub extern "C" fn ftw64(
 }
 
 /// `nftw64` — Large File Support alias for `nftw`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nftw64(
     path: *const u8,
     callback: NftwFn,

@@ -28,7 +28,7 @@ pub const WCONTINUED: i32 = 8;
 // ---------------------------------------------------------------------------
 
 /// True if child terminated normally (via `exit()`).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_snake_case)]
 pub extern "C" fn WIFEXITED(status: i32) -> i32 {
     i32::from(crate::process::wifexited(status))
@@ -37,14 +37,14 @@ pub extern "C" fn WIFEXITED(status: i32) -> i32 {
 /// Return the exit status of the child.
 ///
 /// Only meaningful if `WIFEXITED(status)` is true.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_snake_case)]
 pub extern "C" fn WEXITSTATUS(status: i32) -> i32 {
     crate::process::wexitstatus(status)
 }
 
 /// True if child was terminated by a signal.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_snake_case)]
 pub extern "C" fn WIFSIGNALED(status: i32) -> i32 {
     i32::from(crate::process::wifsignaled(status))
@@ -53,14 +53,14 @@ pub extern "C" fn WIFSIGNALED(status: i32) -> i32 {
 /// Return the signal number that terminated the child.
 ///
 /// Only meaningful if `WIFSIGNALED(status)` is true.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_snake_case)]
 pub extern "C" fn WTERMSIG(status: i32) -> i32 {
     crate::process::wtermsig(status)
 }
 
 /// True if child is currently stopped.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_snake_case)]
 pub extern "C" fn WIFSTOPPED(status: i32) -> i32 {
     // Stopped: low 8 bits = 0x7f.
@@ -70,7 +70,7 @@ pub extern "C" fn WIFSTOPPED(status: i32) -> i32 {
 /// Return the signal that stopped the child.
 ///
 /// Only meaningful if `WIFSTOPPED(status)` is true.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_snake_case)]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn WSTOPSIG(status: i32) -> i32 {
@@ -78,7 +78,7 @@ pub extern "C" fn WSTOPSIG(status: i32) -> i32 {
 }
 
 /// True if child produced a core dump (non-POSIX but widely available).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_snake_case)]
 pub extern "C" fn WCOREDUMP(status: i32) -> i32 {
     i32::from(status & 0x80 != 0)

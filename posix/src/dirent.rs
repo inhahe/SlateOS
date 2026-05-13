@@ -78,7 +78,7 @@ pub struct Dir {
 ///
 /// The returned `Dir` is heap-like but since we're `no_std`, we use
 /// a static pool of Dir structs.  Maximum 8 concurrent open directories.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn opendir(name: *const u8) -> *mut Dir {
     if name.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -132,7 +132,7 @@ pub extern "C" fn opendir(name: *const u8) -> *mut Dir {
 ///
 /// Returns a pointer to a `Dirent`, or NULL when the directory
 /// is exhausted (end of listing).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn readdir(dirp: *mut Dir) -> *mut Dirent {
     if dirp.is_null() {
         errno::set_errno(errno::EBADF);
@@ -175,7 +175,7 @@ pub extern "C" fn readdir(dirp: *mut Dir) -> *mut Dirent {
 /// Close a directory stream.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn closedir(dirp: *mut Dir) -> i32 {
     if dirp.is_null() {
         errno::set_errno(errno::EBADF);
@@ -187,7 +187,7 @@ pub extern "C" fn closedir(dirp: *mut Dir) -> i32 {
 }
 
 /// Reset a directory stream to the beginning.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn rewinddir(dirp: *mut Dir) {
     if dirp.is_null() {
         return;
@@ -201,7 +201,7 @@ pub extern "C" fn rewinddir(dirp: *mut Dir) {
 /// The returned value can be passed to `seekdir` to return to this
 /// position.  In our implementation, the position is simply the entry
 /// index.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn telldir(dirp: *mut Dir) -> i64 {
     if dirp.is_null() {
         return -1;
@@ -211,7 +211,7 @@ pub extern "C" fn telldir(dirp: *mut Dir) -> i64 {
 }
 
 /// Set the position of the directory stream.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn seekdir(dirp: *mut Dir, loc: i64) {
     if dirp.is_null() || loc < 0 {
         return;
@@ -227,7 +227,7 @@ pub extern "C" fn seekdir(dirp: *mut Dir, loc: i64) {
 ///
 /// Stub: returns -1 since our Dir doesn't keep an open fd (the entire
 /// listing is buffered at opendir time).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dirfd(_dirp: *mut Dir) -> i32 {
     // Our implementation reads the full directory at open time and
     // doesn't hold an open fd.  Return -1 (invalid fd).
@@ -237,7 +237,7 @@ pub extern "C" fn dirfd(_dirp: *mut Dir) -> i32 {
 /// Compare two directory entries alphabetically by name.
 ///
 /// Suitable as a comparator for `scandir`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn alphasort(a: *const *const Dirent, b: *const *const Dirent) -> i32 {
     if a.is_null() || b.is_null() {
         return 0;
@@ -323,7 +323,7 @@ unsafe fn scandir_sort(
 /// and `*mut Dirent` are safe because our `malloc` uses `mmap`, which
 /// returns page-aligned memory (≥ 4096 bytes).
 #[allow(clippy::cast_ptr_alignment)]
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn scandir(
     dirname: *const u8,
     namelist: *mut *mut *mut Dirent,
@@ -440,7 +440,7 @@ pub extern "C" fn scandir(
 ///
 /// Uses `strverscmp` on the `d_name` fields.  Like `alphasort`, this is
 /// intended as a comparator for `scandir`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn versionsort(a: *const *const Dirent, b: *const *const Dirent) -> i32 {
     if a.is_null() || b.is_null() {
         return 0;
@@ -471,7 +471,7 @@ pub extern "C" fn versionsort(a: *const *const Dirent, b: *const *const Dirent) 
 /// # Safety
 ///
 /// `dirp`, `entry`, and `result` must all be valid, non-null pointers.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn readdir_r(
     dirp: *mut Dir,
     entry: *mut Dirent,
@@ -515,7 +515,7 @@ pub extern "C" fn readdir_r(
 /// `SYS_FS_LIST_DIR` with a path (not an fd).  Supporting fd-based
 /// directory streams would require kernel support for listing a
 /// directory by fd.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fdopendir(_fd: i32) -> *mut Dir {
     // Our kernel's SYS_FS_LIST_DIR takes a path, not an fd.
     // Without fd-to-path resolution support, we can't implement this.
@@ -610,13 +610,13 @@ fn free_dir(dir: *mut Dir) {
 // ---------------------------------------------------------------------------
 
 /// `readdir64` — LFS64 alias for `readdir`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn readdir64(dirp: *mut Dir) -> *mut Dirent {
     readdir(dirp)
 }
 
 /// `readdir_r64` — LFS64 alias for `readdir_r`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn readdir_r64(
     dirp: *mut Dir,
     entry: *mut Dirent,
@@ -626,7 +626,7 @@ pub unsafe extern "C" fn readdir_r64(
 }
 
 /// `scandir64` — LFS64 alias for `scandir`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::cast_ptr_alignment)]
 pub extern "C" fn scandir64(
     dirname: *const u8,

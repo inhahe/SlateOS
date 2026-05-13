@@ -84,7 +84,7 @@ pub struct Flock {
 /// Performs various operations on open file descriptors.
 ///
 /// Returns the result of the command, or -1 on error (errno set).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
     // Verify the fd exists.
     if fdtable::get_fd(fd).is_none() {
@@ -178,7 +178,7 @@ pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
 }
 
 /// `fcntl64` — LP64 alias for `fcntl` (off_t is already 64-bit).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fcntl64(fd: Fd, cmd: i32, arg: i64) -> i32 {
     fcntl(fd, cmd, arg)
 }

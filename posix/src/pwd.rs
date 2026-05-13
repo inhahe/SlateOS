@@ -109,7 +109,7 @@ static mut GR_POS: i32 = 0;
 /// Look up a user by name.
 ///
 /// Returns a pointer to a static Passwd struct, or null if not found.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getpwnam(name: *const u8) -> *const Passwd {
     if name.is_null() {
         return core::ptr::null();
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn getpwnam(name: *const u8) -> *const Passwd {
 /// Look up a user by UID.
 ///
 /// Returns a pointer to a static Passwd struct, or null if not found.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpwuid(uid: UidT) -> *const Passwd {
     if uid == 0 {
         return &raw const ROOT_PASSWD;
@@ -136,7 +136,7 @@ pub extern "C" fn getpwuid(uid: UidT) -> *const Passwd {
 }
 
 /// Rewind the password database to the beginning.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setpwent() {
     // SAFETY: Single-threaded access.
     unsafe { core::ptr::addr_of_mut!(PW_POS).write(0); }
@@ -145,7 +145,7 @@ pub extern "C" fn setpwent() {
 /// Read the next entry from the password database.
 ///
 /// Returns null when all entries have been read.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpwent() -> *const Passwd {
     let pos = unsafe { *core::ptr::addr_of!(PW_POS) };
     if pos == 0 {
@@ -156,7 +156,7 @@ pub extern "C" fn getpwent() -> *const Passwd {
 }
 
 /// Close the password database.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn endpwent() {
     unsafe { core::ptr::addr_of_mut!(PW_POS).write(0); }
 }
@@ -166,7 +166,7 @@ pub extern "C" fn endpwent() {
 // ---------------------------------------------------------------------------
 
 /// Look up a group by name.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getgrnam(name: *const u8) -> *const Group {
     if name.is_null() {
         return core::ptr::null();
@@ -181,7 +181,7 @@ pub unsafe extern "C" fn getgrnam(name: *const u8) -> *const Group {
 }
 
 /// Look up a group by GID.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getgrgid(gid: GidT) -> *const Group {
     if gid == 0 {
         return &raw const ROOT_GROUP;
@@ -190,13 +190,13 @@ pub extern "C" fn getgrgid(gid: GidT) -> *const Group {
 }
 
 /// Rewind the group database.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setgrent() {
     unsafe { core::ptr::addr_of_mut!(GR_POS).write(0); }
 }
 
 /// Read the next entry from the group database.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getgrent() -> *const Group {
     let pos = unsafe { *core::ptr::addr_of!(GR_POS) };
     if pos == 0 {
@@ -207,7 +207,7 @@ pub extern "C" fn getgrent() -> *const Group {
 }
 
 /// Close the group database.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn endgrent() {
     unsafe { core::ptr::addr_of_mut!(GR_POS).write(0); }
 }
@@ -224,7 +224,7 @@ pub extern "C" fn endgrent() {
 ///
 /// Returns 0 on success, or an error code (`ERANGE` if `buflen` is
 /// too small).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getpwnam_r(
     name: *const u8,
     pwd: *mut Passwd,
@@ -254,7 +254,7 @@ pub unsafe extern "C" fn getpwnam_r(
 /// Look up a user by UID (reentrant).
 ///
 /// Same semantics as `getpwnam_r`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getpwuid_r(
     uid: UidT,
     pwd: *mut Passwd,
@@ -276,7 +276,7 @@ pub unsafe extern "C" fn getpwuid_r(
 }
 
 /// Look up a group by name (reentrant).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getgrnam_r(
     name: *const u8,
     grp: *mut Group,
@@ -303,7 +303,7 @@ pub unsafe extern "C" fn getgrnam_r(
 }
 
 /// Look up a group by GID (reentrant).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getgrgid_r(
     gid: GidT,
     grp: *mut Group,
@@ -429,7 +429,7 @@ fn fill_group_r(
 /// Get the login name.
 ///
 /// Returns "root" (our only user).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getlogin() -> *const u8 {
     c"root".as_ptr().cast::<u8>()
 }
@@ -437,7 +437,7 @@ pub extern "C" fn getlogin() -> *const u8 {
 /// Get the login name into a buffer.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getlogin_r(buf: *mut u8, bufsize: usize) -> i32 {
     if buf.is_null() || bufsize < 5 {
         crate::errno::set_errno(crate::errno::ERANGE);

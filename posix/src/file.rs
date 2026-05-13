@@ -30,7 +30,7 @@ use crate::types::*;
 /// `SYS_FS_OPEN(path_ptr, path_len, flags)`.
 ///
 /// Returns a file descriptor on success, -1 on error (errno set).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
     let _ = mode; // Our kernel doesn't use mode in open yet.
 
@@ -90,7 +90,7 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
 /// the handle type stored in the fd table.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn close(fd: Fd) -> i32 {
     let Some(entry) = fdtable::close_fd(fd) else {
         errno::set_errno(errno::EBADF);
@@ -180,7 +180,7 @@ pub extern "C" fn close(fd: Fd) -> i32 {
 /// - Console → `SYS_CONSOLE_READ_CHAR` (one byte at a time)
 ///
 /// Returns number of bytes read, 0 at EOF, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
@@ -276,7 +276,7 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
 /// - Console → `SYS_CONSOLE_WRITE`
 ///
 /// Returns number of bytes written, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
@@ -395,7 +395,7 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
 ///
 /// Returns the resulting offset from the beginning of the file,
 /// or -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
     // POSIX: EINVAL if whence is not a valid value.
     if whence != crate::fcntl::SEEK_SET
@@ -430,7 +430,7 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
 /// This is implemented as seek→read→seek-back.  This is not atomic
 /// with respect to other threads, but sufficient for single-threaded
 /// programs.  Pipes and consoles return `ESPIPE`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> SsizeT {
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
@@ -483,7 +483,7 @@ pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> Ssi
 /// Write to a file at a given offset without changing the file position.
 ///
 /// Same seek→write→seek-back strategy as `pread`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pwrite(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> SsizeT {
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
@@ -549,7 +549,7 @@ pub struct Iovec {
 ///
 /// Reads sequentially into each iovec buffer.  Returns the total
 /// number of bytes read, or -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn readv(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
     if iov.is_null() || iovcnt <= 0 || iovcnt > 1024 {
         // POSIX: EINVAL if iovcnt ≤ 0 or > IOV_MAX (1024).
@@ -587,7 +587,7 @@ pub extern "C" fn readv(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
 ///
 /// Writes sequentially from each iovec buffer.  Returns the total
 /// number of bytes written, or -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn writev(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
     if iov.is_null() || iovcnt <= 0 || iovcnt > 1024 {
         // POSIX: EINVAL if iovcnt ≤ 0 or > IOV_MAX (1024).
@@ -627,7 +627,7 @@ pub extern "C" fn writev(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
 ///
 /// Returns the lowest available fd pointing to the same resource,
 /// or -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dup(oldfd: Fd) -> Fd {
     let Some(entry) = lookup_fd(oldfd) else { return -1; };
 
@@ -697,7 +697,7 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
 ///
 /// If `newfd` is already open, it is silently closed first.
 /// Returns `newfd` on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
     if oldfd == newfd {
         // POSIX: if oldfd == newfd and oldfd is valid, return newfd.
@@ -792,7 +792,7 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
 /// Like `dup2`, but the `flags` parameter can include `O_CLOEXEC`.
 ///
 /// Returns `newfd` on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dup3(oldfd: Fd, newfd: Fd, flags: i32) -> Fd {
     if oldfd == newfd {
         // POSIX / Linux: dup3 returns EINVAL when oldfd == newfd
@@ -818,7 +818,7 @@ pub extern "C" fn dup3(oldfd: Fd, newfd: Fd, flags: i32) -> Fd {
 ///
 /// `flags` is currently ignored (Linux supports `CLOSE_RANGE_UNSHARE`
 /// and `CLOSE_RANGE_CLOEXEC`, neither of which is meaningful for us).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn close_range(first: u32, last: u32, _flags: u32) -> i32 {
     let mut fd = first;
     while fd <= last {
@@ -833,7 +833,7 @@ pub extern "C" fn close_range(first: u32, last: u32, _flags: u32) -> i32 {
 ///
 /// BSD/Solaris extension.  Closes all fds from `lowfd` to the table
 /// size limit.  Returns nothing (void in C).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn closefrom(lowfd: i32) {
     let max_fd = fdtable::MAX_FDS as i32;
     let mut fd = lowfd.max(0);
@@ -851,7 +851,7 @@ pub extern "C" fn closefrom(lowfd: i32) {
 ///
 /// Our kernel's `SYS_FS_STAT` returns metadata in a kernel-defined
 /// format.  We translate it to the POSIX `struct stat`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
     if path.is_null() || buf.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -886,7 +886,7 @@ pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
 ///
 /// Only meaningful for File handles.  Pipe fds return a
 /// minimal stat with `st_mode = S_IFIFO`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
     if buf.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -932,7 +932,7 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
 }
 
 /// Get symbolic link status (don't follow final symlink).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
     if path.is_null() || buf.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -963,7 +963,7 @@ pub extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Remove a directory entry (delete a file).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn unlink(path: *const u8) -> i32 {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -982,7 +982,7 @@ pub extern "C" fn unlink(path: *const u8) -> i32 {
 /// Rename a file.
 ///
 /// Our kernel's `SYS_FS_RENAME` takes (old_path, old_len, new_path, new_len).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn rename(oldpath: *const u8, newpath: *const u8) -> i32 {
     if oldpath.is_null() || newpath.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -1009,7 +1009,7 @@ pub extern "C" fn rename(oldpath: *const u8, newpath: *const u8) -> i32 {
 }
 
 /// Create a hard link.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn link(oldpath: *const u8, newpath: *const u8) -> i32 {
     if oldpath.is_null() || newpath.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -1036,7 +1036,7 @@ pub extern "C" fn link(oldpath: *const u8, newpath: *const u8) -> i32 {
 }
 
 /// Create a symbolic link.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn symlink(target: *const u8, linkpath: *const u8) -> i32 {
     if target.is_null() || linkpath.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -1066,7 +1066,7 @@ pub extern "C" fn symlink(target: *const u8, linkpath: *const u8) -> i32 {
 /// Read a symbolic link.
 ///
 /// Returns the number of bytes placed in `buf`, or -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn readlink(path: *const u8, buf: *mut u8, bufsiz: SizeT) -> SsizeT {
     if path.is_null() || buf.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -1093,7 +1093,7 @@ pub extern "C" fn readlink(path: *const u8, buf: *mut u8, bufsiz: SizeT) -> Ssiz
 // ---------------------------------------------------------------------------
 
 /// Create a directory.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mkdir(path: *const u8, mode: ModeT) -> i32 {
     let _ = mode; // Our kernel doesn't use mode for mkdir yet.
 
@@ -1112,7 +1112,7 @@ pub extern "C" fn mkdir(path: *const u8, mode: ModeT) -> i32 {
 }
 
 /// Remove a directory.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn rmdir(path: *const u8) -> i32 {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -1133,7 +1133,7 @@ pub extern "C" fn rmdir(path: *const u8) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Truncate a file to a specified length (by path).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn truncate(path: *const u8, length: OffT) -> i32 {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -1161,7 +1161,7 @@ pub extern "C" fn truncate(path: *const u8, length: OffT) -> i32 {
 }
 
 /// Truncate a file to a specified length (by fd).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
     // POSIX: "If length is negative, the function shall fail and the
     // file size shall remain unchanged.  [EINVAL]."
@@ -1192,7 +1192,7 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
 /// Synchronize file data to storage.
 ///
 /// Only meaningful for File handles.  Returns 0 for pipes/console.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fsync(fd: Fd) -> i32 {
     let Some(entry) = lookup_fd(fd) else { return -1; };
 
@@ -1309,7 +1309,7 @@ pub unsafe fn c_strlen_pub(s: *const u8) -> usize {
 /// if the file exists.
 ///
 /// Returns 0 on success, -1 on error (errno set).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -1346,7 +1346,7 @@ pub extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, _flags: i32) -> i32 {
     if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
@@ -1385,7 +1385,7 @@ pub const AT_REMOVEDIR: i32 = 0x200;
 /// Open a file relative to a directory fd.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -> Fd {
     if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
@@ -1397,7 +1397,7 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
 /// Get file status relative to a directory fd.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, _flags: i32) -> i32 {
     if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
@@ -1412,7 +1412,7 @@ pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, _flags: i
 /// Otherwise acts like unlink.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
     if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
@@ -1428,7 +1428,7 @@ pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
 /// Rename a file relative to directory fds.
 ///
 /// POSIX: each `dirfd` is ignored when its corresponding path is absolute.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn renameat(
     olddirfd: i32,
     oldpath: *const u8,
@@ -1449,7 +1449,7 @@ pub extern "C" fn renameat(
 /// `flags` can include `RENAME_NOREPLACE` (1), `RENAME_EXCHANGE` (2).
 /// Our kernel doesn't support these flags yet, so non-zero flags
 /// return EINVAL.  Zero flags delegates to `renameat`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn renameat2(
     olddirfd: i32,
     oldpath: *const u8,
@@ -1468,7 +1468,7 @@ pub extern "C" fn renameat2(
 /// Create a directory relative to a directory fd.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
     if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
@@ -1480,7 +1480,7 @@ pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
 /// Read a symbolic link relative to a directory fd.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn readlinkat(
     dirfd: i32,
     path: *const u8,
@@ -1499,7 +1499,7 @@ pub extern "C" fn readlinkat(
 /// POSIX: if `linkpath` is absolute, `newdirfd` is ignored.
 /// Note: `target` is stored as-is (not resolved), so its absoluteness
 /// doesn't affect whether we need `newdirfd`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u8) -> i32 {
     if newdirfd != AT_FDCWD && !is_absolute_path(linkpath) {
         errno::set_errno(errno::ENOSYS);
@@ -1511,7 +1511,7 @@ pub extern "C" fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u
 /// Create a hard link relative to directory fds.
 ///
 /// POSIX: each `dirfd` is ignored when its corresponding path is absolute.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn linkat(
     olddirfd: i32,
     oldpath: *const u8,
@@ -1533,7 +1533,7 @@ pub extern "C" fn linkat(
 /// Stub: accepts silently.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, _flags: i32) -> i32 {
     if dirfd != AT_FDCWD && !is_absolute_path(path) {
         errno::set_errno(errno::ENOSYS);
@@ -1547,7 +1547,7 @@ pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, _flags: i32
 /// Stub: accepts silently.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fchownat(
     dirfd: i32,
     path: *const u8,
@@ -1571,7 +1571,7 @@ pub extern "C" fn fchownat(
 /// Stub: our OS doesn't have file permissions yet.  Accepts silently.
 ///
 /// Returns 0 (always succeeds).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn chmod(_path: *const u8, _mode: ModeT) -> i32 {
     // No permission system yet — accept silently.
     0
@@ -1580,7 +1580,7 @@ pub extern "C" fn chmod(_path: *const u8, _mode: ModeT) -> i32 {
 /// Change file mode bits (by fd).
 ///
 /// Stub: accepts silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fchmod(_fd: Fd, _mode: ModeT) -> i32 {
     0
 }
@@ -1588,7 +1588,7 @@ pub extern "C" fn fchmod(_fd: Fd, _mode: ModeT) -> i32 {
 /// Change file owner and group.
 ///
 /// Stub: our OS doesn't have multi-user support.  Accepts silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn chown(_path: *const u8, _owner: UidT, _group: GidT) -> i32 {
     0
 }
@@ -1596,7 +1596,7 @@ pub extern "C" fn chown(_path: *const u8, _owner: UidT, _group: GidT) -> i32 {
 /// Change file owner and group (by fd).
 ///
 /// Stub: accepts silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fchown(_fd: Fd, _owner: UidT, _group: GidT) -> i32 {
     0
 }
@@ -1605,7 +1605,7 @@ pub extern "C" fn fchown(_fd: Fd, _owner: UidT, _group: GidT) -> i32 {
 ///
 /// Like `chown`, but does not follow symbolic links — changes ownership
 /// of the link itself rather than its target.  Stub: accepts silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lchown(_path: *const u8, _owner: UidT, _group: GidT) -> i32 {
     0
 }
@@ -1613,7 +1613,7 @@ pub extern "C" fn lchown(_path: *const u8, _owner: UidT, _group: GidT) -> i32 {
 /// Set file mode creation mask.
 ///
 /// Stub: returns 0o022 (previous mask) and ignores the new mask.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn umask(_cmask: ModeT) -> ModeT {
     // No permission system yet — return a typical default mask.
     0o022
@@ -1645,7 +1645,7 @@ pub const POSIX_FADV_DONTNEED: i32 = 4;
 /// Stub: always returns 0 (success).  The kernel doesn't use file
 /// access hints yet, but programs that call `posix_fadvise` should
 /// not fail.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_fadvise(_fd: Fd, _offset: OffT, _len: OffT, _advice: i32) -> i32 {
     0 // Succeed silently — advice is purely advisory.
 }
@@ -1654,7 +1654,7 @@ pub extern "C" fn posix_fadvise(_fd: Fd, _offset: OffT, _len: OffT, _advice: i32
 ///
 /// Stub: returns 0 without actually preallocating.  The filesystem
 /// layer doesn't support preallocation yet.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_fallocate(_fd: Fd, _offset: OffT, _len: OffT) -> i32 {
     0
 }
@@ -1678,7 +1678,7 @@ pub const LOCK_NB: i32 = 4;
 /// at the kernel level.  Programs that call `flock` at startup for
 /// lock files will proceed normally (the lock is advisory and not
 /// enforced).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn flock(_fd: Fd, _operation: i32) -> i32 {
     // Advisory locking not yet implemented in the kernel.
     // Return success so programs that create lock files don't fail.
@@ -1703,7 +1703,7 @@ pub const F_TEST: i32 = 3;
 /// Stub: always succeeds.  Like `flock`, advisory file locking is not
 /// yet enforced by the kernel.  Programs that use `lockf` for lock
 /// files or serialization will proceed normally.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lockf(_fd: Fd, _cmd: i32, _len: OffT) -> i32 {
     // Advisory locking not yet implemented.
     0
@@ -1722,7 +1722,7 @@ pub extern "C" fn lockf(_fd: Fd, _cmd: i32, _len: OffT) -> i32 {
 /// is null, reads from the current file position and advances it.
 ///
 /// Stub: performs the copy in userspace via pread/read + write loop.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sendfile(
     out_fd: Fd,
     in_fd: Fd,
@@ -1840,7 +1840,7 @@ pub extern "C" fn sendfile(
 /// from the current fd position and advances it.
 ///
 /// Stub: performs userspace pread/read + pwrite/write copy.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn copy_file_range(
     fd_in: Fd,
     off_in: *mut i64,
@@ -1939,7 +1939,7 @@ pub struct Timeval {
 ///
 /// Stub: always returns 0.  Our filesystem doesn't track per-file
 /// timestamps yet.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn utimes(_path: *const u8, _times: *const Timeval) -> i32 {
     0
 }
@@ -1947,7 +1947,7 @@ pub extern "C" fn utimes(_path: *const u8, _times: *const Timeval) -> i32 {
 /// Set file access and modification times on an open fd.
 ///
 /// Stub: always returns 0.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn futimes(_fd: Fd, _times: *const Timeval) -> i32 {
     0
 }
@@ -1960,7 +1960,7 @@ pub const UTIME_OMIT: i64 = (1 << 30) - 2;
 /// Set file timestamps with nanosecond precision (relative to dirfd).
 ///
 /// Stub: always returns 0.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn utimensat(
     _dirfd: Fd,
     _path: *const u8,
@@ -1973,7 +1973,7 @@ pub extern "C" fn utimensat(
 /// Set file timestamps with nanosecond precision on an open fd.
 ///
 /// Stub: always returns 0.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn futimens(_fd: Fd, _times: *const crate::stat::Timespec) -> i32 {
     0
 }
@@ -2015,7 +2015,7 @@ fn translate_open_flags(posix_flags: i32) -> u64 {
 /// Equivalent to `open(path, O_CREAT | O_WRONLY | O_TRUNC, mode)`.
 /// This is a POSIX function retained for compatibility; new code should
 /// use `open()` directly.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn creat(path: *const u8, mode: ModeT) -> Fd {
     open(path, fcntl::O_CREAT | fcntl::O_WRONLY | fcntl::O_TRUNC, mode)
 }
@@ -2029,31 +2029,31 @@ pub extern "C" fn creat(path: *const u8, mode: ModeT) -> Fd {
 // _FILE_OFFSET_BITS=64 or that explicitly use the *64 interfaces.
 
 /// `open64` — alias for `open` on LP64.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn open64(path: *const u8, flags: i32, mode: ModeT) -> Fd {
     open(path, flags, mode)
 }
 
 /// `lseek64` — alias for `lseek` on LP64.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lseek64(fd: Fd, offset: OffT, whence: i32) -> OffT {
     lseek(fd, offset, whence)
 }
 
 /// `stat64` — alias for `stat` on LP64.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn stat64(path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
     stat(path, statbuf)
 }
 
 /// `fstat64` — alias for `fstat` on LP64.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fstat64(fd: Fd, statbuf: *mut crate::stat::Stat) -> i32 {
     fstat(fd, statbuf)
 }
 
 /// `lstat64` — alias for `lstat` on LP64.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lstat64(path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
     lstat(path, statbuf)
 }
@@ -2068,37 +2068,37 @@ pub extern "C" fn lstat64(path: *const u8, statbuf: *mut crate::stat::Stat) -> i
 // our current struct layout.
 
 /// glibc internal: `__xstat(ver, path, buf)` → `stat(path, buf)`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __xstat(_ver: i32, path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
     stat(path, statbuf)
 }
 
 /// glibc internal: `__fxstat(ver, fd, buf)` → `fstat(fd, buf)`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __fxstat(_ver: i32, fd: Fd, statbuf: *mut crate::stat::Stat) -> i32 {
     fstat(fd, statbuf)
 }
 
 /// glibc internal: `__lxstat(ver, path, buf)` → `lstat(path, buf)`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __lxstat(_ver: i32, path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
     lstat(path, statbuf)
 }
 
 /// glibc internal: 64-bit `__xstat64`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __xstat64(_ver: i32, path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
     stat(path, statbuf)
 }
 
 /// glibc internal: 64-bit `__fxstat64`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __fxstat64(_ver: i32, fd: Fd, statbuf: *mut crate::stat::Stat) -> i32 {
     fstat(fd, statbuf)
 }
 
 /// glibc internal: 64-bit `__lxstat64`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __lxstat64(_ver: i32, path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
     lstat(path, statbuf)
 }
@@ -2111,13 +2111,13 @@ pub extern "C" fn __lxstat64(_ver: i32, path: *const u8, statbuf: *mut crate::st
 ///
 /// `buflen` is the size of the buffer `buf` points to.  We ignore it
 /// (no runtime overflow check) and delegate to `read`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __read_chk(fd: Fd, buf: *mut u8, count: SizeT, _buflen: SizeT) -> SsizeT {
     read(fd, buf, count)
 }
 
 /// `__pread_chk` — fortified `pread`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __pread_chk(
     fd: Fd,
     buf: *mut u8,
@@ -2129,7 +2129,7 @@ pub extern "C" fn __pread_chk(
 }
 
 /// `__pread64_chk` — LP64 alias for `__pread_chk`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __pread64_chk(
     fd: Fd,
     buf: *mut u8,
@@ -2141,7 +2141,7 @@ pub extern "C" fn __pread64_chk(
 }
 
 /// `__getcwd_chk` — fortified `getcwd`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __getcwd_chk(
     buf: *mut u8,
     size: SizeT,
@@ -2151,7 +2151,7 @@ pub extern "C" fn __getcwd_chk(
 }
 
 /// `__realpath_chk` — fortified `realpath`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __realpath_chk(
     path: *const u8,
     resolved: *mut u8,

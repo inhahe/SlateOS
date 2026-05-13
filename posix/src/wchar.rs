@@ -222,7 +222,7 @@ fn utf8_encode(cp: u32, buf: &mut [u8; 4]) -> usize {
 ///
 /// Returns 0 for null byte, 1..4 for valid UTF-8 lead bytes,
 /// -1 for invalid (sets errno to EILSEQ).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn mblen(s: *const u8, n: usize) -> i32 {
     if s.is_null() {
@@ -268,7 +268,7 @@ pub unsafe extern "C" fn mblen(s: *const u8, n: usize) -> i32 {
 ///
 /// Returns the number of bytes consumed (1..4), 0 for null character,
 /// or -1 for invalid sequence.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn mbtowc(pwc: *mut WcharT, s: *const u8, n: usize) -> i32 {
     if s.is_null() {
@@ -317,7 +317,7 @@ pub unsafe extern "C" fn mbtowc(pwc: *mut WcharT, s: *const u8, n: usize) -> i32
 ///
 /// Returns the number of bytes written (1..4), or -1 if the code
 /// point is not valid Unicode.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn wctomb(s: *mut u8, wc: WcharT) -> i32 {
     if s.is_null() {
@@ -350,7 +350,7 @@ pub unsafe extern "C" fn wctomb(s: *mut u8, wc: WcharT) -> i32 {
 ///
 /// Returns the number of wide characters written (not counting null),
 /// or `(size_t)-1` on encoding error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) -> usize {
     if src.is_null() {
@@ -410,7 +410,7 @@ pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) ->
 ///
 /// Returns the number of bytes written (not counting null terminator),
 /// or `(size_t)-1` if a code point is invalid.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn wcstombs(dst: *mut u8, src: *const WcharT, n: usize) -> usize {
     if src.is_null() {
@@ -465,13 +465,13 @@ pub unsafe extern "C" fn wcstombs(dst: *mut u8, src: *const WcharT, n: usize) ->
 // ---------------------------------------------------------------------------
 
 /// Convert a byte to a wide character.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn btowc(c: i32) -> WcharT {
     if (0..=127).contains(&c) { c } else { -1 }
 }
 
 /// Convert a wide character to a byte.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wctob(wc: WcharT) -> i32 {
     if (0..=127).contains(&wc) { wc } else { -1 }
 }
@@ -485,7 +485,7 @@ pub extern "C" fn wctob(wc: WcharT) -> i32 {
 /// Returns non-zero if `ps` is null or describes the initial shift
 /// state.  Returns 0 if a partial multi-byte sequence is buffered
 /// (e.g. mid-way through a `mbrtowc` call).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mbsinit(ps: *const MbstateT) -> i32 {
     if ps.is_null() {
         return 1; // Null pointer → initial state per POSIX.
@@ -512,7 +512,7 @@ static mut INTERNAL_MBSTATE: MbstateT = MbstateT::new();
 /// - 1..4: number of bytes consumed to complete a character
 /// - `(size_t)-2`: incomplete but valid so far (state updated)
 /// - `(size_t)-1`: invalid byte sequence (errno = EILSEQ)
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn mbrtowc(
     pwc: *mut WcharT,
@@ -631,7 +631,7 @@ pub unsafe extern "C" fn mbrtowc(
 /// UTF-8 encoding is stateless, but accepted for API compatibility.
 ///
 /// Returns the number of bytes written, or `(size_t)-1` on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn wcrtomb(
     s: *mut u8,
@@ -673,7 +673,7 @@ pub unsafe extern "C" fn wcrtomb(
 ///
 /// Returns -1 for non-printable, 0 for null, 1 for printable ASCII,
 /// 2 for CJK (basic heuristic using Unicode block ranges).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wcwidth(wc: WcharT) -> i32 {
     if wc == 0 {
         return 0;
@@ -699,7 +699,7 @@ pub extern "C" fn wcwidth(wc: WcharT) -> i32 {
 }
 
 /// Return the display width of a wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn wcswidth(s: *const WcharT, n: usize) -> i32 {
     if s.is_null() {
@@ -727,86 +727,86 @@ pub unsafe extern "C" fn wcswidth(s: *const WcharT, n: usize) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Check if wide character is alphanumeric.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswalnum(wc: WcharT) -> i32 {
     i32::from(matches!(wc, 0x30..=0x39 | 0x41..=0x5a | 0x61..=0x7a))
 }
 
 /// Check if wide character is alphabetic.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswalpha(wc: WcharT) -> i32 {
     i32::from(matches!(wc, 0x41..=0x5a | 0x61..=0x7a))
 }
 
 /// Check if wide character is a digit.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswdigit(wc: WcharT) -> i32 {
     i32::from(matches!(wc, 0x30..=0x39))
 }
 
 /// Check if wide character is a hex digit.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswxdigit(wc: WcharT) -> i32 {
     i32::from(matches!(wc, 0x30..=0x39 | 0x41..=0x46 | 0x61..=0x66))
 }
 
 /// Check if wide character is whitespace.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswspace(wc: WcharT) -> i32 {
     i32::from(matches!(wc, 0x09..=0x0d | 0x20))
 }
 
 /// Check if wide character is a blank (space or tab).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswblank(wc: WcharT) -> i32 {
     i32::from(matches!(wc, 0x09 | 0x20))
 }
 
 /// Check if wide character is printable.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswprint(wc: WcharT) -> i32 {
     i32::from(wc >= 0x20 && wc != 0x7f)
 }
 
 /// Check if wide character is a control character.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswcntrl(wc: WcharT) -> i32 {
     i32::from(wc < 0x20 || wc == 0x7f)
 }
 
 /// Check if wide character is uppercase.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswupper(wc: WcharT) -> i32 {
     i32::from(matches!(wc, 0x41..=0x5a))
 }
 
 /// Check if wide character is lowercase.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswlower(wc: WcharT) -> i32 {
     i32::from(matches!(wc, 0x61..=0x7a))
 }
 
 /// Check if wide character is punctuation.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswpunct(wc: WcharT) -> i32 {
     i32::from(iswprint(wc) != 0 && iswspace(wc) == 0 && iswalnum(wc) == 0)
 }
 
 /// Check if wide character is a graph character (printable, not space).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswgraph(wc: WcharT) -> i32 {
     i32::from(iswprint(wc) != 0 && wc != 0x20)
 }
 
 /// Convert wide character to lowercase.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn towlower(wc: WcharT) -> WcharT {
     if iswupper(wc) != 0 { wc + 32 } else { wc }
 }
 
 /// Convert wide character to uppercase.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn towupper(wc: WcharT) -> WcharT {
     if iswlower(wc) != 0 { wc - 32 } else { wc }
@@ -844,7 +844,7 @@ const WC_XDIGIT: WctypeT = 12;
 /// # Safety
 ///
 /// `name` must be a valid null-terminated C string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::indexing_slicing)]
 pub unsafe extern "C" fn wctype(name: *const u8) -> WctypeT {
     if name.is_null() {
@@ -882,7 +882,7 @@ pub unsafe extern "C" fn wctype(name: *const u8) -> WctypeT {
 /// Test a wide character against a class obtained from `wctype()`.
 ///
 /// Returns nonzero if `wc` belongs to the class identified by `ct`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswctype(wc: WcharT, ct: WctypeT) -> i32 {
     match ct {
         WC_ALNUM  => iswalnum(wc),
@@ -919,7 +919,7 @@ const WT_TOUPPER: WctransT = 2;
 /// # Safety
 ///
 /// `name` must be a valid null-terminated C string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::indexing_slicing)]
 pub unsafe extern "C" fn wctrans(name: *const u8) -> WctransT {
     if name.is_null() {
@@ -944,7 +944,7 @@ pub unsafe extern "C" fn wctrans(name: *const u8) -> WctransT {
 }
 
 /// Apply a transformation obtained from `wctrans()` to a wide character.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn towctrans(wc: WcharT, tr: WctransT) -> WcharT {
     match tr {
         WT_TOLOWER => towlower(wc),
@@ -958,7 +958,7 @@ pub extern "C" fn towctrans(wc: WcharT, tr: WctransT) -> WcharT {
 // ---------------------------------------------------------------------------
 
 /// Copy a wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcscpy(dst: *mut WcharT, src: *const WcharT) -> *mut WcharT {
     let mut i: usize = 0;
     loop {
@@ -972,7 +972,7 @@ pub unsafe extern "C" fn wcscpy(dst: *mut WcharT, src: *const WcharT) -> *mut Wc
 }
 
 /// Copy at most `n` wide characters.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsncpy(
     dst: *mut WcharT,
     src: *const WcharT,
@@ -996,7 +996,7 @@ pub unsafe extern "C" fn wcsncpy(
 }
 
 /// Return the length of a wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcslen(s: *const WcharT) -> usize {
     let mut i: usize = 0;
     while unsafe { *s.add(i) } != 0 {
@@ -1006,7 +1006,7 @@ pub unsafe extern "C" fn wcslen(s: *const WcharT) -> usize {
 }
 
 /// Compare two wide strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcscmp(s1: *const WcharT, s2: *const WcharT) -> i32 {
     let mut i: usize = 0;
     loop {
@@ -1024,7 +1024,7 @@ pub unsafe extern "C" fn wcscmp(s1: *const WcharT, s2: *const WcharT) -> i32 {
 }
 
 /// Compare at most `n` wide characters.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsncmp(
     s1: *const WcharT,
     s2: *const WcharT,
@@ -1047,7 +1047,7 @@ pub unsafe extern "C" fn wcsncmp(
 }
 
 /// Concatenate wide strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcscat(dst: *mut WcharT, src: *const WcharT) -> *mut WcharT {
     let dlen = unsafe { wcslen(dst) };
     unsafe { wcscpy(dst.add(dlen), src) };
@@ -1055,7 +1055,7 @@ pub unsafe extern "C" fn wcscat(dst: *mut WcharT, src: *const WcharT) -> *mut Wc
 }
 
 /// Find a wide character in a wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcschr(s: *const WcharT, wc: WcharT) -> *const WcharT {
     let mut i: usize = 0;
     loop {
@@ -1071,7 +1071,7 @@ pub unsafe extern "C" fn wcschr(s: *const WcharT, wc: WcharT) -> *const WcharT {
 }
 
 /// Find the last occurrence of a wide character.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsrchr(s: *const WcharT, wc: WcharT) -> *const WcharT {
     let len = unsafe { wcslen(s) };
     let mut i = len;
@@ -1093,7 +1093,7 @@ pub unsafe extern "C" fn wcsrchr(s: *const WcharT, wc: WcharT) -> *const WcharT 
 // ---------------------------------------------------------------------------
 
 /// Copy wide characters.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wmemcpy(
     dst: *mut WcharT,
     src: *const WcharT,
@@ -1108,7 +1108,7 @@ pub unsafe extern "C" fn wmemcpy(
 }
 
 /// Set wide characters to a value.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wmemset(dst: *mut WcharT, wc: WcharT, n: usize) -> *mut WcharT {
     let mut i: usize = 0;
     while i < n {
@@ -1119,7 +1119,7 @@ pub unsafe extern "C" fn wmemset(dst: *mut WcharT, wc: WcharT, n: usize) -> *mut
 }
 
 /// Compare wide character regions.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wmemcmp(s1: *const WcharT, s2: *const WcharT, n: usize) -> i32 {
     let mut i: usize = 0;
     while i < n {
@@ -1201,7 +1201,7 @@ unsafe fn wc_detect_base(nptr: *const WcharT, mut i: usize, mut base: i32) -> (i
 /// # Safety
 ///
 /// `nptr` must point to a valid null-terminated wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn wcstol(
     nptr: *const WcharT,
@@ -1275,7 +1275,7 @@ pub unsafe extern "C" fn wcstol(
 /// # Safety
 ///
 /// `nptr` must point to a valid null-terminated wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn wcstoul(
     nptr: *const WcharT,
@@ -1347,7 +1347,7 @@ pub unsafe extern "C" fn wcstoul(
 /// # Safety
 ///
 /// `nptr` must point to a valid null-terminated wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcstoll(
     nptr: *const WcharT,
     endptr: *mut *const WcharT,
@@ -1363,7 +1363,7 @@ pub unsafe extern "C" fn wcstoll(
 /// # Safety
 ///
 /// `nptr` must point to a valid null-terminated wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcstoull(
     nptr: *const WcharT,
     endptr: *mut *const WcharT,
@@ -1381,7 +1381,7 @@ pub unsafe extern "C" fn wcstoull(
 /// # Safety
 ///
 /// `nptr` must point to a valid null-terminated wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn wcstod(
     nptr: *const WcharT,
@@ -1444,7 +1444,7 @@ pub unsafe extern "C" fn wcstod(
 /// # Safety
 ///
 /// `nptr` must point to a valid null-terminated wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcstof(
     nptr: *const WcharT,
     endptr: *mut *const WcharT,
@@ -1467,7 +1467,7 @@ pub const MB_CUR_MAX: usize = 4;
 ///
 /// Equivalent to `mbrtowc(NULL, s, n, ps)` but doesn't store the
 /// decoded character.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mbrlen(s: *const u8, n: usize, ps: *mut MbstateT) -> usize {
     unsafe { mbrtowc(core::ptr::null_mut(), s, n, ps) }
 }
@@ -1479,7 +1479,7 @@ pub unsafe extern "C" fn mbrlen(s: *const u8, n: usize, ps: *mut MbstateT) -> us
 /// # Safety
 ///
 /// `dst` must have room for the existing string plus `n` + 1 wide chars.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsncat(
     dst: *mut WcharT,
     src: *const WcharT,
@@ -1505,7 +1505,7 @@ pub unsafe extern "C" fn wcsncat(
 /// # Safety
 ///
 /// `s` must be valid for `n * sizeof(wchar_t)` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wmemchr(
     s: *const WcharT,
     wc: WcharT,
@@ -1526,7 +1526,7 @@ pub unsafe extern "C" fn wmemchr(
 /// # Safety
 ///
 /// Both `dst` and `src` must be valid for `n * sizeof(wchar_t)` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wmemmove(
     dst: *mut WcharT,
     src: *const WcharT,
@@ -1553,7 +1553,7 @@ pub unsafe extern "C" fn wmemmove(
 /// # Safety
 ///
 /// Both strings must be valid null-terminated wide strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsstr(
     haystack: *const WcharT,
     needle: *const WcharT,
@@ -1593,7 +1593,7 @@ pub unsafe extern "C" fn wcsstr(
 /// # Safety
 ///
 /// Both strings must be valid null-terminated wide strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsspn(s: *const WcharT, accept: *const WcharT) -> usize {
     let mut count: usize = 0;
     loop {
@@ -1629,7 +1629,7 @@ pub unsafe extern "C" fn wcsspn(s: *const WcharT, accept: *const WcharT) -> usiz
 /// # Safety
 ///
 /// Both strings must be valid null-terminated wide strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcscspn(s: *const WcharT, reject: *const WcharT) -> usize {
     let mut count: usize = 0;
     loop {
@@ -1661,7 +1661,7 @@ pub unsafe extern "C" fn wcscspn(s: *const WcharT, reject: *const WcharT) -> usi
 /// # Safety
 ///
 /// Both strings must be valid null-terminated wide strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcspbrk(s: *const WcharT, accept: *const WcharT) -> *const WcharT {
     let mut i: usize = 0;
     loop {
@@ -1695,7 +1695,7 @@ pub unsafe extern "C" fn wcspbrk(s: *const WcharT, accept: *const WcharT) -> *co
 /// `delim` must be a valid null-terminated wide string.
 /// `saveptr` must point to a valid `*mut WcharT` (used as state).
 /// On first call, `s` must be a valid null-terminated wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcstok(
     s: *mut WcharT,
     delim: *const WcharT,
@@ -1773,7 +1773,7 @@ fn wchar_in_set(wc: WcharT, set: *const WcharT) -> bool {
 /// # Safety
 ///
 /// `s` must be a valid null-terminated wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsdup(s: *const WcharT) -> *mut WcharT {
     if s.is_null() {
         return core::ptr::null_mut();
@@ -1813,13 +1813,13 @@ pub unsafe extern "C" fn wcsdup(s: *const WcharT) -> *mut WcharT {
 /// # Safety
 ///
 /// Both `s1` and `s2` must be valid null-terminated wide strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcscoll(s1: *const WcharT, s2: *const WcharT) -> i32 {
     unsafe { wcscmp(s1, s2) }
 }
 
 /// Locale-aware wide string comparison (locale variant).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcscoll_l(s1: *const WcharT, s2: *const WcharT, _locale: usize) -> i32 {
     unsafe { wcscmp(s1, s2) }
 }
@@ -1834,7 +1834,7 @@ pub unsafe extern "C" fn wcscoll_l(s1: *const WcharT, s2: *const WcharT, _locale
 ///
 /// `dest` must be valid for `n` wide characters.  `src` must be
 /// a valid null-terminated wide string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsxfrm(dest: *mut WcharT, src: *const WcharT, n: usize) -> usize {
     let len = unsafe { wcslen(src) };
     if n > 0 {
@@ -1844,7 +1844,7 @@ pub unsafe extern "C" fn wcsxfrm(dest: *mut WcharT, src: *const WcharT, n: usize
 }
 
 /// Transform a wide string for locale-aware comparison (locale variant).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsxfrm_l(dest: *mut WcharT, src: *const WcharT, n: usize, _locale: usize) -> usize {
     unsafe { wcsxfrm(dest, src, n) }
 }
@@ -1864,7 +1864,7 @@ pub unsafe extern "C" fn wcsxfrm_l(dest: *mut WcharT, src: *const WcharT, n: usi
 ///
 /// `src` must point to a valid `*const u8` pointer to a multibyte string.
 /// `dst` must be valid for `len` wide characters (or may be NULL for counting).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mbsrtowcs(
     dst: *mut WcharT,
     src: *mut *const u8,
@@ -1883,7 +1883,7 @@ pub unsafe extern "C" fn mbsrtowcs(
 /// # Safety
 ///
 /// Same as `mbsrtowcs`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mbsnrtowcs(
     dst: *mut WcharT,
     src: *mut *const u8,
@@ -1954,7 +1954,7 @@ pub unsafe extern "C" fn mbsnrtowcs(
 ///
 /// `src` must point to a valid `*const WcharT` pointer to a wide string.
 /// `dst` must be valid for `len` bytes (or may be NULL for counting).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsrtombs(
     dst: *mut u8,
     src: *mut *const WcharT,
@@ -1972,7 +1972,7 @@ pub unsafe extern "C" fn wcsrtombs(
 /// # Safety
 ///
 /// Same as `wcsrtombs`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::indexing_slicing)]
 pub unsafe extern "C" fn wcsnrtombs(
     dst: *mut u8,
@@ -2039,7 +2039,7 @@ pub unsafe extern "C" fn wcsnrtombs(
 /// Query locale-dependent information.
 ///
 /// Returns reasonable defaults for the C locale.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nl_langinfo(item: i32) -> *const u8 {
     match item {
         // CODESET
@@ -2070,7 +2070,7 @@ pub extern "C" fn nl_langinfo(item: i32) -> *const u8 {
 /// Compares two null-terminated wide strings, converting each character
 /// to lowercase before comparison.  Returns 0 if equal, negative if
 /// `s1 < s2`, positive if `s1 > s2`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcscasecmp(s1: *const WcharT, s2: *const WcharT) -> i32 {
     if s1.is_null() || s2.is_null() {
         // Defensive: POSIX says behaviour is undefined for null.
@@ -2095,7 +2095,7 @@ pub unsafe extern "C" fn wcscasecmp(s1: *const WcharT, s2: *const WcharT) -> i32
 ///
 /// Compares at most `n` wide characters from `s1` and `s2`,
 /// converting to lowercase before comparison.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wcsncasecmp(
     s1: *const WcharT,
     s2: *const WcharT,
@@ -2127,7 +2127,7 @@ pub unsafe extern "C" fn wcsncasecmp(
 ///
 /// Encodes `wc` as UTF-8 and writes the bytes to `stream`.
 /// Returns `wc` on success, `WEOF` on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::indexing_slicing)]
 pub unsafe extern "C" fn fputwc(wc: WcharT, stream: *mut u8) -> WcharT {
     let cp = wc as u32;
@@ -2169,7 +2169,7 @@ pub unsafe extern "C" fn fputwc(wc: WcharT, stream: *mut u8) -> WcharT {
 ///
 /// Reads one UTF-8 encoded character from `stream` and returns
 /// the wide character value.  Returns `WEOF` on error or EOF.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn fgetwc(stream: *mut u8) -> WcharT {
     let first = crate::stdio::fgetc(stream);
     if first < 0 {
@@ -2214,26 +2214,26 @@ pub unsafe extern "C" fn fgetwc(stream: *mut u8) -> WcharT {
 }
 
 /// Write a wide character to a stream (alias for `fputwc`).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn putwc(wc: WcharT, stream: *mut u8) -> WcharT {
     unsafe { fputwc(wc, stream) }
 }
 
 /// Read a wide character from a stream (alias for `fgetwc`).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getwc(stream: *mut u8) -> WcharT {
     unsafe { fgetwc(stream) }
 }
 
 /// Write a wide character to stdout.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putwchar(wc: WcharT) -> WcharT {
     // SAFETY: STDOUT_SENTINEL (1 as *mut u8) is the stdio convention.
     unsafe { fputwc(wc, core::ptr::dangling_mut::<u8>()) }
 }
 
 /// Read a wide character from stdin.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getwchar() -> WcharT {
     // SAFETY: STDIN_SENTINEL (null) is the stdio convention.
     unsafe { fgetwc(core::ptr::null_mut()) }
@@ -2246,7 +2246,7 @@ pub extern "C" fn getwchar() -> WcharT {
 /// back to UTF-8 and push the first byte via `ungetc`.  Since our
 /// stdio only supports one byte of pushback, this only works reliably
 /// for ASCII characters; multi-byte pushback is best-effort.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn ungetwc(wc: WcharT, stream: *mut u8) -> WcharT {
     if wc == WEOF {
         return WEOF;
@@ -2271,7 +2271,7 @@ pub unsafe extern "C" fn ungetwc(wc: WcharT, stream: *mut u8) -> WcharT {
 /// Writes each character of the null-terminated wide string `s` to
 /// `stream` using `fputwc`.  Does NOT write the null terminator.
 /// Returns a non-negative value on success, `WEOF` on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn fputws(s: *const WcharT, stream: *mut u8) -> i32 {
     if s.is_null() {
         return -1;
@@ -2295,7 +2295,7 @@ pub unsafe extern "C" fn fputws(s: *const WcharT, stream: *mut u8) -> i32 {
 /// stopping at a newline (which is included) or EOF.  The resulting
 /// string is null-terminated.  Returns `ws` on success, null on
 /// error or EOF with no characters read.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn fgetws(
     ws: *mut WcharT,
     n: i32,
@@ -2330,7 +2330,7 @@ pub unsafe extern "C" fn fgetws(
 ///
 /// Like `wmemcpy` but returns a pointer to the wide character after
 /// the last one written (i.e., `dest + n`).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn wmempcpy(
     dest: *mut WcharT,
     src: *const WcharT,
@@ -2361,7 +2361,7 @@ pub unsafe extern "C" fn wmempcpy(
 /// Returns the number of wide characters written (excluding the null
 /// terminator), or 0 if the result doesn't fit in `maxsize` wide
 /// characters.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::indexing_slicing)]
 pub unsafe extern "C" fn wcsftime(
     wcs: *mut WcharT,

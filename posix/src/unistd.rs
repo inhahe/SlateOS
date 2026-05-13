@@ -306,7 +306,7 @@ pub unsafe fn resolve_path(path: *const u8, out: &mut [u8; PATH_MAX]) -> Option<
 /// - `EINVAL` — `buf` is null or `size` is 0.
 /// - `ERANGE` — `size` is too small for the CWD path plus its null
 ///   terminator.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
     if buf.is_null() || size == 0 {
         errno::set_errno(errno::EINVAL);
@@ -352,7 +352,7 @@ pub extern "C" fn getcwd(buf: *mut u8, size: SizeT) -> *mut u8 {
 /// - `ENOENT` — `path` is empty or does not exist.
 /// - `ENOTDIR` — resolved path exists but is not a directory.
 /// - `ENAMETOOLONG` — resolved path exceeds `PATH_MAX`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn chdir(path: *const u8) -> i32 {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -415,7 +415,7 @@ pub extern "C" fn chdir(path: *const u8) -> i32 {
 /// Implementing this properly would require either:
 /// - A kernel syscall to resolve an fd back to its path, or
 /// - Tracking the path that was used when each fd was opened.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fchdir(_fd: Fd) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -428,25 +428,25 @@ pub extern "C" fn fchdir(_fd: Fd) -> i32 {
 ///
 /// Returns 0 (root) since we don't have multi-user support in
 /// userspace yet.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getuid() -> UidT {
     0
 }
 
 /// Get the effective user ID of the calling process.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn geteuid() -> UidT {
     0
 }
 
 /// Get the real group ID of the calling process.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getgid() -> GidT {
     0
 }
 
 /// Get the effective group ID of the calling process.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getegid() -> GidT {
     0
 }
@@ -454,7 +454,7 @@ pub extern "C" fn getegid() -> GidT {
 /// Set the user ID of the calling process.
 ///
 /// Stub: succeeds silently (single-user OS, always root).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setuid(_uid: UidT) -> i32 {
     0
 }
@@ -462,7 +462,7 @@ pub extern "C" fn setuid(_uid: UidT) -> i32 {
 /// Set the effective user ID of the calling process.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn seteuid(_uid: UidT) -> i32 {
     0
 }
@@ -470,7 +470,7 @@ pub extern "C" fn seteuid(_uid: UidT) -> i32 {
 /// Set the group ID of the calling process.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setgid(_gid: GidT) -> i32 {
     0
 }
@@ -478,7 +478,7 @@ pub extern "C" fn setgid(_gid: GidT) -> i32 {
 /// Set the effective group ID of the calling process.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setegid(_gid: GidT) -> i32 {
     0
 }
@@ -486,7 +486,7 @@ pub extern "C" fn setegid(_gid: GidT) -> i32 {
 /// Set the real and effective user IDs.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setreuid(_ruid: UidT, _euid: UidT) -> i32 {
     0
 }
@@ -494,7 +494,7 @@ pub extern "C" fn setreuid(_ruid: UidT, _euid: UidT) -> i32 {
 /// Set the real and effective group IDs.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setregid(_rgid: GidT, _egid: GidT) -> i32 {
     0
 }
@@ -502,7 +502,7 @@ pub extern "C" fn setregid(_rgid: GidT, _egid: GidT) -> i32 {
 /// Get the supplementary group IDs.
 ///
 /// Returns 0 (no supplementary groups — only group 0).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getgroups(_size: i32, _list: *mut GidT) -> i32 {
     0
 }
@@ -514,7 +514,7 @@ pub extern "C" fn getgroups(_size: i32, _list: *mut GidT) -> i32 {
 /// succeed without error.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setgroups(_size: usize, _list: *const GidT) -> i32 {
     0
 }
@@ -554,7 +554,7 @@ static mut HOSTNAME_LEN: usize = 9; // "localhost".len()
 /// Defaults to "localhost" until changed via `sethostname()`.
 ///
 /// Returns 0 on success, -1 on error (ENAMETOOLONG if buffer too small).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
     if name.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -591,7 +591,7 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
 /// Get the domain name of the host.
 ///
 /// Stub: returns "(none)" (no NIS/YP domain configured).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
     if name.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -616,7 +616,7 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
 /// Set the domain name of the host.
 ///
 /// Stub: always returns -1 with EPERM (requires root, not implemented).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setdomainname(_name: *const u8, _len: usize) -> i32 {
     errno::set_errno(errno::EPERM);
     -1
@@ -627,7 +627,7 @@ pub extern "C" fn setdomainname(_name: *const u8, _len: usize) -> i32 {
 /// Returns the size of the per-process file descriptor table.
 /// This is a compatibility function; use `sysconf(_SC_OPEN_MAX)` in
 /// new code.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getdtablesize() -> i32 {
     // Match our fd table size.
     256
@@ -636,7 +636,7 @@ pub extern "C" fn getdtablesize() -> i32 {
 /// Set an alarm timer.
 ///
 /// Stub: returns 0 (no alarm support — signals not implemented).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn alarm(_seconds: u32) -> u32 {
     0
 }
@@ -649,7 +649,7 @@ pub extern "C" fn alarm(_seconds: u32) -> u32 {
 ///
 /// Returns the number of microseconds remaining from a previous alarm,
 /// or 0 if none was set.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ualarm(_usecs: u32, _interval: u32) -> u32 {
     0
 }
@@ -657,7 +657,7 @@ pub extern "C" fn ualarm(_usecs: u32, _interval: u32) -> u32 {
 /// Suspend until a signal is delivered.
 ///
 /// Stub: sleeps for 1 second then returns -1/EINTR (no signals).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pause() -> i32 {
     let _ = syscall1(SYS_SLEEP, 1_000_000_000_u64);
     errno::set_errno(errno::EINTR);
@@ -667,7 +667,7 @@ pub extern "C" fn pause() -> i32 {
 /// Get configurable system variables.
 ///
 /// Returns the value of the named system variable, or -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sysconf(name: i32) -> i64 {
     match name {
         _SC_PAGESIZE => 16384, // Our OS uses 16 KiB pages.
@@ -697,7 +697,7 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
 ///
 /// Our OS uses 16 KiB pages.  This is equivalent to
 /// `sysconf(_SC_PAGESIZE)` but more convenient.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getpagesize() -> i32 {
     16384
 }
@@ -710,7 +710,7 @@ pub extern "C" fn getpagesize() -> i32 {
 ///
 /// This stub exists for link compatibility with programs that
 /// reference `sbrk`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sbrk(increment: isize) -> *mut u8 {
     if increment == 0 {
         // Return a non-NULL but meaningless address.
@@ -725,7 +725,7 @@ pub extern "C" fn sbrk(increment: isize) -> *mut u8 {
 /// Set the program break (legacy heap interface).
 ///
 /// Always fails — our OS uses mmap exclusively.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn brk(_addr: *mut u8) -> i32 {
     crate::errno::set_errno(crate::errno::ENOMEM);
     -1
@@ -747,7 +747,7 @@ pub const PC_PIPE_BUF: i32 = 5;
 ///
 /// Returns the value of the named limit for `path`, or -1 if the
 /// limit is indeterminate or the name is invalid.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
     // Return the same values regardless of path — we don't have
     // per-filesystem limits yet.
@@ -766,7 +766,7 @@ pub extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
 /// Get configurable pathname variables for an open file.
 ///
 /// Same as pathconf but takes a file descriptor.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fpathconf(_fd: i32, name: i32) -> i64 {
     pathconf(core::ptr::null(), name)
 }
@@ -779,7 +779,7 @@ pub const CS_PATH: i32 = 0;
 /// If `buf` is non-null and `len` > 0, copies the string into `buf`
 /// (null-terminated).  Returns the total length needed (including
 /// null), or 0 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn confstr(name: i32, buf: *mut u8, len: usize) -> usize {
     let value: &[u8] = if name == CS_PATH {
         b"/bin:/usr/bin"
@@ -828,7 +828,7 @@ pub extern "C" fn confstr(name: i32, buf: *mut u8, len: usize) -> usize {
 /// semantics on some systems.
 ///
 /// Returns `resolved_path` on success, null on error with errno set.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
     if path.is_null() {
         errno::set_errno(errno::EINVAL);
@@ -890,7 +890,7 @@ pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
 /// Stub: no-op.  Our filesystem doesn't have a write-back cache yet,
 /// so there is nothing to flush.  Always succeeds (void return per
 /// POSIX).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sync() {
     // No-op: filesystem writes are synchronous.
 }
@@ -901,7 +901,7 @@ pub extern "C" fn sync() {
 /// via `gethostname()`.  Maximum length is 255 bytes (HOST_NAME_MAX).
 ///
 /// Returns 0 on success, -1 on error (EINVAL if too long, EFAULT if null).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
     if name.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -932,7 +932,7 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
 ///
 /// Stub: returns -1 with `ENOSYS`.  Filesystem namespaces are not
 /// yet implemented.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn chroot(_path: *const u8) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -954,7 +954,7 @@ pub extern "C" fn chroot(_path: *const u8) -> i32 {
 /// continue running in the foreground.
 ///
 /// Returns 0 on success, -1 on error with errno set.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn daemon(nochdir: i32, noclose: i32) -> i32 {
     // Change CWD to root unless suppressed.
     if nochdir == 0 {
@@ -993,7 +993,7 @@ pub extern "C" fn daemon(nochdir: i32, noclose: i32) -> i32 {
 ///
 /// Stub: returns synthetic idle-system values (0.0) since our OS
 /// doesn't track load averages yet.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getloadavg(loadavg: *mut f64, nelem: i32) -> i32 {
     if loadavg.is_null() || nelem <= 0 {
         return -1;
@@ -1030,7 +1030,7 @@ pub const GRND_RANDOM: u32 = 2;
 /// a simple LCG seeded from the monotonic clock if RDRAND fails.
 ///
 /// Returns the number of bytes filled, or -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> isize {
     if buf.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -1045,7 +1045,7 @@ pub extern "C" fn getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> isize {
 ///
 /// Like `getrandom` but with no flags and returns 0/errno.
 /// Maximum 256 bytes per call (POSIX requirement).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getentropy(buf: *mut u8, buflen: usize) -> i32 {
     if buf.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -1122,7 +1122,7 @@ fn fill_random(buf: *mut u8, len: usize) {
 /// Flush data (not metadata) for an open file descriptor.
 ///
 /// Stub: delegates to `fsync` (we don't distinguish data-only sync).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fdatasync(fd: Fd) -> i32 {
     // Our fsync already just returns 0 (filesystem writes are sync).
     crate::file::fsync(fd)
@@ -1131,7 +1131,7 @@ pub extern "C" fn fdatasync(fd: Fd) -> i32 {
 /// Synchronize all data for the filesystem containing `fd`.
 ///
 /// Stub: no-op (same as `sync` — our writes are synchronous).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn syncfs(_fd: Fd) -> i32 {
     0
 }
@@ -1143,7 +1143,7 @@ pub extern "C" fn syncfs(_fd: Fd) -> i32 {
 /// Write a message to standard error and abort.
 ///
 /// Not exactly POSIX, but commonly needed by C runtime init code.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn abort() -> ! {
     // Write "Aborted\n" to stderr (console).
     let msg = b"Aborted\n";
@@ -1173,7 +1173,7 @@ pub const PR_GET_SECCOMP: i32 = 21;
 ///
 /// Stub: `PR_SET_NAME` and `PR_SET_NO_NEW_PRIVS` succeed silently.
 /// Other operations return -1 with EINVAL.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn prctl(option: i32, arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64) -> i32 {
     match option {
         PR_SET_NAME | PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS => 0,
@@ -1200,7 +1200,7 @@ pub extern "C" fn prctl(option: i32, arg2: u64, _arg3: u64, _arg4: u64, _arg5: u
 /// Set real, effective, and saved set-user-ID.
 ///
 /// Stub: succeeds silently (single-user system).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setresuid(_ruid: UidT, _euid: UidT, _suid: UidT) -> i32 {
     0
 }
@@ -1208,7 +1208,7 @@ pub extern "C" fn setresuid(_ruid: UidT, _euid: UidT, _suid: UidT) -> i32 {
 /// Set real, effective, and saved set-group-ID.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setresgid(_rgid: GidT, _egid: GidT, _sgid: GidT) -> i32 {
     0
 }
@@ -1216,7 +1216,7 @@ pub extern "C" fn setresgid(_rgid: GidT, _egid: GidT, _sgid: GidT) -> i32 {
 /// Get real, effective, and saved set-user-ID.
 ///
 /// Stub: returns 0 (root) for all three.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getresuid(ruid: *mut UidT, euid: *mut UidT, suid: *mut UidT) -> i32 {
     if ruid.is_null() || euid.is_null() || suid.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);
@@ -1234,7 +1234,7 @@ pub extern "C" fn getresuid(ruid: *mut UidT, euid: *mut UidT, suid: *mut UidT) -
 /// Get real, effective, and saved set-group-ID.
 ///
 /// Stub: returns 0 (root) for all three.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getresgid(rgid: *mut GidT, egid: *mut GidT, sgid: *mut GidT) -> i32 {
     if rgid.is_null() || egid.is_null() || sgid.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);

@@ -41,7 +41,7 @@ static mut DL_ERROR: *const u8 = core::ptr::null();
 /// Open a shared library.
 ///
 /// Stub: always returns NULL (dynamic linking not supported).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dlopen(_filename: *const u8, _flags: i32) -> *mut u8 {
     // SAFETY: Single-threaded access.
     unsafe {
@@ -54,7 +54,7 @@ pub extern "C" fn dlopen(_filename: *const u8, _flags: i32) -> *mut u8 {
 /// Look up a symbol in a shared library.
 ///
 /// Stub: always returns NULL.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dlsym(_handle: *mut u8, _symbol: *const u8) -> *mut u8 {
     unsafe {
         core::ptr::addr_of_mut!(DL_ERROR)
@@ -66,7 +66,7 @@ pub extern "C" fn dlsym(_handle: *mut u8, _symbol: *const u8) -> *mut u8 {
 /// Close a shared library handle.
 ///
 /// Stub: always returns -1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dlclose(_handle: *mut u8) -> i32 {
     unsafe {
         core::ptr::addr_of_mut!(DL_ERROR)
@@ -78,7 +78,7 @@ pub extern "C" fn dlclose(_handle: *mut u8) -> i32 {
 /// Return a human-readable error message from the last dl* call.
 ///
 /// Returns the error string and clears the error state.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dlerror() -> *const u8 {
     let err = unsafe { *core::ptr::addr_of!(DL_ERROR) };
     if err.is_null() {
@@ -105,7 +105,7 @@ pub struct DlInfo {
 /// Get information about a dynamically loaded symbol.
 ///
 /// Stub: returns 0 (failure) since we don't support dynamic linking.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dladdr(
     _addr: *const core::ffi::c_void,
     _info: *mut DlInfo,
@@ -125,7 +125,7 @@ pub extern "C" fn dladdr(
 ///
 /// Some libraries (libgcc, libunwind) call this to find exception
 /// handling tables.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dl_iterate_phdr(
     _callback: Option<extern "C" fn(*mut u8, usize, *mut u8) -> i32>,
     _data: *mut u8,
@@ -144,7 +144,7 @@ pub extern "C" fn dl_iterate_phdr(
 /// (which require dynamic linking).  Programs using `__thread` or
 /// `thread_local` with the initial-exec model don't call this
 /// function — they use `%fs`-relative addressing directly.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __tls_get_addr(_ti: *mut u8) -> *mut u8 {
     core::ptr::null_mut()
 }

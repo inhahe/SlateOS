@@ -638,7 +638,7 @@ pub(crate) fn write_stream(stream: *mut u8, data: *const u8, len: usize) -> i64 
 ///
 /// Returns the character written as an unsigned char cast to int,
 /// or `EOF` (−1) on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putchar(c: i32) -> i32 {
     fputc(c, STDOUT_SENTINEL as *mut u8)
 }
@@ -650,7 +650,7 @@ pub extern "C" fn putchar(c: i32) -> i32 {
 /// # Safety
 ///
 /// `s` must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn puts(s: *const u8) -> i32 {
     if s.is_null() {
         return EOF;
@@ -676,7 +676,7 @@ pub unsafe extern "C" fn puts(s: *const u8) -> i32 {
 ///
 /// `s` must be a valid null-terminated string.
 /// `stream` must be a valid `FILE*`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn fputs(s: *const u8, stream: *mut u8) -> i32 {
     if s.is_null() {
         return EOF;
@@ -688,7 +688,7 @@ pub unsafe extern "C" fn fputs(s: *const u8, stream: *mut u8) -> i32 {
 }
 
 /// Write a character to a stream.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fputc(c: i32, stream: *mut u8) -> i32 {
     let byte = c as u8;
     let file = stream_to_file(stream);
@@ -703,7 +703,7 @@ pub extern "C" fn fputc(c: i32, stream: *mut u8) -> i32 {
 /// # Safety
 ///
 /// `ptr` must be valid for `size * nmemb` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn fwrite(
     ptr: *const u8,
     size: usize,
@@ -733,7 +733,7 @@ pub unsafe extern "C" fn fwrite(
 ///
 /// Returns the character read as an unsigned char cast to int,
 /// or `EOF` (−1) on error or end of file.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fgetc(stream: *mut u8) -> i32 {
     let file = stream_to_file(stream);
 
@@ -750,13 +750,13 @@ pub extern "C" fn fgetc(stream: *mut u8) -> i32 {
 }
 
 /// Read a character from stdin.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getchar() -> i32 {
     fgetc(STDIN_SENTINEL as *mut u8)
 }
 
 /// Read a character from a stream (function form of `getc` macro).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getc(stream: *mut u8) -> i32 {
     fgetc(stream)
 }
@@ -768,7 +768,7 @@ pub extern "C" fn getc(stream: *mut u8) -> i32 {
 /// # Safety
 ///
 /// `ptr` must be valid for `size * nmemb` bytes.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn fread(
     ptr: *mut u8,
     size: usize,
@@ -797,7 +797,7 @@ pub unsafe extern "C" fn fread(
 /// always null-terminated.
 ///
 /// Returns `buf` on success, null on error or EOF with no data read.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fgets(buf: *mut u8, size: i32, stream: *mut u8) -> *mut u8 {
     if buf.is_null() || size <= 0 {
         return core::ptr::null_mut();
@@ -861,7 +861,7 @@ pub extern "C" fn fgets(buf: *mut u8, size: i32, stream: *mut u8) -> *mut u8 {
 /// # Safety
 ///
 /// `path` and `mode` must be valid null-terminated strings.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut u8 {
     if path.is_null() || mode.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
@@ -892,7 +892,7 @@ pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut u8 {
 /// Associate a stream with an existing file descriptor.
 ///
 /// Returns a `FILE*` on success, null on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fdopen(fd: i32, _mode: *const u8) -> *mut u8 {
     if fd < 0 {
         crate::errno::set_errno(crate::errno::EBADF);
@@ -924,7 +924,7 @@ pub extern "C" fn fdopen(fd: i32, _mode: *const u8) -> *mut u8 {
 /// POSIX: "The original stream shall be closed regardless of whether
 /// the subsequent open succeeds."  On failure, the stream is closed
 /// and NULL is returned.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn freopen(
     path: *const u8,
     mode: *const u8,
@@ -1007,7 +1007,7 @@ pub unsafe extern "C" fn freopen(
 ///
 /// Flushes buffered data and closes the underlying fd.
 /// Returns 0 on success, `EOF` on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fclose(stream: *mut u8) -> i32 {
     let file = stream_to_file(stream);
     // SAFETY: file is valid; exclusive access.
@@ -1034,7 +1034,7 @@ pub extern "C" fn fclose(stream: *mut u8) -> i32 {
 ///
 /// If `stream` is null, flushes all open streams (POSIX requirement).
 /// Returns 0 on success, `EOF` on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fflush(stream: *mut u8) -> i32 {
     // fflush(NULL) flushes all open output streams.
     // Note: null maps to stdin via stream_to_file, so we check
@@ -1061,7 +1061,7 @@ pub const SEEK_END: i32 = 2;
 /// For `SEEK_CUR`, adjusts the offset to account for read-ahead data.
 ///
 /// Returns 0 on success, −1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fseek(stream: *mut u8, offset: i64, whence: i32) -> i32 {
     let file = stream_to_file(stream);
     let f = unsafe { &mut *file };
@@ -1104,7 +1104,7 @@ pub extern "C" fn fseek(stream: *mut u8, offset: i64, whence: i32) -> i32 {
 /// returned position matches the logical stream position.
 ///
 /// Returns the current offset, or −1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ftell(stream: *mut u8) -> i64 {
     let file = stream_to_file(stream);
     let f = unsafe { &mut *file };
@@ -1134,7 +1134,7 @@ pub extern "C" fn ftell(stream: *mut u8) -> i64 {
 ///
 /// Equivalent to `fseek(stream, 0, SEEK_SET)` and clears the error
 /// indicator (POSIX requirement).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn rewind(stream: *mut u8) {
     let _ = fseek(stream, 0, SEEK_SET);
     // Also clear error indicator (POSIX requirement beyond fseek).
@@ -1149,7 +1149,7 @@ pub extern "C" fn rewind(stream: *mut u8) {
 /// Seek in a stream using `off_t` offset.
 ///
 /// On LP64 platforms this is identical to `fseek`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fseeko(stream: *mut u8, offset: crate::types::OffT, whence: i32) -> i32 {
     fseek(stream, offset, whence)
 }
@@ -1157,19 +1157,19 @@ pub extern "C" fn fseeko(stream: *mut u8, offset: crate::types::OffT, whence: i3
 /// Get stream position as `off_t`.
 ///
 /// On LP64 platforms this is identical to `ftell`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ftello(stream: *mut u8) -> crate::types::OffT {
     ftell(stream)
 }
 
 /// `fseeko64` — LP64 alias.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fseeko64(stream: *mut u8, offset: crate::types::OffT, whence: i32) -> i32 {
     fseek(stream, offset, whence)
 }
 
 /// `ftello64` — LP64 alias.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ftello64(stream: *mut u8) -> crate::types::OffT {
     ftell(stream)
 }
@@ -1189,7 +1189,7 @@ pub type FposT = i64;
 ///
 /// The stored value can later be passed to `fsetpos` to restore
 /// the position.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fgetpos(stream: *mut u8, pos: *mut FposT) -> i32 {
     if pos.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
@@ -1207,7 +1207,7 @@ pub extern "C" fn fgetpos(stream: *mut u8, pos: *mut FposT) -> i32 {
 /// Restore the position of a stream.
 ///
 /// Restores to a position previously stored by `fgetpos`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fsetpos(stream: *mut u8, pos: *const FposT) -> i32 {
     if pos.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
@@ -1219,13 +1219,13 @@ pub extern "C" fn fsetpos(stream: *mut u8, pos: *const FposT) -> i32 {
 }
 
 /// `fgetpos64` — LP64 alias.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fgetpos64(stream: *mut u8, pos: *mut FposT) -> i32 {
     fgetpos(stream, pos)
 }
 
 /// `fsetpos64` — LP64 alias.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fsetpos64(stream: *mut u8, pos: *const FposT) -> i32 {
     fsetpos(stream, pos)
 }
@@ -1235,7 +1235,7 @@ pub extern "C" fn fsetpos64(stream: *mut u8, pos: *const FposT) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Get the file descriptor for a stream.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fileno(stream: *mut u8) -> i32 {
     let file = stream_to_file(stream);
     unsafe { (*file).fd }
@@ -1244,7 +1244,7 @@ pub extern "C" fn fileno(stream: *mut u8) -> i32 {
 /// Check end-of-file indicator for a stream.
 ///
 /// Returns non-zero if the EOF indicator is set, 0 otherwise.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn feof(stream: *mut u8) -> i32 {
     let file = stream_to_file(stream);
     i32::from(unsafe { (*file).flags } & FLAG_EOF != 0)
@@ -1253,14 +1253,14 @@ pub extern "C" fn feof(stream: *mut u8) -> i32 {
 /// Check error indicator for a stream.
 ///
 /// Returns non-zero if the error indicator is set, 0 otherwise.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ferror(stream: *mut u8) -> i32 {
     let file = stream_to_file(stream);
     i32::from(unsafe { (*file).flags } & FLAG_ERR != 0)
 }
 
 /// Clear error and EOF indicators for a stream.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clearerr(stream: *mut u8) {
     let file = stream_to_file(stream);
     unsafe { (*file).flags &= !(FLAG_EOF | FLAG_ERR); }
@@ -1274,7 +1274,7 @@ pub extern "C" fn clearerr(stream: *mut u8) {
 ///
 /// Only one byte of pushback is guaranteed per stream (POSIX minimum).
 /// Returns the character on success, `EOF` on failure.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ungetc(ch: i32, stream: *mut u8) -> i32 {
     if ch == EOF {
         return EOF;
@@ -1297,7 +1297,7 @@ pub extern "C" fn ungetc(ch: i32, stream: *mut u8) -> i32 {
 /// `size` is accepted but ignored.
 ///
 /// Returns 0 on success, non-zero on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setvbuf(
     stream: *mut u8,
     _buf: *mut u8,
@@ -1342,7 +1342,7 @@ pub extern "C" fn setvbuf(
 ///
 /// If `buf` is null, sets the stream to unbuffered.
 /// If `buf` is non-null, sets to fully buffered (buf is ignored).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setbuf(stream: *mut u8, buf: *mut u8) {
     if buf.is_null() {
         setvbuf(stream, core::ptr::null_mut(), 2 /* _IONBF */, 0);
@@ -1355,7 +1355,7 @@ pub extern "C" fn setbuf(stream: *mut u8, buf: *mut u8) {
 ///
 /// Like `setbuf`, but allows specifying the buffer size.
 /// If `buf` is null, sets the stream to unbuffered.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setbuffer(stream: *mut u8, buf: *mut u8, size: usize) {
     if buf.is_null() {
         setvbuf(stream, core::ptr::null_mut(), 2 /* _IONBF */, 0);
@@ -1367,7 +1367,7 @@ pub extern "C" fn setbuffer(stream: *mut u8, buf: *mut u8, size: usize) {
 /// Set line-buffered mode for a stream (BSD extension).
 ///
 /// Equivalent to `setvbuf(stream, NULL, _IOLBF, 0)`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setlinebuf(stream: *mut u8) {
     setvbuf(stream, core::ptr::null_mut(), 1 /* _IOLBF */, 0);
 }
@@ -1376,18 +1376,18 @@ pub extern "C" fn setlinebuf(stream: *mut u8) {
 ///
 /// Exported as global symbols so C programs can reference `_IONBF`,
 /// `_IOLBF`, `_IOFBF` by name.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static _IONBF: i32 = 2;
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static _IOLBF: i32 = 1;
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static _IOFBF: i32 = 0;
 
 /// Default buffer size (exposed to programs).
 ///
 /// Programs may use this with `setvbuf`.  We accept but ignore user-provided
 /// buffers, always using our internal 1 KiB buffer.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static BUFSIZ: i32 = 8192;
 
 // ---------------------------------------------------------------------------
@@ -1406,7 +1406,7 @@ pub static BUFSIZ: i32 = 8192;
 /// # Safety
 ///
 /// `s` (if non-null) must be a valid null-terminated string.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn perror(s: *const u8) {
     let err = crate::errno::get_errno();
     let msg = crate::string::strerror(err);
@@ -1433,7 +1433,7 @@ pub unsafe extern "C" fn perror(s: *const u8) {
 /// Remove a file.
 ///
 /// Wrapper around `unlink`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn remove(path: *const u8) -> i32 {
     crate::file::unlink(path)
 }
@@ -1441,7 +1441,7 @@ pub extern "C" fn remove(path: *const u8) -> i32 {
 /// Rename a file.
 ///
 /// Wrapper around `file::rename`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn stdio_rename(old: *const u8, new: *const u8) -> i32 {
     crate::file::rename(old, new)
 }
@@ -1460,7 +1460,7 @@ pub const L_TMPNAM: usize = 20;
 ///
 /// Note: `tmpnam` is considered insecure (TOCTOU race between name
 /// generation and file creation).  Prefer `mkstemp`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn tmpnam(s: *mut u8) -> *mut u8 {
     static mut COUNTER: u32 = 0;
@@ -1539,7 +1539,7 @@ pub extern "C" fn tmpnam(s: *mut u8) -> *mut u8 {
 ///
 /// Stub: returns null.  Proper implementation requires fork+exec or
 /// `posix_spawn` with pipe redirection.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn popen(_command: *const u8, _mode: *const u8) -> *mut u8 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     core::ptr::null_mut()
@@ -1548,7 +1548,7 @@ pub extern "C" fn popen(_command: *const u8, _mode: *const u8) -> *mut u8 {
 /// Close a process pipe.
 ///
 /// Stub: returns −1.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pclose(_stream: *mut u8) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
@@ -1559,7 +1559,7 @@ pub extern "C" fn pclose(_stream: *mut u8) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Write a character to a stream (function form of `putc` macro).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putc(ch: i32, stream: *mut u8) -> i32 {
     fputc(ch, stream)
 }
@@ -1571,7 +1571,7 @@ pub extern "C" fn putc(ch: i32, stream: *mut u8) -> i32 {
 /// Lock a FILE stream for exclusive thread access.
 ///
 /// Stub: no-op.  Our stdio is single-threaded.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn flockfile(_file: *mut core::ffi::c_void) {
     // No-op: single-threaded per-fd access.
 }
@@ -1579,7 +1579,7 @@ pub extern "C" fn flockfile(_file: *mut core::ffi::c_void) {
 /// Try to lock a FILE stream without blocking.
 ///
 /// Stub: always succeeds (returns 0).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ftrylockfile(_file: *mut core::ffi::c_void) -> i32 {
     0
 }
@@ -1587,7 +1587,7 @@ pub extern "C" fn ftrylockfile(_file: *mut core::ffi::c_void) -> i32 {
 /// Unlock a FILE stream.
 ///
 /// Stub: no-op (matches `flockfile`).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn funlockfile(_file: *mut core::ffi::c_void) {
     // No-op.
 }
@@ -1595,7 +1595,7 @@ pub extern "C" fn funlockfile(_file: *mut core::ffi::c_void) {
 /// Non-locking version of `getc`.
 ///
 /// Equivalent to `fgetc` since we don't have internal locks.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getc_unlocked(stream: *mut u8) -> i32 {
     fgetc(stream)
 }
@@ -1603,7 +1603,7 @@ pub extern "C" fn getc_unlocked(stream: *mut u8) -> i32 {
 /// Non-locking version of `getchar`.
 ///
 /// Reads from stdin without locking.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getchar_unlocked() -> i32 {
     fgetc(STDIN_SENTINEL as *mut u8)
 }
@@ -1611,7 +1611,7 @@ pub extern "C" fn getchar_unlocked() -> i32 {
 /// Non-locking version of `putc`.
 ///
 /// Equivalent to `fputc` since we don't have internal locks.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putc_unlocked(c: i32, stream: *mut u8) -> i32 {
     fputc(c, stream)
 }
@@ -1619,7 +1619,7 @@ pub extern "C" fn putc_unlocked(c: i32, stream: *mut u8) -> i32 {
 /// Non-locking version of `putchar`.
 ///
 /// Writes to stdout without locking.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn putchar_unlocked(c: i32) -> i32 {
     fputc(c, STDOUT_SENTINEL as *mut u8)
 }
@@ -1640,7 +1640,7 @@ pub extern "C" fn putchar_unlocked(c: i32) -> i32 {
 /// # Safety
 ///
 /// `lineptr`, `n`, and `stream` must be valid pointers.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn getdelim(
     lineptr: *mut *mut u8,
@@ -1726,7 +1726,7 @@ pub unsafe extern "C" fn getdelim(
 /// # Safety
 ///
 /// `lineptr`, `n`, and `stream` must be valid pointers.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn getline(
     lineptr: *mut *mut u8,
     n: *mut usize,
@@ -1743,31 +1743,31 @@ pub unsafe extern "C" fn getline(
 ///
 /// C programs access this as `extern FILE *stdout;`.  The value 1
 /// is a sentinel that `stream_to_file` maps to `STDOUT_FILE`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static stdout: usize = STDOUT_SENTINEL;
 
 /// Global `FILE*` for standard error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static stderr: usize = STDERR_SENTINEL;
 
 /// Global `FILE*` for standard input.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static stdin: usize = STDIN_SENTINEL;
 
 // glibc internal FILE* aliases — some programs reference these instead
 // of the standard names.
 /// glibc alias for `stdin`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_upper_case_globals)]
 pub static _IO_stdin_: usize = STDIN_SENTINEL;
 
 /// glibc alias for `stdout`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_upper_case_globals)]
 pub static _IO_stdout_: usize = STDOUT_SENTINEL;
 
 /// glibc alias for `stderr`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_upper_case_globals)]
 pub static _IO_stderr_: usize = STDERR_SENTINEL;
 
@@ -1780,7 +1780,7 @@ pub static _IO_stderr_: usize = STDERR_SENTINEL;
 /// # Safety
 ///
 /// Same requirements as `fopen`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn fopen64(path: *const u8, mode: *const u8) -> *mut u8 {
     unsafe { fopen(path, mode) }
 }
@@ -1790,7 +1790,7 @@ pub unsafe extern "C" fn fopen64(path: *const u8, mode: *const u8) -> *mut u8 {
 /// # Safety
 ///
 /// Same requirements as `freopen`.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn freopen64(
     path: *const u8,
     mode: *const u8,

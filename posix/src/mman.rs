@@ -53,7 +53,7 @@ pub const MAP_FAILED: *mut core::ffi::c_void = usize::MAX as *mut core::ffi::c_v
 /// - arg5: offset
 ///
 /// Returns the mapped address, or MAP_FAILED on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mmap(
     addr: *mut core::ffi::c_void,
     length: SizeT,
@@ -88,7 +88,7 @@ pub extern "C" fn mmap(
 /// Unmap a region of memory.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn munmap(addr: *mut core::ffi::c_void, length: SizeT) -> i32 {
     if addr.is_null() || length == 0 {
         errno::set_errno(errno::EINVAL);
@@ -102,7 +102,7 @@ pub extern "C" fn munmap(addr: *mut core::ffi::c_void, length: SizeT) -> i32 {
 /// Set protection on a memory region.
 ///
 /// Returns 0 on success, -1 on error.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mprotect(addr: *mut core::ffi::c_void, len: SizeT, prot: i32) -> i32 {
     if addr.is_null() || len == 0 {
         errno::set_errno(errno::EINVAL);
@@ -132,7 +132,7 @@ pub const MADV_DONTNEED: i32 = 4;
 /// Lock pages in memory.
 ///
 /// Stub: succeeds silently.  No kernel page-pinning support yet.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mlock(_addr: *const core::ffi::c_void, _len: SizeT) -> i32 {
     0
 }
@@ -140,7 +140,7 @@ pub extern "C" fn mlock(_addr: *const core::ffi::c_void, _len: SizeT) -> i32 {
 /// Unlock pages in memory.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn munlock(_addr: *const core::ffi::c_void, _len: SizeT) -> i32 {
     0
 }
@@ -148,7 +148,7 @@ pub extern "C" fn munlock(_addr: *const core::ffi::c_void, _len: SizeT) -> i32 {
 /// Lock all pages in the process address space.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mlockall(_flags: i32) -> i32 {
     0
 }
@@ -156,7 +156,7 @@ pub extern "C" fn mlockall(_flags: i32) -> i32 {
 /// Unlock all pages.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn munlockall() -> i32 {
     0
 }
@@ -164,7 +164,7 @@ pub extern "C" fn munlockall() -> i32 {
 /// Synchronize a mapped region to its backing store.
 ///
 /// Stub: succeeds silently.  We don't have file-backed mmap yet.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn msync(_addr: *mut core::ffi::c_void, _length: SizeT, _flags: i32) -> i32 {
     0
 }
@@ -172,7 +172,7 @@ pub extern "C" fn msync(_addr: *mut core::ffi::c_void, _length: SizeT, _flags: i
 /// Give advice about use of memory.
 ///
 /// Stub: succeeds silently.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn madvise(_addr: *mut core::ffi::c_void, _length: SizeT, _advice: i32) -> i32 {
     0
 }
@@ -185,7 +185,7 @@ pub extern "C" fn madvise(_addr: *mut core::ffi::c_void, _length: SizeT, _advice
 ///
 /// Stub: returns -1 with ENOSYS.  Shared memory between processes
 /// requires kernel support for named memory regions.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn shm_open(_name: *const u8, _oflag: i32, _mode: ModeT) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -194,7 +194,7 @@ pub extern "C" fn shm_open(_name: *const u8, _oflag: i32, _mode: ModeT) -> i32 {
 /// Remove a POSIX shared memory object.
 ///
 /// Stub: returns -1 with ENOSYS.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn shm_unlink(_name: *const u8) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -221,7 +221,7 @@ pub const POSIX_MADV_DONTNEED: i32 = 4;
 /// error code directly (0 on success).
 ///
 /// Stub: always returns 0 (advisory, no kernel action).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_madvise(
     _addr: *mut core::ffi::c_void,
     _len: SizeT,
@@ -238,7 +238,7 @@ pub extern "C" fn posix_madvise(
 ///
 /// Stub: returns -1 with ENOSYS.  Requires kernel support for
 /// anonymous file descriptors backed by anonymous memory.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn memfd_create(_name: *const u8, _flags: u32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
@@ -254,7 +254,7 @@ pub const MREMAP_MAYMOVE: i32 = 1;
 pub const MREMAP_FIXED: i32 = 2;
 
 /// `mmap64` — alias for `mmap` on LP64 (off_t is already 64-bit).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mmap64(
     addr: *mut core::ffi::c_void,
     length: SizeT,
@@ -271,7 +271,7 @@ pub extern "C" fn mmap64(
 /// Stub: returns MAP_FAILED with ENOSYS.  A real implementation would
 /// grow/shrink/relocate an existing mmap region.  We don't support this
 /// because our simple allocator doesn't track mmap regions globally.
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mremap(
     _old_address: *mut core::ffi::c_void,
     _old_size: SizeT,

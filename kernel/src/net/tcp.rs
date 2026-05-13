@@ -2941,6 +2941,19 @@ pub fn last_error(handle: usize) -> u8 {
     conns.get(handle).map_or(TCP_ERR_RESET, |c| c.last_error)
 }
 
+/// Read and clear the pending error code for a connection.
+///
+/// Used by `getsockopt(SO_ERROR)` which requires clear-on-read semantics
+/// per POSIX: after reading, the pending error is reset to zero.
+pub fn take_last_error(handle: usize) -> u8 {
+    let mut conns = CONNECTIONS.lock();
+    conns.get_mut(handle).map_or(TCP_ERR_RESET, |c| {
+        let err = c.last_error;
+        c.last_error = TCP_ERR_NONE;
+        err
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Poll readiness (for POSIX poll/select)
 // ---------------------------------------------------------------------------

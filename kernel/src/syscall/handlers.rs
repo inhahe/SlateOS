@@ -1674,6 +1674,13 @@ pub fn sys_pipe_poll(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(flags as i64)
 }
 
+/// `SYS_PIPE_READABLE_BYTES` — return bytes buffered in a pipe.
+pub fn sys_pipe_readable_bytes(args: &SyscallArgs) -> SyscallResult {
+    let handle = PipeHandle::from_raw(args.arg0);
+    let bytes = pipe::readable_bytes(handle);
+    SyscallResult::ok(bytes as i64)
+}
+
 /// `SYS_PIPE_READ_TIMEOUT` — read from a pipe with a deadline.
 ///
 /// `arg0`: pipe handle (read end).
@@ -7178,7 +7185,12 @@ pub fn sys_tcp_poll_status(args: &SyscallArgs) -> SyscallResult {
 /// Returns: error code (0=none, 1=refused, 2=reset, 3=timedout).
 pub fn sys_tcp_last_error(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0 as usize;
-    let err = crate::net::tcp::last_error(handle);
+    let clear = args.arg1 != 0;
+    let err = if clear {
+        crate::net::tcp::take_last_error(handle)
+    } else {
+        crate::net::tcp::last_error(handle)
+    };
     SyscallResult::ok(err as i64)
 }
 

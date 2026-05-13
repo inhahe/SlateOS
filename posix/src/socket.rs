@@ -293,6 +293,10 @@ pub(crate) struct SocketMeta {
     pub(crate) rcvtimeo_ms: u64,
     /// SO_SNDTIMEO: send timeout in milliseconds (0 = no timeout).
     pub(crate) sndtimeo_ms: u64,
+    /// TCP_CORK: buffer small sends until uncorked (advisory; kernel
+    /// doesn't support explicit corking yet, so this only affects
+    /// getsockopt reporting).
+    cork: bool,
 }
 
 /// Per-fd socket metadata table.
@@ -1048,6 +1052,7 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
         udp_shut_wr: false,
         rcvtimeo_ms: 0,
         sndtimeo_ms: 0,
+        cork: false,
     });
 
     fd
@@ -1180,6 +1185,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 udp_shut_wr: false,
                 rcvtimeo_ms: meta.rcvtimeo_ms,
                 sndtimeo_ms: meta.sndtimeo_ms,
+                cork: meta.cork,
             });
 
             if in_progress {
@@ -1525,6 +1531,7 @@ unsafe fn finish_accept(
         udp_shut_wr: false,
         rcvtimeo_ms: 0,
         sndtimeo_ms: 0,
+        cork: false,
     });
 
     // Fill in the peer address if requested.
@@ -2246,6 +2253,7 @@ pub unsafe extern "C" fn recvfrom(
 
             let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
             let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
+            let waitall = (flags & MSG_WAITALL) != 0 && !is_nb;
 
             // Always try non-blocking first so we can implement timeout
             // semantics in userspace.  If data is available, we return
@@ -2257,15 +2265,27 @@ pub unsafe extern "C" fn recvfrom(
                 buf as u64, len as u64, try_flags as u64,
             );
 
-            let recv_result = if ret >= 0 {
-                ret as isize
+            let recv_result = if ret > 0 {
+                // MSG_WAITALL: keep receiving until full.
+                if waitall && (ret as usize) < len {
+                    tcp_recv_waitall(
+                        entry.handle, buf, len, kern_flags, timeout_ms, ret as usize,
+                    )
+                } else {
+                    ret as isize
+                }
+            } else if ret == 0 {
+                0 // EOF
             } else {
                 let err = translate_net_error(ret);
                 if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
-                    // Blocking socket — poll-wait with SO_RCVTIMEO.
-                    // timeout_ms == 0 means wait indefinitely (tcp_recv_wait
-                    // uses u64::MAX deadline in that case).
-                    tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms)
+                    if waitall {
+                        tcp_recv_waitall(
+                            entry.handle, buf, len, kern_flags, timeout_ms, 0,
+                        )
+                    } else {
+                        tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms)
+                    }
                 } else {
                     errno::set_errno(err);
                     return -1;
@@ -2590,6 +2610,13 @@ pub extern "C" fn setsockopt(
                     );
                 }
             }
+            (SOL_TCP, TCP_CORK) => {
+                // Track cork state.  Kernel doesn't have explicit cork
+                // support yet, so this is advisory (getsockopt will
+                // report the correct value).  TCP_CORK and TCP_NODELAY
+                // are complementary: cork holds data, nodelay pushes it.
+                meta.cork = val != 0;
+            }
             (SOL_TCP, TCP_KEEPIDLE) => {
                 meta.keepidle = val.max(1);
                 if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
@@ -2730,14 +2757,14 @@ pub unsafe extern "C" fn getsockopt(
         let val: i32 = match (level, optname) {
             (SOL_SOCKET, SO_TYPE) => meta.map_or(0, |m| m.sock_type),
             (SOL_SOCKET, SO_ERROR) => {
-                // Query the kernel for the connection's last error code.
-                // This distinguishes ECONNREFUSED (RST on SYN_SENT),
-                // ECONNRESET (RST on established), and ETIMEDOUT
-                // (retransmission exhaustion) — previously we could only
-                // infer the error from poll flags, which was imprecise.
+                // Query and clear the connection's pending error code.
+                // POSIX requires SO_ERROR to be clear-on-read: after
+                // getsockopt returns the error, subsequent reads return 0.
                 if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
-                    let err = crate::syscall::syscall1(
-                        crate::syscall::SYS_TCP_LAST_ERROR, entry.handle,
+                    let err = crate::syscall::syscall2(
+                        crate::syscall::SYS_TCP_LAST_ERROR,
+                        entry.handle,
+                        1, // clear=true
                     ) as u8;
                     match err {
                         1 => errno::ECONNREFUSED,
@@ -2819,7 +2846,7 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_TCP, TCP_KEEPINTVL) => meta.map_or(10, |m| m.keepintvl),
             (SOL_TCP, TCP_KEEPCNT) => meta.map_or(9, |m| m.keepcnt),
             (SOL_TCP, TCP_MAXSEG) => 1460,   // Default MSS (Ethernet MTU - headers).
-            (SOL_TCP, TCP_CORK) => 0,        // Not corked.
+            (SOL_TCP, TCP_CORK) => meta.map_or(0, |m| i32::from(m.cork)),
             (SOL_TCP, TCP_USER_TIMEOUT) => 0, // No user timeout.
             (SOL_TCP, TCP_INFO) => {
                 // TCP_INFO returns a 48-byte struct with connection details.
@@ -4002,6 +4029,48 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
         m.msg_flags = 0;
         m.msg_controllen = 0;
         return 0;
+    }
+
+    // MSG_WAITALL + multi-iov on TCP: receive directly into each iov
+    // sequentially, bypassing the 4 KiB stack buffer.  The stack buffer
+    // approach would cap the receive at 4096 bytes total, violating
+    // MSG_WAITALL semantics when total_cap > 4096.
+    if (flags & MSG_WAITALL) != 0 {
+        if let Some(entry) = fdtable::get_fd(fd) {
+            if entry.kind == HandleKind::TcpStream {
+                let mut total_recv: isize = 0;
+                i = 0;
+                while i < m.msg_iovlen {
+                    // SAFETY: msg_iov is valid for msg_iovlen entries.
+                    let iov = unsafe { &*m.msg_iov.add(i) };
+                    if iov.iov_len > 0 && !iov.iov_base.is_null() {
+                        let n = unsafe { recv(fd, iov.iov_base, iov.iov_len, flags) };
+                        if n < 0 {
+                            // Error: return partial data if any, else propagate.
+                            if total_recv > 0 {
+                                break;
+                            }
+                            m.msg_flags = 0;
+                            m.msg_controllen = 0;
+                            return n;
+                        }
+                        if n == 0 {
+                            // EOF: return what we have (POSIX: short read on EOF).
+                            break;
+                        }
+                        total_recv = total_recv.wrapping_add(n);
+                        // Short recv within this iov means EOF/timeout reached.
+                        if (n as usize) < iov.iov_len {
+                            break;
+                        }
+                    }
+                    i = i.wrapping_add(1);
+                }
+                m.msg_flags = 0;
+                m.msg_controllen = 0;
+                return total_recv;
+            }
+        }
     }
 
     // Receive into a stack buffer, then distribute across iovs.

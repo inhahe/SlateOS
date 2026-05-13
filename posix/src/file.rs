@@ -210,6 +210,10 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             1
         }
         HandleKind::TcpStream => {
+            if entry.handle == 0 {
+                errno::set_errno(errno::ENOTCONN);
+                return -1;
+            }
             let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
                 & crate::fcntl::O_NONBLOCK != 0;
             let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
@@ -285,6 +289,10 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64)
         }
         HandleKind::TcpStream => {
+            if entry.handle == 0 {
+                errno::set_errno(errno::ENOTCONN);
+                return -1;
+            }
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64);
             if ret >= 0 {
                 return ret as SsizeT;

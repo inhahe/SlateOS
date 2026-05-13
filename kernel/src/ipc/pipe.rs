@@ -827,6 +827,25 @@ pub fn poll_status(handle: PipeHandle) -> u16 {
     flags
 }
 
+/// Return the number of bytes available for reading in the pipe.
+///
+/// For the read end: returns `pipe.len` (bytes buffered).
+/// For the write end: returns available space in the buffer.
+/// If the pipe is not found, returns 0.
+pub fn readable_bytes(handle: PipeHandle) -> u64 {
+    let table = PIPES.lock();
+    let Some(pipe) = table.get(&handle.pipe_id()) else {
+        return 0;
+    };
+
+    if handle.end() == PipeEnd::Read {
+        pipe.len as u64
+    } else {
+        // Write end: report writable space (less useful but consistent).
+        pipe.buf.len().saturating_sub(pipe.len) as u64
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------

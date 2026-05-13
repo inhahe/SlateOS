@@ -347,12 +347,21 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
         return -1;
     }
     match kind {
-        HandleKind::Console | HandleKind::Pipe => {
-            // Return 0 bytes available.  A proper implementation would
-            // query the kernel's input buffer.
+        HandleKind::Console => {
+            // Console: no buffering visible from userspace.
             // SAFETY: arg must be at least sizeof(i32).
             unsafe {
                 core::ptr::write_unaligned(arg.cast::<i32>(), 0);
+            }
+            0
+        }
+        HandleKind::Pipe => {
+            // Query actual buffered byte count from the kernel.
+            use crate::syscall::{syscall1, SYS_PIPE_READABLE_BYTES};
+            let bytes = syscall1(SYS_PIPE_READABLE_BYTES, handle) as i32;
+            // SAFETY: arg must be at least sizeof(i32).
+            unsafe {
+                core::ptr::write_unaligned(arg.cast::<i32>(), bytes);
             }
             0
         }

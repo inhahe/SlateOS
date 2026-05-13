@@ -242,11 +242,12 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
             let (readable, writable, hangup, error) = check_readiness(entry.kind, entry.handle);
 
             let mut revents: i16 = 0;
-            if readable && (pfd.events & POLLIN != 0) {
-                revents |= POLLIN;
+            if readable && (pfd.events & (POLLIN | POLLRDNORM) != 0) {
+                // Report whichever flags were requested.
+                revents |= pfd.events & (POLLIN | POLLRDNORM);
             }
-            if writable && (pfd.events & POLLOUT != 0) {
-                revents |= POLLOUT;
+            if writable && (pfd.events & (POLLOUT | POLLWRNORM) != 0) {
+                revents |= pfd.events & (POLLOUT | POLLWRNORM);
             }
             // POSIX: POLLHUP and POLLERR are always reported regardless of
             // requested events.

@@ -672,6 +672,15 @@ pub const SYS_PIPE_WRITE_TIMEOUT: u64 = 227;
 /// this is a read-end or write-end handle.
 pub const SYS_PIPE_POLL: u64 = 228;
 
+/// `SYS_PIPE_READABLE_BYTES` — return the number of bytes buffered in a pipe.
+///
+/// `arg0`: pipe handle (read end or write end).
+///
+/// For a read-end handle: returns the number of bytes available to read.
+/// For a write-end handle: returns the amount of free space in the buffer.
+/// Returns 0 if the pipe handle is invalid.
+pub const SYS_PIPE_READABLE_BYTES: u64 = 229;
+
 /// Create a shared memory region.
 ///
 /// `arg0`: requested size in bytes (rounded up to frame boundary).

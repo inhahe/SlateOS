@@ -1561,19 +1561,28 @@ pub unsafe extern "C" fn send(
                 errno::set_errno(errno::ENOTCONN);
                 return -1;
             }
+            // MSG_DONTWAIT (0x40) or O_NONBLOCK → non-blocking mode.
+            let is_nb = (flags & MSG_DONTWAIT) != 0
+                || fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
-            if ret < 0 {
-                // Map ChannelClosed to EPIPE for TCP send (broken pipe).
-                let posix_err = translate_net_error(ret);
-                if posix_err == errno::ECONNRESET {
-                    // Remote sent FIN/RST — writing is EPIPE.
-                    errno::set_errno(errno::EPIPE);
-                } else {
-                    errno::set_errno(posix_err);
-                }
-                return -1;
+            if ret >= 0 {
+                return ret as isize;
             }
-            ret as isize
+            // Check for WouldBlock on a blocking socket.
+            let is_would_block = ret == errno::native::WOULD_BLOCK;
+            if is_would_block && !is_nb {
+                let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
+                return tcp_send_wait(entry.handle, buf, len, timeout_ms);
+            }
+            // Map ChannelClosed to EPIPE for TCP send (broken pipe).
+            let posix_err = translate_net_error(ret);
+            if posix_err == errno::ECONNRESET {
+                // Remote sent FIN/RST — writing is EPIPE.
+                errno::set_errno(errno::EPIPE);
+            } else {
+                errno::set_errno(posix_err);
+            }
+            -1
         }
         HandleKind::UdpSocket => {
             // send() on UDP requires a prior connect() to set the peer.
@@ -1942,18 +1951,25 @@ pub unsafe extern "C" fn sendto(
             errno::set_errno(errno::ENOTCONN);
             return -1;
         }
+        let is_nb = (flags & MSG_DONTWAIT) != 0
+            || fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
         let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
-        if ret < 0 {
-            let posix_err = translate_net_error(ret);
-            // Map ChannelClosed to EPIPE for TCP send (broken pipe).
-            if posix_err == errno::ECONNRESET {
-                errno::set_errno(errno::EPIPE);
-            } else {
-                errno::set_errno(posix_err);
-            }
-            return -1;
+        if ret >= 0 {
+            return ret as isize;
         }
-        return ret as isize;
+        // Check for WouldBlock on a blocking socket — wait with SO_SNDTIMEO.
+        if ret == errno::native::WOULD_BLOCK && !is_nb {
+            let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
+            return tcp_send_wait(entry.handle, buf, len, timeout_ms);
+        }
+        let posix_err = translate_net_error(ret);
+        // Map ChannelClosed to EPIPE for TCP send (broken pipe).
+        if posix_err == errno::ECONNRESET {
+            errno::set_errno(errno::EPIPE);
+        } else {
+            errno::set_errno(posix_err);
+        }
+        return -1;
     }
 
     if entry.kind != HandleKind::UdpSocket {

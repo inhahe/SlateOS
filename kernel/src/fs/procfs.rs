@@ -360,6 +360,7 @@ const ROOT_FILES: &[&str] = &[
     "filerules",
     "secureboot",
     "eventlog",
+    "sysevents",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7361,6 +7362,10 @@ fn gen_eventlog() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_sysevents() -> Vec<u8> {
+    crate::eventlog::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10028,6 +10033,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "filerules" => Ok(gen_filerules()),
         "secureboot" => Ok(gen_secureboot()),
         "eventlog" => Ok(gen_eventlog()),
+        "sysevents" => Ok(gen_sysevents()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

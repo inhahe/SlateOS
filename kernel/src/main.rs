@@ -74,6 +74,7 @@ mod fb;
 mod cputime;
 mod crypto;
 mod error;
+mod eventlog;
 mod font;
 mod fs;
 mod gdt;
@@ -1763,6 +1764,9 @@ extern "C" fn kmain() -> ! {
 
     serial_println!("[init] Spawning init process ({} bytes ELF)", INIT_ELF.len());
 
+    // Emit boot-complete event to the system event log.
+    syslog!("system.boot", Info, "Kernel boot complete, spawning init");
+
     // Init process capabilities — init is the root userspace process
     // and needs broad access.  Child processes will receive restricted
     // subsets of these capabilities.
@@ -1786,6 +1790,7 @@ extern "C" fn kmain() -> ! {
                 "[init] Init process spawned: pid={}, tid={}, entry={:#x}",
                 result.pid, result.task_id, result.entry_point
             );
+            syslog!("process.launch", Info, "Init process spawned (pid={})", result.pid);
             // The init process is now in the scheduler's run queue.
             // Drop into the idle loop — the scheduler will switch to
             // init when it gets a time slice.
@@ -1794,6 +1799,7 @@ extern "C" fn kmain() -> ! {
         Err(e) => {
             serial_println!("[init] FAILED to spawn init: {:?}", e);
             serial_println!("[init] Falling back to kernel debug shell");
+            syslog!("process.launch", Error, "Init spawn failed: {:?}, falling back to kshell", e);
             kshell::run();
         }
     }

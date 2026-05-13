@@ -1748,6 +1748,7 @@ pub unsafe extern "C" fn recv(
             }
             let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
             let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
+            let waitall = (flags & MSG_WAITALL) != 0 && !is_nb;
 
             // Always try non-blocking first so we can implement
             // timeout/blocking semantics in userspace consistently.
@@ -1757,14 +1758,28 @@ pub unsafe extern "C" fn recv(
                 SYS_TCP_RECV, entry.handle,
                 buf as u64, len as u64, try_flags as u64,
             );
-            if ret >= 0 {
+            if ret > 0 {
+                // MSG_WAITALL: keep receiving until `len` bytes or EOF/error.
+                if waitall && (ret as usize) < len {
+                    return tcp_recv_waitall(
+                        entry.handle, buf, len, kern_flags, timeout_ms, ret as usize,
+                    );
+                }
                 return ret as isize;
+            }
+            if ret == 0 {
+                return 0; // EOF
             }
 
             let err = translate_net_error(ret);
             if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
                 // Blocking socket — poll-wait with SO_RCVTIMEO.
                 // timeout_ms == 0 means wait indefinitely.
+                if waitall {
+                    return tcp_recv_waitall(
+                        entry.handle, buf, len, kern_flags, timeout_ms, 0,
+                    );
+                }
                 return tcp_recv_wait(
                     entry.handle, buf, len, kern_flags, timeout_ms,
                 );
@@ -1920,6 +1935,79 @@ pub(crate) fn tcp_recv_wait(
             }
         }
     }
+}
+
+/// MSG_WAITALL implementation for TCP recv.
+///
+/// Accumulates data into `buf` until exactly `total_len` bytes have been
+/// received, EOF is reached, an error occurs, or the timeout expires.
+/// `already_read` is how many bytes were already received before entering
+/// this function (from the initial non-blocking try).
+///
+/// Returns total bytes read or -1 (with errno set).
+fn tcp_recv_waitall(
+    handle: u64,
+    buf: *mut u8,
+    total_len: usize,
+    kern_flags: u32,
+    timeout_ms: u64,
+    already_read: usize,
+) -> isize {
+    const POLL_NS: u64 = 10_000_000; // 10ms
+
+    let deadline = if timeout_ms > 0 {
+        let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+        now.saturating_add(timeout_ms.saturating_mul(1_000_000))
+    } else {
+        u64::MAX
+    };
+
+    let flags_nb = kern_flags | MSG_DONTWAIT as u32;
+    let mut got = already_read;
+
+    while got < total_len {
+        let remaining = total_len.saturating_sub(got);
+        // SAFETY: buf is valid for total_len bytes; buf.add(got) is within bounds.
+        let dst = unsafe { buf.add(got) };
+
+        let ret = syscall4(
+            SYS_TCP_RECV, handle,
+            dst as u64, remaining as u64, flags_nb as u64,
+        );
+        if ret > 0 {
+            got = got.saturating_add(ret as usize);
+            continue;
+        }
+        if ret == 0 {
+            // EOF — return what we have (POSIX: MSG_WAITALL returns short
+            // read on EOF rather than blocking forever).
+            break;
+        }
+        let err = translate_net_error(ret);
+        if err != errno::EAGAIN && err != errno::EWOULDBLOCK {
+            // Real error.  If we have partial data, return it (POSIX).
+            if got > 0 {
+                break;
+            }
+            errno::set_errno(err);
+            return -1;
+        }
+        // WouldBlock: sleep and retry.
+        if deadline != u64::MAX {
+            let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+            if now >= deadline {
+                // Timeout: return what we have, or EAGAIN if nothing.
+                if got > 0 {
+                    break;
+                }
+                errno::set_errno(errno::EAGAIN);
+                return -1;
+            }
+        }
+        let _ = syscall1(SYS_SLEEP, POLL_NS);
+    }
+
+    got as isize
 }
 
 /// Poll-wait for TCP send to succeed (blocking write with SO_SNDTIMEO).

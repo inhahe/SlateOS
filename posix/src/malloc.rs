@@ -1,8 +1,8 @@
 //! C dynamic memory allocation.
 //!
 //! Implements `malloc`, `free`, `calloc`, `realloc`, `posix_memalign`,
-//! `aligned_alloc`, `valloc`, `memalign` using mmap/munmap as the
-//! backing allocator.
+//! `aligned_alloc`, `valloc`, `memalign`, `malloc_usable_size` using
+//! mmap/munmap as the backing allocator.
 //!
 //! ## Design
 //!
@@ -183,6 +183,33 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
     // For standard malloc, mmap_base == header.  For aligned allocations,
     // mmap_base points to the original mmap start (before alignment padding).
     let _ = mman::munmap(mmap_base as *mut core::ffi::c_void, total);
+}
+
+/// Query the usable size of an allocated block (GNU extension).
+///
+/// Returns the number of usable bytes in the allocation pointed to
+/// by `ptr` — this may be larger than the size originally requested
+/// because our allocator rounds up to page-size mmap regions.
+///
+/// If `ptr` is NULL, returns 0.
+///
+/// # Safety
+///
+/// `ptr` must be NULL or a value returned by `malloc`/`calloc`/`realloc`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn malloc_usable_size(ptr: *mut u8) -> usize {
+    if ptr.is_null() {
+        return 0;
+    }
+
+    // Read header: [mmap_base, total_size] at ptr - HEADER_SIZE.
+    // SAFETY: ptr was returned by malloc, header is valid.
+    let header = unsafe { ptr.sub(HEADER_SIZE) };
+    let mmap_base = unsafe { core::ptr::read_unaligned(header.cast::<u64>()) } as usize;
+    let total = unsafe { core::ptr::read_unaligned(header.add(8).cast::<u64>()) } as usize;
+
+    // Usable bytes = from user pointer to end of mmap region.
+    (mmap_base.wrapping_add(total)).saturating_sub(ptr as usize)
 }
 
 // ---------------------------------------------------------------------------

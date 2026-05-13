@@ -5329,6 +5329,26 @@ pub fn sys_tcp_close(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_TCP_ABORT` — abort a TCP connection by sending RST.
+///
+/// `arg0`: socket handle.
+pub fn sys_tcp_abort(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: same as close.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let handle = args.arg0 as usize;
+
+    match crate::net::tcp::abort(handle) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_TCP_BIND` — bind a TCP listener to a local port.
 ///
 /// `arg0`: local port (1–65535).

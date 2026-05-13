@@ -1955,6 +1955,18 @@ pub const SYS_TCP_ACCEPT: u64 = 805;
 /// Returns: 0 on success.
 pub const SYS_TCP_CLOSE_LISTENER: u64 = 806;
 
+/// Abort a TCP connection by sending RST.
+///
+/// `arg0`: socket handle.
+///
+/// Unlike `SYS_TCP_CLOSE` which performs an orderly FIN shutdown,
+/// this immediately sends RST and reclaims the connection.  The
+/// peer will see "connection reset" on its next read/write.  Use
+/// this for error recovery or process cleanup.
+///
+/// Returns: 0 on success.
+pub const SYS_TCP_ABORT: u64 = 807;
+
 /// Bind a UDP socket to a local port.
 ///
 /// `arg0`: local port (0–65535).

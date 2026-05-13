@@ -2226,6 +2226,66 @@ pub fn close(handle: usize) -> KernelResult<()> {
     Ok(())
 }
 
+/// Abort a TCP connection by sending RST to the peer.
+///
+/// Unlike `close()` which performs an orderly shutdown (FIN handshake),
+/// `abort()` immediately sends RST and reclaims the connection slot.
+/// Use this when:
+/// - A process exits without closing its sockets
+/// - An unrecoverable error makes orderly shutdown pointless
+/// - The application wants to signal an error to the peer
+///
+/// The peer will see a "connection reset" error on its next read/write.
+pub fn abort(handle: usize) -> KernelResult<()> {
+    let mut conns = CONNECTIONS.lock();
+    let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    if !conn.active {
+        return Ok(());
+    }
+
+    // Only send RST if the connection was at least partially established.
+    let should_rst = matches!(
+        conn.state,
+        TcpState::Established
+            | TcpState::FinWait1
+            | TcpState::FinWait2
+            | TcpState::CloseWait
+            | TcpState::LastAck
+            | TcpState::SynReceived
+    );
+
+    let local_port = conn.local_port;
+    let remote_ip = conn.remote_ip;
+    let remote_port = conn.remote_port;
+    let snd_nxt = conn.snd_nxt;
+    let rcv_nxt = conn.rcv_nxt;
+
+    // Immediately reclaim the slot.
+    conn.active = false;
+    conn.state = TcpState::Closed;
+    conn.rx_buffer.clear();
+    conn.tx_buffer.clear();
+    conn.nagle_buf.clear();
+    conn.ooo_buf.clear();
+
+    drop(conns);
+
+    // Send RST to the peer (best-effort — send failures don't matter
+    // since we're aborting anyway).
+    if should_rst {
+        let _ = send_segment(
+            local_port, remote_ip, remote_port,
+            snd_nxt, rcv_nxt, TCP_RST | TCP_ACK, &[],
+        );
+        crate::serial_println!(
+            "[tcp] Connection aborted (RST sent): port {} → {}:{}",
+            local_port, remote_ip, remote_port
+        );
+    }
+
+    Ok(())
+}
+
 /// Check if a connection's remote end has closed.
 pub fn is_remote_closed(handle: usize) -> bool {
     let conns = CONNECTIONS.lock();

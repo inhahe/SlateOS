@@ -1015,6 +1015,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] DNS resolution syscall (SYS_DNS_RESOLVE)
   - [x] DNS reverse resolution syscall (SYS_DNS_REVERSE_RESOLVE 821): PTR lookup exposed to userspace; getnameinfo() in POSIX layer wired to use it
   - [x] Network statistics syscall (SYS_NET_STAT 825): 48-byte interface counters for userspace ifconfig
+  - [x] TCP connection listing syscall (SYS_TCP_LIST 840): 20-byte records with local/remote addr:port, state, rx/tx buffered, flags
+  - [x] TCP listener listing syscall (SYS_TCP_LISTENER_LIST 841): 4-byte records with port and backlog usage
+  - [x] Interface config syscall (SYS_NET_IF_INFO 842): 24-byte record with IP, mask, gateway, DNS, MAC, flags
+  - [x] ARP table syscall (SYS_ARP_TABLE 843): 12-byte records per cache entry (IP, MAC, TTL)
+  - [x] DNS cache stats syscall (SYS_DNS_CACHE_STATS 844): 40-byte hit/miss/eviction/capacity statistics
 - [x] Firewall (basic packet filtering)
   - [x] Rule-based inbound/outbound filtering (allow/deny, protocol, IP/prefix, port, priority)
   - [x] Default policy (accept/drop), first-match-wins evaluation
@@ -1201,6 +1206,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] h_errno/herror/hstrerror: legacy DNS error reporting (HOST_NOT_FOUND, TRY_AGAIN, NO_RECOVERY, NO_DATA)
   - [x] getifaddrs/freeifaddrs: interface address enumeration (eth0 + lo with IFF_UP/LOOPBACK/MULTICAST/BROADCAST flags)
   - [x] getpeername kernel fallback: queries SYS_TCP_PEER_ADDR when cached metadata unavailable (dup'd fds)
+  - [x] getifaddrs real IP: queries SYS_NET_IF_INFO to populate eth0 address and netmask (was INADDR_ANY)
+  - [x] getservbyname/getservbyport: built-in service database (27 entries: http, https, ssh, ftp, smtp, dns, mysql, postgresql, redis, etc.)
+  - [x] getprotobyname/getprotobynumber: built-in protocol database (11 entries: ip, icmp, tcp, udp, gre, esp, ah, sctp, etc.)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

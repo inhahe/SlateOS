@@ -111,6 +111,10 @@ pub const SYS_TCP_LISTENER_LIST: u64 = 841;
 pub const SYS_NET_IF_INFO: u64 = 842;
 pub const SYS_ARP_TABLE: u64 = 843;
 pub const SYS_DNS_CACHE_STATS: u64 = 844;
+pub const SYS_TCP_POLL_STATUS: u64 = 845;
+pub const SYS_TCP_LISTENER_READY: u64 = 846;
+pub const SYS_UDP_RX_READY: u64 = 847;
+pub const SYS_TCP_SHUTDOWN: u64 = 848;
 
 // ---------------------------------------------------------------------------
 // Inline syscall wrappers

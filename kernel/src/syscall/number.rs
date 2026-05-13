@@ -2197,6 +2197,40 @@ pub const SYS_ARP_TABLE: u64 = 843;
 /// Returns 0 on success.
 pub const SYS_DNS_CACHE_STATS: u64 = 844;
 
+/// Query poll readiness of a TCP connection (for poll/select).
+///
+/// `arg0`: connection handle.
+///
+/// Returns: bitmask of readiness flags (POLLIN=1, POLLOUT=4, POLLERR=8,
+/// POLLHUP=16), or negative error code if handle is invalid.
+pub const SYS_TCP_POLL_STATUS: u64 = 845;
+
+/// Check if a TCP listener has pending connections.
+///
+/// `arg0`: listener handle.
+///
+/// Returns: 1 if there are pending connections ready to accept,
+/// 0 if the queue is empty, or negative error code.
+pub const SYS_TCP_LISTENER_READY: u64 = 846;
+
+/// Check if a UDP socket has datagrams ready to receive.
+///
+/// `arg0`: socket handle.
+///
+/// Returns: number of queued datagrams (≥0), or negative error code.
+pub const SYS_UDP_RX_READY: u64 = 847;
+
+/// Shut down part of a TCP connection (half-close).
+///
+/// `arg0`: connection handle.
+/// `arg1`: how — 0 = SHUT_RD, 1 = SHUT_WR, 2 = SHUT_RDWR.
+///
+/// SHUT_WR sends a FIN to the peer (half-close); further sends fail.
+/// SHUT_RD discards incoming data; further reads return EOF.
+///
+/// Returns: 0 on success, negative error code.
+pub const SYS_TCP_SHUTDOWN: u64 = 848;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

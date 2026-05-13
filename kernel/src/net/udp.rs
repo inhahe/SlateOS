@@ -326,6 +326,19 @@ pub fn leave_group(handle: usize, group: Ipv4Addr) -> KernelResult<()> {
     Ok(())
 }
 
+/// Check whether a UDP socket has datagrams ready to receive.
+///
+/// Returns the number of queued datagrams (0 if none).  Useful for
+/// POSIX poll/select readiness checks without consuming data.
+/// Returns 0 for invalid or inactive handles.
+pub fn rx_ready(handle: usize) -> usize {
+    let sockets = SOCKETS.lock();
+    match sockets.get(handle) {
+        Some(sock) if sock.active => sock.rx_queue.len(),
+        _ => 0,
+    }
+}
+
 /// Receive a datagram from a bound socket.
 ///
 /// Returns `None` if no datagrams are queued.

@@ -1,29 +1,32 @@
 //! POSIX poll() and select() — I/O multiplexing.
 //!
-//! ## Current Implementation
+//! ## Implementation
 //!
-//! Our kernel has no unified event notification mechanism yet (no epoll,
-//! no kqueue, no completion ports for arbitrary fd readiness).  This
-//! module provides a **minimal but functional** implementation:
+//! Readiness is determined per fd type:
 //!
-//! - **Immediate readiness**: all valid fds are reported as ready for
-//!   their requested events.  This is correct for regular files (which
-//!   are always "ready") and console (which can always accept writes).
-//!   For pipes and sockets, this may cause programs to attempt I/O that
-//!   blocks, but that's the documented fallback behavior.
+//! - **Regular files / console**: always ready (POSIX mandates this).
+//! - **Pipes**: always reported ready (kernel lacks peek; may cause a
+//!   blocking read, which is the documented fallback).
+//! - **TCP streams**: kernel-queried via `SYS_TCP_POLL_STATUS` — returns
+//!   actual POLLIN/POLLOUT/POLLHUP based on rx-buffer state, send window,
+//!   and connection state.
+//! - **TCP listeners**: kernel-queried via `SYS_TCP_LISTENER_READY` —
+//!   POLLIN set only when a completed connection is in the accept backlog.
+//! - **UDP sockets**: kernel-queried via `SYS_UDP_RX_READY` — POLLIN set
+//!   only when datagrams are queued; always writable when bound.
 //!
-//! - **Timeout handling**: `poll(fds, n, 0)` returns immediately.
-//!   `poll(fds, n, timeout)` with `timeout > 0` sleeps via
-//!   `SYS_SLEEP` then rechecks.  `poll(fds, n, -1)` sleeps briefly
-//!   and returns (avoids infinite hang).
+//! ## Timeout Handling
+//!
+//! `poll(fds, n, 0)` returns immediately (non-blocking).
+//! `poll(fds, n, timeout)` with `timeout > 0` sleeps via `SYS_SLEEP`
+//! then rechecks.  `poll(fds, n, -1)` sleeps briefly and returns.
 //!
 //! ## Future Work
 //!
-//! When the kernel adds `SYS_POLL` or completion-port-based readiness
-//! notification, this module should delegate to the kernel instead of
-//! doing userspace polling.  The pipe `SYS_PIPE_TRY_READ` could be
-//! used for non-destructive pipe readability checks if a zero-length
-//! read semantic is defined.
+//! When the kernel adds an epoll / completion-port mechanism, this
+//! module should delegate to it for true event-driven wakeups instead
+//! of polling.  Pipe readability could use `SYS_PIPE_TRY_READ` with
+//! a zero-length semantic.
 
 use crate::errno;
 use crate::fdtable;
@@ -296,6 +299,10 @@ pub unsafe extern "C" fn ppoll(
 /// Check fd readiness based on handle kind.
 ///
 /// Returns `(readable, writable, hangup)`.
+///
+/// For network sockets, queries the kernel for actual buffer state
+/// rather than always reporting ready.  This prevents spurious wakeups
+/// and makes poll/select behave correctly for event loops.
 fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool) {
     use fdtable::HandleKind;
 
@@ -305,31 +312,43 @@ fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool)
         // Pipe: assumed ready (can't non-destructively check without peek syscall).
         HandleKind::Console | HandleKind::File | HandleKind::Pipe => (true, true, false),
 
-        // TCP stream: ready if connected, hangup if handle=0 (closed).
+        // TCP stream: query kernel for actual rx/tx readiness.
         HandleKind::TcpStream => {
             if handle == 0 {
-                (false, false, true)
-            } else {
-                (true, true, false)
+                return (false, false, true);
             }
+            // SYS_TCP_POLL_STATUS returns a bitmask:
+            //   bit 0 (0x01) = POLLIN (readable)
+            //   bit 2 (0x04) = POLLOUT (writable)
+            //   bit 3 (0x08) = POLLERR
+            //   bit 4 (0x10) = POLLHUP
+            let status = syscall1(SYS_TCP_POLL_STATUS, handle) as u16;
+            let readable = (status & 0x0001) != 0;
+            let writable = (status & 0x0004) != 0;
+            let hangup = (status & 0x0010) != 0;
+            (readable, writable, hangup)
         }
 
-        // TCP listener: readable means a connection may be pending.
+        // TCP listener: readable means a completed connection is pending.
         HandleKind::TcpListener => {
             if handle == 0 {
-                (false, false, true)
-            } else {
-                (true, false, false)
+                return (false, false, true);
             }
+            // SYS_TCP_LISTENER_READY returns 1 if pending, 0 otherwise.
+            let ready = syscall1(SYS_TCP_LISTENER_READY, handle);
+            (ready > 0, false, false)
         }
 
-        // UDP socket: readable/writable if bound.
+        // UDP socket: query kernel for queued datagrams.
         HandleKind::UdpSocket => {
             if handle == 0 {
-                (false, false, false)
-            } else {
-                (true, true, false)
+                return (false, false, false);
             }
+            // SYS_UDP_RX_READY returns number of queued datagrams.
+            let queued = syscall1(SYS_UDP_RX_READY, handle);
+            let readable = queued > 0;
+            // UDP is always writable when bound (no flow control).
+            (readable, true, false)
         }
     }
 }

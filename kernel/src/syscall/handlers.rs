@@ -7037,3 +7037,54 @@ pub fn sys_dns_cache_stats(args: &SyscallArgs) -> SyscallResult {
 
     SyscallResult::ok(0)
 }
+
+/// SYS_TCP_POLL_STATUS — query poll readiness of a TCP connection.
+///
+/// arg0: connection handle
+///
+/// Returns: readiness bitmask (POLLIN=1, POLLOUT=4, POLLERR=8, POLLHUP=16)
+pub fn sys_tcp_poll_status(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    let status = crate::net::tcp::poll_status(handle);
+    SyscallResult::ok(status as i64)
+}
+
+/// SYS_TCP_LISTENER_READY — check if listener has pending connections.
+///
+/// arg0: listener handle
+///
+/// Returns: 1 if pending connections available, 0 otherwise.
+pub fn sys_tcp_listener_ready(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    let ready = crate::net::tcp::listener_has_pending(handle);
+    SyscallResult::ok(if ready { 1 } else { 0 })
+}
+
+/// SYS_UDP_RX_READY — check if UDP socket has queued datagrams.
+///
+/// arg0: socket handle
+///
+/// Returns: number of queued datagrams (≥0).
+pub fn sys_udp_rx_ready(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    let count = crate::net::udp::rx_ready(handle);
+    SyscallResult::ok(count as i64)
+}
+
+/// SYS_TCP_SHUTDOWN — half-close a TCP connection.
+///
+/// arg0: connection handle
+/// arg1: how (0=SHUT_RD, 1=SHUT_WR, 2=SHUT_RDWR)
+///
+/// Returns 0 on success.
+pub fn sys_tcp_shutdown(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    let how = args.arg1 as u32;
+    if how > 2 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    match crate::net::tcp::shutdown(handle, how) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}

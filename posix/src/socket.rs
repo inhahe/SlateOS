@@ -1781,19 +1781,22 @@ pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
         errno::set_errno(errno::ENOTCONN);
         return -1;
     }
-    // Half-close is not supported.  Full shutdown closes the
-    // kernel handle and marks the fd as disconnected.
+
+    // Delegate to the kernel for proper half-close semantics.
+    // SYS_TCP_SHUTDOWN(handle, how) sends FIN for SHUT_WR,
+    // discards rx data for SHUT_RD, or both for SHUT_RDWR.
+    let ret = syscall2(SYS_TCP_SHUTDOWN, entry.handle, how as u64);
+    if ret < 0 {
+        errno::set_errno(translate_net_error(ret));
+        return -1;
+    }
+
+    // For SHUT_RDWR, also mark the fd as disconnected so
+    // subsequent send/recv return ENOTCONN at the POSIX layer.
     if how == SHUT_RDWR {
-        let ret = syscall1(SYS_TCP_CLOSE, entry.handle);
-        if ret < 0 {
-            errno::set_errno(translate_net_error(ret));
-            return -1;
-        }
-        // Mark the handle as closed but keep the fd entry so
-        // subsequent send/recv return the correct error.
-        // Discarding old entry is safe: we just closed its kernel handle above.
         let _ = fdtable::install_fd(fd, HandleKind::TcpStream, 0);
     }
+
     0
 }
 

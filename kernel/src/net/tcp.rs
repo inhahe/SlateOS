@@ -297,6 +297,12 @@ struct TcpConnection {
     rx_buffer: Vec<u8>,
     /// Whether the remote end has closed (FIN received).
     remote_closed: bool,
+    /// Whether the local write side has been shut down (SHUT_WR).
+    /// After this is set, no more data can be sent; a FIN has been queued.
+    local_write_closed: bool,
+    /// Whether the local read side has been shut down (SHUT_RD).
+    /// After this is set, incoming data is ACKed but discarded.
+    local_read_closed: bool,
     /// Retransmit counter (incremented each poll cycle).
     retransmit_timer: u32,
 
@@ -492,6 +498,8 @@ impl TcpConnection {
             rcv_irs: 0,
             rx_buffer: Vec::new(),
             remote_closed: false,
+            local_write_closed: false,
+            local_read_closed: false,
             retransmit_timer: 0,
             srtt_ns_x8: 0,
             rttvar_ns_x4: 0,
@@ -1862,6 +1870,10 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
         {
             return Err(KernelError::InvalidArgument);
         }
+        // Reject sends after shutdown(SHUT_WR).
+        if conn.local_write_closed {
+            return Err(KernelError::InvalidArgument);
+        }
         let unacked = conn.snd_nxt != conn.snd_una;
         (conn.local_port, conn.remote_ip, conn.remote_port,
          conn.snd_nxt, conn.rcv_nxt, effective_window(conn),
@@ -2291,6 +2303,10 @@ pub fn read(handle: usize) -> KernelResult<Vec<u8>> {
     if !conn.active {
         return Err(KernelError::InvalidArgument);
     }
+    // After shutdown(SHUT_RD), reads return empty (EOF).
+    if conn.local_read_closed {
+        return Ok(Vec::new());
+    }
 
     // Drain the receive buffer.
     let data = core::mem::take(&mut conn.rx_buffer);
@@ -2377,6 +2393,82 @@ pub fn close(handle: usize) -> KernelResult<()> {
     conns[handle].tx_buffer.clear();
     conns[handle].nagle_buf.clear();
     conns[handle].ooo_buf.clear();
+
+    Ok(())
+}
+
+/// Shut down part of a TCP connection (half-close).
+///
+/// `how`: 0 = SHUT_RD, 1 = SHUT_WR, 2 = SHUT_RDWR.
+///
+/// - **SHUT_RD**: marks the read side closed.  Incoming data is ACKed
+///   but discarded; reads return empty (EOF).
+/// - **SHUT_WR**: sends a FIN to the peer, transitioning to FIN_WAIT_1
+///   (or LAST_ACK if already in CLOSE_WAIT).  No more sends allowed.
+/// - **SHUT_RDWR**: both of the above.
+///
+/// Unlike `close()`, the connection slot remains active for the
+/// remaining half that is still open.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn shutdown(handle: usize, how: u32) -> KernelResult<()> {
+    let shut_rd = how == 0 || how == 2;
+    let shut_wr = how == 1 || how == 2;
+
+    if shut_rd {
+        let mut conns = CONNECTIONS.lock();
+        let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+        if !conn.active {
+            return Err(KernelError::InvalidArgument);
+        }
+        conn.local_read_closed = true;
+        conn.rx_buffer.clear();
+    }
+
+    if shut_wr {
+        let (local_port, remote_ip, remote_port, seq, ack, state) = {
+            let conns = CONNECTIONS.lock();
+            let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
+            if !conn.active {
+                return Err(KernelError::InvalidArgument);
+            }
+            if conn.local_write_closed {
+                // Already shut down for writing.
+                return Ok(());
+            }
+            (conn.local_port, conn.remote_ip, conn.remote_port,
+             conn.snd_nxt, conn.rcv_nxt, conn.state)
+        };
+
+        match state {
+            TcpState::Established => {
+                // Send FIN, transition to FIN_WAIT_1 but keep connection
+                // active for reading.
+                send_segment(local_port, remote_ip, remote_port, seq, ack, TCP_FIN | TCP_ACK, &[])?;
+                let mut conns = CONNECTIONS.lock();
+                conns[handle].state = TcpState::FinWait1;
+                conns[handle].snd_nxt = seq.wrapping_add(1);
+                conns[handle].local_write_closed = true;
+            }
+            TcpState::CloseWait => {
+                // Remote already sent FIN; our FIN completes the close.
+                send_segment(local_port, remote_ip, remote_port, seq, ack, TCP_FIN | TCP_ACK, &[])?;
+                let mut conns = CONNECTIONS.lock();
+                conns[handle].state = TcpState::LastAck;
+                conns[handle].snd_nxt = seq.wrapping_add(1);
+                conns[handle].local_write_closed = true;
+            }
+            TcpState::SynSent | TcpState::SynReceived => {
+                // Not yet established — just mark write closed.
+                let mut conns = CONNECTIONS.lock();
+                conns[handle].local_write_closed = true;
+            }
+            _ => {
+                // Already in a closing state (FinWait1, FinWait2, etc.).
+                let mut conns = CONNECTIONS.lock();
+                conns[handle].local_write_closed = true;
+            }
+        }
+    }
 
     Ok(())
 }
@@ -2469,6 +2561,83 @@ pub fn is_remote_closed(handle: usize) -> bool {
     conns.get(handle)
         .map(|c| c.remote_closed || c.state == TcpState::CloseWait)
         .unwrap_or(true)
+}
+
+// ---------------------------------------------------------------------------
+// Poll readiness (for POSIX poll/select)
+// ---------------------------------------------------------------------------
+
+/// Poll readiness bits returned by `poll_status()`.
+///
+/// Matches POSIX semantics: POLLIN means data can be read without blocking,
+/// POLLOUT means data can be written without blocking, POLLHUP means the
+/// remote end has closed, POLLERR means the connection encountered an error.
+pub const POLL_READABLE: u16 = 0x0001;
+pub const POLL_WRITABLE: u16 = 0x0004;
+pub const POLL_ERROR: u16    = 0x0008;
+pub const POLL_HANGUP: u16   = 0x0010;
+
+/// Query the poll readiness status of a TCP connection.
+///
+/// Returns a bitmask of `POLL_*` flags indicating what operations can
+/// proceed without blocking.  Returns 0 if the handle is invalid.
+///
+/// - `POLL_READABLE` — rx_buffer has data, or remote has closed (EOF).
+/// - `POLL_WRITABLE` — connection is established and send window > 0.
+/// - `POLL_HANGUP`   — remote end closed (FIN received).
+/// - `POLL_ERROR`    — connection was reset or is in an error state.
+pub fn poll_status(handle: usize) -> u16 {
+    let conns = CONNECTIONS.lock();
+    let conn = match conns.get(handle) {
+        Some(c) if c.active => c,
+        _ => return POLL_HANGUP | POLL_ERROR,
+    };
+
+    let mut flags: u16 = 0;
+
+    // Readable: data in rx_buffer or remote closed (EOF condition),
+    // unless the local read side was shut down (then no more readability).
+    if !conn.local_read_closed {
+        if !conn.rx_buffer.is_empty() || conn.remote_closed {
+            flags |= POLL_READABLE;
+        }
+    }
+
+    // Writable: connection is established, send window allows data,
+    // and the local write side hasn't been shut down.
+    if !conn.local_write_closed {
+        match conn.state {
+            TcpState::Established | TcpState::CloseWait => {
+                // Writable if congestion/flow-control window allows ≥1 byte.
+                let ew = effective_window(conn);
+                if ew > 0 {
+                    flags |= POLL_WRITABLE;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Hangup: remote closed or local write side shut down (peer sees EOF).
+    if conn.remote_closed {
+        flags |= POLL_HANGUP;
+    }
+
+    flags
+}
+
+/// Check if a TCP listener has pending connections ready to accept.
+///
+/// Returns `true` if at least one completed connection is in the backlog.
+/// Returns `false` for invalid or inactive listeners.
+pub fn listener_has_pending(listener_handle: usize) -> bool {
+    let listeners = LISTENERS.lock();
+    let listener = match listeners.get(listener_handle) {
+        Some(l) if l.active => l,
+        _ => return false,
+    };
+
+    listener.backlog.iter().any(|p| p.active)
 }
 
 // ---------------------------------------------------------------------------
@@ -3288,13 +3457,21 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
             // Process data.
             if !payload.is_empty() {
                 if seq == conn.rcv_nxt {
-                    // In-order data — deliver to rx_buffer.
-                    let can_accept = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
+                    // In-order data — deliver to rx_buffer (unless read
+                    // side is shut down, in which case ACK but discard).
+                    let can_accept = if conn.local_read_closed {
+                        0
+                    } else {
+                        MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len())
+                    };
                     let accept = payload.len().min(can_accept);
                     if accept > 0 {
                         conn.rx_buffer.extend_from_slice(&payload[..accept]);
-                        conn.rcv_nxt = conn.rcv_nxt.wrapping_add(accept as u32);
                     }
+                    // Advance rcv_nxt for ALL received data (even discarded)
+                    // so we ACK correctly and the peer doesn't retransmit.
+                    let advance = payload.len() as u32;
+                    conn.rcv_nxt = conn.rcv_nxt.wrapping_add(advance);
 
                     // Deliver contiguous OOO-buffered data now that the
                     // gap has been filled.

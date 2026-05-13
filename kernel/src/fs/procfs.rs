@@ -476,6 +476,10 @@ const ROOT_FILES: &[&str] = &[
     "ioport",
     "msivec",
     "cpuset",
+    "ftrace",
+    "kstack",
+    "fnotify",
+    "netlat",
     "columnview",
     "pathbar",
     "viewstate",
@@ -9201,6 +9205,79 @@ fn gen_cpuset() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_ftrace() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (probes, hits, misses, overhead, ops) = super::ftrace::stats();
+    let enabled = if super::ftrace::is_enabled() { "ON" } else { "OFF" };
+    out.push_str(&format!("=== Function Trace Stats ===\n"));
+    out.push_str(&format!("Tracing: {}  Probes: {}  Hits: {}  Misses: {}  Overhead: {} ns  Ops: {}\n\n",
+        enabled, probes, hits, misses, overhead, ops));
+    out.push_str("Probes:\n");
+    for p in super::ftrace::per_probe() {
+        let avg = if p.hits > 0 { p.total_ns / p.hits } else { 0 };
+        let en = if p.enabled { "on" } else { "off" };
+        out.push_str(&format!("  {:<20} {:<4}  hits={}  miss={}  avg={}ns  max={}ns  [{}]\n",
+            p.func_name, p.kind.label(), p.hits, p.misses, avg, p.max_ns, en));
+    }
+    out.into_bytes()
+}
+
+fn gen_kstack() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cpus, overflows, guards, samples, ops) = super::kstack::stats();
+    out.push_str(&format!("=== Kernel Stack Stats ===\n"));
+    out.push_str(&format!("CPUs: {}  Overflows: {}  Guard hits: {}  Samples: {}  Ops: {}\n\n",
+        cpus, overflows, guards, samples, ops));
+    out.push_str("Per-CPU:\n");
+    for c in super::kstack::per_cpu() {
+        let avg = if c.samples > 0 { c.total_used_samples / c.samples } else { 0 };
+        let pct = if c.stack_size > 0 { (c.high_water as u64) * 100 / (c.stack_size as u64) } else { 0 };
+        out.push_str(&format!("  CPU {:>2}  size={}  cur={}  hwm={}  ({}%)  avg={}  overflows={}  guards={}\n",
+            c.cpu_id, c.stack_size, c.current_used, c.high_water, pct, avg, c.overflows, c.guard_hits));
+    }
+    out.into_bytes()
+}
+
+fn gen_fnotify() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (watches, events, overflows, ops) = super::fnotify::stats();
+    out.push_str(&format!("=== File Notification Stats ===\n"));
+    out.push_str(&format!("Watches: {}  Events: {}  Overflows: {}  Ops: {}\n\n", watches, events, overflows, ops));
+    for t in &super::fnotify::per_type() {
+        out.push_str(&format!("{}: watches={}/{}  events={}  overflows={}  queue={}/{}\n",
+            t.notify_type.label(), t.watches, t.max_watches, t.events, t.overflows,
+            t.queue_depth, t.max_queue_depth));
+    }
+    out.into_bytes()
+}
+
+fn gen_netlat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (ifaces, rtt, proc_s, ops) = super::netlat::stats();
+    out.push_str(&format!("=== Network Latency Stats ===\n"));
+    out.push_str(&format!("Interfaces: {}  RTT samples: {}  Processing samples: {}  Ops: {}\n\n",
+        ifaces, rtt, proc_s, ops));
+    let labels = super::netlat::bucket_labels();
+    for i in super::netlat::per_interface() {
+        let avg_rtt = if i.rtt_samples > 0 { i.rtt_total_ns / i.rtt_samples } else { 0 };
+        let avg_proc = if i.proc_samples > 0 { i.proc_total_ns / i.proc_samples } else { 0 };
+        out.push_str(&format!("{}:  rtt: avg={}ns  min={}ns  max={}ns  ({} samples)\n",
+            i.name, avg_rtt, i.rtt_min_ns, i.rtt_max_ns, i.rtt_samples));
+        out.push_str(&format!("      proc: avg={}ns  max={}ns  ({} samples)\n",
+            avg_proc, i.proc_max_ns, i.proc_samples));
+        out.push_str("      histogram:");
+        for (j, &count) in i.rtt_histogram.iter().enumerate() {
+            out.push_str(&format!(" {}={}", labels[j], count));
+        }
+        out.push('\n');
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9842,6 +9919,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "ioport" => Ok(gen_ioport()),
         "msivec" => Ok(gen_msivec()),
         "cpuset" => Ok(gen_cpuset()),
+        "ftrace" => Ok(gen_ftrace()),
+        "kstack" => Ok(gen_kstack()),
+        "fnotify" => Ok(gen_fnotify()),
+        "netlat" => Ok(gen_netlat()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

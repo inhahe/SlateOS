@@ -1002,6 +1002,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] I/O Port (fs::ioport): x86 I/O port access monitoring with per-region read/write tracking, untracked access counting; `ioport`/`iop` kshell command; /proc/ioport; 8 self-tests
   - [x] MSI Vectors (fs::msivec): MSI/MSI-X interrupt vector monitoring with per-device allocation, interrupt counts, CPU targeting; `msivec`/`msi` kshell command; /proc/msivec; 8 self-tests
   - [x] CPU Sets (fs::cpuset): CPU set/affinity monitoring with cpuset lifecycle, process assignment, affinity change tracking, NUMA masks; `cpuset`/`cset` kshell command; /proc/cpuset; 8 self-tests
+  - [x] Function Trace (fs::ftrace): Function tracing/profiling with per-probe hit/miss counts, overhead tracking, enable/disable; `ftrace`/`ftr` kshell command; /proc/ftrace; 8 self-tests
+  - [x] Kernel Stack (fs::kstack): Kernel stack usage monitoring with per-CPU high-water marks, overflow/guard-hit detection; `kstack`/`kstk` kshell command; /proc/kstack; 8 self-tests
+  - [x] File Notify (fs::fnotify): inotify/fanotify/dnotify monitoring with watch counts, event queues, overflow tracking; `fnotify`/`fnot` kshell command; /proc/fnotify; 8 self-tests
+  - [x] Network Latency (fs::netlat): Network RTT/processing latency with per-interface histograms, min/max/avg tracking; `netlat`/`nlat` kshell command; /proc/netlat; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

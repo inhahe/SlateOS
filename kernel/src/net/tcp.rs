@@ -1254,25 +1254,45 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         remote_ip, remote_port, isn, OUR_WSCALE
     );
 
-    // Wait for SYN-ACK (blocking poll, up to ~5 seconds).
-    for _ in 0..5000 {
-        super::poll();
+    // Wait for SYN-ACK with SYN retransmission (1s, 2s, 4s, 8s = ~15s total).
+    // Each "attempt" is a SYN send followed by a polling wait.  If the SYN
+    // or SYN-ACK is lost, we retransmit rather than silently timing out.
+    const SYN_ATTEMPT_POLLS: [u32; 4] = [1000, 2000, 4000, 8000]; // ~1s, 2s, 4s, 8s
 
-        let state = CONNECTIONS.lock()[handle].state;
-        if state == TcpState::Established {
-            crate::serial_println!("[tcp] Connection established to {}:{}", remote_ip, remote_port);
-            return Ok(handle);
-        }
-        if state == TcpState::Closed {
-            return Err(KernelError::NotSupported); // Connection refused.
+    for (attempt, &polls) in SYN_ATTEMPT_POLLS.iter().enumerate() {
+        // On retry (not the first attempt), retransmit the SYN.
+        if attempt > 0 {
+            crate::serial_println!(
+                "[tcp] SYN retransmit #{} to {}:{}", attempt, remote_ip, remote_port
+            );
+            let _ = send_syn_segment(
+                local_port, remote_ip, remote_port,
+                isn, 0, TCP_SYN | TCP_ECE | TCP_CWR, DEFAULT_WINDOW, OUR_WSCALE,
+                tcp_now_ms(), 0,
+            );
         }
 
-        for _ in 0..10_000 {
-            core::hint::spin_loop();
+        for _ in 0..polls {
+            super::poll();
+
+            let state = CONNECTIONS.lock()[handle].state;
+            if state == TcpState::Established {
+                crate::serial_println!(
+                    "[tcp] Connection established to {}:{}", remote_ip, remote_port
+                );
+                return Ok(handle);
+            }
+            if state == TcpState::Closed {
+                return Err(KernelError::NotSupported); // Connection refused.
+            }
+
+            for _ in 0..10_000 {
+                core::hint::spin_loop();
+            }
         }
     }
 
-    // Timed out — clean up.
+    // All attempts exhausted — clean up.
     let mut conns = CONNECTIONS.lock();
     conns[handle].active = false;
     conns[handle].state = TcpState::Closed;

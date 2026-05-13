@@ -1639,10 +1639,12 @@ pub unsafe extern "C" fn getdelim(
     delimiter: i32,
     stream: *mut u8,
 ) -> isize {
-    if lineptr.is_null() || n.is_null() || stream.is_null() {
+    if lineptr.is_null() || n.is_null() {
         crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
+    // Note: we don't check stream.is_null() because our stdin sentinel
+    // IS null (STDIN_SENTINEL = 0).  stream_to_file() maps 0 → stdin.
 
     let mut buf = unsafe { *lineptr };
     let mut cap = unsafe { *n };

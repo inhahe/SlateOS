@@ -440,6 +440,10 @@ const ROOT_FILES: &[&str] = &[
     "blkqueue",
     "powerstat",
     "inodestat",
+    "migstat",
+    "pagecache",
+    "netdev",
+    "cpustat",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8559,6 +8563,84 @@ fn gen_inodestat() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_migstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cpus, tasks, migs, numa, ops) = crate::fs::migstat::stats();
+    out.push_str(&format!("cpus: {}\n", cpus));
+    out.push_str(&format!("tracked_tasks: {}\n", tasks));
+    out.push_str(&format!("total_migrations: {}\n", migs));
+    out.push_str(&format!("total_numa_crosses: {}\n", numa));
+    out.push_str(&format!("ops: {}\n", ops));
+    for (reason, count) in crate::fs::migstat::reason_stats() {
+        out.push_str(&format!("{}: {}\n", reason.label(), count));
+    }
+    for c in crate::fs::migstat::per_cpu() {
+        out.push_str(&format!("cpu{}: in={} out={} numa={}\n",
+            c.cpu_id, c.migrations_in, c.migrations_out, c.numa_crosses));
+    }
+    out.into_bytes()
+}
+
+fn gen_pagecache() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (devs, hits, misses, evictions, readahead, ops) = crate::fs::pagecache::stats();
+    out.push_str(&format!("devices: {}\n", devs));
+    out.push_str(&format!("total_hits: {}\n", hits));
+    out.push_str(&format!("total_misses: {}\n", misses));
+    out.push_str(&format!("total_evictions: {}\n", evictions));
+    out.push_str(&format!("total_readahead: {}\n", readahead));
+    let rate = crate::fs::pagecache::hit_rate();
+    out.push_str(&format!("hit_rate: {}.{}%\n", rate / 100, rate % 100));
+    out.push_str(&format!("ops: {}\n", ops));
+    for d in crate::fs::pagecache::per_device() {
+        out.push_str(&format!("{}: cached={} hits={} misses={} evict={} dirty={}\n",
+            d.device, d.cached_pages, d.hits, d.misses, d.evictions, d.dirty_pages));
+    }
+    out.into_bytes()
+}
+
+fn gen_netdev() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (ifaces, rx, tx, errors, drops, ops) = crate::fs::netdev::stats();
+    out.push_str(&format!("interfaces: {}\n", ifaces));
+    out.push_str(&format!("total_rx_bytes: {}\n", rx));
+    out.push_str(&format!("total_tx_bytes: {}\n", tx));
+    out.push_str(&format!("total_errors: {}\n", errors));
+    out.push_str(&format!("total_drops: {}\n", drops));
+    out.push_str(&format!("ops: {}\n", ops));
+    for i in crate::fs::netdev::list() {
+        out.push_str(&format!("{} ({}) {}: rx={}/{} tx={}/{} err={}/{} drop={}/{}\n",
+            i.name, i.nic_type.label(), if i.link_up { "UP" } else { "DOWN" },
+            i.rx_bytes, i.rx_packets, i.tx_bytes, i.tx_packets,
+            i.rx_errors, i.tx_errors, i.rx_drops, i.tx_drops));
+    }
+    out.into_bytes()
+}
+
+fn gen_cpustat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cpus, ctxsw, irqs, ops) = crate::fs::cpustat::stats();
+    out.push_str(&format!("cpus: {}\n", cpus));
+    let util = crate::fs::cpustat::utilization();
+    out.push_str(&format!("utilization: {}.{}%\n", util / 100, util % 100));
+    out.push_str(&format!("context_switches: {}\n", ctxsw));
+    out.push_str(&format!("interrupts: {}\n", irqs));
+    out.push_str(&format!("ops: {}\n", ops));
+    let modes = ["user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal"];
+    for c in crate::fs::cpustat::per_cpu() {
+        let parts: Vec<_> = modes.iter().zip(c.times_ns.iter())
+            .map(|(m, ns)| format!("{}={}ns", m, ns))
+            .collect();
+        out.push_str(&format!("cpu{}: {} ctxsw={} irq={}\n",
+            c.cpu_id, parts.join(" "), c.context_switches, c.interrupts));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9164,6 +9246,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "blkqueue" => Ok(gen_blkqueue()),
         "powerstat" => Ok(gen_powerstat()),
         "inodestat" => Ok(gen_inodestat()),
+        "migstat" => Ok(gen_migstat()),
+        "pagecache" => Ok(gen_pagecache()),
+        "netdev" => Ok(gen_netdev()),
+        "cpustat" => Ok(gen_cpustat()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

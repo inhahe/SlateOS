@@ -966,6 +966,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Block Queue (fs::blkqueue): Block I/O request queue monitoring with per-device depth, submit/complete/merge counters, plug/unplug tracking; `blkqueue`/`bqueue` kshell command; /proc/blkqueue; 8 self-tests
   - [x] Power Stats (fs::powerstat): Power domain monitoring with 8 domains, 5 power states, energy accounting (uJ), wake event logging with 6 sources; `powerstat`/`pwstat` kshell command; /proc/powerstat; 8 self-tests
   - [x] Inode Stats (fs::inodestat): Inode/dentry cache monitoring with per-FS inode counts, dcache hit/miss/eviction tracking, hit rate calculation; `inodestat`/`icache` kshell command; /proc/inodestat; 8 self-tests
+  - [x] Migration Stats (fs::migstat): Process CPU migration tracking with per-CPU in/out counters, NUMA crossing detection, 6 migration reasons, hot task ranking; `migstat`/`mig` kshell command; /proc/migstat; 8 self-tests
+  - [x] Page Cache (fs::pagecache): File-backed page cache monitoring with per-device hit/miss/eviction stats, readahead effectiveness tracking, hit rate calculation; `pagecache`/`pcache` kshell command; /proc/pagecache; 8 self-tests
+  - [x] Net Device (fs::netdev): NIC-level statistics with per-interface RX/TX bytes/packets, errors, drops, link state, 6 NIC types; `netdev`/`ndev` kshell command; /proc/netdev; 8 self-tests
+  - [x] CPU Stats (fs::cpustat): Per-CPU utilization breakdown with 8 time modes (user/nice/system/idle/iowait/irq/softirq/steal), context switches, interrupts, utilization %; `cpustat`/`cpust` kshell command; /proc/cpustat; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -3550,6 +3550,7 @@ const COMMANDS: &[&str] = &[
     "nc", "netcat",
     "iperf",
     "snmp",
+    "ftp",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4754,6 +4755,7 @@ fn dispatch(line: &str) {
         "nc" | "netcat" => cmd_nc(args),
         "iperf" => cmd_iperf(args),
         "snmp" => cmd_snmp(args),
+        "ftp" => cmd_ftp(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35758,6 +35760,176 @@ fn cmd_ndisc(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'ndisc help'.", sub);
+        }
+    }
+}
+
+/// `ftp` — FTP client for file transfer.
+fn cmd_ftp(args: &str) {
+    use alloc::format;
+    use alloc::vec::Vec;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("help");
+
+    match sub {
+        "connect" | "c" => {
+            // ftp connect <host> [user] [pass]
+            if parts.len() < 2 {
+                shell_println!("Usage: ftp connect <host> [user] [pass]");
+                return;
+            }
+            let host_str = parts[1];
+            let user = parts.get(2).copied().unwrap_or("");
+            let pass = parts.get(3).copied().unwrap_or("");
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("ftp: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            shell_println!("Connecting to {}...", ip);
+            match crate::net::ftp::connect_and_login(ip, user, pass) {
+                Ok(result) => {
+                    shell_println!("Banner: {}", result.banner);
+                    if result.login_ok {
+                        shell_println!("Login successful");
+                    } else {
+                        shell_println!("Login failed");
+                    }
+                }
+                Err(e) => shell_println!("ftp: connect failed: {:?}", e),
+            }
+        }
+
+        "ls" | "list" | "dir" => {
+            // ftp ls <host> [path] [user] [pass]
+            if parts.len() < 2 {
+                shell_println!("Usage: ftp ls <host> [path] [user] [pass]");
+                return;
+            }
+            let host_str = parts[1];
+            let path = parts.get(2).copied().unwrap_or("");
+            let user = parts.get(3).copied().unwrap_or("");
+            let pass = parts.get(4).copied().unwrap_or("");
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("ftp: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            shell_println!("Listing {}:{}...", ip, if path.is_empty() { "/" } else { path });
+            match crate::net::ftp::list_directory(ip, path, user, pass) {
+                Ok(listing) => {
+                    for line in listing.lines() {
+                        shell_println!("  {}", line);
+                    }
+                }
+                Err(e) => shell_println!("ftp: list failed: {:?}", e),
+            }
+        }
+
+        "get" | "download" => {
+            // ftp get <host> <file> [user] [pass]
+            if parts.len() < 3 {
+                shell_println!("Usage: ftp get <host> <file> [user] [pass]");
+                return;
+            }
+            let host_str = parts[1];
+            let remote_path = parts[2];
+            let user = parts.get(3).copied().unwrap_or("");
+            let pass = parts.get(4).copied().unwrap_or("");
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("ftp: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            shell_println!("Downloading {}:{}...", ip, remote_path);
+            match crate::net::ftp::download_file(ip, remote_path, user, pass) {
+                Ok(data) => {
+                    shell_println!("Downloaded {} bytes", data.len());
+                    // Try to show as text.
+                    if let Ok(text) = core::str::from_utf8(&data) {
+                        let lines: Vec<&str> = text.lines().collect();
+                        let show = lines.len().min(20);
+                        for line in &lines[..show] {
+                            shell_println!("  {}", line);
+                        }
+                        if lines.len() > show {
+                            shell_println!("  ... ({} more lines)", lines.len() - show);
+                        }
+                    } else {
+                        shell_println!("  (binary data, {} bytes)", data.len());
+                    }
+                }
+                Err(e) => shell_println!("ftp: download failed: {:?}", e),
+            }
+        }
+
+        "codes" => {
+            shell_println!("Common FTP reply codes:");
+            shell_println!("  150  {}", crate::net::ftp::reply_description(150));
+            shell_println!("  200  {}", crate::net::ftp::reply_description(200));
+            shell_println!("  220  {}", crate::net::ftp::reply_description(220));
+            shell_println!("  226  {}", crate::net::ftp::reply_description(226));
+            shell_println!("  227  {}", crate::net::ftp::reply_description(227));
+            shell_println!("  230  {}", crate::net::ftp::reply_description(230));
+            shell_println!("  331  {}", crate::net::ftp::reply_description(331));
+            shell_println!("  421  {}", crate::net::ftp::reply_description(421));
+            shell_println!("  530  {}", crate::net::ftp::reply_description(530));
+            shell_println!("  550  {}", crate::net::ftp::reply_description(550));
+        }
+
+        "status" | "stats" => {
+            let s = crate::net::ftp::stats();
+            shell_println!("FTP statistics:");
+            shell_println!("  Connections:   {}", s.connections);
+            shell_println!("  Logins:        {}", s.logins);
+            shell_println!("  LIST commands: {}", s.list_commands);
+            shell_println!("  RETR commands: {}", s.retr_commands);
+            shell_println!("  Downloaded:    {} bytes", s.bytes_downloaded);
+            shell_println!("  Uploaded:      {} bytes", s.bytes_uploaded);
+            shell_println!("  Errors:        {}", s.errors);
+        }
+
+        "test" => {
+            match crate::net::ftp::self_test() {
+                Ok(()) => shell_println!("ftp: all self-tests passed"),
+                Err(e) => shell_println!("ftp: self-test failed: {:?}", e),
+            }
+        }
+
+        _ => {
+            shell_println!("ftp — FTP client for file transfer");
+            shell_println!();
+            shell_println!("Usage:");
+            shell_println!("  ftp connect <host> [user] [pass]       — connect and login");
+            shell_println!("  ftp ls <host> [path] [user] [pass]     — list remote directory");
+            shell_println!("  ftp get <host> <file> [user] [pass]    — download file");
+            shell_println!("  ftp codes                              — show FTP reply codes");
+            shell_println!("  ftp status                             — show statistics");
+            shell_println!("  ftp test                               — run self-tests");
         }
     }
 }
@@ -66877,7 +67049,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

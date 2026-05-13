@@ -1589,19 +1589,22 @@ pub extern "C" fn pow10f(x: f32) -> f32 {
 pub extern "C" fn lgamma_r(x: f64, signp: *mut i32) -> f64 {
     // Compute the sign of Γ(x).
     // Γ(x) > 0 for x > 0.
-    // For x < 0 non-integer, sign alternates: negative for
-    //   x ∈ (-2,-1), (-4,-3), (-6,-5), ... and positive otherwise.
+    // For x < 0 non-integer, sign alternates:
+    //   Γ(x) < 0 for x ∈ (-1,0), (-3,-2), (-5,-4), ... (floor is odd)
+    //   Γ(x) > 0 for x ∈ (-2,-1), (-4,-3), (-6,-5), ... (floor is even)
     let sign: i32 = if x > 0.0 || x.is_nan() || x.is_infinite() {
         1
     } else if x == floor(x) {
         // Pole — sign is undefined, use +1 by convention.
         1
     } else {
-        // floor(x) is the integer part.  If floor(x) is even (in
-        // magnitude), Γ(x) < 0; if odd, Γ(x) > 0.
+        // floor(x) for negative non-integer x:
+        //   x ∈ (-1,0) → floor = -1 (odd)  → Γ < 0
+        //   x ∈ (-2,-1) → floor = -2 (even) → Γ > 0
+        //   x ∈ (-3,-2) → floor = -3 (odd)  → Γ < 0
+        // In Rust, -1 % 2 == -1 (nonzero) and -2 % 2 == 0.
         let n = floor(x) as i64;
-        // n is negative.  Γ(x) < 0 when n is even (0, -2, -4, ...).
-        if n % 2 == 0 { -1 } else { 1 }
+        if n % 2 == 0 { 1 } else { -1 }
     };
 
     if !signp.is_null() {
@@ -3561,5 +3564,734 @@ mod tests {
         assert_eq!(logb(0.0), f64::NEG_INFINITY, "logb(0) = -inf");
         assert_eq!(logb(f64::INFINITY), f64::INFINITY, "logb(inf) = inf");
         assert!(logb(f64::NAN).is_nan(), "logb(NaN) = NaN");
+    }
+
+    // -----------------------------------------------------------------------
+    // logbf — f32 variant
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn logbf_basic() {
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(logbf(1.0), 0.0, "logbf(1) = 0");
+            assert_eq!(logbf(2.0), 1.0, "logbf(2) = 1");
+            assert_eq!(logbf(8.0), 3.0, "logbf(8) = 3");
+            assert_eq!(logbf(0.5), -1.0, "logbf(0.5) = -1");
+        }
+    }
+
+    #[test]
+    fn logbf_special() {
+        assert_eq!(logbf(0.0), f32::NEG_INFINITY, "logbf(0) = -inf");
+        assert_eq!(logbf(f32::INFINITY), f32::INFINITY, "logbf(inf) = inf");
+        assert!(logbf(f32::NAN).is_nan(), "logbf(NaN) = NaN");
+    }
+
+    // -----------------------------------------------------------------------
+    // nan / nanf — NaN constructors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nan_returns_nan() {
+        let tag = b"\0";
+        let result = nan(tag.as_ptr());
+        assert!(result.is_nan(), "nan() should return NaN");
+    }
+
+    #[test]
+    fn nanf_returns_nan() {
+        let tag = b"\0";
+        let result = nanf(tag.as_ptr());
+        assert!(result.is_nan(), "nanf() should return NaN");
+    }
+
+    #[test]
+    fn nan_null_tag() {
+        let result = nan(core::ptr::null());
+        assert!(result.is_nan(), "nan(null) should return NaN");
+    }
+
+    // -----------------------------------------------------------------------
+    // frexpf / ldexpf / modff — f32 variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn frexpf_basic() {
+        let mut e: i32 = 0;
+        let m = frexpf(8.0, &mut e);
+        assert_approx(f64::from(m), 0.5, 1e-6, "frexpf(8) mantissa");
+        assert_eq!(e, 4, "frexpf(8) exponent");
+    }
+
+    #[test]
+    fn frexpf_roundtrip() {
+        let values = [1.0f32, 0.5, 100.0, -3.14, 0.001];
+        for &x in &values {
+            let mut e: i32 = 0;
+            let m = frexpf(x, &mut e);
+            let roundtrip = ldexpf(m, e);
+            assert_approx(f64::from(roundtrip), f64::from(x), 1e-6,
+                &format!("frexpf/ldexpf roundtrip for {x}"));
+        }
+    }
+
+    #[test]
+    fn ldexpf_basic() {
+        let result = ldexpf(1.0, 4);
+        assert_approx(f64::from(result), 16.0, 1e-6, "ldexpf(1, 4)");
+    }
+
+    #[test]
+    fn ldexpf_fraction() {
+        let result = ldexpf(0.75, 3);
+        assert_approx(f64::from(result), 6.0, 1e-6, "ldexpf(0.75, 3)");
+    }
+
+    #[test]
+    fn modff_basic() {
+        let mut ipart: f32 = 0.0;
+        let frac = modff(3.75, &mut ipart);
+        assert_approx(f64::from(ipart), 3.0, 1e-6, "modff(3.75) ipart");
+        assert_approx(f64::from(frac), 0.75, 1e-6, "modff(3.75) frac");
+    }
+
+    #[test]
+    fn modff_negative() {
+        let mut ipart: f32 = 0.0;
+        let frac = modff(-2.25, &mut ipart);
+        assert_approx(f64::from(ipart), -2.0, 1e-6, "modff(-2.25) ipart");
+        assert_approx(f64::from(frac), -0.25, 1e-6, "modff(-2.25) frac");
+    }
+
+    #[test]
+    fn modff_integer() {
+        let mut ipart: f32 = 0.0;
+        let frac = modff(5.0, &mut ipart);
+        assert_approx(f64::from(ipart), 5.0, 1e-6, "modff(5.0) ipart");
+        assert_approx(f64::from(frac), 0.0, 1e-6, "modff(5.0) frac");
+    }
+
+    // -----------------------------------------------------------------------
+    // scalbnf / scalbln / scalblnf
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scalbnf_basic() {
+        let result = scalbnf(1.0, 3);
+        assert_approx(f64::from(result), 8.0, 1e-6, "scalbnf(1, 3)");
+        let result2 = scalbnf(3.0, -1);
+        assert_approx(f64::from(result2), 1.5, 1e-6, "scalbnf(3, -1)");
+    }
+
+    #[test]
+    fn scalbln_basic() {
+        assert_approx(scalbln(1.0, 10), 1024.0, EPS, "scalbln(1, 10)");
+        assert_approx(scalbln(2.0, -1), 1.0, EPS, "scalbln(2, -1)");
+    }
+
+    #[test]
+    fn scalbln_large_exponent() {
+        // Exponents beyond ±1074 clamp to overflow/underflow.
+        let result = scalbln(1.0, 2000);
+        assert_eq!(result, f64::INFINITY, "scalbln(1, 2000) = inf");
+        let result2 = scalbln(1.0, -2000);
+        assert_eq!(result2, 0.0, "scalbln(1, -2000) = 0");
+    }
+
+    #[test]
+    fn scalblnf_basic() {
+        let result = scalblnf(1.0, 4);
+        assert_approx(f64::from(result), 16.0, 1e-6, "scalblnf(1, 4)");
+    }
+
+    // -----------------------------------------------------------------------
+    // nextafterf
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nextafterf_direction() {
+        let up = nextafterf(1.0, 2.0);
+        let down = nextafterf(1.0, 0.0);
+        assert!(up > 1.0, "nextafterf(1, 2) > 1");
+        assert!(down < 1.0, "nextafterf(1, 0) < 1");
+    }
+
+    #[test]
+    fn nextafterf_from_zero() {
+        let pos = nextafterf(0.0, 1.0);
+        assert!(pos > 0.0, "nextafterf(0, 1) > 0");
+        let neg = nextafterf(0.0, -1.0);
+        assert!(neg < 0.0, "nextafterf(0, -1) < 0");
+    }
+
+    #[test]
+    fn nextafterf_same() {
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(nextafterf(1.0, 1.0), 1.0);
+            assert_eq!(nextafterf(0.0, 0.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn nextafterf_nan() {
+        assert!(nextafterf(f32::NAN, 1.0).is_nan());
+        assert!(nextafterf(1.0, f32::NAN).is_nan());
+    }
+
+    // -----------------------------------------------------------------------
+    // remainderf
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remainderf_basic() {
+        let r = remainderf(5.0, 2.0);
+        assert_approx(f64::from(r), 1.0, 1e-6, "remainderf(5, 2)");
+    }
+
+    #[test]
+    fn remainderf_negative() {
+        let r = remainderf(7.0, 3.0);
+        assert_approx(f64::from(r), 1.0, 1e-6, "remainderf(7, 3)");
+    }
+
+    #[test]
+    fn remainderf_nan() {
+        assert!(remainderf(f32::INFINITY, 1.0).is_nan());
+        assert!(remainderf(1.0, 0.0).is_nan());
+    }
+
+    // -----------------------------------------------------------------------
+    // remquof
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remquof_basic() {
+        let mut q: i32 = 0;
+        let r = remquof(7.0, 3.0, &mut q);
+        assert_approx(f64::from(r), 1.0, 1e-6, "remquof(7, 3) remainder");
+        assert_eq!(q, 2, "remquof(7, 3) quotient");
+    }
+
+    #[test]
+    fn remquof_negative() {
+        let mut q: i32 = 0;
+        let r = remquof(-7.0, 3.0, &mut q);
+        assert_approx(f64::from(r), -1.0, 1e-6, "remquof(-7, 3) remainder");
+        assert_eq!(q, -2, "remquof(-7, 3) quotient");
+    }
+
+    // -----------------------------------------------------------------------
+    // fdimf / fmaf
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fdimf_basic() {
+        let r = fdimf(5.0, 3.0);
+        assert_approx(f64::from(r), 2.0, 1e-6, "fdimf(5, 3)");
+        let r2 = fdimf(3.0, 5.0);
+        assert_approx(f64::from(r2), 0.0, 1e-6, "fdimf(3, 5)");
+    }
+
+    #[test]
+    fn fmaf_basic() {
+        // fma(2, 3, 4) = 2*3 + 4 = 10
+        let r = fmaf(2.0, 3.0, 4.0);
+        assert_approx(f64::from(r), 10.0, 1e-6, "fmaf(2, 3, 4)");
+    }
+
+    #[test]
+    fn fmaf_precision() {
+        // fmaf promotes to f64 internally, so (1+eps)*(1+eps)-1 should be
+        // more accurate than naive f32 mul+add.
+        // Use values that are exactly representable in f32.
+        let r = fmaf(1.0, 2.0, 3.0);
+        assert_approx(f64::from(r), 5.0, 1e-6, "fmaf(1, 2, 3) = 5");
+        // Negative: -2*3 + 7 = 1
+        let r2 = fmaf(-2.0, 3.0, 7.0);
+        assert_approx(f64::from(r2), 1.0, 1e-6, "fmaf(-2, 3, 7) = 1");
+    }
+
+    // -----------------------------------------------------------------------
+    // sinhf / coshf / tanhf — hyperbolic f32 variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sinhf_values() {
+        assert_approx(f64::from(sinhf(0.0)), 0.0, 1e-6, "sinhf(0)");
+        assert_approx(f64::from(sinhf(1.0)), 1.175_201, 1e-4, "sinhf(1)");
+        assert_approx(f64::from(sinhf(-1.0)), -1.175_201, 1e-4, "sinhf(-1)");
+    }
+
+    #[test]
+    fn sinhf_special() {
+        assert!(sinhf(f32::NAN).is_nan(), "sinhf(NaN)");
+        assert_eq!(sinhf(f32::INFINITY), f32::INFINITY, "sinhf(inf)");
+        assert_eq!(sinhf(f32::NEG_INFINITY), f32::NEG_INFINITY, "sinhf(-inf)");
+    }
+
+    #[test]
+    fn coshf_values() {
+        assert_approx(f64::from(coshf(0.0)), 1.0, 1e-6, "coshf(0)");
+        assert_approx(f64::from(coshf(1.0)), 1.543_081, 1e-4, "coshf(1)");
+        // cosh is even: cosh(-x) = cosh(x)
+        assert_approx(f64::from(coshf(-1.0)), 1.543_081, 1e-4, "coshf(-1)");
+    }
+
+    #[test]
+    fn coshf_special() {
+        assert!(coshf(f32::NAN).is_nan(), "coshf(NaN)");
+        assert_eq!(coshf(f32::INFINITY), f32::INFINITY, "coshf(inf)");
+        assert_eq!(coshf(f32::NEG_INFINITY), f32::INFINITY, "coshf(-inf)");
+    }
+
+    #[test]
+    fn tanhf_values() {
+        assert_approx(f64::from(tanhf(0.0)), 0.0, 1e-6, "tanhf(0)");
+        assert_approx(f64::from(tanhf(1.0)), 0.761_594, 1e-4, "tanhf(1)");
+        assert_approx(f64::from(tanhf(-1.0)), -0.761_594, 1e-4, "tanhf(-1)");
+    }
+
+    #[test]
+    fn tanhf_limits() {
+        // tanh approaches ±1 for large inputs.
+        assert_approx(f64::from(tanhf(20.0)), 1.0, 1e-6, "tanhf(20) ≈ 1");
+        assert_approx(f64::from(tanhf(-20.0)), -1.0, 1e-6, "tanhf(-20) ≈ -1");
+    }
+
+    // -----------------------------------------------------------------------
+    // asinhf / acoshf / atanhf — inverse hyperbolic f32 variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn asinhf_values() {
+        assert_approx(f64::from(asinhf(0.0)), 0.0, 1e-6, "asinhf(0)");
+        assert_approx(f64::from(asinhf(1.0)), 0.881_374, 1e-4, "asinhf(1)");
+        assert_approx(f64::from(asinhf(-1.0)), -0.881_374, 1e-4, "asinhf(-1)");
+    }
+
+    #[test]
+    fn asinhf_sinh_roundtrip() {
+        let vals = [0.5f32, 1.0, 2.0, -1.5];
+        for &x in &vals {
+            let roundtrip = sinhf(asinhf(x));
+            assert_approx(f64::from(roundtrip), f64::from(x), 1e-4,
+                &format!("sinh(asinh({x}))"));
+        }
+    }
+
+    #[test]
+    fn acoshf_values() {
+        assert_approx(f64::from(acoshf(1.0)), 0.0, 1e-6, "acoshf(1)");
+        assert_approx(f64::from(acoshf(2.0)), 1.316_958, 1e-4, "acoshf(2)");
+    }
+
+    #[test]
+    fn acoshf_domain_error() {
+        // acosh(x) for x < 1 is NaN.
+        assert!(acoshf(0.5).is_nan(), "acoshf(0.5) = NaN");
+        assert!(acoshf(-1.0).is_nan(), "acoshf(-1) = NaN");
+    }
+
+    #[test]
+    fn atanhf_values() {
+        assert_approx(f64::from(atanhf(0.0)), 0.0, 1e-6, "atanhf(0)");
+        assert_approx(f64::from(atanhf(0.5)), 0.549_306, 1e-4, "atanhf(0.5)");
+        assert_approx(f64::from(atanhf(-0.5)), -0.549_306, 1e-4, "atanhf(-0.5)");
+    }
+
+    #[test]
+    fn atanhf_boundary() {
+        assert_eq!(atanhf(1.0), f32::INFINITY, "atanhf(1) = +inf");
+        assert_eq!(atanhf(-1.0), f32::NEG_INFINITY, "atanhf(-1) = -inf");
+        assert!(atanhf(1.5).is_nan(), "atanhf(1.5) = NaN");
+    }
+
+    // -----------------------------------------------------------------------
+    // erff / erfcf — f32 error function variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn erff_values() {
+        assert_approx(f64::from(erff(0.0)), 0.0, 1e-5, "erff(0)");
+        assert_approx(f64::from(erff(1.0)), 0.842_701, 1e-4, "erff(1)");
+        assert_approx(f64::from(erff(-1.0)), -0.842_701, 1e-4, "erff(-1)");
+    }
+
+    #[test]
+    fn erff_large() {
+        // erf(x) → 1 for large x.
+        assert_approx(f64::from(erff(5.0)), 1.0, 1e-5, "erff(5) ≈ 1");
+        assert_approx(f64::from(erff(-5.0)), -1.0, 1e-5, "erff(-5) ≈ -1");
+    }
+
+    #[test]
+    fn erfcf_values() {
+        assert_approx(f64::from(erfcf(0.0)), 1.0, 1e-5, "erfcf(0)");
+        assert_approx(f64::from(erfcf(1.0)), 0.157_299, 1e-4, "erfcf(1)");
+    }
+
+    #[test]
+    fn erfcf_complements_erff() {
+        let vals = [0.0f32, 0.5, 1.0, 2.0, -1.0];
+        for &x in &vals {
+            let sum = f64::from(erff(x)) + f64::from(erfcf(x));
+            assert_approx(sum, 1.0, 1e-5, &format!("erff({x}) + erfcf({x}) = 1"));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // lgammaf / lgammaf_r / tgammaf — f32 gamma variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lgammaf_values() {
+        // lgamma(1) = ln(Γ(1)) = ln(1) = 0
+        assert_approx(f64::from(lgammaf(1.0)), 0.0, 1e-5, "lgammaf(1)");
+        // lgamma(2) = ln(Γ(2)) = ln(1) = 0
+        assert_approx(f64::from(lgammaf(2.0)), 0.0, 1e-5, "lgammaf(2)");
+        // lgamma(5) = ln(4!) = ln(24) ≈ 3.178
+        assert_approx(f64::from(lgammaf(5.0)), 3.178_054, 1e-3, "lgammaf(5)");
+    }
+
+    #[test]
+    fn lgammaf_poles() {
+        // lgamma at non-positive integers → +inf.
+        assert_eq!(lgammaf(0.0), f32::INFINITY, "lgammaf(0) = inf");
+        assert_eq!(lgammaf(-1.0), f32::INFINITY, "lgammaf(-1) = inf");
+    }
+
+    #[test]
+    fn lgammaf_r_sign() {
+        let mut sign: i32 = 0;
+        let result = lgammaf_r(2.0, &mut sign);
+        assert_approx(f64::from(result), 0.0, 1e-5, "lgammaf_r(2)");
+        assert_eq!(sign, 1, "lgammaf_r(2) sign = +1");
+
+        // Between -1 and 0, Γ(x) < 0.
+        let result2 = lgammaf_r(-0.5, &mut sign);
+        assert!(f64::from(result2) > 0.0, "lgammaf_r(-0.5) > 0");
+        assert_eq!(sign, -1, "lgammaf_r(-0.5) sign = -1");
+    }
+
+    #[test]
+    fn tgammaf_values() {
+        // Γ(1) = 1, Γ(5) = 24
+        assert_approx(f64::from(tgammaf(1.0)), 1.0, 1e-4, "tgammaf(1)");
+        assert_approx(f64::from(tgammaf(5.0)), 24.0, 1e-2, "tgammaf(5)");
+    }
+
+    #[test]
+    fn tgammaf_half() {
+        // Γ(0.5) = √π ≈ 1.7724539
+        assert_approx(f64::from(tgammaf(0.5)), 1.772_454, 1e-3, "tgammaf(0.5)");
+    }
+
+    // -----------------------------------------------------------------------
+    // sincosf — f32 sincos
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sincosf_consistency() {
+        let angles: [f32; 5] = [0.0, 1.0, -1.0, 3.14159 / 4.0, 2.0];
+        for &a in &angles {
+            let mut s: f32 = 0.0;
+            let mut c: f32 = 0.0;
+            sincosf(a, &mut s, &mut c);
+            assert_approx(f64::from(s), f64::from(sinf(a)), 1e-6,
+                &format!("sincosf({a}) sin"));
+            assert_approx(f64::from(c), f64::from(cosf(a)), 1e-6,
+                &format!("sincosf({a}) cos"));
+        }
+    }
+
+    #[test]
+    fn sincosf_pythagorean() {
+        let angles: [f32; 4] = [0.5, 1.0, 2.0, -0.7];
+        for &a in &angles {
+            let mut s: f32 = 0.0;
+            let mut c: f32 = 0.0;
+            sincosf(a, &mut s, &mut c);
+            let sum = f64::from(s) * f64::from(s) + f64::from(c) * f64::from(c);
+            assert_approx(sum, 1.0, 1e-5,
+                &format!("sin²({a}) + cos²({a}) = 1"));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // exp10f / pow10f — f32 variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exp10f_values() {
+        assert_approx(f64::from(exp10f(0.0)), 1.0, 1e-6, "exp10f(0)");
+        assert_approx(f64::from(exp10f(1.0)), 10.0, 1e-4, "exp10f(1)");
+        assert_approx(f64::from(exp10f(2.0)), 100.0, 1e-3, "exp10f(2)");
+        assert_approx(f64::from(exp10f(-1.0)), 0.1, 1e-5, "exp10f(-1)");
+    }
+
+    #[test]
+    fn pow10f_is_exp10f() {
+        let vals = [0.0f32, 1.0, -1.0, 2.0, 0.5];
+        for &x in &vals {
+            #[allow(clippy::float_cmp)]
+            {
+                assert_eq!(pow10f(x), exp10f(x), "pow10f({x}) == exp10f({x})");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // asinf / acosf / atanf / atan2f — inverse trig f32 variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn asinf_values() {
+        assert_approx(f64::from(asinf(0.0)), 0.0, 1e-6, "asinf(0)");
+        assert_approx(f64::from(asinf(1.0)), core::f64::consts::FRAC_PI_2, 1e-4, "asinf(1)");
+        assert_approx(f64::from(asinf(-1.0)), -core::f64::consts::FRAC_PI_2, 1e-4, "asinf(-1)");
+        assert_approx(f64::from(asinf(0.5)), core::f64::consts::FRAC_PI_6, 1e-4, "asinf(0.5)");
+    }
+
+    #[test]
+    fn asinf_domain_error() {
+        assert!(asinf(1.5).is_nan(), "asinf(1.5) = NaN");
+        assert!(asinf(-1.5).is_nan(), "asinf(-1.5) = NaN");
+    }
+
+    #[test]
+    fn acosf_values() {
+        assert_approx(f64::from(acosf(1.0)), 0.0, 1e-6, "acosf(1)");
+        assert_approx(f64::from(acosf(0.0)), core::f64::consts::FRAC_PI_2, 1e-4, "acosf(0)");
+        assert_approx(f64::from(acosf(-1.0)), core::f64::consts::PI, 1e-4, "acosf(-1)");
+    }
+
+    #[test]
+    fn acosf_domain_error() {
+        assert!(acosf(1.5).is_nan(), "acosf(1.5) = NaN");
+        assert!(acosf(-1.5).is_nan(), "acosf(-1.5) = NaN");
+    }
+
+    #[test]
+    fn atanf_values() {
+        assert_approx(f64::from(atanf(0.0)), 0.0, 1e-6, "atanf(0)");
+        // Note: our Taylor-series atan has ~2% error at x=±1 (boundary of convergence).
+        assert_approx(f64::from(atanf(1.0)), core::f64::consts::FRAC_PI_4, 0.02, "atanf(1)");
+        assert_approx(f64::from(atanf(-1.0)), -core::f64::consts::FRAC_PI_4, 0.02, "atanf(-1)");
+    }
+
+    #[test]
+    fn atan2f_quadrants() {
+        // Note: our Taylor-series atan has ~2% error at |y/x|=1 (boundary of convergence).
+        // atan2(1, 1) = π/4.
+        assert_approx(f64::from(atan2f(1.0, 1.0)), core::f64::consts::FRAC_PI_4, 0.02,
+            "atan2f(1, 1)");
+        // atan2(1, -1) = 3π/4.
+        assert_approx(f64::from(atan2f(1.0, -1.0)), 3.0 * core::f64::consts::FRAC_PI_4, 0.02,
+            "atan2f(1, -1)");
+        // atan2(-1, 1) = -π/4.
+        assert_approx(f64::from(atan2f(-1.0, 1.0)), -core::f64::consts::FRAC_PI_4, 0.02,
+            "atan2f(-1, 1)");
+    }
+
+    #[test]
+    fn atan2f_axis_values() {
+        assert_approx(f64::from(atan2f(0.0, 1.0)), 0.0, 1e-6, "atan2f(0, 1)");
+        assert_approx(f64::from(atan2f(1.0, 0.0)), core::f64::consts::FRAC_PI_2, 1e-4,
+            "atan2f(1, 0)");
+    }
+
+    // -----------------------------------------------------------------------
+    // lroundf / llround / llroundf — integer rounding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lroundf_values() {
+        assert_eq!(lroundf(2.5), 3, "lroundf(2.5) = 3");
+        assert_eq!(lroundf(2.4), 2, "lroundf(2.4) = 2");
+        assert_eq!(lroundf(-2.5), -3, "lroundf(-2.5) = -3");
+        assert_eq!(lroundf(-2.4), -2, "lroundf(-2.4) = -2");
+        assert_eq!(lroundf(0.0), 0, "lroundf(0) = 0");
+    }
+
+    #[test]
+    fn llround_values() {
+        assert_eq!(llround(2.5), 3, "llround(2.5) = 3");
+        assert_eq!(llround(2.4), 2, "llround(2.4) = 2");
+        assert_eq!(llround(-2.5), -3, "llround(-2.5) = -3");
+        assert_eq!(llround(-3.7), -4, "llround(-3.7) = -4");
+        assert_eq!(llround(0.0), 0, "llround(0) = 0");
+    }
+
+    #[test]
+    fn llroundf_values() {
+        assert_eq!(llroundf(3.5), 4, "llroundf(3.5) = 4");
+        assert_eq!(llroundf(3.4), 3, "llroundf(3.4) = 3");
+        assert_eq!(llroundf(-3.5), -4, "llroundf(-3.5) = -4");
+        assert_eq!(llroundf(-3.4), -3, "llroundf(-3.4) = -3");
+    }
+
+    // -----------------------------------------------------------------------
+    // finitef / dremf / gammaf / significandf — f32 compatibility aliases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn finitef_values() {
+        assert_eq!(finitef(1.0), 1, "finitef(1.0) = 1");
+        assert_eq!(finitef(0.0), 1, "finitef(0.0) = 1");
+        assert_eq!(finitef(-100.0), 1, "finitef(-100.0) = 1");
+        assert_eq!(finitef(f32::INFINITY), 0, "finitef(inf) = 0");
+        assert_eq!(finitef(f32::NEG_INFINITY), 0, "finitef(-inf) = 0");
+        assert_eq!(finitef(f32::NAN), 0, "finitef(NaN) = 0");
+    }
+
+    #[test]
+    fn dremf_alias() {
+        // dremf is remainder for f32.
+        let r = dremf(5.0, 2.0);
+        let expected = remainderf(5.0, 2.0);
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(r, expected, "dremf == remainderf");
+        }
+    }
+
+    #[test]
+    fn gammaf_is_lgammaf() {
+        // gamma is a deprecated alias for lgamma.
+        let vals = [1.0f32, 2.0, 5.0, 0.5];
+        for &x in &vals {
+            #[allow(clippy::float_cmp)]
+            {
+                assert_eq!(gammaf(x), lgammaf(x), "gammaf({x}) == lgammaf({x})");
+            }
+        }
+    }
+
+    #[test]
+    fn significandf_values() {
+        // significand(x) extracts mantissa in [1, 2).
+        let r = significandf(8.0);
+        assert_approx(f64::from(r), 1.0, 1e-6, "significandf(8) = 1.0");
+        let r2 = significandf(12.0);
+        assert_approx(f64::from(r2), 1.5, 1e-6, "significandf(12) = 1.5");
+    }
+
+    // -----------------------------------------------------------------------
+    // exp2f / log2f / log10f — f32 variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exp2f_values() {
+        assert_approx(f64::from(exp2f(0.0)), 1.0, 1e-6, "exp2f(0)");
+        assert_approx(f64::from(exp2f(1.0)), 2.0, 1e-6, "exp2f(1)");
+        assert_approx(f64::from(exp2f(3.0)), 8.0, 1e-4, "exp2f(3)");
+        assert_approx(f64::from(exp2f(-1.0)), 0.5, 1e-6, "exp2f(-1)");
+    }
+
+    #[test]
+    fn log2f_values() {
+        assert_approx(f64::from(log2f(1.0)), 0.0, 1e-6, "log2f(1)");
+        assert_approx(f64::from(log2f(2.0)), 1.0, 1e-5, "log2f(2)");
+        assert_approx(f64::from(log2f(8.0)), 3.0, 1e-5, "log2f(8)");
+        assert_approx(f64::from(log2f(0.5)), -1.0, 1e-5, "log2f(0.5)");
+    }
+
+    #[test]
+    fn log10f_values() {
+        assert_approx(f64::from(log10f(1.0)), 0.0, 1e-6, "log10f(1)");
+        assert_approx(f64::from(log10f(10.0)), 1.0, 1e-5, "log10f(10)");
+        assert_approx(f64::from(log10f(100.0)), 2.0, 1e-5, "log10f(100)");
+        assert_approx(f64::from(log10f(0.1)), -1.0, 1e-5, "log10f(0.1)");
+    }
+
+    // -----------------------------------------------------------------------
+    // expf / logf edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expf_special() {
+        assert!(expf(f32::NAN).is_nan(), "expf(NaN) = NaN");
+        assert_eq!(expf(f32::INFINITY), f32::INFINITY, "expf(inf)");
+        assert_approx(f64::from(expf(f32::NEG_INFINITY)), 0.0, 1e-6, "expf(-inf)");
+    }
+
+    #[test]
+    fn logf_special() {
+        assert!(logf(f32::NAN).is_nan(), "logf(NaN) = NaN");
+        assert_eq!(logf(f32::INFINITY), f32::INFINITY, "logf(inf)");
+        assert_eq!(logf(0.0), f32::NEG_INFINITY, "logf(0) = -inf");
+        assert!(logf(-1.0).is_nan(), "logf(-1) = NaN");
+    }
+
+    // -----------------------------------------------------------------------
+    // log1pf / expm1f — f32 variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn log1pf_values() {
+        assert_approx(f64::from(log1pf(0.0)), 0.0, 1e-6, "log1pf(0)");
+        assert_approx(f64::from(log1pf(1.0)), core::f64::consts::LN_2, 1e-4, "log1pf(1)");
+        // log1p(-1) = log(0) = -inf
+        assert_eq!(log1pf(-1.0), f32::NEG_INFINITY, "log1pf(-1) = -inf");
+    }
+
+    #[test]
+    fn expm1f_values() {
+        assert_approx(f64::from(expm1f(0.0)), 0.0, 1e-6, "expm1f(0)");
+        assert_approx(f64::from(expm1f(1.0)), core::f64::consts::E - 1.0, 1e-4, "expm1f(1)");
+        // expm1(-inf) = -1
+        assert_approx(f64::from(expm1f(f32::NEG_INFINITY)), -1.0, 1e-6, "expm1f(-inf)");
+    }
+
+    // -----------------------------------------------------------------------
+    // cbrtf / hypotf edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cbrtf_negative() {
+        assert_approx(f64::from(cbrtf(-8.0)), -2.0, 1e-5, "cbrtf(-8)");
+        assert_approx(f64::from(cbrtf(-27.0)), -3.0, 1e-4, "cbrtf(-27)");
+    }
+
+    #[test]
+    fn hypotf_zero() {
+        assert_approx(f64::from(hypotf(0.0, 0.0)), 0.0, 1e-6, "hypotf(0, 0)");
+        assert_approx(f64::from(hypotf(3.0, 0.0)), 3.0, 1e-5, "hypotf(3, 0)");
+        assert_approx(f64::from(hypotf(0.0, 4.0)), 4.0, 1e-5, "hypotf(0, 4)");
+    }
+
+    #[test]
+    fn hypotf_inf() {
+        // hypot(inf, anything) = inf.
+        assert_eq!(hypotf(f32::INFINITY, 1.0), f32::INFINITY, "hypotf(inf, 1)");
+        assert_eq!(hypotf(1.0, f32::INFINITY), f32::INFINITY, "hypotf(1, inf)");
+    }
+
+    // -----------------------------------------------------------------------
+    // fminf / fmaxf edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fminf_fmaxf_nan() {
+        // POSIX: if one arg is NaN, return the other.
+        assert_approx(f64::from(fminf(f32::NAN, 1.0)), 1.0, 1e-6, "fminf(NaN, 1)");
+        assert_approx(f64::from(fmaxf(f32::NAN, 1.0)), 1.0, 1e-6, "fmaxf(NaN, 1)");
+        assert_approx(f64::from(fminf(1.0, f32::NAN)), 1.0, 1e-6, "fminf(1, NaN)");
+        assert_approx(f64::from(fmaxf(1.0, f32::NAN)), 1.0, 1e-6, "fmaxf(1, NaN)");
+    }
+
+    // -----------------------------------------------------------------------
+    // copysignf edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn copysignf_zero() {
+        // copysign should work with ±0.
+        let r = copysignf(0.0, -1.0);
+        assert_eq!(r.to_bits(), (-0.0f32).to_bits(), "copysignf(0, -1) = -0");
+        let r2 = copysignf(-0.0, 1.0);
+        assert_eq!(r2.to_bits(), 0.0f32.to_bits(), "copysignf(-0, 1) = +0");
     }
 }

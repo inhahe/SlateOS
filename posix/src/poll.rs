@@ -239,7 +239,7 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
             };
 
             // Determine readiness based on handle kind.
-            let (readable, writable, hangup) = check_readiness(entry.kind, entry.handle);
+            let (readable, writable, hangup, error) = check_readiness(entry.kind, entry.handle);
 
             let mut revents: i16 = 0;
             if readable && (pfd.events & POLLIN != 0) {
@@ -248,8 +248,13 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
             if writable && (pfd.events & POLLOUT != 0) {
                 revents |= POLLOUT;
             }
+            // POSIX: POLLHUP and POLLERR are always reported regardless of
+            // requested events.
             if hangup {
                 revents |= POLLHUP;
+            }
+            if error {
+                revents |= POLLERR;
             }
 
             pfd.revents = revents;
@@ -323,24 +328,29 @@ pub unsafe extern "C" fn ppoll(
 
 /// Check fd readiness based on handle kind.
 ///
-/// Returns `(readable, writable, hangup)`.
+/// Returns `(readable, writable, hangup, error)`.
 ///
 /// For network sockets, queries the kernel for actual buffer state
 /// rather than always reporting ready.  This prevents spurious wakeups
 /// and makes poll/select behave correctly for event loops.
-fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool) {
+///
+/// The `error` flag indicates the socket is in an error state (e.g.,
+/// connection refused/reset).  POSIX requires POLLERR to be reported
+/// unconditionally (regardless of requested events), and select() should
+/// set the fd in exceptfds when an error is present.
+fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool, bool) {
     use fdtable::HandleKind;
 
     match kind {
         // Console: always ready (framebuffer writable, keyboard might have input).
         // File: always ready (POSIX says regular files are always "ready").
         // Pipe: assumed ready (can't non-destructively check without peek syscall).
-        HandleKind::Console | HandleKind::File | HandleKind::Pipe => (true, true, false),
+        HandleKind::Console | HandleKind::File | HandleKind::Pipe => (true, true, false, false),
 
         // TCP stream: query kernel for actual rx/tx readiness.
         HandleKind::TcpStream => {
             if handle == 0 {
-                return (false, false, true);
+                return (false, false, true, true);
             }
             // SYS_TCP_POLL_STATUS returns a bitmask:
             //   bit 0 (0x01) = POLLIN (readable)
@@ -350,30 +360,31 @@ fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool)
             let status = syscall1(SYS_TCP_POLL_STATUS, handle) as u16;
             let readable = (status & 0x0001) != 0;
             let writable = (status & 0x0004) != 0;
+            let error = (status & 0x0008) != 0;
             let hangup = (status & 0x0010) != 0;
-            (readable, writable, hangup)
+            (readable, writable, hangup, error)
         }
 
         // TCP listener: readable means a completed connection is pending.
         HandleKind::TcpListener => {
             if handle == 0 {
-                return (false, false, true);
+                return (false, false, true, true);
             }
             // SYS_TCP_LISTENER_READY returns 1 if pending, 0 otherwise.
             let ready = syscall1(SYS_TCP_LISTENER_READY, handle);
-            (ready > 0, false, false)
+            (ready > 0, false, false, false)
         }
 
         // UDP socket: query kernel for queued datagrams.
         HandleKind::UdpSocket => {
             if handle == 0 {
-                return (false, false, false);
+                return (false, false, false, true);
             }
             // SYS_UDP_RX_READY returns number of queued datagrams.
             let queued = syscall1(SYS_UDP_RX_READY, handle);
             let readable = queued > 0;
             // UDP is always writable when bound (no flow control).
-            (readable, true, false)
+            (readable, true, false, false)
         }
     }
 }
@@ -494,7 +505,7 @@ pub unsafe extern "C" fn select(
                 return -1;
             };
 
-            let (readable, writable, _hangup) = check_readiness(entry.kind, entry.handle);
+            let (readable, writable, _hangup, error) = check_readiness(entry.kind, entry.handle);
 
             if check_read && readable {
                 fd_set_set(fd, readfds);
@@ -504,8 +515,14 @@ pub unsafe extern "C" fn select(
                 fd_set_set(fd, writefds);
                 ready_count = ready_count.wrapping_add(1);
             }
-            // We don't generate exception events, so check_except is always false.
-            let _ = check_except;
+            // POSIX: exceptfds reports "exceptional conditions" which includes
+            // socket errors (POLLERR equivalent).  Also report writable fds in
+            // exceptfds if they have errors — some applications use exceptfds
+            // for connect failure detection in select()-based event loops.
+            if check_except && error {
+                fd_set_set(fd, exceptfds);
+                ready_count = ready_count.wrapping_add(1);
+            }
 
             fd = fd.wrapping_add(1);
         }
@@ -692,50 +709,56 @@ mod tests {
 
     #[test]
     fn test_check_readiness_console() {
-        let (r, w, h) = check_readiness(fdtable::HandleKind::Console, 0);
+        let (r, w, h, e) = check_readiness(fdtable::HandleKind::Console, 0);
         assert!(r, "Console should be readable");
         assert!(w, "Console should be writable");
         assert!(!h, "Console should not be hung up");
+        assert!(!e, "Console should not be in error");
     }
 
     #[test]
     fn test_check_readiness_file() {
-        let (r, w, h) = check_readiness(fdtable::HandleKind::File, 42);
+        let (r, w, h, e) = check_readiness(fdtable::HandleKind::File, 42);
         assert!(r);
         assert!(w);
         assert!(!h);
+        assert!(!e);
     }
 
     #[test]
     fn test_check_readiness_tcp_connected() {
-        let (r, w, h) = check_readiness(fdtable::HandleKind::TcpStream, 123);
+        let (r, w, h, e) = check_readiness(fdtable::HandleKind::TcpStream, 123);
         assert!(r);
         assert!(w);
         assert!(!h);
+        assert!(!e);
     }
 
     #[test]
     fn test_check_readiness_tcp_disconnected() {
-        let (r, w, h) = check_readiness(fdtable::HandleKind::TcpStream, 0);
+        let (r, w, h, e) = check_readiness(fdtable::HandleKind::TcpStream, 0);
         assert!(!r, "Disconnected TCP should not be readable");
         assert!(!w, "Disconnected TCP should not be writable");
         assert!(h, "Disconnected TCP should be hung up");
+        assert!(e, "Disconnected TCP should be in error state");
     }
 
     #[test]
     fn test_check_readiness_udp_bound() {
-        let (r, w, h) = check_readiness(fdtable::HandleKind::UdpSocket, 99);
+        let (r, w, h, e) = check_readiness(fdtable::HandleKind::UdpSocket, 99);
         assert!(r);
         assert!(w);
         assert!(!h);
+        assert!(!e);
     }
 
     #[test]
     fn test_check_readiness_udp_unbound() {
-        let (r, w, h) = check_readiness(fdtable::HandleKind::UdpSocket, 0);
+        let (r, w, h, e) = check_readiness(fdtable::HandleKind::UdpSocket, 0);
         assert!(!r);
         assert!(!w);
         assert!(!h);
+        assert!(e, "Unbound UDP with handle 0 should be in error state");
     }
 
     // -- Timeval tests --

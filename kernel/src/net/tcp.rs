@@ -1368,8 +1368,12 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
 /// handle immediately in `SynSent` state.  The caller should use
 /// `poll_status()` to detect when the connection completes:
 ///
-/// - `POLL_WRITABLE` → connection established (ESTABLISHED state).
-/// - `POLL_ERROR`    → connection failed (slot deactivated).
+/// - `POLL_WRITABLE` (without ERROR) → connection established.
+/// - `POLL_WRITABLE | POLL_ERROR | ...` → connection failed (RST/timeout).
+///
+/// POSIX requires POLLOUT on connect completion regardless of success or
+/// failure, so applications can use `poll(fd, POLLOUT, -1)` then check
+/// `getsockopt(SO_ERROR)` to distinguish success from failure.
 ///
 /// Returns `(handle, KernelError::WouldBlock)` — the WouldBlock is the
 /// expected "in progress" signal, not an error.  The caller should map
@@ -2909,11 +2913,23 @@ pub const POLL_HANGUP: u16   = 0x0010;
 /// - `POLL_WRITABLE` — connection is established and send window > 0.
 /// - `POLL_HANGUP`   — remote end closed (FIN received).
 /// - `POLL_ERROR`    — connection was reset or is in an error state.
+///
+/// When a connection has been reset or refused (active=false), all of
+/// READABLE|WRITABLE|ERROR|HANGUP are returned.  POSIX requires POLLOUT
+/// on connect completion (success or failure) so applications using the
+/// standard `poll(POLLOUT)` pattern for non-blocking connect detect failure.
+/// POLLIN is also set because read() won't block (returns error/EOF).
 pub fn poll_status(handle: usize) -> u16 {
     let conns = CONNECTIONS.lock();
     let conn = match conns.get(handle) {
         Some(c) if c.active => c,
-        _ => return POLL_HANGUP | POLL_ERROR,
+        Some(_) => {
+            // Connection slot exists but was deactivated (RST, timeout, refused,
+            // or fully closed).  Report ready for all operations — they will
+            // return errors immediately without blocking.
+            return POLL_READABLE | POLL_WRITABLE | POLL_ERROR | POLL_HANGUP;
+        }
+        None => return POLL_HANGUP | POLL_ERROR,
     };
 
     let mut flags: u16 = 0;

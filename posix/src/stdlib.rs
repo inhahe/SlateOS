@@ -2695,4 +2695,322 @@ mod tests {
         let ptr = seed48(core::ptr::null());
         assert!(!ptr.is_null());
     }
+
+    // -----------------------------------------------------------------------
+    // getsubopt — comprehensive tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_getsubopt_no_value() {
+        // "ro" matches token 0, no value.
+        let tok0: *const u8 = b"ro\0".as_ptr();
+        let tok1: *const u8 = b"rw\0".as_ptr();
+        let tokens: [*const u8; 3] = [tok0, tok1, core::ptr::null()];
+
+        let mut input = *b"ro\0";
+        let mut optionp: *mut u8 = input.as_mut_ptr();
+        let mut valuep: *mut u8 = core::ptr::null_mut();
+
+        let idx = unsafe {
+            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+        };
+        assert_eq!(idx, 0);
+        assert!(valuep.is_null(), "no value expected");
+    }
+
+    #[test]
+    fn test_getsubopt_with_value() {
+        // "size=512" matches "size" at index 2 with value "512".
+        let tok0: *const u8 = b"ro\0".as_ptr();
+        let tok1: *const u8 = b"rw\0".as_ptr();
+        let tok2: *const u8 = b"size\0".as_ptr();
+        let tokens: [*const u8; 4] = [tok0, tok1, tok2, core::ptr::null()];
+
+        let mut input = *b"size=512\0";
+        let mut optionp: *mut u8 = input.as_mut_ptr();
+        let mut valuep: *mut u8 = core::ptr::null_mut();
+
+        let idx = unsafe {
+            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+        };
+        assert_eq!(idx, 2);
+        assert!(!valuep.is_null());
+        // valuep should point to "512".
+        assert_eq!(unsafe { *valuep }, b'5');
+        assert_eq!(unsafe { *valuep.add(1) }, b'1');
+        assert_eq!(unsafe { *valuep.add(2) }, b'2');
+    }
+
+    #[test]
+    fn test_getsubopt_unrecognized() {
+        // "unknown" doesn't match any token → returns -1.
+        let tok0: *const u8 = b"ro\0".as_ptr();
+        let tokens: [*const u8; 2] = [tok0, core::ptr::null()];
+
+        let mut input = *b"unknown\0";
+        let mut optionp: *mut u8 = input.as_mut_ptr();
+        let mut valuep: *mut u8 = core::ptr::null_mut();
+
+        let idx = unsafe {
+            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+        };
+        assert_eq!(idx, -1);
+        assert!(valuep.is_null()); // No '=' → no value.
+    }
+
+    #[test]
+    fn test_getsubopt_unrecognized_with_value() {
+        // "bad=123" doesn't match → returns -1, but valuep points to value.
+        let tok0: *const u8 = b"good\0".as_ptr();
+        let tokens: [*const u8; 2] = [tok0, core::ptr::null()];
+
+        let mut input = *b"bad=123\0";
+        let mut optionp: *mut u8 = input.as_mut_ptr();
+        let mut valuep: *mut u8 = core::ptr::null_mut();
+
+        let idx = unsafe {
+            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+        };
+        assert_eq!(idx, -1);
+        assert!(!valuep.is_null()); // '=' present → value set.
+        assert_eq!(unsafe { *valuep }, b'1');
+    }
+
+    #[test]
+    fn test_getsubopt_multiple_suboptions() {
+        // "a,b,c" should parse all three sequentially.
+        let tok_a: *const u8 = b"a\0".as_ptr();
+        let tok_b: *const u8 = b"b\0".as_ptr();
+        let tok_c: *const u8 = b"c\0".as_ptr();
+        let tokens: [*const u8; 4] = [tok_a, tok_b, tok_c, core::ptr::null()];
+
+        let mut input = *b"a,b,c\0";
+        let mut optionp: *mut u8 = input.as_mut_ptr();
+        let mut valuep: *mut u8 = core::ptr::null_mut();
+
+        let idx1 = unsafe {
+            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+        };
+        assert_eq!(idx1, 0); // "a"
+
+        let idx2 = unsafe {
+            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+        };
+        assert_eq!(idx2, 1); // "b"
+
+        let idx3 = unsafe {
+            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+        };
+        assert_eq!(idx3, 2); // "c"
+    }
+
+    #[test]
+    fn test_getsubopt_empty_value() {
+        // "key=" has an empty value.
+        let tok0: *const u8 = b"key\0".as_ptr();
+        let tokens: [*const u8; 2] = [tok0, core::ptr::null()];
+
+        let mut input = *b"key=\0";
+        let mut optionp: *mut u8 = input.as_mut_ptr();
+        let mut valuep: *mut u8 = core::ptr::null_mut();
+
+        let idx = unsafe {
+            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+        };
+        assert_eq!(idx, 0);
+        assert!(!valuep.is_null());
+        // Value should be empty (pointing to the null terminator).
+        assert_eq!(unsafe { *valuep }, 0);
+    }
+
+    #[test]
+    fn test_getsubopt_null_optionp() {
+        let tok0: *const u8 = b"a\0".as_ptr();
+        let tokens: [*const u8; 2] = [tok0, core::ptr::null()];
+        let mut valuep: *mut u8 = core::ptr::null_mut();
+
+        let idx = unsafe {
+            getsubopt(core::ptr::null_mut(), tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+        };
+        assert_eq!(idx, -1);
+    }
+
+    #[test]
+    fn test_getsubopt_null_tokens() {
+        let mut input = *b"test\0";
+        let mut optionp: *mut u8 = input.as_mut_ptr();
+        let mut valuep: *mut u8 = core::ptr::null_mut();
+
+        let idx = unsafe {
+            getsubopt(&mut optionp, core::ptr::null(), &mut valuep)
+        };
+        assert_eq!(idx, -1);
+    }
+
+    #[test]
+    fn test_getsubopt_null_valuep() {
+        let tok0: *const u8 = b"a\0".as_ptr();
+        let tokens: [*const u8; 2] = [tok0, core::ptr::null()];
+        let mut input = *b"a\0";
+        let mut optionp: *mut u8 = input.as_mut_ptr();
+
+        let idx = unsafe {
+            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), core::ptr::null_mut())
+        };
+        assert_eq!(idx, -1);
+    }
+
+    #[test]
+    fn test_getsubopt_advances_past_comma() {
+        // After parsing "x,y", optionp should point at "y".
+        let tok_x: *const u8 = b"x\0".as_ptr();
+        let tokens: [*const u8; 2] = [tok_x, core::ptr::null()];
+
+        let mut input = *b"x,remaining\0";
+        let mut optionp: *mut u8 = input.as_mut_ptr();
+        let mut valuep: *mut u8 = core::ptr::null_mut();
+
+        let _ = unsafe {
+            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+        };
+        // optionp should now point to "remaining".
+        assert_eq!(unsafe { *optionp }, b'r');
+    }
+
+    // -----------------------------------------------------------------------
+    // strtol additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strtol_base_36_z_and_10() {
+        // "z" in base 36 = 35.
+        let v = unsafe { strtol(b"z\0".as_ptr(), core::ptr::null_mut(), 36) };
+        assert_eq!(v, 35);
+        // "10" in base 36 = 36.
+        let v = unsafe { strtol(b"10\0".as_ptr(), core::ptr::null_mut(), 36) };
+        assert_eq!(v, 36);
+    }
+
+    #[test]
+    fn test_strtol_invalid_base() {
+        crate::errno::set_errno(0);
+        let v = unsafe { strtol(b"123\0".as_ptr(), core::ptr::null_mut(), 1) };
+        assert_eq!(v, 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        crate::errno::set_errno(0);
+        let v = unsafe { strtol(b"123\0".as_ptr(), core::ptr::null_mut(), 37) };
+        assert_eq!(v, 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_strtol_binary() {
+        let v = unsafe { strtol(b"1010\0".as_ptr(), core::ptr::null_mut(), 2) };
+        assert_eq!(v, 10);
+    }
+
+    #[test]
+    fn test_strtol_whitespace_only() {
+        let mut end: *const u8 = core::ptr::null();
+        let v = unsafe { strtol(b"   \0".as_ptr(), &mut end, 10) };
+        assert_eq!(v, 0);
+        // endptr should equal nptr (no conversion).
+        let input = b"   \0".as_ptr();
+        let v2 = unsafe { strtol(input, &mut end, 10) };
+        assert_eq!(v2, 0);
+        assert_eq!(end, input);
+    }
+
+    #[test]
+    fn test_strtol_plus_sign() {
+        let v = unsafe { strtol(b"+42\0".as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, 42);
+    }
+
+    #[test]
+    fn test_strtoul_u64_max() {
+        crate::errno::set_errno(0);
+        let v = unsafe {
+            strtoul(b"18446744073709551615\0".as_ptr(), core::ptr::null_mut(), 10)
+        };
+        assert_eq!(v, u64::MAX);
+        assert_eq!(crate::errno::get_errno(), 0); // NOT overflow
+    }
+
+    #[test]
+    fn test_strtoul_hex_mixed_case() {
+        let v = unsafe { strtoul(b"0xABCDEF\0".as_ptr(), core::ptr::null_mut(), 0) };
+        assert_eq!(v, 0xABCDEF);
+    }
+
+    // -----------------------------------------------------------------------
+    // abs / labs / llabs edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_abs_zero() {
+        assert_eq!(abs(0), 0);
+    }
+
+    #[test]
+    fn test_abs_positive() {
+        assert_eq!(abs(42), 42);
+    }
+
+    #[test]
+    fn test_abs_negative() {
+        assert_eq!(abs(-42), 42);
+    }
+
+    #[test]
+    fn test_labs_large_values() {
+        assert_eq!(labs(i64::MAX), i64::MAX);
+        assert_eq!(labs(-1_000_000_000), 1_000_000_000);
+    }
+
+    #[test]
+    fn test_llabs_large_values() {
+        assert_eq!(llabs(i64::MAX), i64::MAX);
+        assert_eq!(llabs(-1_000_000_000), 1_000_000_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // div / ldiv / lldiv
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_div_negative_numerator() {
+        let result = div(-17, 5);
+        assert_eq!(result.quot, -3);
+        assert_eq!(result.rem, -2);
+    }
+
+    #[test]
+    fn test_div_negative_denominator() {
+        let result = div(17, -5);
+        assert_eq!(result.quot, -3);
+        assert_eq!(result.rem, 2);
+    }
+
+    #[test]
+    fn test_div_exact() {
+        let result = div(20, 5);
+        assert_eq!(result.quot, 4);
+        assert_eq!(result.rem, 0);
+    }
+
+    #[test]
+    fn test_ldiv_large() {
+        let result = ldiv(i64::MAX, 3);
+        assert_eq!(result.quot, i64::MAX / 3);
+        assert_eq!(result.rem, i64::MAX % 3);
+    }
+
+    #[test]
+    fn test_lldiv_large() {
+        let result = lldiv(i64::MAX, 2);
+        assert_eq!(result.quot, i64::MAX / 2);
+        assert_eq!(result.rem, 1);
+    }
 }

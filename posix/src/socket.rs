@@ -6158,6 +6158,405 @@ mod tests {
         assert_eq!(unsafe { inet_aton(c"".as_ptr().cast(), &mut addr) }, 0);
     }
 
+    // -- gai_strerror tests (pure function) --
+
+    #[test]
+    fn test_gai_strerror_success() {
+        let msg = unsafe { c_str_to_slice(gai_strerror(0)) };
+        assert_eq!(msg, b"Success");
+    }
+
+    #[test]
+    fn test_gai_strerror_noname() {
+        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_NONAME)) };
+        assert_eq!(msg, b"Name or service not known");
+    }
+
+    #[test]
+    fn test_gai_strerror_family() {
+        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_FAMILY)) };
+        assert_eq!(msg, b"Address family not supported");
+    }
+
+    #[test]
+    fn test_gai_strerror_again() {
+        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_AGAIN)) };
+        assert_eq!(msg, b"Temporary failure in name resolution");
+    }
+
+    #[test]
+    fn test_gai_strerror_memory() {
+        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_MEMORY)) };
+        assert_eq!(msg, b"Memory allocation failure");
+    }
+
+    #[test]
+    fn test_gai_strerror_service() {
+        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_SERVICE)) };
+        assert_eq!(msg, b"Service not supported");
+    }
+
+    #[test]
+    fn test_gai_strerror_system() {
+        let msg = unsafe { c_str_to_slice(gai_strerror(EAI_SYSTEM)) };
+        assert_eq!(msg, b"System error");
+    }
+
+    #[test]
+    fn test_gai_strerror_unknown() {
+        let msg = unsafe { c_str_to_slice(gai_strerror(9999)) };
+        assert_eq!(msg, b"Unknown error");
+    }
+
+    // -- EAI_* constant values --
+
+    #[test]
+    fn test_eai_constants() {
+        assert_eq!(EAI_ADDRFAMILY, 1);
+        assert_eq!(EAI_AGAIN, 2);
+        assert_eq!(EAI_BADFLAGS, 3);
+        assert_eq!(EAI_FAIL, 4);
+        assert_eq!(EAI_FAMILY, 5);
+        assert_eq!(EAI_MEMORY, 6);
+        assert_eq!(EAI_NODATA, 7);
+        assert_eq!(EAI_NONAME, 8);
+        assert_eq!(EAI_SERVICE, 9);
+        assert_eq!(EAI_SOCKTYPE, 10);
+        assert_eq!(EAI_SYSTEM, 11);
+        assert_eq!(EAI_OVERFLOW, -12);
+    }
+
+    // -- AI_* flag constants --
+
+    #[test]
+    fn test_ai_flag_constants() {
+        assert_eq!(AI_PASSIVE, 0x0001);
+        assert_eq!(AI_CANONNAME, 0x0002);
+        assert_eq!(AI_NUMERICHOST, 0x0004);
+        assert_eq!(AI_NUMERICSERV, 0x0400);
+    }
+
+    // -- NI_* flag constants --
+
+    #[test]
+    fn test_ni_flag_constants() {
+        assert_eq!(NI_NUMERICHOST, 1);
+        assert_eq!(NI_NUMERICSERV, 2);
+        assert_eq!(NI_NOFQDN, 4);
+        assert_eq!(NI_NAMEREQD, 8);
+        assert_eq!(NI_DGRAM, 16);
+    }
+
+    // -- MSG_* flag constants --
+
+    #[test]
+    fn test_msg_flag_constants() {
+        assert_eq!(MSG_OOB, 1);
+        assert_eq!(MSG_PEEK, 2);
+        assert_eq!(MSG_DONTROUTE, 4);
+        assert_eq!(MSG_TRUNC, 0x20);
+        assert_eq!(MSG_DONTWAIT, 0x40);
+        assert_eq!(MSG_EOR, 0x80);
+        assert_eq!(MSG_WAITALL, 0x100);
+        assert_eq!(MSG_MORE, 0x8000);
+        assert_eq!(MSG_NOSIGNAL, 0x4000);
+    }
+
+    // -- SHUT_* constants --
+
+    #[test]
+    fn test_shut_constants() {
+        assert_eq!(SHUT_RD, 0);
+        assert_eq!(SHUT_WR, 1);
+        assert_eq!(SHUT_RDWR, 2);
+    }
+
+    // -- SOL_* constants --
+
+    #[test]
+    fn test_sol_constants() {
+        assert_eq!(SOL_SOCKET, 1);
+        assert_eq!(SOL_TCP, 6);
+        assert_eq!(SOL_IP, 0);
+    }
+
+    // -- SO_* option constants --
+
+    #[test]
+    fn test_so_option_constants() {
+        assert_eq!(SO_REUSEADDR, 2);
+        assert_eq!(SO_TYPE, 3);
+        assert_eq!(SO_ERROR, 4);
+        assert_eq!(SO_BROADCAST, 6);
+        assert_eq!(SO_SNDBUF, 7);
+        assert_eq!(SO_RCVBUF, 8);
+        assert_eq!(SO_KEEPALIVE, 9);
+        assert_eq!(SO_LINGER, 13);
+        assert_eq!(SO_REUSEPORT, 15);
+        assert_eq!(SO_RCVLOWAT, 18);
+        assert_eq!(SO_SNDLOWAT, 19);
+        assert_eq!(SO_RCVTIMEO, 20);
+        assert_eq!(SO_SNDTIMEO, 21);
+        assert_eq!(SO_ACCEPTCONN, 30);
+        assert_eq!(SO_PROTOCOL, 38);
+        assert_eq!(SO_DOMAIN, 39);
+    }
+
+    // -- getaddrinfo with numeric host (no syscalls needed) --
+
+    #[test]
+    fn test_getaddrinfo_null_res() {
+        let ret = unsafe { getaddrinfo(
+            b"127.0.0.1\0".as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null_mut(),
+        ) };
+        assert_eq!(ret, EAI_SYSTEM);
+    }
+
+    #[test]
+    fn test_getaddrinfo_both_null_node_service() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        let ret = unsafe { getaddrinfo(
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            &mut res,
+        ) };
+        assert_eq!(ret, EAI_NONAME);
+    }
+
+    #[test]
+    fn test_getaddrinfo_numeric_ipv4() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        let hints = Addrinfo {
+            ai_flags: AI_NUMERICHOST | AI_NUMERICSERV,
+            ai_family: AF_INET,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: core::ptr::null_mut(),
+            ai_addr: core::ptr::null_mut(),
+            ai_next: core::ptr::null_mut(),
+        };
+        let ret = unsafe { getaddrinfo(
+            b"192.168.1.1\0".as_ptr(),
+            b"80\0".as_ptr(),
+            &hints,
+            &mut res,
+        ) };
+        assert_eq!(ret, 0);
+        assert!(!res.is_null());
+
+        let info = unsafe { &*res };
+        assert_eq!(info.ai_family, AF_INET);
+        assert_eq!(info.ai_socktype, SOCK_STREAM);
+        assert_eq!(info.ai_protocol, IPPROTO_TCP);
+        assert!(!info.ai_addr.is_null());
+
+        // Check the sockaddr.
+        let sa = unsafe { &*(info.ai_addr as *const SockaddrIn) };
+        assert_eq!(sa.sin_family, AF_INET as u16);
+        assert_eq!(ntohs(sa.sin_port), 80);
+        // Address should be 192.168.1.1 in network byte order.
+        assert_eq!(sa.sin_addr.s_addr, u32::from_ne_bytes([192, 168, 1, 1]));
+
+        // Clean up (no-op but good practice).
+        freeaddrinfo(res);
+    }
+
+    #[test]
+    fn test_getaddrinfo_numeric_loopback() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        let hints = Addrinfo {
+            ai_flags: AI_NUMERICHOST,
+            ai_family: AF_INET,
+            ai_socktype: SOCK_DGRAM,
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: core::ptr::null_mut(),
+            ai_addr: core::ptr::null_mut(),
+            ai_next: core::ptr::null_mut(),
+        };
+        let ret = unsafe { getaddrinfo(
+            b"127.0.0.1\0".as_ptr(),
+            core::ptr::null(),
+            &hints,
+            &mut res,
+        ) };
+        assert_eq!(ret, 0);
+        assert!(!res.is_null());
+
+        let info = unsafe { &*res };
+        assert_eq!(info.ai_socktype, SOCK_DGRAM);
+        assert_eq!(info.ai_protocol, IPPROTO_UDP);
+
+        let sa = unsafe { &*(info.ai_addr as *const SockaddrIn) };
+        assert_eq!(sa.sin_addr.s_addr, htonl(INADDR_LOOPBACK));
+        assert_eq!(sa.sin_port, 0); // No service specified.
+
+        freeaddrinfo(res);
+    }
+
+    #[test]
+    fn test_getaddrinfo_null_node_passive() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        let hints = Addrinfo {
+            ai_flags: AI_PASSIVE | AI_NUMERICSERV,
+            ai_family: AF_INET,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: core::ptr::null_mut(),
+            ai_addr: core::ptr::null_mut(),
+            ai_next: core::ptr::null_mut(),
+        };
+        let ret = unsafe { getaddrinfo(
+            core::ptr::null(),
+            b"8080\0".as_ptr(),
+            &hints,
+            &mut res,
+        ) };
+        assert_eq!(ret, 0);
+        assert!(!res.is_null());
+
+        let sa = unsafe { &*((*res).ai_addr as *const SockaddrIn) };
+        // AI_PASSIVE + null node → INADDR_ANY.
+        assert_eq!(sa.sin_addr.s_addr, htonl(INADDR_ANY));
+        assert_eq!(ntohs(sa.sin_port), 8080);
+
+        freeaddrinfo(res);
+    }
+
+    #[test]
+    fn test_getaddrinfo_null_node_no_passive() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        let hints = Addrinfo {
+            ai_flags: AI_NUMERICSERV,
+            ai_family: AF_INET,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: core::ptr::null_mut(),
+            ai_addr: core::ptr::null_mut(),
+            ai_next: core::ptr::null_mut(),
+        };
+        let ret = unsafe { getaddrinfo(
+            core::ptr::null(),
+            b"443\0".as_ptr(),
+            &hints,
+            &mut res,
+        ) };
+        assert_eq!(ret, 0);
+        assert!(!res.is_null());
+
+        let sa = unsafe { &*((*res).ai_addr as *const SockaddrIn) };
+        // No AI_PASSIVE + null node → INADDR_LOOPBACK.
+        assert_eq!(sa.sin_addr.s_addr, htonl(INADDR_LOOPBACK));
+        assert_eq!(ntohs(sa.sin_port), 443);
+
+        freeaddrinfo(res);
+    }
+
+    #[test]
+    fn test_getaddrinfo_unsupported_af_inet6() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        let hints = Addrinfo {
+            ai_flags: 0,
+            ai_family: AF_INET6, // We only support AF_INET.
+            ai_socktype: 0,
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: core::ptr::null_mut(),
+            ai_addr: core::ptr::null_mut(),
+            ai_next: core::ptr::null_mut(),
+        };
+        let ret = unsafe { getaddrinfo(
+            b"::1\0".as_ptr(),
+            core::ptr::null(),
+            &hints,
+            &mut res,
+        ) };
+        assert_eq!(ret, EAI_FAMILY);
+    }
+
+    #[test]
+    fn test_getaddrinfo_no_socktype_returns_two_results() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        let hints = Addrinfo {
+            ai_flags: AI_NUMERICHOST | AI_NUMERICSERV,
+            ai_family: AF_INET,
+            ai_socktype: 0, // No type → get both TCP and UDP.
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: core::ptr::null_mut(),
+            ai_addr: core::ptr::null_mut(),
+            ai_next: core::ptr::null_mut(),
+        };
+        let ret = unsafe { getaddrinfo(
+            b"10.0.0.1\0".as_ptr(),
+            b"53\0".as_ptr(),
+            &hints,
+            &mut res,
+        ) };
+        assert_eq!(ret, 0);
+        assert!(!res.is_null());
+
+        // First result should be SOCK_STREAM (TCP).
+        let r1 = unsafe { &*res };
+        assert_eq!(r1.ai_socktype, SOCK_STREAM);
+        assert_eq!(r1.ai_protocol, IPPROTO_TCP);
+        assert!(!r1.ai_next.is_null());
+
+        // Second result should be SOCK_DGRAM (UDP).
+        let r2 = unsafe { &*r1.ai_next };
+        assert_eq!(r2.ai_socktype, SOCK_DGRAM);
+        assert_eq!(r2.ai_protocol, IPPROTO_UDP);
+        assert!(r2.ai_next.is_null()); // End of list.
+
+        freeaddrinfo(res);
+    }
+
+    #[test]
+    fn test_getaddrinfo_numerichost_rejects_hostname() {
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        let hints = Addrinfo {
+            ai_flags: AI_NUMERICHOST,
+            ai_family: AF_INET,
+            ai_socktype: SOCK_STREAM,
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: core::ptr::null_mut(),
+            ai_addr: core::ptr::null_mut(),
+            ai_next: core::ptr::null_mut(),
+        };
+        // "example.com" is not numeric → should fail with EAI_NONAME.
+        let ret = unsafe { getaddrinfo(
+            b"example.com\0".as_ptr(),
+            b"80\0".as_ptr(),
+            &hints,
+            &mut res,
+        ) };
+        assert_eq!(ret, EAI_NONAME);
+    }
+
+    // -- socketpair stub --
+
+    #[test]
+    fn test_socketpair_returns_enosys() {
+        let mut sv = [0i32; 2];
+        let ret = socketpair(AF_UNIX, SOCK_STREAM, 0, &mut sv);
+        assert_eq!(ret, -1);
+    }
+
+    // -- freeaddrinfo is no-op (should not crash) --
+
+    #[test]
+    fn test_freeaddrinfo_null_no_crash() {
+        freeaddrinfo(core::ptr::null_mut());
+    }
+
     // -- Helper --
 
     /// Read a null-terminated C string into a byte slice.

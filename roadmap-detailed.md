@@ -614,7 +614,7 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
 
 ### 2.6 Init / Service Manager
 
-- [ ] PID 1 init process
+- [x] PID 1 init process _(initproc.rs: boot sequencing, orphan reaping, shutdown/reboot, emergency mode, critical service tracking, periodic maintenance)_
 - [x] Dependency-based parallel service startup _(svcstart.rs: topological sort, start levels)_
 - [x] Socket activation _(sockact.rs: socket→service mapping, trigger/claim/release, idle-stop)_
 - [x] Automatic crash restart with exponential backoff _(svcstart.rs: 1s→60s cap, max 5 retries)_
@@ -638,7 +638,7 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
   - [x] Log storage and rotation _(logpersist.rs)_
     - [x] Configurable per-namespace log files (e.g., security.jsonl, network.jsonl, or single combined.jsonl)
     - [x] Rotation policies: by size (default 50 MB per file), by time (daily/weekly), by count (keep N rotated files)
-    - [ ] Compression of rotated logs (zstd)
+    - [x] Compression of rotated logs (zstd) _(logpersist.rs: zstd/lz4/gzip via fs codec libs, configurable, only keeps compressed if smaller)_
     - [x] Maximum total log storage cap (default 500 MB, configurable)
     - [x] Automatic pruning: oldest rotated logs deleted when cap exceeded
     - [x] Crash-safe writes: append + fsync, no partial JSON lines on power loss

@@ -77,6 +77,41 @@ pub enum RotationMode {
     PerNamespace,
 }
 
+/// Compression algorithm for rotated log files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogCompression {
+    /// No compression — rotated files stay as plain `.jsonl`.
+    None,
+    /// Zstd compression — rotated files stored as `.jsonl.zst`.
+    Zstd,
+    /// LZ4 compression — rotated files stored as `.jsonl.lz4`.
+    Lz4,
+    /// Gzip compression — rotated files stored as `.jsonl.gz`.
+    Gzip,
+}
+
+impl LogCompression {
+    /// File extension for compressed files.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Zstd => ".zst",
+            Self::Lz4 => ".lz4",
+            Self::Gzip => ".gz",
+        }
+    }
+
+    /// Human-readable name.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Zstd => "zstd",
+            Self::Lz4 => "lz4",
+            Self::Gzip => "gzip",
+        }
+    }
+}
+
 /// Configuration for log rotation.
 #[derive(Clone)]
 pub struct RotationConfig {
@@ -94,6 +129,8 @@ pub struct RotationConfig {
     pub min_persist_severity: Severity,
     /// Whether rotation is enabled.
     pub enabled: bool,
+    /// Compression algorithm for rotated log files.
+    pub compression: LogCompression,
 }
 
 impl Default for RotationConfig {
@@ -106,6 +143,7 @@ impl Default for RotationConfig {
             max_total_storage: DEFAULT_MAX_TOTAL_STORAGE,
             min_persist_severity: Severity::Info,
             enabled: true,
+            compression: LogCompression::Zstd, // Default: zstd per roadmap spec
         }
     }
 }
@@ -141,6 +179,10 @@ struct State {
     total_bytes: u64,
     /// Total pruned files.
     total_pruned: u64,
+    /// Total bytes saved by compression.
+    total_bytes_saved_by_compression: u64,
+    /// Total files compressed during rotation.
+    total_files_compressed: u64,
     /// Whether initialized.
     initialized: bool,
 }
@@ -156,12 +198,15 @@ impl State {
                 max_total_storage: DEFAULT_MAX_TOTAL_STORAGE,
                 min_persist_severity: Severity::Info,
                 enabled: true,
+                compression: LogCompression::Zstd,
             },
             cursors: Vec::new(),
             global_last_flushed: 0,
             total_flushes: 0,
             total_bytes: 0,
             total_pruned: 0,
+            total_bytes_saved_by_compression: 0,
+            total_files_compressed: 0,
             initialized: false,
         }
     }
@@ -317,8 +362,11 @@ pub fn flush() -> KernelResult<usize> {
     let mode = state.config.mode;
     let max_file_size = state.config.max_file_size;
     let max_rotated = state.config.max_rotated_files;
+    let compression = state.config.compression;
 
     let mut total_flushed = 0usize;
+    let mut total_compress_saved: u64 = 0;
+    let mut total_compress_ops: u64 = 0;
 
     // Track total bytes written across the flush for deferred update to
     // state.total_bytes (can't mutate state while cursor borrows state.cursors).
@@ -354,10 +402,17 @@ pub fn flush() -> KernelResult<usize> {
 
                 // Check if rotation is needed.
                 if cursor.current_size >= max_file_size {
-                    rotate_file(&log_dir, "combined", max_rotated);
+                    let (orig, comp) = rotate_file(&log_dir, "combined", max_rotated, compression);
                     #[allow(clippy::arithmetic_side_effects)]
                     { cursor.rotation_count += 1; }
                     cursor.current_size = 0;
+                    if orig > 0 {
+                        #[allow(clippy::arithmetic_side_effects)]
+                        {
+                            total_compress_saved += orig.saturating_sub(comp);
+                            total_compress_ops += 1;
+                        }
+                    }
                 }
 
                 cursor.last_flushed_seq = result.newest_seq;
@@ -401,10 +456,17 @@ pub fn flush() -> KernelResult<usize> {
 
                 // Check if rotation is needed.
                 if cursor.current_size >= max_file_size {
-                    rotate_file(&log_dir, &cursor.name, max_rotated);
+                    let (orig, comp) = rotate_file(&log_dir, &cursor.name, max_rotated, compression);
                     #[allow(clippy::arithmetic_side_effects)]
                     { cursor.rotation_count += 1; }
                     cursor.current_size = 0;
+                    if orig > 0 {
+                        #[allow(clippy::arithmetic_side_effects)]
+                        {
+                            total_compress_saved += orig.saturating_sub(comp);
+                            total_compress_ops += 1;
+                        }
+                    }
                 }
 
                 cursor.last_flushed_seq = ns_result.newest_seq;
@@ -414,7 +476,11 @@ pub fn flush() -> KernelResult<usize> {
 
     // Deferred update — cursor borrows are released now.
     #[allow(clippy::arithmetic_side_effects)]
-    { state.total_bytes += total_bytes_batch; }
+    {
+        state.total_bytes += total_bytes_batch;
+        state.total_bytes_saved_by_compression += total_compress_saved;
+        state.total_files_compressed += total_compress_ops;
+    }
 
     state.global_last_flushed = result.newest_seq;
     #[allow(clippy::arithmetic_side_effects)]
@@ -423,31 +489,108 @@ pub fn flush() -> KernelResult<usize> {
     Ok(total_flushed)
 }
 
-/// Rotate a log file: combined.jsonl → combined.1.jsonl → combined.2.jsonl → ...
+/// Rotate a log file: combined.jsonl → combined.1.jsonl.zst → combined.2.jsonl.zst → ...
 ///
-/// Oldest file beyond max_rotated is deleted.
-fn rotate_file(log_dir: &str, name: &str, max_rotated: u32) {
+/// Oldest file beyond max_rotated is deleted. When compression is enabled,
+/// rotated files are compressed in-place (read, compress, write back).
+///
+/// Returns (original_bytes, compressed_bytes) if compression was performed,
+/// or (0, 0) if no compression.
+fn rotate_file(log_dir: &str, name: &str, max_rotated: u32, compression: LogCompression)
+    -> (u64, u64)
+{
     use alloc::format;
 
-    // Delete the oldest rotated file if it exists.
-    let oldest_path = format!("{}/{}.{}.jsonl", log_dir, name, max_rotated);
-    let _ = crate::fs::Vfs::remove(&oldest_path);
+    let ext = compression.extension();
+
+    // Delete the oldest rotated file if it exists (try both compressed and plain).
+    let oldest_compressed = format!("{}/{}.{}.jsonl{}", log_dir, name, max_rotated, ext);
+    let oldest_plain = format!("{}/{}.{}.jsonl", log_dir, name, max_rotated);
+    let _ = crate::fs::Vfs::remove(&oldest_compressed);
+    if compression != LogCompression::None {
+        let _ = crate::fs::Vfs::remove(&oldest_plain);
+    }
 
     // Shift existing rotations: N-1 → N, N-2 → N-1, ..., 1 → 2.
+    // Try compressed extension first, fall back to plain.
     let mut i = max_rotated;
     while i > 1 {
         #[allow(clippy::arithmetic_side_effects)]
-        let src = format!("{}/{}.{}.jsonl", log_dir, name, i - 1);
-        let dst = format!("{}/{}.{}.jsonl", log_dir, name, i);
-        let _ = crate::fs::Vfs::rename(&src, &dst);
+        let n_minus_1 = i - 1;
+        let src_c = format!("{}/{}.{}.jsonl{}", log_dir, name, n_minus_1, ext);
+        let dst_c = format!("{}/{}.{}.jsonl{}", log_dir, name, i, ext);
+        let src_p = format!("{}/{}.{}.jsonl", log_dir, name, n_minus_1);
+        let dst_p = format!("{}/{}.{}.jsonl", log_dir, name, i);
+
+        if compression != LogCompression::None {
+            // Try compressed first.
+            if crate::fs::Vfs::rename(&src_c, &dst_c).is_err() {
+                // Fall back to plain (from before compression was enabled).
+                let _ = crate::fs::Vfs::rename(&src_p, &dst_p);
+            }
+        } else {
+            let _ = crate::fs::Vfs::rename(&src_p, &dst_p);
+        }
+
         #[allow(clippy::arithmetic_side_effects)]
         { i -= 1; }
     }
 
-    // Rename current file to .1.
+    // Rename current file to .1 (initially uncompressed).
     let current = format!("{}/{}.jsonl", log_dir, name);
     let first_rotated = format!("{}/{}.1.jsonl", log_dir, name);
     let _ = crate::fs::Vfs::rename(&current, &first_rotated);
+
+    // Compress the newly rotated file if compression is enabled.
+    if compression != LogCompression::None {
+        compress_rotated_file(&first_rotated, compression)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Compress a rotated log file in-place.
+///
+/// Reads the file, compresses it, writes the compressed version with the
+/// appropriate extension, and removes the original.
+///
+/// Returns (original_bytes, compressed_bytes).
+fn compress_rotated_file(path: &str, compression: LogCompression) -> (u64, u64) {
+    use alloc::format;
+
+    // Read the uncompressed file.
+    let data = match crate::fs::Vfs::read_file(path) {
+        Ok(d) => d,
+        Err(_) => return (0, 0),
+    };
+
+    let original_size = data.len() as u64;
+    if original_size == 0 {
+        return (0, 0);
+    }
+
+    // Compress using the appropriate algorithm.
+    let compressed = match compression {
+        LogCompression::Zstd => crate::fs::zstd::compress_zstd(&data),
+        LogCompression::Lz4 => crate::fs::lz4::compress(&data),
+        LogCompression::Gzip => crate::fs::compress::gzip(&data),
+        LogCompression::None => return (0, 0),
+    };
+
+    let compressed_size = compressed.len() as u64;
+
+    // Only keep compressed version if it's actually smaller.
+    if compressed_size < original_size {
+        let compressed_path = format!("{}{}", path, compression.extension());
+        if crate::fs::Vfs::write_file(&compressed_path, &compressed).is_ok() {
+            // Remove the uncompressed original.
+            let _ = crate::fs::Vfs::remove(path);
+            return (original_size, compressed_size);
+        }
+    }
+
+    // Compression didn't help or write failed — keep original.
+    (0, 0)
 }
 
 /// Prune old rotated log files to stay within the total storage cap.
@@ -510,7 +653,10 @@ fn collect_log_files(
 ) {
     use alloc::format;
 
-    // Current file.
+    // Compressed extensions to check (in priority order).
+    let compress_exts = [".zst", ".lz4", ".gz"];
+
+    // Current file (never compressed — only rotated files get compressed).
     let current = format!("{}/{}.jsonl", log_dir, name);
     if let Ok(meta) = crate::fs::Vfs::stat(&current) {
         #[allow(clippy::arithmetic_side_effects)]
@@ -518,13 +664,26 @@ fn collect_log_files(
         files.push((current, meta.size));
     }
 
-    // Rotated files.
+    // Rotated files — check compressed extensions first, then plain.
     for i in 1..=max_rotated {
-        let path = format!("{}/{}.{}.jsonl", log_dir, name, i);
-        if let Ok(meta) = crate::fs::Vfs::stat(&path) {
-            #[allow(clippy::arithmetic_side_effects)]
-            { *total += meta.size; }
-            files.push((path, meta.size));
+        let mut found = false;
+        for ext in &compress_exts {
+            let path = format!("{}/{}.{}.jsonl{}", log_dir, name, i, ext);
+            if let Ok(meta) = crate::fs::Vfs::stat(&path) {
+                #[allow(clippy::arithmetic_side_effects)]
+                { *total += meta.size; }
+                files.push((path, meta.size));
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            let path = format!("{}/{}.{}.jsonl", log_dir, name, i);
+            if let Ok(meta) = crate::fs::Vfs::stat(&path) {
+                #[allow(clippy::arithmetic_side_effects)]
+                { *total += meta.size; }
+                files.push((path, meta.size));
+            }
         }
     }
 }
@@ -589,6 +748,16 @@ pub fn set_min_severity(sev: Severity) {
     STATE.lock().config.min_persist_severity = sev;
 }
 
+/// Set the compression algorithm for rotated log files.
+pub fn set_compression(compression: LogCompression) {
+    STATE.lock().config.compression = compression;
+}
+
+/// Get the current compression algorithm.
+pub fn compression() -> LogCompression {
+    STATE.lock().config.compression
+}
+
 // ---------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------
@@ -606,6 +775,12 @@ pub struct RotationStats {
     pub max_rotated_files: u32,
     pub max_total_storage: u64,
     pub min_persist_severity: Severity,
+    /// Compression algorithm in use.
+    pub compression: LogCompression,
+    /// Total bytes saved by compression.
+    pub bytes_saved_by_compression: u64,
+    /// Total files compressed during rotation.
+    pub files_compressed: u64,
     /// Per-cursor stats: (name, events_flushed, bytes_written, rotations, current_size).
     pub cursors: Vec<(String, u64, u64, u64, u64)>,
 }
@@ -629,6 +804,9 @@ pub fn stats() -> RotationStats {
         max_rotated_files: state.config.max_rotated_files,
         max_total_storage: state.config.max_total_storage,
         min_persist_severity: state.config.min_persist_severity,
+        compression: state.config.compression,
+        bytes_saved_by_compression: state.total_bytes_saved_by_compression,
+        files_compressed: state.total_files_compressed,
         cursors,
     }
 }
@@ -650,9 +828,12 @@ pub fn procfs_content() -> String {
     out.push_str(&alloc::format!("Max file size: {} MiB\n", st.max_file_size / (1024 * 1024)));
     out.push_str(&alloc::format!("Max rotated:   {}\n", st.max_rotated_files));
     out.push_str(&alloc::format!("Max total:     {} MiB\n", st.max_total_storage / (1024 * 1024)));
+    out.push_str(&alloc::format!("Compression:   {}\n", st.compression.label()));
     out.push_str(&alloc::format!("Total flushes: {}\n", st.total_flushes));
     out.push_str(&alloc::format!("Total written: {} bytes\n", st.total_bytes_written));
     out.push_str(&alloc::format!("Total pruned:  {} files\n", st.total_pruned));
+    out.push_str(&alloc::format!("Files compressed: {}\n", st.files_compressed));
+    out.push_str(&alloc::format!("Bytes saved:   {} bytes\n", st.bytes_saved_by_compression));
     out.push_str(&alloc::format!("Last seq:      {}\n", st.global_last_flushed_seq));
 
     if !st.cursors.is_empty() {

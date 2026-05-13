@@ -32780,6 +32780,7 @@ fn cmd_logpersist(args: &str) {
                 RotationMode::Combined => "combined",
                 RotationMode::PerNamespace => "per-namespace",
             });
+            shell_println!("  Compression:    {}", st.compression.label());
             shell_println!("  Log dir:        {}", st.log_dir);
             shell_println!("  Min severity:   {}", st.min_persist_severity.as_str());
             shell_println!("  Max file size:  {} MiB", st.max_file_size / (1024 * 1024));
@@ -32787,6 +32788,8 @@ fn cmd_logpersist(args: &str) {
             shell_println!("  Max total:      {} MiB", st.max_total_storage / (1024 * 1024));
             shell_println!("  Total flushes:  {}", st.total_flushes);
             shell_println!("  Total written:  {} bytes", st.total_bytes_written);
+            shell_println!("  Files compressed: {}", st.files_compressed);
+            shell_println!("  Bytes saved:    {} bytes", st.bytes_saved_by_compression);
             shell_println!("  Total pruned:   {} files", st.total_pruned);
             shell_println!("  Last seq:       {}", st.global_last_flushed_seq);
             if !st.cursors.is_empty() {
@@ -32863,6 +32866,26 @@ fn cmd_logpersist(args: &str) {
                 shell_println!("Minimum persist severity: {}", cfg.min_persist_severity.as_str());
             }
         }
+        "compress" | "compression" => {
+            use crate::logpersist::LogCompression;
+            if let Some(algo) = parts.get(1) {
+                let c = match *algo {
+                    "none" | "off" => LogCompression::None,
+                    "zstd" => LogCompression::Zstd,
+                    "lz4" => LogCompression::Lz4,
+                    "gzip" | "gz" => LogCompression::Gzip,
+                    _ => {
+                        shell_println!("Unknown algorithm: {}. Use: none, zstd, lz4, gzip", algo);
+                        return;
+                    }
+                };
+                logpersist::set_compression(c);
+                shell_println!("Compression set to {}", c.label());
+            } else {
+                let c = logpersist::compression();
+                shell_println!("Current compression: {}", c.label());
+            }
+        }
         "test" => {
             match logpersist::self_test() {
                 Ok(()) => shell_println!("Log persistence self-test: PASSED"),
@@ -32878,6 +32901,7 @@ fn cmd_logpersist(args: &str) {
             shell_println!("  enable / disable   Toggle persistence");
             shell_println!("  mode [combined|per-namespace]  Set/show rotation mode");
             shell_println!("  severity [level]   Set/show min persist severity");
+            shell_println!("  compress [none|zstd|lz4|gzip]  Set/show compression");
             shell_println!("  test               Run self-test");
         }
         _ => {

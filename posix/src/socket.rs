@@ -3411,6 +3411,34 @@ pub unsafe extern "C" fn gethostbyname(name: *const u8) -> *const Hostent {
 }
 
 // ---------------------------------------------------------------------------
+// gethostbyname2 — lookup with address family selection
+// ---------------------------------------------------------------------------
+
+/// Look up a host by name with a specified address family.
+///
+/// Like `gethostbyname`, but allows selecting the address family
+/// (AF_INET for IPv4, AF_INET6 for IPv6).  Since our kernel only
+/// supports IPv4 DNS resolution, AF_INET6 lookups always fail.
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gethostbyname2(name: *const u8, af: i32) -> *const Hostent {
+    match af {
+        AF_INET => {
+            // Delegate to gethostbyname for IPv4.
+            unsafe { gethostbyname(name) }
+        }
+        AF_INET6 => {
+            // IPv6 not supported by our kernel's DNS resolver.
+            core::ptr::null()
+        }
+        _ => core::ptr::null(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // gethostbyaddr — reverse DNS lookup
 // ---------------------------------------------------------------------------
 

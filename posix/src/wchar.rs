@@ -23,11 +23,23 @@
 //! - `wcsspn`, `wcscspn`, `wcspbrk`, `wcstok` — wide string search/tokenize
 //! - `wcstol`, `wcstoul`, `wcstoll`, `wcstoull` — wide string→integer
 //! - `wcstod`, `wcstof` — wide string→float
-//! - `wmemcpy`, `wmemset`, `wmemcmp`, `wmemmove`, `wmemchr` — wide memory operations
+//! - `wmemcpy`, `wmemset`, `wmemcmp`, `wmemmove`, `wmemchr`, `wmempcpy` — wide memory ops
 //! - `mbsrtowcs`, `mbsnrtowcs`, `wcsrtombs`, `wcsnrtombs` — restartable string conversion
+//! - `wcscasecmp`, `wcsncasecmp` — case-insensitive wide string comparison
+//! - `fputwc`, `fgetwc`, `putwc`, `getwc`, `putwchar`, `getwchar` — wide char I/O
+//! - `fputws`, `fgetws` — wide string I/O
+//! - `ungetwc` — push back wide character (ASCII only; multi-byte is best-effort)
 
 /// Wide character type (32-bit Unicode code point).
 pub type WcharT = i32;
+
+/// Wide-character EOF indicator.
+///
+/// Analogous to `EOF` for byte streams.  POSIX requires WEOF to be a
+/// value of type `wint_t` that is distinct from any valid wide character.
+/// On glibc/musl with 32-bit `wchar_t`, WEOF is 0xFFFFFFFF (i.e., -1
+/// when interpreted as `i32`).
+pub const WEOF: WcharT = -1;
 
 /// Multibyte conversion state for restartable functions (`mbrtowc`, `wcrtomb`).
 ///
@@ -39,51 +51,57 @@ pub type WcharT = i32;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MbstateT {
-    _opaque: [u8; 8],
+    opaque: [u8; 8],
 }
 
 impl MbstateT {
     /// Create a zero-initialized (initial) shift state.
     const fn new() -> Self {
-        Self { _opaque: [0; 8] }
+        Self { opaque: [0; 8] }
     }
 
     /// Check if this is the initial shift state.
-    fn is_initial(&self) -> bool {
-        self._opaque[4] == 0 && self._opaque[5] == 0
+    #[allow(clippy::indexing_slicing)] // indices 4,5 always in bounds for [u8; 8]
+    fn is_initial(self) -> bool {
+        self.opaque[4] == 0 && self.opaque[5] == 0
     }
 
     /// Get accumulated byte count.
-    fn count(&self) -> usize {
-        self._opaque[4] as usize
+    #[allow(clippy::indexing_slicing)] // index 4 always in bounds for [u8; 8]
+    fn count(self) -> usize {
+        self.opaque[4] as usize
     }
 
     /// Get expected total byte count (0 = initial).
-    fn expected(&self) -> usize {
-        self._opaque[5] as usize
+    #[allow(clippy::indexing_slicing)] // index 5 always in bounds for [u8; 8]
+    fn expected(self) -> usize {
+        self.opaque[5] as usize
     }
 
     /// Store an accumulated byte.
+    #[allow(clippy::indexing_slicing)] // idx < 4 is checked; indices 4 always in bounds for [u8; 8]
     fn push(&mut self, b: u8) {
-        let idx = self._opaque[4] as usize;
+        let idx = self.opaque[4] as usize;
         if idx < 4 {
-            self._opaque[idx] = b;
-            self._opaque[4] = self._opaque[4].wrapping_add(1);
+            self.opaque[idx] = b;
+            self.opaque[4] = self.opaque[4].wrapping_add(1);
         }
     }
 
     /// Set the expected byte count for the current character.
+    #[allow(clippy::indexing_slicing)] // index 5 always in bounds for [u8; 8]
     fn set_expected(&mut self, n: u8) {
-        self._opaque[5] = n;
+        self.opaque[5] = n;
     }
 
     /// Get the accumulated bytes.
-    fn bytes(&self, n: usize) -> [u8; 4] {
+    #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+    fn bytes(self, n: usize) -> [u8; 4] {
         let mut out = [0u8; 4];
         let count = if n < 4 { n } else { 4 };
         let mut i = 0;
         while i < count {
-            out[i] = self._opaque[i];
+            out[i] = self.opaque[i];
             i += 1;
         }
         out
@@ -91,7 +109,7 @@ impl MbstateT {
 
     /// Reset to initial state.
     fn reset(&mut self) {
-        self._opaque = [0; 8];
+        self.opaque = [0; 8];
     }
 }
 
@@ -121,7 +139,7 @@ fn is_cont(b: u8) -> bool {
 /// Decode a complete UTF-8 sequence from `bytes[..len]` into a code point.
 ///
 /// Returns `None` for invalid sequences (overlong, surrogate, > U+10FFFF).
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 fn utf8_decode(bytes: &[u8], len: usize) -> Option<u32> {
     let cp = match len {
         1 => u32::from(bytes[0]),
@@ -204,7 +222,7 @@ fn utf8_encode(cp: u32, buf: &mut [u8; 4]) -> usize {
 /// Returns 0 for null byte, 1..4 for valid UTF-8 lead bytes,
 /// -1 for invalid (sets errno to EILSEQ).
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn mblen(s: *const u8, n: usize) -> i32 {
     if s.is_null() {
         return 0; // No state-dependent encoding.
@@ -250,7 +268,7 @@ pub unsafe extern "C" fn mblen(s: *const u8, n: usize) -> i32 {
 /// Returns the number of bytes consumed (1..4), 0 for null character,
 /// or -1 for invalid sequence.
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn mbtowc(pwc: *mut WcharT, s: *const u8, n: usize) -> i32 {
     if s.is_null() {
         return 0;
@@ -299,6 +317,7 @@ pub unsafe extern "C" fn mbtowc(pwc: *mut WcharT, s: *const u8, n: usize) -> i32
 /// Returns the number of bytes written (1..4), or -1 if the code
 /// point is not valid Unicode.
 #[unsafe(no_mangle)]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn wctomb(s: *mut u8, wc: WcharT) -> i32 {
     if s.is_null() {
         return 0; // No state-dependent encoding.
@@ -331,7 +350,7 @@ pub unsafe extern "C" fn wctomb(s: *mut u8, wc: WcharT) -> i32 {
 /// Returns the number of wide characters written (not counting null),
 /// or `(size_t)-1` on encoding error.
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) -> usize {
     if src.is_null() {
         return 0;
@@ -368,18 +387,15 @@ pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) ->
             i += 1;
         }
 
-        match utf8_decode(&buf, seq_len) {
-            Some(cp) => {
-                if !dst.is_null() {
-                    unsafe { *dst.add(dst_count) = cp as WcharT; }
-                }
-                src_off += seq_len;
-                dst_count += 1;
+        if let Some(cp) = utf8_decode(&buf, seq_len) {
+            if !dst.is_null() {
+                unsafe { *dst.add(dst_count) = cp as WcharT; }
             }
-            None => {
-                crate::errno::set_errno(crate::errno::EILSEQ);
-                return usize::MAX;
-            }
+            src_off += seq_len;
+            dst_count += 1;
+        } else {
+            crate::errno::set_errno(crate::errno::EILSEQ);
+            return usize::MAX;
         }
     }
     dst_count
@@ -394,7 +410,7 @@ pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) ->
 /// Returns the number of bytes written (not counting null terminator),
 /// or `(size_t)-1` if a code point is invalid.
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn wcstombs(dst: *mut u8, src: *const WcharT, n: usize) -> usize {
     if src.is_null() {
         return 0;
@@ -564,17 +580,14 @@ pub unsafe extern "C" fn mbrtowc(
         let seq_len = state.expected();
         state.reset();
 
-        match utf8_decode(&buf, seq_len) {
-            Some(cp) => {
-                if !pwc.is_null() {
-                    unsafe { *pwc = cp as WcharT; }
-                }
-                if cp == 0 { 0 } else { consumed }
+        if let Some(cp) = utf8_decode(&buf, seq_len) {
+            if !pwc.is_null() {
+                unsafe { *pwc = cp as WcharT; }
             }
-            None => {
-                crate::errno::set_errno(crate::errno::EILSEQ);
-                usize::MAX // -1: EILSEQ.
-            }
+            if cp == 0 { 0 } else { consumed }
+        } else {
+            crate::errno::set_errno(crate::errno::EILSEQ);
+            usize::MAX // -1: EILSEQ.
         }
     } else {
         // Continue from partial state.
@@ -598,17 +611,14 @@ pub unsafe extern "C" fn mbrtowc(
         let seq_len = state.expected();
         state.reset();
 
-        match utf8_decode(&buf, seq_len) {
-            Some(cp) => {
-                if !pwc.is_null() {
-                    unsafe { *pwc = cp as WcharT; }
-                }
-                if cp == 0 { 0 } else { consumed }
+        if let Some(cp) = utf8_decode(&buf, seq_len) {
+            if !pwc.is_null() {
+                unsafe { *pwc = cp as WcharT; }
             }
-            None => {
-                crate::errno::set_errno(crate::errno::EILSEQ);
-                usize::MAX
-            }
+            if cp == 0 { 0 } else { consumed }
+        } else {
+            crate::errno::set_errno(crate::errno::EILSEQ);
+            usize::MAX
         }
     }
 }
@@ -621,6 +631,7 @@ pub unsafe extern "C" fn mbrtowc(
 ///
 /// Returns the number of bytes written, or `(size_t)-1` on error.
 #[unsafe(no_mangle)]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn wcrtomb(
     s: *mut u8,
     wc: WcharT,
@@ -833,6 +844,7 @@ const WC_XDIGIT: WctypeT = 12;
 ///
 /// `name` must be a valid null-terminated C string.
 #[unsafe(no_mangle)]
+#[allow(clippy::indexing_slicing)]
 pub unsafe extern "C" fn wctype(name: *const u8) -> WctypeT {
     if name.is_null() {
         return 0;
@@ -907,6 +919,7 @@ const WT_TOUPPER: WctransT = 2;
 ///
 /// `name` must be a valid null-terminated C string.
 #[unsafe(no_mangle)]
+#[allow(clippy::indexing_slicing)]
 pub unsafe extern "C" fn wctrans(name: *const u8) -> WctransT {
     if name.is_null() {
         return 0;
@@ -1200,7 +1213,7 @@ pub unsafe extern "C" fn wcstol(
     }
 
     // POSIX: base must be 0 or in [2, 36].
-    if base != 0 && (base < 2 || base > 36) {
+    if base != 0 && !(2..=36).contains(&base) {
         crate::errno::set_errno(crate::errno::EINVAL);
         if !endptr.is_null() { unsafe { *endptr = nptr; } }
         return 0;
@@ -1274,7 +1287,7 @@ pub unsafe extern "C" fn wcstoul(
     }
 
     // POSIX: base must be 0 or in [2, 36].
-    if base != 0 && (base < 2 || base > 36) {
+    if base != 0 && !(2..=36).contains(&base) {
         crate::errno::set_errno(crate::errno::EINVAL);
         if !endptr.is_null() { unsafe { *endptr = nptr; } }
         return 0;
@@ -1368,7 +1381,7 @@ pub unsafe extern "C" fn wcstoull(
 ///
 /// `nptr` must point to a valid null-terminated wide string.
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn wcstod(
     nptr: *const WcharT,
     endptr: *mut *const WcharT,
@@ -1411,7 +1424,7 @@ pub unsafe extern "C" fn wcstod(
     }
 
     let mut byte_end: *const u8 = core::ptr::null();
-    let val = unsafe { crate::stdlib::strtod(buf.as_ptr(), &mut byte_end) };
+    let val = unsafe { crate::stdlib::strtod(buf.as_ptr(), &raw mut byte_end) };
 
     if !endptr.is_null() {
         let bytes_consumed = if byte_end.is_null() {
@@ -1688,14 +1701,14 @@ pub unsafe extern "C" fn wcstok(
     saveptr: *mut *mut WcharT,
 ) -> *mut WcharT {
     // Determine start position.
-    let mut ptr = if !s.is_null() {
-        s
-    } else {
+    let mut ptr = if s.is_null() {
         let saved = unsafe { *saveptr };
         if saved.is_null() {
             return core::ptr::null_mut();
         }
         saved
+    } else {
+        s
     };
 
     // Skip leading delimiters.
@@ -1768,20 +1781,24 @@ pub unsafe extern "C" fn wcsdup(s: *const WcharT) -> *mut WcharT {
     let len = unsafe { wcslen(s) };
     let size = len.wrapping_add(1).wrapping_mul(core::mem::size_of::<WcharT>());
 
-    let dest = crate::malloc::malloc(size);
-    if dest.is_null() {
+    let raw_ptr = crate::malloc::malloc(size);
+    if raw_ptr.is_null() {
         return core::ptr::null_mut();
     }
 
     // Copy including the null terminator.
+    // SAFETY: malloc returned aligned memory of sufficient size for (len+1) WcharT values.
+    // Our malloc implementation guarantees at least 8-byte alignment, which satisfies
+    // WcharT (i32, 4-byte alignment).
+    #[allow(clippy::cast_ptr_alignment)]
+    let out_ptr = raw_ptr.cast::<WcharT>();
     let mut i: usize = 0;
-    let dst = dest.cast::<WcharT>();
     while i <= len {
-        unsafe { *dst.add(i) = *s.add(i); }
+        unsafe { *out_ptr.add(i) = *s.add(i); }
         i = i.wrapping_add(1);
     }
 
-    dst
+    out_ptr
 }
 
 // ---------------------------------------------------------------------------
@@ -1893,7 +1910,7 @@ pub unsafe extern "C" fn mbsnrtowcs(
         let pwc = if dst.is_null() {
             core::ptr::null_mut()
         } else {
-            &mut wc as *mut WcharT
+            &raw mut wc
         };
 
         let ret = unsafe { mbrtowc(pwc, s, n, ps) };
@@ -1905,21 +1922,22 @@ pub unsafe extern "C" fn mbsnrtowcs(
             }
             unsafe { *src = core::ptr::null(); }
             return written;
-        } else if ret == usize::MAX {
+        }
+        if ret == usize::MAX {
             // Encoding error.
             crate::errno::set_errno(crate::errno::EILSEQ);
             return usize::MAX;
-        } else if ret == usize::MAX.wrapping_sub(1) {
+        }
+        if ret == usize::MAX.wrapping_sub(1) {
             // Incomplete sequence and we've run out of bytes.
             break;
-        } else {
-            if !dst.is_null() {
-                unsafe { *dst.add(written) = wc; }
-            }
-            s = unsafe { s.add(ret) };
-            bytes_consumed = bytes_consumed.wrapping_add(ret);
-            written = written.wrapping_add(1);
         }
+        if !dst.is_null() {
+            unsafe { *dst.add(written) = wc; }
+        }
+        s = unsafe { s.add(ret) };
+        bytes_consumed = bytes_consumed.wrapping_add(ret);
+        written = written.wrapping_add(1);
     }
 
     unsafe { *src = s; }
@@ -1954,6 +1972,7 @@ pub unsafe extern "C" fn wcsrtombs(
 ///
 /// Same as `wcsrtombs`.
 #[unsafe(no_mangle)]
+#[allow(clippy::indexing_slicing)]
 pub unsafe extern "C" fn wcsnrtombs(
     dst: *mut u8,
     src: *mut *const WcharT,
@@ -1974,13 +1993,7 @@ pub unsafe extern "C" fn wcsnrtombs(
         let wc = unsafe { *s };
 
         // Encode into temporary buffer to know the byte count.
-        let out = if dst.is_null() {
-            buf.as_mut_ptr()
-        } else {
-            buf.as_mut_ptr()
-        };
-
-        let ret = unsafe { wcrtomb(out, wc, ps) };
+        let ret = unsafe { wcrtomb(buf.as_mut_ptr(), wc, ps) };
 
         if ret == usize::MAX {
             // Encoding error.
@@ -2045,6 +2058,292 @@ pub extern "C" fn nl_langinfo(item: i32) -> *const u8 {
         // THOUSEP and everything else
         _ => c"".as_ptr().cast::<u8>(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wide string case-insensitive comparison
+// ---------------------------------------------------------------------------
+
+/// Case-insensitive wide string comparison.
+///
+/// Compares two null-terminated wide strings, converting each character
+/// to lowercase before comparison.  Returns 0 if equal, negative if
+/// `s1 < s2`, positive if `s1 > s2`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcscasecmp(s1: *const WcharT, s2: *const WcharT) -> i32 {
+    if s1.is_null() || s2.is_null() {
+        // Defensive: POSIX says behaviour is undefined for null.
+        return 0;
+    }
+    let mut i: usize = 0;
+    loop {
+        let c1 = towlower(unsafe { *s1.add(i) });
+        let c2 = towlower(unsafe { *s2.add(i) });
+        if c1 != c2 {
+            return c1.wrapping_sub(c2);
+        }
+        // Both equal — if nul terminator, strings are identical.
+        if c1 == 0 {
+            return 0;
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Case-insensitive wide string comparison with length limit.
+///
+/// Compares at most `n` wide characters from `s1` and `s2`,
+/// converting to lowercase before comparison.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcsncasecmp(
+    s1: *const WcharT,
+    s2: *const WcharT,
+    n: usize,
+) -> i32 {
+    if n == 0 || s1.is_null() || s2.is_null() {
+        return 0;
+    }
+    let mut i: usize = 0;
+    while i < n {
+        let c1 = towlower(unsafe { *s1.add(i) });
+        let c2 = towlower(unsafe { *s2.add(i) });
+        if c1 != c2 {
+            return c1.wrapping_sub(c2);
+        }
+        if c1 == 0 {
+            return 0;
+        }
+        i = i.wrapping_add(1);
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Wide character I/O
+// ---------------------------------------------------------------------------
+
+/// Write a wide character to a stream.
+///
+/// Encodes `wc` as UTF-8 and writes the bytes to `stream`.
+/// Returns `wc` on success, `WEOF` on error.
+#[unsafe(no_mangle)]
+#[allow(clippy::indexing_slicing)]
+pub unsafe extern "C" fn fputwc(wc: WcharT, stream: *mut u8) -> WcharT {
+    let cp = wc as u32;
+    let mut buf = [0u8; 4];
+    let len = if cp < 0x80 {
+        buf[0] = cp as u8;
+        1
+    } else if cp < 0x800 {
+        buf[0] = 0xC0 | (cp >> 6) as u8;
+        buf[1] = 0x80 | (cp & 0x3F) as u8;
+        2
+    } else if cp < 0x1_0000 {
+        buf[0] = 0xE0 | (cp >> 12) as u8;
+        buf[1] = 0x80 | ((cp >> 6) & 0x3F) as u8;
+        buf[2] = 0x80 | (cp & 0x3F) as u8;
+        3
+    } else if cp <= 0x10_FFFF {
+        buf[0] = 0xF0 | (cp >> 18) as u8;
+        buf[1] = 0x80 | ((cp >> 12) & 0x3F) as u8;
+        buf[2] = 0x80 | ((cp >> 6) & 0x3F) as u8;
+        buf[3] = 0x80 | (cp & 0x3F) as u8;
+        4
+    } else {
+        crate::errno::set_errno(crate::errno::EILSEQ);
+        return WEOF;
+    };
+
+    let mut i: usize = 0;
+    while i < len {
+        if crate::stdio::fputc(i32::from(buf[i]), stream) < 0 {
+            return WEOF;
+        }
+        i = i.wrapping_add(1);
+    }
+    wc
+}
+
+/// Read a wide character from a stream.
+///
+/// Reads one UTF-8 encoded character from `stream` and returns
+/// the wide character value.  Returns `WEOF` on error or EOF.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fgetwc(stream: *mut u8) -> WcharT {
+    let first = crate::stdio::fgetc(stream);
+    if first < 0 {
+        return WEOF;
+    }
+    let b0 = first as u8;
+
+    // Single-byte ASCII.
+    if b0 < 0x80 {
+        return WcharT::from(b0);
+    }
+
+    // Determine expected length and initial bits.
+    let (expected_len, mut cp): (usize, u32) = if b0 & 0xE0 == 0xC0 {
+        (2, u32::from(b0 & 0x1F))
+    } else if b0 & 0xF0 == 0xE0 {
+        (3, u32::from(b0 & 0x0F))
+    } else if b0 & 0xF8 == 0xF0 {
+        (4, u32::from(b0 & 0x07))
+    } else {
+        crate::errno::set_errno(crate::errno::EILSEQ);
+        return WEOF;
+    };
+
+    // Read continuation bytes.
+    let mut i: usize = 1;
+    while i < expected_len {
+        let next = crate::stdio::fgetc(stream);
+        if next < 0 {
+            return WEOF;
+        }
+        let nb = next as u8;
+        if nb & 0xC0 != 0x80 {
+            crate::errno::set_errno(crate::errno::EILSEQ);
+            return WEOF;
+        }
+        cp = (cp << 6) | u32::from(nb & 0x3F);
+        i = i.wrapping_add(1);
+    }
+
+    cp as WcharT
+}
+
+/// Write a wide character to a stream (alias for `fputwc`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn putwc(wc: WcharT, stream: *mut u8) -> WcharT {
+    unsafe { fputwc(wc, stream) }
+}
+
+/// Read a wide character from a stream (alias for `fgetwc`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getwc(stream: *mut u8) -> WcharT {
+    unsafe { fgetwc(stream) }
+}
+
+/// Write a wide character to stdout.
+#[unsafe(no_mangle)]
+pub extern "C" fn putwchar(wc: WcharT) -> WcharT {
+    // SAFETY: STDOUT_SENTINEL (1 as *mut u8) is the stdio convention.
+    unsafe { fputwc(wc, core::ptr::dangling_mut::<u8>()) }
+}
+
+/// Read a wide character from stdin.
+#[unsafe(no_mangle)]
+pub extern "C" fn getwchar() -> WcharT {
+    // SAFETY: STDIN_SENTINEL (null) is the stdio convention.
+    unsafe { fgetwc(core::ptr::null_mut()) }
+}
+
+/// Push back a wide character onto a stream.
+///
+/// Only one character of pushback is guaranteed.  Returns `wc` on
+/// success, `WEOF` if pushback fails.  We encode the wide character
+/// back to UTF-8 and push the first byte via `ungetc`.  Since our
+/// stdio only supports one byte of pushback, this only works reliably
+/// for ASCII characters; multi-byte pushback is best-effort.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ungetwc(wc: WcharT, stream: *mut u8) -> WcharT {
+    if wc == WEOF {
+        return WEOF;
+    }
+    // For ASCII, push back directly.
+    let cp = wc as u32;
+    if cp < 0x80 {
+        if crate::stdio::ungetc(cp as i32, stream) < 0 {
+            return WEOF;
+        }
+        return wc;
+    }
+    // Multi-byte: best-effort single-byte pushback of first UTF-8 byte.
+    // This is a known limitation — full multi-byte pushback would
+    // require expanding the stdio ungetc buffer.
+    crate::errno::set_errno(crate::errno::EILSEQ);
+    WEOF
+}
+
+/// Write a wide string to a stream.
+///
+/// Writes each character of the null-terminated wide string `s` to
+/// `stream` using `fputwc`.  Does NOT write the null terminator.
+/// Returns a non-negative value on success, `WEOF` on error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fputws(s: *const WcharT, stream: *mut u8) -> i32 {
+    if s.is_null() {
+        return -1;
+    }
+    let mut i: usize = 0;
+    loop {
+        let wc = unsafe { *s.add(i) };
+        if wc == 0 {
+            return 0; // Success.
+        }
+        if unsafe { fputwc(wc, stream) } == WEOF {
+            return -1;
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Read a wide string from a stream.
+///
+/// Reads at most `n-1` wide characters from `stream` into `ws`,
+/// stopping at a newline (which is included) or EOF.  The resulting
+/// string is null-terminated.  Returns `ws` on success, null on
+/// error or EOF with no characters read.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fgetws(
+    ws: *mut WcharT,
+    n: i32,
+    stream: *mut u8,
+) -> *mut WcharT {
+    if ws.is_null() || n <= 0 {
+        return core::ptr::null_mut();
+    }
+    let max = (n as usize).wrapping_sub(1); // Reserve space for null terminator.
+    let mut count: usize = 0;
+    while count < max {
+        let wc = unsafe { fgetwc(stream) };
+        if wc == WEOF {
+            if count == 0 {
+                return core::ptr::null_mut(); // EOF with nothing read.
+            }
+            break;
+        }
+        unsafe { *ws.add(count) = wc; }
+        count = count.wrapping_add(1);
+        // Stop after newline.
+        if wc == WcharT::from(b'\n') {
+            break;
+        }
+    }
+    // Null-terminate.
+    unsafe { *ws.add(count) = 0; }
+    ws
+}
+
+/// Copy wide characters, returning pointer past last written.
+///
+/// Like `wmemcpy` but returns a pointer to the wide character after
+/// the last one written (i.e., `dest + n`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wmempcpy(
+    dest: *mut WcharT,
+    src: *const WcharT,
+    n: usize,
+) -> *mut WcharT {
+    if !dest.is_null() && !src.is_null() {
+        let mut i: usize = 0;
+        while i < n {
+            unsafe { *dest.add(i) = *src.add(i); }
+            i = i.wrapping_add(1);
+        }
+    }
+    // SAFETY: dest + n is one past the last element written.
+    unsafe { dest.add(n) }
 }
 
 // ---------------------------------------------------------------------------

@@ -91,6 +91,10 @@ pub extern "C" fn exit(status: i32) -> ! {
     // Reset count (in case an atexit handler calls exit again).
     unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
 
+    // POSIX: flush all open output streams before termination.
+    // This ensures buffered printf/fputs output is not lost.
+    crate::stdio::fflush(core::ptr::null_mut());
+
     #[allow(clippy::used_underscore_items)]
     crate::process::_exit(status);
 }

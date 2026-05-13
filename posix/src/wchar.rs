@@ -1714,6 +1714,53 @@ pub unsafe extern "C" fn wcsdup(s: *const WcharT) -> *mut WcharT {
 }
 
 // ---------------------------------------------------------------------------
+// Wide string collation
+// ---------------------------------------------------------------------------
+
+/// Locale-aware wide string comparison.
+///
+/// Since we only support the C locale, this is identical to `wcscmp`.
+///
+/// # Safety
+///
+/// Both `s1` and `s2` must be valid null-terminated wide strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcscoll(s1: *const WcharT, s2: *const WcharT) -> i32 {
+    unsafe { wcscmp(s1, s2) }
+}
+
+/// Locale-aware wide string comparison (locale variant).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcscoll_l(s1: *const WcharT, s2: *const WcharT, _locale: usize) -> i32 {
+    unsafe { wcscmp(s1, s2) }
+}
+
+/// Transform a wide string for locale-aware comparison.
+///
+/// Copies at most `n` wide characters of `src` into `dest`.  Since
+/// we only support the C locale, this is just `wcsncpy` semantics.
+/// Returns the length of `src` (not counting null).
+///
+/// # Safety
+///
+/// `dest` must be valid for `n` wide characters.  `src` must be
+/// a valid null-terminated wide string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcsxfrm(dest: *mut WcharT, src: *const WcharT, n: usize) -> usize {
+    let len = unsafe { wcslen(src) };
+    if n > 0 {
+        unsafe { wcsncpy(dest, src, n); }
+    }
+    len
+}
+
+/// Transform a wide string for locale-aware comparison (locale variant).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcsxfrm_l(dest: *mut WcharT, src: *const WcharT, n: usize, _locale: usize) -> usize {
+    unsafe { wcsxfrm(dest, src, n) }
+}
+
+// ---------------------------------------------------------------------------
 // Restartable string conversions: mbsrtowcs / wcsrtombs
 // ---------------------------------------------------------------------------
 

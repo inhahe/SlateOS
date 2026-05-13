@@ -1252,6 +1252,40 @@ pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut u8, buflen: usize) ->
     }
 }
 
+/// Locale-aware string comparison (locale variant).
+///
+/// Since we only support the C locale, delegates to `strcmp`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strcoll_l(s1: *const u8, s2: *const u8, _locale: usize) -> i32 {
+    unsafe { strcmp(s1, s2) }
+}
+
+/// Transform a string for locale-aware comparison (locale variant).
+///
+/// Since we only support the C locale, delegates to `strxfrm`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strxfrm_l(dest: *mut u8, src: *const u8, n: usize, _locale: usize) -> usize {
+    unsafe { strxfrm(dest, src, n) }
+}
+
+/// Locale-aware `strerror`.
+///
+/// Returns the same result as `strerror` (locale is ignored).
+#[unsafe(no_mangle)]
+pub extern "C" fn strerror_l(errnum: i32, _locale: usize) -> *const u8 {
+    strerror(errnum)
+}
+
+/// XPG variant of `strerror_r`.
+///
+/// Some glibc-compiled programs reference `__xpg_strerror_r` instead
+/// of the GNU-specific `strerror_r`.  The XPG version returns 0 on
+/// success and an error code on failure (same as our `strerror_r`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __xpg_strerror_r(errnum: i32, buf: *mut u8, buflen: usize) -> i32 {
+    unsafe { strerror_r(errnum, buf, buflen) }
+}
+
 // ---------------------------------------------------------------------------
 // BSD safe string functions
 // ---------------------------------------------------------------------------

@@ -213,6 +213,208 @@ pub extern "C" fn endgrent() {
 }
 
 // ---------------------------------------------------------------------------
+// Reentrant password/group lookups
+// ---------------------------------------------------------------------------
+
+/// Look up a user by name (reentrant).
+///
+/// Copies the result into caller-provided `pwd` and `buf`.  On success,
+/// `*result` is set to `pwd`; if the user is not found, `*result` is
+/// NULL and 0 is returned.
+///
+/// Returns 0 on success, or an error code (`ERANGE` if `buflen` is
+/// too small).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwnam_r(
+    name: *const u8,
+    pwd: *mut Passwd,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Passwd,
+) -> i32 {
+    if result.is_null() || pwd.is_null() || buf.is_null() {
+        return crate::errno::EINVAL;
+    }
+
+    // Default: not found.
+    unsafe { *result = core::ptr::null(); }
+
+    if name.is_null() {
+        return 0;
+    }
+
+    let len = unsafe { crate::string::strlen(name) };
+    if len == 4 && matches_root(name) {
+        return fill_passwd_r(pwd, buf, buflen, result);
+    }
+
+    0
+}
+
+/// Look up a user by UID (reentrant).
+///
+/// Same semantics as `getpwnam_r`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getpwuid_r(
+    uid: UidT,
+    pwd: *mut Passwd,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Passwd,
+) -> i32 {
+    if result.is_null() || pwd.is_null() || buf.is_null() {
+        return crate::errno::EINVAL;
+    }
+
+    unsafe { *result = core::ptr::null(); }
+
+    if uid == 0 {
+        return fill_passwd_r(pwd, buf, buflen, result);
+    }
+
+    0
+}
+
+/// Look up a group by name (reentrant).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrnam_r(
+    name: *const u8,
+    grp: *mut Group,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Group,
+) -> i32 {
+    if result.is_null() || grp.is_null() || buf.is_null() {
+        return crate::errno::EINVAL;
+    }
+
+    unsafe { *result = core::ptr::null(); }
+
+    if name.is_null() {
+        return 0;
+    }
+
+    let len = unsafe { crate::string::strlen(name) };
+    if len == 4 && matches_root(name) {
+        return fill_group_r(grp, buf, buflen, result);
+    }
+
+    0
+}
+
+/// Look up a group by GID (reentrant).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getgrgid_r(
+    gid: GidT,
+    grp: *mut Group,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Group,
+) -> i32 {
+    if result.is_null() || grp.is_null() || buf.is_null() {
+        return crate::errno::EINVAL;
+    }
+
+    unsafe { *result = core::ptr::null(); }
+
+    if gid == 0 {
+        return fill_group_r(grp, buf, buflen, result);
+    }
+
+    0
+}
+
+/// Fill in a Passwd struct with root user data, copying strings into `buf`.
+///
+/// String layout in buf: "root\0x\0root\0/\0/bin/sh\0" = 24 bytes.
+fn fill_passwd_r(
+    pwd: *mut Passwd,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Passwd,
+) -> i32 {
+    // Strings: "root\0" (5) + "x\0" (2) + "root\0" (5) + "/\0" (2) + "/bin/sh\0" (8) = 22
+    const NEEDED: usize = 22;
+    if buflen < NEEDED {
+        return crate::errno::ERANGE;
+    }
+
+    // Copy strings into buf.
+    let strings: &[u8] = b"root\0x\0root\0/\0/bin/sh\0";
+    let mut i: usize = 0;
+    while i < NEEDED {
+        // SAFETY: i < NEEDED <= buflen, buf is valid.
+        unsafe { *buf.add(i) = strings[i]; }
+        i = i.wrapping_add(1);
+    }
+
+    // Fill the struct with pointers into buf.
+    // SAFETY: pwd is non-null (checked by caller).
+    unsafe {
+        (*pwd).pw_name = buf;                     // "root" at offset 0
+        (*pwd).pw_passwd = buf.add(5);            // "x" at offset 5
+        (*pwd).pw_uid = 0;
+        (*pwd).pw_gid = 0;
+        (*pwd).pw_gecos = buf.add(7);             // "root" at offset 7
+        (*pwd).pw_dir = buf.add(12);              // "/" at offset 12
+        (*pwd).pw_shell = buf.add(14);            // "/bin/sh" at offset 14
+        *result = pwd;
+    }
+
+    0
+}
+
+/// Fill in a Group struct with root group data, copying strings into `buf`.
+///
+/// String layout: "root\0x\0" + null pointer for gr_mem = 7 + 8 = 15 bytes.
+fn fill_group_r(
+    grp: *mut Group,
+    buf: *mut u8,
+    buflen: usize,
+    result: *mut *const Group,
+) -> i32 {
+    // Strings: "root\0" (5) + "x\0" (2) = 7 bytes for strings.
+    // Plus 8 bytes for a null pointer (gr_mem entry), aligned to 8 bytes.
+    // We need strings + alignment padding + one null pointer.
+    const STR_BYTES: usize = 7;
+    // Align up to 8 for the pointer.
+    const ALIGN: usize = 8;
+    const PTR_START: usize = (STR_BYTES + ALIGN - 1) & !(ALIGN - 1); // = 8
+    const NEEDED: usize = PTR_START + ALIGN; // 8 + 8 = 16
+
+    if buflen < NEEDED {
+        return crate::errno::ERANGE;
+    }
+
+    // Copy strings.
+    let strings: &[u8] = b"root\0x\0";
+    let mut i: usize = 0;
+    while i < STR_BYTES {
+        unsafe { *buf.add(i) = strings[i]; }
+        i = i.wrapping_add(1);
+    }
+
+    // Write a null pointer for gr_mem (empty member list).
+    // Zero the padding and pointer bytes.
+    i = STR_BYTES;
+    while i < NEEDED {
+        unsafe { *buf.add(i) = 0; }
+        i = i.wrapping_add(1);
+    }
+
+    unsafe {
+        (*grp).gr_name = buf;                     // "root" at offset 0
+        (*grp).gr_passwd = buf.add(5);            // "x" at offset 5
+        (*grp).gr_gid = 0;
+        // gr_mem points to the null pointer we wrote at PTR_START.
+        (*grp).gr_mem = buf.add(PTR_START).cast::<*const u8>();
+        *result = grp;
+    }
+
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Login name
 // ---------------------------------------------------------------------------
 

@@ -1111,6 +1111,21 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kshell `firewall`/`fw` command (on/off, policy, allow/deny rules, stats, conntrack)
   - [x] Self-test: disabled passthrough, default DROP, rule matching, IP prefix, connection tracking
   - [x] Per-rule match counters: each rule tracks packet match count; rule_stats() returns sorted diagnostics; reset_rule_counters() clears counters
+- [x] Network diagnostic tools and protocols:
+  - [x] HTTP/1.1 client (GET/HEAD requests, header parsing, redirect following, chunked transfer)
+  - [x] NTP client (RFC 5905 time synchronization, round-trip delay compensation, periodic sync)
+  - [x] UPnP IGD / NAT-PMP port forwarding (SSDP discovery, SOAP control, automatic NAT traversal)
+  - [x] mDNS / DNS-SD zero-config service discovery (RFC 6762/6763, multicast DNS, service registration/browsing)
+  - [x] Telnet server (RFC 854, remote kshell access, IAC negotiation, max 4 sessions, command blocking)
+  - [x] TFTP client and server (RFC 1350, stop-and-wait ACK, 4 concurrent transfers, VFS integration)
+  - [x] Network syslog client/receiver (RFC 5424/3164, remote log forwarding, ring buffer, severity/facility)
+  - [x] Wake-on-LAN magic packet sender (UDP port 9, 6×0xFF + 16×MAC)
+  - [x] Packet capture (pcap format, ring buffer, BPF-like filters, Wireshark-compatible export)
+  - [x] Traceroute (ICMP echo with increasing TTL, Time Exceeded correlation, per-hop RTT)
+  - [x] IGMP multicast group management (IGMPv2 RFC 2236, membership reports, query responses, report suppression)
+  - [x] LLDP neighbor discovery (IEEE 802.1AB, TLV parsing, neighbor table, periodic advertisements)
+  - [x] Netstat unified network status (TCP/UDP/listeners, interface stats, routing, protocol summary)
+  - [x] ARP-based network discovery (subnet scanning, host enumeration, reverse DNS)
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 
 ### 2.5 POSIX compatibility layer

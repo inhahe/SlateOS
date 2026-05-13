@@ -338,3 +338,29 @@ pub static mut __progname: *const u8 = UNKNOWN_PROG.as_ptr();
 /// Full program name (BSD alias).
 #[unsafe(no_mangle)]
 pub static mut __progname_full: *const u8 = UNKNOWN_PROG.as_ptr();
+
+// ---------------------------------------------------------------------------
+// GCC initialization/finalization stubs
+// ---------------------------------------------------------------------------
+
+/// GCC CRT: global constructor initialization.
+///
+/// Older GCC-compiled programs reference this symbol for running
+/// constructors in `.init_array`.  Modern toolchains use
+/// `.init_array` entries directly, but the symbol must exist for
+/// link compatibility.
+#[unsafe(no_mangle)]
+pub extern "C" fn __libc_csu_init() {
+    // No-op: we don't have a .init_array processing loop yet.
+    // Static constructors (if any) would be called here.
+}
+
+/// GCC CRT: global destructor finalization.
+///
+/// Called during exit to run `.fini_array` destructors.  Modern
+/// toolchains use `__cxa_finalize` instead, but the symbol must
+/// exist for link compatibility.
+#[unsafe(no_mangle)]
+pub extern "C" fn __libc_csu_fini() {
+    // No-op: destructors are handled by atexit/__cxa_finalize.
+}

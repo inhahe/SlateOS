@@ -1010,6 +1010,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Task I/O (fs::taskio): Per-task I/O accounting with read/write bytes, syscall counts, cancelled writes, I/O wait; `taskio`/`tio` kshell command; /proc/taskio; 8 self-tests
   - [x] TTY Stats (fs::ttystat): Terminal/serial device monitoring with per-TTY read/write tracking, signals, overruns, buffer usage; `ttystat`/`ttys` kshell command; /proc/ttystat; 8 self-tests
   - [x] Swap Activity (fs::swapact): Swap in/out monitoring with per-area page counts, latencies, type tracking; `swapact`/`swact` kshell command; /proc/swapact; 8 self-tests
+  - [x] Scheduler Wait (fs::schedwait): Task wait accounting with per-reason breakdown (runqueue/io/lock/sleep/ipc/pgfault), latency histogram; `schedwait`/`swait` kshell command; /proc/schedwait; 8 self-tests
+  - [x] Rate Limiter (fs::ratestat): Kernel rate limiter monitoring with per-limiter allow/deny/burst tracking, token bucket state; `ratestat`/`rstat` kshell command; /proc/ratestat; 8 self-tests
+  - [x] I/O Memory (fs::iomem): MMIO region mapping with per-region read/write counts, cacheability/prefetchability flags; `iomem`/`imem` kshell command; /proc/iomem; 8 self-tests
+  - [x] VM Zones (fs::vmzone): Virtual memory zone monitoring with per-zone free/active/inactive pages, watermarks, alloc/reclaim; `vmzone`/`vzone` kshell command; /proc/vmzone; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

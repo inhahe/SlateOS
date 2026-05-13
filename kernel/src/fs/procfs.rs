@@ -484,6 +484,10 @@ const ROOT_FILES: &[&str] = &[
     "taskio",
     "ttystat",
     "swapact",
+    "schedwait",
+    "ratestat",
+    "iomem",
+    "vmzone",
     "columnview",
     "pathbar",
     "viewstate",
@@ -9353,6 +9357,79 @@ fn gen_swapact() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_schedwait() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (waits, ns, ops) = super::schedwait::stats();
+    let avg = if waits > 0 { ns / waits } else { 0 };
+    out.push_str(&format!("=== Scheduler Wait Stats ===\n"));
+    out.push_str(&format!("Total waits: {}  Total ns: {}  Avg ns: {}  Ops: {}\n\n", waits, ns, avg, ops));
+    out.push_str("Per-reason:\n");
+    for (reason, count, total, max) in super::schedwait::per_reason() {
+        let avg_r = if count > 0 { total / count } else { 0 };
+        out.push_str(&format!("  {:<10} count={}  total={}ns  avg={}ns  max={}ns\n",
+            reason.label(), count, total, avg_r, max));
+    }
+    let (labels, counts) = super::schedwait::histogram();
+    out.push_str("\nHistogram:");
+    for (i, &count) in counts.iter().enumerate() {
+        out.push_str(&format!(" {}={}", labels[i], count));
+    }
+    out.push('\n');
+    out.into_bytes()
+}
+
+fn gen_ratestat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (limiters, allows, denies, bursts, ops) = super::ratestat::stats();
+    out.push_str(&format!("=== Rate Limiter Stats ===\n"));
+    out.push_str(&format!("Limiters: {}  Allows: {}  Denies: {}  Bursts: {}  Ops: {}\n\n",
+        limiters, allows, denies, bursts, ops));
+    out.push_str("Per-limiter:\n");
+    for l in super::ratestat::per_limiter() {
+        let deny_pct = if l.allows + l.denies > 0 { l.denies * 10000 / (l.allows + l.denies) } else { 0 };
+        out.push_str(&format!("  {:<15} rate={}/s  burst={}  tokens={}  allow={}  deny={}  ({}.{}%)  bursts={}\n",
+            l.name, l.rate_per_sec, l.burst_size, l.current_tokens,
+            l.allows, l.denies, deny_pct / 100, deny_pct % 100, l.burst_events));
+    }
+    out.into_bytes()
+}
+
+fn gen_iomem() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (regs, reads, writes, ops) = super::iomem::stats();
+    out.push_str(&format!("=== I/O Memory Stats ===\n"));
+    out.push_str(&format!("Regions: {}  Reads: {}  Writes: {}  Ops: {}\n\n", regs, reads, writes, ops));
+    out.push_str("Regions:\n");
+    for r in super::iomem::regions() {
+        let cache = if r.cacheable { "C" } else { "UC" };
+        let pf = if r.prefetchable { "+PF" } else { "" };
+        out.push_str(&format!("  {:<12} 0x{:016x}-0x{:016x} ({} B)  reads={}  writes={}  [{}{}]\n",
+            r.name, r.base, r.base + r.size - 1, r.size, r.reads, r.writes, cache, pf));
+    }
+    out.into_bytes()
+}
+
+fn gen_vmzone() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (zones, allocs, frees, reclaims, ops) = super::vmzone::stats();
+    out.push_str(&format!("=== VM Zone Stats ===\n"));
+    out.push_str(&format!("Zones: {}  Allocs: {}  Frees: {}  Reclaims: {}  Ops: {}\n\n",
+        zones, allocs, frees, reclaims, ops));
+    out.push_str("Per-zone:\n");
+    for z in super::vmzone::per_zone() {
+        let pct = if z.total_pages > 0 { z.free_pages * 100 / z.total_pages } else { 0 };
+        out.push_str(&format!("  {:<10} [{}]  total={}  free={}({}%)  active={}  inactive={}  wmark: {}/{}/{}  alloc={}  free={}  reclaim={}\n",
+            z.name, z.zone_type.label(), z.total_pages, z.free_pages, pct,
+            z.active_pages, z.inactive_pages, z.wmark_min, z.wmark_low, z.wmark_high,
+            z.allocs, z.frees, z.reclaim_count));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10002,6 +10079,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "taskio" => Ok(gen_taskio()),
         "ttystat" => Ok(gen_ttystat()),
         "swapact" => Ok(gen_swapact()),
+        "schedwait" => Ok(gen_schedwait()),
+        "ratestat" => Ok(gen_ratestat()),
+        "iomem" => Ok(gen_iomem()),
+        "vmzone" => Ok(gen_vmzone()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

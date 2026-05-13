@@ -2245,12 +2245,12 @@ pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
                 return -1;
             }
 
-            // For SHUT_RDWR, also mark the fd as disconnected so
-            // subsequent send/recv return ENOTCONN at the POSIX layer.
-            if how == SHUT_RDWR {
-                let _ = fdtable::install_fd(fd, HandleKind::TcpStream, 0);
-            }
-
+            // Do NOT zero the handle here.  The kernel connection still
+            // needs to complete the FIN exchange and be cleaned up by
+            // close().  After shutdown, the kernel enforces:
+            // - SHUT_RD: recv returns 0 (EOF, via local_read_closed)
+            // - SHUT_WR: send returns EPIPE (via local_write_closed)
+            // - SHUT_RDWR: both of the above
             0
         }
         HandleKind::UdpSocket => {

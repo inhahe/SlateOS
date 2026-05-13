@@ -2895,10 +2895,20 @@ pub fn local_port(handle: usize) -> Option<u16> {
 }
 
 /// Check if a connection's remote end has closed.
+/// Check if reading from this connection should return EOF (0 bytes).
+///
+/// Returns true when:
+/// - The remote end sent FIN (`remote_closed`)
+/// - The local read side was shut down (`local_read_closed`)
+/// - The connection is in CloseWait (remote FIN received)
+/// - The handle doesn't exist or is inactive
+///
+/// This is used by `sys_tcp_recv` to distinguish "no data yet, wait"
+/// (WouldBlock) from "connection is done, return EOF" (0).
 pub fn is_remote_closed(handle: usize) -> bool {
     let conns = CONNECTIONS.lock();
     conns.get(handle)
-        .map(|c| c.remote_closed || c.state == TcpState::CloseWait)
+        .map(|c| c.remote_closed || c.local_read_closed || c.state == TcpState::CloseWait)
         .unwrap_or(true)
 }
 

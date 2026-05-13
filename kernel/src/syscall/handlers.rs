@@ -6427,6 +6427,40 @@ pub fn sys_dns_reverse_resolve(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_NET_STAT` — query network interface statistics.
+///
+/// `arg0`: pointer to 48-byte output buffer.
+///
+/// Returns 0 on success.
+pub fn sys_net_stat(args: &SyscallArgs) -> SyscallResult {
+    let out_ptr = args.arg0 as *mut u8;
+
+    if out_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Output: 6 × u64 = 48 bytes.
+    const STAT_SIZE: usize = 48;
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, STAT_SIZE) {
+        return SyscallResult::err(e);
+    }
+
+    let stats = crate::net::interface::stats();
+
+    // SAFETY: out_ptr validated for STAT_SIZE bytes above.
+    unsafe {
+        let buf = core::slice::from_raw_parts_mut(out_ptr, STAT_SIZE);
+        buf[0..8].copy_from_slice(&stats.tx_bytes.to_le_bytes());
+        buf[8..16].copy_from_slice(&stats.tx_packets.to_le_bytes());
+        buf[16..24].copy_from_slice(&stats.tx_errors.to_le_bytes());
+        buf[24..32].copy_from_slice(&stats.rx_bytes.to_le_bytes());
+        buf[32..40].copy_from_slice(&stats.rx_packets.to_le_bytes());
+        buf[40..48].copy_from_slice(&stats.rx_drops.to_le_bytes());
+    }
+
+    SyscallResult::ok(0)
+}
+
 /// `SYS_ICMP_PING` — send an ICMP Echo Request.
 ///
 /// `arg0`: IPv4 address (network byte order u32).

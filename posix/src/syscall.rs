@@ -102,6 +102,9 @@ pub const SYS_UDP_MCAST_LEAVE: u64 = 815;
 
 pub const SYS_DNS_RESOLVE: u64 = 820;
 pub const SYS_DNS_REVERSE_RESOLVE: u64 = 821;
+pub const SYS_NET_STAT: u64 = 825;
+pub const SYS_ICMP_PING: u64 = 830;
+pub const SYS_ICMP_PING_WAIT: u64 = 831;
 
 // ---------------------------------------------------------------------------
 // Inline syscall wrappers

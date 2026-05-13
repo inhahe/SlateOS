@@ -2049,6 +2049,21 @@ pub const SYS_DNS_RESOLVE: u64 = 820;
 /// (the hostname length), or negative error on failure.
 pub const SYS_DNS_REVERSE_RESOLVE: u64 = 821;
 
+/// Query network interface statistics.
+///
+/// `arg0`: pointer to output buffer (48 bytes for `InterfaceStats`).
+///
+/// Writes 6 × u64 values (little-endian) into the buffer:
+///   [0..8]   tx_bytes
+///   [8..16]  tx_packets
+///   [16..24] tx_errors
+///   [24..32] rx_bytes
+///   [32..40] rx_packets
+///   [40..48] rx_drops
+///
+/// Returns: 0 on success, negative error on failure.
+pub const SYS_NET_STAT: u64 = 825;
+
 /// Send an ICMP Echo Request (ping) to an IPv4 address.
 ///
 /// `arg0`: IPv4 address as a 32-bit integer in **network byte order**.

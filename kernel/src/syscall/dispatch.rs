@@ -86,6 +86,7 @@ use super::number::{
     SYS_UDP_BIND, SYS_UDP_CLOSE, SYS_UDP_RECV, SYS_UDP_SEND,
     SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE,
     SYS_DNS_RESOLVE, SYS_DNS_REVERSE_RESOLVE,
+    SYS_NET_STAT,
     SYS_ICMP_PING, SYS_ICMP_PING_WAIT,
     SYS_YIELD,
 };
@@ -422,6 +423,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_UDP_MCAST_LEAVE as usize] = Some(handlers::sys_udp_mcast_leave);
     handlers[SYS_DNS_RESOLVE as usize] = Some(handlers::sys_dns_resolve);
     handlers[SYS_DNS_REVERSE_RESOLVE as usize] = Some(handlers::sys_dns_reverse_resolve);
+    handlers[SYS_NET_STAT as usize] = Some(handlers::sys_net_stat);
     handlers[SYS_ICMP_PING as usize] = Some(handlers::sys_icmp_ping);
     handlers[SYS_ICMP_PING_WAIT as usize] = Some(handlers::sys_icmp_ping_wait);
 

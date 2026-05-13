@@ -85,6 +85,7 @@ mod hrtimer;
 mod hypervisor;
 mod idt;
 mod idle;
+mod initproc;
 mod iommu;
 mod iommu_remap;
 mod invariant;

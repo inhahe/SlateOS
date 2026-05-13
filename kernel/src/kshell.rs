@@ -3526,6 +3526,7 @@ const COMMANDS: &[&str] = &[
     "ktimer", "ktrace", "lockdep", "lz4", "lz4cat", "rng", "supervisor", "sv", "timers", "trace", "unlz4", "xattr", "xxd", "zip", "zstd", "zstdcat",
     "mousedev", "usbdev", "nslookup", "fw",
     "reslimit", "rlimit",
+    "initproc",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4706,6 +4707,7 @@ fn dispatch(line: &str) {
         "svcstart" | "svcs" => cmd_svcstart(args),
         "drvmon" => cmd_drvmon(args),
         "reslimit" | "rlimit" => cmd_reslimit(args),
+        "initproc" | "init" => cmd_initproc(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -33506,6 +33508,109 @@ fn cmd_reslimit(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'reslimit help'.", sub);
+        }
+    }
+}
+
+/// `initproc` / `init` — PID 1 init process management.
+fn cmd_initproc(args: &str) {
+    use crate::initproc;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", initproc::procfs_content());
+        }
+        "state" => {
+            shell_println!("System state: {}", initproc::system_state().label());
+        }
+        "boot" => {
+            let stages = initproc::boot_stages();
+            if stages.is_empty() {
+                shell_println!("No boot stages recorded (run 'initproc start' first)");
+            } else {
+                shell_println!("{:<15} {:>10}  {}", "Stage", "Duration", "Status");
+                for (name, duration_ns, success) in &stages {
+                    let us = duration_ns / 1000;
+                    let status = if *success { "OK" } else { "FAILED" };
+                    shell_println!("{:<15} {:>8} µs  {}", name, us, status);
+                }
+                shell_println!("\nTotal boot time: {:.2} ms",
+                    initproc::boot_time_ns() as f64 / 1_000_000.0);
+            }
+        }
+        "orphans" => {
+            shell_println!("Pending orphans: {}", initproc::orphan_count());
+        }
+        "critical" => {
+            if let Some(action) = parts.get(1) {
+                match *action {
+                    "add" => {
+                        if let Some(name) = parts.get(2) {
+                            initproc::mark_critical(name);
+                            shell_println!("Marked '{}' as critical", name);
+                        } else {
+                            shell_println!("Usage: initproc critical add <service-name>");
+                        }
+                    }
+                    "remove" => {
+                        if let Some(name) = parts.get(2) {
+                            initproc::unmark_critical(name);
+                            shell_println!("Unmarked '{}' as critical", name);
+                        } else {
+                            shell_println!("Usage: initproc critical remove <service-name>");
+                        }
+                    }
+                    _ => shell_println!("Usage: initproc critical <add|remove> <name>"),
+                }
+            } else {
+                shell_println!("Usage: initproc critical <add|remove> <name>");
+            }
+        }
+        "start" => {
+            match initproc::start() {
+                Ok(()) => shell_println!("Init process started, system running"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "shutdown" => {
+            let reason = match parts.get(1).copied() {
+                Some("reboot") => initproc::ShutdownReason::Reboot,
+                Some("power") => initproc::ShutdownReason::PowerButton,
+                _ => initproc::ShutdownReason::UserRequest,
+            };
+            match initproc::shutdown(reason) {
+                Ok(()) => shell_println!("Shutdown complete"),
+                Err(e) => shell_println!("Error: {:?}", e),
+            }
+        }
+        "tick" => {
+            initproc::tick();
+            shell_println!("Init tick executed");
+        }
+        "test" => {
+            let ok = initproc::self_test();
+            if ok {
+                shell_println!("Init process self-test: PASSED");
+            } else {
+                shell_println!("Init process self-test: FAILED");
+            }
+        }
+        "help" => {
+            shell_println!("initproc — PID 1 init process (system orchestrator)");
+            shell_println!("  show                  Full status overview");
+            shell_println!("  state                 Current system state");
+            shell_println!("  boot                  Boot stage timing");
+            shell_println!("  orphans               Pending orphan count");
+            shell_println!("  critical add <name>   Mark service as critical");
+            shell_println!("  critical remove <name> Unmark critical service");
+            shell_println!("  start                 Run boot sequence");
+            shell_println!("  shutdown [reboot]     Initiate shutdown/reboot");
+            shell_println!("  tick                  Run one main loop iteration");
+            shell_println!("  test                  Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'initproc help'.", sub);
         }
     }
 }
@@ -63952,7 +64057,7 @@ fn cmd_type(args: &str) {
 fn is_builtin(name: &str) -> bool {
     matches!(name,
         "help" | "?" | "cd" | "meminfo" | "mem" | "ps" | "tasks" | "clear" | "cls"
-        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "reslimit" | "rlimit" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
+        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "reslimit" | "rlimit" | "initproc" | "init" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"

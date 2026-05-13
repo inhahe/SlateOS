@@ -618,7 +618,7 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
 - [x] Dependency-based parallel service startup _(svcstart.rs: topological sort, start levels)_
 - [x] Socket activation _(sockact.rs: socket→service mapping, trigger/claim/release, idle-stop)_
 - [x] Automatic crash restart with exponential backoff _(svcstart.rs: 1s→60s cap, max 5 retries)_
-- [ ] Resource limits per service (cgroup-equivalent)
+- [x] Resource limits per service (cgroup-equivalent) _(reslimit.rs: hierarchical groups, CPU/memory/IO/process limits, soft/hard enforcement, usage tracking)_
 - [x] JSON-lines structured logging (text-based, NOT binary) _(eventlog.rs + logpersist.rs)_
   - [x] Event logging service (system-wide event collection daemon) _(eventlog.rs: 4096-entry ring buffer)_
     - [x] Hierarchical event namespace taxonomy (mirrors hook namespaces from Phase 6.5):
@@ -651,7 +651,7 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
 - [x] Startup app list (separate from service manager, simple sequential list) _(svcstart.rs)_
   - [x] Disk-idle heuristic for "app is loaded, start next one" (2-3 sec timeout) _(configurable timeout)_
   - [x] Option to wait until previous app signals ready, or load immediately
-- [ ] Low-priority I/O for background service/library loading (don't obstruct user)
+- [x] Low-priority I/O for background service/library loading (don't obstruct user) _(reslimit.rs: IoLimits::low_priority flag + weight-based I/O scheduling)_
 - [x] On-demand service loading with priority insertion into schedule _(sockact.rs trigger)_
 - [x] Only two ways to load programs on startup: service manager + startup app list
 

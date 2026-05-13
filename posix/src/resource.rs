@@ -346,3 +346,479 @@ pub extern "C" fn prlimit64(
 ) -> i32 {
     prlimit(pid, resource, new_limit, old_limit)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: reset RLIMITS to the compile-time defaults.
+    ///
+    /// Must be called at the start of any test that reads or writes
+    /// RLIMITS or NICE_VALUE, because tests share the same process
+    /// and the statics are mutable globals.  Run with
+    /// `--test-threads=1` to avoid races between tests.
+    #[allow(clippy::indexing_slicing)]
+    fn reset_global_state() {
+        unsafe {
+            // Reset NICE_VALUE.
+            core::ptr::addr_of_mut!(NICE_VALUE).write(0);
+
+            // Reset RLIMITS to the compile-time defaults.
+            let limits = core::ptr::addr_of_mut!(RLIMITS).as_mut().unwrap();
+            // First fill everything with RLIM_INFINITY.
+            for slot in limits.iter_mut() {
+                *slot = Rlimit {
+                    rlim_cur: RLIM_INFINITY,
+                    rlim_max: RLIM_INFINITY,
+                };
+            }
+            // Stack: 8 MiB soft, unlimited hard.
+            limits[RLIMIT_STACK as usize] = Rlimit {
+                rlim_cur: 8 * 1024 * 1024,
+                rlim_max: RLIM_INFINITY,
+            };
+            // Open files: 256/256.
+            limits[RLIMIT_NOFILE as usize] = Rlimit {
+                rlim_cur: 256,
+                rlim_max: 256,
+            };
+            // Core: 0/0.
+            limits[RLIMIT_CORE as usize] = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. RLIMIT_* constants match Linux values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rlimit_constants_match_linux() {
+        assert_eq!(RLIMIT_CPU, 0);
+        assert_eq!(RLIMIT_FSIZE, 1);
+        assert_eq!(RLIMIT_DATA, 2);
+        assert_eq!(RLIMIT_STACK, 3);
+        assert_eq!(RLIMIT_CORE, 4);
+        assert_eq!(RLIMIT_RSS, 5);
+        assert_eq!(RLIMIT_NPROC, 6);
+        assert_eq!(RLIMIT_NOFILE, 7);
+        assert_eq!(RLIMIT_MEMLOCK, 8);
+        assert_eq!(RLIMIT_AS, 9);
+        assert_eq!(RLIMIT_MSGQUEUE, 12);
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. RLIM_INFINITY equals u64::MAX
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rlim_infinity_is_u64_max() {
+        assert_eq!(RLIM_INFINITY, u64::MAX);
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. PRIO_* constants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prio_constants() {
+        assert_eq!(PRIO_PROCESS, 0);
+        assert_eq!(PRIO_PGRP, 1);
+        assert_eq!(PRIO_USER, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. RUSAGE_* constants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rusage_constants() {
+        assert_eq!(RUSAGE_SELF, 0);
+        assert_eq!(RUSAGE_CHILDREN, -1);
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. getrlimit: valid resource, null pointer, invalid resource
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getrlimit_valid_resource() {
+        reset_global_state();
+        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let ret = getrlimit(RLIMIT_STACK, &mut rl);
+        assert_eq!(ret, 0);
+        assert_eq!(rl.rlim_cur, 8 * 1024 * 1024);
+        assert_eq!(rl.rlim_max, RLIM_INFINITY);
+    }
+
+    #[test]
+    fn getrlimit_null_pointer() {
+        reset_global_state();
+        let ret = getrlimit(RLIMIT_STACK, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn getrlimit_invalid_resource() {
+        reset_global_state();
+        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let ret = getrlimit(-1, &mut rl);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let ret = getrlimit(9999, &mut rl);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. Default limits
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_limits_stack() {
+        reset_global_state();
+        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_STACK, &mut rl), 0);
+        assert_eq!(rl.rlim_cur, 8 * 1024 * 1024, "RLIMIT_STACK soft should be 8 MiB");
+        assert_eq!(rl.rlim_max, RLIM_INFINITY, "RLIMIT_STACK hard should be RLIM_INFINITY");
+    }
+
+    #[test]
+    fn default_limits_nofile() {
+        reset_global_state();
+        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_NOFILE, &mut rl), 0);
+        assert_eq!(rl.rlim_cur, 256);
+        assert_eq!(rl.rlim_max, 256);
+    }
+
+    #[test]
+    fn default_limits_core() {
+        reset_global_state();
+        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_CORE, &mut rl), 0);
+        assert_eq!(rl.rlim_cur, 0);
+        assert_eq!(rl.rlim_max, 0);
+    }
+
+    #[test]
+    fn default_limits_others_are_infinity() {
+        reset_global_state();
+        // Resources that default to RLIM_INFINITY for both soft and hard.
+        let inf_resources = [
+            RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_RSS,
+            RLIMIT_NPROC, RLIMIT_MEMLOCK, RLIMIT_AS, RLIMIT_MSGQUEUE,
+        ];
+        for &res in &inf_resources {
+            let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            assert_eq!(getrlimit(res, &mut rl), 0, "getrlimit failed for resource {res}");
+            assert_eq!(rl.rlim_cur, RLIM_INFINITY, "resource {res} soft should be RLIM_INFINITY");
+            assert_eq!(rl.rlim_max, RLIM_INFINITY, "resource {res} hard should be RLIM_INFINITY");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. setrlimit: set-and-verify, soft > hard, null pointer, invalid
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn setrlimit_set_and_verify() {
+        reset_global_state();
+        let new = Rlimit { rlim_cur: 1024, rlim_max: 4096 };
+        let ret = setrlimit(RLIMIT_CPU, &new);
+        assert_eq!(ret, 0);
+
+        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_CPU, &mut readback), 0);
+        assert_eq!(readback.rlim_cur, 1024);
+        assert_eq!(readback.rlim_max, 4096);
+    }
+
+    #[test]
+    fn setrlimit_soft_exceeds_hard_rejected() {
+        reset_global_state();
+        let bad = Rlimit { rlim_cur: 5000, rlim_max: 1000 };
+        let ret = setrlimit(RLIMIT_CPU, &bad);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn setrlimit_null_pointer() {
+        reset_global_state();
+        let ret = setrlimit(RLIMIT_CPU, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn setrlimit_invalid_resource() {
+        reset_global_state();
+        let new = Rlimit { rlim_cur: 100, rlim_max: 200 };
+        let ret = setrlimit(-1, &new);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let ret = setrlimit(9999, &new);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // 8. getrlimit + setrlimit round trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getrlimit_setrlimit_round_trip() {
+        reset_global_state();
+        let new = Rlimit { rlim_cur: 42, rlim_max: 1000 };
+        assert_eq!(setrlimit(RLIMIT_DATA, &new), 0);
+
+        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_DATA, &mut readback), 0);
+        assert_eq!(readback.rlim_cur, 42);
+        assert_eq!(readback.rlim_max, 1000);
+
+        // Update again with different values.
+        let new2 = Rlimit { rlim_cur: 500, rlim_max: 500 };
+        assert_eq!(setrlimit(RLIMIT_DATA, &new2), 0);
+
+        assert_eq!(getrlimit(RLIMIT_DATA, &mut readback), 0);
+        assert_eq!(readback.rlim_cur, 500);
+        assert_eq!(readback.rlim_max, 500);
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. nice: increments, clamping, return value
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nice_increments_stored_value() {
+        reset_global_state();
+        let val = nice(5);
+        assert_eq!(val, 5);
+        let val = nice(3);
+        assert_eq!(val, 8);
+    }
+
+    #[test]
+    fn nice_clamps_to_upper_bound() {
+        reset_global_state();
+        // Start at 0, add 100 => clamped to 19.
+        let val = nice(100);
+        assert_eq!(val, 19);
+    }
+
+    #[test]
+    fn nice_clamps_to_lower_bound() {
+        reset_global_state();
+        // Start at 0, subtract 100 => clamped to -20.
+        let val = nice(-100);
+        assert_eq!(val, -20);
+    }
+
+    #[test]
+    fn nice_returns_new_value() {
+        reset_global_state();
+        assert_eq!(nice(10), 10);
+        assert_eq!(nice(-3), 7);
+        assert_eq!(nice(0), 7);
+    }
+
+    // -----------------------------------------------------------------------
+    // 10. getpriority: returns stored value, invalid which
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getpriority_returns_stored_nice() {
+        reset_global_state();
+        // Set nice to 5 first.
+        nice(5);
+        let val = getpriority(PRIO_PROCESS, 0);
+        assert_eq!(val, 5);
+        assert_eq!(errno::get_errno(), 0, "errno should be cleared on success");
+    }
+
+    #[test]
+    fn getpriority_invalid_which() {
+        reset_global_state();
+        let val = getpriority(999, 0);
+        assert_eq!(val, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn getpriority_all_valid_which_values() {
+        reset_global_state();
+        nice(3);
+        for &which in &[PRIO_PROCESS, PRIO_PGRP, PRIO_USER] {
+            let val = getpriority(which, 0);
+            assert_eq!(val, 3, "getpriority with which={which} should return nice value");
+            assert_eq!(errno::get_errno(), 0);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // 11. setpriority: stores value, clamps, invalid which
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn setpriority_stores_value() {
+        reset_global_state();
+        assert_eq!(setpriority(PRIO_PROCESS, 0, 10), 0);
+        assert_eq!(getpriority(PRIO_PROCESS, 0), 10);
+    }
+
+    #[test]
+    fn setpriority_clamps_to_range() {
+        reset_global_state();
+        assert_eq!(setpriority(PRIO_PROCESS, 0, 50), 0);
+        assert_eq!(getpriority(PRIO_PROCESS, 0), 19);
+
+        assert_eq!(setpriority(PRIO_PROCESS, 0, -50), 0);
+        assert_eq!(getpriority(PRIO_PROCESS, 0), -20);
+    }
+
+    #[test]
+    fn setpriority_invalid_which() {
+        reset_global_state();
+        let ret = setpriority(999, 0, 5);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // 12. getrusage: RUSAGE_SELF zeroed, null, invalid who
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getrusage_self_returns_zeroed() {
+        // Pre-fill with garbage to verify it gets zeroed.
+        let mut usage = unsafe { core::mem::MaybeUninit::<Rusage>::zeroed().assume_init() };
+        usage.ru_maxrss = 999;
+        usage.ru_minflt = 42;
+
+        let ret = getrusage(RUSAGE_SELF, &mut usage);
+        assert_eq!(ret, 0);
+        assert_eq!(usage.ru_utime.tv_sec, 0);
+        assert_eq!(usage.ru_utime.tv_usec, 0);
+        assert_eq!(usage.ru_stime.tv_sec, 0);
+        assert_eq!(usage.ru_stime.tv_usec, 0);
+        assert_eq!(usage.ru_maxrss, 0);
+        assert_eq!(usage.ru_minflt, 0);
+        assert_eq!(usage.ru_majflt, 0);
+        assert_eq!(usage.ru_nswap, 0);
+        assert_eq!(usage.ru_inblock, 0);
+        assert_eq!(usage.ru_oublock, 0);
+        assert_eq!(usage.ru_msgsnd, 0);
+        assert_eq!(usage.ru_msgrcv, 0);
+        assert_eq!(usage.ru_nsignals, 0);
+        assert_eq!(usage.ru_nvcsw, 0);
+        assert_eq!(usage.ru_nivcsw, 0);
+    }
+
+    #[test]
+    fn getrusage_children_returns_zeroed() {
+        let mut usage = unsafe { core::mem::MaybeUninit::<Rusage>::zeroed().assume_init() };
+        let ret = getrusage(RUSAGE_CHILDREN, &mut usage);
+        assert_eq!(ret, 0);
+        assert_eq!(usage.ru_maxrss, 0);
+    }
+
+    #[test]
+    fn getrusage_null_pointer() {
+        let ret = getrusage(RUSAGE_SELF, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn getrusage_invalid_who() {
+        let mut usage = unsafe { core::mem::MaybeUninit::<Rusage>::zeroed().assume_init() };
+        let ret = getrusage(99, &mut usage);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // 13. prlimit: get-only, set-only, get-and-set
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prlimit_get_only() {
+        reset_global_state();
+        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let ret = prlimit(0, RLIMIT_STACK, core::ptr::null(), &mut old);
+        assert_eq!(ret, 0);
+        assert_eq!(old.rlim_cur, 8 * 1024 * 1024);
+        assert_eq!(old.rlim_max, RLIM_INFINITY);
+    }
+
+    #[test]
+    fn prlimit_set_only() {
+        reset_global_state();
+        let new = Rlimit { rlim_cur: 100, rlim_max: 200 };
+        let ret = prlimit(0, RLIMIT_CPU, &new, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+
+        // Verify via getrlimit.
+        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_CPU, &mut readback), 0);
+        assert_eq!(readback.rlim_cur, 100);
+        assert_eq!(readback.rlim_max, 200);
+    }
+
+    #[test]
+    fn prlimit_get_and_set() {
+        reset_global_state();
+        // Set an initial value.
+        let init = Rlimit { rlim_cur: 10, rlim_max: 20 };
+        assert_eq!(setrlimit(RLIMIT_FSIZE, &init), 0);
+
+        // prlimit: get old, set new.
+        let new = Rlimit { rlim_cur: 30, rlim_max: 40 };
+        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let ret = prlimit(0, RLIMIT_FSIZE, &new, &mut old);
+        assert_eq!(ret, 0);
+
+        // Old should be what we set initially.
+        assert_eq!(old.rlim_cur, 10);
+        assert_eq!(old.rlim_max, 20);
+
+        // Current should be the new values.
+        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_FSIZE, &mut readback), 0);
+        assert_eq!(readback.rlim_cur, 30);
+        assert_eq!(readback.rlim_max, 40);
+    }
+
+    // -----------------------------------------------------------------------
+    // 14. Rlimit struct layout: 16 bytes (two u64s)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rlimit_struct_size() {
+        assert_eq!(
+            core::mem::size_of::<Rlimit>(),
+            16,
+            "Rlimit must be exactly 16 bytes (two u64 fields)"
+        );
+    }
+
+    #[test]
+    fn rlimit_struct_alignment() {
+        assert_eq!(
+            core::mem::align_of::<Rlimit>(),
+            core::mem::align_of::<u64>(),
+            "Rlimit alignment must match u64"
+        );
+    }
+}

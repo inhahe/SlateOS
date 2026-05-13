@@ -112,3 +112,172 @@ pub const S_IXOTH: u32 = 0o001;
 pub const DEFAULT_FILE_MODE: u32 = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 /// Default directory permissions (owner rwx, group/other rx).
 pub const DEFAULT_DIR_MODE: u32 = S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- open() flags match Linux x86_64 --
+
+    #[test]
+    fn test_open_flags() {
+        assert_eq!(O_RDONLY, 0);
+        assert_eq!(O_WRONLY, 1);
+        assert_eq!(O_RDWR, 2);
+        assert_eq!(O_ACCMODE, 3);
+        assert_eq!(O_CREAT, 64);       // 0o100
+        assert_eq!(O_EXCL, 128);       // 0o200
+        assert_eq!(O_NOCTTY, 256);     // 0o400
+        assert_eq!(O_TRUNC, 512);      // 0o1000
+        assert_eq!(O_APPEND, 1024);    // 0o2000
+        assert_eq!(O_NONBLOCK, 2048);  // 0o4000
+        assert_eq!(O_CLOEXEC, 524288); // 0o2_000_000
+    }
+
+    #[test]
+    fn test_o_sync_value() {
+        // O_SYNC on Linux x86_64 = 0o4_010_000 = 0x101000 = 1052672
+        assert_eq!(O_SYNC, 0o4_010_000);
+        assert_eq!(O_SYNC, 1_052_672);
+    }
+
+    #[test]
+    fn test_o_directory_nofollow() {
+        assert_eq!(O_DIRECTORY, 0o200_000);
+        assert_eq!(O_NOFOLLOW, 0o400_000);
+        assert_eq!(O_DIRECTORY, 65536);
+        assert_eq!(O_NOFOLLOW, 131072);
+    }
+
+    #[test]
+    fn test_accmode_mask() {
+        // O_ACCMODE should extract access mode from flags
+        assert_eq!(O_RDONLY & O_ACCMODE, O_RDONLY);
+        assert_eq!(O_WRONLY & O_ACCMODE, O_WRONLY);
+        assert_eq!(O_RDWR & O_ACCMODE, O_RDWR);
+        // Flags with access mode should be extractable
+        assert_eq!((O_RDWR | O_CREAT | O_TRUNC) & O_ACCMODE, O_RDWR);
+    }
+
+    // -- lseek whence --
+
+    #[test]
+    fn test_seek_constants() {
+        assert_eq!(SEEK_SET, 0);
+        assert_eq!(SEEK_CUR, 1);
+        assert_eq!(SEEK_END, 2);
+    }
+
+    // -- access() mode flags --
+
+    #[test]
+    fn test_access_flags() {
+        assert_eq!(F_OK, 0);
+        assert_eq!(X_OK, 1);
+        assert_eq!(W_OK, 2);
+        assert_eq!(R_OK, 4);
+    }
+
+    #[test]
+    fn test_access_flags_combinable() {
+        // R_OK | W_OK | X_OK should be 7 (read+write+execute)
+        assert_eq!(R_OK | W_OK | X_OK, 7);
+    }
+
+    // -- File type mode bits (S_IF*) match Linux --
+
+    #[test]
+    fn test_file_type_bits() {
+        assert_eq!(S_IFMT, 0o170_000);
+        assert_eq!(S_IFDIR, 0o040_000);
+        assert_eq!(S_IFCHR, 0o020_000);
+        assert_eq!(S_IFBLK, 0o060_000);
+        assert_eq!(S_IFREG, 0o100_000);
+        assert_eq!(S_IFIFO, 0o010_000);
+        assert_eq!(S_IFLNK, 0o120_000);
+        assert_eq!(S_IFSOCK, 0o140_000);
+    }
+
+    #[test]
+    fn test_file_types_extracted_by_mask() {
+        // S_IFMT should correctly extract file type
+        assert_eq!(S_IFREG & S_IFMT, S_IFREG);
+        assert_eq!(S_IFDIR & S_IFMT, S_IFDIR);
+        assert_eq!(S_IFLNK & S_IFMT, S_IFLNK);
+        // Permissions should be masked out
+        assert_eq!((S_IFREG | 0o644) & S_IFMT, S_IFREG);
+    }
+
+    // -- Permission bits --
+
+    #[test]
+    fn test_permission_bits() {
+        assert_eq!(S_IRUSR, 0o400);
+        assert_eq!(S_IWUSR, 0o200);
+        assert_eq!(S_IXUSR, 0o100);
+        assert_eq!(S_IRGRP, 0o040);
+        assert_eq!(S_IWGRP, 0o020);
+        assert_eq!(S_IXGRP, 0o010);
+        assert_eq!(S_IROTH, 0o004);
+        assert_eq!(S_IWOTH, 0o002);
+        assert_eq!(S_IXOTH, 0o001);
+    }
+
+    // -- Special bits --
+
+    #[test]
+    fn test_special_bits() {
+        assert_eq!(S_ISUID, 0o4000);
+        assert_eq!(S_ISGID, 0o2000);
+        assert_eq!(S_ISVTX, 0o1000);
+    }
+
+    // -- Derived modes --
+
+    #[test]
+    fn test_default_file_mode() {
+        // 0644 = owner rw, group r, others r
+        assert_eq!(DEFAULT_FILE_MODE, 0o644);
+    }
+
+    #[test]
+    fn test_default_dir_mode() {
+        // 0755 = owner rwx, group rx, others rx
+        assert_eq!(DEFAULT_DIR_MODE, 0o755);
+    }
+
+    // -- No overlap between file types --
+
+    #[test]
+    fn test_file_types_distinct() {
+        let types = [S_IFREG, S_IFDIR, S_IFLNK, S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK];
+        for i in 0..types.len() {
+            for j in (i + 1)..types.len() {
+                assert_ne!(types[i], types[j], "file types must not overlap");
+            }
+        }
+    }
+
+    // -- Permission bits are disjoint --
+
+    #[test]
+    fn test_permission_bits_disjoint() {
+        let perms = [
+            S_IRUSR, S_IWUSR, S_IXUSR,
+            S_IRGRP, S_IWGRP, S_IXGRP,
+            S_IROTH, S_IWOTH, S_IXOTH,
+        ];
+        // All bits should be unique (no overlap)
+        let mut combined: u32 = 0;
+        for p in perms {
+            assert_eq!(combined & p, 0, "permission bit 0o{p:o} overlaps");
+            combined |= p;
+        }
+        // Full permission = 0o777
+        assert_eq!(combined, 0o777);
+    }
+}

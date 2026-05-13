@@ -269,3 +269,256 @@ pub extern "C" fn sem_unlink(_name: *const u8) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- sem_init --
+
+    #[test]
+    fn test_sem_init_zero() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(-1),
+        };
+        let ret = sem_init(&raw mut sem, 0, 0);
+        assert_eq!(ret, 0);
+        let mut val: i32 = -1;
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, 0);
+    }
+
+    #[test]
+    fn test_sem_init_positive() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        let ret = sem_init(&raw mut sem, 0, 5);
+        assert_eq!(ret, 0);
+        let mut val: i32 = 0;
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, 5);
+    }
+
+    #[test]
+    fn test_sem_init_max_valid() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        let ret = sem_init(&raw mut sem, 0, i32::MAX as u32);
+        assert_eq!(ret, 0);
+        let mut val: i32 = 0;
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, i32::MAX);
+    }
+
+    #[test]
+    fn test_sem_init_overflow_rejected() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        // i32::MAX + 1 = 2147483648 — should be rejected
+        let ret = sem_init(&raw mut sem, 0, (i32::MAX as u32).wrapping_add(1));
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sem_init_null() {
+        let ret = sem_init(core::ptr::null_mut(), 0, 1);
+        assert_eq!(ret, -1);
+    }
+
+    // -- sem_destroy --
+
+    #[test]
+    fn test_sem_destroy_succeeds() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(5),
+        };
+        assert_eq!(sem_destroy(&raw mut sem), 0);
+    }
+
+    // -- sem_post --
+
+    #[test]
+    fn test_sem_post_increments() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 0);
+
+        let ret = sem_post(&raw mut sem);
+        assert_eq!(ret, 0);
+
+        let mut val: i32 = 0;
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, 1);
+    }
+
+    #[test]
+    fn test_sem_post_multiple() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 0);
+
+        for _ in 0..10 {
+            sem_post(&raw mut sem);
+        }
+
+        let mut val: i32 = 0;
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, 10);
+    }
+
+    #[test]
+    fn test_sem_post_overflow_rejected() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(i32::MAX),
+        };
+        let ret = sem_post(&raw mut sem);
+        assert_eq!(ret, -1);
+        // Value should not have changed
+        let mut val: i32 = 0;
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, i32::MAX);
+    }
+
+    #[test]
+    fn test_sem_post_null() {
+        let ret = sem_post(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+    }
+
+    // -- sem_trywait --
+
+    #[test]
+    fn test_sem_trywait_decrements() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 3);
+
+        let ret = sem_trywait(&raw mut sem);
+        assert_eq!(ret, 0);
+
+        let mut val: i32 = 0;
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, 2);
+    }
+
+    #[test]
+    fn test_sem_trywait_fails_at_zero() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 0);
+
+        let ret = sem_trywait(&raw mut sem);
+        assert_eq!(ret, -1); // EAGAIN
+    }
+
+    #[test]
+    fn test_sem_trywait_null() {
+        let ret = sem_trywait(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sem_trywait_drain() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 3);
+
+        assert_eq!(sem_trywait(&raw mut sem), 0);
+        assert_eq!(sem_trywait(&raw mut sem), 0);
+        assert_eq!(sem_trywait(&raw mut sem), 0);
+        // Now zero — should fail
+        assert_eq!(sem_trywait(&raw mut sem), -1);
+    }
+
+    // -- sem_getvalue --
+
+    #[test]
+    fn test_sem_getvalue_basic() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 42);
+
+        let mut val: i32 = 0;
+        let ret = sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(ret, 0);
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn test_sem_getvalue_null_sem() {
+        let mut val: i32 = 0;
+        let ret = sem_getvalue(core::ptr::null_mut(), &raw mut val);
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sem_getvalue_null_sval() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(5),
+        };
+        let ret = sem_getvalue(&raw mut sem, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+    }
+
+    // -- post/trywait round trip --
+
+    #[test]
+    fn test_sem_post_trywait_round_trip() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 0);
+
+        // Can't trywait on empty
+        assert_eq!(sem_trywait(&raw mut sem), -1);
+
+        // Post once
+        assert_eq!(sem_post(&raw mut sem), 0);
+
+        // Now can trywait
+        assert_eq!(sem_trywait(&raw mut sem), 0);
+
+        // Empty again
+        assert_eq!(sem_trywait(&raw mut sem), -1);
+    }
+
+    // -- Named semaphore stubs --
+
+    #[test]
+    fn test_sem_open_returns_failed() {
+        let ret = sem_open(b"/mysem\0".as_ptr(), 0);
+        assert_eq!(ret, SEM_FAILED);
+        assert!(SEM_FAILED.is_null());
+    }
+
+    #[test]
+    fn test_sem_close_returns_error() {
+        assert_eq!(sem_close(core::ptr::null_mut()), -1);
+    }
+
+    #[test]
+    fn test_sem_unlink_returns_error() {
+        assert_eq!(sem_unlink(b"/mysem\0".as_ptr()), -1);
+    }
+
+    // -- SemT layout --
+
+    #[test]
+    fn test_sem_size() {
+        // AtomicI32 = 4 bytes
+        assert_eq!(core::mem::size_of::<SemT>(), 4);
+    }
+}

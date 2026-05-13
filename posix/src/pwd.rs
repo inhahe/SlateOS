@@ -468,3 +468,564 @@ fn matches_root(s: *const u8) -> bool {
         *s == b'r' && *s.add(1) == b'o' && *s.add(2) == b'o' && *s.add(3) == b't'
     }
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests (run with `cargo test -p posix -- --test-threads=1`)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::errno;
+
+    // Helper: reset global enumeration state between tests.
+    fn reset_state() {
+        unsafe {
+            core::ptr::addr_of_mut!(PW_POS).write(0);
+            core::ptr::addr_of_mut!(GR_POS).write(0);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // getpwnam
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getpwnam_root_found() {
+        reset_state();
+        let pw = unsafe { getpwnam(b"root\0".as_ptr()) };
+        assert!(!pw.is_null());
+        let pw = unsafe { &*pw };
+        assert_eq!(pw.pw_uid, 0);
+        assert_eq!(pw.pw_gid, 0);
+        // Verify the name is "root".
+        let name = unsafe { core::ffi::CStr::from_ptr(pw.pw_name.cast()) };
+        assert_eq!(name.to_bytes(), b"root");
+    }
+
+    #[test]
+    fn getpwnam_nonroot_returns_null() {
+        reset_state();
+        let pw = unsafe { getpwnam(b"nobody\0".as_ptr()) };
+        assert!(pw.is_null());
+    }
+
+    #[test]
+    fn getpwnam_null_name_returns_null() {
+        reset_state();
+        let pw = unsafe { getpwnam(core::ptr::null()) };
+        assert!(pw.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // getpwuid
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getpwuid_zero_returns_root() {
+        reset_state();
+        let pw = getpwuid(0);
+        assert!(!pw.is_null());
+        let pw = unsafe { &*pw };
+        assert_eq!(pw.pw_uid, 0);
+        assert_eq!(pw.pw_gid, 0);
+    }
+
+    #[test]
+    fn getpwuid_nonzero_returns_null() {
+        reset_state();
+        assert!(getpwuid(1).is_null());
+        assert!(getpwuid(1000).is_null());
+        assert!(getpwuid(u32::MAX).is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // getpwent / setpwent / endpwent enumeration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pwent_enumeration() {
+        reset_state();
+        setpwent();
+
+        // First call returns root.
+        let pw = getpwent();
+        assert!(!pw.is_null());
+        let pw = unsafe { &*pw };
+        assert_eq!(pw.pw_uid, 0);
+
+        // Second call returns null (only one entry).
+        assert!(getpwent().is_null());
+
+        // setpwent resets enumeration.
+        setpwent();
+        let pw2 = getpwent();
+        assert!(!pw2.is_null());
+        let pw2 = unsafe { &*pw2 };
+        assert_eq!(pw2.pw_uid, 0);
+
+        // endpwent also resets.
+        endpwent();
+        let pw3 = getpwent();
+        assert!(!pw3.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // getgrnam
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getgrnam_root_found() {
+        reset_state();
+        let gr = unsafe { getgrnam(b"root\0".as_ptr()) };
+        assert!(!gr.is_null());
+        let gr = unsafe { &*gr };
+        assert_eq!(gr.gr_gid, 0);
+        let name = unsafe { core::ffi::CStr::from_ptr(gr.gr_name.cast()) };
+        assert_eq!(name.to_bytes(), b"root");
+    }
+
+    #[test]
+    fn getgrnam_nonroot_returns_null() {
+        reset_state();
+        let gr = unsafe { getgrnam(b"wheel\0".as_ptr()) };
+        assert!(gr.is_null());
+    }
+
+    #[test]
+    fn getgrnam_null_name_returns_null() {
+        reset_state();
+        let gr = unsafe { getgrnam(core::ptr::null()) };
+        assert!(gr.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // getgrgid
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getgrgid_zero_returns_root() {
+        reset_state();
+        let gr = getgrgid(0);
+        assert!(!gr.is_null());
+        let gr = unsafe { &*gr };
+        assert_eq!(gr.gr_gid, 0);
+    }
+
+    #[test]
+    fn getgrgid_nonzero_returns_null() {
+        reset_state();
+        assert!(getgrgid(1).is_null());
+        assert!(getgrgid(100).is_null());
+        assert!(getgrgid(u32::MAX).is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // getgrent / setgrent / endgrent enumeration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn grent_enumeration() {
+        reset_state();
+        setgrent();
+
+        // First call returns root group.
+        let gr = getgrent();
+        assert!(!gr.is_null());
+        let gr = unsafe { &*gr };
+        assert_eq!(gr.gr_gid, 0);
+
+        // Second call returns null.
+        assert!(getgrent().is_null());
+
+        // setgrent resets.
+        setgrent();
+        let gr2 = getgrent();
+        assert!(!gr2.is_null());
+
+        // endgrent also resets.
+        endgrent();
+        let gr3 = getgrent();
+        assert!(!gr3.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // getpwnam_r
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getpwnam_r_root_found() {
+        reset_state();
+        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 128];
+        let mut result: *const Passwd = core::ptr::null();
+
+        let ret = unsafe {
+            getpwnam_r(
+                b"root\0".as_ptr(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+
+        assert_eq!(ret, 0);
+        assert!(!result.is_null());
+        assert_eq!(pwd.pw_uid, 0);
+        assert_eq!(pwd.pw_gid, 0);
+
+        // Verify strings were copied into buf.
+        let name = unsafe { core::ffi::CStr::from_ptr(pwd.pw_name.cast()) };
+        assert_eq!(name.to_bytes(), b"root");
+        let shell = unsafe { core::ffi::CStr::from_ptr(pwd.pw_shell.cast()) };
+        assert_eq!(shell.to_bytes(), b"/bin/sh");
+        let dir = unsafe { core::ffi::CStr::from_ptr(pwd.pw_dir.cast()) };
+        assert_eq!(dir.to_bytes(), b"/");
+        let gecos = unsafe { core::ffi::CStr::from_ptr(pwd.pw_gecos.cast()) };
+        assert_eq!(gecos.to_bytes(), b"root");
+    }
+
+    #[test]
+    fn getpwnam_r_nonroot_result_null() {
+        reset_state();
+        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 128];
+        let mut result: *const Passwd = core::ptr::null();
+
+        let ret = unsafe {
+            getpwnam_r(
+                b"nobody\0".as_ptr(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+
+        assert_eq!(ret, 0);
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn getpwnam_r_buffer_too_small() {
+        reset_state();
+        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 4]; // Way too small (need 22 bytes).
+        let mut result: *const Passwd = core::ptr::null();
+
+        let ret = unsafe {
+            getpwnam_r(
+                b"root\0".as_ptr(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+
+        assert_eq!(ret, errno::ERANGE);
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn getpwnam_r_null_args_einval() {
+        reset_state();
+        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 128];
+        let mut result: *const Passwd = core::ptr::null();
+
+        // Null result pointer.
+        let ret = unsafe {
+            getpwnam_r(
+                b"root\0".as_ptr(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ret, errno::EINVAL);
+
+        // Null pwd pointer.
+        let ret = unsafe {
+            getpwnam_r(
+                b"root\0".as_ptr(),
+                core::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        assert_eq!(ret, errno::EINVAL);
+
+        // Null buf pointer.
+        let ret = unsafe {
+            getpwnam_r(
+                b"root\0".as_ptr(),
+                &mut pwd,
+                core::ptr::null_mut(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn getpwnam_r_null_name_not_found() {
+        reset_state();
+        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 128];
+        let mut result: *const Passwd = core::ptr::null();
+
+        let ret = unsafe {
+            getpwnam_r(
+                core::ptr::null(),
+                &mut pwd,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+
+        // Null name is not an error, just "not found".
+        assert_eq!(ret, 0);
+        assert!(result.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // getpwuid_r
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getpwuid_r_zero_found() {
+        reset_state();
+        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 128];
+        let mut result: *const Passwd = core::ptr::null();
+
+        let ret = unsafe {
+            getpwuid_r(0, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result)
+        };
+
+        assert_eq!(ret, 0);
+        assert!(!result.is_null());
+        assert_eq!(pwd.pw_uid, 0);
+        assert_eq!(pwd.pw_gid, 0);
+    }
+
+    #[test]
+    fn getpwuid_r_nonzero_result_null() {
+        reset_state();
+        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 128];
+        let mut result: *const Passwd = core::ptr::null();
+
+        let ret = unsafe {
+            getpwuid_r(999, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result)
+        };
+
+        assert_eq!(ret, 0);
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn getpwuid_r_buffer_too_small() {
+        reset_state();
+        let mut pwd: Passwd = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 2];
+        let mut result: *const Passwd = core::ptr::null();
+
+        let ret = unsafe {
+            getpwuid_r(0, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result)
+        };
+
+        assert_eq!(ret, errno::ERANGE);
+        assert!(result.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // getgrnam_r
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getgrnam_r_root_found() {
+        reset_state();
+        let mut grp: Group = unsafe { core::mem::zeroed() };
+        // Need 16 bytes (7 string bytes + 1 padding + 8 null pointer).
+        let mut buf = [0u8; 128];
+        let mut result: *const Group = core::ptr::null();
+
+        let ret = unsafe {
+            getgrnam_r(
+                b"root\0".as_ptr(),
+                &mut grp,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+
+        assert_eq!(ret, 0);
+        assert!(!result.is_null());
+        assert_eq!(grp.gr_gid, 0);
+        let name = unsafe { core::ffi::CStr::from_ptr(grp.gr_name.cast()) };
+        assert_eq!(name.to_bytes(), b"root");
+    }
+
+    #[test]
+    fn getgrnam_r_buffer_too_small() {
+        reset_state();
+        let mut grp: Group = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 4]; // Need 16 bytes.
+        let mut result: *const Group = core::ptr::null();
+
+        let ret = unsafe {
+            getgrnam_r(
+                b"root\0".as_ptr(),
+                &mut grp,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+
+        assert_eq!(ret, errno::ERANGE);
+        assert!(result.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // getgrgid_r
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getgrgid_r_zero_found() {
+        reset_state();
+        let mut grp: Group = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 128];
+        let mut result: *const Group = core::ptr::null();
+
+        let ret = unsafe {
+            getgrgid_r(0, &mut grp, buf.as_mut_ptr(), buf.len(), &mut result)
+        };
+
+        assert_eq!(ret, 0);
+        assert!(!result.is_null());
+        assert_eq!(grp.gr_gid, 0);
+    }
+
+    #[test]
+    fn getgrgid_r_buffer_too_small() {
+        reset_state();
+        let mut grp: Group = unsafe { core::mem::zeroed() };
+        let mut buf = [0u8; 2];
+        let mut result: *const Group = core::ptr::null();
+
+        let ret = unsafe {
+            getgrgid_r(0, &mut grp, buf.as_mut_ptr(), buf.len(), &mut result)
+        };
+
+        assert_eq!(ret, errno::ERANGE);
+        assert!(result.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // getlogin / getlogin_r
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getlogin_returns_root() {
+        let login = getlogin();
+        assert!(!login.is_null());
+        let name = unsafe { core::ffi::CStr::from_ptr(login.cast()) };
+        assert_eq!(name.to_bytes(), b"root");
+    }
+
+    #[test]
+    fn getlogin_r_writes_root() {
+        let mut buf = [0u8; 32];
+        let ret = getlogin_r(buf.as_mut_ptr(), buf.len());
+        assert_eq!(ret, 0);
+        // Verify "root\0" was written.
+        assert_eq!(&buf[..5], b"root\0");
+    }
+
+    #[test]
+    fn getlogin_r_buffer_too_small() {
+        let mut buf = [0u8; 3]; // Need 5 bytes for "root\0".
+        let ret = getlogin_r(buf.as_mut_ptr(), buf.len());
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn getlogin_r_null_buf_returns_error() {
+        let ret = getlogin_r(core::ptr::null_mut(), 100);
+        assert_eq!(ret, -1);
+    }
+
+    // -----------------------------------------------------------------------
+    // ROOT_PASSWD static
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn root_passwd_static_fields() {
+        let pw = &ROOT_PASSWD;
+        assert_eq!(pw.pw_uid, 0);
+        assert_eq!(pw.pw_gid, 0);
+
+        let name = unsafe { core::ffi::CStr::from_ptr(pw.pw_name.cast()) };
+        assert_eq!(name.to_bytes(), b"root");
+
+        let passwd = unsafe { core::ffi::CStr::from_ptr(pw.pw_passwd.cast()) };
+        assert_eq!(passwd.to_bytes(), b"x");
+
+        let gecos = unsafe { core::ffi::CStr::from_ptr(pw.pw_gecos.cast()) };
+        assert_eq!(gecos.to_bytes(), b"root");
+
+        let dir = unsafe { core::ffi::CStr::from_ptr(pw.pw_dir.cast()) };
+        assert_eq!(dir.to_bytes(), b"/");
+
+        let shell = unsafe { core::ffi::CStr::from_ptr(pw.pw_shell.cast()) };
+        assert_eq!(shell.to_bytes(), b"/bin/sh");
+    }
+
+    // -----------------------------------------------------------------------
+    // ROOT_GROUP static
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn root_group_static_fields() {
+        let gr = &ROOT_GROUP;
+        assert_eq!(gr.gr_gid, 0);
+
+        let name = unsafe { core::ffi::CStr::from_ptr(gr.gr_name.cast()) };
+        assert_eq!(name.to_bytes(), b"root");
+
+        let passwd = unsafe { core::ffi::CStr::from_ptr(gr.gr_passwd.cast()) };
+        assert_eq!(passwd.to_bytes(), b"x");
+
+        // gr_mem is non-null and first element is null (empty member list).
+        assert!(!gr.gr_mem.is_null());
+        let first_member = unsafe { *gr.gr_mem };
+        assert!(first_member.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // Struct layout (size checks for x86_64)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn passwd_struct_size() {
+        // 5 pointers (8 bytes each) + 2 u32 fields (packed together) = 48 bytes.
+        assert_eq!(core::mem::size_of::<Passwd>(), 48);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn group_struct_size() {
+        // 2 pointers (8 each) + 1 u32 + 4 padding + 1 pointer (8) = 32 bytes.
+        assert_eq!(core::mem::size_of::<Group>(), 32);
+    }
+}

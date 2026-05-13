@@ -215,3 +215,180 @@ pub extern "C" fn getcpu(cpu: *mut u32, node: *mut u32) -> i32 {
     }
     0
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Policy constants match Linux --
+
+    #[test]
+    fn test_sched_policy_values() {
+        assert_eq!(SCHED_OTHER, 0);
+        assert_eq!(SCHED_FIFO, 1);
+        assert_eq!(SCHED_RR, 2);
+        assert_eq!(SCHED_BATCH, 3);
+        assert_eq!(SCHED_IDLE, 5);
+    }
+
+    // -- sched_getscheduler --
+
+    #[test]
+    fn test_sched_getscheduler_returns_other() {
+        assert_eq!(sched_getscheduler(0), SCHED_OTHER);
+        assert_eq!(sched_getscheduler(1), SCHED_OTHER);
+        assert_eq!(sched_getscheduler(-1), SCHED_OTHER);
+    }
+
+    // -- sched_setscheduler --
+
+    #[test]
+    fn test_sched_setscheduler_succeeds() {
+        assert_eq!(sched_setscheduler(0, SCHED_RR, core::ptr::null()), 0);
+    }
+
+    // -- sched_getparam --
+
+    #[test]
+    fn test_sched_getparam_fills_zero_priority() {
+        let mut param = SchedParam { sched_priority: 99 };
+        let ret = sched_getparam(0, &raw mut param);
+        assert_eq!(ret, 0);
+        assert_eq!(param.sched_priority, 0);
+    }
+
+    #[test]
+    fn test_sched_getparam_null() {
+        let ret = sched_getparam(0, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+    }
+
+    // -- sched_setparam --
+
+    #[test]
+    fn test_sched_setparam_succeeds() {
+        let param = SchedParam { sched_priority: 50 };
+        assert_eq!(sched_setparam(0, &raw const param), 0);
+    }
+
+    // -- Priority range --
+
+    #[test]
+    fn test_sched_priority_min() {
+        assert_eq!(sched_get_priority_min(SCHED_OTHER), 0);
+        assert_eq!(sched_get_priority_min(SCHED_FIFO), 0);
+        assert_eq!(sched_get_priority_min(SCHED_RR), 0);
+    }
+
+    #[test]
+    fn test_sched_priority_max_realtime() {
+        assert_eq!(sched_get_priority_max(SCHED_FIFO), 99);
+        assert_eq!(sched_get_priority_max(SCHED_RR), 99);
+    }
+
+    #[test]
+    fn test_sched_priority_max_other() {
+        assert_eq!(sched_get_priority_max(SCHED_OTHER), 0);
+        assert_eq!(sched_get_priority_max(SCHED_BATCH), 0);
+        assert_eq!(sched_get_priority_max(SCHED_IDLE), 0);
+    }
+
+    // -- sched_rr_get_interval --
+
+    #[test]
+    fn test_sched_rr_get_interval_100ms() {
+        let mut tp = crate::stat::Timespec { tv_sec: 99, tv_nsec: 99 };
+        let ret = sched_rr_get_interval(0, &raw mut tp);
+        assert_eq!(ret, 0);
+        assert_eq!(tp.tv_sec, 0);
+        assert_eq!(tp.tv_nsec, 100_000_000); // 100ms
+    }
+
+    #[test]
+    fn test_sched_rr_get_interval_null() {
+        let ret = sched_rr_get_interval(0, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+    }
+
+    // -- CPU affinity --
+
+    #[test]
+    fn test_cpu_setsize() {
+        assert_eq!(CPU_SETSIZE, 1024);
+    }
+
+    #[test]
+    fn test_cpuset_size() {
+        // 1024 bits = 128 bytes = 16 * 8
+        assert_eq!(core::mem::size_of::<CpuSetT>(), 128);
+    }
+
+    #[test]
+    fn test_sched_getaffinity_sets_cpu0() {
+        let mut cpuset = CpuSetT { bits: [0xFF; 16] };
+        let ret = sched_getaffinity(
+            0,
+            core::mem::size_of::<CpuSetT>(),
+            &raw mut cpuset,
+        );
+        assert_eq!(ret, 0);
+        assert_eq!(cpuset.bits[0], 1); // Only CPU 0
+        for i in 1..16 {
+            assert_eq!(cpuset.bits[i], 0, "bits[{i}] should be 0");
+        }
+    }
+
+    #[test]
+    fn test_sched_getaffinity_null() {
+        let ret = sched_getaffinity(0, 128, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sched_getaffinity_too_small() {
+        let mut cpuset = CpuSetT { bits: [0; 16] };
+        let ret = sched_getaffinity(0, 1, &raw mut cpuset); // Too small
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sched_setaffinity_succeeds() {
+        let cpuset = CpuSetT { bits: [1; 16] };
+        let ret = sched_setaffinity(0, 128, &raw const cpuset);
+        assert_eq!(ret, 0);
+    }
+
+    // -- sched_getcpu / getcpu --
+
+    #[test]
+    fn test_sched_getcpu_returns_zero() {
+        assert_eq!(sched_getcpu(), 0);
+    }
+
+    #[test]
+    fn test_getcpu_returns_zero() {
+        let mut cpu: u32 = 99;
+        let mut node: u32 = 99;
+        let ret = getcpu(&raw mut cpu, &raw mut node);
+        assert_eq!(ret, 0);
+        assert_eq!(cpu, 0);
+        assert_eq!(node, 0);
+    }
+
+    #[test]
+    fn test_getcpu_null_args() {
+        let ret = getcpu(core::ptr::null_mut(), core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    // -- SchedParam layout --
+
+    #[test]
+    fn test_sched_param_size() {
+        assert_eq!(core::mem::size_of::<SchedParam>(), 4);
+    }
+}

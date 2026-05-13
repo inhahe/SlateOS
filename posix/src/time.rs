@@ -2304,4 +2304,459 @@ mod tests {
         let mut tm2 = tm;
         assert_eq!(mktime(&mut tm), timelocal(&mut tm2));
     }
+
+    // -- strftime additional specifiers --
+
+    /// Helper: run strftime on a Tm and return the result as a byte vector.
+    fn run_strftime(fmt: &[u8], tm: &Tm) -> Vec<u8> {
+        let mut buf = [0u8; 128];
+        let n = unsafe {
+            strftime(
+                buf.as_mut_ptr(),
+                buf.len(),
+                fmt.as_ptr(),
+                &raw const *tm,
+            )
+        };
+        buf[..n].to_vec()
+    }
+
+    #[test]
+    fn test_strftime_12hour_clock() {
+        let mut tm = zero_tm();
+        tm.tm_year = 123; // 2023
+        tm.tm_mon = 0;
+        tm.tm_mday = 15;
+
+        // Midnight (0:00) → 12 in 12-hour format
+        tm.tm_hour = 0;
+        assert_eq!(run_strftime(b"%I\0", &tm), b"12");
+
+        // 1 AM
+        tm.tm_hour = 1;
+        assert_eq!(run_strftime(b"%I\0", &tm), b"01");
+
+        // Noon
+        tm.tm_hour = 12;
+        assert_eq!(run_strftime(b"%I\0", &tm), b"12");
+
+        // 1 PM
+        tm.tm_hour = 13;
+        assert_eq!(run_strftime(b"%I\0", &tm), b"01");
+
+        // 11 PM
+        tm.tm_hour = 23;
+        assert_eq!(run_strftime(b"%I\0", &tm), b"11");
+    }
+
+    #[test]
+    fn test_strftime_ampm() {
+        let mut tm = zero_tm();
+        tm.tm_year = 123;
+        tm.tm_mon = 0;
+        tm.tm_mday = 15;
+
+        tm.tm_hour = 0;
+        assert_eq!(run_strftime(b"%p\0", &tm), b"AM");
+        assert_eq!(run_strftime(b"%P\0", &tm), b"am");
+
+        tm.tm_hour = 11;
+        assert_eq!(run_strftime(b"%p\0", &tm), b"AM");
+
+        tm.tm_hour = 12;
+        assert_eq!(run_strftime(b"%p\0", &tm), b"PM");
+        assert_eq!(run_strftime(b"%P\0", &tm), b"pm");
+
+        tm.tm_hour = 23;
+        assert_eq!(run_strftime(b"%p\0", &tm), b"PM");
+    }
+
+    #[test]
+    fn test_strftime_iso_date() {
+        let mut tm = zero_tm();
+        tm.tm_year = 123; // 2023
+        tm.tm_mon = 5;    // June
+        tm.tm_mday = 15;
+        assert_eq!(run_strftime(b"%F\0", &tm), b"2023-06-15");
+    }
+
+    #[test]
+    fn test_strftime_time_formats() {
+        let mut tm = zero_tm();
+        tm.tm_hour = 14;
+        tm.tm_min = 30;
+        tm.tm_sec = 5;
+
+        assert_eq!(run_strftime(b"%T\0", &tm), b"14:30:05");
+        assert_eq!(run_strftime(b"%R\0", &tm), b"14:30");
+    }
+
+    #[test]
+    fn test_strftime_12hour_time_with_ampm() {
+        let mut tm = zero_tm();
+        tm.tm_hour = 14;
+        tm.tm_min = 30;
+        tm.tm_sec = 5;
+
+        let result = run_strftime(b"%r\0", &tm);
+        assert_eq!(result, b"02:30:05 PM");
+    }
+
+    #[test]
+    fn test_strftime_day_of_year() {
+        let mut tm = zero_tm();
+        tm.tm_year = 123;
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        tm.tm_yday = 0;  // Jan 1 = day 1
+        assert_eq!(run_strftime(b"%j\0", &tm), b"001");
+
+        tm.tm_yday = 364; // Day 365 of a non-leap year (Dec 31)
+        assert_eq!(run_strftime(b"%j\0", &tm), b"365");
+    }
+
+    #[test]
+    fn test_strftime_weekday_names() {
+        let mut tm = zero_tm();
+        tm.tm_year = 123;
+
+        tm.tm_wday = 0;
+        assert_eq!(run_strftime(b"%A\0", &tm), b"Sunday");
+        assert_eq!(run_strftime(b"%a\0", &tm), b"Sun");
+
+        tm.tm_wday = 1;
+        assert_eq!(run_strftime(b"%A\0", &tm), b"Monday");
+        assert_eq!(run_strftime(b"%a\0", &tm), b"Mon");
+
+        tm.tm_wday = 6;
+        assert_eq!(run_strftime(b"%A\0", &tm), b"Saturday");
+        assert_eq!(run_strftime(b"%a\0", &tm), b"Sat");
+    }
+
+    #[test]
+    fn test_strftime_month_names() {
+        let mut tm = zero_tm();
+        tm.tm_year = 123;
+        tm.tm_mday = 1;
+
+        tm.tm_mon = 0;
+        assert_eq!(run_strftime(b"%B\0", &tm), b"January");
+        assert_eq!(run_strftime(b"%b\0", &tm), b"Jan");
+
+        tm.tm_mon = 11;
+        assert_eq!(run_strftime(b"%B\0", &tm), b"December");
+        assert_eq!(run_strftime(b"%b\0", &tm), b"Dec");
+    }
+
+    #[test]
+    fn test_strftime_timezone() {
+        let tm = zero_tm();
+        assert_eq!(run_strftime(b"%z\0", &tm), b"+0000");
+        assert_eq!(run_strftime(b"%Z\0", &tm), b"UTC");
+    }
+
+    #[test]
+    fn test_strftime_century() {
+        let mut tm = zero_tm();
+        tm.tm_year = 123; // 2023
+        assert_eq!(run_strftime(b"%C\0", &tm), b"20");
+
+        tm.tm_year = 0; // 1900
+        assert_eq!(run_strftime(b"%C\0", &tm), b"19");
+    }
+
+    #[test]
+    fn test_strftime_iso_weekday() {
+        let mut tm = zero_tm();
+
+        // Monday=1
+        tm.tm_wday = 1;
+        assert_eq!(run_strftime(b"%u\0", &tm), b"1");
+
+        // Sunday=7
+        tm.tm_wday = 0;
+        assert_eq!(run_strftime(b"%u\0", &tm), b"7");
+    }
+
+    #[test]
+    fn test_strftime_space_padded_day() {
+        let mut tm = zero_tm();
+        tm.tm_mday = 5;
+        assert_eq!(run_strftime(b"%e\0", &tm), b" 5");
+
+        tm.tm_mday = 15;
+        assert_eq!(run_strftime(b"%e\0", &tm), b"15");
+    }
+
+    #[test]
+    fn test_strftime_literal_escapes() {
+        let tm = zero_tm();
+        assert_eq!(run_strftime(b"%%\0", &tm), b"%");
+        assert_eq!(run_strftime(b"%n\0", &tm), b"\n");
+        assert_eq!(run_strftime(b"%t\0", &tm), b"\t");
+    }
+
+    #[test]
+    fn test_strftime_date_composite() {
+        let mut tm = zero_tm();
+        tm.tm_year = 123; // 2023
+        tm.tm_mon = 5;    // June
+        tm.tm_mday = 15;
+        // %D = %m/%d/%y
+        assert_eq!(run_strftime(b"%D\0", &tm), b"06/15/23");
+    }
+
+    // -- strptime additional tests --
+
+    #[test]
+    fn test_strptime_ampm() {
+        let mut tm = zero_tm();
+        let rem = unsafe {
+            strptime(
+                b"02:30 PM\0".as_ptr(),
+                b"%I:%M %p\0".as_ptr(),
+                &raw mut tm,
+            )
+        };
+        assert!(!rem.is_null());
+        assert_eq!(tm.tm_hour, 14); // 2 PM = 14
+        assert_eq!(tm.tm_min, 30);
+    }
+
+    #[test]
+    fn test_strptime_noon_pm() {
+        let mut tm = zero_tm();
+        unsafe {
+            strptime(
+                b"12:00 PM\0".as_ptr(),
+                b"%I:%M %p\0".as_ptr(),
+                &raw mut tm,
+            );
+        }
+        assert_eq!(tm.tm_hour, 12); // 12 PM = noon = 12
+    }
+
+    #[test]
+    fn test_strptime_midnight_am() {
+        let mut tm = zero_tm();
+        unsafe {
+            strptime(
+                b"12:00 AM\0".as_ptr(),
+                b"%I:%M %p\0".as_ptr(),
+                &raw mut tm,
+            );
+        }
+        assert_eq!(tm.tm_hour, 0); // 12 AM = midnight = 0
+    }
+
+    #[test]
+    fn test_strptime_month_name() {
+        let mut tm = zero_tm();
+        let rem = unsafe {
+            strptime(
+                b"January\0".as_ptr(),
+                b"%B\0".as_ptr(),
+                &raw mut tm,
+            )
+        };
+        assert!(!rem.is_null());
+        assert_eq!(tm.tm_mon, 0); // January = 0
+    }
+
+    #[test]
+    fn test_strptime_month_abbr() {
+        let mut tm = zero_tm();
+        let rem = unsafe {
+            strptime(
+                b"Dec\0".as_ptr(),
+                b"%b\0".as_ptr(),
+                &raw mut tm,
+            )
+        };
+        assert!(!rem.is_null());
+        assert_eq!(tm.tm_mon, 11); // December = 11
+    }
+
+    #[test]
+    fn test_strptime_weekday_name() {
+        let mut tm = zero_tm();
+        let rem = unsafe {
+            strptime(
+                b"Wednesday\0".as_ptr(),
+                b"%A\0".as_ptr(),
+                &raw mut tm,
+            )
+        };
+        assert!(!rem.is_null());
+        assert_eq!(tm.tm_wday, 3); // Wednesday = 3
+    }
+
+    #[test]
+    fn test_strptime_iso_date() {
+        let mut tm = zero_tm();
+        let input = b"2023-06-15\0";
+        let fmt = b"%Y-%m-%d\0";
+        let rem = unsafe {
+            strptime(input.as_ptr(), fmt.as_ptr(), &raw mut tm)
+        };
+        assert!(!rem.is_null());
+        assert_eq!(tm.tm_year, 123); // 2023-1900
+        assert_eq!(tm.tm_mon, 5);    // June = 5
+        assert_eq!(tm.tm_mday, 15);
+    }
+
+    #[test]
+    fn test_strptime_2digit_year() {
+        let mut tm = zero_tm();
+        unsafe {
+            strptime(b"99\0".as_ptr(), b"%y\0".as_ptr(), &raw mut tm);
+        }
+        assert_eq!(tm.tm_year, 99); // 1999 - 1900
+
+        let mut tm2 = zero_tm();
+        unsafe {
+            strptime(b"05\0".as_ptr(), b"%y\0".as_ptr(), &raw mut tm2);
+        }
+        assert_eq!(tm2.tm_year, 105); // 2005 - 1900
+    }
+
+    #[test]
+    fn test_strptime_timezone_offset() {
+        let mut tm = zero_tm();
+        let rem = unsafe {
+            strptime(
+                b"+0530\0".as_ptr(),
+                b"%z\0".as_ptr(),
+                &raw mut tm,
+            )
+        };
+        // Should succeed (parse but ignore timezone)
+        assert!(!rem.is_null());
+    }
+
+    #[test]
+    fn test_strptime_literal_percent() {
+        let mut tm = zero_tm();
+        let rem = unsafe {
+            strptime(
+                b"100%\0".as_ptr(),
+                b"100%%\0".as_ptr(),
+                &raw mut tm,
+            )
+        };
+        assert!(!rem.is_null());
+    }
+
+    #[test]
+    fn test_strptime_returns_remaining() {
+        let mut tm = zero_tm();
+        let input = b"2023 extra stuff\0";
+        let rem = unsafe {
+            strptime(input.as_ptr(), b"%Y\0".as_ptr(), &raw mut tm)
+        };
+        assert!(!rem.is_null());
+        // rem should point to " extra stuff"
+        assert_eq!(unsafe { *rem }, b' ');
+    }
+
+    #[test]
+    fn test_strptime_bad_input() {
+        let mut tm = zero_tm();
+        let rem = unsafe {
+            strptime(b"abc\0".as_ptr(), b"%Y\0".as_ptr(), &raw mut tm)
+        };
+        assert!(rem.is_null()); // No digits for %Y
+    }
+
+    // -- ISO 8601 week date tests --
+
+    #[test]
+    fn test_iso_week_2015_jan1() {
+        // 2015-01-01 is Thursday → ISO week 01 of 2015
+        let mut tm = zero_tm();
+        tm.tm_year = 115; // 2015
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        tm.tm_wday = 4;   // Thursday
+        tm.tm_yday = 0;
+        let (year, week) = iso_week_date(&tm);
+        assert_eq!(year, 2015);
+        assert_eq!(week, 1);
+    }
+
+    #[test]
+    fn test_iso_week_2014_dec29() {
+        // 2014-12-29 is Monday → ISO week 01 of 2015
+        let mut tm = zero_tm();
+        tm.tm_year = 114; // 2014
+        tm.tm_mon = 11;   // December
+        tm.tm_mday = 29;
+        tm.tm_wday = 1;   // Monday
+        tm.tm_yday = 362; // 0-indexed
+        let (year, week) = iso_week_date(&tm);
+        assert_eq!(year, 2015);
+        assert_eq!(week, 1);
+    }
+
+    #[test]
+    fn test_iso_week_2016_jan1() {
+        // 2016-01-01 is Friday → ISO week 53 of 2015
+        let mut tm = zero_tm();
+        tm.tm_year = 116; // 2016
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        tm.tm_wday = 5;   // Friday
+        tm.tm_yday = 0;
+        let (year, week) = iso_week_date(&tm);
+        assert_eq!(year, 2015);
+        assert_eq!(week, 53);
+    }
+
+    // -- mktime edge cases --
+
+    #[test]
+    fn test_mktime_negative_month() {
+        // tm_mon = -1 should borrow from year (December of previous year)
+        let mut tm = zero_tm();
+        tm.tm_year = 124; // 2024
+        tm.tm_mon = -1;   // Should normalize to December 2023
+        tm.tm_mday = 15;
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_mon, 11);      // December
+        assert_eq!(tm.tm_year, 123);     // 2023
+        assert_eq!(tm.tm_mday, 15);
+    }
+
+    #[test]
+    fn test_mktime_overflow_day() {
+        // Jan 32 should become Feb 1
+        let mut tm = zero_tm();
+        tm.tm_year = 124; // 2024
+        tm.tm_mon = 0;    // January
+        tm.tm_mday = 32;
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_mon, 1);   // February
+        assert_eq!(tm.tm_mday, 1);
+    }
+
+    #[test]
+    fn test_mktime_overflow_seconds() {
+        // 70 seconds should overflow to 1 min 10 sec
+        let mut tm = zero_tm();
+        tm.tm_year = 124;
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        tm.tm_sec = 70;
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_sec, 10);
+        assert_eq!(tm.tm_min, 1);
+    }
+
+    // -- clock constants --
+
+    #[test]
+    fn test_clock_id_values() {
+        assert_eq!(CLOCK_REALTIME, 0);
+        assert_eq!(CLOCK_MONOTONIC, 1);
+    }
 }

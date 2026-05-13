@@ -493,3 +493,552 @@ pub extern "C" fn __libc_current_sigrtmin() -> i32 {
 pub extern "C" fn __libc_current_sigrtmax() -> i32 {
     64
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Signal number constants match Linux x86_64 --
+
+    #[test]
+    fn test_signal_number_values() {
+        assert_eq!(SIGHUP, 1);
+        assert_eq!(SIGINT, 2);
+        assert_eq!(SIGQUIT, 3);
+        assert_eq!(SIGILL, 4);
+        assert_eq!(SIGTRAP, 5);
+        assert_eq!(SIGABRT, 6);
+        assert_eq!(SIGBUS, 7);
+        assert_eq!(SIGFPE, 8);
+        assert_eq!(SIGKILL, 9);
+        assert_eq!(SIGUSR1, 10);
+        assert_eq!(SIGSEGV, 11);
+        assert_eq!(SIGUSR2, 12);
+        assert_eq!(SIGPIPE, 13);
+        assert_eq!(SIGALRM, 14);
+        assert_eq!(SIGTERM, 15);
+        assert_eq!(SIGCHLD, 17);
+        assert_eq!(SIGCONT, 18);
+        assert_eq!(SIGSTOP, 19);
+        assert_eq!(SIGTSTP, 20);
+    }
+
+    #[test]
+    fn test_nsig() {
+        assert_eq!(NSIG, 65);
+    }
+
+    // -- Signal handler constants --
+
+    #[test]
+    fn test_sig_dfl_ign_err() {
+        assert_eq!(SIG_DFL, 0);
+        assert_eq!(SIG_IGN, 1);
+        assert_eq!(SIG_ERR, usize::MAX);
+    }
+
+    // -- sigaction flags match Linux --
+
+    #[test]
+    fn test_sa_flag_values() {
+        assert_eq!(SA_NOCLDSTOP, 1);
+        assert_eq!(SA_NOCLDWAIT, 2);
+        assert_eq!(SA_SIGINFO, 4);
+        assert_eq!(SA_RESTART, 0x1000_0000);
+        assert_eq!(SA_NODEFER, 0x4000_0000);
+    }
+
+    // -- sigaltstack constants --
+
+    #[test]
+    fn test_sigaltstack_constants() {
+        assert_eq!(MINSIGSTKSZ, 2048);
+        assert_eq!(SIGSTKSZ, 8192);
+        assert_eq!(SS_ONSTACK, 1);
+        assert_eq!(SS_DISABLE, 2);
+    }
+
+    // -- sigemptyset --
+
+    #[test]
+    fn test_sigemptyset_basic() {
+        let mut set: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+        let ret = unsafe { sigemptyset(&raw mut set) };
+        assert_eq!(ret, 0);
+        assert_eq!(set, 0);
+    }
+
+    #[test]
+    fn test_sigemptyset_null() {
+        let ret = unsafe { sigemptyset(core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+    }
+
+    // -- sigfillset --
+
+    #[test]
+    fn test_sigfillset_basic() {
+        let mut set: u64 = 0;
+        let ret = unsafe { sigfillset(&raw mut set) };
+        assert_eq!(ret, 0);
+        assert_eq!(set, u64::MAX);
+    }
+
+    #[test]
+    fn test_sigfillset_null() {
+        let ret = unsafe { sigfillset(core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+    }
+
+    // -- sigaddset --
+
+    #[test]
+    fn test_sigaddset_basic() {
+        let mut set: u64 = 0;
+        let ret = unsafe { sigaddset(&raw mut set, SIGINT) };
+        assert_eq!(ret, 0);
+        // SIGINT = 2 → bit 1 set
+        assert_eq!(set, 1u64 << 1);
+    }
+
+    #[test]
+    fn test_sigaddset_multiple() {
+        let mut set: u64 = 0;
+        unsafe {
+            sigaddset(&raw mut set, SIGHUP);   // bit 0
+            sigaddset(&raw mut set, SIGTERM);   // bit 14
+            sigaddset(&raw mut set, SIGKILL);   // bit 8
+        }
+        assert_ne!(set & (1u64 << 0), 0);   // SIGHUP
+        assert_ne!(set & (1u64 << 14), 0);  // SIGTERM
+        assert_ne!(set & (1u64 << 8), 0);   // SIGKILL
+        // Other bits should be 0
+        assert_eq!(set & !(1u64 << 0 | 1u64 << 14 | 1u64 << 8), 0);
+    }
+
+    #[test]
+    fn test_sigaddset_null() {
+        let ret = unsafe { sigaddset(core::ptr::null_mut(), SIGINT) };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sigaddset_invalid_signum_zero() {
+        let mut set: u64 = 0;
+        let ret = unsafe { sigaddset(&raw mut set, 0) };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sigaddset_invalid_signum_too_large() {
+        let mut set: u64 = 0;
+        let ret = unsafe { sigaddset(&raw mut set, NSIG) };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sigaddset_invalid_signum_negative() {
+        let mut set: u64 = 0;
+        let ret = unsafe { sigaddset(&raw mut set, -1) };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sigaddset_boundary_signal_1() {
+        let mut set: u64 = 0;
+        let ret = unsafe { sigaddset(&raw mut set, 1) };
+        assert_eq!(ret, 0);
+        assert_eq!(set, 1u64 << 0); // signal 1 → bit 0
+    }
+
+    #[test]
+    fn test_sigaddset_boundary_signal_64() {
+        let mut set: u64 = 0;
+        let ret = unsafe { sigaddset(&raw mut set, 64) };
+        assert_eq!(ret, 0);
+        assert_eq!(set, 1u64 << 63); // signal 64 → bit 63
+    }
+
+    // -- sigdelset --
+
+    #[test]
+    fn test_sigdelset_basic() {
+        let mut set: u64 = u64::MAX;
+        let ret = unsafe { sigdelset(&raw mut set, SIGINT) };
+        assert_eq!(ret, 0);
+        assert_eq!(set & (1u64 << 1), 0); // SIGINT bit cleared
+    }
+
+    #[test]
+    fn test_sigdelset_from_empty() {
+        let mut set: u64 = 0;
+        let ret = unsafe { sigdelset(&raw mut set, SIGINT) };
+        assert_eq!(ret, 0);
+        assert_eq!(set, 0); // Still empty
+    }
+
+    #[test]
+    fn test_sigdelset_null() {
+        let ret = unsafe { sigdelset(core::ptr::null_mut(), SIGINT) };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sigdelset_invalid() {
+        let mut set: u64 = u64::MAX;
+        let ret = unsafe { sigdelset(&raw mut set, 0) };
+        assert_eq!(ret, -1);
+    }
+
+    // -- sigismember --
+
+    #[test]
+    fn test_sigismember_present() {
+        let set: u64 = 1u64 << 1; // SIGINT (signal 2 → bit 1)
+        let ret = unsafe { sigismember(&raw const set, SIGINT) };
+        assert_eq!(ret, 1);
+    }
+
+    #[test]
+    fn test_sigismember_absent() {
+        let set: u64 = 0;
+        let ret = unsafe { sigismember(&raw const set, SIGINT) };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_sigismember_full_set() {
+        let set: u64 = u64::MAX;
+        for sig in 1..NSIG {
+            let ret = unsafe { sigismember(&raw const set, sig) };
+            assert_eq!(ret, 1, "signal {sig} should be in full set");
+        }
+    }
+
+    #[test]
+    fn test_sigismember_null() {
+        let ret = unsafe { sigismember(core::ptr::null(), SIGINT) };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sigismember_invalid() {
+        let set: u64 = u64::MAX;
+        let ret = unsafe { sigismember(&raw const set, 0) };
+        assert_eq!(ret, -1);
+    }
+
+    // -- Round-trip: add then check --
+
+    #[test]
+    fn test_sigaddset_then_sigismember() {
+        let mut set: u64 = 0;
+        unsafe { sigemptyset(&raw mut set); }
+
+        // Add SIGTERM, verify it's there
+        unsafe { sigaddset(&raw mut set, SIGTERM); }
+        assert_eq!(unsafe { sigismember(&raw const set, SIGTERM) }, 1);
+
+        // SIGINT should still be absent
+        assert_eq!(unsafe { sigismember(&raw const set, SIGINT) }, 0);
+    }
+
+    #[test]
+    fn test_sigaddset_sigdelset_round_trip() {
+        let mut set: u64 = 0;
+        unsafe {
+            sigemptyset(&raw mut set);
+            sigaddset(&raw mut set, SIGINT);
+            sigaddset(&raw mut set, SIGTERM);
+        }
+        assert_eq!(unsafe { sigismember(&raw const set, SIGINT) }, 1);
+        assert_eq!(unsafe { sigismember(&raw const set, SIGTERM) }, 1);
+
+        // Remove SIGINT
+        unsafe { sigdelset(&raw mut set, SIGINT); }
+        assert_eq!(unsafe { sigismember(&raw const set, SIGINT) }, 0);
+        assert_eq!(unsafe { sigismember(&raw const set, SIGTERM) }, 1);
+    }
+
+    #[test]
+    fn test_sigfillset_then_delset() {
+        let mut set: u64 = 0;
+        unsafe {
+            sigfillset(&raw mut set);
+            sigdelset(&raw mut set, SIGKILL);
+        }
+        assert_eq!(unsafe { sigismember(&raw const set, SIGKILL) }, 0);
+        assert_eq!(unsafe { sigismember(&raw const set, SIGTERM) }, 1);
+    }
+
+    // -- signal() function --
+
+    #[test]
+    fn test_signal_set_handler() {
+        // Reset to known state.
+        let old = signal(SIGTERM, SIG_IGN);
+        // old should be whatever was there before (SIG_DFL unless another test changed it)
+        assert_ne!(old, SIG_ERR);
+
+        // Now set it back
+        let prev = signal(SIGTERM, SIG_DFL);
+        assert_eq!(prev, SIG_IGN);
+    }
+
+    #[test]
+    fn test_signal_rejects_sigkill() {
+        let ret = signal(SIGKILL, SIG_IGN);
+        assert_eq!(ret, SIG_ERR);
+    }
+
+    #[test]
+    fn test_signal_rejects_sigstop() {
+        let ret = signal(SIGSTOP, SIG_IGN);
+        assert_eq!(ret, SIG_ERR);
+    }
+
+    #[test]
+    fn test_signal_rejects_invalid_signum() {
+        assert_eq!(signal(0, SIG_IGN), SIG_ERR);
+        assert_eq!(signal(-1, SIG_IGN), SIG_ERR);
+        assert_eq!(signal(NSIG, SIG_IGN), SIG_ERR);
+    }
+
+    #[test]
+    fn test_signal_boundary_valid() {
+        // Signal 1 (SIGHUP) should work
+        let old = signal(SIGHUP, SIG_IGN);
+        assert_ne!(old, SIG_ERR);
+        signal(SIGHUP, old); // Restore
+    }
+
+    // -- sigaction --
+
+    #[test]
+    fn test_sigaction_set_and_get() {
+        let new_act = Sigaction {
+            sa_handler: SIG_IGN,
+            sa_mask: 0,
+            sa_flags: SA_RESTART,
+            sa_restorer: 0,
+        };
+        let mut old_act = Sigaction {
+            sa_handler: 0,
+            sa_mask: 0,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+
+        let ret = unsafe { sigaction(SIGTERM, &raw const new_act, &raw mut old_act) };
+        assert_eq!(ret, 0);
+
+        // Now get it back
+        let mut check_act = Sigaction {
+            sa_handler: 0,
+            sa_mask: 0,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+        let ret = unsafe { sigaction(SIGTERM, core::ptr::null(), &raw mut check_act) };
+        assert_eq!(ret, 0);
+        assert_eq!(check_act.sa_handler, SIG_IGN);
+
+        // Restore original
+        unsafe { sigaction(SIGTERM, &raw const old_act, core::ptr::null_mut()); }
+    }
+
+    #[test]
+    fn test_sigaction_rejects_sigkill() {
+        let act = Sigaction {
+            sa_handler: SIG_IGN,
+            sa_mask: 0,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+        let ret = unsafe { sigaction(SIGKILL, &raw const act, core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sigaction_rejects_sigstop() {
+        let act = Sigaction {
+            sa_handler: SIG_IGN,
+            sa_mask: 0,
+            sa_flags: 0,
+            sa_restorer: 0,
+        };
+        let ret = unsafe { sigaction(SIGSTOP, &raw const act, core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sigaction_null_both() {
+        // Both act and oldact null — should succeed (query nothing)
+        let ret = unsafe { sigaction(SIGTERM, core::ptr::null(), core::ptr::null_mut()) };
+        assert_eq!(ret, 0);
+    }
+
+    // -- sigprocmask --
+
+    #[test]
+    fn test_sigprocmask_returns_empty_old_set() {
+        let mut oldset: u64 = 0xDEAD;
+        let ret = sigprocmask(0, core::ptr::null(), &raw mut oldset);
+        assert_eq!(ret, 0);
+        assert_eq!(oldset, 0);
+    }
+
+    #[test]
+    fn test_sigprocmask_null_oldset() {
+        let ret = sigprocmask(0, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    // -- sigsuspend --
+
+    #[test]
+    fn test_sigsuspend_returns_eintr() {
+        let mask: u64 = 0;
+        let ret = sigsuspend(&raw const mask);
+        assert_eq!(ret, -1);
+        // POSIX: sigsuspend always returns -1 with EINTR
+    }
+
+    // -- sigpending --
+
+    #[test]
+    fn test_sigpending_returns_empty() {
+        let mut set: u64 = 0xFFFF;
+        let ret = unsafe { sigpending(&raw mut set) };
+        assert_eq!(ret, 0);
+        assert_eq!(set, 0); // No signals pending
+    }
+
+    #[test]
+    fn test_sigpending_null() {
+        let ret = unsafe { sigpending(core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+    }
+
+    // -- strsignal --
+
+    #[test]
+    fn test_strsignal_known_signals() {
+        let ptr = strsignal(SIGHUP);
+        assert_eq!(unsafe { *ptr }, b'H'); // "Hangup"
+
+        let ptr = strsignal(SIGINT);
+        assert_eq!(unsafe { *ptr }, b'I'); // "Interrupt"
+
+        let ptr = strsignal(SIGKILL);
+        assert_eq!(unsafe { *ptr }, b'K'); // "Killed"
+
+        let ptr = strsignal(SIGSEGV);
+        assert_eq!(unsafe { *ptr }, b'S'); // "Segmentation fault"
+
+        let ptr = strsignal(SIGTERM);
+        assert_eq!(unsafe { *ptr }, b'T'); // "Terminated"
+    }
+
+    #[test]
+    fn test_strsignal_unknown() {
+        let ptr = strsignal(99);
+        assert!(!ptr.is_null());
+        assert_eq!(unsafe { *ptr }, b'U'); // "Unknown signal"
+    }
+
+    #[test]
+    fn test_strsignal_zero() {
+        let ptr = strsignal(0);
+        assert!(!ptr.is_null());
+        assert_eq!(unsafe { *ptr }, b'U'); // "Unknown signal 0"
+    }
+
+    #[test]
+    fn test_strsignal_negative() {
+        let ptr = strsignal(-1);
+        assert!(!ptr.is_null());
+        // Should return unknown signal message
+    }
+
+    // -- sigaltstack --
+
+    #[test]
+    fn test_sigaltstack_get_returns_disabled() {
+        let mut oss = StackT {
+            ss_sp: core::ptr::null_mut(),
+            ss_flags: 0,
+            ss_size: 0,
+        };
+        let ret = sigaltstack(core::ptr::null(), &raw mut oss);
+        assert_eq!(ret, 0);
+        assert_eq!(oss.ss_flags, SS_DISABLE);
+        assert!(oss.ss_sp.is_null());
+        assert_eq!(oss.ss_size, 0);
+    }
+
+    #[test]
+    fn test_sigaltstack_set_valid() {
+        let mut stack_buf = [0u8; SIGSTKSZ];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: 0,
+            ss_size: SIGSTKSZ,
+        };
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_sigaltstack_too_small() {
+        let mut stack_buf = [0u8; 1024]; // Less than MINSIGSTKSZ
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: 0,
+            ss_size: 1024,
+        };
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, -1); // Should fail: stack too small
+    }
+
+    #[test]
+    fn test_sigaltstack_disable() {
+        let ss = StackT {
+            ss_sp: core::ptr::null_mut(),
+            ss_flags: SS_DISABLE,
+            ss_size: 0,
+        };
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, 0); // SS_DISABLE → no size check
+    }
+
+    // -- siginterrupt --
+
+    #[test]
+    fn test_siginterrupt_always_succeeds() {
+        assert_eq!(siginterrupt(SIGALRM, 1), 0);
+        assert_eq!(siginterrupt(SIGALRM, 0), 0);
+    }
+
+    // -- kill / raise stubs --
+
+    #[test]
+    fn test_kill_returns_enosys() {
+        let ret = kill(1, SIGTERM);
+        assert_eq!(ret, -1);
+    }
+
+    // -- realtime signal range --
+
+    #[test]
+    fn test_sigrtmin_sigrtmax() {
+        assert_eq!(__libc_current_sigrtmin(), 32);
+        assert_eq!(__libc_current_sigrtmax(), 64);
+        // rtmax > rtmin
+        assert!(__libc_current_sigrtmax() > __libc_current_sigrtmin());
+    }
+}

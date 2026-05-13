@@ -140,3 +140,96 @@ pub extern "C" fn mq_notify(_mqdes: MqdT, _sevp: *const u8) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // All mqueue functions are stubs returning -1 with ENOSYS.
+
+    #[test]
+    fn test_mq_open_returns_error() {
+        let ret = mq_open(b"/test_queue\0".as_ptr(), 0);
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_mq_close_returns_error() {
+        assert_eq!(mq_close(0), -1);
+    }
+
+    #[test]
+    fn test_mq_unlink_returns_error() {
+        assert_eq!(mq_unlink(b"/test_queue\0".as_ptr()), -1);
+    }
+
+    #[test]
+    fn test_mq_send_returns_error() {
+        assert_eq!(mq_send(0, b"hello\0".as_ptr(), 5, 0), -1);
+    }
+
+    #[test]
+    fn test_mq_receive_returns_error() {
+        let mut buf = [0u8; 64];
+        let mut prio: u32 = 0;
+        assert_eq!(mq_receive(0, buf.as_mut_ptr(), 64, &raw mut prio), -1);
+    }
+
+    #[test]
+    fn test_mq_getattr_returns_error() {
+        let mut attr = MqAttr {
+            mq_flags: 0,
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _pad: [0; 4],
+        };
+        assert_eq!(mq_getattr(0, &raw mut attr), -1);
+    }
+
+    #[test]
+    fn test_mq_setattr_returns_error() {
+        let attr = MqAttr {
+            mq_flags: 0,
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _pad: [0; 4],
+        };
+        assert_eq!(mq_setattr(0, &raw const attr, core::ptr::null_mut()), -1);
+    }
+
+    #[test]
+    fn test_mq_timedsend_returns_error() {
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        assert_eq!(mq_timedsend(0, b"hello\0".as_ptr(), 5, 0, &raw const ts), -1);
+    }
+
+    #[test]
+    fn test_mq_timedreceive_returns_error() {
+        let mut buf = [0u8; 64];
+        let mut prio: u32 = 0;
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        assert_eq!(
+            mq_timedreceive(0, buf.as_mut_ptr(), 64, &raw mut prio, &raw const ts),
+            -1,
+        );
+    }
+
+    #[test]
+    fn test_mq_notify_returns_error() {
+        assert_eq!(mq_notify(0, core::ptr::null()), -1);
+    }
+
+    // -- MqAttr layout --
+
+    #[test]
+    fn test_mq_attr_size() {
+        // 4 i64 fields + 4 i64 padding = 8 * 8 = 64 bytes
+        assert_eq!(core::mem::size_of::<MqAttr>(), 64);
+    }
+}

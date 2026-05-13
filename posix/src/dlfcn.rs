@@ -148,3 +148,135 @@ pub extern "C" fn dl_iterate_phdr(
 pub extern "C" fn __tls_get_addr(_ti: *mut u8) -> *mut u8 {
     core::ptr::null_mut()
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Constants match Linux/glibc --
+
+    #[test]
+    fn test_rtld_constants() {
+        assert_eq!(RTLD_LAZY, 1);
+        assert_eq!(RTLD_NOW, 2);
+        assert_eq!(RTLD_GLOBAL, 0x100);
+        assert_eq!(RTLD_LOCAL, 0);
+        assert!(RTLD_DEFAULT.is_null());
+    }
+
+    // -- dlopen always returns NULL --
+
+    #[test]
+    fn test_dlopen_returns_null() {
+        let handle = dlopen(b"libfoo.so\0".as_ptr(), RTLD_LAZY);
+        assert!(handle.is_null());
+    }
+
+    #[test]
+    fn test_dlopen_null_filename() {
+        // dlopen(NULL, ...) would normally return main program handle
+        let handle = dlopen(core::ptr::null(), RTLD_NOW);
+        assert!(handle.is_null());
+    }
+
+    // -- dlsym always returns NULL --
+
+    #[test]
+    fn test_dlsym_returns_null() {
+        let sym = dlsym(core::ptr::null_mut(), b"some_function\0".as_ptr());
+        assert!(sym.is_null());
+    }
+
+    // -- dlclose always returns -1 --
+
+    #[test]
+    fn test_dlclose_returns_error() {
+        assert_eq!(dlclose(core::ptr::null_mut()), -1);
+    }
+
+    // -- dlerror returns error after dl* call then clears --
+
+    #[test]
+    fn test_dlerror_after_dlopen() {
+        // Clear any prior error.
+        let _ = dlerror();
+
+        // Trigger an error.
+        let _ = dlopen(b"libfoo.so\0".as_ptr(), RTLD_LAZY);
+
+        let err = dlerror();
+        assert!(!err.is_null());
+        // Should contain "not supported"
+        let first_byte = unsafe { *err };
+        assert_eq!(first_byte, b'd'); // "dynamic linking not supported"
+    }
+
+    #[test]
+    fn test_dlerror_clears_after_read() {
+        // Trigger an error.
+        let _ = dlopen(b"libfoo.so\0".as_ptr(), RTLD_LAZY);
+
+        // First call should return the error.
+        let err1 = dlerror();
+        assert!(!err1.is_null());
+
+        // Second call should return null (error cleared).
+        let err2 = dlerror();
+        assert!(err2.is_null());
+    }
+
+    #[test]
+    fn test_dlerror_after_dlsym() {
+        let _ = dlerror(); // Clear
+        let _ = dlsym(core::ptr::null_mut(), b"func\0".as_ptr());
+        let err = dlerror();
+        assert!(!err.is_null());
+    }
+
+    #[test]
+    fn test_dlerror_after_dlclose() {
+        let _ = dlerror(); // Clear
+        let _ = dlclose(core::ptr::null_mut());
+        let err = dlerror();
+        assert!(!err.is_null());
+    }
+
+    // -- dladdr returns 0 (failure) --
+
+    #[test]
+    fn test_dladdr_returns_zero() {
+        let mut info = DlInfo {
+            dli_fname: core::ptr::null(),
+            dli_fbase: core::ptr::null_mut(),
+            dli_sname: core::ptr::null(),
+            dli_saddr: core::ptr::null_mut(),
+        };
+        assert_eq!(dladdr(core::ptr::null(), &raw mut info), 0);
+    }
+
+    // -- dl_iterate_phdr returns 0 --
+
+    #[test]
+    fn test_dl_iterate_phdr_returns_zero() {
+        assert_eq!(dl_iterate_phdr(None, core::ptr::null_mut()), 0);
+    }
+
+    // -- __tls_get_addr returns NULL --
+
+    #[test]
+    fn test_tls_get_addr_returns_null() {
+        assert!(__tls_get_addr(core::ptr::null_mut()).is_null());
+    }
+
+    // -- DlInfo layout --
+
+    #[test]
+    fn test_dlinfo_size() {
+        // 4 pointers on x86_64 = 32 bytes
+        assert_eq!(core::mem::size_of::<DlInfo>(), 32);
+    }
+}

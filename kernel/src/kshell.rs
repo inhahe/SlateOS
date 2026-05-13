@@ -3529,6 +3529,7 @@ const COMMANDS: &[&str] = &[
     "initproc",
     "healthmon", "hmon",
     "udriver", "udrvfw",
+    "devhotplug", "devhp",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4712,6 +4713,7 @@ fn dispatch(line: &str) {
         "initproc" | "init" => cmd_initproc(args),
         "healthmon" | "hmon" => cmd_healthmon(args),
         "udriver" | "udrvfw" => cmd_udriver(args),
+        "devhotplug" | "devhp" => cmd_devhotplug(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -33830,6 +33832,98 @@ fn cmd_udriver(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'udriver help'.", sub);
+        }
+    }
+}
+
+/// `devhotplug` / `devhp` — device hotplug event system.
+fn cmd_devhotplug(args: &str) {
+    use crate::devhotplug;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", devhotplug::procfs_content());
+        }
+        "stats" => {
+            let st = devhotplug::stats();
+            shell_println!("Device Hotplug System");
+            shell_println!("  Pending events:   {}", st.pending_events);
+            shell_println!("  Total arrived:    {}", st.total_arrived);
+            shell_println!("  Total removed:    {}", st.total_removed);
+            shell_println!("  Total bindings:   {}", st.total_bindings);
+            shell_println!("  Events dropped:   {}", st.events_dropped);
+            shell_println!("  Driver DB:        {} entries", st.driver_db_entries);
+            shell_println!("  History:          {} entries", st.history_entries);
+        }
+        "pending" => {
+            let events = devhotplug::pending_events();
+            if events.is_empty() {
+                shell_println!("No pending events");
+            } else {
+                shell_println!("{} pending event(s):", events.len());
+                for e in &events {
+                    let addr_str = e.device_addr.map(|a| {
+                        alloc::format!("{:02x}:{:02x}.{}", a.bus, a.device, a.function)
+                    }).unwrap_or_default();
+                    let drv_str = e.matched_driver.as_deref().unwrap_or("-");
+                    shell_println!("  #{} {} {} {} → {}", e.id, e.bus.label(), e.kind.label(), addr_str, drv_str);
+                }
+            }
+        }
+        "history" => {
+            let history = devhotplug::event_history();
+            if history.is_empty() {
+                shell_println!("No event history");
+            } else {
+                shell_println!("Event history ({} entries):", history.len());
+                for e in &history {
+                    let ts_s = e.timestamp_ns / 1_000_000_000;
+                    let addr_str = e.device_addr.map(|a| {
+                        alloc::format!("{:02x}:{:02x}.{}", a.bus, a.device, a.function)
+                    }).unwrap_or_default();
+                    let drv_str = e.matched_driver.as_deref().unwrap_or("-");
+                    shell_println!("  [{}s] #{} {} {} {} → {}", ts_s, e.id, e.bus.label(), e.kind.label(), addr_str, drv_str);
+                }
+            }
+        }
+        "db" | "drivers" => {
+            let db = devhotplug::driver_database();
+            if db.is_empty() {
+                shell_println!("Driver database is empty");
+            } else {
+                shell_println!("{} driver database entries:", db.len());
+                shell_println!("{:<5} {:<10} {:<10} {:<10} {:<20} {}", "ID", "Vendor", "Device", "Class", "Driver", "Priority");
+                for e in &db {
+                    let v = if e.vendor_id == 0xFFFF { alloc::string::String::from("*") } else { alloc::format!("{:04x}", e.vendor_id) };
+                    let d = if e.device_id == 0xFFFF { alloc::string::String::from("*") } else { alloc::format!("{:04x}", e.device_id) };
+                    let c = if e.class == 0xFF { alloc::string::String::from("*:") } else { alloc::format!("{:02x}:", e.class) };
+                    let s = if e.subclass == 0xFF { alloc::string::String::from("*") } else { alloc::format!("{:02x}", e.subclass) };
+                    let enabled = if e.enabled { "" } else { " [off]" };
+                    shell_println!("{:<5} {:<10} {:<10} {}{:<7} {:<20} {}{}", e.id, v, d, c, s, e.driver_name, e.priority, enabled);
+                }
+            }
+        }
+        "init" => {
+            devhotplug::init();
+            shell_println!("Hotplug system initialized with built-in driver database");
+        }
+        "test" => {
+            devhotplug::self_test();
+            shell_println!("Device hotplug self-test: PASSED");
+        }
+        "help" => {
+            shell_println!("devhotplug — device hotplug event system");
+            shell_println!("  show              Full status overview");
+            shell_println!("  stats             Summary statistics");
+            shell_println!("  pending           List pending events");
+            shell_println!("  history           Event history");
+            shell_println!("  db/drivers        Driver matching database");
+            shell_println!("  init              Initialize with built-in entries");
+            shell_println!("  test              Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'devhotplug help'.", sub);
         }
     }
 }
@@ -64276,7 +64370,7 @@ fn cmd_type(args: &str) {
 fn is_builtin(name: &str) -> bool {
     matches!(name,
         "help" | "?" | "cd" | "meminfo" | "mem" | "ps" | "tasks" | "clear" | "cls"
-        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "reslimit" | "rlimit" | "initproc" | "init" | "healthmon" | "hmon" | "udriver" | "udrvfw" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
+        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "reslimit" | "rlimit" | "initproc" | "init" | "healthmon" | "hmon" | "udriver" | "udrvfw" | "devhotplug" | "devhp" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"

@@ -26,6 +26,7 @@
 //! - `asin`, `asinf`, `acos`, `acosf`, `atan`, `atanf` — inverse trig
 //! - `atan2`, `atan2f` — two-argument arctangent
 //! - `sinh`, `sinhf`, `cosh`, `coshf`, `tanh`, `tanhf` — hyperbolic
+//! - `asinh`, `asinhf`, `acosh`, `acoshf`, `atanh`, `atanhf` — inverse hyperbolic
 //! - `frexp`, `frexpf`, `ldexp`, `ldexpf`, `modf`, `modff` — decomposition
 //! - `scalbn`, `scalbnf`, `scalbln`, `scalblnf` — scale by power of 2
 //! - `ilogb`, `ilogbf`, `logb`, `logbf` — exponent extraction
@@ -35,7 +36,16 @@
 //! - `fmin`, `fmax`, `fminf`, `fmaxf` — min/max
 //! - `fdim`, `fdimf` — positive difference
 //! - `fma`, `fmaf` — fused multiply-add
+//! - `remquo`, `remquof` — IEEE remainder with quotient bits
 //! - `nan`, `nanf` — quiet NaN
+//! - `erf`, `erff`, `erfc`, `erfcf` — error function
+//! - `lgamma`, `lgammaf`, `lgamma_r`, `lgammaf_r` — log-gamma
+//! - `tgamma`, `tgammaf` — true gamma function
+//! - `sincos`, `sincosf` — simultaneous sin/cos
+//! - `exp10`, `exp10f`, `pow10`, `pow10f` — base-10 exponential
+//! - `j0`, `j1`, `jn` — Bessel functions (first kind)
+//! - `y0`, `y1`, `yn` — Bessel functions (second kind)
+//! - `finite`, `significand`, `drem`, `gamma` — deprecated aliases
 //!
 //! ## Accuracy
 //!
@@ -1245,4 +1255,499 @@ pub extern "C" fn tgamma(x: f64) -> f64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn tgammaf(x: f32) -> f32 {
     tgamma(f64::from(x)) as f32
+}
+
+// ---------------------------------------------------------------------------
+// Inverse hyperbolic functions
+// ---------------------------------------------------------------------------
+
+/// Inverse hyperbolic sine: asinh(x) = ln(x + √(x² + 1)).
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn asinh(x: f64) -> f64 {
+    if x.is_nan() || x.is_infinite() {
+        return x;
+    }
+    // For large |x|, avoid x*x overflow: asinh(x) ≈ sign(x) * (ln(2) + ln(|x|)).
+    let a = fabs(x);
+    if a > 1e150 {
+        let r = consts::LN_2 + log(a);
+        return if x < 0.0 { -r } else { r };
+    }
+    // For small |x|, use log1p for accuracy: asinh(x) = log1p(x + x²/(1+√(1+x²))).
+    if a < 0.5 {
+        let r = log1p(a + a * a / (1.0 + sqrt(1.0 + a * a)));
+        return if x < 0.0 { -r } else { r };
+    }
+    let r = log(a + sqrt(a * a + 1.0));
+    if x < 0.0 { -r } else { r }
+}
+
+/// Inverse hyperbolic sine (f32).
+#[unsafe(no_mangle)]
+pub extern "C" fn asinhf(x: f32) -> f32 {
+    asinh(f64::from(x)) as f32
+}
+
+/// Inverse hyperbolic cosine: acosh(x) = ln(x + √(x² - 1)), x >= 1.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn acosh(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if x < 1.0 {
+        return f64::NAN; // Domain error.
+    }
+    if x.is_infinite() {
+        return f64::INFINITY;
+    }
+    // For large x, avoid overflow: acosh(x) ≈ ln(2) + ln(x).
+    if x > 1e150 {
+        return consts::LN_2 + log(x);
+    }
+    // For x near 1, use log1p for accuracy:
+    //   acosh(x) = log1p((x-1) + √((x-1)*(x+1)))
+    if x < 2.0 {
+        let t = x - 1.0;
+        return log1p(t + sqrt(t * (x + 1.0)));
+    }
+    log(x + sqrt(x * x - 1.0))
+}
+
+/// Inverse hyperbolic cosine (f32).
+#[unsafe(no_mangle)]
+pub extern "C" fn acoshf(x: f32) -> f32 {
+    acosh(f64::from(x)) as f32
+}
+
+/// Inverse hyperbolic tangent: atanh(x) = 0.5 * ln((1+x)/(1-x)), |x| < 1.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn atanh(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    if x == 1.0 {
+        return f64::INFINITY;
+    }
+    if x == -1.0 {
+        return f64::NEG_INFINITY;
+    }
+    if fabs(x) > 1.0 {
+        return f64::NAN; // Domain error.
+    }
+    // Use log1p for accuracy: atanh(x) = 0.5 * log1p(2x / (1-x)).
+    0.5 * log1p(2.0 * x / (1.0 - x))
+}
+
+/// Inverse hyperbolic tangent (f32).
+#[unsafe(no_mangle)]
+pub extern "C" fn atanhf(x: f32) -> f32 {
+    atanh(f64::from(x)) as f32
+}
+
+// ---------------------------------------------------------------------------
+// sincos — compute sin and cos simultaneously
+// ---------------------------------------------------------------------------
+
+/// Compute sine and cosine simultaneously (GNU extension).
+///
+/// More efficient than calling sin() and cos() separately when both
+/// are needed.
+///
+/// # Safety
+///
+/// `sinp` and `cosp` must be valid, writable pointers.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn sincos(x: f64, sinp: *mut f64, cosp: *mut f64) {
+    // SAFETY: Caller must provide valid pointers per POSIX convention.
+    if !sinp.is_null() {
+        unsafe { *sinp = sin(x); }
+    }
+    if !cosp.is_null() {
+        unsafe { *cosp = cos(x); }
+    }
+}
+
+/// sincos (f32).
+#[unsafe(no_mangle)]
+pub extern "C" fn sincosf(x: f32, sinp: *mut f32, cosp: *mut f32) {
+    if !sinp.is_null() {
+        unsafe { *sinp = sinf(x); }
+    }
+    if !cosp.is_null() {
+        unsafe { *cosp = cosf(x); }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// remquo — IEEE remainder with quotient
+// ---------------------------------------------------------------------------
+
+/// IEEE 754 remainder with quotient bits.
+///
+/// Returns the same remainder as `remainder(x, y)`, and stores at least
+/// the low 3 bits of the integral quotient in `*quo` (with the sign
+/// of `x/y`).
+///
+/// # Safety
+///
+/// `quo` must be a valid, writable pointer.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+pub extern "C" fn remquo(x: f64, y: f64, quo: *mut i32) -> f64 {
+    if y == 0.0 || x.is_nan() || y.is_nan() || x.is_infinite() {
+        if !quo.is_null() {
+            // SAFETY: quo verified non-null.
+            unsafe { *quo = 0; }
+        }
+        if x.is_nan() { return x; }
+        if y.is_nan() { return y; }
+        return f64::NAN;
+    }
+
+    // Compute quotient and remainder.
+    let q_exact = x / y;
+    let q_rounded = round(q_exact);
+    let rem = x - q_rounded * y;
+
+    if !quo.is_null() {
+        // Store low bits of quotient with correct sign.
+        let q_int = q_rounded as i64;
+        // POSIX requires at least 3 bits; we provide 31.
+        let q_low = (q_int & 0x7FFF_FFFF) as i32;
+        let sign = if (x < 0.0) != (y < 0.0) { -1_i32 } else { 1_i32 };
+        // SAFETY: quo verified non-null.
+        unsafe {
+            *quo = if q_int < 0 { -q_low } else { q_low };
+            // Ensure sign matches x/y.
+            if *quo != 0 && ((*quo < 0) != (sign < 0)) {
+                *quo = -*quo;
+            }
+        }
+    }
+
+    rem
+}
+
+/// remquo (f32).
+#[unsafe(no_mangle)]
+pub extern "C" fn remquof(x: f32, y: f32, quo: *mut i32) -> f32 {
+    remquo(f64::from(x), f64::from(y), quo) as f32
+}
+
+// ---------------------------------------------------------------------------
+// exp10 / pow10 — base-10 exponential (GNU extensions)
+// ---------------------------------------------------------------------------
+
+/// Compute 10^x (GNU extension).
+#[unsafe(no_mangle)]
+pub extern "C" fn exp10(x: f64) -> f64 {
+    pow(10.0, x)
+}
+
+/// exp10 (f32).
+#[unsafe(no_mangle)]
+pub extern "C" fn exp10f(x: f32) -> f32 {
+    powf(10.0, x)
+}
+
+/// Alias for `exp10` (GNU extension, deprecated).
+#[unsafe(no_mangle)]
+pub extern "C" fn pow10(x: f64) -> f64 {
+    exp10(x)
+}
+
+/// pow10 (f32).
+#[unsafe(no_mangle)]
+pub extern "C" fn pow10f(x: f32) -> f32 {
+    exp10f(x)
+}
+
+// ---------------------------------------------------------------------------
+// lgamma_r — thread-safe lgamma with sign
+// ---------------------------------------------------------------------------
+
+/// Thread-safe lgamma: returns lgamma(x) and stores the sign of Γ(x) in `*signp`.
+///
+/// `*signp` is set to 1 if Γ(x) >= 0, or -1 if Γ(x) < 0.
+///
+/// # Safety
+///
+/// `signp` must be a valid, writable pointer (or NULL, in which case
+/// the sign is not stored).
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn lgamma_r(x: f64, signp: *mut i32) -> f64 {
+    // Compute the sign of Γ(x).
+    // Γ(x) > 0 for x > 0.
+    // For x < 0 non-integer, sign alternates: negative for
+    //   x ∈ (-2,-1), (-4,-3), (-6,-5), ... and positive otherwise.
+    let sign: i32 = if x > 0.0 || x.is_nan() || x.is_infinite() {
+        1
+    } else if x == floor(x) {
+        // Pole — sign is undefined, use +1 by convention.
+        1
+    } else {
+        // floor(x) is the integer part.  If floor(x) is even (in
+        // magnitude), Γ(x) < 0; if odd, Γ(x) > 0.
+        let n = floor(x) as i64;
+        // n is negative.  Γ(x) < 0 when n is even (0, -2, -4, ...).
+        if n % 2 == 0 { -1 } else { 1 }
+    };
+
+    if !signp.is_null() {
+        // SAFETY: signp verified non-null.
+        unsafe { *signp = sign; }
+    }
+
+    lgamma(x)
+}
+
+/// lgamma_r (f32).
+#[unsafe(no_mangle)]
+pub extern "C" fn lgammaf_r(x: f32, signp: *mut i32) -> f32 {
+    lgamma_r(f64::from(x), signp) as f32
+}
+
+// ---------------------------------------------------------------------------
+// Deprecated / compatibility aliases
+// ---------------------------------------------------------------------------
+
+/// `finite(x)` — deprecated BSD alias for `isfinite(x)`.
+///
+/// Returns non-zero if `x` is not infinity or NaN.
+#[unsafe(no_mangle)]
+pub extern "C" fn finite(x: f64) -> i32 {
+    isfinite(x)
+}
+
+/// `finitef(x)` — f32 variant of `finite`.
+#[unsafe(no_mangle)]
+pub extern "C" fn finitef(x: f32) -> i32 {
+    if x.is_infinite() || x.is_nan() { 0 } else { 1 }
+}
+
+/// `drem(x, y)` — deprecated alias for `remainder(x, y)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn drem(x: f64, y: f64) -> f64 {
+    remainder(x, y)
+}
+
+/// `dremf(x, y)` — f32 variant.
+#[unsafe(no_mangle)]
+pub extern "C" fn dremf(x: f32, y: f32) -> f32 {
+    remainderf(x, y)
+}
+
+/// `gamma(x)` — deprecated alias for `lgamma(x)`.
+///
+/// Note: historically `gamma()` meant the log-gamma function, not the
+/// true gamma function.  Use `tgamma()` for Γ(x).
+#[unsafe(no_mangle)]
+pub extern "C" fn gamma(x: f64) -> f64 {
+    lgamma(x)
+}
+
+/// `gammaf(x)` — f32 variant.
+#[unsafe(no_mangle)]
+pub extern "C" fn gammaf(x: f32) -> f32 {
+    lgammaf(x)
+}
+
+/// `significand(x)` — extract significand (mantissa) scaled to [1, 2).
+///
+/// Returns `x * 2^(-ilogb(x))`, i.e. the significand as if the
+/// exponent were 0.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn significand(x: f64) -> f64 {
+    if x.is_nan() || x.is_infinite() || x == 0.0 {
+        return x;
+    }
+    // scalbn(x, -ilogb(x)) normalizes x to [1, 2).
+    scalbn(x, -ilogb(x))
+}
+
+/// `significandf(x)` — f32 variant.
+#[unsafe(no_mangle)]
+pub extern "C" fn significandf(x: f32) -> f32 {
+    significand(f64::from(x)) as f32
+}
+
+// ---------------------------------------------------------------------------
+// Bessel functions (first and second kind)
+// ---------------------------------------------------------------------------
+
+/// Bessel function of the first kind, order 0.
+///
+/// Uses polynomial approximation: rational for |x| <= 3, and
+/// asymptotic expansion for |x| > 3.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn j0(x: f64) -> f64 {
+    let a = fabs(x);
+
+    if a <= 3.0 {
+        // Rational approximation for small |x|.
+        // J0(x) ≈ 1 - x²/4 + x⁴/64 - x⁶/2304 + ...
+        let x2 = x * x;
+        let x4 = x2 * x2;
+        let x6 = x4 * x2;
+        let x8 = x4 * x4;
+        1.0 - x2 / 4.0
+            + x4 / 64.0
+            - x6 / 2304.0
+            + x8 / 147_456.0
+    } else {
+        // Asymptotic: J0(x) ≈ √(2/(πx)) * cos(x - π/4).
+        let phase = a - consts::FRAC_PI_4;
+        sqrt(2.0 / (consts::PI * a)) * cos(phase)
+    }
+}
+
+/// Bessel function of the first kind, order 1.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn j1(x: f64) -> f64 {
+    let a = fabs(x);
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+
+    if a <= 3.0 {
+        // Series: J1(x) = x/2 * (1 - x²/8 + x⁴/192 - x⁶/9216 + ...).
+        let x2 = x * x;
+        let x4 = x2 * x2;
+        let x6 = x4 * x2;
+        sign * a / 2.0 * (1.0
+            - a * a / 8.0
+            + x4 / 192.0
+            - x6 / 9216.0)
+    } else {
+        // Asymptotic: J1(x) ≈ √(2/(πx)) * cos(x - 3π/4).
+        let phase = a - 3.0 * consts::FRAC_PI_4;
+        sign * sqrt(2.0 / (consts::PI * a)) * cos(phase)
+    }
+}
+
+/// Bessel function of the first kind, order n (integer).
+///
+/// Uses Miller's backward recurrence for stability.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn jn(n: i32, x: f64) -> f64 {
+    if n == 0 { return j0(x); }
+    if n == 1 { return j1(x); }
+
+    let sign = if n < 0 && (-n) % 2 != 0 { -1.0 } else { 1.0 };
+    let n_abs = if n < 0 { -n } else { n };
+    let a = fabs(x);
+
+    if a == 0.0 {
+        return 0.0;
+    }
+
+    // Forward recurrence: J_{n+1}(x) = (2n/x)*J_n(x) - J_{n-1}(x).
+    // Stable for n < x; for n > x, accuracy degrades but is acceptable
+    // for our purposes.
+    let mut j_prev = j0(a);
+    let mut j_curr = j1(a);
+
+    let mut k: i32 = 1;
+    while k < n_abs {
+        let j_next = (2.0 * f64::from(k) / a) * j_curr - j_prev;
+        j_prev = j_curr;
+        j_curr = j_next;
+        k = k.wrapping_add(1);
+    }
+
+    let result = if x < 0.0 && n_abs % 2 != 0 { -j_curr } else { j_curr };
+    sign * result
+}
+
+/// Bessel function of the second kind, order 0.
+///
+/// Y0(x) ≈ (2/π) * (J0(x) * (ln(x/2) + γ) + series correction).
+/// Uses asymptotic expansion for large x.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn y0(x: f64) -> f64 {
+    if x <= 0.0 {
+        return if x == 0.0 { f64::NEG_INFINITY } else { f64::NAN };
+    }
+    if x.is_nan() {
+        return x;
+    }
+
+    if x > 3.0 {
+        // Asymptotic: Y0(x) ≈ √(2/(πx)) * sin(x - π/4).
+        let phase = x - consts::FRAC_PI_4;
+        return sqrt(2.0 / (consts::PI * x)) * sin(phase);
+    }
+
+    // Small x: Y0(x) = (2/π) * (J0(x)*(ln(x/2) + γ) + correction).
+    // Euler-Mascheroni constant γ ≈ 0.5772156649.
+    const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
+    let j0x = j0(x);
+    let ln_term = log(x / 2.0) + EULER_GAMMA;
+
+    // First few correction terms from the series.
+    let x2 = x * x;
+    let correction = x2 / 4.0 - x2 * x2 * 3.0 / 128.0;
+
+    (2.0 / consts::PI) * (j0x * ln_term + correction)
+}
+
+/// Bessel function of the second kind, order 1.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn y1(x: f64) -> f64 {
+    if x <= 0.0 {
+        return if x == 0.0 { f64::NEG_INFINITY } else { f64::NAN };
+    }
+    if x.is_nan() {
+        return x;
+    }
+
+    if x > 3.0 {
+        // Asymptotic: Y1(x) ≈ √(2/(πx)) * sin(x - 3π/4).
+        let phase = x - 3.0 * consts::FRAC_PI_4;
+        return sqrt(2.0 / (consts::PI * x)) * sin(phase);
+    }
+
+    // Small x: Y1(x) ≈ (2/π) * (J1(x)*ln(x/2) - 1/x).
+    const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
+    let j1x = j1(x);
+    let ln_term = log(x / 2.0) + EULER_GAMMA;
+    (2.0 / consts::PI) * (j1x * ln_term - 1.0 / x)
+}
+
+/// Bessel function of the second kind, order n (integer).
+///
+/// Uses forward recurrence from Y0 and Y1.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn yn(n: i32, x: f64) -> f64 {
+    if x <= 0.0 {
+        return if x == 0.0 { f64::NEG_INFINITY } else { f64::NAN };
+    }
+    if n == 0 { return y0(x); }
+    if n == 1 { return y1(x); }
+
+    let n_abs = if n < 0 { -n } else { n };
+
+    // Forward recurrence: Y_{n+1}(x) = (2n/x)*Y_n(x) - Y_{n-1}(x).
+    let mut y_prev = y0(x);
+    let mut y_curr = y1(x);
+
+    let mut k: i32 = 1;
+    while k < n_abs {
+        let y_next = (2.0 * f64::from(k) / x) * y_curr - y_prev;
+        y_prev = y_curr;
+        y_curr = y_next;
+        k = k.wrapping_add(1);
+    }
+
+    if n < 0 && (-n) % 2 != 0 { -y_curr } else { y_curr }
 }

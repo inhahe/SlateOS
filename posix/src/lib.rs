@@ -59,13 +59,15 @@
 //! - **User/Group**: `getpwnam`, `getpwuid`, `getgrnam`, `getgrgid`,
 //!   `getlogin`, password/group enumeration
 //! - **Math**: `fabs`, `floor`, `ceil`, `round`, `trunc`, `fmod`,
-//!   `sqrt`, `cbrt`, `hypot`, `pow`, `exp`/`exp2`/`expm1`,
-//!   `log`/`log2`/`log10`/`log1p`, `sin`, `cos`, `tan`,
+//!   `sqrt`, `cbrt`, `hypot`, `pow`, `exp`/`exp2`/`expm1`/`exp10`,
+//!   `log`/`log2`/`log10`/`log1p`, `sin`, `cos`, `tan`, `sincos`,
 //!   `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`,
+//!   `asinh`, `acosh`, `atanh`,
 //!   `frexp`, `ldexp`, `modf`, `scalbn`, `ilogb`, `logb`,
 //!   `isnan`, `isinf`, `isfinite`, `copysign`, `fmin`, `fmax`,
-//!   `fdim`, `fma`, `remainder`, `rint`, `nearbyint`, `nextafter`,
-//!   `erf`, `erfc`, `lgamma`, `tgamma`
+//!   `fdim`, `fma`, `remainder`, `remquo`, `rint`, `nearbyint`,
+//!   `nextafter`, `erf`, `erfc`, `lgamma`, `lgamma_r`, `tgamma`,
+//!   `j0`, `j1`, `jn`, `y0`, `y1`, `yn` (Bessel)
 //!   (and `f32` variants)
 //! - **Wide Characters** (full UTF-8): `mblen`, `mbtowc`, `wctomb`,
 //!   `mbstowcs`, `wcstombs`, `btowc`, `wctob`, `mbsinit`, `mbrtowc`,

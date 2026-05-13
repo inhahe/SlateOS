@@ -244,25 +244,34 @@ global_asm!(
     // ---------------------------------------------------------------
     // void _start(void)  — process entry point
     //
-    // Called by the kernel via IRETQ with no arguments.
-    // Calls main(0, NULL, NULL), then exit(retval).
+    // Called by the kernel via IRETQ with no arguments on the stack.
+    // Calls __libc_start_main(main, 0, NULL, ...) which initializes
+    // the C runtime (environ, program name, etc.) and calls main.
+    //
+    // When the kernel adds argument passing, this should extract
+    // argc/argv from the stack per the SysV x86_64 ABI:
+    //   [rsp]     = argc
+    //   [rsp+8]   = argv[0], ...
+    //   argv terminated by NULL, then envp follows.
     // ---------------------------------------------------------------
     ".weak _start",
     ".type _start, @function",
     "_start:",
-    // Align stack to 16 bytes (should already be, but be safe).
+    // Align stack to 16 bytes (ABI requirement for call).
     "    and rsp, -16",
     // Clear frame pointer for backtraces.
     "    xor ebp, ebp",
-    // Call main(argc=0, argv=NULL, envp=NULL).
-    "    xor edi, edi",          // argc = 0
-    "    xor esi, esi",          // argv = NULL
-    "    xor edx, edx",          // envp = NULL
-    "    call main",
-    // main returned in EAX — pass to exit.
-    "    mov edi, eax",
-    "    call exit",
-    // exit should not return, but if it does, halt.
+    // Call __libc_start_main(main, argc, argv, init, fini, rtld_fini, stack_end).
+    // SysV x86_64: rdi, rsi, rdx, rcx, r8, r9, [stack]
+    "    lea rdi, [rip + main]", // 1st arg: pointer to main
+    "    xor esi, esi",          // 2nd arg: argc = 0
+    "    xor edx, edx",          // 3rd arg: argv = NULL
+    "    xor ecx, ecx",          // 4th arg: init = 0 (unused)
+    "    xor r8d, r8d",          // 5th arg: fini = 0 (unused)
+    "    xor r9d, r9d",          // 6th arg: rtld_fini = 0 (unused)
+    "    push 0",                // 7th arg: stack_end = NULL (on stack)
+    "    call __libc_start_main",
+    // __libc_start_main should not return, but if it does, halt.
     "    ud2",
 );
 

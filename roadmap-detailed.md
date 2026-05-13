@@ -604,6 +604,9 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
 
 - [x] Enough POSIX libc for: gcc, coreutils, bash, CPython (extensive coverage: stdio, string, stdlib, time, locale, socket, fcntl, stat, mmap, spawn, environ, pthread stubs, and more)
 - [x] Translate POSIX calls to native syscalls (fd table maps POSIX fds to kernel handles by type; read/write/close dispatch by HandleKind)
+- [x] Userspace memory allocator (malloc/free/calloc/realloc/posix_memalign/aligned_alloc/valloc/memalign)
+  - Current design: per-allocation mmap — every malloc() gets its own mmap region with a 16-byte header (mmap_base + total_size). free() calls munmap(). This is correct, safe, and handles all alignment requirements, but every allocation is a syscall. Suitable for bootstrapping and programs with moderate allocation rates.
+  - Future upgrade path: replace with arena-based allocator (dlmalloc or jemalloc port) that batches small allocations into larger mmap'd arenas. The current design exercises the mmap/munmap syscall path well and provides a correct baseline to validate against.
 - [ ] /proc, /sys equivalents (for programs that need them) — blocked on kernel support
 - [ ] POSIX signals → translate to native IPC messages — blocked on kernel-ipc zone
 - [x] POSIX file descriptors → translate to native handles (256-fd table with per-fd flags, status flags, handle refcounting for dup)
@@ -1002,6 +1005,16 @@ _Multi-format clipboard: source puts full rich + plain text, OS auto-generates s
 - [ ] Audio mixing (per-app volume control)
 - [ ] System notification sounds (set of sounds for apps to use)
 - [ ] Sound history (which apps played/are playing sound, link to app settings)
+- [ ] ASIO driver — actual low-latency audio I/O for professional/music production use
+  - [ ] Direct hardware access path bypassing the mixer when an app holds exclusive ASIO mode
+  - [ ] Target: ≤ 3ms round-trip latency at 48 kHz (64-sample buffer), competitive with Windows ASIO drivers
+  - [ ] Per-device ASIO buffer size configuration (32/64/128/256/512/1024 samples)
+  - [ ] Multi-channel support (stereo minimum, 8+ channels for audio interfaces)
+  - [ ] Sample rate switching (44.1/48/88.2/96/176.4/192 kHz)
+  - [ ] Clock source selection (internal, S/PDIF, ADAT, word clock)
+  - [ ] ASIO SDK-compatible C API so existing DAW software (Reaper, Ardour, etc.) can use it with minimal porting
+  - [ ] Fallback: when no app holds exclusive ASIO mode, device is available to the normal mixer
+  - [ ] Real-time thread priority for ASIO callback threads (deadline scheduler integration)
 
 ---
 

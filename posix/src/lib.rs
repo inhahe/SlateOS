@@ -11,15 +11,17 @@
 //! function signatures to our native syscalls with minimal overhead:
 //!
 //! - **File I/O**: `open`, `close`, `read`, `write`, `lseek`, `stat`,
-//!   `fstat`, `unlink`, `mkdir`, `rmdir`, `rename`, `dup`, `dup2`,
-//!   `dup3`, `access`, `chmod`, `chown`, `umask`, `truncate`,
-//!   `ftruncate`, `fsync`, `fdatasync`, `link`, `symlink`, `readlink`,
-//!   `utimes`, `futimes`, `utimensat`, `futimens`, `sendfile`
+//!   `fstat`, `lstat`, `fstatat`, `creat`, `unlink`, `mkdir`, `rmdir`,
+//!   `rename`, `dup`, `dup2`, `dup3`, `access`, `chmod`, `fchmod`,
+//!   `chown`, `fchown`, `lchown`, `umask`, `truncate`, `ftruncate`,
+//!   `fsync`, `fdatasync`, `link`, `symlink`, `readlink`, `utimes`,
+//!   `futimes`, `utimensat`, `futimens`, `sendfile`, `mknod`, `mkfifo`
 //! - **Sockets**: `socket`, `connect`, `bind`, `listen`, `accept`,
 //!   `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`,
 //!   `getsockopt`, `getpeername`, `getsockname`, `getaddrinfo`,
-//!   `freeaddrinfo`, `getnameinfo`, `gethostbyname`, `htons`, `htonl`,
-//!   `inet_addr`, `inet_ntoa`, `inet_aton`, `inet_pton`, `inet_ntop`
+//!   `freeaddrinfo`, `getnameinfo`, `gethostbyname`, `gethostbyname2`,
+//!   `htons`, `htonl`, `inet_addr`, `inet_ntoa`, `inet_aton`,
+//!   `inet_pton`, `inet_ntop`
 //! - **I/O Multiplexing**: `poll`, `select`, `pselect`
 //! - **Terminal**: `ioctl` (TIOCGWINSZ, TCGETS, FIONBIO, etc.),
 //!   `isatty`, `ttyname`, `tcgetattr`, `tcsetattr`, `cfmakeraw`,
@@ -29,7 +31,9 @@
 //! - **Process**: `_exit`, `getpid`, `getppid`, `posix_spawn`,
 //!   `posix_spawnp`, `execve`, `execvp`, `execv`, `vfork`, `waitpid`,
 //!   `sleep`, `nanosleep`, `getpgrp`, `setpgid`, `setsid`, `getsid`
-//! - **Memory**: `mmap`, `munmap`, `mprotect`
+//! - **Memory**: `mmap`, `munmap`, `mprotect`, `mmap64`, `mremap`,
+//!   `mlock`/`munlock`/`mlockall`/`munlockall`, `msync`, `madvise`,
+//!   `posix_madvise`, `shm_open`/`shm_unlink`, `memfd_create`
 //! - **Pipes**: `pipe`, `pipe2`
 //! - **Signals**: Stub constants and handlers (partial), `sigwait`,
 //!   `sigtimedwait`, `sigqueue`, `sigaltstack`, `siginterrupt`
@@ -40,8 +44,11 @@
 //!   `setjmp`/`longjmp`/`sigsetjmp`/`siglongjmp`, `qsort`, `bsearch`,
 //!   `atoi`/`atol`/`atoll`/`strtol`/`strtoul`,
 //!   `random`/`srandom`/`initstate`/`setstate`,
+//!   `drand48`/`lrand48`/`mrand48`/`srand48`/`seed48`/`nrand48`/`erand48`/`jrand48`,
+//!   `mktemp`,
 //!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification,
-//!   `__ctype_b_loc`/`__ctype_tolower_loc`/`__ctype_toupper_loc`
+//!   `__ctype_b_loc`/`__ctype_tolower_loc`/`__ctype_toupper_loc`,
+//!   `__ctype_get_mb_cur_max`
 //! - **Formatted Output**: `printf`, `fprintf`, `dprintf`, `sprintf`,
 //!   `snprintf`, `asprintf` (via assembly trampoline for C variadic capture)
 //! - **Formatted Input**: `sscanf`, `scanf`, `fscanf` (string/stdin/stream
@@ -51,9 +58,11 @@
 //!   (pathname expansion), `wordexp`/`wordfree` (word expansion)
 //! - **Character Encoding**: `iconv_open`, `iconv`, `iconv_close`
 //!   (UTF-8/ASCII conversions)
-//! - **Resource Limits**: `getrlimit`, `setrlimit`, `getrusage`
+//! - **Resource Limits**: `getrlimit`, `setrlimit`, `getrusage`,
+//!   `prlimit`/`prlimit64`
 //! - **Timers**: `timer_create`, `timer_settime`, `timer_gettime`,
-//!   `timer_delete`, `timer_getoverrun` (stubs — no signal delivery)
+//!   `timer_delete`, `timer_getoverrun` (stubs — no signal delivery),
+//!   `setitimer`/`getitimer`
 //! - **System**: `uname`
 //! - **Logging**: `openlog`, `syslog`, `closelog`, `setlogmask`
 //! - **User/Group**: `getpwnam`, `getpwuid`, `getgrnam`, `getgrgid`,
@@ -93,7 +102,28 @@
 //!   `flockfile`/`funlockfile`/`ftrylockfile`, `if_nametoindex`,
 //!   `if_indextoname`, `ppoll`, `putenv`, `strcasestr`,
 //!   `explicit_bzero`, `strtoimax`/`strtoumax`, `getrandom`,
-//!   `getentropy`, `clock_nanosleep`, `clock_settime`
+//!   `getentropy`, `clock_nanosleep`, `clock_settime`,
+//!   `fchdir`, `getdomainname`/`setdomainname`, `getdtablesize`
+//! - **Dynamic Linking** (stubs): `dlopen`, `dlsym`, `dlclose`, `dlerror`,
+//!   `dladdr`, `dl_iterate_phdr`, `__tls_get_addr`
+//! - **Directories**: `opendir`, `closedir`, `readdir`, `rewinddir`,
+//!   `seekdir`, `telldir`, `scandir`, `alphasort`, `versionsort`,
+//!   `readdir_r`, `fdopendir`, `dirfd`
+//! - **File Mode Testing**: `S_ISREG`, `S_ISDIR`, `S_ISLNK`, `S_ISCHR`,
+//!   `S_ISBLK`, `S_ISFIFO`, `S_ISSOCK`, `mknod`/`mknodat`,
+//!   `mkfifo`/`mkfifoat`
+//! - **LP64 Aliases**: `open64`, `lseek64`, `stat64`, `fstat64`, `lstat64`,
+//!   `fopen64`, `freopen64`, `mmap64`, `prlimit64`
+//! - **glibc Compat**: `__xstat`/`__fxstat`/`__lxstat` (and `*64` variants),
+//!   `__libc_malloc`/`__libc_free`/`__libc_realloc`/`__libc_calloc`/`__libc_memalign`,
+//!   `__isoc99_sscanf`/`__isoc99_scanf`/`__isoc99_fscanf`,
+//!   `__libc_current_sigrtmin`/`__libc_current_sigrtmax`,
+//!   `_IO_stdin_`/`_IO_stdout_`/`_IO_stderr_`,
+//!   `gnu_get_libc_version`/`gnu_get_libc_release`, `getauxval`
+//! - **C++ ABI**: `__cxa_guard_acquire`/`__cxa_guard_release`/`__cxa_guard_abort`,
+//!   `__cxa_atexit`, `__cxa_thread_atexit_impl`, `__cxa_pure_virtual`,
+//!   `__cxa_allocate_exception`/`__cxa_throw`/`__cxa_begin_catch`/`__cxa_end_catch`,
+//!   `__gxx_personality_v0`, `_Unwind_Resume`, `__stack_chk_fail`
 //!
 //! ## Error Handling
 //!

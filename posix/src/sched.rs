@@ -191,3 +191,27 @@ pub extern "C" fn sched_setaffinity(
 ) -> i32 {
     0
 }
+
+/// Get the CPU number on which the calling thread is running.
+///
+/// Stub: always returns 0 (single-CPU assumption until SMP is
+/// implemented in the kernel).
+#[unsafe(no_mangle)]
+pub extern "C" fn sched_getcpu() -> i32 {
+    0
+}
+
+/// Get CPU and NUMA node (Linux vDSO interface).
+///
+/// Stub: returns 0 for both CPU and node.
+#[unsafe(no_mangle)]
+pub extern "C" fn getcpu(cpu: *mut u32, node: *mut u32) -> i32 {
+    if !cpu.is_null() {
+        // SAFETY: Caller guarantees pointer validity.
+        unsafe { *cpu = 0; }
+    }
+    if !node.is_null() {
+        unsafe { *node = 0; }
+    }
+    0
+}

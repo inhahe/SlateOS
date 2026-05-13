@@ -1140,6 +1140,104 @@ pub extern "C" fn abort() -> ! {
 }
 
 // ---------------------------------------------------------------------------
+// prctl — process control (Linux)
+// ---------------------------------------------------------------------------
+
+/// prctl options.
+pub const PR_SET_NAME: i32 = 15;
+/// Get process name.
+pub const PR_GET_NAME: i32 = 16;
+/// Set "no new privileges" flag.
+pub const PR_SET_NO_NEW_PRIVS: i32 = 38;
+/// Get "no new privileges" flag.
+pub const PR_GET_NO_NEW_PRIVS: i32 = 39;
+/// Set seccomp mode.
+pub const PR_SET_SECCOMP: i32 = 22;
+/// Get seccomp mode.
+pub const PR_GET_SECCOMP: i32 = 21;
+
+/// Process control operations (Linux).
+///
+/// Stub: `PR_SET_NAME` and `PR_SET_NO_NEW_PRIVS` succeed silently.
+/// Other operations return -1 with EINVAL.
+#[unsafe(no_mangle)]
+pub extern "C" fn prctl(option: i32, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64) -> i32 {
+    match option {
+        PR_SET_NAME | PR_SET_NO_NEW_PRIVS => 0,
+        PR_GET_NO_NEW_PRIVS => 0, // Report "not set".
+        PR_GET_NAME => {
+            // Would need to write a name into arg2 as a buffer.
+            // Return empty name for now.
+            if _arg2 != 0 {
+                // SAFETY: Caller provides valid buffer per prctl contract.
+                unsafe { *((_arg2) as *mut u8) = 0; }
+            }
+            0
+        }
+        _ => {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            -1
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Linux misc: setresuid/setresgid/getresuid/getresgid
+// ---------------------------------------------------------------------------
+
+/// Set real, effective, and saved set-user-ID.
+///
+/// Stub: succeeds silently (single-user system).
+#[unsafe(no_mangle)]
+pub extern "C" fn setresuid(_ruid: UidT, _euid: UidT, _suid: UidT) -> i32 {
+    0
+}
+
+/// Set real, effective, and saved set-group-ID.
+///
+/// Stub: succeeds silently.
+#[unsafe(no_mangle)]
+pub extern "C" fn setresgid(_rgid: GidT, _egid: GidT, _sgid: GidT) -> i32 {
+    0
+}
+
+/// Get real, effective, and saved set-user-ID.
+///
+/// Stub: returns 0 (root) for all three.
+#[unsafe(no_mangle)]
+pub extern "C" fn getresuid(ruid: *mut UidT, euid: *mut UidT, suid: *mut UidT) -> i32 {
+    if ruid.is_null() || euid.is_null() || suid.is_null() {
+        crate::errno::set_errno(crate::errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: All pointers verified non-null.
+    unsafe {
+        *ruid = 0;
+        *euid = 0;
+        *suid = 0;
+    }
+    0
+}
+
+/// Get real, effective, and saved set-group-ID.
+///
+/// Stub: returns 0 (root) for all three.
+#[unsafe(no_mangle)]
+pub extern "C" fn getresgid(rgid: *mut GidT, egid: *mut GidT, sgid: *mut GidT) -> i32 {
+    if rgid.is_null() || egid.is_null() || sgid.is_null() {
+        crate::errno::set_errno(crate::errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: All pointers verified non-null.
+    unsafe {
+        *rgid = 0;
+        *egid = 0;
+        *sgid = 0;
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

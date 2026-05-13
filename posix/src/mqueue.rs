@@ -101,3 +101,42 @@ pub extern "C" fn mq_setattr(
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
+
+/// Send a message with a timeout.
+///
+/// Stub: returns -1 with ENOSYS.
+#[unsafe(no_mangle)]
+pub extern "C" fn mq_timedsend(
+    _mqdes: MqdT,
+    _msg_ptr: *const u8,
+    _msg_len: usize,
+    _msg_prio: u32,
+    _abs_timeout: *const crate::stat::Timespec,
+) -> i32 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}
+
+/// Receive a message with a timeout.
+///
+/// Stub: returns -1 with ENOSYS.
+#[unsafe(no_mangle)]
+pub extern "C" fn mq_timedreceive(
+    _mqdes: MqdT,
+    _msg_ptr: *mut u8,
+    _msg_len: usize,
+    _msg_prio: *mut u32,
+    _abs_timeout: *const crate::stat::Timespec,
+) -> isize {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}
+
+/// Request notification when a message arrives.
+///
+/// Stub: returns -1 with ENOSYS.
+#[unsafe(no_mangle)]
+pub extern "C" fn mq_notify(_mqdes: MqdT, _sevp: *const u8) -> i32 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}

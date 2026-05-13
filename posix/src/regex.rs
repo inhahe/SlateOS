@@ -6,15 +6,16 @@
 //! ## Supported Features
 //!
 //! - **Basic Regular Expressions (BRE)**: `.`, `*`, `^`, `$`, `[...]`,
-//!   `[^...]`, `\(...\)`, `\{m,n\}`, character ranges.
+//!   `[^...]`, `\(...\)`, character ranges.
 //! - **Extended Regular Expressions (ERE)** via `REG_EXTENDED`:
-//!   `+`, `?`, `|`, `(...)`, `{m,n}` (unescaped).
+//!   `+`, `?`, `|`, `(...)` (unescaped).
 //!
 //! ## Limitations
 //!
 //! - Maximum pattern length: 1024 bytes.
 //! - Maximum compiled instructions: 512.
 //! - Maximum 9 sub-expressions (capturing groups).
+//! - No counted repetition (`\{m,n\}` in BRE, `{m,n}` in ERE).
 //! - No backreferences (`\1`-`\9`) in the pattern — only in
 //!   the match result (`pmatch[1..9]`).
 //! - POSIX character classes (`[:alpha:]`, `[:digit:]`, etc.) supported
@@ -909,7 +910,6 @@ struct MatchCtx<'a> {
     string_ptr: *const u8,
     slen: usize,
     eflags: i32,
-    start: usize,
 }
 
 /// Try to match starting at position `start` in `string`.
@@ -921,7 +921,7 @@ fn try_match(
     eflags: i32,
     groups: &mut [RegMatch; MAX_GROUPS],
 ) -> bool {
-    let ctx = MatchCtx { prog, string_ptr, slen, eflags, start };
+    let ctx = MatchCtx { prog, string_ptr, slen, eflags };
     exec_recursive(&ctx, start, 0, groups)
 }
 
@@ -1073,7 +1073,11 @@ fn match_class(
 
 /// Match beginning of line anchor (^).
 fn match_bol(ctx: &MatchCtx<'_>, cur_sp: usize) -> bool {
-    let at_bol = cur_sp == ctx.start && ctx.eflags & REG_NOTBOL == 0;
+    // `^` anchors to the start of the string (position 0), NOT the
+    // start of the current match attempt.  The previous code used
+    // `cur_sp == ctx.start` which made `^` match at every position
+    // that regexec tried — effectively making `^` a no-op.
+    let at_bol = cur_sp == 0 && ctx.eflags & REG_NOTBOL == 0;
     let at_newline = ctx.prog.flags & REG_NEWLINE != 0
         && cur_sp > 0
         && unsafe { *ctx.string_ptr.add(cur_sp.wrapping_sub(1)) } == b'\n';

@@ -1,12 +1,14 @@
-//! POSIX filesystem statistics.
+//! POSIX and Linux filesystem statistics.
 //!
-//! Implements `statvfs` and `fstatvfs` stubs.
+//! Implements `statvfs`, `fstatvfs` (POSIX) and `statfs`, `fstatfs`
+//! (Linux) stubs.
 //!
 //! ## Implementation
 //!
 //! Our kernel doesn't have filesystem statistics syscalls yet.
-//! These stubs return reasonable defaults (large free space, 4K
-//! block size) so programs that check disk space don't fail.
+//! These stubs return reasonable defaults (large free space, 16 KiB
+//! block size matching the OS page size) so programs that check disk
+//! space don't fail.
 
 use crate::errno;
 
@@ -106,4 +108,104 @@ fn fill_defaults(buf: *mut Statvfs) {
     s.f_fsid = 1;
     s.f_flag = 0;
     s.f_namemax = 255;
+}
+
+// ===========================================================================
+// Linux `statfs` / `fstatfs`
+// ===========================================================================
+
+/// Linux filesystem statistics (struct statfs).
+///
+/// Different from `statvfs` — has different field names and includes
+/// filesystem type.  Many Linux programs use `statfs` directly instead
+/// of the POSIX `statvfs`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Statfs {
+    /// Filesystem type magic number.
+    pub f_type: i64,
+    /// Optimal transfer block size.
+    pub f_bsize: i64,
+    /// Total data blocks.
+    pub f_blocks: u64,
+    /// Free blocks.
+    pub f_bfree: u64,
+    /// Free blocks available to unprivileged user.
+    pub f_bavail: u64,
+    /// Total file nodes.
+    pub f_files: u64,
+    /// Free file nodes.
+    pub f_ffree: u64,
+    /// Filesystem ID.
+    pub f_fsid: [i32; 2],
+    /// Maximum filename length.
+    pub f_namelen: i64,
+    /// Fragment size.
+    pub f_frsize: i64,
+    /// Mount flags.
+    pub f_flags: i64,
+    /// Padding.
+    f_spare: [i64; 4],
+}
+
+/// ext4 filesystem magic number.
+const EXT4_SUPER_MAGIC: i64 = 0xEF53;
+
+/// Fill a Statfs with reasonable defaults.
+fn fill_statfs_defaults(buf: *mut Statfs) {
+    // SAFETY: Caller verified buf is non-null.
+    let s = unsafe { &mut *buf };
+    s.f_type = EXT4_SUPER_MAGIC;
+    s.f_bsize = 16384;
+    #[allow(clippy::arithmetic_side_effects)]
+    {
+        s.f_blocks = 10 * 1024 * 1024 * 1024 / 16384;
+        s.f_bfree = 1024 * 1024 * 1024 / 16384;
+    }
+    s.f_bavail = s.f_bfree;
+    s.f_files = 1_000_000;
+    s.f_ffree = 500_000;
+    s.f_fsid = [1, 0];
+    s.f_namelen = 255;
+    s.f_frsize = 16384;
+    s.f_flags = 0;
+    s.f_spare = [0; 4];
+}
+
+/// Get filesystem statistics (Linux).
+///
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn statfs(path: *const u8, buf: *mut Statfs) -> i32 {
+    if path.is_null() || buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    fill_statfs_defaults(buf);
+    0
+}
+
+/// Get filesystem statistics for an fd (Linux).
+///
+/// Returns 0 on success, -1 on error.
+#[unsafe(no_mangle)]
+pub extern "C" fn fstatfs(_fd: i32, buf: *mut Statfs) -> i32 {
+    if buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    fill_statfs_defaults(buf);
+    0
+}
+
+/// `statfs64` — LP64 alias (off_t already 64-bit).
+#[unsafe(no_mangle)]
+pub extern "C" fn statfs64(path: *const u8, buf: *mut Statfs) -> i32 {
+    statfs(path, buf)
+}
+
+/// `fstatfs64` — LP64 alias.
+#[unsafe(no_mangle)]
+pub extern "C" fn fstatfs64(fd: i32, buf: *mut Statfs) -> i32 {
+    fstatfs(fd, buf)
 }

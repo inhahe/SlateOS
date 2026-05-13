@@ -5465,9 +5465,11 @@ pub fn sys_tcp_bind(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_TCP_ACCEPT` — accept an incoming TCP connection (blocking).
+/// `SYS_TCP_ACCEPT` — accept an incoming TCP connection.
 ///
 /// `arg0`: listener handle.
+/// `arg1` (optional): flags.  Bit 0 = non-blocking (return WouldBlock
+///   instead of waiting if no pending connections).
 pub fn sys_tcp_accept(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with READ rights.
     if let Err(e) = require_cap_type(
@@ -5478,8 +5480,16 @@ pub fn sys_tcp_accept(args: &SyscallArgs) -> SyscallResult {
     }
 
     let listener_handle = args.arg0 as usize;
+    let flags = args.arg1 as u32;
+    const ACCEPT_NONBLOCK: u32 = 1;
 
-    match crate::net::tcp::accept(listener_handle) {
+    let result = if (flags & ACCEPT_NONBLOCK) != 0 {
+        crate::net::tcp::try_accept(listener_handle)
+    } else {
+        crate::net::tcp::accept(listener_handle)
+    };
+
+    match result {
         Ok(conn_handle) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(conn_handle as i64)

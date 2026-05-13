@@ -1355,7 +1355,16 @@ pub unsafe extern "C" fn accept(
         return -1;
     }
 
-    let ret = syscall1(SYS_TCP_ACCEPT, entry.handle);
+    // If the listener socket has O_NONBLOCK, use non-blocking accept.
+    let nb_flag: u64 = if fdtable::get_status_flags(fd).unwrap_or(0)
+        & crate::fcntl::O_NONBLOCK != 0
+    {
+        1 // ACCEPT_NONBLOCK
+    } else {
+        0
+    };
+
+    let ret = syscall2(SYS_TCP_ACCEPT, entry.handle, nb_flag);
     if ret < 0 {
         errno::set_errno(translate_net_error(ret));
         return -1;

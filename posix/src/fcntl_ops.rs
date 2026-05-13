@@ -267,6 +267,48 @@ mod tests {
         };
         assert_eq!(f.l_len, 0);
     }
+
+    // -- fcntl command constants (must match Linux x86_64) --
+
+    #[test]
+    fn test_fcntl_command_values() {
+        assert_eq!(F_DUPFD, 0);
+        assert_eq!(F_GETFD, 1);
+        assert_eq!(F_SETFD, 2);
+        assert_eq!(F_GETFL, 3);
+        assert_eq!(F_SETFL, 4);
+        assert_eq!(F_GETLK, 5);
+        assert_eq!(F_SETLK, 6);
+        assert_eq!(F_SETLKW, 7);
+        assert_eq!(F_DUPFD_CLOEXEC, 1030);
+    }
+
+    // -- Lock type constants --
+
+    #[test]
+    fn test_lock_type_values() {
+        assert_eq!(F_RDLCK, 0);
+        assert_eq!(F_WRLCK, 1);
+        assert_eq!(F_UNLCK, 2);
+    }
+
+    // -- Flock alignment --
+
+    #[test]
+    fn test_flock_alignment() {
+        // repr(C) struct with i64 fields must be 8-byte aligned.
+        assert!(core::mem::align_of::<Flock>() >= 4);
+    }
+
+    // -- Lock type exhaustiveness --
+
+    #[test]
+    fn test_flock_lock_types_distinct() {
+        // All lock types must be distinct values.
+        assert_ne!(F_RDLCK, F_WRLCK);
+        assert_ne!(F_RDLCK, F_UNLCK);
+        assert_ne!(F_WRLCK, F_UNLCK);
+    }
 }
 
 /// Duplicate fd to lowest available >= `min_fd`.

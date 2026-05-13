@@ -2180,3 +2180,74 @@ pub extern "C" fn __realpath_chk(
 ) -> *mut u8 {
     crate::unistd::realpath(path, resolved)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- translate_open_flags --
+
+    #[test]
+    fn translate_rdonly() {
+        let flags = translate_open_flags(fcntl::O_RDONLY);
+        // O_RDONLY = 0, so no access-mode bits set.
+        assert_eq!(flags, 0);
+    }
+
+    #[test]
+    fn translate_wronly() {
+        let flags = translate_open_flags(fcntl::O_WRONLY);
+        assert_eq!(flags & 0x3, 1); // O_WRONLY = 1.
+    }
+
+    #[test]
+    fn translate_rdwr() {
+        let flags = translate_open_flags(fcntl::O_RDWR);
+        assert_eq!(flags & 0x3, 2); // O_RDWR = 2.
+    }
+
+    #[test]
+    fn translate_creat_trunc() {
+        let flags = translate_open_flags(
+            fcntl::O_WRONLY | fcntl::O_CREAT | fcntl::O_TRUNC,
+        );
+        assert_ne!(flags & 0x40, 0, "O_CREAT bit");   // Bit 6.
+        assert_ne!(flags & 0x200, 0, "O_TRUNC bit");  // Bit 9.
+    }
+
+    #[test]
+    fn translate_append() {
+        let flags = translate_open_flags(fcntl::O_APPEND);
+        assert_ne!(flags & 0x400, 0, "O_APPEND bit"); // Bit 10.
+    }
+
+    #[test]
+    fn translate_excl() {
+        let flags = translate_open_flags(fcntl::O_CREAT | fcntl::O_EXCL);
+        assert_ne!(flags & 0x40, 0, "O_CREAT bit");
+        assert_ne!(flags & 0x80, 0, "O_EXCL bit"); // Bit 7.
+    }
+
+    #[test]
+    fn translate_all_flags() {
+        let flags = translate_open_flags(
+            fcntl::O_RDWR | fcntl::O_CREAT | fcntl::O_TRUNC
+            | fcntl::O_APPEND | fcntl::O_EXCL,
+        );
+        assert_eq!(flags & 0x3, 2);     // O_RDWR.
+        assert_ne!(flags & 0x40, 0);    // O_CREAT.
+        assert_ne!(flags & 0x80, 0);    // O_EXCL.
+        assert_ne!(flags & 0x200, 0);   // O_TRUNC.
+        assert_ne!(flags & 0x400, 0);   // O_APPEND.
+    }
+
+    #[test]
+    fn translate_no_flags() {
+        let flags = translate_open_flags(0);
+        assert_eq!(flags, 0);
+    }
+}

@@ -6084,6 +6084,80 @@ mod tests {
         assert_eq!(unsafe { inet_aton(c"1.2.3.4".as_ptr().cast(), core::ptr::null_mut()) }, 0);
     }
 
+    // -- hstrerror tests --
+
+    #[test]
+    fn test_hstrerror_no_error() {
+        let msg = unsafe { c_str_to_slice(hstrerror(0)) };
+        assert!(msg.starts_with(b"Resolver Error 0"));
+    }
+
+    #[test]
+    fn test_hstrerror_host_not_found() {
+        let msg = unsafe { c_str_to_slice(hstrerror(HOST_NOT_FOUND)) };
+        assert_eq!(msg, b"Host not found");
+    }
+
+    #[test]
+    fn test_hstrerror_try_again() {
+        let msg = unsafe { c_str_to_slice(hstrerror(TRY_AGAIN)) };
+        assert_eq!(msg, b"Try again");
+    }
+
+    #[test]
+    fn test_hstrerror_no_recovery() {
+        let msg = unsafe { c_str_to_slice(hstrerror(NO_RECOVERY)) };
+        assert_eq!(msg, b"Non-recoverable error");
+    }
+
+    #[test]
+    fn test_hstrerror_no_data() {
+        let msg = unsafe { c_str_to_slice(hstrerror(NO_DATA)) };
+        assert_eq!(msg, b"No address associated with name");
+    }
+
+    #[test]
+    fn test_hstrerror_unknown() {
+        let msg = unsafe { c_str_to_slice(hstrerror(9999)) };
+        assert_eq!(msg, b"Unknown resolver error");
+    }
+
+    // -- inet_addr edge cases --
+
+    #[test]
+    fn test_inet_addr_octet_overflow() {
+        // Octets > 255 should be rejected.
+        let p = unsafe { inet_addr(c"256.1.1.1".as_ptr().cast()) };
+        assert_eq!(p, u32::MAX); // INADDR_NONE
+    }
+
+    #[test]
+    fn test_inet_addr_too_few_dots() {
+        let p = unsafe { inet_addr(c"1.2.3".as_ptr().cast()) };
+        assert_eq!(p, u32::MAX);
+    }
+
+    #[test]
+    fn test_inet_addr_trailing_chars() {
+        let p = unsafe { inet_addr(c"1.2.3.4x".as_ptr().cast()) };
+        assert_eq!(p, u32::MAX);
+    }
+
+    // -- inet_aton edge cases --
+
+    #[test]
+    fn test_inet_aton_broadcast() {
+        let mut addr: u32 = 0;
+        assert_eq!(unsafe { inet_aton(c"255.255.255.255".as_ptr().cast(), &mut addr) }, 1);
+        assert_eq!(addr, u32::from_be(0xFFFFFFFF));
+    }
+
+    #[test]
+    fn test_inet_aton_empty_string() {
+        let mut addr: u32 = 0;
+        assert_eq!(unsafe { inet_aton(c"".as_ptr().cast(), &mut addr) }, 0);
+    }
+
     // -- Helper --
 
     /// Read a null-terminated C string into a byte slice.

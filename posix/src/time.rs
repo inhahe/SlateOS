@@ -2980,4 +2980,255 @@ mod tests {
         // POSIX requires CLOCKS_PER_SEC = 1_000_000.
         assert_eq!(CLOCKS_PER_SEC, 1_000_000);
     }
+
+    // -- is_leap edge cases --
+
+    #[test]
+    fn test_is_leap_century_boundary() {
+        // 1600 is a leap year (divisible by 400).
+        assert!(is_leap(1600));
+        // 1700, 1800 are NOT leap years (divisible by 100, not 400).
+        assert!(!is_leap(1700));
+        assert!(!is_leap(1800));
+        // 2100 is NOT a leap year.
+        assert!(!is_leap(2100));
+        // 2400 IS a leap year.
+        assert!(is_leap(2400));
+    }
+
+    #[test]
+    fn test_is_leap_common_years() {
+        assert!(!is_leap(2001));
+        assert!(!is_leap(2002));
+        assert!(!is_leap(2003));
+        assert!(is_leap(2004));
+        assert!(!is_leap(2005));
+    }
+
+    // -- secs_to_tm edge cases --
+
+    #[test]
+    fn test_secs_to_tm_pre_epoch_1960() {
+        // 1960-01-01 00:00:00 UTC = -315619200
+        let t: TimeT = -315_619_200;
+        let tm = gmtime(&t);
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 60);    // 1960
+        assert_eq!(tm.tm_mon, 0);      // January
+        assert_eq!(tm.tm_mday, 1);
+        assert_eq!(tm.tm_hour, 0);
+        assert_eq!(tm.tm_min, 0);
+        assert_eq!(tm.tm_sec, 0);
+    }
+
+    #[test]
+    fn test_secs_to_tm_y2k38_plus_one() {
+        // 2038-01-19 03:14:08 — first second past 32-bit overflow.
+        let t: TimeT = 2_147_483_648;
+        let tm = gmtime(&t);
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 138);
+        assert_eq!(tm.tm_mon, 0);
+        assert_eq!(tm.tm_mday, 19);
+        assert_eq!(tm.tm_hour, 3);
+        assert_eq!(tm.tm_min, 14);
+        assert_eq!(tm.tm_sec, 8);
+    }
+
+    #[test]
+    fn test_secs_to_tm_non_leap_century() {
+        // 2100-03-01 00:00:00 UTC — tests non-leap century year 2100.
+        let t: TimeT = 4_107_542_400;
+        let tm = gmtime(&t);
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 200);   // 2100
+        assert_eq!(tm.tm_mon, 2);      // March (2100 is NOT a leap year)
+        assert_eq!(tm.tm_mday, 1);
+    }
+
+    #[test]
+    fn test_secs_to_tm_1970_jan_02() {
+        // 86400 seconds = 1970-01-02 00:00:00.
+        let t: TimeT = 86400;
+        let tm = gmtime(&t);
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 70);
+        assert_eq!(tm.tm_mon, 0);
+        assert_eq!(tm.tm_mday, 2);
+        assert_eq!(tm.tm_yday, 1);
+        assert_eq!(tm.tm_wday, 5); // Friday.
+    }
+
+    // -- mktime normalization edge cases --
+
+    #[test]
+    fn test_mktime_negative_hour_borrows() {
+        // -1 hour from midnight Jan 1 → 23:00 Dec 31 previous year.
+        let mut tm = zero_tm();
+        tm.tm_year = 124; // 2024
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        tm.tm_hour = -1;
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_hour, 23);
+        assert_eq!(tm.tm_mday, 31);
+        assert_eq!(tm.tm_mon, 11);  // December
+        assert_eq!(tm.tm_year, 123); // 2023
+    }
+
+    #[test]
+    fn test_mktime_large_seconds_cascade() {
+        // 3661 seconds = 1 hour, 1 minute, 1 second.
+        let mut tm = zero_tm();
+        tm.tm_year = 70;
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        tm.tm_sec = 3661;
+        let t = mktime(&mut tm);
+        assert_eq!(t, 3661);
+        assert_eq!(tm.tm_hour, 1);
+        assert_eq!(tm.tm_min, 1);
+        assert_eq!(tm.tm_sec, 1);
+    }
+
+    #[test]
+    fn test_mktime_month_negative_deep() {
+        // Month -13 should go back a full year + 1 month.
+        let mut tm = zero_tm();
+        tm.tm_year = 124; // 2024
+        tm.tm_mon = -13;  // Should normalize to November 2022.
+        tm.tm_mday = 1;
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_year, 122); // 2022
+        assert_eq!(tm.tm_mon, 11);   // December
+    }
+
+    #[test]
+    fn test_mktime_month_large_positive() {
+        // Month 24 = 2 years forward.
+        let mut tm = zero_tm();
+        tm.tm_year = 70; // 1970
+        tm.tm_mon = 24;  // 2 years = 1972 January
+        tm.tm_mday = 1;
+        let _ = mktime(&mut tm);
+        assert_eq!(tm.tm_year, 72);
+        assert_eq!(tm.tm_mon, 0);
+    }
+
+    // -- iso_week_date edge cases --
+
+    #[test]
+    fn test_iso_week_jan1_2024() {
+        // 2024-01-01 is Monday (wday=1, yday=0).
+        // ISO week 01 of 2024 (first Thursday = Jan 4).
+        let mut tm = zero_tm();
+        tm.tm_year = 124;
+        tm.tm_wday = 1; // Monday
+        tm.tm_yday = 0;
+        let (iso_year, iso_week) = iso_week_date(&tm);
+        assert_eq!(iso_year, 2024);
+        assert_eq!(iso_week, 1);
+    }
+
+    #[test]
+    fn test_iso_week_dec31_2024() {
+        // 2024-12-31 is Tuesday (wday=2, yday=365 in leap year).
+        // ISO: The Thursday of this week is Jan 2, 2025 → week 01 of 2025.
+        let mut tm = zero_tm();
+        tm.tm_year = 124;
+        tm.tm_wday = 2; // Tuesday
+        tm.tm_yday = 365;
+        let (iso_year, iso_week) = iso_week_date(&tm);
+        assert_eq!(iso_year, 2025);
+        assert_eq!(iso_week, 1);
+    }
+
+    #[test]
+    fn test_iso_week_dec29_2014() {
+        // 2014-12-29 is Monday (wday=1, yday=362).
+        // Thursday of this ISO week = Jan 1, 2015 → week 01 of 2015.
+        let mut tm = zero_tm();
+        tm.tm_year = 114;
+        tm.tm_wday = 1; // Monday
+        tm.tm_yday = 362;
+        let (iso_year, iso_week) = iso_week_date(&tm);
+        assert_eq!(iso_year, 2015);
+        assert_eq!(iso_week, 1);
+    }
+
+    #[test]
+    fn test_iso_week_jan1_2016_in_prev_year() {
+        // 2016-01-01 is Friday (wday=5, yday=0).
+        // Thursday of this week is Dec 31, 2015 → still in 2015's weeks.
+        // 2015 has 53 weeks (2015-01-01 is Thursday).
+        let mut tm = zero_tm();
+        tm.tm_year = 116;
+        tm.tm_wday = 5; // Friday
+        tm.tm_yday = 0;
+        let (iso_year, iso_week) = iso_week_date(&tm);
+        assert_eq!(iso_year, 2015);
+        assert_eq!(iso_week, 53);
+    }
+
+    #[test]
+    fn test_iso_week_mid_year_2024() {
+        // 2024-06-15 is Saturday (wday=6, yday=166 in leap year).
+        let mut tm = zero_tm();
+        tm.tm_year = 124;
+        tm.tm_wday = 6; // Saturday
+        tm.tm_yday = 166;
+        let (iso_year, iso_week) = iso_week_date(&tm);
+        assert_eq!(iso_year, 2024);
+        // Thursday of this ISO week: 166 + 4 - 6 = 164; 164/7 + 1 = 24.
+        assert_eq!(iso_week, 24);
+    }
+
+    // -- gmtime/mktime roundtrip for extended range --
+
+    #[test]
+    fn test_roundtrip_post_2038_timestamps() {
+        let timestamps: &[TimeT] = &[
+            2_147_483_648,  // 2038-01-19 03:14:08
+            4_107_542_400,  // 2100-03-01
+        ];
+        for &t in timestamps {
+            let tm = gmtime(&t);
+            let tm = unsafe { &mut *tm };
+            let t2 = mktime(tm);
+            assert_eq!(t, t2, "roundtrip failed for post-2038 timestamp {t}");
+        }
+    }
+
+    // -- wday cycle via gmtime --
+
+    #[test]
+    fn test_gmtime_weekday_cycle() {
+        // 1970-01-01 (Thu=4) through 1970-01-07 (Wed=3).
+        let expected_wdays = [4, 5, 6, 0, 1, 2, 3]; // Thu..Wed
+        for (i, &expected) in expected_wdays.iter().enumerate() {
+            let t: TimeT = (i as i64) * 86400;
+            let tm = gmtime(&t);
+            let tm = unsafe { &*tm };
+            assert_eq!(
+                tm.tm_wday, expected,
+                "day {} from epoch should be wday {}, got {}",
+                i, expected, tm.tm_wday
+            );
+        }
+    }
+
+    #[test]
+    fn test_gmtime_end_of_1970() {
+        // Last second of 1970: 1970-12-31 23:59:59.
+        let t: TimeT = 365 * 86400 - 1;
+        let tm = gmtime(&t);
+        let tm = unsafe { &*tm };
+        assert_eq!(tm.tm_year, 70);
+        assert_eq!(tm.tm_mon, 11);  // December
+        assert_eq!(tm.tm_mday, 31);
+        assert_eq!(tm.tm_hour, 23);
+        assert_eq!(tm.tm_min, 59);
+        assert_eq!(tm.tm_sec, 59);
+        assert_eq!(tm.tm_yday, 364);
+    }
 }

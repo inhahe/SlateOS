@@ -501,6 +501,32 @@ pub extern "C" fn ttyname(fd: i32) -> *const u8 {
     }
 }
 
+/// Return the pathname of the controlling terminal.
+///
+/// If `s` is non-null, the path is copied there (must have room for
+/// `L_ctermid` = 20 bytes).  If `s` is null, a pointer to a static
+/// string is returned.
+///
+/// Our OS always uses `/dev/console` as the controlling terminal.
+#[unsafe(no_mangle)]
+pub extern "C" fn ctermid(s: *mut u8) -> *const u8 {
+    let path = c"/dev/console";
+    if s.is_null() {
+        return path.as_ptr().cast::<u8>();
+    }
+    // Copy the path into the caller's buffer.
+    let bytes = path.to_bytes_with_nul();
+    let mut i: usize = 0;
+    while i < bytes.len() {
+        if let Some(&b) = bytes.get(i) {
+            // SAFETY: i < bytes.len() = 13 <= L_ctermid (typically 20).
+            unsafe { *s.add(i) = b; }
+        }
+        i = i.wrapping_add(1);
+    }
+    s.cast_const()
+}
+
 // ---------------------------------------------------------------------------
 // tcgetattr() / tcsetattr() — convenience wrappers
 // ---------------------------------------------------------------------------

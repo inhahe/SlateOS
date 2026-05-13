@@ -1560,3 +1560,115 @@ pub extern "C" fn jrand48(xsubi: *mut u16) -> i64 {
 
     i64::from((next >> 16) as i32)
 }
+
+// ---------------------------------------------------------------------------
+// getsubopt — parse suboption strings
+// ---------------------------------------------------------------------------
+
+/// Parse comma-separated suboptions.
+///
+/// Scans `*optionp` for the next suboption from the null-terminated
+/// `tokens` array.  On match, `*valuep` points to the value after `=`
+/// (or null if no `=`), `*optionp` is advanced past the suboption,
+/// and the matching token index is returned.  Returns -1 if no match.
+///
+/// # Safety
+///
+/// `optionp` must point to a valid `*mut u8` pointing into a
+/// modifiable string.  `tokens` must be a null-terminated array of
+/// null-terminated C strings.  `valuep` must be a valid pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getsubopt(
+    optionp: *mut *mut u8,
+    tokens: *const *const u8,
+    valuep: *mut *mut u8,
+) -> i32 {
+    if optionp.is_null() || tokens.is_null() || valuep.is_null() {
+        return -1;
+    }
+
+    let opt = unsafe { *optionp };
+    if opt.is_null() || unsafe { *opt } == 0 {
+        return -1;
+    }
+
+    // Find the end of this suboption (comma or null).
+    let mut end: usize = 0;
+    while unsafe { *opt.add(end) } != 0 && unsafe { *opt.add(end) } != b',' {
+        end = end.wrapping_add(1);
+    }
+
+    // Find '=' within this suboption to separate key from value.
+    let mut eq_pos: Option<usize> = None;
+    let mut j: usize = 0;
+    while j < end {
+        if unsafe { *opt.add(j) } == b'=' {
+            eq_pos = Some(j);
+            break;
+        }
+        j = j.wrapping_add(1);
+    }
+
+    let key_len = eq_pos.unwrap_or(end);
+
+    // Try to match against each token.
+    let mut idx: i32 = 0;
+    loop {
+        let token = unsafe { *tokens.add(idx as usize) };
+        if token.is_null() {
+            break;
+        }
+
+        // Compare key_len bytes of opt against this token.
+        let tok_len = unsafe { crate::string::strlen(token) };
+        if tok_len == key_len {
+            let mut matched = true;
+            let mut k: usize = 0;
+            while k < key_len {
+                if unsafe { *opt.add(k) } != unsafe { *token.add(k) } {
+                    matched = false;
+                    break;
+                }
+                k = k.wrapping_add(1);
+            }
+
+            if matched {
+                // Set valuep to the value after '=' (or null).
+                if let Some(ep) = eq_pos {
+                    unsafe { *valuep = opt.add(ep.wrapping_add(1)); }
+                } else {
+                    unsafe { *valuep = core::ptr::null_mut(); }
+                }
+
+                // Advance optionp past this suboption.
+                if unsafe { *opt.add(end) } == b',' {
+                    unsafe { *optionp = opt.add(end.wrapping_add(1)); }
+                } else {
+                    unsafe { *optionp = opt.add(end); }
+                }
+
+                // Null-terminate the key portion (write '\0' at '=' or end).
+                unsafe { *opt.add(key_len) = 0; }
+
+                return idx;
+            }
+        }
+
+        idx = idx.wrapping_add(1);
+    }
+
+    // No match — still advance past this suboption.
+    if let Some(ep) = eq_pos {
+        unsafe { *valuep = opt.add(ep.wrapping_add(1)); }
+    } else {
+        unsafe { *valuep = core::ptr::null_mut(); }
+    }
+    if unsafe { *opt.add(end) } == b',' {
+        unsafe { *optionp = opt.add(end.wrapping_add(1)); }
+    } else {
+        unsafe { *optionp = opt.add(end); }
+    }
+    unsafe { *opt.add(key_len) = 0; }
+
+    -1
+}

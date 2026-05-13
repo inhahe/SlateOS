@@ -604,3 +604,35 @@ fn free_dir(dir: *mut Dir) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// LFS64 aliases — our off_t/ino_t are already 64-bit
+// ---------------------------------------------------------------------------
+
+/// `readdir64` — LFS64 alias for `readdir`.
+#[unsafe(no_mangle)]
+pub extern "C" fn readdir64(dirp: *mut Dir) -> *mut Dirent {
+    readdir(dirp)
+}
+
+/// `readdir_r64` — LFS64 alias for `readdir_r`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn readdir_r64(
+    dirp: *mut Dir,
+    entry: *mut Dirent,
+    result: *mut *mut Dirent,
+) -> i32 {
+    readdir_r(dirp, entry, result)
+}
+
+/// `scandir64` — LFS64 alias for `scandir`.
+#[unsafe(no_mangle)]
+#[allow(clippy::cast_ptr_alignment)]
+pub extern "C" fn scandir64(
+    dirname: *const u8,
+    namelist: *mut *mut *mut Dirent,
+    filter: Option<extern "C" fn(*const Dirent) -> i32>,
+    compar: Option<extern "C" fn(*const *const Dirent, *const *const Dirent) -> i32>,
+) -> i32 {
+    scandir(dirname, namelist, filter, compar)
+}

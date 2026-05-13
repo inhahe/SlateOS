@@ -559,6 +559,17 @@ pub extern "C" fn __cxa_pure_virtual() -> ! {
     crate::unistd::abort();
 }
 
+/// Called when a deleted virtual function is invoked.
+///
+/// Similar to `__cxa_pure_virtual` but for functions marked `= delete`.
+/// Prints a diagnostic and aborts.
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_deleted_virtual() -> ! {
+    let msg = b"deleted virtual method called\n";
+    let _ = crate::file::write(2, msg.as_ptr(), msg.len());
+    crate::unistd::abort();
+}
+
 // ---------------------------------------------------------------------------
 // C++ ABI — static initialization guards
 // ---------------------------------------------------------------------------

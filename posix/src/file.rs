@@ -808,6 +808,43 @@ pub extern "C" fn dup3(oldfd: Fd, newfd: Fd, flags: i32) -> Fd {
 }
 
 // ---------------------------------------------------------------------------
+// close_range / closefrom — bulk close
+// ---------------------------------------------------------------------------
+
+/// Close all file descriptors in the range `[first, last]`.
+///
+/// Linux-compatible `close_range` syscall wrapper.  On success returns 0;
+/// on error returns -1 and sets errno.
+///
+/// `flags` is currently ignored (Linux supports `CLOSE_RANGE_UNSHARE`
+/// and `CLOSE_RANGE_CLOEXEC`, neither of which is meaningful for us).
+#[unsafe(no_mangle)]
+pub extern "C" fn close_range(first: u32, last: u32, _flags: u32) -> i32 {
+    let mut fd = first;
+    while fd <= last {
+        // close() is best-effort here — ignore errors on individual fds.
+        let _ = close(fd as i32);
+        fd = fd.wrapping_add(1);
+    }
+    0
+}
+
+/// Close all file descriptors >= `lowfd`.
+///
+/// BSD/Solaris extension.  Closes all fds from `lowfd` to the table
+/// size limit.  Returns nothing (void in C).
+#[unsafe(no_mangle)]
+pub extern "C" fn closefrom(lowfd: i32) {
+    // Use a reasonable upper bound — our fd table max is typically 256.
+    let max_fd: i32 = 256;
+    let mut fd = lowfd.max(0);
+    while fd < max_fd {
+        let _ = close(fd);
+        fd = fd.wrapping_add(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // stat / fstat / lstat
 // ---------------------------------------------------------------------------
 

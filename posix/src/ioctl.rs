@@ -958,6 +958,215 @@ mod tests {
     fn test_cfsetspeed_null() {
         assert_eq!(unsafe { cfsetspeed(core::ptr::null_mut(), B9600) }, -1);
     }
+
+    // -- ctermid tests --
+
+    #[test]
+    fn test_ctermid_null_returns_static() {
+        let ptr = ctermid(core::ptr::null_mut());
+        assert!(!ptr.is_null());
+        // Should be "/dev/console".
+        let slice = unsafe {
+            let len = crate::string::strlen(ptr);
+            core::slice::from_raw_parts(ptr, len)
+        };
+        assert_eq!(slice, b"/dev/console");
+    }
+
+    #[test]
+    fn test_ctermid_copies_to_buffer() {
+        let mut buf = [0xFFu8; 20];
+        let ptr = ctermid(buf.as_mut_ptr());
+        assert_eq!(ptr, buf.as_ptr());
+        // Should have written "/dev/console\0".
+        assert_eq!(&buf[..13], b"/dev/console\0");
+    }
+
+    // -- isatty tests (use pre-initialized Console fds 0/1/2) --
+
+    #[test]
+    fn test_isatty_stdin() {
+        assert_eq!(isatty(0), 1, "fd 0 (stdin) is Console → isatty");
+    }
+
+    #[test]
+    fn test_isatty_stdout() {
+        assert_eq!(isatty(1), 1, "fd 1 (stdout) is Console → isatty");
+    }
+
+    #[test]
+    fn test_isatty_stderr() {
+        assert_eq!(isatty(2), 1, "fd 2 (stderr) is Console → isatty");
+    }
+
+    #[test]
+    fn test_isatty_invalid_fd() {
+        assert_eq!(isatty(-1), 0);
+    }
+
+    #[test]
+    fn test_isatty_non_terminal_fd() {
+        // Allocate a File fd — isatty should return 0.
+        let fd = fdtable::alloc_fd(HandleKind::File, 100).unwrap();
+        assert_eq!(isatty(fd), 0);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // -- ttyname tests --
+
+    #[test]
+    fn test_ttyname_console() {
+        let ptr = ttyname(0);
+        assert!(!ptr.is_null());
+        let slice = unsafe {
+            let len = crate::string::strlen(ptr);
+            core::slice::from_raw_parts(ptr, len)
+        };
+        assert_eq!(slice, b"/dev/console");
+    }
+
+    #[test]
+    fn test_ttyname_invalid_fd() {
+        assert!(ttyname(-1).is_null());
+    }
+
+    #[test]
+    fn test_ttyname_non_terminal() {
+        let fd = fdtable::alloc_fd(HandleKind::Pipe, 50).unwrap();
+        assert!(ttyname(fd).is_null());
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // -- tcsetattr action constant validation --
+
+    #[test]
+    fn test_tcsetattr_action_constants() {
+        assert_eq!(TCSANOW, 0);
+        assert_eq!(TCSADRAIN, 1);
+        assert_eq!(TCSAFLUSH, 2);
+    }
+
+    // -- tcflow / tcflush action constants --
+
+    #[test]
+    fn test_tcflow_action_constants() {
+        assert_eq!(TCOON, 0);
+        assert_eq!(TCOOFF, 1);
+        assert_eq!(TCION, 2);
+        assert_eq!(TCIOFF, 3);
+    }
+
+    #[test]
+    fn test_tcflush_action_constants() {
+        assert_eq!(TCIFLUSH, 0);
+        assert_eq!(TCOFLUSH, 1);
+        assert_eq!(TCIOFLUSH, 2);
+    }
+
+    // -- Default termios baud rates --
+
+    #[test]
+    fn test_default_termios_baud() {
+        let t = default_termios();
+        assert_eq!(t.c_ispeed, B38400);
+        assert_eq!(t.c_ospeed, B38400);
+    }
+
+    // -- Baud rate constants --
+
+    #[test]
+    fn test_baud_rate_constants() {
+        // Values must match Linux octal definitions.
+        assert_eq!(B9600, 0o15);
+        assert_eq!(B19200, 0o16);
+        assert_eq!(B38400, 0o17);
+        assert_eq!(B115200, 0o10002);
+    }
+
+    // -- c_cc index constants --
+
+    #[test]
+    fn test_cc_index_constants() {
+        assert_eq!(VINTR, 0);
+        assert_eq!(VQUIT, 1);
+        assert_eq!(VERASE, 2);
+        assert_eq!(VKILL, 3);
+        assert_eq!(VEOF, 4);
+        assert_eq!(VTIME, 5);
+        assert_eq!(VMIN, 6);
+        assert_eq!(VSTART, 8);
+        assert_eq!(VSTOP, 9);
+        assert_eq!(VSUSP, 10);
+        assert_eq!(VEOL, 11);
+        assert_eq!(NCCS, 32);
+    }
+
+    // -- PTY stubs --
+
+    #[test]
+    fn test_posix_openpt_returns_enosys() {
+        assert_eq!(posix_openpt(0), -1);
+    }
+
+    #[test]
+    fn test_grantpt_succeeds() {
+        assert_eq!(grantpt(0), 0);
+    }
+
+    #[test]
+    fn test_unlockpt_succeeds() {
+        assert_eq!(unlockpt(0), 0);
+    }
+
+    #[test]
+    fn test_ptsname_returns_null() {
+        assert!(ptsname(0).is_null());
+    }
+
+    #[test]
+    fn test_ptsname_r_returns_enosys() {
+        let mut buf = [0u8; 64];
+        assert_eq!(ptsname_r(0, buf.as_mut_ptr(), buf.len()), -1);
+    }
+
+    // -- validate_terminal_fd --
+
+    #[test]
+    fn test_validate_terminal_fd_console() {
+        assert!(validate_terminal_fd(0).is_ok());
+        assert!(validate_terminal_fd(1).is_ok());
+        assert!(validate_terminal_fd(2).is_ok());
+    }
+
+    #[test]
+    fn test_validate_terminal_fd_invalid() {
+        assert_eq!(validate_terminal_fd(-1), Err(crate::errno::EBADF));
+    }
+
+    #[test]
+    fn test_validate_terminal_fd_non_terminal() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 200).unwrap();
+        assert_eq!(validate_terminal_fd(fd), Err(crate::errno::ENOTTY));
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // -- cfmakeraw does not crash on null --
+
+    #[test]
+    fn test_cfmakeraw_null() {
+        // Should silently return without crashing.
+        unsafe { cfmakeraw(core::ptr::null_mut()); }
+    }
+
+    // -- cfmakeraw clears parity --
+
+    #[test]
+    fn test_cfmakeraw_clears_parity() {
+        let mut t = default_termios();
+        t.c_cflag |= PARENB;
+        unsafe { cfmakeraw(&raw mut t); }
+        assert_eq!(t.c_cflag & PARENB, 0, "PARENB should be cleared in raw mode");
+    }
 }
 
 // ---------------------------------------------------------------------------

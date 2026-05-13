@@ -1432,4 +1432,316 @@ mod tests {
     fn path_max_is_4096() {
         assert_eq!(PATH_MAX, 4096);
     }
+
+    // ------------------------------------------------------------------
+    // sysconf — system configuration variables
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_sysconf_pagesize() {
+        assert_eq!(sysconf(_SC_PAGESIZE), 16384);
+        assert_eq!(sysconf(_SC_PAGE_SIZE), 16384);
+    }
+
+    #[test]
+    fn test_sysconf_open_max() {
+        assert_eq!(sysconf(_SC_OPEN_MAX), 256);
+    }
+
+    #[test]
+    fn test_sysconf_clk_tck() {
+        assert_eq!(sysconf(_SC_CLK_TCK), 100);
+    }
+
+    #[test]
+    fn test_sysconf_arg_max() {
+        assert_eq!(sysconf(_SC_ARG_MAX), 131_072);
+    }
+
+    #[test]
+    fn test_sysconf_version() {
+        assert_eq!(sysconf(_SC_VERSION), 200_809);
+    }
+
+    #[test]
+    fn test_sysconf_phys_pages() {
+        assert!(sysconf(_SC_PHYS_PAGES) > 0);
+    }
+
+    #[test]
+    fn test_sysconf_unknown_returns_negative() {
+        assert_eq!(sysconf(-999), -1);
+    }
+
+    // ------------------------------------------------------------------
+    // getpagesize / getdtablesize
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_getpagesize() {
+        assert_eq!(getpagesize(), 16384);
+    }
+
+    #[test]
+    fn test_getdtablesize() {
+        assert_eq!(getdtablesize(), 256);
+    }
+
+    // ------------------------------------------------------------------
+    // pathconf / fpathconf
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_pathconf_path_max() {
+        assert_eq!(pathconf(core::ptr::null(), _PC_PATH_MAX), PATH_MAX as i64);
+    }
+
+    #[test]
+    fn test_pathconf_name_max() {
+        assert_eq!(pathconf(core::ptr::null(), _PC_NAME_MAX), 255);
+    }
+
+    #[test]
+    fn test_pathconf_pipe_buf() {
+        assert_eq!(pathconf(core::ptr::null(), _PC_PIPE_BUF), 4096);
+    }
+
+    #[test]
+    fn test_pathconf_link_max() {
+        assert_eq!(pathconf(core::ptr::null(), _PC_LINK_MAX), 127);
+    }
+
+    #[test]
+    fn test_pathconf_unknown_returns_negative() {
+        assert_eq!(pathconf(core::ptr::null(), -999), -1);
+    }
+
+    #[test]
+    fn test_fpathconf_delegates_to_pathconf() {
+        // fpathconf should return the same values as pathconf.
+        assert_eq!(fpathconf(0, _PC_PATH_MAX), pathconf(core::ptr::null(), _PC_PATH_MAX));
+        assert_eq!(fpathconf(0, _PC_NAME_MAX), pathconf(core::ptr::null(), _PC_NAME_MAX));
+    }
+
+    // ------------------------------------------------------------------
+    // confstr
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_confstr_cs_path_size() {
+        // With null buf, returns needed size.
+        let needed = confstr(_CS_PATH, core::ptr::null_mut(), 0);
+        // "/bin:/usr/bin" (13 chars) + '\0' = 14 bytes.
+        assert_eq!(needed, 14);
+    }
+
+    #[test]
+    fn test_confstr_cs_path_copies() {
+        let mut buf = [0xFFu8; 64];
+        let needed = confstr(_CS_PATH, buf.as_mut_ptr(), buf.len());
+        assert_eq!(needed, 14);
+        assert_eq!(&buf[..14], b"/bin:/usr/bin\0");
+    }
+
+    #[test]
+    fn test_confstr_cs_path_truncation() {
+        let mut buf = [0xFFu8; 6]; // Smaller than needed.
+        let needed = confstr(_CS_PATH, buf.as_mut_ptr(), buf.len());
+        assert_eq!(needed, 14); // Still returns full needed size.
+        // Should have written 5 chars + null.
+        assert_eq!(&buf[..6], b"/bin:\0");
+    }
+
+    #[test]
+    fn test_confstr_unknown_returns_zero() {
+        assert_eq!(confstr(-999, core::ptr::null_mut(), 0), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // sbrk / brk
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_sbrk_zero_returns_address() {
+        let ptr = sbrk(0);
+        assert!(!ptr.is_null());
+    }
+
+    #[test]
+    fn test_sbrk_nonzero_fails() {
+        let ptr = sbrk(4096);
+        assert_eq!(ptr, usize::MAX as *mut u8); // (void *)-1
+    }
+
+    #[test]
+    fn test_brk_always_fails() {
+        assert_eq!(brk(core::ptr::null_mut()), -1);
+    }
+
+    // ------------------------------------------------------------------
+    // uid/gid stubs (single-user → always 0/root)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_getuid_root() {
+        assert_eq!(getuid(), 0);
+    }
+
+    #[test]
+    fn test_geteuid_root() {
+        assert_eq!(geteuid(), 0);
+    }
+
+    #[test]
+    fn test_getgid_root() {
+        assert_eq!(getgid(), 0);
+    }
+
+    #[test]
+    fn test_getegid_root() {
+        assert_eq!(getegid(), 0);
+    }
+
+    #[test]
+    fn test_setuid_succeeds() {
+        assert_eq!(setuid(0), 0);
+    }
+
+    #[test]
+    fn test_setgid_succeeds() {
+        assert_eq!(setgid(0), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // getresuid / getresgid
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_getresuid_fills_zeros() {
+        let mut ruid: UidT = 99;
+        let mut euid: UidT = 99;
+        let mut suid: UidT = 99;
+        let ret = getresuid(&raw mut ruid, &raw mut euid, &raw mut suid);
+        assert_eq!(ret, 0);
+        assert_eq!(ruid, 0);
+        assert_eq!(euid, 0);
+        assert_eq!(suid, 0);
+    }
+
+    #[test]
+    fn test_getresuid_null_fails() {
+        assert_eq!(getresuid(core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut()), -1);
+    }
+
+    #[test]
+    fn test_getresgid_fills_zeros() {
+        let mut rgid: GidT = 99;
+        let mut egid: GidT = 99;
+        let mut sgid: GidT = 99;
+        let ret = getresgid(&raw mut rgid, &raw mut egid, &raw mut sgid);
+        assert_eq!(ret, 0);
+        assert_eq!(rgid, 0);
+        assert_eq!(egid, 0);
+        assert_eq!(sgid, 0);
+    }
+
+    #[test]
+    fn test_getresgid_null_fails() {
+        assert_eq!(getresgid(core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut()), -1);
+    }
+
+    #[test]
+    fn test_setresuid_succeeds() {
+        assert_eq!(setresuid(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_setresgid_succeeds() {
+        assert_eq!(setresgid(0, 0, 0), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // prctl stubs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_prctl_set_name_succeeds() {
+        assert_eq!(prctl(PR_SET_NAME, 0, 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_prctl_set_no_new_privs_succeeds() {
+        assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_prctl_get_name_writes_null() {
+        let mut buf = [0xFFu8; 16];
+        let ret = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(ret, 0);
+        assert_eq!(buf[0], 0);
+    }
+
+    #[test]
+    fn test_prctl_unknown_fails() {
+        assert_eq!(prctl(-999, 0, 0, 0, 0), -1);
+    }
+
+    // ------------------------------------------------------------------
+    // alarm / getgroups stubs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_alarm_returns_zero() {
+        assert_eq!(alarm(0), 0);
+        assert_eq!(alarm(10), 0);
+    }
+
+    #[test]
+    fn test_getgroups_zero_size_returns_zero() {
+        // POSIX: getgroups(0, NULL) returns number of supplementary groups.
+        // Our stub returns 0.
+        assert_eq!(getgroups(0, core::ptr::null_mut()), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // syncfs / fdatasync stubs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_syncfs_succeeds() {
+        assert_eq!(syncfs(0), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // _SC_ constant values
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_sc_constant_values() {
+        assert_eq!(_SC_PAGESIZE, 30);
+        assert_eq!(_SC_PAGE_SIZE, _SC_PAGESIZE);
+        assert_eq!(_SC_OPEN_MAX, 4);
+        assert_eq!(_SC_CLK_TCK, 2);
+        assert_eq!(_SC_ARG_MAX, 0);
+        assert_eq!(_SC_NPROCESSORS_CONF, 83);
+        assert_eq!(_SC_NPROCESSORS_ONLN, 84);
+    }
+
+    // ------------------------------------------------------------------
+    // _PC_ constant values
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_pc_constant_values() {
+        assert_eq!(_PC_LINK_MAX, 0);
+        assert_eq!(_PC_MAX_CANON, 1);
+        assert_eq!(_PC_MAX_INPUT, 2);
+        assert_eq!(_PC_NAME_MAX, 3);
+        assert_eq!(_PC_PATH_MAX, 4);
+        assert_eq!(_PC_PIPE_BUF, 5);
+        assert_eq!(_PC_CHOWN_RESTRICTED, 6);
+        assert_eq!(_PC_NO_TRUNC, 7);
+        assert_eq!(_PC_VDISABLE, 8);
+    }
 }

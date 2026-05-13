@@ -203,30 +203,36 @@ pub extern "C" fn sqrt(x: f64) -> f64 {
     if x < 0.0 { return f64::NAN; }
     if x == 0.0 || x.is_nan() || x.is_infinite() { return x; }
 
-    // Initial guess.
-    let mut guess = x * 0.5;
-    // 8 iterations of Newton's method: g = (g + x/g) / 2.
+    // Decompose x = m * 2^e (0.5 <= m < 1) for a good initial guess.
+    // The naive initial guess (x * 0.5) fails catastrophically for values
+    // far from 1.0 because Newton's method only halves the error per step
+    // when the guess is orders of magnitude off.  By halving the exponent
+    // we start within a factor of ~sqrt(2) of the true answer, giving
+    // quadratic convergence (each iteration doubles correct digits).
+    let mut e: i32 = 0;
+    let m = frexp_internal(x, &mut e);
+    let guess = if e & 1 == 0 {
+        // e even: sqrt(m * 2^e) = sqrt(m) * 2^(e/2)
+        ldexp(m, e / 2)
+    } else {
+        // e odd: sqrt(2m) * 2^((e-1)/2)
+        ldexp(m * 2.0, (e - 1) / 2)
+    };
+
+    // Newton's method: g = (g + x/g) / 2.
+    // 6 iterations from a good guess gives full f64 precision (~15 digits).
+    let mut g = guess;
     let mut iter = 0;
-    while iter < 8 {
-        guess = (guess + x / guess) * 0.5;
+    while iter < 6 {
+        g = (g + x / g) * 0.5;
         iter += 1;
     }
-    guess
+    g
 }
 
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects, clippy::suboptimal_flops)]
 pub extern "C" fn sqrtf(x: f32) -> f32 {
-    if x < 0.0 { return f32::NAN; }
-    if x == 0.0 || x.is_nan() || x.is_infinite() { return x; }
-
-    let mut guess = x * 0.5;
-    let mut iter = 0;
-    while iter < 6 {
-        guess = (guess + x / guess) * 0.5;
-        iter += 1;
-    }
-    guess
+    sqrt(f64::from(x)) as f32
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +394,15 @@ pub extern "C" fn powf(base: f32, exponent: f32) -> f32 {
 fn ipow(mut base: f64, mut exp: i64) -> f64 {
     if exp < 0 {
         base = 1.0 / base;
-        exp = -exp;
+        // wrapping_neg of i64::MIN gives i64::MIN (still negative).
+        // Handle that case: base is already inverted, and 2^63 iterations
+        // would produce 0 or infinity depending on |base|.
+        exp = exp.wrapping_neg();
+        if exp < 0 {
+            // exp was i64::MIN; |base| has been inverted above.
+            let a = fabs(base);
+            return if a < 1.0 { 0.0 } else if a > 1.0 { f64::INFINITY } else { 1.0 };
+        }
     }
 
     let mut result = 1.0;

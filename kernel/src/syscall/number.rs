@@ -2161,6 +2161,42 @@ pub const SYS_NET_IF_INFO: u64 = 842;
 /// Returns: number of listeners written.
 pub const SYS_TCP_LISTENER_LIST: u64 = 841;
 
+/// Query the ARP cache.
+///
+/// Writes an array of 12-byte ARP entry records to the caller's buffer.
+///
+/// Each record layout:
+/// ```text
+/// [0..4]  = IPv4 address (network order)
+/// [4..10] = MAC address (6 bytes)
+/// [10..12] = TTL in seconds (u16 LE)
+/// ```
+///
+/// - `arg0`: pointer to output buffer
+/// - `arg1`: buffer length in bytes
+///
+/// Returns: number of entries written.
+pub const SYS_ARP_TABLE: u64 = 843;
+
+/// Query DNS cache statistics.
+///
+/// Writes 40 bytes of statistics:
+///
+/// ```text
+/// [0..8]   = cache hits (u64 LE)
+/// [8..16]  = cache misses (u64 LE)
+/// [16..24] = evictions (u64 LE)
+/// [24..28] = current entries (u32 LE)
+/// [28..32] = capacity (u32 LE)
+/// [32..40] = reserved (0)
+/// ```
+///
+/// - `arg0`: pointer to output buffer (>= 40 bytes)
+/// - `arg1`: buffer length in bytes
+///
+/// Returns 0 on success.
+pub const SYS_DNS_CACHE_STATS: u64 = 844;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

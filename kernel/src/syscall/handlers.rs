@@ -6939,3 +6939,101 @@ pub fn sys_net_if_info(args: &SyscallArgs) -> SyscallResult {
 
     SyscallResult::ok(0)
 }
+
+/// `SYS_ARP_TABLE` — query the ARP cache.
+///
+/// `arg0`: pointer to output buffer.
+/// `arg1`: buffer length in bytes.
+///
+/// Writes 12-byte records per entry.  Returns the number written.
+pub fn sys_arp_table(args: &SyscallArgs) -> SyscallResult {
+    let buf_ptr = args.arg0 as usize;
+    let buf_len = args.arg1 as usize;
+
+    if buf_ptr == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    const RECORD_SIZE: usize = 12;
+    let max_records = buf_len / RECORD_SIZE;
+    if max_records == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    let (entries, count) = crate::net::arp::cache_entries();
+    let mut written: usize = 0;
+
+    for i in 0..count {
+        if written >= max_records {
+            break;
+        }
+        if let Some(entry) = entries.get(i) {
+            let mut record = [0u8; RECORD_SIZE];
+
+            // [0..4] IP address.
+            record[0] = entry.ip.0[0];
+            record[1] = entry.ip.0[1];
+            record[2] = entry.ip.0[2];
+            record[3] = entry.ip.0[3];
+
+            // [4..10] MAC address.
+            record[4] = entry.mac.0[0];
+            record[5] = entry.mac.0[1];
+            record[6] = entry.mac.0[2];
+            record[7] = entry.mac.0[3];
+            record[8] = entry.mac.0[4];
+            record[9] = entry.mac.0[5];
+
+            // [10..12] TTL in seconds (u16 LE).
+            let ttl = entry.ttl_secs.min(u64::from(u16::MAX)) as u16;
+            record[10] = ttl as u8;
+            record[11] = (ttl >> 8) as u8;
+
+            let dst = (buf_ptr + written * RECORD_SIZE) as *mut u8;
+            unsafe {
+                core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE);
+            }
+            written = written.wrapping_add(1);
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(written as i64)
+}
+
+/// `SYS_DNS_CACHE_STATS` — query DNS cache statistics.
+///
+/// `arg0`: pointer to output buffer (>= 40 bytes).
+/// `arg1`: buffer length in bytes.
+///
+/// Returns 0 on success.
+pub fn sys_dns_cache_stats(args: &SyscallArgs) -> SyscallResult {
+    let out_ptr = args.arg0 as usize;
+    let buf_len = args.arg1 as usize;
+
+    if out_ptr == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    const STATS_SIZE: usize = 40;
+    if buf_len < STATS_SIZE {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let stats = crate::net::dns::cache_stats();
+    let mut buf = [0u8; STATS_SIZE];
+
+    buf[0..8].copy_from_slice(&stats.hits.to_le_bytes());
+    buf[8..16].copy_from_slice(&stats.misses.to_le_bytes());
+    buf[16..24].copy_from_slice(&stats.evictions.to_le_bytes());
+    buf[24..28].copy_from_slice(&(stats.entries as u32).to_le_bytes());
+    buf[28..32].copy_from_slice(&(stats.capacity as u32).to_le_bytes());
+    // [32..40] reserved.
+
+    let dst = out_ptr as *mut u8;
+    unsafe {
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, STATS_SIZE);
+    }
+
+    SyscallResult::ok(0)
+}

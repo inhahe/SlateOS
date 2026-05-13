@@ -350,6 +350,7 @@ mod tests {
 
     /// Allocate an fd and immediately close it, returning the fd number.
     /// Helper for tests that need a disposable fd.
+    #[allow(dead_code)]
     fn alloc_and_close(kind: HandleKind, handle: u64) -> i32 {
         let fd = alloc_fd(kind, handle).expect("alloc_fd failed");
         let _ = close_fd(fd);
@@ -527,7 +528,7 @@ mod tests {
         // O_WRONLY = 1, then try to change access mode to O_RDWR via F_SETFL.
         let fd = alloc_fd_with_flags(HandleKind::File, 66, 1).unwrap();
         // Attempt to set O_RDWR (2) via set_status_flags — should NOT change access mode.
-        set_status_flags(fd, 2);
+        let _ = set_status_flags(fd, 2);
         let flags = get_status_flags(fd).unwrap();
         assert_eq!(flags & 0x3, 1, "access mode must be immutable after open");
 

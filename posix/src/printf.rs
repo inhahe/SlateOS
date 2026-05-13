@@ -2287,7 +2287,7 @@ mod tests {
 
     #[test]
     fn fmt_g_negative() {
-        let val = (-2.5f64);
+        let val = -2.5f64;
         let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
         assert_eq!(s, "-2.5", "got: {s}");
     }
@@ -2523,7 +2523,7 @@ mod tests {
 
     #[test]
     fn fmt_e_negative() {
-        let val = (-1.5f64);
+        let val = -1.5f64;
         let (s, _) = snprintf_str(b"%e\0", &[], &[val.to_bits()]);
         assert!(s.starts_with("-1.5"), "got: {s}");
     }

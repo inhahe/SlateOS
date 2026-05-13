@@ -252,7 +252,11 @@ pub extern "C" fn clock_nanosleep(
         let _ = syscall1(SYS_SLEEP, sleep_ns);
     } else {
         // Relative time: same as nanosleep.
-        nanosleep(request, remain);
+        // Propagate EINTR if interrupted (clock_nanosleep returns error
+        // codes directly, not via errno).
+        if nanosleep(request, remain) != 0 {
+            return errno::EINTR;
+        }
     }
 
     0
@@ -1103,7 +1107,8 @@ fn format_asctime(tm: &Tm, buf: &mut [u8; 32]) -> usize {
     pos = write_char(buf.as_mut_ptr(), limit, pos, b' ');
     pos = write_str(buf.as_mut_ptr(), limit, pos, mon_abbr(tm.tm_mon));
     pos = write_char(buf.as_mut_ptr(), limit, pos, b' ');
-    pos = write_dec2(buf.as_mut_ptr(), limit, pos, tm.tm_mday);
+    // POSIX: asctime uses space-padded day (" 1" not "01").
+    pos = write_space_dec2(buf.as_mut_ptr(), limit, pos, tm.tm_mday);
     pos = write_char(buf.as_mut_ptr(), limit, pos, b' ');
     pos = write_dec2(buf.as_mut_ptr(), limit, pos, tm.tm_hour);
     pos = write_char(buf.as_mut_ptr(), limit, pos, b':');

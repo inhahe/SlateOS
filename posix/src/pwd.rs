@@ -76,12 +76,26 @@ static ROOT_PASSWD: Passwd = Passwd {
     pw_shell: c"/bin/sh".as_ptr().cast::<u8>(),
 };
 
+/// Empty null-terminated member list for `gr_mem`.
+///
+/// POSIX requires `gr_mem` to point to a null-terminated array of
+/// member name pointers.  A null pointer for the array itself would
+/// crash programs that iterate `grp->gr_mem[i]` without null-checking.
+/// Wrapper is needed because `*const u8` is not `Sync`.
+#[repr(transparent)]
+struct SyncMemberList([*const u8; 1]);
+
+// SAFETY: Contains only a null pointer — immutable, no data to race on.
+unsafe impl Sync for SyncMemberList {}
+
+static EMPTY_MEM: SyncMemberList = SyncMemberList([core::ptr::null()]);
+
 /// The single "root" group entry.
 static ROOT_GROUP: Group = Group {
     gr_name: c"root".as_ptr().cast::<u8>(),
     gr_passwd: c"x".as_ptr().cast::<u8>(),
     gr_gid: 0,
-    gr_mem: core::ptr::null(), // No additional members.
+    gr_mem: EMPTY_MEM.0.as_ptr(),
 };
 
 /// Enumeration position for getpwent/getgrent.

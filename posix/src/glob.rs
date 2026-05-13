@@ -165,7 +165,10 @@ fn collect_matches(
         }
 
         // Match against pattern.
-        if unsafe { fnmatch::fnmatch(file_pattern, name, 0) } != 0 {
+        // FNM_PERIOD: POSIX requires that leading dots in filenames
+        // only match explicit dots in the pattern (e.g. "*" must not
+        // match ".bashrc").
+        if unsafe { fnmatch::fnmatch(file_pattern, name, fnmatch::FNM_PERIOD) } != 0 {
             continue;
         }
 

@@ -1017,6 +1017,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Poll readiness kernel queries: SYS_TCP_POLL_STATUS (845) returns actual POLLIN/POLLOUT/POLLHUP from rx_buffer state + send window + connection state; SYS_TCP_LISTENER_READY (846) checks accept backlog; SYS_UDP_RX_READY (847) returns queued datagram count
   - [x] POSIX poll/select accuracy: check_readiness() queries kernel for TCP/UDP/listener state instead of always reporting ready
   - [x] Error code translation fix: translate_net_error() now matches actual KernelError discriminant values (-4=WouldBlock→EAGAIN, -6=TimedOut→ETIMEDOUT, etc.) instead of fictional numbering
+  - [x] Non-blocking TCP connect: connect_start() sends SYN and returns handle in SYN_SENT state; SYS_TCP_CONNECT arg2 bit 0 = non-blocking; POSIX connect() returns EINPROGRESS when O_NONBLOCK set; SYN retransmission with exponential backoff; SYN_SENT 30s timeout cleanup
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close, abort, peer_addr (SYS_TCP_CONNECT through SYS_TCP_PEER_ADDR)

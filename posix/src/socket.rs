@@ -1956,7 +1956,17 @@ pub extern "C" fn setsockopt(
     if let Some(mut meta) = get_meta(fd) {
         match (level, optname) {
             (SOL_SOCKET, SO_REUSEADDR) => { meta.reuseaddr = val != 0; }
-            (SOL_SOCKET, SO_KEEPALIVE) => { meta.keepalive = val != 0; }
+            (SOL_SOCKET, SO_KEEPALIVE) => {
+                meta.keepalive = val != 0;
+                // Wire through to kernel for TCP streams with active handles.
+                if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
+                    let _ = syscall2(
+                        SYS_TCP_SET_KEEPALIVE,
+                        entry.handle,
+                        u64::from(val != 0),
+                    );
+                }
+            }
             (SOL_SOCKET, SO_RCVBUF) => { meta.rcvbuf = val.max(1); }
             (SOL_SOCKET, SO_SNDBUF) => { meta.sndbuf = val.max(1); }
             (SOL_SOCKET, SO_BROADCAST) => { meta.broadcast = val != 0; }
@@ -1981,7 +1991,17 @@ pub extern "C" fn setsockopt(
                 // Accept silently — these are common options that programs
                 // set but we don't implement at the kernel level yet.
             }
-            (SOL_TCP, TCP_NODELAY) => { meta.nodelay = val != 0; }
+            (SOL_TCP, TCP_NODELAY) => {
+                meta.nodelay = val != 0;
+                // Wire through to kernel for TCP streams with active handles.
+                if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
+                    let _ = syscall2(
+                        SYS_TCP_SET_NODELAY,
+                        entry.handle,
+                        u64::from(val != 0),
+                    );
+                }
+            }
             (SOL_IP | IPPROTO_IP, IP_MULTICAST_TTL | IP_MULTICAST_LOOP) => {
                 // Accept silently — no kernel support for these yet,
                 // but programs often set them alongside IP_ADD_MEMBERSHIP.
@@ -2084,7 +2104,29 @@ pub unsafe extern "C" fn getsockopt(
         // Return the stored value based on level + option.
         let val: i32 = match (level, optname) {
             (SOL_SOCKET, SO_TYPE) => meta.map_or(0, |m| m.sock_type),
-            (SOL_SOCKET, SO_ERROR) => 0, // No pending error.
+            (SOL_SOCKET, SO_ERROR) => {
+                // For TCP sockets, query kernel poll status to detect
+                // errors (e.g., failed non-blocking connect).
+                if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
+                    let status = crate::syscall::syscall1(
+                        crate::syscall::SYS_TCP_POLL_STATUS, entry.handle,
+                    ) as u16;
+                    // POLL_ERROR (0x08) or POLL_HANGUP (0x10) on a socket
+                    // that was never established → connection refused.
+                    // Note: POLLHUP on an established connection is normal
+                    // EOF, not an error.
+                    if (status & 0x0008) != 0 {
+                        errno::ECONNREFUSED
+                    } else if (status & 0x0010) != 0 && (status & 0x0004) == 0 {
+                        // Hangup without writable → connection was lost.
+                        errno::ECONNRESET
+                    } else {
+                        0 // No pending error.
+                    }
+                } else {
+                    0
+                }
+            }
             (SOL_SOCKET, SO_REUSEADDR) => meta.map_or(0, |m| i32::from(m.reuseaddr)),
             (SOL_SOCKET, SO_KEEPALIVE) => meta.map_or(0, |m| i32::from(m.keepalive)),
             (SOL_SOCKET, SO_RCVBUF) => meta.map_or(65536, |m| m.rcvbuf),

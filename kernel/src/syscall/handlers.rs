@@ -7225,3 +7225,47 @@ pub fn sys_tcp_shutdown(args: &SyscallArgs) -> SyscallResult {
         Err(e) => SyscallResult::err(e),
     }
 }
+
+/// `SYS_TCP_SET_NODELAY` — enable or disable TCP_NODELAY (Nagle algorithm).
+///
+/// `arg0`: socket handle.
+/// `arg1`: 0 = enable Nagle (default), non-zero = disable Nagle (TCP_NODELAY).
+///
+/// Returns 0 on success.
+pub fn sys_tcp_set_nodelay(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let handle = args.arg0 as usize;
+    let nodelay = args.arg1 != 0;
+    match crate::net::tcp::set_nodelay(handle, nodelay) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_TCP_SET_KEEPALIVE` — enable or disable TCP keepalive probes.
+///
+/// `arg0`: socket handle.
+/// `arg1`: 0 = disable keepalive, non-zero = enable keepalive.
+///
+/// Returns 0 on success.
+pub fn sys_tcp_set_keepalive(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let handle = args.arg0 as usize;
+    let enabled = args.arg1 != 0;
+    match crate::net::tcp::set_keepalive(handle, enabled) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}

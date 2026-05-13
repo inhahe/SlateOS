@@ -4064,6 +4064,25 @@ pub fn tick_time_wait_cleanup() {
                     conn.ooo_buf.clear();
                 }
             }
+            TcpState::FinWait1 => {
+                // FIN_WAIT_1: we sent FIN but never got the ACK.
+                // The FIN retransmit loop in tick_retransmit() handles
+                // resending the FIN, but after 60 seconds the connection
+                // is clearly dead — reclaim.
+                let elapsed = now.saturating_sub(conn.last_activity_ns);
+                if elapsed >= FIN_WAIT2_TIMEOUT_NS {
+                    crate::serial_println!(
+                        "[tcp] FIN_WAIT_1 timeout for port {} → {}:{} — reclaiming",
+                        conn.local_port, conn.remote_ip, conn.remote_port
+                    );
+                    conn.active = false;
+                    conn.state = TcpState::Closed;
+                    conn.rx_buffer.clear();
+                    conn.tx_buffer.clear();
+                    conn.nagle_buf.clear();
+                    conn.ooo_buf.clear();
+                }
+            }
             TcpState::FinWait2 => {
                 // FIN_WAIT_2: we sent our FIN and got the ACK, but
                 // the peer hasn't sent its FIN yet.  If the peer
@@ -4202,6 +4221,46 @@ pub fn tick_retransmit() {
             tcp_now_ms(), 0,
         );
         // Lock dropped — can't continue scan; next tick handles rest.
+        return;
+    }
+
+    // --- FIN retransmission for FinWait1/LastAck ---
+    // If the FIN segment was lost, the peer never saw it and won't
+    // transition.  Retransmit the FIN with exponential backoff.
+    for idx in 0..MAX_CONNECTIONS {
+        let conn = &mut conns[idx];
+        if !conn.active {
+            continue;
+        }
+        if conn.state != TcpState::FinWait1 && conn.state != TcpState::LastAck {
+            continue;
+        }
+        let elapsed = now.saturating_sub(conn.last_activity_ns);
+        if elapsed < conn.rto_ns {
+            continue;
+        }
+
+        // Retransmit FIN+ACK.
+        let lp = conn.local_port;
+        let ri = conn.remote_ip;
+        let rp = conn.remote_port;
+        // FIN occupies one sequence number; snd_nxt is already past it,
+        // so we retransmit at snd_nxt-1 (the FIN's seq).
+        let fin_seq = conn.snd_nxt.wrapping_sub(1);
+        let ack_nr = conn.rcv_nxt;
+
+        conn.rto_ns = conn.rto_ns.saturating_mul(2).min(RTO_MAX_NS);
+        conn.last_activity_ns = now;
+
+        crate::serial_println!(
+            "[tcp] FIN retransmit ({:?}) to {}:{} (port {}, rto={}ms)",
+            conn.state, ri, rp, lp, conn.rto_ns / 1_000_000
+        );
+
+        drop(conns);
+        let _ = send_segment(
+            lp, ri, rp, fin_seq, ack_nr, TCP_FIN | TCP_ACK, &[],
+        );
         return;
     }
 

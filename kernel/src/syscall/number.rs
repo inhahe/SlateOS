@@ -2258,6 +2258,18 @@ pub const SYS_TCP_SHUTDOWN: u64 = 848;
 /// Returns: 0 on success, negative error code.
 pub const SYS_TCP_INFO: u64 = 849;
 
+/// `SYS_TCP_SET_NODELAY` — enable or disable TCP Nagle algorithm.
+///
+/// `arg0`: socket handle.
+/// `arg1`: 0 = enable Nagle (default), 1 = disable Nagle (TCP_NODELAY).
+pub const SYS_TCP_SET_NODELAY: u64 = 850;
+
+/// `SYS_TCP_SET_KEEPALIVE` — enable or disable TCP keepalive probes.
+///
+/// `arg0`: socket handle.
+/// `arg1`: 0 = disable, 1 = enable.
+pub const SYS_TCP_SET_KEEPALIVE: u64 = 851;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

@@ -3544,6 +3544,7 @@ const COMMANDS: &[&str] = &[
     "pcap", "tcpdump",
     "traceroute", "tracert",
     "igmp",
+    "lldp",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4742,6 +4743,7 @@ fn dispatch(line: &str) {
         "pcap" | "tcpdump" => cmd_pcap(args),
         "traceroute" | "tracert" => cmd_traceroute(args),
         "igmp" => cmd_igmp(args),
+        "lldp" => cmd_lldp(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35472,6 +35474,93 @@ fn cmd_igmp(args: &str) {
     }
 }
 
+/// `lldp` — Link Layer Discovery Protocol.
+fn cmd_lldp(args: &str) {
+    use alloc::format;
+    use crate::net::lldp;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("lldp — Link Layer Discovery Protocol");
+            shell_println!("  lldp neighbors      Show discovered neighbors");
+            shell_println!("  lldp status          Show LLDP statistics");
+            shell_println!("  lldp enable          Enable LLDP advertisements");
+            shell_println!("  lldp disable         Disable LLDP advertisements");
+            shell_println!("  lldp clear           Clear neighbor table");
+            shell_println!("  lldp test            Run self-tests");
+        }
+        "neighbors" | "show" | "list" => {
+            let nbrs = lldp::neighbors();
+            if nbrs.is_empty() {
+                shell_println!("No LLDP neighbors discovered");
+            } else {
+                shell_println!("LLDP Neighbors ({}):", nbrs.len());
+                for n in &nbrs {
+                    shell_println!("  ─────────────────────────────────");
+                    shell_println!("  MAC:       {}", n.mac);
+                    if !n.system_name.is_empty() {
+                        shell_println!("  Name:      {}", n.system_name);
+                    }
+                    if !n.chassis_id.is_empty() {
+                        shell_println!("  Chassis:   {}", n.chassis_id);
+                    }
+                    if !n.port_id.is_empty() {
+                        shell_println!("  Port:      {}", n.port_id);
+                    }
+                    if !n.port_desc.is_empty() {
+                        shell_println!("  Port Desc: {}", n.port_desc);
+                    }
+                    if !n.system_desc.is_empty() {
+                        shell_println!("  Sys Desc:  {}", n.system_desc);
+                    }
+                    if n.capabilities != 0 {
+                        shell_println!("  Caps:      {} (enabled: {})",
+                            lldp::format_capabilities(n.capabilities),
+                            lldp::format_capabilities(n.enabled_caps),
+                        );
+                    }
+                    if !n.mgmt_ip.is_unspecified() {
+                        shell_println!("  Mgmt IP:   {}", n.mgmt_ip);
+                    }
+                    shell_println!("  TTL:       {}s", n.ttl);
+                }
+            }
+        }
+        "status" | "stats" => {
+            let s = lldp::stats();
+            shell_println!("LLDP Status");
+            shell_println!("  TX enabled:       {}", if s.tx_enabled { "yes" } else { "no" });
+            shell_println!("  Neighbors:        {}", s.neighbor_count);
+            shell_println!("  Frames received:  {}", s.frames_received);
+            shell_println!("  Frames sent:      {}", s.frames_sent);
+            shell_println!("  Expired:          {}", s.neighbors_expired);
+            shell_println!("  Parse errors:     {}", s.parse_errors);
+        }
+        "enable" | "on" => {
+            lldp::enable();
+            shell_println!("LLDP advertisements enabled");
+        }
+        "disable" | "off" => {
+            lldp::disable();
+            shell_println!("LLDP advertisements disabled");
+        }
+        "clear" | "flush" => {
+            lldp::clear_neighbors();
+            shell_println!("LLDP neighbor table cleared");
+        }
+        "test" => {
+            match lldp::self_test() {
+                Ok(()) => shell_println!("LLDP self-test: PASSED"),
+                Err(e) => shell_println!("LLDP self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Unknown subcommand '{}'. Try 'lldp help'.", sub);
+        }
+    }
+}
+
 /// `inputa11y` / `ia11y` — input accessibility features.
 fn cmd_inputa11y(args: &str) {
     use crate::fs::inputa11y;
@@ -65926,7 +66015,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

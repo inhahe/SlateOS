@@ -24,6 +24,7 @@ pub mod frag;
 pub mod http;
 pub mod icmp;
 pub mod igmp;
+pub mod lldp;
 pub mod mdns;
 pub mod ntp;
 pub mod syslog;
@@ -95,6 +96,7 @@ pub fn poll() {
         firewall::tick_conntrack_cleanup();
         ntp::tick();
         igmp::tick();
+        lldp::tick();
         mdns::tick();
         syslog::tick();
         telnet::tick();

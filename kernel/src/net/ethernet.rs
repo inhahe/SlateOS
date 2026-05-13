@@ -102,6 +102,7 @@ pub fn process_frame(data: &[u8]) -> KernelResult<()> {
     match frame.ethertype {
         ETHERTYPE_ARP => super::arp::process_arp(frame.payload),
         ETHERTYPE_IPV4 => super::ipv4::process_ipv4(frame.payload),
+        super::lldp::ETHERTYPE_LLDP => super::lldp::process_frame(&frame.src, frame.payload),
         _ => {
             // Unknown protocol — silently drop.
             Ok(())

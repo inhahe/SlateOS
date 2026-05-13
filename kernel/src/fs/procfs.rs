@@ -391,6 +391,7 @@ const ROOT_FILES: &[&str] = &[
     "iperf",
     "snmp",
     "ftp",
+    "smtp",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7516,6 +7517,10 @@ fn gen_ftp() -> Vec<u8> {
     crate::net::ftp::procfs_content().into_bytes()
 }
 
+fn gen_smtp() -> Vec<u8> {
+    crate::net::smtp::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10214,6 +10219,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "iperf" => Ok(gen_iperf()),
         "snmp" => Ok(gen_snmp()),
         "ftp" => Ok(gen_ftp()),
+        "smtp" => Ok(gen_smtp()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

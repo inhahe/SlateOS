@@ -3551,6 +3551,7 @@ const COMMANDS: &[&str] = &[
     "iperf",
     "snmp",
     "ftp",
+    "smtp",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4756,6 +4757,7 @@ fn dispatch(line: &str) {
         "iperf" => cmd_iperf(args),
         "snmp" => cmd_snmp(args),
         "ftp" => cmd_ftp(args),
+        "smtp" => cmd_smtp(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35760,6 +35762,97 @@ fn cmd_ndisc(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'ndisc help'.", sub);
+        }
+    }
+}
+
+/// `smtp` — SMTP client for sending email.
+fn cmd_smtp(args: &str) {
+    use alloc::format;
+    use alloc::vec::Vec;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("help");
+
+    match sub {
+        "send" | "s" => {
+            // smtp send <server> <from> <to> <subject> [body...]
+            if parts.len() < 5 {
+                shell_println!("Usage: smtp send <server> <from> <to> <subject> [body...]");
+                return;
+            }
+            let server_str = parts[1];
+            let from = parts[2];
+            let to = parts[3];
+            let subject = parts[4];
+            let body = if parts.len() > 5 {
+                parts[5..].join(" ")
+            } else {
+                alloc::string::String::from("(no body)")
+            };
+
+            let ip = if let Some(ip) = parse_ipv4(server_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(server_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("smtp: cannot resolve server '{}'", server_str);
+                        return;
+                    }
+                }
+            };
+
+            let msg = crate::net::smtp::EmailMessage::new(from, to, subject, &body);
+            shell_println!("Sending to {} via {}...", to, ip);
+            match crate::net::smtp::send_email(ip, 0, &msg) {
+                Ok(result) => {
+                    shell_println!("Banner: {}", result.banner);
+                    if result.accepted {
+                        shell_println!("Message accepted: {}", result.server_reply);
+                    } else {
+                        shell_println!("Message rejected: {}", result.server_reply);
+                    }
+                }
+                Err(e) => shell_println!("smtp: send failed: {:?}", e),
+            }
+        }
+
+        "codes" => {
+            shell_println!("Common SMTP reply codes:");
+            shell_println!("  220  {}", crate::net::smtp::reply_description(220));
+            shell_println!("  250  {}", crate::net::smtp::reply_description(250));
+            shell_println!("  354  {}", crate::net::smtp::reply_description(354));
+            shell_println!("  421  {}", crate::net::smtp::reply_description(421));
+            shell_println!("  450  {}", crate::net::smtp::reply_description(450));
+            shell_println!("  500  {}", crate::net::smtp::reply_description(500));
+            shell_println!("  550  {}", crate::net::smtp::reply_description(550));
+            shell_println!("  554  {}", crate::net::smtp::reply_description(554));
+        }
+
+        "status" | "stats" => {
+            let s = crate::net::smtp::stats();
+            shell_println!("SMTP statistics:");
+            shell_println!("  Connections:     {}", s.connections);
+            shell_println!("  Messages sent:   {}", s.messages_sent);
+            shell_println!("  Messages failed: {}", s.messages_failed);
+            shell_println!("  Bytes sent:      {}", s.bytes_sent);
+        }
+
+        "test" => {
+            match crate::net::smtp::self_test() {
+                Ok(()) => shell_println!("smtp: all self-tests passed"),
+                Err(e) => shell_println!("smtp: self-test failed: {:?}", e),
+            }
+        }
+
+        _ => {
+            shell_println!("smtp — SMTP client for sending email");
+            shell_println!();
+            shell_println!("Usage:");
+            shell_println!("  smtp send <server> <from> <to> <subject> [body...]");
+            shell_println!("  smtp codes                 — show SMTP reply codes");
+            shell_println!("  smtp status                — show statistics");
+            shell_println!("  smtp test                  — run self-tests");
         }
     }
 }
@@ -67049,7 +67142,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

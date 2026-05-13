@@ -994,6 +994,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] IPC Namespace (fs::ipcns): IPC namespace isolation monitoring with SysV shm/sem/msg tracking per namespace; `ipcns`/`ipcn` kshell command; /proc/ipcns; 8 self-tests
   - [x] Network Queue (fs::netqueue): Per-queue/NAPI network monitoring with RX/TX packet counts, drops, budget exhaustion tracking; `netqueue`/`nq` kshell command; /proc/netqueue; 8 self-tests
   - [x] Security Module (fs::secmod): LSM-like security module monitoring with per-hook check/denial counts, audit events, deny rate; `secmod`/`smod` kshell command; /proc/secmod; 8 self-tests
+  - [x] VM Balloon (fs::vmballoon): VM memory balloon driver monitoring with inflate/deflate/OOM tracking, target size, free page hints; `vmballoon`/`vbal` kshell command; /proc/vmballoon; 8 self-tests
+  - [x] Device Freq (fs::devfreq): Device frequency scaling monitoring with governor, transitions, frequency clamping for GPU/membus; `devfreq`/`dfreq` kshell command; /proc/devfreq; 8 self-tests
+  - [x] Hardware RNG (fs::hwrng): Hardware random number generator monitoring with per-source entropy tracking, pool status, reseed events; `hwrng`/`hrng` kshell command; /proc/hwrng; 8 self-tests
+  - [x] ACPI Stats (fs::acpistat): ACPI event monitoring with power/lid/battery/thermal events, GPE tracking, suspend/resume counts; `acpistat`/`acpi` kshell command; /proc/acpistat; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

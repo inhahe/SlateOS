@@ -468,6 +468,10 @@ const ROOT_FILES: &[&str] = &[
     "ipcns",
     "netqueue",
     "secmod",
+    "vmballoon",
+    "devfreq",
+    "hwrng",
+    "acpistat",
     "columnview",
     "pathbar",
     "viewstate",
@@ -9068,6 +9072,68 @@ fn gen_secmod() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_vmballoon() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cur, target, inf, def, oom, ops) = super::vmballoon::stats();
+    out.push_str(&format!("=== VM Balloon Stats ===\n"));
+    out.push_str(&format!("Current: {} pages  Target: {} pages  Inflates: {}  Deflates: {}  OOM: {}  Ops: {}\n",
+        cur, target, inf, def, oom, ops));
+    if let Some(s) = super::vmballoon::status() {
+        let cur_mb = s.current_pages * 16 / 1024;
+        let max_mb = s.max_pages * 16 / 1024;
+        out.push_str(&format!("Size: {} MiB / {} MiB  Hints: {}\n", cur_mb, max_mb, s.free_page_hints));
+    }
+    out.into_bytes()
+}
+
+fn gen_devfreq() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (devs, trans, ops) = super::devfreq::stats();
+    out.push_str(&format!("=== Device Frequency Stats ===\n"));
+    out.push_str(&format!("Devices: {}  Transitions: {}  Ops: {}\n\n", devs, trans, ops));
+    for d in super::devfreq::list() {
+        out.push_str(&format!("  [{}] {:<12} {}-{} kHz  cur={} kHz  gov={}  trans={}\n",
+            d.id, d.name, d.min_freq_khz, d.max_freq_khz, d.cur_freq_khz, d.governor.label(), d.transitions));
+    }
+    out.into_bytes()
+}
+
+fn gen_hwrng() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (generated, requested, reseeds, bits, ops) = super::hwrng::stats();
+    let ps = super::hwrng::pool_status();
+    let ready = if ps.ready { "YES" } else { "NO" };
+    out.push_str(&format!("=== Hardware RNG Stats ===\n"));
+    out.push_str(&format!("Generated: {} B  Requested: {} B  Reseeds: {}  Pool: {}/{} bits  Ready: {}  Ops: {}\n\n",
+        generated, requested, reseeds, bits, ps.pool_size_bits, ready, ops));
+    out.push_str("Sources:\n");
+    for (src, bytes, failures) in super::hwrng::source_breakdown() {
+        out.push_str(&format!("  {:<12} {} bytes  {} failures\n", src.label(), bytes, failures));
+    }
+    out.into_bytes()
+}
+
+fn gen_acpistat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (events, gpes, suspends, resumes, ops) = super::acpistat::stats();
+    out.push_str(&format!("=== ACPI Stats ===\n"));
+    out.push_str(&format!("Events: {}  GPEs: {}  Suspends: {}  Resumes: {}  Ops: {}\n\n", events, gpes, suspends, resumes, ops));
+    out.push_str("Event types:\n");
+    for (ev, count) in &super::acpistat::event_counts() {
+        out.push_str(&format!("  {:<14} {}\n", ev.label(), count));
+    }
+    out.push_str("\nGPEs:\n");
+    for g in super::acpistat::gpe_list() {
+        let en = if g.enabled { "on" } else { "off" };
+        out.push_str(&format!("  GPE 0x{:02x}  count={}  [{}]\n", g.gpe_num, g.count, en));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9701,6 +9767,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "ipcns" => Ok(gen_ipcns()),
         "netqueue" => Ok(gen_netqueue()),
         "secmod" => Ok(gen_secmod()),
+        "vmballoon" => Ok(gen_vmballoon()),
+        "devfreq" => Ok(gen_devfreq()),
+        "hwrng" => Ok(gen_hwrng()),
+        "acpistat" => Ok(gen_acpistat()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

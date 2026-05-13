@@ -27,6 +27,7 @@
 
 pub mod a11y;
 pub mod acl;
+pub mod acpistat;
 pub mod aiostat;
 #[allow(dead_code)]
 pub mod ar;
@@ -103,6 +104,7 @@ pub mod deskicons;
 pub mod detailcols;
 pub mod devicemgr;
 pub mod devfs;
+pub mod devfreq;
 pub mod devpair;
 pub mod dictation;
 pub mod directio;
@@ -173,6 +175,7 @@ pub mod haptfeedback;
 pub mod hdrdisplay;
 pub mod health;
 pub mod hwmonitor;
+pub mod hwrng;
 pub mod hotkeys;
 pub mod hotcorners;
 pub mod history;
@@ -411,6 +414,7 @@ pub mod vdesktop;
 pub mod vfs;
 pub mod viewstate;
 pub mod voicecontrol;
+pub mod vmballoon;
 pub mod vmmap;
 pub mod volumeosd;
 pub mod vpn;

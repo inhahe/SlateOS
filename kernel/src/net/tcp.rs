@@ -3677,6 +3677,41 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
             } else if flags & TCP_RST != 0 {
                 conn.active = false;
                 conn.state = TcpState::Closed;
+            } else if flags & TCP_SYN != 0 {
+                // Retransmitted SYN from client — our SYN-ACK was likely lost.
+                // Retransmit the SYN-ACK.  Gather connection info and drop
+                // the lock before sending.
+                let lp = conn.local_port;
+                let ri = conn.remote_ip;
+                let rp = conn.remote_port;
+                let our_isn = conn.snd_iss;
+                let rcv = conn.rcv_nxt;
+                let ecn = conn.ecn_ok;
+                let ts = conn.ts_ok;
+                let ts_recent_echo = conn.ts_recent;
+                let wscale = conn.wscale_ok;
+                conn.last_activity_ns = crate::hrtimer::now_ns();
+                drop(conns);
+
+                let synack_flags = if ecn {
+                    TCP_SYN | TCP_ACK | TCP_ECE
+                } else {
+                    TCP_SYN | TCP_ACK
+                };
+
+                if wscale || ts {
+                    let _ = send_syn_segment(
+                        lp, ri, rp, our_isn, rcv, synack_flags,
+                        DEFAULT_WINDOW, OUR_WSCALE,
+                        tcp_now_ms(),
+                        if ts { ts_recent_echo } else { 0 },
+                    );
+                } else {
+                    let _ = send_segment(lp, ri, rp, our_isn, rcv, synack_flags, &[]);
+                }
+                crate::serial_println!(
+                    "[tcp] SYN-ACK retransmit to {}:{} (port {})", ri, rp, lp
+                );
             }
         }
 

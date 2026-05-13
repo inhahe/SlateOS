@@ -612,12 +612,13 @@ pub unsafe extern "C" fn pselect(
         return unsafe { select(nfds, readfds, writefds, exceptfds, core::ptr::null_mut()) };
     }
 
-    // Convert timespec to timeval.
+    // Convert timespec to timeval (ceiling division for ns→µs so a
+    // non-zero sub-microsecond timeout doesn't become non-blocking {0,0}).
     // SAFETY: timeout is non-null, caller guarantees validity.
     let ts = unsafe { &*timeout };
     let mut tv = Timeval {
         tv_sec: ts.tv_sec,
-        tv_usec: ts.tv_nsec / 1000,
+        tv_usec: (ts.tv_nsec + 999) / 1000,
     };
 
     unsafe { select(nfds, readfds, writefds, exceptfds, &raw mut tv) }

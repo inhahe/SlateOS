@@ -999,8 +999,13 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
         return -1;
     }
 
+    // Strip SOCK_NONBLOCK and SOCK_CLOEXEC flags from the type argument
+    // (Linux extension: flags can be OR'd into the type parameter).
+    let flags = sock_type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
+    let base_type = sock_type & !(SOCK_NONBLOCK | SOCK_CLOEXEC);
+
     // Validate type + protocol combination.
-    match sock_type {
+    match base_type {
         SOCK_STREAM => {
             if protocol != 0 && protocol != IPPROTO_TCP {
                 errno::set_errno(errno::EPROTONOSUPPORT);
@@ -1021,22 +1026,29 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
 
     // Determine the initial handle kind.  The handle is 0 (no kernel
     // handle yet) — it will be set on connect/bind.
-    let kind = match sock_type {
+    let kind = match base_type {
         SOCK_STREAM => HandleKind::TcpStream,
         _ => HandleKind::UdpSocket,
     };
 
-    // Sockets are bidirectional (O_RDWR).
+    // Sockets are bidirectional (O_RDWR).  Apply O_NONBLOCK if requested.
+    let initial_flags = crate::fcntl::O_RDWR
+        | if (flags & SOCK_NONBLOCK) != 0 { crate::fcntl::O_NONBLOCK } else { 0 };
     let Some(fd) = fdtable::alloc_fd_with_flags(
-        kind, 0, crate::fcntl::O_RDWR,
+        kind, 0, initial_flags,
     ) else {
         errno::set_errno(errno::EMFILE);
         return -1;
     };
 
+    // Apply FD_CLOEXEC if requested.
+    if (flags & SOCK_CLOEXEC) != 0 {
+        let _ = fdtable::set_fd_flags(fd, 1); // FD_CLOEXEC = 1
+    }
+
     // Store socket metadata for later use by connect/bind/listen.
     set_meta(fd, SocketMeta {
-        sock_type,
+        sock_type: base_type,
         bound_port: 0,
         peer_addr: 0,
         peer_port: 0,
@@ -1174,7 +1186,11 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
 
             // Update the fd table with the kernel connection handle.
             // Discarding the old entry is safe: handle was 0 (no kernel resource to close).
-            let _ = fdtable::install_fd(fd, HandleKind::TcpStream, ret as u64);
+            // Preserve existing status flags (e.g. O_NONBLOCK set via fcntl).
+            let prev_flags = fdtable::get_status_flags(fd).unwrap_or(0);
+            let _ = fdtable::install_fd_with_flags(
+                fd, HandleKind::TcpStream, ret as u64, prev_flags,
+            );
 
             // Store peer address for getpeername().
             set_meta(fd, SocketMeta {
@@ -1329,7 +1345,11 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
 
             // Update fd table with the kernel UDP handle.
             // Discarding old entry is safe: handle was 0 (no kernel resource).
-            let _ = fdtable::install_fd(fd, HandleKind::UdpSocket, ret as u64);
+            // Preserve existing status flags (O_NONBLOCK, etc.).
+            let prev_flags = fdtable::get_status_flags(fd).unwrap_or(0);
+            let _ = fdtable::install_fd_with_flags(
+                fd, HandleKind::UdpSocket, ret as u64, prev_flags,
+            );
             meta.bound_port = sin.sin_port;
             meta.local_addr = sin.sin_addr.s_addr;
             set_meta(fd, meta);
@@ -1387,7 +1407,11 @@ pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
 
     // Change the fd to a TcpListener with the kernel listener handle.
     // Discarding old entry is safe: handle was 0 (unconnected socket).
-    let _ = fdtable::install_fd(fd, HandleKind::TcpListener, ret as u64);
+    // Preserve existing status flags (O_NONBLOCK for non-blocking accept).
+    let prev_flags = fdtable::get_status_flags(fd).unwrap_or(0);
+    let _ = fdtable::install_fd_with_flags(
+        fd, HandleKind::TcpListener, ret as u64, prev_flags,
+    );
 
     0
 }
@@ -1709,7 +1733,10 @@ pub unsafe extern "C" fn send(
                     return -1;
                 }
                 let new_handle = bind_ret as u64;
-                let _ = fdtable::install_fd(fd, HandleKind::UdpSocket, new_handle);
+                let prev_flags = fdtable::get_status_flags(fd).unwrap_or(0);
+                let _ = fdtable::install_fd_with_flags(
+                    fd, HandleKind::UdpSocket, new_handle, prev_flags,
+                );
                 // Re-apply peer filter on the new handle.
                 let peer_port_host = u16::from_be(meta.peer_port);
                 let _ = syscall3(
@@ -2238,8 +2265,11 @@ pub unsafe extern "C" fn sendto(
             return -1;
         }
         let new_handle = bind_ret as u64;
-        // Update fd table with the new kernel handle.
-        let _ = fdtable::install_fd(fd, HandleKind::UdpSocket, new_handle);
+        // Update fd table with the new kernel handle, preserving status flags.
+        let prev_flags = fdtable::get_status_flags(fd).unwrap_or(0);
+        let _ = fdtable::install_fd_with_flags(
+            fd, HandleKind::UdpSocket, new_handle, prev_flags,
+        );
         new_handle
     } else {
         entry.handle

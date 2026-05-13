@@ -1006,6 +1006,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kernel Stack (fs::kstack): Kernel stack usage monitoring with per-CPU high-water marks, overflow/guard-hit detection; `kstack`/`kstk` kshell command; /proc/kstack; 8 self-tests
   - [x] File Notify (fs::fnotify): inotify/fanotify/dnotify monitoring with watch counts, event queues, overflow tracking; `fnotify`/`fnot` kshell command; /proc/fnotify; 8 self-tests
   - [x] Network Latency (fs::netlat): Network RTT/processing latency with per-interface histograms, min/max/avg tracking; `netlat`/`nlat` kshell command; /proc/netlat; 8 self-tests
+  - [x] Disk Stats (fs::diskstat): Block device I/O monitoring with per-device read/write IOPS, throughput, latency, merges, discards; `diskstat`/`dstat` kshell command; /proc/diskstat; 8 self-tests
+  - [x] Task I/O (fs::taskio): Per-task I/O accounting with read/write bytes, syscall counts, cancelled writes, I/O wait; `taskio`/`tio` kshell command; /proc/taskio; 8 self-tests
+  - [x] TTY Stats (fs::ttystat): Terminal/serial device monitoring with per-TTY read/write tracking, signals, overruns, buffer usage; `ttystat`/`ttys` kshell command; /proc/ttystat; 8 self-tests
+  - [x] Swap Activity (fs::swapact): Swap in/out monitoring with per-area page counts, latencies, type tracking; `swapact`/`swact` kshell command; /proc/swapact; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

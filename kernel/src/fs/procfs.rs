@@ -480,6 +480,10 @@ const ROOT_FILES: &[&str] = &[
     "kstack",
     "fnotify",
     "netlat",
+    "diskstat",
+    "taskio",
+    "ttystat",
+    "swapact",
     "columnview",
     "pathbar",
     "viewstate",
@@ -9278,6 +9282,77 @@ fn gen_netlat() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_diskstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (devs, reads, writes, rb, wb, ops) = super::diskstat::stats();
+    out.push_str(&format!("=== Disk Stats ===\n"));
+    out.push_str(&format!("Devices: {}  Reads: {}  Writes: {}  ReadBytes: {}  WriteBytes: {}  Ops: {}\n\n",
+        devs, reads, writes, rb, wb, ops));
+    out.push_str("Per-device:\n");
+    for d in super::diskstat::per_device() {
+        let avg_r = if d.reads > 0 { d.read_ns / d.reads } else { 0 };
+        let avg_w = if d.writes > 0 { d.write_ns / d.writes } else { 0 };
+        out.push_str(&format!("  {:<10} R: {}({} B, avg {}ns)  W: {}({} B, avg {}ns)  disc={}  flush={}  merges: r={} w={}\n",
+            d.name, d.reads, d.read_bytes, avg_r, d.writes, d.write_bytes, avg_w,
+            d.discards, d.flushes, d.merges_read, d.merges_write));
+    }
+    out.into_bytes()
+}
+
+fn gen_taskio() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (tasks, rb, wb, cancelled, io_wait, ops) = super::taskio::stats();
+    out.push_str(&format!("=== Per-Task I/O Stats ===\n"));
+    out.push_str(&format!("Tasks: {}  ReadBytes: {}  WriteBytes: {}  Cancelled: {}  IOWait: {} ns  Ops: {}\n\n",
+        tasks, rb, wb, cancelled, io_wait, ops));
+    out.push_str("Per-task:\n");
+    for t in super::taskio::per_task() {
+        out.push_str(&format!("  PID {:>5}  read={}({} calls)  write={}({} calls)  cancel={}  iowait={}ns  majflt={}\n",
+            t.pid, t.read_bytes, t.read_syscalls, t.write_bytes, t.write_syscalls,
+            t.cancelled_write_bytes, t.io_wait_ns, t.page_faults_io));
+    }
+    out.into_bytes()
+}
+
+fn gen_ttystat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (ttys, rb, wb, sigs, overruns, ops) = super::ttystat::stats();
+    out.push_str(&format!("=== TTY Stats ===\n"));
+    out.push_str(&format!("TTYs: {}  ReadBytes: {}  WriteBytes: {}  Signals: {}  Overruns: {}  Ops: {}\n\n",
+        ttys, rb, wb, sigs, overruns, ops));
+    out.push_str("Per-TTY:\n");
+    for t in super::ttystat::per_tty() {
+        let pct = if t.buf_size > 0 { (t.buf_used as u64) * 100 / (t.buf_size as u64) } else { 0 };
+        out.push_str(&format!("  {:<10} [{}]  read={}({} ops)  write={}({} ops)  sigs={}  overruns={}  buf={}/{}({}%)\n",
+            t.name, t.tty_type.label(), t.read_bytes, t.read_ops, t.write_bytes, t.write_ops,
+            t.signals_sent, t.overruns, t.buf_used, t.buf_size, pct));
+    }
+    out.into_bytes()
+}
+
+fn gen_swapact() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (areas, si, so, sip, sop, ops) = super::swapact::stats();
+    out.push_str(&format!("=== Swap Activity Stats ===\n"));
+    out.push_str(&format!("Areas: {}  SwapIn: {}  SwapOut: {}  InPages: {}  OutPages: {}  Ops: {}\n\n",
+        areas, si, so, sip, sop, ops));
+    out.push_str("Per-area:\n");
+    for a in super::swapact::per_area() {
+        let pct = if a.total_pages > 0 { a.used_pages * 100 / a.total_pages } else { 0 };
+        let avg_in = if a.swap_in_count > 0 { a.swap_in_ns / a.swap_in_count } else { 0 };
+        let avg_out = if a.swap_out_count > 0 { a.swap_out_ns / a.swap_out_count } else { 0 };
+        out.push_str(&format!("  {:<15} [{}] prio={}  used={}/{}({}%)  in: {}({} pg, avg {}ns)  out: {}({} pg, avg {}ns)\n",
+            a.name, a.swap_type.label(), a.priority, a.used_pages, a.total_pages, pct,
+            a.swap_in_count, a.swap_in_pages, avg_in,
+            a.swap_out_count, a.swap_out_pages, avg_out));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9923,6 +9998,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "kstack" => Ok(gen_kstack()),
         "fnotify" => Ok(gen_fnotify()),
         "netlat" => Ok(gen_netlat()),
+        "diskstat" => Ok(gen_diskstat()),
+        "taskio" => Ok(gen_taskio()),
+        "ttystat" => Ok(gen_ttystat()),
+        "swapact" => Ok(gen_swapact()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

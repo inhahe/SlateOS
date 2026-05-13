@@ -597,7 +597,7 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
 - [x] ARP with cache expiration (5-minute TTL, LRU eviction)
 - [x] ICMP echo request/reply with RTT measurement, checksum verification, Destination Unreachable/Time Exceeded handling
 - [x] IPv4/TCP/UDP checksum verification on all incoming packets
-- [ ] UPnP / NAT-PMP port forwarding (detect and configure router)
+- [x] UPnP / NAT-PMP port forwarding (detect and configure router) _(upnp.rs: NAT-PMP RFC 6886 packet building/parsing, UPnP IGD SSDP discovery + SOAP control, mapping lifecycle with renewal/expiry, duplicate detection)_
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 
 ### 2.5 POSIX Compatibility Layer

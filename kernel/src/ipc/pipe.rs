@@ -820,7 +820,10 @@ pub fn poll_status(handle: PipeHandle) -> u16 {
             flags |= 0x04; // POLL_WRITABLE
         }
         if pipe.read_closed {
-            flags |= 0x10; // POLL_HANGUP (reader gone → broken pipe)
+            // POSIX/Linux: write end of a broken pipe reports POLLERR
+            // (not POLLHUP).  Programs check POLLERR to detect that a
+            // write will fail with EPIPE.
+            flags |= 0x08; // POLL_ERROR (broken pipe)
         }
     }
 

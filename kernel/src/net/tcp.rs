@@ -2897,6 +2897,19 @@ pub fn local_port(handle: usize) -> Option<u16> {
     Some(conn.local_port)
 }
 
+/// Query the local port of a TCP listener.
+///
+/// Returns the port the listener is bound to, or `None` if the
+/// handle is invalid or the listener is inactive.
+pub fn listener_local_port(handle: usize) -> Option<u16> {
+    let listeners = LISTENERS.lock();
+    let listener = listeners.get(handle)?;
+    if !listener.active {
+        return None;
+    }
+    Some(listener.port)
+}
+
 /// Check if a connection's remote end has closed.
 /// Check if reading from this connection should return EOF (0 bytes).
 ///

@@ -5,8 +5,8 @@
 //! Readiness is determined per fd type:
 //!
 //! - **Regular files / console**: always ready (POSIX mandates this).
-//! - **Pipes**: always reported ready (kernel lacks peek; may cause a
-//!   blocking read, which is the documented fallback).
+//! - **Pipes**: kernel-queried via `SYS_PIPE_POLL` — reports actual
+//!   readability/writability based on buffer state and end closure.
 //! - **TCP streams**: kernel-queried via `SYS_TCP_POLL_STATUS` — returns
 //!   actual POLLIN/POLLOUT/POLLHUP based on rx-buffer state, send window,
 //!   and connection state.

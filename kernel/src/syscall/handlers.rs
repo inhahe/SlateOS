@@ -7202,16 +7202,23 @@ pub fn sys_tcp_last_error(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(err as i64)
 }
 
-/// SYS_TCP_LOCAL_PORT — query the local port of a TCP connection.
+/// SYS_TCP_LOCAL_PORT — query the local port of a TCP connection or listener.
 ///
-/// arg0: connection handle
+/// arg0: handle (connection or listener, depending on arg1)
+/// arg1: 0 = connection handle, 1 = listener handle
 ///
 /// Returns the local port number (positive u16 range) on success,
 /// or InvalidArgument if the handle is invalid or not active.
 pub fn sys_tcp_local_port(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0 as usize;
-    match crate::net::tcp::local_port(handle) {
-        Some(port) => SyscallResult::ok(port as i64),
+    let is_listener = args.arg1 != 0;
+    let port = if is_listener {
+        crate::net::tcp::listener_local_port(handle)
+    } else {
+        crate::net::tcp::local_port(handle)
+    };
+    match port {
+        Some(p) => SyscallResult::ok(p as i64),
         None => SyscallResult::err(KernelError::InvalidArgument),
     }
 }

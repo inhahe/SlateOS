@@ -146,6 +146,10 @@ pub const IP_ADD_MEMBERSHIP: i32 = 35;
 /// Leave a multicast group.
 /// Value: `IpMreq` struct.
 pub const IP_DROP_MEMBERSHIP: i32 = 36;
+/// Set the IP Time-To-Live for unicast packets.
+pub const IP_TTL: i32 = 2;
+/// Set the IP Type-of-Service / DSCP field.
+pub const IP_TOS: i32 = 1;
 /// Set the TTL for multicast packets.
 pub const IP_MULTICAST_TTL: i32 = 33;
 /// Set the loopback mode for multicast packets.
@@ -1791,7 +1795,10 @@ pub unsafe extern "C" fn recv(
             }
             let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
             let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
-            let waitall = (flags & MSG_WAITALL) != 0 && !is_nb;
+            // MSG_WAITALL is meaningless with MSG_PEEK (peeking doesn't
+            // consume data, so looping would re-read the same bytes forever).
+            let waitall = (flags & MSG_WAITALL) != 0 && !is_nb
+                && (flags & MSG_PEEK) == 0;
 
             // Always try non-blocking first so we can implement
             // timeout/blocking semantics in userspace consistently.
@@ -2305,7 +2312,9 @@ pub unsafe extern "C" fn recvfrom(
 
             let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
             let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
-            let waitall = (flags & MSG_WAITALL) != 0 && !is_nb;
+            // MSG_WAITALL is meaningless with MSG_PEEK (same as recv above).
+            let waitall = (flags & MSG_WAITALL) != 0 && !is_nb
+                && (flags & MSG_PEEK) == 0;
 
             // Always try non-blocking first so we can implement timeout
             // semantics in userspace.  If data is available, we return
@@ -2629,8 +2638,11 @@ pub extern "C" fn setsockopt(
                     let tv_usec = unsafe {
                         core::ptr::read_unaligned(optval.add(8).cast::<i64>())
                     };
+                    // Ceiling division: round sub-millisecond values UP so
+                    // that any non-zero timeval yields at least 1ms (otherwise
+                    // {0, 500us} would store as 0ms = "no timeout" = block forever).
                     (tv_sec.max(0) as u64).saturating_mul(1000)
-                        .saturating_add((tv_usec.max(0) as u64) / 1000)
+                        .saturating_add(((tv_usec.max(0) as u64) + 999) / 1000)
                 } else {
                     val.max(0) as u64
                 };
@@ -2644,8 +2656,9 @@ pub extern "C" fn setsockopt(
                     let tv_usec = unsafe {
                         core::ptr::read_unaligned(optval.add(8).cast::<i64>())
                     };
+                    // Ceiling division (same rationale as SO_RCVTIMEO above).
                     (tv_sec.max(0) as u64).saturating_mul(1000)
-                        .saturating_add((tv_usec.max(0) as u64) / 1000)
+                        .saturating_add(((tv_usec.max(0) as u64) + 999) / 1000)
                 } else {
                     val.max(0) as u64
                 };
@@ -2922,6 +2935,12 @@ pub unsafe extern "C" fn getsockopt(
                 *optlen = 48;
                 return 0;
             }
+            // IP-level options: return sensible defaults even though we
+            // don't have per-socket kernel storage for these yet.
+            (SOL_IP, IP_TTL) => 64,               // Default unicast TTL.
+            (SOL_IP, IP_TOS) => 0,                // Default: no DSCP/TOS.
+            (SOL_IP, IP_MULTICAST_TTL) => 1,      // Default multicast TTL.
+            (SOL_IP, IP_MULTICAST_LOOP) => 1,     // Default: loopback enabled.
             _ => {
                 errno::set_errno(errno::ENOPROTOOPT);
                 return -1;
@@ -3063,8 +3082,19 @@ pub unsafe extern "C" fn getsockname(
     let local_port = if meta.bound_port != 0 {
         meta.bound_port
     } else if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
-        let port_raw = crate::syscall::syscall1(
-            crate::syscall::SYS_TCP_LOCAL_PORT, entry.handle,
+        // Connection: query kernel for ephemeral port (arg1=0 = connection).
+        let port_raw = crate::syscall::syscall2(
+            crate::syscall::SYS_TCP_LOCAL_PORT, entry.handle, 0,
+        );
+        if port_raw > 0 {
+            (port_raw as u16).to_be()
+        } else {
+            0
+        }
+    } else if entry.kind == HandleKind::TcpListener && entry.handle != 0 {
+        // Listener: query kernel for listener's bound port (arg1=1 = listener).
+        let port_raw = crate::syscall::syscall2(
+            crate::syscall::SYS_TCP_LOCAL_PORT, entry.handle, 1,
         );
         if port_raw > 0 {
             (port_raw as u16).to_be()
@@ -3502,8 +3532,8 @@ pub unsafe extern "C" fn getaddrinfo(
     unsafe { *res = core::ptr::null_mut(); }
 
     // Parse hints if provided.
-    let (want_family, want_socktype, want_passive) = if hints.is_null() {
-        (0, 0, false) // Accept any family/socktype.
+    let (want_family, want_socktype, want_passive, want_flags) = if hints.is_null() {
+        (0, 0, false, 0i32) // Accept any family/socktype.
     } else {
         // SAFETY: hints is non-null.
         let h = unsafe { &*hints };
@@ -3511,7 +3541,7 @@ pub unsafe extern "C" fn getaddrinfo(
         if h.ai_family != 0 && h.ai_family != AF_INET {
             return EAI_FAMILY;
         }
-        (h.ai_family, h.ai_socktype, h.ai_flags & AI_PASSIVE != 0)
+        (h.ai_family, h.ai_socktype, h.ai_flags & AI_PASSIVE != 0, h.ai_flags)
     };
 
     // We need at least a node or a service.
@@ -3531,7 +3561,11 @@ pub unsafe extern "C" fn getaddrinfo(
         // Try numeric parse first.
         let numeric = unsafe { inet_addr(node) };
         if numeric == 0xFFFF_FFFF {
-            // Not numeric — do DNS resolution.
+            // Not numeric — AI_NUMERICHOST prohibits DNS resolution.
+            if (want_flags & AI_NUMERICHOST) != 0 {
+                return EAI_NONAME;
+            }
+            // Do DNS resolution.
             let he = unsafe { gethostbyname(node) };
             if he.is_null() {
                 return EAI_NONAME;
@@ -3559,6 +3593,10 @@ pub unsafe extern "C" fn getaddrinfo(
         if numeric > 0 {
             numeric
         } else {
+            // Not a numeric port — AI_NUMERICSERV prohibits name lookup.
+            if (want_flags & AI_NUMERICSERV) != 0 {
+                return EAI_NONAME;
+            }
             // Try service name lookup (e.g., "http" → 80).
             // Match protocol: use "tcp" for SOCK_STREAM, "udp" for SOCK_DGRAM.
             let proto_filter = match want_socktype {

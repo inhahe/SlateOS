@@ -128,6 +128,7 @@ pub extern "C" fn close(fd: Fd) -> i32 {
             } else if linger_on && linger_secs > 0 {
                 // SO_LINGER with positive timeout: initiate graceful close,
                 // then block until close completes or timeout expires.
+                const POLL_NS: u64 = 10_000_000; // 10ms
                 let ret = syscall1(SYS_TCP_CLOSE, entry.handle);
                 if ret < 0 {
                     return errno::translate(ret) as i32;
@@ -135,7 +136,6 @@ pub extern "C" fn close(fd: Fd) -> i32 {
                 // Wait for connection to reach CLOSED/TIME_WAIT.
                 let deadline_ns = (syscall0(SYS_CLOCK_MONOTONIC) as u64)
                     .saturating_add((linger_secs as u64).saturating_mul(1_000_000_000));
-                const POLL_NS: u64 = 10_000_000; // 10ms
                 loop {
                     let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
                     if now >= deadline_ns {

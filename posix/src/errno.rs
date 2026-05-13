@@ -194,17 +194,20 @@ pub fn translate(ret: i64) -> i64 {
         return ret;
     }
 
+    #[allow(clippy::match_same_arms)] // Kept separate for readability: each
+    // native error code documents its semantic mapping even when the POSIX
+    // target is the same (e.g. INTERNAL_ERROR and IO_ERROR both → EIO).
     let err = match ret {
         // General errors
         native::INTERNAL_ERROR => EIO,
         native::NOT_SUPPORTED => ENOTSUP,
         native::INVALID_ARGUMENT => EINVAL,
-        native::WOULD_BLOCK => EAGAIN,
+        native::WOULD_BLOCK | native::CHANNEL_FULL => EAGAIN,
         native::CANCELLED => ECANCELED,
         native::TIMED_OUT => ETIMEDOUT,
 
         // Memory errors
-        native::OUT_OF_MEMORY => ENOMEM,
+        native::OUT_OF_MEMORY | native::RESOURCE_EXHAUSTED => ENOMEM,
         native::INVALID_ADDRESS => EFAULT,
 
         // Process errors
@@ -212,8 +215,6 @@ pub fn translate(ret: i64) -> i64 {
 
         // IPC errors
         native::CHANNEL_CLOSED => ECONNRESET,
-        native::CHANNEL_FULL => EAGAIN, // Send buffer full → try again.
-        native::RESOURCE_EXHAUSTED => ENOMEM,
 
         // Capability / permission errors
         native::PERMISSION_DENIED => EACCES,

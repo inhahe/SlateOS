@@ -200,6 +200,9 @@ pub extern "C" fn fd_set_isset(fd: i32, set: *const FdSet) -> i32 {
 /// `fds` must point to an array of at least `nfds` `Pollfd` entries.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i32 {
+    // Sleep interval: 10ms (balance between responsiveness and CPU).
+    const POLL_INTERVAL_NS: u64 = 10_000_000;
+
     if fds.is_null() && nfds > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -207,8 +210,6 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
 
     // Poll in a loop: check readiness, if nothing ready sleep briefly,
     // repeat until timeout expires or an fd becomes ready.
-    // Sleep interval: 10ms (balance between responsiveness and CPU).
-    const POLL_INTERVAL_NS: u64 = 10_000_000; // 10ms
     let deadline_ns = if timeout > 0 {
         let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
         now.saturating_add(u64::from(timeout as u32).saturating_mul(1_000_000))
@@ -448,13 +449,13 @@ pub unsafe extern "C" fn select(
     exceptfds: *mut FdSet,
     timeout: *mut Timeval,
 ) -> i32 {
+    // Sleep interval for polling: 10ms (balance responsiveness vs CPU).
+    const POLL_INTERVAL_NS: u64 = 10_000_000;
+
     if nfds < 0 || nfds as usize > FD_SETSIZE {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-
-    // Sleep interval for polling: 10ms (balance responsiveness vs CPU).
-    const POLL_INTERVAL_NS: u64 = 10_000_000;
 
     // Compute deadline from timeout.
     // NULL = block indefinitely, {0,0} = non-blocking poll.

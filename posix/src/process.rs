@@ -379,6 +379,7 @@ pub extern "C" fn getpgid(pid: PidT) -> PidT {
 ///
 /// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
+#[allow(clippy::similar_names)] // POSIX parameter names: pid and pgid.
 pub extern "C" fn setpgid(pid: PidT, pgid: PidT) -> i32 {
     ensure_pg_init();
     let us = getpid();

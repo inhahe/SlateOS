@@ -606,14 +606,14 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
         }
         _SC_OPEN_MAX => 256,
         _SC_CLK_TCK => 100,            // 100 Hz timer tick (Linux default).
-        _SC_ARG_MAX => 131072,          // 128 KiB argument limit.
+        _SC_ARG_MAX => 131_072,         // 128 KiB argument limit.
         _SC_CHILD_MAX => 1024,          // Max child processes.
         _SC_NGROUPS_MAX => 32,          // Max supplementary groups.
-        _SC_VERSION => 200809,          // POSIX.1-2008.
+        _SC_VERSION => 200_809,         // POSIX.1-2008.
         _SC_HOST_NAME_MAX => HOST_NAME_MAX as i64, // Matches our HOSTNAME_BUF size.
         _SC_LOGIN_NAME_MAX => 256,      // Max login name.
         _SC_LINE_MAX => 2048,           // Max line length.
-        _SC_THREADS => 200809,          // POSIX threads supported (version).
+        _SC_THREADS => 200_809,         // POSIX threads supported (version).
         _SC_THREAD_STACK_MIN => 65536,  // 64 KiB minimum thread stack.
         _SC_PHYS_PAGES => 8192,         // ~128 MiB at 16 KiB pages (TODO: query kernel).
         _SC_AVPHYS_PAGES => 4096,       // ~64 MiB available (TODO: query kernel).

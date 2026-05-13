@@ -6,7 +6,8 @@
 //!
 //! ## Supported Format Specifiers
 //!
-//! - `%d`, `%i` — signed decimal integer → `*mut i32`
+//! - `%d` — signed decimal integer → `*mut i32`
+//! - `%i` — signed integer with auto-detect base (0x→hex, 0→oct, else dec) → `*mut i32`
 //! - `%u` — unsigned decimal integer → `*mut u32`
 //! - `%ld`, `%li`, `%lu` — long variants → `*mut i64` / `*mut u64`
 //! - `%lld`, `%lli`, `%llu` — long long → same as long on LP64
@@ -245,8 +246,14 @@ fn scan_core(ctx: &mut ScanCtx) -> i32 {
             ctx.fmt_advance();
 
             match conv {
-                b'd' | b'i' => {
+                b'd' => {
                     if !scan_signed_int(ctx, suppress, width, long_mod) {
+                        break;
+                    }
+                }
+                b'i' => {
+                    // %i auto-detects base: 0x/0X → hex, 0 → octal, else decimal.
+                    if !scan_signed_int_auto(ctx, suppress, width, long_mod) {
                         break;
                     }
                 }
@@ -322,9 +329,9 @@ fn scan_core(ctx: &mut ScanCtx) -> i32 {
 // Conversion helpers
 // ---------------------------------------------------------------------------
 
-/// Scan a signed decimal/auto-detect integer.
+/// Scan a signed decimal integer (`%d`).
 ///
-/// Returns true if conversion succeeded (even if suppressed).
+/// Always base 10.  Returns true if conversion succeeded (even if suppressed).
 #[allow(clippy::arithmetic_side_effects)]
 fn scan_signed_int(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> bool {
     ctx.skip_ws();
@@ -348,6 +355,97 @@ fn scan_signed_int(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8
             break;
         }
         val = val.wrapping_mul(10).wrapping_add(i64::from(c.wrapping_sub(b'0')));
+        ctx.advance();
+        count = count.wrapping_add(1);
+    }
+
+    if count == 0 {
+        return false;
+    }
+
+    if negative {
+        val = val.wrapping_neg();
+    }
+
+    if !suppress {
+        let ptr = ctx.next_arg();
+        if long_mod >= 1 {
+            let p = ptr as *mut i64;
+            if !p.is_null() {
+                unsafe { *p = val; }
+            }
+        } else {
+            let p = ptr as *mut i32;
+            if !p.is_null() {
+                unsafe { *p = val as i32; }
+            }
+        }
+        ctx.assigned += 1;
+    }
+    true
+}
+
+/// Scan a signed integer with auto-detected base (`%i`).
+///
+/// POSIX/C: `%i` detects the base from the input prefix:
+/// - `0x` or `0X` → hexadecimal (base 16)
+/// - `0` (without x) → octal (base 8)
+/// - otherwise → decimal (base 10)
+#[allow(clippy::arithmetic_side_effects)]
+fn scan_signed_int_auto(
+    ctx: &mut ScanCtx,
+    suppress: bool,
+    width: usize,
+    long_mod: u8,
+) -> bool {
+    ctx.skip_ws();
+    if ctx.peek() == 0 {
+        return false;
+    }
+
+    let negative = ctx.peek() == b'-';
+    let has_sign = negative || ctx.peek() == b'+';
+    if has_sign {
+        ctx.advance();
+    }
+
+    let mut remaining = if has_sign { width.saturating_sub(1) } else { width };
+
+    // Detect base from prefix.
+    let base: u64;
+    if ctx.peek() == b'0' && remaining > 0 {
+        // Could be hex (0x) or octal (0).
+        let next = unsafe { *ctx.input.add(ctx.si.wrapping_add(1)) };
+        if (next == b'x' || next == b'X') && remaining > 2 {
+            base = 16;
+            ctx.advance(); // skip '0'
+            ctx.advance(); // skip 'x'/'X'
+            remaining = remaining.saturating_sub(2);
+        } else {
+            base = 8;
+            // Don't consume the leading '0' — it's a valid octal digit
+            // and the loop below will parse it.
+        }
+    } else {
+        base = 10;
+    }
+
+    // Parse digits in the detected base.
+    let mut val: i64 = 0;
+    let mut count: usize = 0;
+
+    while count < remaining {
+        let c = ctx.peek();
+        let digit = match c {
+            b'0'..=b'9' => i64::from(c.wrapping_sub(b'0')),
+            b'a'..=b'f' if base == 16 => i64::from(c.wrapping_sub(b'a')).wrapping_add(10),
+            b'A'..=b'F' if base == 16 => i64::from(c.wrapping_sub(b'A')).wrapping_add(10),
+            _ => break,
+        };
+        if digit >= base as i64 {
+            break;
+        }
+        val = val.wrapping_mul(base as i64).wrapping_add(digit);
         ctx.advance();
         count = count.wrapping_add(1);
     }

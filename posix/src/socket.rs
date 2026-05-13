@@ -179,7 +179,7 @@ pub const MSG_MORE: i32 = 0x8000;
 /// Don't send SIGPIPE (ignored — no signals).
 pub const MSG_NOSIGNAL: i32 = 0x4000;
 /// Set close-on-exec for received fds (recvmsg).
-pub const MSG_CMSG_CLOEXEC: i32 = 0x40000000;
+pub const MSG_CMSG_CLOEXEC: i32 = 0x4000_0000;
 
 /// Socket type flag: set `O_NONBLOCK` on the new socket (Linux extension).
 pub const SOCK_NONBLOCK: i32 = 0o4000;
@@ -920,7 +920,7 @@ fn write_hex16_ntop(buf: &mut [u8; 46], pos: &mut usize, val: u16) {
     // Find the first non-zero nibble.
     let mut started = false;
     for shift in [12u32, 8, 4, 0] {
-        let nibble = ((val as u32) >> shift) & 0xF;
+        let nibble = (u32::from(val) >> shift) & 0xF;
         if nibble != 0 || started {
             if let Some(slot) = buf.get_mut(*pos) {
                 *slot = HEX[nibble as usize];
@@ -1174,13 +1174,11 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
             }
 
             // Non-blocking connect: pass flag bit 0 if O_NONBLOCK is set.
-            let nb_flag: u64 = if fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0
-            {
-                1 // CONNECT_NONBLOCK
-            } else {
-                0
-            };
+            let nb_flag: u64 = u64::from(
+                fdtable::get_status_flags(fd).unwrap_or(0)
+                    & crate::fcntl::O_NONBLOCK
+                    != 0,
+            );
 
             let ret = syscall3(SYS_TCP_CONNECT, u64::from(ip), u64::from(port), nb_flag);
             if ret < 0 {
@@ -1915,7 +1913,7 @@ pub unsafe extern "C" fn recv(
 
             let ret = syscall4(
                 SYS_TCP_RECV, entry.handle,
-                buf as u64, len as u64, try_flags as u64,
+                buf as u64, len as u64, u64::from(try_flags),
             );
             if ret > 0 {
                 // MSG_WAITALL: keep receiving until `len` bytes or EOF/error.
@@ -2072,7 +2070,7 @@ pub(crate) fn tcp_recv_wait(
     loop {
         let ret = syscall4(
             SYS_TCP_RECV, handle,
-            buf as u64, len as u64, flags_nb as u64,
+            buf as u64, len as u64, u64::from(flags_nb),
         );
         if ret > 0 {
             return ret as isize;
@@ -2135,7 +2133,7 @@ fn tcp_recv_waitall(
 
         let ret = syscall4(
             SYS_TCP_RECV, handle,
-            dst as u64, remaining as u64, flags_nb as u64,
+            dst as u64, remaining as u64, u64::from(flags_nb),
         );
         if ret > 0 {
             got = got.saturating_add(ret as usize);
@@ -2480,7 +2478,7 @@ pub unsafe extern "C" fn recvfrom(
 
             let ret = syscall4(
                 SYS_TCP_RECV, entry.handle,
-                buf as u64, len as u64, try_flags as u64,
+                buf as u64, len as u64, u64::from(try_flags),
             );
 
             let recv_result = if ret > 0 {
@@ -2708,6 +2706,7 @@ pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
 ///
 /// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
+#[allow(clippy::similar_names)] // tv_sec/tv_usec are standard POSIX field names.
 pub extern "C" fn setsockopt(
     fd: i32,
     level: i32,
@@ -2947,6 +2946,7 @@ fn setsockopt_multicast(
 ///
 /// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
+#[allow(clippy::similar_names)] // tv_sec/tv_usec are standard POSIX field names.
 pub unsafe extern "C" fn getsockopt(
     fd: i32,
     level: i32,
@@ -4195,6 +4195,8 @@ pub struct Cmsghdr {
 /// Ancillary data (`msg_control`) is ignored.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isize {
+    const STACK_BUF: usize = 4096;
+    const LARGE_BUF: usize = 16384;
     if msg.is_null() {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -4249,7 +4251,6 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
 
     // If total fits in a stack buffer, concatenate for one send call.
     // This produces a single TCP segment / UDP datagram instead of multiple.
-    const STACK_BUF: usize = 4096;
     if total <= STACK_BUF {
         let mut buf = [0u8; STACK_BUF];
         let mut pos: usize = 0;
@@ -4299,7 +4300,6 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
         }
         // Use a 16 KiB stack buffer (one page).  For the rare case of
         // UDP datagrams > 16 KiB, use a 64 KiB buffer.
-        const LARGE_BUF: usize = 16384;
         if total <= LARGE_BUF {
             let mut buf = [0u8; LARGE_BUF];
             let mut pos: usize = 0;
@@ -4400,6 +4400,8 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
 /// Ancillary data (`msg_control`) is not populated.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize {
+    const STACK_BUF_SMALL: usize = 4096;
+    const STACK_BUF_LARGE: usize = 16384; // One 16 KiB page.
     if msg.is_null() {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -4545,8 +4547,6 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
     // total_cap (clamped to 16 KiB) to avoid unnecessary truncation.
     // For TCP: 4 KiB is fine — TCP is a byte stream and short reads are
     // expected; the remaining data is still in the kernel buffer.
-    const STACK_BUF_SMALL: usize = 4096;
-    const STACK_BUF_LARGE: usize = 16384; // One 16 KiB page.
 
     let is_dgram = fdtable::get_fd(fd)
         .is_some_and(|e| e.kind == HandleKind::UdpSocket);

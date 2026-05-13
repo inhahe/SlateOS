@@ -112,10 +112,28 @@ pub const SO_REUSEPORT: i32 = 15;
 pub const SO_RCVTIMEO: i32 = 20;
 /// Send timeout.
 pub const SO_SNDTIMEO: i32 = 21;
+/// Socket is accepting connections (listening).
+pub const SO_ACCEPTCONN: i32 = 30;
+/// Domain of the socket.
+pub const SO_DOMAIN: i32 = 39;
+/// Protocol of the socket.
+pub const SO_PROTOCOL: i32 = 38;
 
 // TCP-level socket options (SOL_TCP).
 /// Disable Nagle's algorithm.
 pub const TCP_NODELAY: i32 = 1;
+/// Idle time before keepalive probes (seconds).
+pub const TCP_KEEPIDLE: i32 = 4;
+/// Interval between keepalive probes (seconds).
+pub const TCP_KEEPINTVL: i32 = 5;
+/// Number of keepalive probes before dropping.
+pub const TCP_KEEPCNT: i32 = 6;
+/// Peer's advertised MSS.
+pub const TCP_MAXSEG: i32 = 2;
+/// Enable TCP cork (coalesce small writes).
+pub const TCP_CORK: i32 = 3;
+/// User timeout (milliseconds) — time to wait for data ACK.
+pub const TCP_USER_TIMEOUT: i32 = 18;
 
 // IP-level socket options (IPPROTO_IP / SOL_IP).
 /// IP protocol level for setsockopt/getsockopt.
@@ -132,12 +150,26 @@ pub const IP_MULTICAST_TTL: i32 = 33;
 pub const IP_MULTICAST_LOOP: i32 = 34;
 
 // MSG flags for send/recv.
+/// Out-of-band data.
+pub const MSG_OOB: i32 = 1;
 /// Peek at incoming data without consuming.
 pub const MSG_PEEK: i32 = 2;
-/// Non-blocking operation.
-pub const MSG_DONTWAIT: i32 = 0x40;
+/// Send without routing (ignored — we always route).
+pub const MSG_DONTROUTE: i32 = 4;
 /// Data was truncated (returned by recvmsg).
 pub const MSG_TRUNC: i32 = 0x20;
+/// Non-blocking operation.
+pub const MSG_DONTWAIT: i32 = 0x40;
+/// Terminate a record (ignored — TCP is byte-stream).
+pub const MSG_EOR: i32 = 0x80;
+/// Wait for full request or error.
+pub const MSG_WAITALL: i32 = 0x100;
+/// More data coming (cork the send).
+pub const MSG_MORE: i32 = 0x8000;
+/// Don't send SIGPIPE (ignored — no signals).
+pub const MSG_NOSIGNAL: i32 = 0x4000;
+/// Set close-on-exec for received fds (recvmsg).
+pub const MSG_CMSG_CLOEXEC: i32 = 0x40000000;
 
 /// Socket type flag: set `O_NONBLOCK` on the new socket (Linux extension).
 pub const SOCK_NONBLOCK: i32 = 0o4000;
@@ -1934,7 +1966,20 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_SOCKET, SO_REUSEPORT) => 0,  // Port reuse not supported.
             (SOL_SOCKET, SO_LINGER) => meta.map_or(0, |m| m.linger_secs),
             (SOL_SOCKET, SO_RCVTIMEO | SO_SNDTIMEO) => 0, // No timeout.
+            (SOL_SOCKET, SO_ACCEPTCONN) => i32::from(entry.kind == HandleKind::TcpListener),
+            (SOL_SOCKET, SO_DOMAIN) => AF_INET,
+            (SOL_SOCKET, SO_PROTOCOL) => match entry.kind {
+                HandleKind::TcpStream | HandleKind::TcpListener => IPPROTO_TCP,
+                HandleKind::UdpSocket => IPPROTO_UDP,
+                _ => 0,
+            },
             (SOL_TCP, TCP_NODELAY) => meta.map_or(0, |m| i32::from(m.nodelay)),
+            (SOL_TCP, TCP_KEEPIDLE) => 75,   // Default 75s (matches kernel default).
+            (SOL_TCP, TCP_KEEPINTVL) => 10,  // Default 10s (matches kernel default).
+            (SOL_TCP, TCP_KEEPCNT) => 9,     // Default 9 probes (matches kernel default).
+            (SOL_TCP, TCP_MAXSEG) => 1460,   // Default MSS (Ethernet MTU - headers).
+            (SOL_TCP, TCP_CORK) => 0,        // Not corked.
+            (SOL_TCP, TCP_USER_TIMEOUT) => 0, // No user timeout.
             _ => {
                 errno::set_errno(errno::ENOPROTOOPT);
                 return -1;

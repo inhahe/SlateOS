@@ -974,6 +974,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] PID Stats (fs::pidstat): PID allocation/namespace monitoring with namespace hierarchy, high watermark tracking, reuse detection; `pidstat`/`pidst` kshell command; /proc/pidstat; 8 self-tests
   - [x] Binary Format (fs::binfmt): Executable loader stats with 6 formats (elf64/elf32/script/flat/wasm/unknown), load time tracking, 6 error categories; `binfmt`/`bfmt` kshell command; /proc/binfmt; 8 self-tests
   - [x] Pipe Stats (fs::pipestat): Pipe/FIFO I/O monitoring with buffer utilization, read/write blocking events, per-PID filtering, anonymous/named pipe types; `pipestat`/`pipest` kshell command; /proc/pipestat; 8 self-tests
+  - [x] Socket Buffer (fs::sockbuf): Network buffer pool monitoring with 6 pools (TCP/UDP/Raw/ICMP/Multicast/General), alloc/free/drop tracking, peak buffer watermark; `sockbuf`/`sbuf` kshell command; /proc/sockbuf; 8 self-tests
+  - [x] Sched Latency (fs::schedlat): Scheduling latency with per-CPU wakeup/runqueue/preempt latency tracking, 8-bucket histograms, max latency detection; `schedlat`/`slat` kshell command; /proc/schedlat; 8 self-tests
+  - [x] Memory Pressure (fs::mempress): PSI-like memory pressure monitoring with 5 pressure levels, stall/reclaim event tracking, OOM proximity indicator; `mempress`/`mpress` kshell command; /proc/mempress; 8 self-tests
+  - [x] CPU Cache (fs::cpucache): CPU cache hierarchy monitoring with L1d/L1i/L2/L3 hit/miss/eviction stats, per-level and overall hit rates, topology info; `cpucache`/`ccache` kshell command; /proc/cpucache; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

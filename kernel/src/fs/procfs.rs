@@ -86,7 +86,7 @@ const ROOT_FILES: &[&str] = &[
     "filesystems",
     "cmdline",
     "loadavg",
-    "cacheinfo",
+    "cpucache",
     "locks",
     "fdinfo",
     "diskstats",
@@ -448,6 +448,10 @@ const ROOT_FILES: &[&str] = &[
     "pidstat",
     "binfmt",
     "pipestat",
+    "sockbuf",
+    "schedlat",
+    "mempress",
+    "cpucache",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8719,6 +8723,76 @@ fn gen_pipestat() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_sockbuf() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (pools, allocs, frees, drops, bytes, ops) = crate::fs::sockbuf::stats();
+    out.push_str(&format!("pools: {}\n", pools));
+    out.push_str(&format!("total_allocs: {}\n", allocs));
+    out.push_str(&format!("total_frees: {}\n", frees));
+    out.push_str(&format!("total_drops: {}\n", drops));
+    out.push_str(&format!("total_bytes: {}\n", bytes));
+    out.push_str(&format!("ops: {}\n", ops));
+    for p in crate::fs::sockbuf::pool_stats() {
+        out.push_str(&format!("{}: active={} bytes={} allocs={} frees={} drops={} peak={}\n",
+            p.pool.label(), p.active_buffers, p.total_bytes, p.allocs, p.frees, p.drops, p.peak_buffers));
+    }
+    out.into_bytes()
+}
+
+fn gen_schedlat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cpus, wakes, runqs, preempts, max_ns, ops) = crate::fs::schedlat::stats();
+    out.push_str(&format!("cpus: {}\n", cpus));
+    out.push_str(&format!("total_wakeups: {}\n", wakes));
+    out.push_str(&format!("total_runq_waits: {}\n", runqs));
+    out.push_str(&format!("total_preempts: {}\n", preempts));
+    out.push_str(&format!("global_max_ns: {}\n", max_ns));
+    out.push_str(&format!("ops: {}\n", ops));
+    let labels = ["<1us", "<10us", "<100us", "<1ms", "<10ms", "<100ms", "<1s", ">=1s"];
+    let hist = crate::fs::schedlat::global_histogram();
+    for (i, count) in hist.iter().enumerate() {
+        out.push_str(&format!("{}: {}\n", labels[i], count));
+    }
+    out.into_bytes()
+}
+
+fn gen_mempress() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let c = crate::fs::mempress::current();
+    out.push_str(&format!("level: {}\n", c.level.label()));
+    out.push_str(&format!("oom_proximity: {}%\n", c.oom_proximity));
+    out.push_str(&format!("total_stall_ns: {}\n", c.total_stall_ns));
+    out.push_str(&format!("total_reclaim_pages: {}\n", c.total_reclaim_pages));
+    let (stalls, reclaims, stall_ns, pages, changes, oom, ops) = crate::fs::mempress::stats();
+    out.push_str(&format!("stall_events: {}\n", stalls));
+    out.push_str(&format!("reclaim_events: {}\n", reclaims));
+    out.push_str(&format!("level_changes: {}\n", changes));
+    out.push_str(&format!("ops: {}\n", ops));
+    out.into_bytes()
+}
+
+fn gen_cpucache() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (levels, hits, misses, ops) = crate::fs::cpucache::stats();
+    out.push_str(&format!("levels: {}\n", levels));
+    out.push_str(&format!("total_hits: {}\n", hits));
+    out.push_str(&format!("total_misses: {}\n", misses));
+    let rate = crate::fs::cpucache::overall_hit_rate();
+    out.push_str(&format!("overall_hit_rate: {}.{}%\n", rate / 100, rate % 100));
+    out.push_str(&format!("ops: {}\n", ops));
+    for c in crate::fs::cpucache::topology() {
+        let r = crate::fs::cpucache::hit_rate(c.level);
+        out.push_str(&format!("{}: {}KB {}B/line {}way {}set shared={} hits={} miss={} rate={}.{}%\n",
+            c.level.label(), c.size_kb, c.line_size, c.ways, c.sets, c.shared_cpus,
+            c.hits, c.misses, r / 100, r % 100));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9332,6 +9406,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "pidstat" => Ok(gen_pidstat()),
         "binfmt" => Ok(gen_binfmt()),
         "pipestat" => Ok(gen_pipestat()),
+        "sockbuf" => Ok(gen_sockbuf()),
+        "schedlat" => Ok(gen_schedlat()),
+        "mempress" => Ok(gen_mempress()),
+        "cpucache" => Ok(gen_cpucache()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

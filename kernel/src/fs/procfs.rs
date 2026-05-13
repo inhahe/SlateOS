@@ -420,6 +420,10 @@ const ROOT_FILES: &[&str] = &[
     "kconsole",
     "signalq",
     "memcg",
+    "tlbstat",
+    "pagestat",
+    "dmastat",
+    "compstat",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8187,6 +8191,78 @@ fn gen_memcg() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_tlbstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cpus, hits, misses, shootdowns, flushes, ops) = crate::fs::tlbstat::stats();
+    out.push_str(&format!("cpus: {}\n", cpus));
+    out.push_str(&format!("total_hits: {}\n", hits));
+    out.push_str(&format!("total_misses: {}\n", misses));
+    out.push_str(&format!("hit_rate: {}%\n", crate::fs::tlbstat::hit_rate()));
+    out.push_str(&format!("total_shootdowns: {}\n", shootdowns));
+    out.push_str(&format!("total_flushes: {}\n", flushes));
+    out.push_str(&format!("ops: {}\n", ops));
+    for cs in crate::fs::tlbstat::cpu_stats() {
+        out.push_str(&format!("cpu{}: hits={} misses={} shootdowns_sent={} flushes={}\n",
+            cs.cpu_id, cs.hits, cs.misses, cs.shootdowns_sent, cs.flushes));
+    }
+    out.into_bytes()
+}
+
+fn gen_pagestat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (zones, allocs, frees, reclaims, fails, ops) = crate::fs::pagestat::stats();
+    out.push_str(&format!("zones: {}\n", zones));
+    out.push_str(&format!("total_allocs: {}\n", allocs));
+    out.push_str(&format!("total_frees: {}\n", frees));
+    out.push_str(&format!("total_reclaims: {}\n", reclaims));
+    out.push_str(&format!("total_fails: {}\n", fails));
+    out.push_str(&format!("ops: {}\n", ops));
+    let (hp_total, hp_free, hp_res) = crate::fs::pagestat::hugepage_info();
+    out.push_str(&format!("hugepages: total={} free={} reserved={}\n", hp_total, hp_free, hp_res));
+    for zs in crate::fs::pagestat::zone_stats() {
+        out.push_str(&format!("{}: total={} free={} alloc={} frag={}%\n",
+            zs.zone.label(), zs.total_pages, zs.free_pages, zs.allocated, zs.fragmentation_pct));
+    }
+    out.into_bytes()
+}
+
+fn gen_dmastat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (devs, maps, unmaps, bytes, faults, ops) = crate::fs::dmastat::stats();
+    out.push_str(&format!("devices: {}\n", devs));
+    out.push_str(&format!("total_maps: {}\n", maps));
+    out.push_str(&format!("total_unmaps: {}\n", unmaps));
+    out.push_str(&format!("total_bytes: {}\n", bytes));
+    out.push_str(&format!("total_faults: {}\n", faults));
+    out.push_str(&format!("ops: {}\n", ops));
+    for d in crate::fs::dmastat::device_stats() {
+        out.push_str(&format!("{}: maps={} active={} xfer={} faults={} iommu={}\n",
+            d.name, d.maps, d.active_mappings, d.bytes_transferred, d.faults, d.iommu_enabled));
+    }
+    out.into_bytes()
+}
+
+fn gen_compstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (zones, attempts, migrations, stalls, stall_ns, ops) = crate::fs::compstat::stats();
+    out.push_str(&format!("zones: {}\n", zones));
+    out.push_str(&format!("total_attempts: {}\n", attempts));
+    out.push_str(&format!("total_migrations: {}\n", migrations));
+    out.push_str(&format!("total_stalls: {}\n", stalls));
+    out.push_str(&format!("total_stall_ns: {}\n", stall_ns));
+    out.push_str(&format!("success_rate: {}%\n", crate::fs::compstat::success_rate()));
+    out.push_str(&format!("ops: {}\n", ops));
+    for zs in crate::fs::compstat::zone_stats() {
+        out.push_str(&format!("{}: attempts={} success={} failed={} migrated={} stalls={}\n",
+            zs.zone.label(), zs.attempts, zs.successes, zs.failures, zs.pages_migrated, zs.stalls));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8772,6 +8848,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "kconsole" => Ok(gen_kconsole()),
         "signalq" => Ok(gen_signalq()),
         "memcg" => Ok(gen_memcg()),
+        "tlbstat" => Ok(gen_tlbstat()),
+        "pagestat" => Ok(gen_pagestat()),
+        "dmastat" => Ok(gen_dmastat()),
+        "compstat" => Ok(gen_compstat()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

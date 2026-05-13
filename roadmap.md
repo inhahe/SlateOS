@@ -946,6 +946,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Kernel Console (fs::kconsole): Virtual console management with 5 types, switch/create/resize, scrollback, I/O routing; `kconsole`/`kcon` kshell command; /proc/kconsole; 8 self-tests
   - [x] Signal Queue (fs::signalq): Signal/exception delivery with 12 hardware signals + user-defined, per-process pending/blocked/delivered tracking; `signalq`/`sigq` kshell command; /proc/signalq; 8 self-tests
   - [x] Memory Cgroup (fs::memcg): Per-cgroup memory accounting with hard/soft limits, swap tracking, OOM recording, charge/uncharge; `memcg`/`mcg` kshell command; /proc/memcg; 8 self-tests
+  - [x] TLB Stats (fs::tlbstat): TLB performance monitoring with per-CPU hits/misses/shootdowns/flushes, shootdown event log, hit rate calculation; `tlbstat`/`tstat` kshell command; /proc/tlbstat; 8 self-tests
+  - [x] Page Stats (fs::pagestat): Page allocator monitoring with 5 zones, order histogram, huge page tracking, fragmentation metrics; `pagestat`/`pgstat` kshell command; /proc/pagestat; 8 self-tests
+  - [x] DMA Stats (fs::dmastat): DMA/IOMMU monitoring with per-device map/unmap/transfer tracking, IOMMU fault log, device registration; `dmastat`/`dma` kshell command; /proc/dmastat; 8 self-tests
+  - [x] Compaction Stats (fs::compstat): Memory compaction monitoring with per-zone attempts/success/failure, page migration tracking, stall accounting; `compstat`/`cstat` kshell command; /proc/compstat; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

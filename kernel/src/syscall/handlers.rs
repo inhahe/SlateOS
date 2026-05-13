@@ -6870,3 +6870,72 @@ pub fn sys_tcp_listener_list(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(written as i64)
 }
+
+/// `SYS_NET_IF_INFO` — query network interface configuration.
+///
+/// `arg0`: pointer to output buffer (>= 24 bytes).
+/// `arg1`: buffer length in bytes.
+///
+/// Returns 0 on success with interface info written.
+pub fn sys_net_if_info(args: &SyscallArgs) -> SyscallResult {
+    let out_ptr = args.arg0 as usize;
+    let buf_len = args.arg1 as usize;
+
+    if out_ptr == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    const INFO_SIZE: usize = 24;
+    if buf_len < INFO_SIZE {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let info = crate::net::interface::info();
+    let mut record = [0u8; INFO_SIZE];
+
+    // [0..4] IPv4 address.
+    record[0] = info.ip.0[0];
+    record[1] = info.ip.0[1];
+    record[2] = info.ip.0[2];
+    record[3] = info.ip.0[3];
+
+    // [4..8] subnet mask.
+    record[4] = info.subnet_mask.0[0];
+    record[5] = info.subnet_mask.0[1];
+    record[6] = info.subnet_mask.0[2];
+    record[7] = info.subnet_mask.0[3];
+
+    // [8..12] gateway.
+    record[8] = info.gateway.0[0];
+    record[9] = info.gateway.0[1];
+    record[10] = info.gateway.0[2];
+    record[11] = info.gateway.0[3];
+
+    // [12..16] DNS server.
+    record[12] = info.dns.0[0];
+    record[13] = info.dns.0[1];
+    record[14] = info.dns.0[2];
+    record[15] = info.dns.0[3];
+
+    // [16..22] MAC address.
+    record[16] = info.mac.0[0];
+    record[17] = info.mac.0[1];
+    record[18] = info.mac.0[2];
+    record[19] = info.mac.0[3];
+    record[20] = info.mac.0[4];
+    record[21] = info.mac.0[5];
+
+    // [22] flags.
+    record[22] = u8::from(info.up);
+
+    // [23] reserved.
+    record[23] = 0;
+
+    let dst = out_ptr as *mut u8;
+    // SAFETY: out_ptr is a userspace pointer, buf_len >= INFO_SIZE.
+    unsafe {
+        core::ptr::copy_nonoverlapping(record.as_ptr(), dst, INFO_SIZE);
+    }
+
+    SyscallResult::ok(0)
+}

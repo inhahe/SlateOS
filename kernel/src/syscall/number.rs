@@ -2124,6 +2124,26 @@ pub const SYS_ICMP_PING_WAIT: u64 = 831;
 /// Returns: number of connections written (may be < total if buffer too small).
 pub const SYS_TCP_LIST: u64 = 840;
 
+/// Query network interface configuration (IP, mask, gateway, DNS, MAC).
+///
+/// Writes a 24-byte configuration record to the caller's buffer:
+///
+/// ```text
+/// [0..4]   = IPv4 address (network order)
+/// [4..8]   = subnet mask (network order)
+/// [8..12]  = gateway (network order)
+/// [12..16] = DNS server (network order)
+/// [16..22] = MAC address (6 bytes)
+/// [22]     = flags (bit 0 = up)
+/// [23]     = reserved (0)
+/// ```
+///
+/// - `arg0`: pointer to output buffer (must be >= 24 bytes)
+/// - `arg1`: buffer length in bytes
+///
+/// Returns 0 on success.
+pub const SYS_NET_IF_INFO: u64 = 842;
+
 /// List active TCP listeners.
 ///
 /// Writes an array of 4-byte listener records to the caller's buffer.

@@ -108,6 +108,7 @@ pub const SYS_ICMP_PING: u64 = 830;
 pub const SYS_ICMP_PING_WAIT: u64 = 831;
 pub const SYS_TCP_LIST: u64 = 840;
 pub const SYS_TCP_LISTENER_LIST: u64 = 841;
+pub const SYS_NET_IF_INFO: u64 = 842;
 
 // ---------------------------------------------------------------------------
 // Inline syscall wrappers

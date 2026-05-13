@@ -3193,18 +3193,13 @@ pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32 {
         return -1;
     }
 
-    // Query the kernel for the eth0 IP address.
-    // SYS_NET_STAT returns 48 bytes of interface statistics; we just
-    // need to know if the interface is configured.  We can get the IP
-    // from the first 4 bytes of the peer addr query — but actually,
-    // we don't have a direct "get interface IP" syscall.  We'll use
-    // a convention: if NET_STAT succeeds, the interface is up.
-    let mut stat_buf = [0u8; 48];
+    // Query the kernel for interface configuration (IP, mask, gateway, DNS, MAC, flags).
+    let mut if_info = [0u8; 24];
     let net_up = syscall2(
-        SYS_NET_STAT,
-        stat_buf.as_mut_ptr() as u64,
-        stat_buf.len() as u64,
-    ) == 0;
+        SYS_NET_IF_INFO,
+        if_info.as_mut_ptr() as u64,
+        if_info.len() as u64,
+    ) == 0 && if_info[22] != 0; // byte 22 = flags, bit 0 = up
 
     // SAFETY: single-threaded, static storage.
     unsafe {
@@ -3224,16 +3219,18 @@ pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32 {
         (*lo).ifa_next = core::ptr::null_mut();
 
         if net_up {
-            // Set up eth0 entry.
+            // Set up eth0 entry with real IP and mask from kernel.
             let eth0 = core::ptr::addr_of_mut!(IFADDRS_ETH0);
             let eth0_addr = core::ptr::addr_of_mut!(IFADDRS_ETH0_ADDR);
             let eth0_mask = core::ptr::addr_of_mut!(IFADDRS_ETH0_MASK);
             let eth0_name = core::ptr::addr_of_mut!(IFADDRS_ETH0_NAME);
-            // We don't have a direct way to query the interface IP from
-            // userspace, so set to 0.0.0.0 (INADDR_ANY) indicating it's
-            // configured but the IP is available via other means.
-            (*eth0_addr).sin_addr.s_addr = 0;
-            (*eth0_mask).sin_addr.s_addr = 0;
+
+            // if_info[0..4] = IP, [4..8] = mask (already in network byte order).
+            (*eth0_addr).sin_addr.s_addr =
+                u32::from_ne_bytes([if_info[0], if_info[1], if_info[2], if_info[3]]);
+            (*eth0_mask).sin_addr.s_addr =
+                u32::from_ne_bytes([if_info[4], if_info[5], if_info[6], if_info[7]]);
+
             (*eth0).ifa_name = (*eth0_name).as_ptr();
             (*eth0).ifa_flags = IFF_UP | IFF_RUNNING | IFF_MULTICAST | IFF_BROADCAST;
             (*eth0).ifa_addr = eth0_addr.cast();

@@ -501,7 +501,6 @@ pub fn wait_reply(seq: u16, timeout_polls: u32) -> bool {
 ///
 /// Polls the NIC for up to `timeout_polls` iterations.
 /// Returns `Some(rtt_ns)` on success, `None` on timeout.
-#[allow(dead_code)] // Public API for userspace ping utility
 pub fn wait_reply_rtt(seq: u16, timeout_polls: u32) -> Option<u64> {
     for _ in 0..timeout_polls {
         super::poll();

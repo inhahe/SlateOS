@@ -6407,6 +6407,45 @@ pub fn sys_dns_reverse_resolve(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_ICMP_PING` — send an ICMP Echo Request.
+///
+/// `arg0`: IPv4 address (network byte order u32).
+///
+/// Returns the sequence number on success.
+pub fn sys_icmp_ping(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with WRITE rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let ip = crate::net::interface::Ipv4Addr::from_u32(args.arg0 as u32);
+    match crate::net::icmp::ping(ip) {
+        Ok(seq) => SyscallResult::ok(i64::from(seq)),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_ICMP_PING_WAIT` — wait for an ICMP Echo Reply.
+///
+/// `arg0`: sequence number from `SYS_ICMP_PING`.
+/// `arg1`: timeout in milliseconds (0 = default 2000ms).
+///
+/// Returns RTT in nanoseconds on success, or `TimedOut`.
+pub fn sys_icmp_ping_wait(args: &SyscallArgs) -> SyscallResult {
+    let seq = args.arg0 as u16;
+    let timeout_ms = args.arg1 as u32;
+    // Default timeout: 2000ms ≈ 2000 poll iterations.
+    let polls = if timeout_ms == 0 { 2000 } else { timeout_ms };
+
+    match crate::net::icmp::wait_reply_rtt(seq, polls) {
+        Some(rtt_ns) => SyscallResult::ok(rtt_ns as i64),
+        None => SyscallResult::err(KernelError::TimedOut),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Scheduler configuration (50–59)
 // ---------------------------------------------------------------------------

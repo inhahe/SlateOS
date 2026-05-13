@@ -2037,6 +2037,29 @@ pub const SYS_DNS_RESOLVE: u64 = 820;
 /// (the hostname length), or negative error on failure.
 pub const SYS_DNS_REVERSE_RESOLVE: u64 = 821;
 
+/// Send an ICMP Echo Request (ping) to an IPv4 address.
+///
+/// `arg0`: IPv4 address as a 32-bit integer in **network byte order**.
+///
+/// Sends a single ICMP Echo Request to the target and immediately
+/// returns the sequence number used.  Use `SYS_ICMP_PING_WAIT` to
+/// block until the reply arrives.
+///
+/// Returns: sequence number (u16) on success, negative error on failure.
+pub const SYS_ICMP_PING: u64 = 830;
+
+/// Wait for an ICMP Echo Reply for a given sequence number.
+///
+/// `arg0`: sequence number from `SYS_ICMP_PING`.
+/// `arg1`: timeout in milliseconds (0 = default 2000ms).
+///
+/// Blocks (polling the NIC) until the reply arrives or the timeout
+/// expires.
+///
+/// Returns: RTT in nanoseconds on success, or negative error if the
+/// ping timed out (`TimedOut`).
+pub const SYS_ICMP_PING_WAIT: u64 = 831;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

@@ -235,7 +235,7 @@ pub fn translate(ret: i64) -> i64 {
         native::IS_A_DIRECTORY => EISDIR,
         native::NO_SPACE => ENOSPC,
         native::BAD_HANDLE => EBADF,
-        native::TOO_MANY_LINKS => ELOOP,
+        native::TOO_MANY_LINKS => EMLINK,
         native::DIRECTORY_NOT_EMPTY => ENOTEMPTY,
         native::READ_ONLY_FS => EROFS,
         native::TOO_MANY_OPEN_FILES => EMFILE,
@@ -365,5 +365,73 @@ mod tests {
         assert!(!ptr.is_null());
         // SAFETY: ptr is valid and points to the errno atomic.
         assert_eq!(unsafe { *ptr }, 42);
+    }
+
+    #[test]
+    fn test_translate_too_many_links() {
+        // TOO_MANY_LINKS is a filesystem error for exceeding the
+        // hard link count limit.  It must map to EMLINK (not ELOOP,
+        // which is for symlink resolution loops).
+        let result = translate(native::TOO_MANY_LINKS);
+        assert_eq!(result, -1);
+        assert_eq!(get_errno(), EMLINK);
+    }
+
+    #[test]
+    fn test_translate_filesystem_errors() {
+        // Verify all filesystem error translations.
+        assert_eq!(translate(native::NOT_FOUND), -1);
+        assert_eq!(get_errno(), ENOENT);
+
+        assert_eq!(translate(native::ALREADY_EXISTS), -1);
+        assert_eq!(get_errno(), EEXIST);
+
+        assert_eq!(translate(native::NOT_A_DIRECTORY), -1);
+        assert_eq!(get_errno(), ENOTDIR);
+
+        assert_eq!(translate(native::IS_A_DIRECTORY), -1);
+        assert_eq!(get_errno(), EISDIR);
+
+        assert_eq!(translate(native::NO_SPACE), -1);
+        assert_eq!(get_errno(), ENOSPC);
+
+        assert_eq!(translate(native::BAD_HANDLE), -1);
+        assert_eq!(get_errno(), EBADF);
+
+        assert_eq!(translate(native::DIRECTORY_NOT_EMPTY), -1);
+        assert_eq!(get_errno(), ENOTEMPTY);
+
+        assert_eq!(translate(native::READ_ONLY_FS), -1);
+        assert_eq!(get_errno(), EROFS);
+
+        assert_eq!(translate(native::TOO_MANY_OPEN_FILES), -1);
+        assert_eq!(get_errno(), EMFILE);
+
+        assert_eq!(translate(native::FILE_TOO_LARGE), -1);
+        assert_eq!(get_errno(), EFBIG);
+    }
+
+    #[test]
+    fn test_translate_ipc_errors() {
+        assert_eq!(translate(native::CHANNEL_CLOSED), -1);
+        assert_eq!(get_errno(), ECONNRESET);
+
+        assert_eq!(translate(native::CHANNEL_FULL), -1);
+        assert_eq!(get_errno(), EAGAIN);
+
+        assert_eq!(translate(native::RESOURCE_EXHAUSTED), -1);
+        assert_eq!(get_errno(), ENOMEM);
+    }
+
+    #[test]
+    fn test_translate_device_errors() {
+        assert_eq!(translate(native::IO_ERROR), -1);
+        assert_eq!(get_errno(), EIO);
+
+        assert_eq!(translate(native::NO_SUCH_DEVICE), -1);
+        assert_eq!(get_errno(), ENODEV);
+
+        assert_eq!(translate(native::RESOURCE_BUSY), -1);
+        assert_eq!(get_errno(), EBUSY);
     }
 }

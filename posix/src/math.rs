@@ -3296,4 +3296,270 @@ mod tests {
         assert_approx(fdim(5.0, 3.0), 2.0, EPS, "fdim(5,3)");
         assert_approx(fdim(3.0, 5.0), 0.0, EPS, "fdim(3,5)");
     }
+
+    // -----------------------------------------------------------------------
+    // rint — ties to even (banker's rounding)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rint_ties_to_even() {
+        // Half-integer ties: round to nearest *even* integer.
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(rint(0.5), 0.0, "rint(0.5) → 0 (even)");
+            assert_eq!(rint(1.5), 2.0, "rint(1.5) → 2 (even)");
+            assert_eq!(rint(2.5), 2.0, "rint(2.5) → 2 (even)");
+            assert_eq!(rint(3.5), 4.0, "rint(3.5) → 4 (even)");
+            assert_eq!(rint(4.5), 4.0, "rint(4.5) → 4 (even)");
+            assert_eq!(rint(5.5), 6.0, "rint(5.5) → 6 (even)");
+        }
+    }
+
+    #[test]
+    fn rint_negative_ties_to_even() {
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(rint(-0.5), 0.0, "rint(-0.5) → 0 (even, toward zero)");
+            assert_eq!(rint(-1.5), -2.0, "rint(-1.5) → -2 (even)");
+            assert_eq!(rint(-2.5), -2.0, "rint(-2.5) → -2 (even)");
+            assert_eq!(rint(-3.5), -4.0, "rint(-3.5) → -4 (even)");
+        }
+    }
+
+    #[test]
+    fn rint_non_ties() {
+        // Non-tie cases: round to nearest.
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(rint(0.3), 0.0, "rint(0.3) → 0");
+            assert_eq!(rint(0.7), 1.0, "rint(0.7) → 1");
+            assert_eq!(rint(1.2), 1.0, "rint(1.2) → 1");
+            assert_eq!(rint(1.8), 2.0, "rint(1.8) → 2");
+            assert_eq!(rint(-0.3), 0.0, "rint(-0.3) → 0");
+            assert_eq!(rint(-0.7), -1.0, "rint(-0.7) → -1");
+        }
+    }
+
+    #[test]
+    fn rint_exact_integers() {
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(rint(0.0), 0.0, "rint(0.0)");
+            assert_eq!(rint(1.0), 1.0, "rint(1.0)");
+            assert_eq!(rint(-1.0), -1.0, "rint(-1.0)");
+            assert_eq!(rint(100.0), 100.0, "rint(100.0)");
+        }
+    }
+
+    #[test]
+    fn rint_special_values() {
+        assert!(rint(f64::NAN).is_nan(), "rint(NaN) → NaN");
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(rint(f64::INFINITY), f64::INFINITY, "rint(inf)");
+            assert_eq!(rint(f64::NEG_INFINITY), f64::NEG_INFINITY, "rint(-inf)");
+        }
+    }
+
+    #[test]
+    fn rint_preserves_signed_zero() {
+        // rint(±0.0) must preserve the sign.
+        let pos = rint(0.0);
+        let neg = rint(-0.0);
+        assert_eq!(pos.to_bits(), 0.0_f64.to_bits(), "rint(+0) = +0");
+        assert_eq!(neg.to_bits(), (-0.0_f64).to_bits(), "rint(-0) = -0");
+    }
+
+    #[test]
+    fn rint_large_values() {
+        // Values >= 2^52 are already exact integers, returned unchanged.
+        let big = 4_503_599_627_370_496.0; // 2^52
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(rint(big), big, "rint(2^52) unchanged");
+            assert_eq!(rint(big + 1.0), big + 1.0, "rint(2^52 + 1) unchanged");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // rintf — single-precision ties to even
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rintf_ties_to_even() {
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(rintf(0.5), 0.0, "rintf(0.5) → 0");
+            assert_eq!(rintf(1.5), 2.0, "rintf(1.5) → 2");
+            assert_eq!(rintf(2.5), 2.0, "rintf(2.5) → 2");
+            assert_eq!(rintf(3.5), 4.0, "rintf(3.5) → 4");
+            assert_eq!(rintf(-0.5), 0.0, "rintf(-0.5) → 0");
+            assert_eq!(rintf(-1.5), -2.0, "rintf(-1.5) → -2");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // lrint — ties to even, returns i64
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn lrint_ties_to_even() {
+        assert_eq!(lrint(0.5), 0, "lrint(0.5) → 0 (even)");
+        assert_eq!(lrint(1.5), 2, "lrint(1.5) → 2 (even)");
+        assert_eq!(lrint(2.5), 2, "lrint(2.5) → 2 (even)");
+        assert_eq!(lrint(3.5), 4, "lrint(3.5) → 4 (even)");
+        assert_eq!(lrint(4.5), 4, "lrint(4.5) → 4 (even)");
+        assert_eq!(lrint(5.5), 6, "lrint(5.5) → 6 (even)");
+    }
+
+    #[test]
+    fn lrint_negative_ties() {
+        assert_eq!(lrint(-0.5), 0, "lrint(-0.5) → 0");
+        assert_eq!(lrint(-1.5), -2, "lrint(-1.5) → -2");
+        assert_eq!(lrint(-2.5), -2, "lrint(-2.5) → -2");
+        assert_eq!(lrint(-3.5), -4, "lrint(-3.5) → -4");
+    }
+
+    #[test]
+    fn lrint_non_ties() {
+        assert_eq!(lrint(0.3), 0, "lrint(0.3) → 0");
+        assert_eq!(lrint(0.7), 1, "lrint(0.7) → 1");
+        assert_eq!(lrint(1.2), 1, "lrint(1.2) → 1");
+        assert_eq!(lrint(1.8), 2, "lrint(1.8) → 2");
+        assert_eq!(lrint(-0.3), 0, "lrint(-0.3) → 0");
+        assert_eq!(lrint(-0.7), -1, "lrint(-0.7) → -1");
+    }
+
+    #[test]
+    fn lrint_special_values() {
+        // NaN and Inf → 0 per our implementation.
+        assert_eq!(lrint(f64::NAN), 0, "lrint(NaN) → 0");
+        assert_eq!(lrint(f64::INFINITY), 0, "lrint(inf) → 0");
+        assert_eq!(lrint(f64::NEG_INFINITY), 0, "lrint(-inf) → 0");
+    }
+
+    #[test]
+    fn lrintf_ties_to_even() {
+        assert_eq!(lrintf(0.5), 0, "lrintf(0.5) → 0");
+        assert_eq!(lrintf(1.5), 2, "lrintf(1.5) → 2");
+        assert_eq!(lrintf(2.5), 2, "lrintf(2.5) → 2");
+        assert_eq!(lrintf(-0.5), 0, "lrintf(-0.5) → 0");
+        assert_eq!(lrintf(-1.5), -2, "lrintf(-1.5) → -2");
+    }
+
+    // -----------------------------------------------------------------------
+    // nearbyint — same as rint (no FP exception distinction in our impl)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nearbyint_ties_to_even() {
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(nearbyint(0.5), 0.0, "nearbyint(0.5) → 0");
+            assert_eq!(nearbyint(1.5), 2.0, "nearbyint(1.5) → 2");
+            assert_eq!(nearbyint(2.5), 2.0, "nearbyint(2.5) → 2");
+            assert_eq!(nearbyint(-0.5), 0.0, "nearbyint(-0.5) → 0");
+        }
+    }
+
+    #[test]
+    fn nearbyintf_ties_to_even() {
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(nearbyintf(0.5), 0.0, "nearbyintf(0.5) → 0");
+            assert_eq!(nearbyintf(1.5), 2.0, "nearbyintf(1.5) → 2");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ilogb — unbiased exponent extraction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ilogb_powers_of_two() {
+        assert_eq!(ilogb(1.0), 0, "ilogb(1) = 0");
+        assert_eq!(ilogb(2.0), 1, "ilogb(2) = 1");
+        assert_eq!(ilogb(4.0), 2, "ilogb(4) = 2");
+        assert_eq!(ilogb(0.5), -1, "ilogb(0.5) = -1");
+        assert_eq!(ilogb(0.25), -2, "ilogb(0.25) = -2");
+        assert_eq!(ilogb(1024.0), 10, "ilogb(1024) = 10");
+    }
+
+    #[test]
+    fn ilogb_non_powers() {
+        // ilogb returns the floor-log2 for the exponent field.
+        // ilogb(3.0) — 3 = 1.1_2 * 2^1, so exponent = 1.
+        assert_eq!(ilogb(3.0), 1, "ilogb(3) = 1");
+        // ilogb(5.0) — 5 = 1.01_2 * 2^2, so exponent = 2.
+        assert_eq!(ilogb(5.0), 2, "ilogb(5) = 2");
+        // ilogb(7.0) — 7 = 1.11_2 * 2^2, so exponent = 2.
+        assert_eq!(ilogb(7.0), 2, "ilogb(7) = 2");
+    }
+
+    #[test]
+    fn ilogb_negative() {
+        // ilogb ignores the sign bit.
+        assert_eq!(ilogb(-1.0), 0, "ilogb(-1) = 0");
+        assert_eq!(ilogb(-8.0), 3, "ilogb(-8) = 3");
+    }
+
+    #[test]
+    fn ilogb_special_values() {
+        assert_eq!(ilogb(0.0), i32::MIN, "ilogb(0) = FP_ILOGB0");
+        assert_eq!(ilogb(-0.0), i32::MIN, "ilogb(-0) = FP_ILOGB0");
+        assert_eq!(ilogb(f64::INFINITY), i32::MAX, "ilogb(inf) = INT_MAX");
+        assert_eq!(ilogb(f64::NEG_INFINITY), i32::MAX, "ilogb(-inf) = INT_MAX");
+        assert_eq!(ilogb(f64::NAN), i32::MAX, "ilogb(NaN) = FP_ILOGBNAN");
+    }
+
+    #[test]
+    fn ilogb_subnormals() {
+        // Smallest subnormal: 2^-1074 (bits = 1).
+        let smallest = f64::from_bits(1);
+        assert_eq!(ilogb(smallest), -1074, "ilogb(smallest subnormal) = -1074");
+
+        // Largest subnormal: biased_exp=0, all mantissa bits set.
+        // Value ≈ (2^52 - 1) * 2^-1074 ≈ 2^-1022 - 2^-1074.
+        // The leading 1-bit is at position 51, so exponent = -1023 + 51 - 51 wait...
+        // mantissa = 0x000F_FFFF_FFFF_FFFF, leading_zeros() of u64 = 12.
+        // lz = 12 - 12 = 0. exponent = -1023 - 0 = -1023.
+        let largest_sub = f64::from_bits(0x000F_FFFF_FFFF_FFFF);
+        assert_eq!(ilogb(largest_sub), -1023, "ilogb(largest subnormal) = -1023");
+
+        // A mid-range subnormal: mantissa bit 51 clear, bit 50 set.
+        // mantissa = 0x0004_0000_0000_0000.  leading_zeros() of u64:
+        //   bits: 0x0004... = 0000_0000_0000_0100_0000...
+        //   leading zeros = 13.  lz = 13 - 12 = 1.
+        //   exponent = -1023 - 1 = -1024.
+        let mid = f64::from_bits(0x0004_0000_0000_0000);
+        assert_eq!(ilogb(mid), -1024, "ilogb(mid subnormal) = -1024");
+    }
+
+    #[test]
+    fn ilogbf_basic() {
+        assert_eq!(ilogbf(1.0), 0, "ilogbf(1) = 0");
+        assert_eq!(ilogbf(8.0), 3, "ilogbf(8) = 3");
+        assert_eq!(ilogbf(0.0), i32::MIN, "ilogbf(0) = FP_ILOGB0");
+    }
+
+    // -----------------------------------------------------------------------
+    // logb — same as ilogb but returns f64
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn logb_basic() {
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(logb(1.0), 0.0, "logb(1) = 0");
+            assert_eq!(logb(2.0), 1.0, "logb(2) = 1");
+            assert_eq!(logb(0.5), -1.0, "logb(0.5) = -1");
+        }
+    }
+
+    #[test]
+    fn logb_special() {
+        assert_eq!(logb(0.0), f64::NEG_INFINITY, "logb(0) = -inf");
+        assert_eq!(logb(f64::INFINITY), f64::INFINITY, "logb(inf) = inf");
+        assert!(logb(f64::NAN).is_nan(), "logb(NaN) = NaN");
+    }
 }

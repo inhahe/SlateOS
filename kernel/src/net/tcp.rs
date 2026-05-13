@@ -1612,10 +1612,18 @@ fn start_rtt_timing(conn: &mut TcpConnection, seq: u32) {
 /// This is the maximum amount of data we may have in flight at once.
 /// `snd_wnd` is already scaled (i.e. the true window after applying
 /// the peer's window scale factor).
+/// Compute the usable send window — how many NEW bytes we can put in flight.
+///
+/// This is `min(snd_wnd, cwnd) - bytes_in_flight`.  Without subtracting
+/// in-flight bytes, back-to-back send() calls (before ACKs arrive) would
+/// each use the full window, grossly overshooting congestion control.
 fn effective_window(conn: &TcpConnection) -> usize {
     let peer = conn.snd_wnd as usize;
     let cong = conn.cwnd as usize;
-    peer.min(cong)
+    let total_window = peer.min(cong);
+    // Bytes currently in-flight (sent but not yet acknowledged).
+    let in_flight = conn.snd_nxt.wrapping_sub(conn.snd_una) as usize;
+    total_window.saturating_sub(in_flight)
 }
 
 /// Effective MSS for outgoing data on this connection.

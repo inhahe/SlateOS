@@ -202,3 +202,194 @@ pub extern "C" fn mkfifoat(_dirfd: i32, _pathname: *const u8, _mode: u32) -> i32
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fcntl::*;
+
+    // -- S_IS* C-callable functions --
+
+    #[test]
+    fn test_s_isreg() {
+        assert_eq!(S_ISREG(S_IFREG | 0o644), 1);
+        assert_eq!(S_ISREG(S_IFDIR | 0o755), 0);
+        assert_eq!(S_ISREG(0), 0);
+    }
+
+    #[test]
+    fn test_s_isdir() {
+        assert_eq!(S_ISDIR(S_IFDIR | 0o755), 1);
+        assert_eq!(S_ISDIR(S_IFREG | 0o644), 0);
+    }
+
+    #[test]
+    fn test_s_islnk() {
+        assert_eq!(S_ISLNK(S_IFLNK | 0o777), 1);
+        assert_eq!(S_ISLNK(S_IFREG | 0o644), 0);
+    }
+
+    #[test]
+    fn test_s_ischr() {
+        assert_eq!(S_ISCHR(S_IFCHR | 0o666), 1);
+        assert_eq!(S_ISCHR(S_IFBLK | 0o660), 0);
+    }
+
+    #[test]
+    fn test_s_isblk() {
+        assert_eq!(S_ISBLK(S_IFBLK | 0o660), 1);
+        assert_eq!(S_ISBLK(S_IFCHR | 0o666), 0);
+    }
+
+    #[test]
+    fn test_s_isfifo() {
+        assert_eq!(S_ISFIFO(S_IFIFO | 0o644), 1);
+        assert_eq!(S_ISFIFO(S_IFREG | 0o644), 0);
+    }
+
+    #[test]
+    fn test_s_issock() {
+        assert_eq!(S_ISSOCK(S_IFSOCK | 0o755), 1);
+        assert_eq!(S_ISSOCK(S_IFREG | 0o644), 0);
+    }
+
+    // -- Stat struct methods --
+
+    #[test]
+    fn test_stat_is_file() {
+        let mut st = Stat::zeroed();
+        st.st_mode = S_IFREG | 0o644;
+        assert!(st.is_file());
+        assert!(!st.is_dir());
+        assert!(!st.is_link());
+    }
+
+    #[test]
+    fn test_stat_is_dir() {
+        let mut st = Stat::zeroed();
+        st.st_mode = S_IFDIR | 0o755;
+        assert!(st.is_dir());
+        assert!(!st.is_file());
+    }
+
+    #[test]
+    fn test_stat_is_link() {
+        let mut st = Stat::zeroed();
+        st.st_mode = S_IFLNK | 0o777;
+        assert!(st.is_link());
+        assert!(!st.is_file());
+        assert!(!st.is_dir());
+    }
+
+    #[test]
+    fn test_stat_is_chr() {
+        let mut st = Stat::zeroed();
+        st.st_mode = S_IFCHR | 0o666;
+        assert!(st.is_chr());
+    }
+
+    #[test]
+    fn test_stat_is_blk() {
+        let mut st = Stat::zeroed();
+        st.st_mode = S_IFBLK | 0o660;
+        assert!(st.is_blk());
+    }
+
+    #[test]
+    fn test_stat_is_fifo() {
+        let mut st = Stat::zeroed();
+        st.st_mode = S_IFIFO | 0o644;
+        assert!(st.is_fifo());
+    }
+
+    #[test]
+    fn test_stat_is_sock() {
+        let mut st = Stat::zeroed();
+        st.st_mode = S_IFSOCK;
+        assert!(st.is_sock());
+    }
+
+    // -- Stat struct layout --
+
+    #[test]
+    fn test_stat_size() {
+        // Linux x86_64 struct stat is 144 bytes.
+        assert_eq!(core::mem::size_of::<Stat>(), 144);
+    }
+
+    #[test]
+    fn test_stat_zeroed() {
+        let st = Stat::zeroed();
+        assert_eq!(st.st_dev, 0);
+        assert_eq!(st.st_ino, 0);
+        assert_eq!(st.st_mode, 0);
+        assert_eq!(st.st_size, 0);
+    }
+
+    // -- Timespec layout --
+
+    #[test]
+    fn test_timespec_size() {
+        assert_eq!(core::mem::size_of::<Timespec>(), 16);
+    }
+
+    #[test]
+    fn test_timespec_default() {
+        let ts = Timespec::default();
+        assert_eq!(ts.tv_sec, 0);
+        assert_eq!(ts.tv_nsec, 0);
+    }
+
+    // -- File mode constants match Linux --
+
+    #[test]
+    fn test_mode_constants() {
+        assert_eq!(S_IFMT, 0o170_000);
+        assert_eq!(S_IFREG, 0o100_000);
+        assert_eq!(S_IFDIR, 0o040_000);
+        assert_eq!(S_IFLNK, 0o120_000);
+        assert_eq!(S_IFCHR, 0o020_000);
+        assert_eq!(S_IFBLK, 0o060_000);
+        assert_eq!(S_IFIFO, 0o010_000);
+        assert_eq!(S_IFSOCK, 0o140_000);
+    }
+
+    #[test]
+    fn test_permission_constants() {
+        assert_eq!(S_IRUSR, 0o400);
+        assert_eq!(S_IWUSR, 0o200);
+        assert_eq!(S_IXUSR, 0o100);
+        assert_eq!(S_IRGRP, 0o040);
+        assert_eq!(S_IWGRP, 0o020);
+        assert_eq!(S_IXGRP, 0o010);
+        assert_eq!(S_IROTH, 0o004);
+        assert_eq!(S_IWOTH, 0o002);
+        assert_eq!(S_IXOTH, 0o001);
+    }
+
+    #[test]
+    fn test_special_bits() {
+        assert_eq!(S_ISUID, 0o4000);
+        assert_eq!(S_ISGID, 0o2000);
+        assert_eq!(S_ISVTX, 0o1000);
+    }
+
+    // -- All types are disjoint --
+
+    #[test]
+    fn test_file_types_disjoint() {
+        let types = [S_IFREG, S_IFDIR, S_IFLNK, S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK];
+        for i in 0..types.len() {
+            for j in (i + 1)..types.len() {
+                assert_ne!(
+                    types[i], types[j],
+                    "file types must be disjoint"
+                );
+            }
+        }
+    }
+}

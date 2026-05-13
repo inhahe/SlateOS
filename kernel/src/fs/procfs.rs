@@ -428,6 +428,10 @@ const ROOT_FILES: &[&str] = &[
     "epollstat",
     "vmmap",
     "softirq",
+    "netfilter",
+    "schedclass",
+    "cpuidle",
+    "futexstat",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8336,6 +8340,71 @@ fn gen_softirq() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_netfilter() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (rules, ct, packets, accepted, dropped, ops) = crate::fs::netfilter::stats();
+    out.push_str(&format!("rules: {}\n", rules));
+    out.push_str(&format!("conntrack: {}\n", ct));
+    out.push_str(&format!("total_packets: {}\n", packets));
+    out.push_str(&format!("total_accepted: {}\n", accepted));
+    out.push_str(&format!("total_dropped: {}\n", dropped));
+    out.push_str(&format!("ops: {}\n", ops));
+    for r in crate::fs::netfilter::list_rules() {
+        out.push_str(&format!("#{}: {} {} {} matches={} enabled={}\n",
+            r.id, r.chain.label(), r.action.label(), r.description, r.matches, r.enabled));
+    }
+    out.into_bytes()
+}
+
+fn gen_schedclass() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (tasks, classes, switches, migrations, ops) = crate::fs::schedclass::stats();
+    out.push_str(&format!("tasks: {}\n", tasks));
+    out.push_str(&format!("classes: {}\n", classes));
+    out.push_str(&format!("total_switches: {}\n", switches));
+    out.push_str(&format!("total_migrations: {}\n", migrations));
+    out.push_str(&format!("ops: {}\n", ops));
+    for cs in crate::fs::schedclass::class_stats() {
+        out.push_str(&format!("{}: tasks={} switches={} runtime={}ns avg_slice={}ns\n",
+            cs.class.label(), cs.task_count, cs.context_switches, cs.total_runtime_ns, cs.avg_slice_ns));
+    }
+    out.into_bytes()
+}
+
+fn gen_cpuidle() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cpus, transitions, idle_ns, ops) = crate::fs::cpuidle::stats();
+    out.push_str(&format!("cpus: {}\n", cpus));
+    out.push_str(&format!("total_transitions: {}\n", transitions));
+    out.push_str(&format!("total_idle_ns: {}\n", idle_ns));
+    out.push_str(&format!("ops: {}\n", ops));
+    for cs in crate::fs::cpuidle::per_cpu() {
+        out.push_str(&format!("cpu{}: state={} idle={}% idle_ns={}\n",
+            cs.cpu_id, cs.current_state.label(), crate::fs::cpuidle::idle_pct(cs.cpu_id), cs.total_idle_ns));
+    }
+    out.into_bytes()
+}
+
+fn gen_futexstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (addrs, procs, waits, wakes, timeouts, ops) = crate::fs::futexstat::stats();
+    out.push_str(&format!("tracked_addrs: {}\n", addrs));
+    out.push_str(&format!("tracked_procs: {}\n", procs));
+    out.push_str(&format!("total_waits: {}\n", waits));
+    out.push_str(&format!("total_wakes: {}\n", wakes));
+    out.push_str(&format!("total_timeouts: {}\n", timeouts));
+    out.push_str(&format!("ops: {}\n", ops));
+    for h in crate::fs::futexstat::hotspots(10) {
+        out.push_str(&format!("{:#x}: waits={} wakes={} waiters={} max={}\n",
+            h.address, h.waits, h.wakes, h.current_waiters, h.max_waiters));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -8929,6 +8998,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "epollstat" => Ok(gen_epollstat()),
         "vmmap" => Ok(gen_vmmap()),
         "softirq" => Ok(gen_softirq()),
+        "netfilter" => Ok(gen_netfilter()),
+        "schedclass" => Ok(gen_schedclass()),
+        "cpuidle" => Ok(gen_cpuidle()),
+        "futexstat" => Ok(gen_futexstat()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

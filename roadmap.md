@@ -954,6 +954,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Epoll Stats (fs::epollstat): Event polling infrastructure monitoring with instance create/destroy, FD registration, wait/deliver/timeout tracking; `epollstat`/`epoll` kshell command; /proc/epollstat; 8 self-tests
   - [x] VM Map (fs::vmmap): Virtual memory area monitoring with per-process VMA tracking, mmap/munmap, 7 VMA types, permission labels, address space summary; `vmmap`/`vmap` kshell command; /proc/vmmap; 8 self-tests
   - [x] Soft IRQ (fs::softirq): Deferred interrupt processing monitoring with 10 softirq types, per-CPU counters, tasklet tracking, ksoftirqd wakeups; `softirq`/`sirq` kshell command; /proc/softirq; 8 self-tests
+  - [x] Netfilter (fs::netfilter): Packet filtering/firewall with 5 chains, 6 actions, rule management, connection tracking, match/byte counters; `netfilter`/`nfilt` kshell command; /proc/netfilter; 8 self-tests
+  - [x] Sched Class (fs::schedclass): Scheduler class tracking with 5 classes (RT/DL/Normal/Batch/Idle), per-task info, context switches, time slices, migrations; `schedclass`/`sclass` kshell command; /proc/schedclass; 8 self-tests
+  - [x] CPU Idle (fs::cpuidle): CPU C-state monitoring with 7 idle states, per-CPU residency tracking, transition counts, idle percentage; `cpuidle`/`cidle` kshell command; /proc/cpuidle; 8 self-tests
+  - [x] Futex Stats (fs::futexstat): Futex contention monitoring with per-address wait/wake/timeout tracking, hotspot detection, per-process stats; `futexstat`/`fxstat` kshell command; /proc/futexstat; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

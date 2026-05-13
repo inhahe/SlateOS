@@ -745,8 +745,6 @@ pub static RAND_MAX: i32 = 0x7FFF_FFFF;
 // Temporary files
 // ---------------------------------------------------------------------------
 
-/// Counter for generating unique temporary filenames.
-static mut MKSTEMP_COUNTER: u32 = 0;
 
 /// Create a unique temporary file.
 ///
@@ -787,22 +785,16 @@ pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
     // Try up to 100 unique names.
     let mut attempt: u32 = 0;
     while attempt < 100 {
-        // Generate a unique suffix using counter + pid + attempt.
-        let counter = unsafe { *core::ptr::addr_of!(MKSTEMP_COUNTER) };
-        unsafe { core::ptr::addr_of_mut!(MKSTEMP_COUNTER).write(counter.wrapping_add(1)); }
+        // Generate random bytes for the suffix.  Use getrandom (backed
+        // by RDRAND) for unpredictability — predictable temp file names
+        // are a security vulnerability (symlink attacks).
+        let mut rand_bytes = [0u8; 6];
+        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
 
-        let pid = crate::process::getpid() as u32;
-        let seed = counter
-            .wrapping_mul(31)
-            .wrapping_add(pid)
-            .wrapping_mul(17)
-            .wrapping_add(attempt);
-
-        // Fill the 6 X's with alphanumeric characters derived from seed.
-        let mut val = seed;
+        // Fill the 6 X's with alphanumeric characters from random bytes.
         let mut j: usize = 0;
         while j < 6 {
-            let idx = (val % 36) as u8;
+            let idx = rand_bytes[j] % 36;
             let ch = if idx < 10 {
                 b'0'.wrapping_add(idx)
             } else {
@@ -810,7 +802,6 @@ pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
             };
             // SAFETY: suffix_start + j < len, template is writable.
             unsafe { *template.add(suffix_start.wrapping_add(j)) = ch; }
-            val = val.wrapping_div(36).wrapping_add(1);
             j = j.wrapping_add(1);
         }
 
@@ -893,27 +884,19 @@ pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
     // Try up to 100 unique names.
     let mut attempt: u32 = 0;
     while attempt < 100 {
-        let counter = unsafe { *core::ptr::addr_of!(MKSTEMP_COUNTER) };
-        unsafe { core::ptr::addr_of_mut!(MKSTEMP_COUNTER).write(counter.wrapping_add(1)); }
+        // Use getrandom for unpredictable suffix (same rationale as mkstemp).
+        let mut rand_bytes = [0u8; 6];
+        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
 
-        let pid = crate::process::getpid() as u32;
-        let seed = counter
-            .wrapping_mul(31)
-            .wrapping_add(pid)
-            .wrapping_mul(17)
-            .wrapping_add(attempt);
-
-        let mut val = seed;
         let mut j: usize = 0;
         while j < 6 {
-            let idx = (val % 36) as u8;
+            let idx = rand_bytes[j] % 36;
             let ch = if idx < 10 {
                 b'0'.wrapping_add(idx)
             } else {
                 b'a'.wrapping_add(idx.wrapping_sub(10))
             };
             unsafe { *template.add(suffix_start.wrapping_add(j)) = ch; }
-            val = val.wrapping_div(36).wrapping_add(1);
             j = j.wrapping_add(1);
         }
 
@@ -980,22 +963,13 @@ pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
     // Try up to 100 unique names.
     let mut attempt: u32 = 0;
     while attempt < 100 {
-        // Generate a unique suffix (reuse mkstemp's counter).
-        let counter = unsafe { *core::ptr::addr_of!(MKSTEMP_COUNTER) };
-        unsafe { core::ptr::addr_of_mut!(MKSTEMP_COUNTER).write(counter.wrapping_add(1)); }
+        // Generate a cryptographically random suffix via RDRAND-backed getrandom.
+        let mut rand_bytes = [0u8; 6];
+        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
 
-        let pid = crate::process::getpid() as u32;
-        let seed = counter
-            .wrapping_mul(31)
-            .wrapping_add(pid)
-            .wrapping_mul(17)
-            .wrapping_add(attempt)
-            .wrapping_add(1000); // Offset from mkstemp to avoid collisions.
-
-        let mut val = seed;
         let mut j: usize = 0;
         while j < 6 {
-            let idx = (val % 36) as u8;
+            let idx = rand_bytes[j] % 36;
             let ch = if idx < 10 {
                 b'0'.wrapping_add(idx)
             } else {
@@ -1003,7 +977,6 @@ pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
             };
             // SAFETY: suffix_start + j < len, template is writable.
             unsafe { *template.add(suffix_start.wrapping_add(j)) = ch; }
-            val = val.wrapping_div(36).wrapping_add(1);
             j = j.wrapping_add(1);
         }
 

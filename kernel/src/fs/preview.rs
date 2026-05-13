@@ -36,6 +36,8 @@
 //! - Custom generators can be registered for application-specific types.
 //! - Generation is bounded: max input file size and max decode time.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -878,8 +880,8 @@ pub fn self_test() -> KernelResult<()> {
     // Test 7: stats tracking.
     {
         let (gen_count, _, _, _) = stats();
-        // At least 0 (tests above may or may not hit generate()).
-        assert!(gen_count >= 0);
+        // Verify stats returns valid values (u64, always >= 0).
+        let _ = gen_count;
         serial_println!("[preview] test 7 passed: stats tracking");
     }
 

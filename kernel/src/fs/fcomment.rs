@@ -33,6 +33,8 @@
 //! - Max 65536 files with comments
 //! - Comments are stored as plain UTF-8 text
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

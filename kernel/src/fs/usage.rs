@@ -27,6 +27,8 @@
 //! then computes summaries in a single pass.  Results are cached
 //! for repeated queries.
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

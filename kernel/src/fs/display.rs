@@ -27,6 +27,8 @@
 //!   → display::confirm_change() / display::revert_change()
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

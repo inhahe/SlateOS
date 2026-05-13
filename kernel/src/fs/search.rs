@@ -35,6 +35,8 @@
 //! Directory-level filters (type, name) are applied before descending,
 //! file-level filters (size, date, content) require a stat() call.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

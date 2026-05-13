@@ -31,6 +31,8 @@
 //! - Field names use lowercase dot-notation: `"audio.artist"`, `"image.width"`.
 //! - Custom extractors can be registered at runtime via `register_extractor()`.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

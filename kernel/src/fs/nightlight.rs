@@ -32,6 +32,8 @@
 //! - **Scheduled**: fixed start/end times
 //! - **SunsetSunrise**: automatic based on location (latitude/longitude)
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};

@@ -21,6 +21,8 @@
 //! mount at `/tmp` captures `/tmp/foo` but not `/tmpfile`.  Multiple
 //! mounts are supported; submount directories are synthesized in readdir.
 
+#![allow(dead_code)]
+
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;

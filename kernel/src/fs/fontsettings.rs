@@ -18,6 +18,8 @@
 //!   → a11y (accessibility font sizes)
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;

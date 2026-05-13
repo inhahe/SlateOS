@@ -21,6 +21,8 @@
 //!   → GUI renders tabs from the FileProperties struct
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -484,7 +486,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         let (gathers, checksums) = stats();
         assert!(gathers > 0);
-        assert!(checksums >= 0);
+        let _ = checksums; // u64, always >= 0
         serial_println!("[properties] test 6 passed: stats");
     }
 

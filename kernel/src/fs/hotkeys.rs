@@ -29,6 +29,8 @@
 //!   → if not matched: return false (pass to focused app)
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

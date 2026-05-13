@@ -30,6 +30,8 @@
 //! - System bookmarks (Home, etc.) cannot be removed, only hidden.
 //! - Thread-safe via spin::Mutex.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

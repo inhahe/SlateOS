@@ -41,6 +41,8 @@
 //! design.txt: "make a snapshot or restore from snapshot feature, with
 //! branching like a VM does? options for what to include in the snapshot?"
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

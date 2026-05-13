@@ -36,6 +36,8 @@
 //!   in the buffer cache.
 //! - Statistics track call count and entries returned for profiling.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

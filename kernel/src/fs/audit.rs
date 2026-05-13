@@ -41,6 +41,8 @@
 //!
 //! Linux audit(8), auditd(8), auditctl(8), ausearch(8)
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

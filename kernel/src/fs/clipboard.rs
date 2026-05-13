@@ -34,6 +34,8 @@
 //! - File cut operations record source paths + cut flag.
 //! - Thread-safe via spin::Mutex.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

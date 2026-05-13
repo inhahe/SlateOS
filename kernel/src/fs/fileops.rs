@@ -33,6 +33,8 @@
 //! - **MergeDir**: merge subdirectories, apply policy to file conflicts
 //! - **Ask**: defer to callback (for GUI prompts)
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;

@@ -51,6 +51,8 @@
 //! - Max 65536 files in the attribute store
 //! - Max 1024 indexed attribute names
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;

@@ -50,6 +50,8 @@
 //! Implements the [`FileSystem`] trait.  Write operations return
 //! `NotSupported` (this is a read-only filesystem).
 
+#![allow(dead_code)]
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;

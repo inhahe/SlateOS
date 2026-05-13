@@ -36,6 +36,8 @@
 //! Works with `appregistry` for `tray_icon` / `start_hidden` flags,
 //! and with `notifcenter` for badge/notification counts.
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

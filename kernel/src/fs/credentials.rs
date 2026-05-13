@@ -34,6 +34,8 @@
 //! - A "master unlock" is required before reading secrets (debounced).
 //! - Secrets are stored in memory (would be encrypted at rest on disk).
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

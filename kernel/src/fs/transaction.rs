@@ -38,6 +38,8 @@
 //! design.txt: "ability of programs to group any writes into an atomic write"
 //! design.txt: "make it atomic - can undo the whole copy or move or delete"
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

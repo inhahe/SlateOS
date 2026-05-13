@@ -48,6 +48,8 @@
 //! For now, the overlay API can be called directly or through the
 //! kshell `overlay` command.
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;

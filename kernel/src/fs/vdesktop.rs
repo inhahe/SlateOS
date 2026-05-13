@@ -24,6 +24,8 @@
 //!   → vdesktop::current()       // highlight active
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -509,7 +511,7 @@ pub fn wrap_around() -> bool {
 
 /// Create default desktops (Desktop 1, Desktop 2).
 pub fn init_defaults() -> KernelResult<()> {
-    let mut state = STATE.lock();
+    let state = STATE.lock();
     if !state.desktops.is_empty() {
         return Ok(()); // Already initialized.
     }

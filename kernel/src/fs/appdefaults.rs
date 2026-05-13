@@ -18,6 +18,8 @@
 //!   → backup (settings backup)
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;

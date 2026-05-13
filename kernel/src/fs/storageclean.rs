@@ -34,6 +34,8 @@
 //! - **LargeFiles**: files above a configurable threshold
 //! - **OldDownloads**: download directory files older than threshold
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;

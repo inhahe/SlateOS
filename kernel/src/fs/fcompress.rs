@@ -56,6 +56,8 @@
 //!
 //! Total header: 16 bytes.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};

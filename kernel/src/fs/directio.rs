@@ -42,6 +42,8 @@
 //! - Maximum single DIO transfer: 4 MiB (larger than splice since DIO
 //!   is typically used for large sequential I/O).
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

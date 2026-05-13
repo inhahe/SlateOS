@@ -16,6 +16,8 @@
 //! archive data.  All format-specific parsing is delegated to the
 //! individual modules (zip, tar, cpio, ar, rar, sevenz).
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

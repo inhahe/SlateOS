@@ -31,6 +31,8 @@
 //! - Excluded path prefixes: /tmp, /proc, /sys, /dev (configurable).
 //! - Thread-safe via spin::Mutex (low contention — recording is fast).
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

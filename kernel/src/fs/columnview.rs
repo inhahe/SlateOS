@@ -32,6 +32,8 @@
 //! (length, bitrate for audio; width, height for images) appear only
 //! when files of that type are present.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

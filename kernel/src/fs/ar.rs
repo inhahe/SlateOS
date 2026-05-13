@@ -46,6 +46,8 @@
 //! - GNU binutils ar format
 //! - Debian Policy Manual §22.2
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

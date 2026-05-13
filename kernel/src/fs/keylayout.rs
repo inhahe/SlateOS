@@ -25,6 +25,8 @@
 //!   → keylayout::set_active("us") / "dvorak" / etc.
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

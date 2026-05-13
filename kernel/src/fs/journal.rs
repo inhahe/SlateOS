@@ -30,6 +30,8 @@
 //! - design.txt lines 1013-1035: "detect filesystem changes since last API call,
 //!   even if program was closed or OS rebooted"
 
+#![allow(dead_code)]
+
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;

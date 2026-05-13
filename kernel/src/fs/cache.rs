@@ -44,6 +44,8 @@
 //! Inspired by the Unix buffer cache (bio.c) and Linux's buffer_head
 //! layer, simplified for a single-lock microkernel.
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

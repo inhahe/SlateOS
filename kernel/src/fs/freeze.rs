@@ -32,6 +32,8 @@
 //! - The VFS integration point is `is_frozen(path)` — write-path
 //!   operations can check this before proceeding.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

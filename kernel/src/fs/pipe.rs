@@ -37,6 +37,8 @@
 //! POSIX: mkfifo(3), pipe(7)
 //! Linux: pipe(2), fifo(7), /proc/sys/fs/pipe-max-size
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec;

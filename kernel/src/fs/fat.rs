@@ -18,6 +18,8 @@
 //! - Microsoft FAT specification (fatgen103.doc)
 //! - <https://wiki.osdev.org/FAT>
 
+#![allow(dead_code)]
+
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
@@ -3144,7 +3146,8 @@ impl FileSystem for FatFs {
         } else {
             // File doesn't exist — will create it.
             first_cluster = 0;
-            name83 = [0u8; 11]; // Unused for new-file path.
+            #[allow(unused_assignments)]
+            { name83 = [0u8; 11]; }
             dir_lba = 0;
             dir_offset = 0;
             exists = false;

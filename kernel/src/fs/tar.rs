@@ -60,6 +60,8 @@
 //! - GNU tar info pages
 //! - <https://www.gnu.org/software/tar/manual/html_node/Standard.html>
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

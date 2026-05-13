@@ -30,6 +30,8 @@
 //!   → scriptlang::run_file(engine_id, path) → result
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -464,7 +466,7 @@ pub fn init_defaults() {
         return;
     }
 
-    let mut next_id = || NEXT_ENGINE_ID.fetch_add(1, Ordering::Relaxed);
+    let next_id = || NEXT_ENGINE_ID.fetch_add(1, Ordering::Relaxed);
 
     // Lua 5.4 — tiny, fast, designed for embedding.
     let lua_id = next_id();

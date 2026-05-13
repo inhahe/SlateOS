@@ -36,6 +36,8 @@
 //! {"type":"footer","files":42,"bytes":123456,"duration_ns":...}
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

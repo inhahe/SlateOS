@@ -45,6 +45,8 @@
 //! - Currently only supports the root mount (`/`).  When multiple mount
 //!   points are added, each will get its own `/_TRASH/` directory.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 

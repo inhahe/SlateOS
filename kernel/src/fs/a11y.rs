@@ -25,6 +25,8 @@
 //!   → a11y::config() / a11y::set_*()
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

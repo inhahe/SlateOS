@@ -47,6 +47,8 @@
 //! - LZ4 frame format: <https://github.com/lz4/lz4/blob/dev/doc/lz4_Frame_format.md>
 //! - xxHash-32: <https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md>
 
+#![allow(dead_code)]
+
 use alloc::vec;
 use alloc::vec::Vec;
 

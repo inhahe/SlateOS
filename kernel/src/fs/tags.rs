@@ -36,6 +36,8 @@
 //! tag-based searches.  The index is rebuilt from a filesystem scan
 //! and updated incrementally on add/remove operations.
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;

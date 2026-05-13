@@ -39,6 +39,8 @@
 //! - Cross-application drags go through kernel-managed session state.
 //! - Same FormatData model as clipboard for consistency.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

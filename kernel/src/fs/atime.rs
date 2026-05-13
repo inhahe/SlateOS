@@ -32,6 +32,8 @@
 //! Per-mount override is supported: individual filesystems can have
 //! stricter or more relaxed atime policies than the global default.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

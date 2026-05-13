@@ -21,6 +21,8 @@
 //! Results include operations/second, throughput (MB/s for data ops),
 //! and per-operation latency in nanoseconds with comparison to targets.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

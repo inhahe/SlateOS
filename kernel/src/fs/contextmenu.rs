@@ -26,6 +26,8 @@
 //! - Settings page lets users see and disable individual extensions
 //! - Rate limit: >200ms handler gets skipped with "loading..." entry
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

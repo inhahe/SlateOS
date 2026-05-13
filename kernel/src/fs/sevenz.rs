@@ -35,6 +35,8 @@
 //! - p7zip source code
 //! - <https://py7zr.readthedocs.io/en/latest/archive_format.html>
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

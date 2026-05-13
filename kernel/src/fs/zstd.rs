@@ -30,6 +30,8 @@
 //! - Zstandard format spec: <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md>
 //! - xxHash specification: <https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md>
 
+#![allow(dead_code)]
+
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};

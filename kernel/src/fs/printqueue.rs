@@ -29,6 +29,8 @@
 //! dispatched) and resumed.  Completed, failed, and cancelled jobs
 //! remain in the queue until explicitly cleared via `clear_completed`.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

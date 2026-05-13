@@ -21,6 +21,8 @@
 //!   → autostart::set_enabled(id, false) → disable without removing
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

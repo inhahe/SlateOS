@@ -20,6 +20,8 @@
 //!   → colorpicker::sample_screen(x, y) → Color
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

@@ -55,6 +55,8 @@
 //! - <https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT>
 //! - Info-ZIP source (unzip/zip)
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

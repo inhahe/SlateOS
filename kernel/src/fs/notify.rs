@@ -41,6 +41,8 @@
 //! paths.  With a small number of watches (<100), linear scan is fine.
 //! If watch counts grow, a trie-based path index would be needed.
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::string::String;

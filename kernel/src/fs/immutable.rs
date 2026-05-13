@@ -39,6 +39,8 @@
 //! ext2/ext4 inode flags.  The VFS layer queries `check_*` functions
 //! before performing operations.
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

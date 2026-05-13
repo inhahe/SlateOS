@@ -26,6 +26,8 @@
 //! 3. Category icon (audio → musical note, image → picture)
 //! 4. Generic file/folder icon
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

@@ -31,6 +31,8 @@
 //! When a pinned app is also running, its pinned slot shows the running
 //! state (no duplicate entry).
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

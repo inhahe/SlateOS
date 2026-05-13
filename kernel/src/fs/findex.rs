@@ -34,6 +34,8 @@
 //! - Build is synchronous; for large trees, consider incremental updates.
 //! - This is the kernel-space bootstrap; a userspace daemon can extend it.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;

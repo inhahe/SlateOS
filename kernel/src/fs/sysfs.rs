@@ -37,6 +37,8 @@
 //! The hostname is stored in this module (not via sysctl) since it's
 //! a string, not a u64 — it doesn't fit the sysctl integer model.
 
+#![allow(dead_code)]
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;

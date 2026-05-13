@@ -27,6 +27,8 @@
 //! Comparison uses file size + modification time for fast detection,
 //! with optional content hash verification for certainty.
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

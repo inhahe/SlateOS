@@ -33,6 +33,8 @@
 //! - Maximum tracked sparse files: 256 (LRU eviction).
 //! - Maximum regions per file: 64 (excess merged).
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

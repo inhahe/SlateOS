@@ -32,6 +32,8 @@
 //! - **Boot**: boot time analysis, startup items
 //! - **Security**: certificate validity, capability config
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;

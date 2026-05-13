@@ -34,6 +34,8 @@
 //! design.txt: "Per-block hashing [...] detects which part is corrupt,
 //! enables dedup"
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use spin::Mutex;

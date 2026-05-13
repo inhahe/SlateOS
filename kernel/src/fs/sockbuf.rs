@@ -20,6 +20,8 @@
 //!   → memcg (memory cgroup)
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;

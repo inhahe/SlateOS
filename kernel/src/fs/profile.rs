@@ -18,6 +18,8 @@
 //! The profiler is designed to be low-overhead: atomic counters
 //! for fast-path recording, no allocations on the hot path.
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

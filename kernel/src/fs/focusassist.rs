@@ -32,6 +32,8 @@
 //! - **systray**: displays DND icon and missed count badge
 //! - **power**: can auto-activate on presentation/gaming mode
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;

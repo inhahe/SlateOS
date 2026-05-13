@@ -19,6 +19,8 @@
 //!   → winsnap::snap_left(window_id)
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

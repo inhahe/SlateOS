@@ -32,6 +32,8 @@
 //! - Maximum queue depth of 8192 pending directories to bound memory.
 //! - Walk is synchronous — suitable for kernel-space file operations.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

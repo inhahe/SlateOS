@@ -25,6 +25,8 @@
 //! - Maximum template content size: 1 MiB.
 //! - Templates are ordered by category and display priority.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

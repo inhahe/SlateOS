@@ -28,6 +28,8 @@
 //! - MP4 (H.264 + AAC)
 //! - GIF (animated, no audio)
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;

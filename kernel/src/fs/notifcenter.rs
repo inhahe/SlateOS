@@ -37,6 +37,8 @@
 //! - Automatic expiry (configurable TTL)
 //! - Grouping by app
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;

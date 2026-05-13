@@ -34,6 +34,8 @@
 //! - **Unchecked**: nothing selected
 //! - **Partial**: some children selected (displayed as filled square)
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

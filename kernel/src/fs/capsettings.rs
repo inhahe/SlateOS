@@ -23,6 +23,8 @@
 //!   → capsettings::check_access(uid, program, path) → bool
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

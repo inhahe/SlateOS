@@ -18,6 +18,8 @@
 //!   → bootcfg (boot configuration)
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;
@@ -365,7 +367,7 @@ pub fn self_test() {
 
     // 4: Record boot.
     let total = record_boot().expect("boot");
-    assert!(total >= 0); // Just verify it returns.
+    let _ = total; // u64, always >= 0; just verify it returns
     crate::serial_println!("  [4/8] record boot: OK");
 
     // 5: Stages by category.

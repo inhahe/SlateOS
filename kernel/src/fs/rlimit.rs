@@ -27,6 +27,8 @@
 //! POSIX: `getrlimit(2)`, `setrlimit(2)`, `ulimit(1)`
 //! Linux: `prlimit(2)`, `/proc/self/limits`
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

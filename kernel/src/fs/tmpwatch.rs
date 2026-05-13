@@ -40,6 +40,8 @@
 //!
 //! systemd-tmpfiles(8), tmpwatch(8), tmpreaper(8)
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;

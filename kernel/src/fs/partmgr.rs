@@ -21,6 +21,8 @@
 //!   → partmgr::delete_partition(disk_id, part_id) → Ok(())
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

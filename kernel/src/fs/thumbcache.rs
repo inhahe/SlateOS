@@ -32,6 +32,8 @@
 //!   this module only manages the cache storage.
 //! - Thread-safe via spin::Mutex.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

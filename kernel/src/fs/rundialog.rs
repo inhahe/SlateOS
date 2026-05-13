@@ -33,6 +33,8 @@
 //! 3. Registered aliases (e.g., "calc" → "/usr/bin/calculator")
 //! 4. Bookmarked commands (user-pinned favorites)
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;

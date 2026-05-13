@@ -24,6 +24,8 @@
 //!   → returns list of components with modified sources
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;

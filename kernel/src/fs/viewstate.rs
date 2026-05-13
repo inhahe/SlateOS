@@ -23,6 +23,8 @@
 //! - Global default settings that apply everywhere unless overridden.
 //! - Template patterns (e.g., "all Pictures folders use large icons").
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -524,7 +526,8 @@ pub fn self_test() -> KernelResult<()> {
         let (saved, templates, gets, sets) = stats();
         assert!(gets > 0);
         assert!(sets > 0);
-        assert!(templates > 0 || saved >= 0);
+        let _ = saved; // u64, always >= 0
+        assert!(templates > 0 || true);
         serial_println!("[viewstate] test 6 passed: stats");
     }
 

@@ -13,6 +13,8 @@
 //!   → LinkReport { broken_symlinks, hardlink_groups, ... }
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

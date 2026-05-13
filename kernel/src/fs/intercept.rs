@@ -48,6 +48,8 @@
 //! design.txt: "Interceptor capability: programs can reject operations
 //! before they happen with strict timeout (~100ms)"
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

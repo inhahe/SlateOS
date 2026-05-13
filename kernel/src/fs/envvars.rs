@@ -26,6 +26,8 @@
 //! - User variables override system variables of the same name
 //! - PATH is special: user PATH is *appended* to system PATH
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;

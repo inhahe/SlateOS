@@ -29,6 +29,8 @@
 //! - Priority is inherited by child tasks at creation time.
 //! - Per-task, not per-file (matches Linux ionice model).
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

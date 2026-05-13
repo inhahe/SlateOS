@@ -20,6 +20,8 @@
 //!   → sysdiag (diagnostics)
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

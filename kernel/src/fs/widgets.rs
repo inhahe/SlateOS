@@ -34,6 +34,8 @@
 //!
 //! Third-party widgets register via the widget API.
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

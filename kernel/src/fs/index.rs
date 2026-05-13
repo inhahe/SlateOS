@@ -35,6 +35,8 @@
 //! in configured file/directory list with configured extensions/filespecs.
 //! useful defaults, but indexer does not run by default."
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

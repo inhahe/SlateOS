@@ -21,6 +21,8 @@
 //!   → pathbar::back() / pathbar::forward() for navigation
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -528,10 +530,8 @@ pub fn self_test() -> KernelResult<()> {
     // Test 6: stats.
     {
         let (nav, complete, hist, recent_len) = stats();
-        assert!(nav >= 0);
-        assert!(complete >= 0);
-        assert!(hist >= 0);
-        assert!(recent_len >= 0);
+        // Sanity check: stats returns valid values (these are u64, so always >= 0).
+        let _ = (nav, complete, hist, recent_len);
         serial_println!("[pathbar] test 6 passed: stats");
     }
 

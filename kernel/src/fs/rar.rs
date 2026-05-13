@@ -41,6 +41,8 @@
 //! - RAR 5.0 archive format: <https://www.rarlab.com/technote.htm>
 //! - unrar source: <https://github.com/AJenbo/unrar>
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 

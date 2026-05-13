@@ -34,6 +34,8 @@
 //! - **taskbar**: reads task list for running-app display
 //! - **sysdiag**: reads resources for system health panels
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;

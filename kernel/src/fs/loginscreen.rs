@@ -19,6 +19,8 @@
 //!   → loginscreen::config() → read background, layout, etc.
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;

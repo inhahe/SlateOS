@@ -22,6 +22,8 @@
 //! - LZMA2: 7-Zip LZMA SDK (lzma.txt, LzmaDec.c)
 //! - LZMA: Igor Pavlov's specification in the LZMA SDK
 
+#![allow(dead_code)]
+
 use alloc::vec;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};

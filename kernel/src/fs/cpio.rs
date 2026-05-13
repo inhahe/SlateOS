@@ -47,6 +47,8 @@
 //! - Linux `usr/gen_init_cpio.c`
 //! - <https://man.freebsd.org/cgi/man.cgi?query=cpio&sektion=5>
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

@@ -36,6 +36,8 @@
 //! - DontNeed is purely advisory (hint for future cache eviction policy).
 //! - Limited to 256 active advice entries (LRU eviction when full).
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

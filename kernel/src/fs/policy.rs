@@ -33,6 +33,8 @@
 //! Once any setting is manually changed, `current_profile()` returns
 //! `None` to indicate the configuration no longer matches a preset.
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

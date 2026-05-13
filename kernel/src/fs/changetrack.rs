@@ -50,6 +50,8 @@
 //! changetrack status                      — list all cursors
 //! ```
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

@@ -42,6 +42,8 @@
 //! Applications are organized into categories for the start menu tree.
 //! An app can belong to multiple categories.
 
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::string::String;

@@ -28,6 +28,8 @@
 //! test data, shuffling, and non-security randomness.  A real CSPRNG
 //! (seeded from hardware RNG / RDRAND) should replace it in the future.
 
+#![allow(dead_code)]
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;

@@ -37,6 +37,8 @@
 //! - **Tile**: Repeat image across desktop
 //! - **Span**: Stretch across all monitors
 
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

@@ -45,6 +45,8 @@
 //!        `fs.protected_fifos` (sysctl parameters)
 //! Yama LSM symlink restrictions
 
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{KernelError, KernelResult};

@@ -596,6 +596,7 @@ fn scan_signed_int_auto(
 
     // Detect base from prefix.
     let base: u64;
+    let saved_pos = ctx.si; // Save for rollback if hex prefix is incomplete.
     if ctx.peek() == b'0' && remaining > 0 {
         // Could be hex (0x) or octal (0).
         let next = unsafe { *ctx.input.add(ctx.si.wrapping_add(1)) };
@@ -634,7 +635,16 @@ fn scan_signed_int_auto(
     }
 
     if count == 0 {
-        return false;
+        if base == 16 {
+            // Incomplete hex prefix (e.g. "0xZ"): roll back past the "0x"
+            // and re-parse as octal "0".
+            ctx.si = saved_pos;
+            // The leading '0' is a valid octal integer with value 0.
+            ctx.advance(); // consume the '0'
+            val = 0;
+        } else {
+            return false;
+        }
     }
 
     if negative {
@@ -851,8 +861,15 @@ fn scan_float(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> 
         return false;
     }
 
-    // Exponent.
+    // Exponent.  Only consume the 'e'/sign prefix if actual exponent
+    // digits follow; otherwise leave them in the input (scanf must only
+    // consume the longest valid prefix, and "1.5e" is not valid — only
+    // "1.5" is).
     if count < width && (ctx.peek() == b'e' || ctx.peek() == b'E') && bi < 62 {
+        let save_si = ctx.si;
+        let save_bi = bi;
+        let save_count = count;
+
         buf_put(&mut buf, &mut bi, ctx.peek());
         ctx.advance();
         count = count.wrapping_add(1);
@@ -863,10 +880,18 @@ fn scan_float(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> 
             count = count.wrapping_add(1);
         }
 
+        let exp_digit_start = count;
         while count < width && ctx.peek().is_ascii_digit() && bi < 62 {
             buf_put(&mut buf, &mut bi, ctx.peek());
             ctx.advance();
             count = count.wrapping_add(1);
+        }
+
+        if count == exp_digit_start {
+            // No exponent digits after 'e'[sign] — rollback.
+            ctx.si = save_si;
+            bi = save_bi;
+            let _ = save_count; // count unused after this block.
         }
     }
 

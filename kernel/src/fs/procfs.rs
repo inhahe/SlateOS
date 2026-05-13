@@ -464,6 +464,10 @@ const ROOT_FILES: &[&str] = &[
     "ksmstat",
     "clocksrc",
     "pmcstat",
+    "cputhr",
+    "ipcns",
+    "netqueue",
+    "secmod",
     "columnview",
     "pathbar",
     "viewstate",
@@ -9000,6 +9004,70 @@ fn gen_pmcstat() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_cputhr() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cpus, events, ms, caps, ops) = super::cputhr::stats();
+    out.push_str(&format!("=== CPU Thermal Throttle Stats ===\n"));
+    out.push_str(&format!("CPUs: {}  Throttle events: {}  Total: {}ms  Freq caps: {}  Ops: {}\n\n", cpus, events, ms, caps, ops));
+    for c in super::cputhr::per_cpu() {
+        let temp = c.temp_mc / 1000;
+        let temp_frac = (c.temp_mc % 1000) / 100;
+        let cap = if c.freq_cap_mhz > 0 { alloc::format!("{}MHz", c.freq_cap_mhz) } else { String::from("none") };
+        let throttled = if c.is_throttled { " [THROTTLED]" } else { "" };
+        out.push_str(&format!("  CPU {} pkg={} temp={}.{}°C throttle={} total={}ms max={}ms cap={}{}\n",
+            c.cpu_id, c.package_id, temp, temp_frac, c.throttle_count, c.total_throttle_ms, c.max_throttle_ms, cap, throttled));
+    }
+    out.into_bytes()
+}
+
+fn gen_ipcns() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (nss, shm, sem, msg, ops) = super::ipcns::stats();
+    out.push_str(&format!("=== IPC Namespace Stats ===\n"));
+    out.push_str(&format!("Namespaces: {}  SHM: {}  SEM: {}  MSG: {}  Ops: {}\n\n", nss, shm, sem, msg, ops));
+    for ns in super::ipcns::ns_list() {
+        out.push_str(&format!("  [{}] {:<16} shm={}({} bytes) sem={}({}) msg={}({} bytes)\n",
+            ns.ns_id, ns.name, ns.shm_segments, ns.shm_bytes, ns.sem_sets, ns.sem_total, ns.msg_queues, ns.msg_bytes));
+    }
+    out.into_bytes()
+}
+
+fn gen_netqueue() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (queues, rx, tx, napi, drops, ops) = super::netqueue::stats();
+    out.push_str(&format!("=== Network Queue Stats ===\n"));
+    out.push_str(&format!("Queues: {}  RX: {} pkts  TX: {} pkts  NAPI: {}  Drops: {}  Ops: {}\n\n", queues, rx, tx, napi, drops, ops));
+    for q in super::netqueue::per_queue() {
+        out.push_str(&format!("  {} q{} {:<3} pkts={} bytes={} drops={} napi={} budget_ex={} backlog={}\n",
+            q.iface, q.queue_id, q.direction.label(), q.packets, q.bytes, q.drops, q.napi_polls, q.napi_budget_exhausted, q.backlog_len));
+    }
+    out.into_bytes()
+}
+
+fn gen_secmod() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (mods, checks, denials, audits, ops) = super::secmod::stats();
+    let deny_rate = if checks > 0 { denials * 10000 / checks } else { 0 };
+    out.push_str(&format!("=== Security Module Stats ===\n"));
+    out.push_str(&format!("Modules: {}  Checks: {}  Denials: {} ({}.{}%)  Audits: {}  Ops: {}\n\n",
+        mods, checks, denials, deny_rate / 100, deny_rate % 100, audits, ops));
+    let hooks = ["file_open", "file_perm", "inode_cr", "inode_rm", "task_al", "task_kl", "sock_cr", "sock_cn"];
+    for m in super::secmod::per_module() {
+        let status = if m.enabled { "on" } else { "off" };
+        out.push_str(&format!("  {} [{}] checks={} denials={} audits={}\n", m.name, status, m.total_checks, m.total_denials, m.audit_events));
+        for (i, h) in hooks.iter().enumerate() {
+            if m.checks[i] > 0 {
+                out.push_str(&format!("    {:<10} checks={} denials={}\n", h, m.checks[i], m.denials[i]));
+            }
+        }
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9629,6 +9697,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "ksmstat" => Ok(gen_ksmstat()),
         "clocksrc" => Ok(gen_clocksrc()),
         "pmcstat" => Ok(gen_pmcstat()),
+        "cputhr" => Ok(gen_cputhr()),
+        "ipcns" => Ok(gen_ipcns()),
+        "netqueue" => Ok(gen_netqueue()),
+        "secmod" => Ok(gen_secmod()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

@@ -990,6 +990,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] KSM Stats (fs::ksmstat): Kernel same-page merging with per-process sharing counts, merge/unmerge tracking, scan progress, memory saved; `ksmstat`/`ksm` kshell command; /proc/ksmstat; 8 self-tests
   - [x] Clock Source (fs::clocksrc): System clock source monitoring with frequency, rating, skew corrections, read latency tracking; `clocksrc`/`clksrc` kshell command; /proc/clocksrc; 8 self-tests
   - [x] PMC Stats (fs::pmcstat): Hardware performance counters with per-CPU cycles/instructions/cache/branch tracking, IPC and miss rate derivation; `pmcstat`/`pmc` kshell command; /proc/pmcstat; 8 self-tests
+  - [x] CPU Throttle (fs::cputhr): Per-CPU thermal throttle monitoring with event/duration tracking, frequency capping, temperature readout; `cputhr`/`cthr` kshell command; /proc/cputhr; 8 self-tests
+  - [x] IPC Namespace (fs::ipcns): IPC namespace isolation monitoring with SysV shm/sem/msg tracking per namespace; `ipcns`/`ipcn` kshell command; /proc/ipcns; 8 self-tests
+  - [x] Network Queue (fs::netqueue): Per-queue/NAPI network monitoring with RX/TX packet counts, drops, budget exhaustion tracking; `netqueue`/`nq` kshell command; /proc/netqueue; 8 self-tests
+  - [x] Security Module (fs::secmod): LSM-like security module monitoring with per-hook check/denial counts, audit events, deny rate; `secmod`/`smod` kshell command; /proc/secmod; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

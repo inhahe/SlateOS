@@ -1624,11 +1624,24 @@ pub unsafe extern "C" fn send(
                 let timeout_ms = get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
                 return tcp_send_wait(entry.handle, buf, len, timeout_ms);
             }
-            // Map ChannelClosed to EPIPE for TCP send (broken pipe).
+            // ChannelClosed from send covers two distinct POSIX errors:
+            // - EPIPE: local write side shut down (SHUT_WR sent FIN), or
+            //          peer cleanly closed (FIN received).
+            // - ECONNRESET: peer sent RST (abortive close).
+            // Distinguish by checking last_error: RST sets TCP_ERR_RESET,
+            // while graceful shutdown / local SHUT_WR leaves it at NONE.
             let posix_err = translate_net_error(ret);
             if posix_err == errno::ECONNRESET {
-                // Remote sent FIN/RST — writing is EPIPE.
-                errno::set_errno(errno::EPIPE);
+                let last = crate::syscall::syscall1(
+                    crate::syscall::SYS_TCP_LAST_ERROR, entry.handle,
+                ) as u8;
+                if last == 2 {
+                    // TCP_ERR_RESET — genuine connection reset.
+                    errno::set_errno(errno::ECONNRESET);
+                } else {
+                    // Local shutdown or graceful close — EPIPE per POSIX.
+                    errno::set_errno(errno::EPIPE);
+                }
             } else {
                 errno::set_errno(posix_err);
             }
@@ -1928,8 +1941,16 @@ pub(crate) fn tcp_send_wait(
         // Negative: check if it's just WouldBlock (window still closed).
         let err = translate_net_error(ret);
         if err != errno::EAGAIN && err != errno::EWOULDBLOCK {
-            // Real error (ECONNRESET, EPIPE, etc.)
-            errno::set_errno(err);
+            // Real error — distinguish RST (ECONNRESET) from local
+            // shutdown/graceful close (EPIPE).
+            if err == errno::ECONNRESET {
+                let last = crate::syscall::syscall1(
+                    crate::syscall::SYS_TCP_LAST_ERROR, handle,
+                ) as u8;
+                errno::set_errno(if last == 2 { errno::ECONNRESET } else { errno::EPIPE });
+            } else {
+                errno::set_errno(err);
+            }
             return -1;
         }
         // Still can't send — check timeout.
@@ -1998,9 +2019,12 @@ pub unsafe extern "C" fn sendto(
             return tcp_send_wait(entry.handle, buf, len, timeout_ms);
         }
         let posix_err = translate_net_error(ret);
-        // Map ChannelClosed to EPIPE for TCP send (broken pipe).
+        // Distinguish RST (ECONNRESET) from local shutdown (EPIPE).
         if posix_err == errno::ECONNRESET {
-            errno::set_errno(errno::EPIPE);
+            let last = crate::syscall::syscall1(
+                crate::syscall::SYS_TCP_LAST_ERROR, entry.handle,
+            ) as u8;
+            errno::set_errno(if last == 2 { errno::ECONNRESET } else { errno::EPIPE });
         } else {
             errno::set_errno(posix_err);
         }

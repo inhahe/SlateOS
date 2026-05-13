@@ -273,7 +273,16 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                     entry.handle, buf, count, timeout_ms,
                 );
             }
-            // Non-blocking or non-WouldBlock error — translate normally.
+            // Non-blocking or non-WouldBlock error.
+            // ChannelClosed (-300) needs EPIPE/ECONNRESET distinction:
+            // RST from peer → ECONNRESET; local shutdown/graceful close → EPIPE.
+            if ret == errno::native::CHANNEL_CLOSED {
+                let last = syscall1(
+                    crate::syscall::SYS_TCP_LAST_ERROR, entry.handle,
+                ) as u8;
+                errno::set_errno(if last == 2 { errno::ECONNRESET } else { errno::EPIPE });
+                return -1;
+            }
             return errno::translate(ret) as SsizeT;
         }
         HandleKind::UdpSocket => {

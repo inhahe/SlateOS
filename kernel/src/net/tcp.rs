@@ -3399,6 +3399,14 @@ const TIME_WAIT_DURATION_NS: u64 = 60_000_000_000;
 /// This timeout reclaims the slot after 60 seconds of inactivity.
 const FIN_WAIT2_TIMEOUT_NS: u64 = 60_000_000_000;
 
+/// SYN_RECEIVED timeout: 30 seconds.
+///
+/// A server-side connection enters SYN_RECEIVED after receiving a SYN
+/// and sending SYN-ACK, but the final ACK from the client never arrived.
+/// This happens when the client crashes mid-handshake, or during SYN
+/// flood attacks.  30 seconds matches typical TCP implementations.
+const SYN_RECEIVED_TIMEOUT_NS: u64 = 30_000_000_000;
+
 /// Clean up connections in terminal TCP states after their timers expire.
 ///
 /// Called from the same periodic tick as `tick_keepalive`.  Scans all
@@ -3410,6 +3418,8 @@ const FIN_WAIT2_TIMEOUT_NS: u64 = 60_000_000_000;
 ///   Matches Linux `tcp_fin_timeout` default.
 /// - **LAST_ACK** (30s): we sent FIN, waiting for the final ACK.  The
 ///   peer's FIN-ACK may have been lost.
+/// - **SYN_RECEIVED** (30s): received SYN and sent SYN-ACK, but the
+///   client's ACK never arrived (crashed client or SYN flood).
 pub fn tick_time_wait_cleanup() {
     let now = crate::hrtimer::now_ns();
     let mut conns = CONNECTIONS.lock();
@@ -3463,6 +3473,24 @@ pub fn tick_time_wait_cleanup() {
                 if elapsed >= 30_000_000_000 {
                     crate::serial_println!(
                         "[tcp] LAST_ACK timeout for port {} → {}:{} — reclaiming",
+                        conn.local_port, conn.remote_ip, conn.remote_port
+                    );
+                    conn.active = false;
+                    conn.state = TcpState::Closed;
+                    conn.rx_buffer.clear();
+                    conn.tx_buffer.clear();
+                    conn.nagle_buf.clear();
+                    conn.ooo_buf.clear();
+                }
+            }
+            TcpState::SynReceived => {
+                // Half-open connection: received SYN and sent SYN-ACK,
+                // but the client's final ACK never arrived.  This prevents
+                // slot exhaustion from SYN floods or crashed clients.
+                let elapsed = now.saturating_sub(conn.last_activity_ns);
+                if elapsed >= SYN_RECEIVED_TIMEOUT_NS {
+                    crate::serial_println!(
+                        "[tcp] SYN_RECEIVED timeout for port {} ← {}:{} — reclaiming",
                         conn.local_port, conn.remote_ip, conn.remote_port
                     );
                     conn.active = false;

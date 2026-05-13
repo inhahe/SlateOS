@@ -17,9 +17,13 @@
 //!
 //! ## Timeout Handling
 //!
-//! `poll(fds, n, 0)` returns immediately (non-blocking).
-//! `poll(fds, n, timeout)` with `timeout > 0` sleeps via `SYS_SLEEP`
-//! then rechecks.  `poll(fds, n, -1)` sleeps briefly and returns.
+//! Both `poll()` and `select()` use a polling loop with 10ms sleep
+//! intervals: check all fds, if none ready sleep 10ms, repeat until
+//! an fd becomes ready or the deadline expires.
+//!
+//! - `poll(fds, n, 0)` / `select(…, {0,0})`: non-blocking, check once.
+//! - `poll(fds, n, timeout)` / `select(…, tv)`: loop until timeout.
+//! - `poll(fds, n, -1)` / `select(…, NULL)`: loop indefinitely.
 //!
 //! ## Future Work
 //!
@@ -201,42 +205,43 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
         return -1;
     }
 
-    // Sleep if a non-zero timeout was requested.
-    if timeout > 0 {
-        // SYS_SLEEP expects nanoseconds.
-        let ns = u64::from(timeout as u32).saturating_mul(1_000_000);
-        let _ = syscall1(SYS_SLEEP, ns);
-    } else if timeout < 0 {
-        // Infinite wait — sleep briefly to avoid busy-spin.
-        // 10ms is a reasonable compromise between responsiveness and CPU usage.
-        let _ = syscall1(SYS_SLEEP, 10_000_000);
-    }
+    // Poll in a loop: check readiness, if nothing ready sleep briefly,
+    // repeat until timeout expires or an fd becomes ready.
+    // Sleep interval: 10ms (balance between responsiveness and CPU).
+    const POLL_INTERVAL_NS: u64 = 10_000_000; // 10ms
+    let deadline_ns = if timeout > 0 {
+        let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+        now.saturating_add(u64::from(timeout as u32).saturating_mul(1_000_000))
+    } else {
+        0
+    };
 
-    let mut ready_count: i32 = 0;
-    let mut i: u64 = 0;
+    loop {
+        let mut ready_count: i32 = 0;
+        let mut i: u64 = 0;
 
-    while i < nfds {
-        // SAFETY: fds is valid for nfds entries.
-        let pfd = unsafe { &mut *fds.add(i as usize) };
-        pfd.revents = 0;
+        while i < nfds {
+            // SAFETY: fds is valid for nfds entries.
+            let pfd = unsafe { &mut *fds.add(i as usize) };
+            pfd.revents = 0;
 
-        // Negative fd = skip (POSIX says ignore, set revents=0).
-        if pfd.fd < 0 {
-            i = i.wrapping_add(1);
-            continue;
-        }
+            // Negative fd = skip (POSIX says ignore, set revents=0).
+            if pfd.fd < 0 {
+                i = i.wrapping_add(1);
+                continue;
+            }
 
-        let Some(entry) = fdtable::get_fd(pfd.fd) else {
-            pfd.revents = POLLNVAL;
-            ready_count = ready_count.wrapping_add(1);
-            i = i.wrapping_add(1);
-            continue;
-        };
+            let Some(entry) = fdtable::get_fd(pfd.fd) else {
+                pfd.revents = POLLNVAL;
+                ready_count = ready_count.wrapping_add(1);
+                i = i.wrapping_add(1);
+                continue;
+            };
 
-        // Determine readiness based on handle kind.
-        let (readable, writable, hangup) = check_readiness(entry.kind, entry.handle);
+            // Determine readiness based on handle kind.
+            let (readable, writable, hangup) = check_readiness(entry.kind, entry.handle);
 
-        let mut revents: i16 = 0;
+            let mut revents: i16 = 0;
         if readable && (pfd.events & POLLIN != 0) {
             revents |= POLLIN;
         }
@@ -255,7 +260,27 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
         i = i.wrapping_add(1);
     }
 
-    ready_count
+    // If any fds are ready, return immediately.
+    if ready_count > 0 {
+        return ready_count;
+    }
+
+    // Non-blocking (timeout == 0): return immediately.
+    if timeout == 0 {
+        return 0;
+    }
+
+    // Check deadline for positive timeouts.
+    if timeout > 0 {
+        let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+        if now >= deadline_ns {
+            return 0; // Timeout expired.
+        }
+    }
+
+    // Sleep briefly and retry.
+    let _ = syscall1(SYS_SLEEP, POLL_INTERVAL_NS);
+    } // end loop
 }
 
 // ---------------------------------------------------------------------------
@@ -388,26 +413,36 @@ pub unsafe extern "C" fn select(
         return -1;
     }
 
-    // Handle timeout: convert to milliseconds, then sleep.
+    // Sleep interval for polling: 10ms (balance responsiveness vs CPU).
+    const POLL_INTERVAL_NS: u64 = 10_000_000;
+
+    // Compute deadline from timeout.
+    // NULL = block indefinitely, {0,0} = non-blocking poll.
+    let is_nonblocking: bool;
+    let deadline_ns: u64;
+
     if timeout.is_null() {
-        // NULL timeout = block indefinitely.  Sleep briefly to avoid busy-spin.
-        let _ = syscall1(SYS_SLEEP, 10_000_000); // 10ms
+        // Block indefinitely — no deadline.
+        is_nonblocking = false;
+        deadline_ns = u64::MAX;
     } else {
         // SAFETY: caller guarantees timeout validity.
         let tv = unsafe { &*timeout };
         let ms = tv.tv_sec.saturating_mul(1000)
             .saturating_add(tv.tv_usec / 1000);
-        if ms > 0 {
-            let ns = (ms as u64).saturating_mul(1_000_000);
-            let _ = syscall1(SYS_SLEEP, ns);
+        if ms == 0 {
+            // {0,0} = non-blocking (check once, return immediately).
+            is_nonblocking = true;
+            deadline_ns = 0;
+        } else {
+            is_nonblocking = false;
+            let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+            deadline_ns = now.saturating_add((ms as u64).saturating_mul(1_000_000));
         }
-        // If timeout is {0,0}, don't sleep (non-blocking select).
     }
 
-    let mut ready_count: i32 = 0;
-
-    // Prepare result sets: start with empty sets, add ready fds.
-    // We need to read the input sets first, then clear and rebuild them.
+    // Capture input sets before the loop — we clear and rebuild output sets
+    // each iteration.
     let read_input = if readfds.is_null() {
         None
     } else {
@@ -427,52 +462,75 @@ pub unsafe extern "C" fn select(
         Some(unsafe { *exceptfds })
     };
 
-    // Clear output sets.
-    if !readfds.is_null() {
-        fd_set_zero(readfds);
-    }
-    if !writefds.is_null() {
-        fd_set_zero(writefds);
-    }
-    if !exceptfds.is_null() {
-        fd_set_zero(exceptfds);
-    }
+    loop {
+        // Clear output sets at start of each iteration.
+        if !readfds.is_null() {
+            fd_set_zero(readfds);
+        }
+        if !writefds.is_null() {
+            fd_set_zero(writefds);
+        }
+        if !exceptfds.is_null() {
+            fd_set_zero(exceptfds);
+        }
 
-    // Check each fd.
-    let mut fd: i32 = 0;
-    while fd < nfds {
-        let check_read = read_input.as_ref().is_some_and(|s| is_set_in(fd, s));
-        let check_write = write_input.as_ref().is_some_and(|s| is_set_in(fd, s));
-        let check_except = except_input.as_ref().is_some_and(|s| is_set_in(fd, s));
+        let mut ready_count: i32 = 0;
 
-        if !check_read && !check_write && !check_except {
+        // Check each fd for readiness.
+        let mut fd: i32 = 0;
+        while fd < nfds {
+            let check_read = read_input.as_ref().is_some_and(|s| is_set_in(fd, s));
+            let check_write = write_input.as_ref().is_some_and(|s| is_set_in(fd, s));
+            let check_except = except_input.as_ref().is_some_and(|s| is_set_in(fd, s));
+
+            if !check_read && !check_write && !check_except {
+                fd = fd.wrapping_add(1);
+                continue;
+            }
+
+            let Some(entry) = fdtable::get_fd(fd) else {
+                // Invalid fd in the set — error per POSIX.
+                errno::set_errno(errno::EBADF);
+                return -1;
+            };
+
+            let (readable, writable, _hangup) = check_readiness(entry.kind, entry.handle);
+
+            if check_read && readable {
+                fd_set_set(fd, readfds);
+                ready_count = ready_count.wrapping_add(1);
+            }
+            if check_write && writable {
+                fd_set_set(fd, writefds);
+                ready_count = ready_count.wrapping_add(1);
+            }
+            // We don't generate exception events, so check_except is always false.
+            let _ = check_except;
+
             fd = fd.wrapping_add(1);
-            continue;
         }
 
-        let Some(entry) = fdtable::get_fd(fd) else {
-            // Invalid fd in the set — this is an error per POSIX.
-            errno::set_errno(errno::EBADF);
-            return -1;
-        };
-
-        let (readable, writable, _hangup) = check_readiness(entry.kind, entry.handle);
-
-        if check_read && readable {
-            fd_set_set(fd, readfds);
-            ready_count = ready_count.wrapping_add(1);
+        // If any fds are ready, return immediately.
+        if ready_count > 0 {
+            return ready_count;
         }
-        if check_write && writable {
-            fd_set_set(fd, writefds);
-            ready_count = ready_count.wrapping_add(1);
+
+        // Non-blocking: return immediately even if nothing ready.
+        if is_nonblocking {
+            return 0;
         }
-        // We don't generate exception events, so check_except is always false.
-        let _ = check_except;
 
-        fd = fd.wrapping_add(1);
-    }
+        // Check deadline for timed waits.
+        if deadline_ns != u64::MAX {
+            let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+            if now >= deadline_ns {
+                return 0; // Timeout expired.
+            }
+        }
 
-    ready_count
+        // Sleep briefly and retry.
+        let _ = syscall1(SYS_SLEEP, POLL_INTERVAL_NS);
+    } // end loop
 }
 
 /// Test if a fd is set in an `FdSet` (internal helper, takes a reference).

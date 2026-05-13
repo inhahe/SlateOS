@@ -998,6 +998,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Device Freq (fs::devfreq): Device frequency scaling monitoring with governor, transitions, frequency clamping for GPU/membus; `devfreq`/`dfreq` kshell command; /proc/devfreq; 8 self-tests
   - [x] Hardware RNG (fs::hwrng): Hardware random number generator monitoring with per-source entropy tracking, pool status, reseed events; `hwrng`/`hrng` kshell command; /proc/hwrng; 8 self-tests
   - [x] ACPI Stats (fs::acpistat): ACPI event monitoring with power/lid/battery/thermal events, GPE tracking, suspend/resume counts; `acpistat`/`acpi` kshell command; /proc/acpistat; 8 self-tests
+  - [x] Userfaultfd (fs::userfault): User-space page fault handling with per-process fault/resolve tracking, copy/zero page stats, latency measurement; `userfault`/`uffd` kshell command; /proc/userfault; 8 self-tests
+  - [x] I/O Port (fs::ioport): x86 I/O port access monitoring with per-region read/write tracking, untracked access counting; `ioport`/`iop` kshell command; /proc/ioport; 8 self-tests
+  - [x] MSI Vectors (fs::msivec): MSI/MSI-X interrupt vector monitoring with per-device allocation, interrupt counts, CPU targeting; `msivec`/`msi` kshell command; /proc/msivec; 8 self-tests
+  - [x] CPU Sets (fs::cpuset): CPU set/affinity monitoring with cpuset lifecycle, process assignment, affinity change tracking, NUMA masks; `cpuset`/`cset` kshell command; /proc/cpuset; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

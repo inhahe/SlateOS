@@ -472,6 +472,10 @@ const ROOT_FILES: &[&str] = &[
     "devfreq",
     "hwrng",
     "acpistat",
+    "userfault",
+    "ioport",
+    "msivec",
+    "cpuset",
     "columnview",
     "pathbar",
     "viewstate",
@@ -9134,6 +9138,69 @@ fn gen_acpistat() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_userfault() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (handlers, faults, resolves, copies, zeros, ops) = super::userfault::stats();
+    out.push_str(&format!("=== Userfaultfd Stats ===\n"));
+    out.push_str(&format!("Handlers: {}  Faults: {}  Resolves: {}  Copies: {}  Zeros: {}  Ops: {}\n\n",
+        handlers, faults, resolves, copies, zeros, ops));
+    out.push_str("Per-process:\n");
+    for h in super::userfault::per_process() {
+        let avg_ns = if h.resolves > 0 { h.total_resolve_ns / h.resolves } else { 0 };
+        out.push_str(&format!("  PID {:>5}  ranges={}  miss={}  wp={}  minor={}  resolves={}  avg_ns={}  max_ns={}  copy={}  zero={}\n",
+            h.pid, h.registered_ranges, h.faults_missing, h.faults_wp, h.faults_minor,
+            h.resolves, avg_ns, h.max_resolve_ns, h.copy_pages, h.zero_pages));
+    }
+    out.into_bytes()
+}
+
+fn gen_ioport() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (regions, reads, writes, ur, uw, ops) = super::ioport::stats();
+    out.push_str(&format!("=== I/O Port Stats ===\n"));
+    out.push_str(&format!("Regions: {}  Reads: {}  Writes: {}  Untracked R: {}  Untracked W: {}  Ops: {}\n\n",
+        regions, reads, writes, ur, uw, ops));
+    out.push_str("Per-region:\n");
+    for r in super::ioport::per_region() {
+        out.push_str(&format!("  {:<6} 0x{:04x}-0x{:04x}  reads={}  writes={}  rbytes={}  wbytes={}\n",
+            r.name, r.base, r.base + r.length - 1, r.reads, r.writes, r.read_bytes, r.write_bytes));
+    }
+    out.into_bytes()
+}
+
+fn gen_msivec() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (devs, vecs, ints, allocs, frees, ops) = super::msivec::stats();
+    out.push_str(&format!("=== MSI Vector Stats ===\n"));
+    out.push_str(&format!("Devices: {}  Vectors: {}  Interrupts: {}  Allocs: {}  Frees: {}  Ops: {}\n\n",
+        devs, vecs, ints, allocs, frees, ops));
+    out.push_str("Per-device:\n");
+    for d in super::msivec::per_device() {
+        out.push_str(&format!("  {:<10} {:<5}  alloc={}  active={}  ints={}  cpu={}\n",
+            d.device, d.msi_type.label(), d.vectors_allocated, d.vectors_active, d.interrupts, d.target_cpu));
+    }
+    out.into_bytes()
+}
+
+fn gen_cpuset() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (sets, assignments, affinity, ops) = super::cpuset::stats();
+    out.push_str(&format!("=== CPU Set Stats ===\n"));
+    out.push_str(&format!("Sets: {}  Assignments: {}  Affinity changes: {}  Ops: {}\n\n",
+        sets, assignments, affinity, ops));
+    out.push_str("CPU sets:\n");
+    for s in super::cpuset::list() {
+        let excl = if s.exclusive { "excl" } else { "shared" };
+        out.push_str(&format!("  [{}] {:<10} cpus=0x{:x}  mem=0x{:x}  procs={}  affinity={}  [{}]\n",
+            s.id, s.name, s.cpu_mask, s.mem_mask, s.processes, s.affinity_changes, excl));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9771,6 +9838,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "devfreq" => Ok(gen_devfreq()),
         "hwrng" => Ok(gen_hwrng()),
         "acpistat" => Ok(gen_acpistat()),
+        "userfault" => Ok(gen_userfault()),
+        "ioport" => Ok(gen_ioport()),
+        "msivec" => Ok(gen_msivec()),
+        "cpuset" => Ok(gen_cpuset()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

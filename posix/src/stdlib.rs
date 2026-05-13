@@ -2075,4 +2075,246 @@ mod tests {
         // 10^(2147483647) overflows f64 → infinity.
         assert!(pow10(i32::MAX).is_infinite());
     }
+
+    // -----------------------------------------------------------------------
+    // strtol edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strtol_overflow_positive() {
+        // Value larger than i64::MAX should clamp to LONG_MAX.
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(b"9999999999999999999999\0".as_ptr(), &mut endptr, 10) };
+        assert_eq!(val, i64::MAX);
+    }
+
+    #[test]
+    fn test_strtol_overflow_negative() {
+        // Value more negative than i64::MIN should clamp to LONG_MIN.
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(b"-9999999999999999999999\0".as_ptr(), &mut endptr, 10) };
+        assert_eq!(val, i64::MIN);
+    }
+
+    #[test]
+    fn test_strtol_empty_no_digits() {
+        // No valid digits: endptr should point to start, result should be 0.
+        let input = b"   abc\0";
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(input.as_ptr(), &mut endptr, 10) };
+        assert_eq!(val, 0);
+    }
+
+    #[test]
+    fn test_strtol_base_2() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(b"1010\0".as_ptr(), &mut endptr, 2) };
+        assert_eq!(val, 10, "binary 1010 = decimal 10");
+    }
+
+    #[test]
+    fn test_strtol_base_36() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(b"z\0".as_ptr(), &mut endptr, 36) };
+        assert_eq!(val, 35, "'z' in base 36 = 35");
+    }
+
+    #[test]
+    fn test_strtol_long_min_exact() {
+        // i64::MIN = -9223372036854775808
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(b"-9223372036854775808\0".as_ptr(), &mut endptr, 10) };
+        assert_eq!(val, i64::MIN);
+    }
+
+    #[test]
+    fn test_strtol_long_max_exact() {
+        // i64::MAX = 9223372036854775807
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(b"9223372036854775807\0".as_ptr(), &mut endptr, 10) };
+        assert_eq!(val, i64::MAX);
+    }
+
+    // -----------------------------------------------------------------------
+    // strtoul edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strtoul_overflow() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtoul(b"99999999999999999999999\0".as_ptr(), &mut endptr, 10) };
+        assert_eq!(val, u64::MAX);
+    }
+
+    #[test]
+    fn test_strtoul_max_exact() {
+        // u64::MAX = 18446744073709551615
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtoul(b"18446744073709551615\0".as_ptr(), &mut endptr, 10) };
+        assert_eq!(val, u64::MAX);
+    }
+
+    #[test]
+    fn test_strtoul_hex_uppercase() {
+        let mut endptr: *const u8 = core::ptr::null();
+        let val = unsafe { strtoul(b"0xDEAD\0".as_ptr(), &mut endptr, 0) };
+        assert_eq!(val, 0xDEAD);
+    }
+
+    // -----------------------------------------------------------------------
+    // qsort edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_qsort_empty_array() {
+        // qsort on empty array should not crash.
+        let mut arr: [i32; 0] = [];
+        unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
+            unsafe { *(a as *const i32) - *(b as *const i32) }
+        }
+        unsafe { qsort(arr.as_mut_ptr().cast(), 0, 4, cmp) };
+    }
+
+    #[test]
+    fn test_qsort_one_element() {
+        let mut arr = [42i32];
+        unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
+            unsafe { *(a as *const i32) - *(b as *const i32) }
+        }
+        unsafe { qsort(arr.as_mut_ptr().cast(), 1, 4, cmp) };
+        assert_eq!(arr[0], 42);
+    }
+
+    #[test]
+    fn test_qsort_presorted() {
+        let mut arr = [1i32, 2, 3, 4, 5];
+        unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
+            unsafe { *(a as *const i32) - *(b as *const i32) }
+        }
+        unsafe { qsort(arr.as_mut_ptr().cast(), 5, 4, cmp) };
+        assert_eq!(arr, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_qsort_reverse_sorted() {
+        let mut arr = [5i32, 4, 3, 2, 1];
+        unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
+            unsafe { *(a as *const i32) - *(b as *const i32) }
+        }
+        unsafe { qsort(arr.as_mut_ptr().cast(), 5, 4, cmp) };
+        assert_eq!(arr, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_qsort_duplicates() {
+        let mut arr = [3i32, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5];
+        unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
+            unsafe { *(a as *const i32) - *(b as *const i32) }
+        }
+        unsafe { qsort(arr.as_mut_ptr().cast(), 11, 4, cmp) };
+        assert_eq!(arr, [1, 1, 2, 3, 3, 4, 5, 5, 5, 6, 9]);
+    }
+
+    // -----------------------------------------------------------------------
+    // bsearch edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bsearch_finds_element() {
+        let arr = [1i32, 3, 5, 7, 9, 11];
+        let key: i32 = 7;
+        unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
+            unsafe { *(a as *const i32) - *(b as *const i32) }
+        }
+        let result = unsafe {
+            bsearch(
+                (&key as *const i32).cast(),
+                arr.as_ptr().cast(),
+                6, 4, cmp,
+            )
+        };
+        assert!(!result.is_null());
+        assert_eq!(unsafe { *(result as *const i32) }, 7);
+    }
+
+    #[test]
+    fn test_bsearch_missing_element() {
+        let arr = [1i32, 3, 5, 7, 9, 11];
+        let key: i32 = 4;
+        unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
+            unsafe { *(a as *const i32) - *(b as *const i32) }
+        }
+        let result = unsafe {
+            bsearch(
+                (&key as *const i32).cast(),
+                arr.as_ptr().cast(),
+                6, 4, cmp,
+            )
+        };
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_bsearch_empty() {
+        let key: i32 = 42;
+        unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
+            unsafe { *(a as *const i32) - *(b as *const i32) }
+        }
+        let result = unsafe {
+            bsearch(
+                (&key as *const i32).cast(),
+                core::ptr::null(),
+                0, 4, cmp,
+            )
+        };
+        assert!(result.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // abs / labs / llabs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_abs_values() {
+        assert_eq!(abs(-5), 5);
+        assert_eq!(abs(0), 0);
+        assert_eq!(abs(5), 5);
+    }
+
+    #[test]
+    fn test_labs_values() {
+        assert_eq!(labs(-100_000), 100_000);
+        assert_eq!(labs(0), 0);
+    }
+
+    #[test]
+    fn test_llabs_values() {
+        assert_eq!(llabs(-1_000_000_000_000), 1_000_000_000_000);
+        assert_eq!(llabs(0), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // div / ldiv / lldiv
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_div_positive_operands() {
+        let result = div(10, 3);
+        assert_eq!(result.quot, 3);
+        assert_eq!(result.rem, 1);
+    }
+
+    #[test]
+    fn test_div_negative_operand() {
+        let result = div(-10, 3);
+        assert_eq!(result.quot, -3);
+        assert_eq!(result.rem, -1);
+    }
+
+    #[test]
+    fn test_lldiv_large_value() {
+        let result = lldiv(i64::MAX, 2);
+        assert_eq!(result.quot, i64::MAX / 2);
+        assert_eq!(result.rem, 1);
+    }
 }

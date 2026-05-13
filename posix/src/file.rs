@@ -820,8 +820,14 @@ pub extern "C" fn dup3(oldfd: Fd, newfd: Fd, flags: i32) -> Fd {
 /// and `CLOSE_RANGE_CLOEXEC`, neither of which is meaningful for us).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn close_range(first: u32, last: u32, _flags: u32) -> i32 {
+    // Cap at MAX_FDS-1: no fd above 255 can be open in our table,
+    // and iterating up to u32::MAX would take ~4 billion iterations
+    // due to wrapping.  Programs commonly pass UINT_MAX as `last`
+    // to close "everything from first upward."
+    let max = fdtable::MAX_FDS as u32;
+    let effective_last = if last >= max { max.wrapping_sub(1) } else { last };
     let mut fd = first;
-    while fd <= last {
+    while fd <= effective_last {
         // close() is best-effort here — ignore errors on individual fds.
         let _ = close(fd as i32);
         fd = fd.wrapping_add(1);
@@ -2327,12 +2333,20 @@ mod tests {
         assert_eq!(POSIX_FADV_NOREUSE, 5);
     }
 
-    // -- creat is open with O_CREAT|O_WRONLY|O_TRUNC --
+    // -- close_range edge cases --
 
     #[test]
-    fn test_close_range_boundary() {
-        // close_range with inverted range should not crash.
-        // In our implementation it closes nothing (first > last).
+    fn test_close_range_inverted() {
+        // close_range with first > last should do nothing (no crash).
         let _ = close_range(100, 50, 0);
+    }
+
+    #[test]
+    fn test_close_range_uint_max() {
+        // Programs commonly call close_range(3, UINT_MAX, 0) to close
+        // all fds from 3 upward.  This must not loop for 4 billion
+        // iterations — it should cap at MAX_FDS.
+        let _ = close_range(200, u32::MAX, 0);
+        // If this returns in reasonable time, the cap works.
     }
 }

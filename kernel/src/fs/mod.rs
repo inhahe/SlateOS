@@ -73,6 +73,7 @@ pub mod cliphistory;
 pub mod clipboard;
 pub mod clipsync;
 pub mod clipaction;
+pub mod clocksrc;
 pub mod cloudsync;
 pub mod colorblind;
 pub mod colorpicker;
@@ -200,6 +201,7 @@ pub mod kbshortcuts;
 pub mod kconsole;
 pub mod kernlog;
 pub mod kprobes;
+pub mod ksmstat;
 pub mod kthread;
 pub mod kernparam;
 pub mod keylayout;
@@ -279,6 +281,7 @@ pub mod procfs;
 pub mod procstat;
 pub mod prociso;
 pub mod policy;
+pub mod pmcstat;
 pub mod policyengine;
 pub mod power;
 pub mod powerprofile;
@@ -426,6 +429,7 @@ pub mod xz;
 pub mod zip;
 #[allow(dead_code)]
 pub mod zstd;
+pub mod zramstat;
 
 pub use vfs::{
     DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, LockType, Timestamp, Vfs,

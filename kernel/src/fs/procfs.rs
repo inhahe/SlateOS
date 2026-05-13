@@ -460,6 +460,10 @@ const ROOT_FILES: &[&str] = &[
     "cgiostat",
     "bpfstat",
     "pgtable",
+    "zramstat",
+    "ksmstat",
+    "clocksrc",
+    "pmcstat",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8929,6 +8933,73 @@ fn gen_pgtable() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_zramstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (devs, orig, compr, reads, writes, ops) = super::zramstat::stats();
+    let ratio = if compr > 0 { orig * 100 / compr } else { 0 };
+    out.push_str(&format!("=== ZRAM Stats ===\n"));
+    out.push_str(&format!("Devices: {}  Orig: {}  Compr: {}  Ratio: {}.{}x  Reads: {}  Writes: {}  Ops: {}\n\n",
+        devs, orig, compr, ratio / 100, ratio % 100, reads, writes, ops));
+    for d in super::zramstat::per_device() {
+        let r = if d.compr_data_size > 0 { d.orig_data_size * 100 / d.compr_data_size } else { 0 };
+        out.push_str(&format!("  {} disk={}  orig={}  compr={}  ratio={}.{}x  mem={}  R={} W={} D={}\n",
+            d.name, d.disk_size, d.orig_data_size, d.compr_data_size,
+            r / 100, r % 100, d.mem_used, d.reads, d.writes, d.discards));
+    }
+    out.into_bytes()
+}
+
+fn gen_ksmstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (shared, sharing, merges, unmerges, saved, ops) = super::ksmstat::stats();
+    let (scans, pages_scanned) = super::ksmstat::scan_stats();
+    out.push_str(&format!("=== KSM Stats ===\n"));
+    out.push_str(&format!("Shared: {}  Sharing: {}  Merges: {}  Unmerges: {}  Saved: {} bytes  Ops: {}\n", shared, sharing, merges, unmerges, saved, ops));
+    out.push_str(&format!("Scans: {}  Pages scanned: {}\n\n", scans, pages_scanned));
+    out.push_str("Per-process:\n");
+    for p in super::ksmstat::per_process() {
+        out.push_str(&format!("  pid={:<6} {:<12} shared={} unshared={} volatile={}\n",
+            p.pid, p.name, p.shared_pages, p.unshared_pages, p.volatile_pages));
+    }
+    out.into_bytes()
+}
+
+fn gen_clocksrc() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (sources, reads, skews, ops) = super::clocksrc::stats();
+    out.push_str(&format!("=== Clock Source Stats ===\n"));
+    out.push_str(&format!("Sources: {}  Reads: {}  Skew corrections: {}  Ops: {}\n\n", sources, reads, skews, ops));
+    for s in super::clocksrc::list() {
+        let cur = if s.is_current { " [CURRENT]" } else { "" };
+        let avg_skew = if s.skew_corrections > 0 { s.total_skew_ns / s.skew_corrections } else { 0 };
+        out.push_str(&format!("  [{}] {:<10} {}Hz rating={} reads={} skew_corr={} max_skew={}ns latency={}ns{}\n",
+            s.id, s.name, s.freq_hz, s.rating.label(), s.reads, s.skew_corrections, s.max_skew_ns, s.read_latency_ns, cur));
+    }
+    out.into_bytes()
+}
+
+fn gen_pmcstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cpus, samples, mx, ipc, ops) = super::pmcstat::stats();
+    let cmr = super::pmcstat::cache_miss_rate_x10000();
+    out.push_str(&format!("=== PMC Stats ===\n"));
+    out.push_str(&format!("CPUs: {}  Samples: {}  Multiplex: {}  IPC: {}.{}  Cache miss: {}.{}%  Ops: {}\n\n",
+        cpus, samples, mx, ipc / 100, ipc % 100, cmr / 100, cmr % 100, ops));
+    let events = ["cycles", "insns", "cache-miss", "cache-ref", "br-miss", "br-insn", "bus-cyc", "stall-fe"];
+    for c in super::pmcstat::per_cpu() {
+        out.push_str(&format!("  CPU {}:", c.cpu_id));
+        for (i, label) in events.iter().enumerate() {
+            out.push_str(&format!(" {}={}", label, c.counters[i]));
+        }
+        out.push_str(&format!(" samples={}\n", c.samples));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9554,6 +9625,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "cgiostat" => Ok(gen_cgiostat()),
         "bpfstat" => Ok(gen_bpfstat()),
         "pgtable" => Ok(gen_pgtable()),
+        "zramstat" => Ok(gen_zramstat()),
+        "ksmstat" => Ok(gen_ksmstat()),
+        "clocksrc" => Ok(gen_clocksrc()),
+        "pmcstat" => Ok(gen_pmcstat()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

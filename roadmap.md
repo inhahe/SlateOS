@@ -986,6 +986,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Cgroup I/O Stats (fs::cgiostat): Per-cgroup disk I/O accounting with read/write bytes/IOPS, bandwidth throttling, I/O wait time; `cgiostat`/`cgio` kshell command; /proc/cgiostat; 8 self-tests
   - [x] BPF Stats (fs::bpfstat): eBPF program lifecycle monitoring with per-program run counts, verifier errors, map tracking; `bpfstat`/`bpf` kshell command; /proc/bpfstat; 8 self-tests
   - [x] Page Table Stats (fs::pgtable): Page table allocation monitoring with per-level alloc/free, page walks, TLB flush tracking (single/range/full/global); `pgtable`/`pgtbl` kshell command; /proc/pgtable; 8 self-tests
+  - [x] ZRAM Stats (fs::zramstat): Compressed RAM swap monitoring with per-device compression ratios, read/write/discard tracking, memory savings; `zramstat`/`zram` kshell command; /proc/zramstat; 8 self-tests
+  - [x] KSM Stats (fs::ksmstat): Kernel same-page merging with per-process sharing counts, merge/unmerge tracking, scan progress, memory saved; `ksmstat`/`ksm` kshell command; /proc/ksmstat; 8 self-tests
+  - [x] Clock Source (fs::clocksrc): System clock source monitoring with frequency, rating, skew corrections, read latency tracking; `clocksrc`/`clksrc` kshell command; /proc/clocksrc; 8 self-tests
+  - [x] PMC Stats (fs::pmcstat): Hardware performance counters with per-CPU cycles/instructions/cache/branch tracking, IPC and miss rate derivation; `pmcstat`/`pmc` kshell command; /proc/pmcstat; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -2496,30 +2496,6 @@ pub fn get_rtt_ns(handle: usize) -> KernelResult<u64> {
     Ok(conn.srtt_ns_x8 >> SRTT_ALPHA_SHIFT)
 }
 
-/// Read data from a TCP connection (drain entire buffer).
-///
-/// Returns available data (may be empty if nothing received yet).
-/// Call `poll()` first to process incoming packets.
-///
-/// **Prefer `read_up_to()` from syscall handlers** — this function
-/// drains the entire rx_buffer and the caller is responsible for all
-/// of the returned data.  If only part is consumed, the rest is lost.
-pub fn read(handle: usize) -> KernelResult<Vec<u8>> {
-    let mut conns = CONNECTIONS.lock();
-    let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
-    if !conn.active {
-        return Err(KernelError::InvalidArgument);
-    }
-    // After shutdown(SHUT_RD), reads return empty (EOF).
-    if conn.local_read_closed {
-        return Ok(Vec::new());
-    }
-
-    // Drain the receive buffer.
-    let data = core::mem::take(&mut conn.rx_buffer);
-    Ok(data)
-}
-
 /// Read up to `max_bytes` from a TCP connection's receive buffer.
 ///
 /// Consumes only as many bytes as requested; the remainder stays

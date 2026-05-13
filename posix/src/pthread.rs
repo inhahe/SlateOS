@@ -690,15 +690,18 @@ pub extern "C" fn pthread_cond_timedwait(
     // SAFETY: mutex verified non-null above.
     unsafe { pthread_mutex_unlock(mutex); }
 
-    // Get current time to compute deadline.
-    let deadline = unsafe { (*abstime).tv_sec };
+    // Get current time and compute deadline with full nanosecond precision.
+    let abs = unsafe { &*abstime };
+    let deadline_sec = abs.tv_sec;
+    let deadline_nsec = abs.tv_nsec;
     let mut now_ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
-    let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now_ts);
 
     let mut timed_out = false;
     while c.generation.load(Ordering::Acquire) == current_gen {
         let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now_ts);
-        if now_ts.tv_sec >= deadline {
+        if now_ts.tv_sec > deadline_sec
+            || (now_ts.tv_sec == deadline_sec && now_ts.tv_nsec >= deadline_nsec)
+        {
             timed_out = true;
             break;
         }

@@ -1316,8 +1316,13 @@ pub unsafe extern "C" fn wcstod(
         let wc = unsafe { *nptr.add(i) };
         if wc == 0 { break; }
         match wc {
-            // '+', '-', '.', '0'-'9', 'E', 'e'
-            0x2b | 0x2d | 0x2e | 0x30..=0x39 | 0x45 | 0x65 => {
+            // '+', '-', '.', '0'-'9', 'E', 'e', plus 'i','n','f','a','t','y'
+            // for "inf"/"infinity"/"nan" parsing.
+            0x2b | 0x2d | 0x2e | 0x30..=0x39 | 0x45 | 0x65
+            | 0x49 | 0x69 | 0x4e | 0x6e | 0x46 | 0x66
+            | 0x41 | 0x61 | 0x54 | 0x74 | 0x59 | 0x79
+            | 0x28 | 0x29 // '(' and ')' for nan(payload)
+            => {
                 buf[bi] = wc as u8;
                 bi = bi.wrapping_add(1);
                 i = i.wrapping_add(1);

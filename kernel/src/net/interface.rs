@@ -17,6 +17,7 @@
 //! child namespaces.
 
 use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
 
@@ -293,5 +294,77 @@ pub fn ns_info(ns_id: crate::netns::NetNsId) -> InterfaceInfo {
             dns: from_netns_ip(cfg.dns),
         },
         None => InterfaceInfo::default(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interface statistics (lock-free atomic counters)
+// ---------------------------------------------------------------------------
+
+/// Total bytes sent (Ethernet frame payload, excluding Ethernet header).
+static TX_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Total bytes received.
+static RX_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Total frames sent.
+static TX_PACKETS: AtomicU64 = AtomicU64::new(0);
+/// Total frames received.
+static RX_PACKETS: AtomicU64 = AtomicU64::new(0);
+/// Total send errors.
+static TX_ERRORS: AtomicU64 = AtomicU64::new(0);
+/// Total frames dropped (invalid, too short, etc.).
+static RX_DROPS: AtomicU64 = AtomicU64::new(0);
+
+/// Record a successful frame transmission.
+pub fn record_tx(bytes: usize) {
+    TX_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    TX_PACKETS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a failed frame transmission.
+pub fn record_tx_error() {
+    TX_ERRORS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a successful frame reception.
+pub fn record_rx(bytes: usize) {
+    RX_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    RX_PACKETS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a dropped incoming frame.
+pub fn record_rx_drop() {
+    RX_DROPS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot of interface traffic statistics.
+#[derive(Debug, Clone, Copy)]
+pub struct InterfaceStats {
+    /// Total bytes transmitted.
+    pub tx_bytes: u64,
+    /// Total frames transmitted.
+    pub tx_packets: u64,
+    /// Total transmit errors.
+    pub tx_errors: u64,
+    /// Total bytes received.
+    pub rx_bytes: u64,
+    /// Total frames received.
+    pub rx_packets: u64,
+    /// Total received frames dropped.
+    pub rx_drops: u64,
+}
+
+/// Return a snapshot of interface traffic statistics.
+///
+/// Counters are monotonically increasing and never reset (except on
+/// reboot).  Use the difference between two snapshots to compute
+/// per-interval rates.
+pub fn stats() -> InterfaceStats {
+    InterfaceStats {
+        tx_bytes: TX_BYTES.load(Ordering::Relaxed),
+        tx_packets: TX_PACKETS.load(Ordering::Relaxed),
+        tx_errors: TX_ERRORS.load(Ordering::Relaxed),
+        rx_bytes: RX_BYTES.load(Ordering::Relaxed),
+        rx_packets: RX_PACKETS.load(Ordering::Relaxed),
+        rx_drops: RX_DROPS.load(Ordering::Relaxed),
     }
 }

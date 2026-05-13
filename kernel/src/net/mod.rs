@@ -59,7 +59,9 @@ pub fn poll() {
         let frame = recv_frame();
         match frame {
             Some(data) => {
+                interface::record_rx(data.len());
                 if let Err(e) = ethernet::process_frame(&data) {
+                    interface::record_rx_drop();
                     crate::serial_println!("[net] Error processing frame: {:?}", e);
                 }
             }
@@ -108,15 +110,31 @@ fn recv_frame() -> Option<Vec<u8>> {
 pub fn send_frame(frame: &[u8]) -> KernelResult<()> {
     // Try virtio-net first.
     if let Some(result) = crate::virtio::net::with_device(|dev| dev.send(frame)) {
+        if result.is_ok() {
+            interface::record_tx(frame.len());
+        } else {
+            interface::record_tx_error();
+        }
         return result;
     }
     // Fall back to e1000.
     if let Some(result) = crate::e1000::with_device(|dev| dev.send(frame)) {
+        if result.is_ok() {
+            interface::record_tx(frame.len());
+        } else {
+            interface::record_tx_error();
+        }
         return result;
     }
     // Fall back to rtl8139.
     if crate::rtl8139::with_device(|_| ()).is_some() {
-        return crate::rtl8139::send(frame);
+        let result = crate::rtl8139::send(frame);
+        if result.is_ok() {
+            interface::record_tx(frame.len());
+        } else {
+            interface::record_tx_error();
+        }
+        return result;
     }
     Err(KernelError::NoSuchDevice)
 }

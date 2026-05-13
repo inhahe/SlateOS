@@ -1151,7 +1151,16 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
 
             let ret = syscall3(SYS_TCP_CONNECT, u64::from(ip), u64::from(port), nb_flag);
             if ret < 0 {
-                errno::set_errno(translate_net_error(ret));
+                // The kernel's blocking connect returns specific errors:
+                // -2 (NotSupported) = connection refused (RST on SYN)
+                // -6 (TimedOut) = no SYN-ACK after retransmission
+                // Map these to correct POSIX errno values.
+                let posix_err = match ret {
+                    -2 => errno::ECONNREFUSED,
+                    -6 => errno::ETIMEDOUT,
+                    _ => translate_net_error(ret),
+                };
+                errno::set_errno(posix_err);
                 return -1;
             }
 
@@ -1358,18 +1367,14 @@ pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
         return -1;
     }
 
-    // Must have been bound first.
-    if meta.bound_port == 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
     // Don't re-listen on an already-listening socket.
     if entry.kind == HandleKind::TcpListener && entry.handle != 0 {
         return 0;
     }
 
-    let port = u16::from_be(meta.bound_port);
+    // If not bound, implicitly bind to port 0 (ephemeral).
+    // POSIX: listen() on an unbound socket auto-binds.
+    let port = if meta.bound_port == 0 { 0 } else { u16::from_be(meta.bound_port) };
     let ret = syscall1(SYS_TCP_BIND, u64::from(port));
     if ret < 0 {
         errno::set_errno(translate_net_error(ret));
@@ -1620,6 +1625,11 @@ pub unsafe extern "C" fn send(
         return -1;
     }
 
+    // POSIX: send with len==0 succeeds with 0 bytes (no-op).
+    if len == 0 {
+        return 0;
+    }
+
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -1747,6 +1757,12 @@ pub unsafe extern "C" fn recv(
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
+    }
+
+    // POSIX: recv with len==0 succeeds immediately with 0 bytes.
+    // This is NOT an EOF indicator — it's a no-op.
+    if len == 0 {
+        return 0;
     }
 
     let Some(entry) = fdtable::get_fd(fd) else {

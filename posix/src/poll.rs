@@ -450,16 +450,18 @@ pub unsafe extern "C" fn select(
     } else {
         // SAFETY: caller guarantees timeout validity.
         let tv = unsafe { &*timeout };
-        let ms = tv.tv_sec.saturating_mul(1000)
-            .saturating_add(tv.tv_usec / 1000);
-        if ms == 0 {
+        if tv.tv_sec == 0 && tv.tv_usec == 0 {
             // {0,0} = non-blocking (check once, return immediately).
             is_nonblocking = true;
             deadline_ns = 0;
         } else {
             is_nonblocking = false;
             let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
-            deadline_ns = now.saturating_add((ms as u64).saturating_mul(1_000_000));
+            // Convert to nanoseconds, rounding up to ensure we don't
+            // treat sub-millisecond timeouts as instant polls.
+            let timeout_ns = (tv.tv_sec.max(0) as u64).saturating_mul(1_000_000_000)
+                .saturating_add((tv.tv_usec.max(0) as u64).saturating_mul(1_000));
+            deadline_ns = now.saturating_add(timeout_ns);
         }
     }
 

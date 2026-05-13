@@ -79,6 +79,30 @@ fn match_bracket(
         }
         first = false;
 
+        // Check for POSIX character class [:classname:].
+        if ch == b'[' && unsafe { *pat.add(ppos.wrapping_add(1)) } == b':' {
+            let name_start = ppos.wrapping_add(2);
+            let mut end = name_start;
+            while unsafe { *pat.add(end) } != 0 {
+                if unsafe { *pat.add(end) } == b':'
+                    && unsafe { *pat.add(end.wrapping_add(1)) } == b']'
+                {
+                    break;
+                }
+                end = end.wrapping_add(1);
+            }
+            if unsafe { *pat.add(end) } == b':'
+                && unsafe { *pat.add(end.wrapping_add(1)) } == b']'
+            {
+                if posix_class_matches(pat, name_start, end.wrapping_sub(name_start), sc) {
+                    matched = true;
+                }
+                ppos = end.wrapping_add(2); // Skip past ":]"
+                continue;
+            }
+            // Not a valid class — treat '[' as literal and fall through.
+        }
+
         let mut low = ch;
         ppos = ppos.wrapping_add(1);
 
@@ -242,5 +266,55 @@ fn do_match(
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POSIX character class matching for bracket expressions
+// ---------------------------------------------------------------------------
+
+/// Check if character `c` matches a POSIX character class by name.
+///
+/// `name_start` is the offset into `pat` where the class name begins,
+/// `name_len` is the length of the name (between `[:` and `:]`).
+fn posix_class_matches(pat: *const u8, name_start: usize, name_len: usize, c: u8) -> bool {
+    let name_eq = |expected: &[u8]| -> bool {
+        if name_len != expected.len() { return false; }
+        let mut k = 0;
+        while k < name_len {
+            if unsafe { *pat.add(name_start.wrapping_add(k)) } != expected[k] {
+                return false;
+            }
+            k = k.wrapping_add(1);
+        }
+        true
+    };
+
+    if name_eq(b"alpha") {
+        c.is_ascii_alphabetic()
+    } else if name_eq(b"digit") {
+        c.is_ascii_digit()
+    } else if name_eq(b"alnum") {
+        c.is_ascii_alphanumeric()
+    } else if name_eq(b"space") {
+        c.is_ascii_whitespace()
+    } else if name_eq(b"upper") {
+        c.is_ascii_uppercase()
+    } else if name_eq(b"lower") {
+        c.is_ascii_lowercase()
+    } else if name_eq(b"punct") {
+        c.is_ascii_punctuation()
+    } else if name_eq(b"cntrl") {
+        c.is_ascii_control()
+    } else if name_eq(b"print") {
+        (0x20..=0x7E).contains(&c)
+    } else if name_eq(b"graph") {
+        (0x21..=0x7E).contains(&c)
+    } else if name_eq(b"xdigit") {
+        c.is_ascii_hexdigit()
+    } else if name_eq(b"blank") {
+        c == b' ' || c == b'\t'
+    } else {
+        false // Unknown class — no match.
     }
 }

@@ -5628,9 +5628,12 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
     let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
     let src_ptr = args.arg3 as *mut u8;
-    // arg4: flags — bit 1 (0x02) = MSG_PEEK (peek without consuming).
+    // arg4: flags —
+    //   bit 1 (0x02) = MSG_PEEK (peek without consuming)
+    //   bit 5 (0x20) = MSG_TRUNC (return real datagram size, not truncated)
     let flags = args.arg4 as u32;
     let peek = (flags & 0x02) != 0;
+    let trunc = (flags & 0x20) != 0;
 
     if buf_ptr.is_null() && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -5657,7 +5660,8 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
 
     match datagram_opt {
         Some(datagram) => {
-            let copy_len = datagram.data.len().min(buf_cap);
+            let real_len = datagram.data.len();
+            let copy_len = real_len.min(buf_cap);
             if copy_len > 0 && !buf_ptr.is_null() {
                 // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
                 unsafe {
@@ -5689,8 +5693,11 @@ pub fn sys_udp_recv(args: &SyscallArgs) -> SyscallResult {
                 }
             }
 
+            // MSG_TRUNC: return real datagram size even if truncated.
+            // Without MSG_TRUNC: return number of bytes copied.
+            let ret_len = if trunc { real_len } else { copy_len };
             #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(copy_len as i64)
+            SyscallResult::ok(ret_len as i64)
         }
         None => SyscallResult::err(KernelError::WouldBlock),
     }

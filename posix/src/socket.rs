@@ -1603,9 +1603,10 @@ pub unsafe extern "C" fn recv(
     };
 
     // Build kernel flags from POSIX MSG_* constants.
-    // MSG_PEEK (0x02) and MSG_DONTWAIT (0x40) are passed through
-    // directly since we use matching numeric values.
-    let kern_flags = (flags as u32) & (MSG_PEEK as u32 | MSG_DONTWAIT as u32);
+    // MSG_PEEK (0x02), MSG_TRUNC (0x20), and MSG_DONTWAIT (0x40) are
+    // passed through directly since we use matching numeric values.
+    let kern_flags = (flags as u32)
+        & (MSG_PEEK as u32 | MSG_TRUNC as u32 | MSG_DONTWAIT as u32);
 
     // If the socket has O_NONBLOCK set, add MSG_DONTWAIT automatically.
     let kern_flags = if fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0 {
@@ -1789,9 +1790,10 @@ pub unsafe extern "C" fn recvfrom(
         return -1;
     };
 
-    // Build kernel flags (MSG_PEEK=0x02, MSG_DONTWAIT=0x40).
+    // Build kernel flags (MSG_PEEK=0x02, MSG_TRUNC=0x20, MSG_DONTWAIT=0x40).
     let kern_flags = {
-        let f = (flags as u32) & (MSG_PEEK as u32 | MSG_DONTWAIT as u32);
+        let f = (flags as u32)
+            & (MSG_PEEK as u32 | MSG_TRUNC as u32 | MSG_DONTWAIT as u32);
         if fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0 {
             f | (MSG_DONTWAIT as u32)
         } else {

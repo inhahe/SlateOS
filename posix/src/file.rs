@@ -496,7 +496,8 @@ pub struct Iovec {
 /// number of bytes read, or -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn readv(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
-    if iov.is_null() || iovcnt <= 0 {
+    if iov.is_null() || iovcnt <= 0 || iovcnt > 1024 {
+        // POSIX: EINVAL if iovcnt ≤ 0 or > IOV_MAX (1024).
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -533,7 +534,8 @@ pub extern "C" fn readv(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
 /// number of bytes written, or -1 on error.
 #[unsafe(no_mangle)]
 pub extern "C" fn writev(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
-    if iov.is_null() || iovcnt <= 0 {
+    if iov.is_null() || iovcnt <= 0 || iovcnt > 1024 {
+        // POSIX: EINVAL if iovcnt ≤ 0 or > IOV_MAX (1024).
         errno::set_errno(errno::EINVAL);
         return -1;
     }

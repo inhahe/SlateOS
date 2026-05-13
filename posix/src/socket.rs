@@ -1128,6 +1128,14 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
         return -1;
     }
 
+    // Guard: connect() on a listening socket is invalid.  After listen()
+    // the entry kind becomes TcpListener — the socket is consumed for
+    // accepting connections and cannot be used for outgoing connections.
+    if entry.kind == HandleKind::TcpListener {
+        errno::set_errno(errno::EISCONN);
+        return -1;
+    }
+
     match meta.sock_type {
         SOCK_STREAM => {
             // TCP connect: call SYS_TCP_CONNECT(ip, port).
@@ -1494,9 +1502,27 @@ pub unsafe extern "C" fn accept(
         return -1;
     };
 
-    if entry.kind != HandleKind::TcpListener || entry.handle == 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
+    // POSIX error hierarchy for accept():
+    // - ENOTSOCK: fd is not a socket at all
+    // - EOPNOTSUPP: socket type doesn't support accept (UDP)
+    // - EINVAL: socket is listening but handle is 0 (shouldn't happen)
+    match entry.kind {
+        HandleKind::TcpListener if entry.handle != 0 => { /* valid — proceed */ }
+        HandleKind::TcpListener => {
+            // Listener without a kernel handle (shouldn't happen normally).
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        HandleKind::TcpStream | HandleKind::UdpSocket => {
+            // Connected TCP or UDP — accept is not supported.
+            errno::set_errno(errno::EOPNOTSUPP);
+            return -1;
+        }
+        _ => {
+            // File, Pipe, Console — not a socket.
+            errno::set_errno(errno::ENOTSOCK);
+            return -1;
+        }
     }
 
     let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
@@ -4119,6 +4145,11 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
     if m.msg_iov.is_null() || m.msg_iovlen == 0 {
         return 0;
     }
+    // POSIX: EMSGSIZE if msg_iovlen exceeds IOV_MAX.
+    if m.msg_iovlen > 1024 {
+        errno::set_errno(errno::EMSGSIZE);
+        return -1;
+    }
 
     // Calculate total size across all iovecs.
     let mut total: usize = 0;
@@ -4191,7 +4222,86 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
         };
     }
 
-    // Larger than stack buffer — send each iov individually.
+    // Larger than stack buffer.
+    // For UDP: MUST concatenate all iovecs into a single datagram.
+    // Sending each iov separately would create multiple datagrams, which
+    // is wrong — sendmsg on DGRAM sends exactly one datagram.
+    // For TCP: per-iov sending is correct (TCP is a byte stream).
+    let is_dgram = fdtable::get_fd(fd)
+        .is_some_and(|e| e.kind == HandleKind::UdpSocket);
+
+    if is_dgram {
+        // UDP: concatenate into a larger buffer.  Max UDP payload = 65507.
+        const UDP_MAX: usize = 65507;
+        if total > UDP_MAX {
+            errno::set_errno(errno::EMSGSIZE);
+            return -1;
+        }
+        // Use a 16 KiB stack buffer (one page).  For the rare case of
+        // UDP datagrams > 16 KiB, use a 64 KiB buffer.
+        const LARGE_BUF: usize = 16384;
+        if total <= LARGE_BUF {
+            let mut buf = [0u8; LARGE_BUF];
+            let mut pos: usize = 0;
+            i = 0;
+            while i < m.msg_iovlen {
+                let iov = unsafe { &*m.msg_iov.add(i) };
+                if iov.iov_len > 0 && !iov.iov_base.is_null() {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            iov.iov_base.cast::<u8>(),
+                            buf.as_mut_ptr().add(pos),
+                            iov.iov_len,
+                        );
+                    }
+                    pos = pos.wrapping_add(iov.iov_len);
+                }
+                i = i.wrapping_add(1);
+            }
+            return if has_dest {
+                unsafe {
+                    sendto(
+                        fd, buf.as_ptr(), pos, flags,
+                        m.msg_name.cast::<Sockaddr>().cast_const(),
+                        m.msg_namelen,
+                    )
+                }
+            } else {
+                unsafe { send(fd, buf.as_ptr().cast(), pos, flags) }
+            };
+        }
+        // > 16 KiB but <= 65507: use maximum buffer.
+        let mut buf = [0u8; UDP_MAX];
+        let mut pos: usize = 0;
+        i = 0;
+        while i < m.msg_iovlen {
+            let iov = unsafe { &*m.msg_iov.add(i) };
+            if iov.iov_len > 0 && !iov.iov_base.is_null() {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        iov.iov_base.cast::<u8>(),
+                        buf.as_mut_ptr().add(pos),
+                        iov.iov_len,
+                    );
+                }
+                pos = pos.wrapping_add(iov.iov_len);
+            }
+            i = i.wrapping_add(1);
+        }
+        return if has_dest {
+            unsafe {
+                sendto(
+                    fd, buf.as_ptr(), pos, flags,
+                    m.msg_name.cast::<Sockaddr>().cast_const(),
+                    m.msg_namelen,
+                )
+            }
+        } else {
+            unsafe { send(fd, buf.as_ptr().cast(), pos, flags) }
+        };
+    }
+
+    // TCP: send each iov individually (correct for byte-stream sockets).
     let mut sent: isize = 0;
     i = 0;
     while i < m.msg_iovlen {
@@ -4241,6 +4351,11 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
         m.msg_flags = 0;
         m.msg_controllen = 0;
         return 0;
+    }
+    // POSIX: EMSGSIZE if msg_iovlen exceeds IOV_MAX.
+    if m.msg_iovlen > 1024 {
+        errno::set_errno(errno::EMSGSIZE);
+        return -1;
     }
 
     // Single iov — receive directly without copying.
@@ -4354,67 +4469,121 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
 
     // Receive into a stack buffer, then distribute across iovs.
     // Use recvfrom to populate msg_name (source address) if requested.
-    const STACK_BUF: usize = 4096;
-    let recv_cap = if total_cap < STACK_BUF { total_cap } else { STACK_BUF };
-    let mut buf = [0u8; STACK_BUF];
-    let ret = if !m.msg_name.is_null() && m.msg_namelen > 0 {
-        let mut addrlen = m.msg_namelen;
-        let r = unsafe {
-            recvfrom(
-                fd,
-                buf.as_mut_ptr(),
-                recv_cap,
-                flags,
-                m.msg_name.cast::<Sockaddr>(),
-                &mut addrlen,
-            )
+    //
+    // For UDP: datagrams are message-oriented — if the receive buffer is
+    // smaller than the datagram, the excess is discarded (not returned on
+    // the next recv).  We must provide a buffer at least as large as
+    // total_cap (clamped to 16 KiB) to avoid unnecessary truncation.
+    // For TCP: 4 KiB is fine — TCP is a byte stream and short reads are
+    // expected; the remaining data is still in the kernel buffer.
+    const STACK_BUF_SMALL: usize = 4096;
+    const STACK_BUF_LARGE: usize = 16384; // One 16 KiB page.
+
+    let is_dgram = fdtable::get_fd(fd)
+        .is_some_and(|e| e.kind == HandleKind::UdpSocket);
+
+    // Choose receive buffer size: for UDP, use the larger buffer if needed
+    // to avoid truncating datagrams the caller has room for.
+    let use_large_buf = is_dgram && total_cap > STACK_BUF_SMALL;
+
+    let (received, trunc_flag) = if use_large_buf {
+        let recv_cap = if total_cap < STACK_BUF_LARGE { total_cap } else { STACK_BUF_LARGE };
+        let mut buf = [0u8; STACK_BUF_LARGE];
+        let ret = if !m.msg_name.is_null() && m.msg_namelen > 0 {
+            let mut addrlen = m.msg_namelen;
+            let r = unsafe {
+                recvfrom(
+                    fd, buf.as_mut_ptr(), recv_cap, flags,
+                    m.msg_name.cast::<Sockaddr>(), &mut addrlen,
+                )
+            };
+            m.msg_namelen = addrlen;
+            r
+        } else {
+            m.msg_namelen = 0;
+            unsafe { recv(fd, buf.as_mut_ptr().cast(), recv_cap, flags) }
         };
-        m.msg_namelen = addrlen;
-        r
-    } else {
-        m.msg_namelen = 0;
-        unsafe { recv(fd, buf.as_mut_ptr().cast(), recv_cap, flags) }
-    };
-    if ret <= 0 {
-        m.msg_flags = 0;
-        m.msg_controllen = 0;
-        return ret;
-    }
-
-    // Distribute received bytes across iovecs.
-    let received = ret as usize;
-    let mut remaining = received;
-    let mut src_pos: usize = 0;
-    i = 0;
-    while i < m.msg_iovlen && remaining > 0 {
-        let iov = unsafe { &*m.msg_iov.add(i) };
-        if iov.iov_len > 0 && !iov.iov_base.is_null() {
-            let to_copy = if remaining < iov.iov_len { remaining } else { iov.iov_len };
-            // SAFETY: src_pos + to_copy <= received <= STACK_BUF;
-            //         iov_base is valid for iov_len bytes (caller guarantee).
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    buf.as_ptr().add(src_pos),
-                    iov.iov_base.cast::<u8>(),
-                    to_copy,
-                );
-            }
-            src_pos = src_pos.wrapping_add(to_copy);
-            remaining = remaining.wrapping_sub(to_copy);
+        if ret <= 0 {
+            m.msg_flags = 0;
+            m.msg_controllen = 0;
+            return ret;
         }
-        i = i.wrapping_add(1);
-    }
-
-    // Set MSG_TRUNC if we received a full buffer but total capacity
-    // was larger (indicating potential data truncation for datagrams).
-    m.msg_flags = if received == recv_cap && recv_cap < total_cap {
-        MSG_TRUNC
+        let received = ret as usize;
+        // Distribute received bytes across iovecs.
+        let mut remaining = received;
+        let mut src_pos: usize = 0;
+        i = 0;
+        while i < m.msg_iovlen && remaining > 0 {
+            let iov = unsafe { &*m.msg_iov.add(i) };
+            if iov.iov_len > 0 && !iov.iov_base.is_null() {
+                let to_copy = if remaining < iov.iov_len { remaining } else { iov.iov_len };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        buf.as_ptr().add(src_pos),
+                        iov.iov_base.cast::<u8>(),
+                        to_copy,
+                    );
+                }
+                src_pos = src_pos.wrapping_add(to_copy);
+                remaining = remaining.wrapping_sub(to_copy);
+            }
+            i = i.wrapping_add(1);
+        }
+        let trunc = received == recv_cap && recv_cap < total_cap;
+        (ret, trunc)
     } else {
-        0
+        let recv_cap = if total_cap < STACK_BUF_SMALL { total_cap } else { STACK_BUF_SMALL };
+        let mut buf = [0u8; STACK_BUF_SMALL];
+        let ret = if !m.msg_name.is_null() && m.msg_namelen > 0 {
+            let mut addrlen = m.msg_namelen;
+            let r = unsafe {
+                recvfrom(
+                    fd, buf.as_mut_ptr(), recv_cap, flags,
+                    m.msg_name.cast::<Sockaddr>(), &mut addrlen,
+                )
+            };
+            m.msg_namelen = addrlen;
+            r
+        } else {
+            m.msg_namelen = 0;
+            unsafe { recv(fd, buf.as_mut_ptr().cast(), recv_cap, flags) }
+        };
+        if ret <= 0 {
+            m.msg_flags = 0;
+            m.msg_controllen = 0;
+            return ret;
+        }
+        let received = ret as usize;
+        // Distribute received bytes across iovecs.
+        let mut remaining = received;
+        let mut src_pos: usize = 0;
+        i = 0;
+        while i < m.msg_iovlen && remaining > 0 {
+            let iov = unsafe { &*m.msg_iov.add(i) };
+            if iov.iov_len > 0 && !iov.iov_base.is_null() {
+                let to_copy = if remaining < iov.iov_len { remaining } else { iov.iov_len };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        buf.as_ptr().add(src_pos),
+                        iov.iov_base.cast::<u8>(),
+                        to_copy,
+                    );
+                }
+                src_pos = src_pos.wrapping_add(to_copy);
+                remaining = remaining.wrapping_sub(to_copy);
+            }
+            i = i.wrapping_add(1);
+        }
+        let trunc = received == recv_cap && recv_cap < total_cap;
+        (ret, trunc)
     };
+
+    // Set MSG_TRUNC if the receive buffer was full and smaller than total
+    // capacity (indicating potential data truncation for datagrams).
+    m.msg_flags = if trunc_flag { MSG_TRUNC } else { 0 };
     m.msg_controllen = 0;
 
-    ret
+    received
 }
 
 // ---------------------------------------------------------------------------

@@ -368,8 +368,12 @@ fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool,
             let status = syscall1(SYS_PIPE_POLL, handle) as u16;
             let readable = (status & 0x0001) != 0;
             let writable = (status & 0x0004) != 0;
+            let error = (status & 0x0008) != 0;
             let hangup = (status & 0x0010) != 0;
-            (readable, writable, hangup, false)
+            // The kernel reports POLLERR (0x08) on the write end of a
+            // broken pipe (reader closed).  This must be surfaced so
+            // poll() reports POLLERR and select() fires exceptfds.
+            (readable, writable, hangup, error)
         }
 
         // TCP stream: query kernel for actual rx/tx readiness.

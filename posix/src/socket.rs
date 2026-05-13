@@ -258,9 +258,9 @@ pub(crate) struct SocketMeta {
     /// Network byte order.  0 if not yet bound.
     bound_port: u16,
     /// Remote peer IP address (network byte order).  Set on `connect()`.
-    peer_addr: u32,
+    pub(crate) peer_addr: u32,
     /// Remote peer port (network byte order).  Set on `connect()`.
-    peer_port: u16,
+    pub(crate) peer_port: u16,
     /// Local IP address (network byte order).  Set on `bind()`.
     local_addr: u32,
     /// SO_KEEPALIVE setting (stored; kernel applies when syscall exists).
@@ -290,9 +290,9 @@ pub(crate) struct SocketMeta {
     /// UDP shutdown state: SHUT_WR called (disables send).
     pub(crate) udp_shut_wr: bool,
     /// SO_RCVTIMEO: receive timeout in milliseconds (0 = no timeout).
-    rcvtimeo_ms: u64,
+    pub(crate) rcvtimeo_ms: u64,
     /// SO_SNDTIMEO: send timeout in milliseconds (0 = no timeout).
-    sndtimeo_ms: u64,
+    pub(crate) sndtimeo_ms: u64,
 }
 
 /// Per-fd socket metadata table.
@@ -1786,7 +1786,7 @@ fn udp_recv_wait(
 /// semantics.  `timeout_ms == 0` means wait indefinitely (shouldn't
 /// be called in that case, but handled for safety).
 /// Returns bytes received or -1 (with errno set).
-fn tcp_recv_wait(
+pub(crate) fn tcp_recv_wait(
     handle: u64,
     buf: *mut u8,
     len: usize,
@@ -4262,7 +4262,7 @@ pub extern "C" fn getprotobynumber(number: i32) -> *const Protoent {
 /// | -505 | InvalidHandle     | EBADF           |
 /// | -600 | IoError           | EIO             |
 /// | -601 | NoSuchDevice      | ENODEV          |
-fn translate_net_error(code: i64) -> i32 {
+pub(crate) fn translate_net_error(code: i64) -> i32 {
     match code {
         // General.
         -1  => errno::EIO,           // InternalError

@@ -181,19 +181,52 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             1
         }
         HandleKind::TcpStream => {
-            // Pass MSG_DONTWAIT if the fd has O_NONBLOCK set.
-            let flags: u64 = if fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0
-            {
-                0x40 // MSG_DONTWAIT
-            } else {
-                0
-            };
-            syscall4(SYS_TCP_RECV, entry.handle, buf as u64, count as u64, flags)
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
+                & crate::fcntl::O_NONBLOCK != 0;
+            let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
+
+            // Use MSG_DONTWAIT if non-blocking or if we have SO_RCVTIMEO
+            // (so we control the timeout at the posix layer).
+            let flags: u64 = if is_nb || timeout_ms > 0 { 0x40 } else { 0 };
+            let ret = syscall4(
+                SYS_TCP_RECV, entry.handle, buf as u64, count as u64, flags,
+            );
+            if ret >= 0 {
+                return ret as SsizeT;
+            }
+            // Handle WouldBlock with SO_RCVTIMEO polling.
+            let err_code = ret;
+            let posix_err = crate::socket::translate_net_error(err_code);
+            if (posix_err == errno::EAGAIN || posix_err == errno::EWOULDBLOCK) && !is_nb {
+                if timeout_ms > 0 {
+                    return crate::socket::tcp_recv_wait(
+                        entry.handle, buf, count, 0, timeout_ms,
+                    );
+                }
+                // No timeout: fall back to kernel blocking.
+                let retry = syscall4(
+                    SYS_TCP_RECV, entry.handle, buf as u64, count as u64, 0,
+                );
+                return errno::translate(retry) as SsizeT;
+            }
+            errno::set_errno(posix_err);
+            return -1;
         }
-        HandleKind::TcpListener | HandleKind::UdpSocket => {
+        HandleKind::UdpSocket => {
+            // POSIX: read() on a connected UDP socket behaves like recv().
+            let meta = crate::socket::get_meta(fd);
+            let is_connected = meta.is_some_and(|m| m.peer_addr != 0 || m.peer_port != 0);
+            if !is_connected {
+                errno::set_errno(errno::EDESTADDRREQ);
+                return -1;
+            }
+            // Delegate to recv() with flags=0.
+            return unsafe {
+                crate::socket::recv(fd, buf, count, 0)
+            } as SsizeT;
+        }
+        HandleKind::TcpListener => {
             // Listeners are not readable via read(); use accept().
-            // UDP is not readable via read(); use recvfrom().
             errno::set_errno(errno::EINVAL);
             return -1;
         }
@@ -232,9 +265,20 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         HandleKind::TcpStream => {
             syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64)
         }
-        HandleKind::TcpListener | HandleKind::UdpSocket => {
+        HandleKind::UdpSocket => {
+            // POSIX: write() on a connected UDP socket behaves like send().
+            let meta = crate::socket::get_meta(fd);
+            let is_connected = meta.is_some_and(|m| m.peer_addr != 0 || m.peer_port != 0);
+            if !is_connected {
+                errno::set_errno(errno::EDESTADDRREQ);
+                return -1;
+            }
+            return unsafe {
+                crate::socket::send(fd, buf, count, 0)
+            } as SsizeT;
+        }
+        HandleKind::TcpListener => {
             // Listeners are not writable via write(); use accept().
-            // UDP is not writable via write(); use sendto().
             errno::set_errno(errno::EINVAL);
             return -1;
         }

@@ -279,13 +279,59 @@ pub unsafe extern "C" fn strtod(
         i = i.wrapping_add(1);
     }
 
-    let start = i;
+    // Check for "inf", "infinity", "nan" (case-insensitive).
+    let c0 = unsafe { *nptr.add(i) } | 0x20; // ASCII lowercase
+    if c0 == b'i' {
+        // Possible "inf" or "infinity".
+        let c1 = unsafe { *nptr.add(i.wrapping_add(1)) } | 0x20;
+        let c2 = unsafe { *nptr.add(i.wrapping_add(2)) } | 0x20;
+        if c1 == b'n' && c2 == b'f' {
+            i = i.wrapping_add(3);
+            // Check for full "infinity".
+            let rest = [
+                unsafe { *nptr.add(i) } | 0x20,
+                unsafe { *nptr.add(i.wrapping_add(1)) } | 0x20,
+                unsafe { *nptr.add(i.wrapping_add(2)) } | 0x20,
+                unsafe { *nptr.add(i.wrapping_add(3)) } | 0x20,
+                unsafe { *nptr.add(i.wrapping_add(4)) } | 0x20,
+            ];
+            if rest == [b'i', b'n', b'i', b't', b'y'] {
+                i = i.wrapping_add(5);
+            }
+            if !endptr.is_null() {
+                unsafe { *endptr = nptr.add(i); }
+            }
+            return if negative { f64::NEG_INFINITY } else { f64::INFINITY };
+        }
+    } else if c0 == b'n' {
+        let c1 = unsafe { *nptr.add(i.wrapping_add(1)) } | 0x20;
+        let c2 = unsafe { *nptr.add(i.wrapping_add(2)) } | 0x20;
+        if c1 == b'a' && c2 == b'n' {
+            i = i.wrapping_add(3);
+            // Skip optional (chars) payload per C99.
+            if unsafe { *nptr.add(i) } == b'(' {
+                let mut j = i.wrapping_add(1);
+                while unsafe { *nptr.add(j) } != 0 && unsafe { *nptr.add(j) } != b')' {
+                    j = j.wrapping_add(1);
+                }
+                if unsafe { *nptr.add(j) } == b')' {
+                    i = j.wrapping_add(1);
+                }
+            }
+            if !endptr.is_null() {
+                unsafe { *endptr = nptr.add(i); }
+            }
+            return f64::NAN;
+        }
+    }
 
     // Integer part.
     let mut int_part: f64 = 0.0;
+    let mut has_digits = false;
     while (unsafe { *nptr.add(i) }).is_ascii_digit() {
         int_part = int_part * 10.0 + f64::from(unsafe { *nptr.add(i) }.wrapping_sub(b'0'));
         i = i.wrapping_add(1);
+        has_digits = true;
     }
 
     // Fractional part.
@@ -297,11 +343,12 @@ pub unsafe extern "C" fn strtod(
             frac_part += f64::from(unsafe { *nptr.add(i) }.wrapping_sub(b'0')) / divisor;
             divisor *= 10.0;
             i = i.wrapping_add(1);
+            has_digits = true;
         }
     }
 
-    // If no digits were parsed, endptr points to start.
-    if i == start {
+    // If no digits were parsed, endptr points to nptr (no conversion).
+    if !has_digits {
         if !endptr.is_null() {
             unsafe { *endptr = nptr; }
         }

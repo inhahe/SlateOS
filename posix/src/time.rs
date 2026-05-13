@@ -440,6 +440,94 @@ pub extern "C" fn ctime(timep: *const TimeT) -> *const u8 {
     asctime(localtime(timep))
 }
 
+// ---------------------------------------------------------------------------
+// Reentrant variants (_r suffix)
+// ---------------------------------------------------------------------------
+
+/// Convert time_t to broken-down UTC time (reentrant).
+///
+/// Writes the result into the caller-supplied `result` buffer instead
+/// of using a shared static.  Returns `result` on success, null on error.
+///
+/// # Safety
+///
+/// Both pointers must be valid and non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gmtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm {
+    if timep.is_null() || result.is_null() {
+        return core::ptr::null_mut();
+    }
+    let secs = unsafe { *timep };
+    let tm = unsafe { &mut *result };
+    secs_to_tm(secs, tm);
+    result
+}
+
+/// Convert time_t to broken-down local time (reentrant).
+///
+/// Since we have no timezone support, this is identical to `gmtime_r`.
+///
+/// # Safety
+///
+/// Both pointers must be valid and non-null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn localtime_r(timep: *const TimeT, result: *mut Tm) -> *mut Tm {
+    unsafe { gmtime_r(timep, result) }
+}
+
+/// Convert broken-down time to string (reentrant).
+///
+/// Writes the result into the caller-supplied `buf` (must be at least
+/// 26 bytes).  Returns `buf` on success, null on error.
+///
+/// # Safety
+///
+/// `tm` must point to a valid `Tm`.  `buf` must be at least 26 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn asctime_r(tm: *const Tm, buf: *mut u8) -> *mut u8 {
+    if tm.is_null() || buf.is_null() {
+        return core::ptr::null_mut();
+    }
+    let t = unsafe { &*tm };
+    // Write directly into the user buffer (reinterpreted as [u8; 32]
+    // since format_asctime needs 26 bytes max — "Thu Jan  1 00:00:00 1970\n\0").
+    let mut tmp = [0u8; 32];
+    let len = format_asctime(t, &mut tmp);
+    // Copy to user buffer (len includes the \n but not the \0).
+    let copy_len = if len < 26 { len.wrapping_add(1) } else { 26 };
+    let mut i: usize = 0;
+    while i < copy_len {
+        unsafe { *buf.add(i) = tmp[i]; }
+        i = i.wrapping_add(1);
+    }
+    // Null-terminate.
+    unsafe { *buf.add(i) = 0; }
+    buf
+}
+
+/// Convert time_t to string (reentrant).
+///
+/// Equivalent to `asctime_r(localtime_r(timep, &tm), buf)`.
+///
+/// # Safety
+///
+/// `timep` must be valid.  `buf` must be at least 26 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ctime_r(timep: *const TimeT, buf: *mut u8) -> *mut u8 {
+    if timep.is_null() || buf.is_null() {
+        return core::ptr::null_mut();
+    }
+    let mut result = Tm {
+        tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 0,
+        tm_mon: 0, tm_year: 0, tm_wday: 0, tm_yday: 0,
+        tm_isdst: 0,
+    };
+    if unsafe { gmtime_r(timep, &mut result) }.is_null() {
+        return core::ptr::null_mut();
+    }
+    unsafe { asctime_r(&result, buf) }
+}
+
 /// Format time according to a format string.
 ///
 /// Supports these POSIX and GNU extension conversions:
@@ -785,34 +873,52 @@ fn days_in_month(mon: i32, year: i32) -> i32 {
 }
 
 /// Convert seconds since epoch (1970-01-01 00:00:00 UTC) to broken-down time.
+///
+/// Handles both positive timestamps (post-1970) and negative ones
+/// (pre-1970) correctly.  Uses Euclidean division (always positive
+/// remainders) for time-of-day decomposition.
 #[allow(clippy::arithmetic_side_effects)]
 fn secs_to_tm(secs: TimeT, tm: &mut Tm) {
+    // Use Euclidean division to always get non-negative remainders.
+    // Rust's % truncates toward zero: -1 % 60 = -1, but we need 59.
     let mut rem = secs;
 
-    // Seconds, minutes, hours.
-    tm.tm_sec = (rem % 60) as i32;
-    rem /= 60;
-    tm.tm_min = (rem % 60) as i32;
-    rem /= 60;
-    tm.tm_hour = (rem % 24) as i32;
-    rem /= 24;
+    // Seconds.
+    tm.tm_sec = (rem.rem_euclid(60)) as i32;
+    rem = rem.div_euclid(60);
+    // Minutes.
+    tm.tm_min = (rem.rem_euclid(60)) as i32;
+    rem = rem.div_euclid(60);
+    // Hours.
+    tm.tm_hour = (rem.rem_euclid(24)) as i32;
+    rem = rem.div_euclid(24);
 
-    // rem is now days since epoch.
+    // rem is now days since epoch (can be negative for pre-1970).
     // 1970-01-01 was a Thursday (wday=4).
-    tm.tm_wday = ((rem + 4) % 7) as i32;
-    if tm.tm_wday < 0 {
-        tm.tm_wday += 7;
-    }
+    tm.tm_wday = ((rem + 4).rem_euclid(7)) as i32;
 
     // Compute year and day-of-year.
     let mut year: i32 = 1970;
-    loop {
-        let days_this_year = if is_leap(year) { 366 } else { 365 };
-        if rem < i64::from(days_this_year) {
-            break;
+    if rem >= 0 {
+        // Post-epoch: count forward.
+        loop {
+            let days_this_year: i64 = if is_leap(year) { 366 } else { 365 };
+            if rem < days_this_year {
+                break;
+            }
+            rem -= days_this_year;
+            year += 1;
         }
-        rem -= i64::from(days_this_year);
-        year += 1;
+    } else {
+        // Pre-epoch: count backward.
+        loop {
+            year -= 1;
+            let days_this_year: i64 = if is_leap(year) { 366 } else { 365 };
+            rem += days_this_year;
+            if rem >= 0 {
+                break;
+            }
+        }
     }
 
     tm.tm_year = year - 1900;
@@ -848,6 +954,13 @@ fn tm_to_secs(tm: &mut Tm) -> TimeT {
             days += if is_leap(y) { 366 } else { 365 };
             y += 1;
         }
+    } else if year < 1970 {
+        // Pre-epoch: count backward from 1970.
+        let mut y = 1969;
+        while y >= year {
+            days -= if is_leap(y) { 366 } else { 365 };
+            y -= 1;
+        }
     }
 
     // Add days for months.
@@ -869,10 +982,7 @@ fn tm_to_secs(tm: &mut Tm) -> TimeT {
     }
     tm.tm_yday += tm.tm_mday - 1;
 
-    tm.tm_wday = ((days + 4) % 7) as i32;
-    if tm.tm_wday < 0 {
-        tm.tm_wday += 7;
-    }
+    tm.tm_wday = ((days + 4).rem_euclid(7)) as i32;
 
     days * 86400 + i64::from(tm.tm_hour) * 3600 + i64::from(tm.tm_min) * 60 + i64::from(tm.tm_sec)
 }

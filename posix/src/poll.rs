@@ -315,11 +315,18 @@ pub unsafe extern "C" fn ppoll(
     } else {
         // SAFETY: tspec is non-null and points to valid Timespec.
         let ts = unsafe { &*tspec };
-        // Convert seconds + nanoseconds to milliseconds, clamping to i32.
-        let ms = ts.tv_sec
-            .saturating_mul(1_000)
-            .saturating_add(ts.tv_nsec / 1_000_000);
-        if ms > i64::from(i32::MAX) { i32::MAX } else { ms as i32 }
+        if ts.tv_sec == 0 && ts.tv_nsec == 0 {
+            0 // Explicit {0,0} = non-blocking poll.
+        } else {
+            // Convert to milliseconds, rounding up so sub-ms timeouts
+            // don't collapse to 0 (which poll treats as non-blocking).
+            let ms = ts.tv_sec
+                .saturating_mul(1_000)
+                .saturating_add((ts.tv_nsec.saturating_add(999_999)) / 1_000_000);
+            if ms > i64::from(i32::MAX) { i32::MAX }
+            else if ms <= 0 { 1 } // Ensure non-zero for non-zero input.
+            else { ms as i32 }
+        }
     };
 
     // Delegate to poll.

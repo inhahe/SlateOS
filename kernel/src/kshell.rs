@@ -3530,6 +3530,7 @@ const COMMANDS: &[&str] = &[
     "healthmon", "hmon",
     "udriver", "udrvfw",
     "devhotplug", "devhp",
+    "devpower", "devpm",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4714,6 +4715,7 @@ fn dispatch(line: &str) {
         "healthmon" | "hmon" => cmd_healthmon(args),
         "udriver" | "udrvfw" => cmd_udriver(args),
         "devhotplug" | "devhp" => cmd_devhotplug(args),
+        "devpower" | "devpm" => cmd_devpower(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -33924,6 +33926,70 @@ fn cmd_devhotplug(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'devhotplug help'.", sub);
+        }
+    }
+}
+
+/// `devpower` / `devpm` — device power management.
+fn cmd_devpower(args: &str) {
+    use crate::devpower;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", devpower::procfs_content());
+        }
+        "stats" => {
+            let st = devpower::stats();
+            shell_println!("Device Power Management");
+            shell_println!("  Devices:          {}", st.total_devices);
+            shell_println!("  Active (D0):      {}", st.active_devices);
+            shell_println!("  Sleeping:         {}", st.sleeping_devices);
+            shell_println!("  System sleeping:  {}", st.system_sleeping);
+            shell_println!("  System suspends:  {}", st.total_system_suspends);
+            shell_println!("  System resumes:   {}", st.total_system_resumes);
+            shell_println!("  Device suspends:  {}", st.total_device_suspends);
+            shell_println!("  Device resumes:   {}", st.total_device_resumes);
+            shell_println!("  Failures:         {}", st.total_failures);
+        }
+        "list" | "devices" => {
+            let devs = devpower::all_devices();
+            if devs.is_empty() {
+                shell_println!("No managed devices");
+            } else {
+                shell_println!("{:<14} {:<20} {:<12} {}", "Address", "Name", "State", "Policy");
+                for d in &devs {
+                    shell_println!(
+                        "{:02x}:{:02x}.{:<8} {:<20} {:<12} {}",
+                        d.addr.bus, d.addr.device, d.addr.function,
+                        d.name, d.current_state.short(), d.policy.label(),
+                    );
+                }
+            }
+        }
+        "suspend" => {
+            let count = devpower::system_suspend();
+            shell_println!("System suspend: {} devices suspended", count);
+        }
+        "resume" => {
+            let count = devpower::system_resume();
+            shell_println!("System resume: {} devices resumed", count);
+        }
+        "test" => {
+            devpower::self_test();
+            shell_println!("Device power management self-test: PASSED");
+        }
+        "help" => {
+            shell_println!("devpower — device power management");
+            shell_println!("  show            Full status overview");
+            shell_println!("  stats           Summary statistics");
+            shell_println!("  list/devices    List managed devices");
+            shell_println!("  suspend         System-wide device suspend");
+            shell_println!("  resume          System-wide device resume");
+            shell_println!("  test            Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'devpower help'.", sub);
         }
     }
 }
@@ -64370,7 +64436,7 @@ fn cmd_type(args: &str) {
 fn is_builtin(name: &str) -> bool {
     matches!(name,
         "help" | "?" | "cd" | "meminfo" | "mem" | "ps" | "tasks" | "clear" | "cls"
-        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "reslimit" | "rlimit" | "initproc" | "init" | "healthmon" | "hmon" | "udriver" | "udrvfw" | "devhotplug" | "devhp" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
+        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "reslimit" | "rlimit" | "initproc" | "init" | "healthmon" | "hmon" | "udriver" | "udrvfw" | "devhotplug" | "devhp" | "devpower" | "devpm" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"

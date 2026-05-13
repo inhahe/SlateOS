@@ -370,6 +370,7 @@ const ROOT_FILES: &[&str] = &[
     "syshealth",
     "udriver",
     "hotplug",
+    "devpower",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7411,6 +7412,10 @@ fn gen_hotplug() -> Vec<u8> {
     crate::devhotplug::procfs_content().into_bytes()
 }
 
+fn gen_devpower() -> Vec<u8> {
+    crate::devpower::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10088,6 +10093,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "syshealth" => Ok(gen_syshealth()),
         "udriver" => Ok(gen_udriver()),
         "hotplug" => Ok(gen_hotplug()),
+        "devpower" => Ok(gen_devpower()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

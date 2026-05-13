@@ -74,6 +74,7 @@ mod fb;
 mod cputime;
 mod crypto;
 mod devhotplug;
+mod devpower;
 mod drvmon;
 mod error;
 mod eventlog;

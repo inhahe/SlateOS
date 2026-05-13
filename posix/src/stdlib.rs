@@ -2317,4 +2317,229 @@ mod tests {
         assert_eq!(result.quot, i64::MAX / 2);
         assert_eq!(result.rem, 1);
     }
+
+    #[test]
+    fn test_div_i32_min_by_minus_one() {
+        // Division overflow: i32::MIN / -1 can't fit in i32.
+        // Must not panic — returns wrapping result.
+        let result = div(i32::MIN, -1);
+        assert_eq!(result.quot, i32::MIN);
+        assert_eq!(result.rem, 0);
+    }
+
+    #[test]
+    fn test_ldiv_i64_min_by_minus_one() {
+        let result = ldiv(i64::MIN, -1);
+        assert_eq!(result.quot, i64::MIN);
+        assert_eq!(result.rem, 0);
+    }
+
+    #[test]
+    fn test_div_zero_denom() {
+        let result = div(42, 0);
+        assert_eq!(result.quot, 0);
+        assert_eq!(result.rem, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // strtod edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strtod_endptr() {
+        let mut end: *const u8 = core::ptr::null();
+        let v = unsafe { strtod(b"3.14\0".as_ptr(), &mut end) };
+        assert!((v - 3.14).abs() < 1e-10);
+        // endptr should point to the null terminator.
+        assert_eq!(unsafe { *end }, 0);
+    }
+
+    #[test]
+    fn test_strtod_neg_sign() {
+        let v = unsafe { strtod(b"-2.5\0".as_ptr(), core::ptr::null_mut()) };
+        assert!((v - (-2.5)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_strtod_sci_notation() {
+        let v = unsafe { strtod(b"1.5e3\0".as_ptr(), core::ptr::null_mut()) };
+        assert!((v - 1500.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_strtod_negative_exponent() {
+        let v = unsafe { strtod(b"5e-2\0".as_ptr(), core::ptr::null_mut()) };
+        assert!((v - 0.05).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_strtod_inf() {
+        let v = unsafe { strtod(b"inf\0".as_ptr(), core::ptr::null_mut()) };
+        assert!(v.is_infinite() && v > 0.0);
+    }
+
+    #[test]
+    fn test_strtod_neg_inf() {
+        let v = unsafe { strtod(b"-INFINITY\0".as_ptr(), core::ptr::null_mut()) };
+        assert!(v.is_infinite() && v < 0.0);
+    }
+
+    #[test]
+    fn test_strtod_nan() {
+        let v = unsafe { strtod(b"nan\0".as_ptr(), core::ptr::null_mut()) };
+        assert!(v.is_nan());
+    }
+
+    #[test]
+    fn test_strtod_nan_payload() {
+        let mut end: *const u8 = core::ptr::null();
+        let v = unsafe { strtod(b"NAN(1234)x\0".as_ptr(), &mut end) };
+        assert!(v.is_nan());
+        // endptr should point past "NAN(1234)".
+        assert_eq!(unsafe { *end }, b'x');
+    }
+
+    #[test]
+    fn test_strtod_dot_only_no_conversion() {
+        // Just a dot with no digits — no conversion per POSIX.
+        let mut end: *const u8 = core::ptr::null();
+        let v = unsafe { strtod(b".\0".as_ptr(), &mut end) };
+        assert_eq!(v, 0.0);
+        assert_eq!(end, b".\0".as_ptr()); // endptr = nptr
+    }
+
+    #[test]
+    fn test_strtod_leading_dot() {
+        let v = unsafe { strtod(b".5\0".as_ptr(), core::ptr::null_mut()) };
+        assert!((v - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_strtod_trailing_dot() {
+        let mut end: *const u8 = core::ptr::null();
+        let v = unsafe { strtod(b"5.x\0".as_ptr(), &mut end) };
+        assert!((v - 5.0).abs() < 1e-10);
+        assert_eq!(unsafe { *end }, b'x');
+    }
+
+    #[test]
+    fn test_strtod_e_without_digits_not_consumed() {
+        // "1e" — 'e' without exponent digits should not be consumed.
+        let mut end: *const u8 = core::ptr::null();
+        let v = unsafe { strtod(b"1e\0".as_ptr(), &mut end) };
+        assert!((v - 1.0).abs() < 1e-10);
+        assert_eq!(unsafe { *end }, b'e');
+    }
+
+    #[test]
+    fn test_strtod_e_sign_without_digits_not_consumed() {
+        // "1e+" — 'e+' without digits should not be consumed.
+        let mut end: *const u8 = core::ptr::null();
+        let v = unsafe { strtod(b"1e+\0".as_ptr(), &mut end) };
+        assert!((v - 1.0).abs() < 1e-10);
+        assert_eq!(unsafe { *end }, b'e');
+    }
+
+    #[test]
+    fn test_strtod_overflow_sets_erange() {
+        crate::errno::set_errno(0);
+        let v = unsafe { strtod(b"1e999\0".as_ptr(), core::ptr::null_mut()) };
+        assert!(v.is_infinite());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_strtod_whitespace_tabs() {
+        let v = unsafe { strtod(b"  \t42\0".as_ptr(), core::ptr::null_mut()) };
+        assert!((v - 42.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_strtod_empty_string() {
+        let mut end: *const u8 = core::ptr::null();
+        let input = b"\0";
+        let v = unsafe { strtod(input.as_ptr(), &mut end) };
+        assert_eq!(v, 0.0);
+        assert_eq!(end, input.as_ptr());
+    }
+
+    #[test]
+    fn test_strtof_basic() {
+        let v = unsafe { strtof(b"3.14\0".as_ptr(), core::ptr::null_mut()) };
+        assert!((v - 3.14f32).abs() < 1e-5);
+    }
+
+    // -----------------------------------------------------------------------
+    // strtol edge cases: i64::MIN, hex prefix backtracking, ERANGE
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strtol_i64_min() {
+        crate::errno::set_errno(0);
+        let v = unsafe {
+            strtol(b"-9223372036854775808\0".as_ptr(), core::ptr::null_mut(), 10)
+        };
+        assert_eq!(v, i64::MIN);
+        assert_eq!(crate::errno::get_errno(), 0); // NOT overflow
+    }
+
+    #[test]
+    fn test_strtol_i64_max() {
+        crate::errno::set_errno(0);
+        let v = unsafe {
+            strtol(b"9223372036854775807\0".as_ptr(), core::ptr::null_mut(), 10)
+        };
+        assert_eq!(v, i64::MAX);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_strtol_positive_overflow() {
+        crate::errno::set_errno(0);
+        let v = unsafe {
+            strtol(b"9223372036854775808\0".as_ptr(), core::ptr::null_mut(), 10)
+        };
+        assert_eq!(v, i64::MAX);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_strtol_negative_overflow() {
+        crate::errno::set_errno(0);
+        let v = unsafe {
+            strtol(b"-9223372036854775809\0".as_ptr(), core::ptr::null_mut(), 10)
+        };
+        assert_eq!(v, i64::MIN);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_strtol_hex_0x_backtrack() {
+        // "0xG" — invalid hex digit after 0x, backtrack and parse "0".
+        let mut end: *const u8 = core::ptr::null();
+        let v = unsafe { strtol(b"0xG\0".as_ptr(), &mut end, 0) };
+        assert_eq!(v, 0);
+        // endptr should point past "0" but before "x".
+        let offset = unsafe { end.offset_from(b"0xG\0".as_ptr()) };
+        assert_eq!(offset, 1);
+    }
+
+    #[test]
+    fn test_strtoul_negative_wraps() {
+        // POSIX: strtoul("-1") wraps to ULONG_MAX.
+        crate::errno::set_errno(0);
+        let v = unsafe { strtoul(b"-1\0".as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, u64::MAX);
+        assert_eq!(crate::errno::get_errno(), 0); // NOT an error
+    }
+
+    #[test]
+    fn test_strtoul_overflow_erange() {
+        crate::errno::set_errno(0);
+        let v = unsafe {
+            strtoul(b"18446744073709551616\0".as_ptr(), core::ptr::null_mut(), 10)
+        };
+        assert_eq!(v, u64::MAX);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
 }

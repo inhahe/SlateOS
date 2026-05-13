@@ -394,3 +394,49 @@ fn aligned_alloc_impl(alignment: usize, size: usize) -> *mut u8 {
 
     aligned_user as *mut u8
 }
+
+// ---------------------------------------------------------------------------
+// glibc internal aliases
+// ---------------------------------------------------------------------------
+//
+// Some programs call glibc's internal __libc_* symbols directly
+// (e.g., when overriding malloc).  These just delegate to our
+// implementations.
+
+/// glibc internal: `__libc_malloc`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __libc_malloc(size: usize) -> *mut u8 {
+    malloc(size)
+}
+
+/// glibc internal: `__libc_free`.
+///
+/// # Safety
+///
+/// Same requirements as `free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __libc_free(ptr: *mut u8) {
+    unsafe { free(ptr); }
+}
+
+/// glibc internal: `__libc_realloc`.
+///
+/// # Safety
+///
+/// Same requirements as `realloc`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __libc_realloc(ptr: *mut u8, size: usize) -> *mut u8 {
+    unsafe { realloc(ptr, size) }
+}
+
+/// glibc internal: `__libc_calloc`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __libc_calloc(nmemb: usize, size: usize) -> *mut u8 {
+    calloc(nmemb, size)
+}
+
+/// glibc internal: `__libc_memalign`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __libc_memalign(alignment: usize, size: usize) -> *mut u8 {
+    memalign(alignment, size)
+}

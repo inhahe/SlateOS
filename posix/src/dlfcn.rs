@@ -112,3 +112,39 @@ pub extern "C" fn dladdr(
 ) -> i32 {
     0 // 0 = failure for dladdr (unlike most POSIX functions).
 }
+
+// ---------------------------------------------------------------------------
+// dl_iterate_phdr — iterate over loaded shared objects
+// ---------------------------------------------------------------------------
+
+/// Iterate over program headers of loaded shared objects.
+///
+/// Stub: calls `callback` once with NULL info (for the main executable),
+/// then returns 0.  Since we don't support dynamic linking, there are
+/// no shared objects to iterate over.
+///
+/// Some libraries (libgcc, libunwind) call this to find exception
+/// handling tables.
+#[unsafe(no_mangle)]
+pub extern "C" fn dl_iterate_phdr(
+    _callback: Option<extern "C" fn(*mut u8, usize, *mut u8) -> i32>,
+    _data: *mut u8,
+) -> i32 {
+    // No shared objects to iterate — return immediately.
+    0
+}
+
+// ---------------------------------------------------------------------------
+// __tls_get_addr — thread-local storage access
+// ---------------------------------------------------------------------------
+
+/// TLS access for the GNU TLS model.
+///
+/// Stub: returns NULL.  We don't support the GD or LD TLS models
+/// (which require dynamic linking).  Programs using `__thread` or
+/// `thread_local` with the initial-exec model don't call this
+/// function — they use `%fs`-relative addressing directly.
+#[unsafe(no_mangle)]
+pub extern "C" fn __tls_get_addr(_ti: *mut u8) -> *mut u8 {
+    core::ptr::null_mut()
+}

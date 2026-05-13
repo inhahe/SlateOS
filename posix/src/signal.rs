@@ -473,3 +473,23 @@ pub extern "C" fn sigqueue(_pid: crate::types::PidT, _sig: i32, _value: usize) -
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
+
+// ---------------------------------------------------------------------------
+// Realtime signal range
+// ---------------------------------------------------------------------------
+
+/// glibc: return the lowest realtime signal number.
+///
+/// SIGRTMIN is typically 32 on Linux (signals 32-64 are realtime).
+/// We don't support realtime signals, but programs that query the
+/// range need valid values.
+#[unsafe(no_mangle)]
+pub extern "C" fn __libc_current_sigrtmin() -> i32 {
+    32
+}
+
+/// glibc: return the highest realtime signal number.
+#[unsafe(no_mangle)]
+pub extern "C" fn __libc_current_sigrtmax() -> i32 {
+    64
+}

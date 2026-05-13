@@ -116,6 +116,25 @@ core::arch::global_asm!(
     "add rsp, 64",
     "pop rbp",
     "ret",
+
+    // -----------------------------------------------------------------------
+    // glibc C99 aliases — identical to the above, just different names.
+    // Programs compiled with -std=c99 or later link against __isoc99_*.
+    // -----------------------------------------------------------------------
+    ".global __isoc99_sscanf",
+    ".type __isoc99_sscanf, @function",
+    "__isoc99_sscanf:",
+    "jmp sscanf",
+
+    ".global __isoc99_scanf",
+    ".type __isoc99_scanf, @function",
+    "__isoc99_scanf:",
+    "jmp scanf",
+
+    ".global __isoc99_fscanf",
+    ".type __isoc99_fscanf, @function",
+    "__isoc99_fscanf:",
+    "jmp fscanf",
 );
 
 // ---------------------------------------------------------------------------

@@ -1898,3 +1898,86 @@ fn translate_open_flags(posix_flags: i32) -> u64 {
 pub extern "C" fn creat(path: *const u8, mode: ModeT) -> Fd {
     open(path, fcntl::O_CREAT | fcntl::O_WRONLY | fcntl::O_TRUNC, mode)
 }
+
+// ---------------------------------------------------------------------------
+// LP64 aliases — 64-bit variants identical to regular versions
+// ---------------------------------------------------------------------------
+//
+// On LP64 (our x86_64 target), off_t is already 64-bit, so the *64
+// variants are identical.  These exist for programs compiled with
+// _FILE_OFFSET_BITS=64 or that explicitly use the *64 interfaces.
+
+/// `open64` — alias for `open` on LP64.
+#[unsafe(no_mangle)]
+pub extern "C" fn open64(path: *const u8, flags: i32, mode: ModeT) -> Fd {
+    open(path, flags, mode)
+}
+
+/// `lseek64` — alias for `lseek` on LP64.
+#[unsafe(no_mangle)]
+pub extern "C" fn lseek64(fd: Fd, offset: OffT, whence: i32) -> OffT {
+    lseek(fd, offset, whence)
+}
+
+/// `stat64` — alias for `stat` on LP64.
+#[unsafe(no_mangle)]
+pub extern "C" fn stat64(path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
+    stat(path, statbuf)
+}
+
+/// `fstat64` — alias for `fstat` on LP64.
+#[unsafe(no_mangle)]
+pub extern "C" fn fstat64(fd: Fd, statbuf: *mut crate::stat::Stat) -> i32 {
+    fstat(fd, statbuf)
+}
+
+/// `lstat64` — alias for `lstat` on LP64.
+#[unsafe(no_mangle)]
+pub extern "C" fn lstat64(path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
+    lstat(path, statbuf)
+}
+
+// ---------------------------------------------------------------------------
+// glibc __xstat family — internal stat wrappers
+// ---------------------------------------------------------------------------
+//
+// glibc internally calls __xstat(ver, path, buf) instead of stat(path, buf).
+// The `ver` argument selects the stat struct version (1 = old, 3 = current).
+// On modern systems, `ver` is always 1 or 3; we ignore it and always use
+// our current struct layout.
+
+/// glibc internal: `__xstat(ver, path, buf)` → `stat(path, buf)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __xstat(_ver: i32, path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
+    stat(path, statbuf)
+}
+
+/// glibc internal: `__fxstat(ver, fd, buf)` → `fstat(fd, buf)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __fxstat(_ver: i32, fd: Fd, statbuf: *mut crate::stat::Stat) -> i32 {
+    fstat(fd, statbuf)
+}
+
+/// glibc internal: `__lxstat(ver, path, buf)` → `lstat(path, buf)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __lxstat(_ver: i32, path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
+    lstat(path, statbuf)
+}
+
+/// glibc internal: 64-bit `__xstat64`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __xstat64(_ver: i32, path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
+    stat(path, statbuf)
+}
+
+/// glibc internal: 64-bit `__fxstat64`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __fxstat64(_ver: i32, fd: Fd, statbuf: *mut crate::stat::Stat) -> i32 {
+    fstat(fd, statbuf)
+}
+
+/// glibc internal: 64-bit `__lxstat64`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __lxstat64(_ver: i32, path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
+    lstat(path, statbuf)
+}

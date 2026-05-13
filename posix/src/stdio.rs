@@ -1670,6 +1670,34 @@ pub static _IO_stdout_: usize = STDOUT_SENTINEL;
 pub static _IO_stderr_: usize = STDERR_SENTINEL;
 
 // ---------------------------------------------------------------------------
+// LP64 aliases — fopen64
+// ---------------------------------------------------------------------------
+
+/// `fopen64` — alias for `fopen` on LP64.
+///
+/// # Safety
+///
+/// Same requirements as `fopen`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fopen64(path: *const u8, mode: *const u8) -> *mut u8 {
+    unsafe { fopen(path, mode) }
+}
+
+/// `freopen64` — alias for `freopen` on LP64.
+///
+/// # Safety
+///
+/// Same requirements as `freopen`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn freopen64(
+    path: *const u8,
+    mode: *const u8,
+    stream: *mut u8,
+) -> *mut u8 {
+    unsafe { freopen(path, mode, stream) }
+}
+
+// ---------------------------------------------------------------------------
 // Internal helper
 // ---------------------------------------------------------------------------
 

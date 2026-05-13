@@ -253,6 +253,19 @@ pub const MREMAP_MAYMOVE: i32 = 1;
 /// Flag indicating a fixed new address was provided.
 pub const MREMAP_FIXED: i32 = 2;
 
+/// `mmap64` — alias for `mmap` on LP64 (off_t is already 64-bit).
+#[unsafe(no_mangle)]
+pub extern "C" fn mmap64(
+    addr: *mut core::ffi::c_void,
+    length: SizeT,
+    prot: i32,
+    flags: i32,
+    fd: i32,
+    offset: OffT,
+) -> *mut core::ffi::c_void {
+    mmap(addr, length, prot, flags, fd, offset)
+}
+
 /// Remap a virtual memory region.
 ///
 /// Stub: returns MAP_FAILED with ENOSYS.  A real implementation would

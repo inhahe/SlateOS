@@ -279,12 +279,14 @@ pub extern "C" fn __ctype_b_loc() -> *const *const u16 {
     // static raw pointers while remaining branchless.
     static mut CACHED: *const u16 = core::ptr::null();
     // SAFETY: single-threaded init; pointer is stable (points into
-    // a static array that never moves).
+    // a static array that never moves).  Using addr_of_mut to comply
+    // with Rust 2024 rules (no direct references to static mut).
     unsafe {
-        if CACHED.is_null() {
-            CACHED = CTYPE_TABLE.as_ptr().add(128);
+        let ptr = core::ptr::addr_of_mut!(CACHED);
+        if ptr.read().is_null() {
+            ptr.write(CTYPE_TABLE.as_ptr().add(128));
         }
-        core::ptr::addr_of!(CACHED).cast()
+        ptr.cast()
     }
 }
 
@@ -334,11 +336,13 @@ static TOUPPER_TABLE: [i32; 384] = build_toupper_table();
 #[unsafe(no_mangle)]
 pub extern "C" fn __ctype_tolower_loc() -> *const *const i32 {
     static mut CACHED: *const i32 = core::ptr::null();
+    // SAFETY: single-threaded init; using addr_of_mut for Rust 2024.
     unsafe {
-        if CACHED.is_null() {
-            CACHED = TOLOWER_TABLE.as_ptr().add(128);
+        let ptr = core::ptr::addr_of_mut!(CACHED);
+        if ptr.read().is_null() {
+            ptr.write(TOLOWER_TABLE.as_ptr().add(128));
         }
-        core::ptr::addr_of!(CACHED).cast()
+        ptr.cast()
     }
 }
 
@@ -346,11 +350,13 @@ pub extern "C" fn __ctype_tolower_loc() -> *const *const i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn __ctype_toupper_loc() -> *const *const i32 {
     static mut CACHED: *const i32 = core::ptr::null();
+    // SAFETY: single-threaded init; using addr_of_mut for Rust 2024.
     unsafe {
-        if CACHED.is_null() {
-            CACHED = TOUPPER_TABLE.as_ptr().add(128);
+        let ptr = core::ptr::addr_of_mut!(CACHED);
+        if ptr.read().is_null() {
+            ptr.write(TOUPPER_TABLE.as_ptr().add(128));
         }
-        core::ptr::addr_of!(CACHED).cast()
+        ptr.cast()
     }
 }
 

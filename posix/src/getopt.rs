@@ -16,8 +16,8 @@
 //! ## Limitations
 //!
 //! - Not thread-safe (uses global state, matching POSIX spec).
-//! - Long option matching is simple prefix match (ambiguous prefixes
-//!   return '?').
+//! - Long option matching is exact only (no unambiguous prefix
+//!   matching like GNU getopt).
 
 /// Pointer to the argument of the current option.
 #[unsafe(no_mangle)]
@@ -283,6 +283,7 @@ fn getopt_long_impl(
     long_only: bool,
 ) -> i32 {
     let ind = unsafe { core::ptr::addr_of!(optind).read() };
+    let pos = unsafe { core::ptr::addr_of!(OPTPOS).read() };
     if ind >= argc || argv.is_null() || optstring.is_null() {
         return -1;
     }
@@ -301,41 +302,64 @@ fn getopt_long_impl(
 
     // Check for "--" (end of options).
     if unsafe { *arg.add(1) } == b'-' && unsafe { *arg.add(2) } == 0 {
-        unsafe { core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1)); }
+        unsafe {
+            core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
+            core::ptr::addr_of_mut!(OPTPOS).write(0);
+        }
         return -1;
     }
 
-    // Check for long option: "--something" or (with long_only) "-something".
-    let is_long = unsafe { *arg.add(1) } == b'-';
-    if is_long || (long_only && !longopts.is_null()) {
-        let name_start = if is_long { 2usize } else { 1usize };
-        let result = try_match_long(arg, name_start, longopts, longindex);
-        if let Some(ret) = result {
-            // Consume the argument.
-            let mut next_ind = ind.wrapping_add(1);
+    // Only try long option matching when we're NOT in the middle of
+    // grouped short options (pos == 0). If OPTPOS > 0, we're mid-scan
+    // on a grouped arg like "-abc" and must continue with short options.
+    if pos == 0 {
+        // Check for long option: "--something" or (with long_only) "-something".
+        let is_long = unsafe { *arg.add(1) } == b'-';
+        if is_long || (long_only && !longopts.is_null()) {
+            let name_start = if is_long { 2usize } else { 1usize };
+            let result = try_match_long(arg, name_start, longopts, longindex);
+            if let Some(ret) = result {
+                // Consume the argument.
+                let mut next_ind = ind.wrapping_add(1);
 
-            // Handle required/optional argument.
-            let matched_idx = if longindex.is_null() {
-                -1
-            } else {
-                unsafe { *longindex }
-            };
+                // Handle required/optional argument.
+                let matched_idx = if longindex.is_null() {
+                    -1
+                } else {
+                    unsafe { *longindex }
+                };
 
-            if matched_idx >= 0 {
-                let opt = unsafe { &*longopts.add(matched_idx as usize) };
-                handle_long_opt_arg(arg, name_start, opt, argc, argv, &mut next_ind);
+                if matched_idx >= 0 {
+                    let opt = unsafe { &*longopts.add(matched_idx as usize) };
+                    let arg_result =
+                        handle_long_opt_arg(arg, name_start, opt, argc, argv, &mut next_ind);
+                    if arg_result < 0 {
+                        // Error: either unwanted "=val" or missing required arg.
+                        unsafe {
+                            core::ptr::addr_of_mut!(optind).write(next_ind);
+                            core::ptr::addr_of_mut!(OPTPOS).write(0);
+                        }
+                        return i32::from(b'?');
+                    }
+                }
+
+                unsafe {
+                    core::ptr::addr_of_mut!(optind).write(next_ind);
+                    core::ptr::addr_of_mut!(OPTPOS).write(0);
+                }
+                return ret;
             }
 
-            unsafe { core::ptr::addr_of_mut!(optind).write(next_ind); }
-            return ret;
+            // If this was "--something" (double dash) and no match, it's an error.
+            if is_long {
+                unsafe {
+                    core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
+                    core::ptr::addr_of_mut!(OPTPOS).write(0);
+                }
+                return i32::from(b'?');
+            }
+            // For long_only with single dash, fall through to short option handling.
         }
-
-        // If this was "--something" (double dash) and no match, it's an error.
-        if is_long {
-            unsafe { core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1)); }
-            return i32::from(b'?');
-        }
-        // For long_only with single dash, fall through to short option handling.
     }
 
     // Delegate to short-option getopt.
@@ -423,6 +447,9 @@ fn names_match(
 }
 
 /// Handle the argument for a matched long option.
+///
+/// Returns 0 on success, -1 on error (unwanted `=value` for no_argument
+/// options, or missing required argument).
 #[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
 fn handle_long_opt_arg(
     arg: *const u8,
@@ -431,7 +458,7 @@ fn handle_long_opt_arg(
     argc: i32,
     argv: *const *const u8,
     next_ind: &mut i32,
-) {
+) -> i32 {
     // Find the '=' if present (inline argument).
     let mut i = name_start;
     let mut has_eq = false;
@@ -448,6 +475,11 @@ fn handle_long_opt_arg(
     }
 
     if has_eq {
+        if opt.has_arg == NO_ARGUMENT {
+            // "--foo=bar" when foo takes no argument — error.
+            unsafe { core::ptr::addr_of_mut!(optarg).write(core::ptr::null()); }
+            return -1;
+        }
         // Argument is after the '='.
         let arg_ptr = unsafe { arg.add(i.wrapping_add(1)) };
         unsafe { core::ptr::addr_of_mut!(optarg).write(arg_ptr); }
@@ -460,8 +492,10 @@ fn handle_long_opt_arg(
         } else {
             // Missing required argument.
             unsafe { core::ptr::addr_of_mut!(optarg).write(core::ptr::null()); }
+            return -1;
         }
     } else {
         unsafe { core::ptr::addr_of_mut!(optarg).write(core::ptr::null()); }
     }
+    0
 }

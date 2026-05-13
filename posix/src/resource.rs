@@ -65,10 +65,10 @@ pub struct Rlimit {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Rusage {
-    /// User CPU time used.
-    pub ru_utime: crate::stat::Timespec,
-    /// System CPU time used.
-    pub ru_stime: crate::stat::Timespec,
+    /// User CPU time used (POSIX: struct timeval, not timespec).
+    pub ru_utime: crate::time::Timeval,
+    /// System CPU time used (POSIX: struct timeval, not timespec).
+    pub ru_stime: crate::time::Timeval,
     /// Maximum resident set size (in kilobytes).
     pub ru_maxrss: i64,
     // The remaining fields are rarely used but required by POSIX.

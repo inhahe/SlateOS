@@ -73,6 +73,7 @@ mod e1000;
 mod fb;
 mod cputime;
 mod crypto;
+mod drvmon;
 mod error;
 mod eventlog;
 mod font;

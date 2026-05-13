@@ -3444,7 +3444,7 @@ const COMMANDS: &[&str] = &[
     "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds", "hotcorners", "hcorn", "dynlock", "dlock", "snaplayout", "snlayout", "haptfeedback", "haptic", "eyeprotect", "eye", "pinnedapps", "pinned", "inputmethod", "imf", "storagesense", "ssense", "autofix", "afix", "recentsearch", "rsearch", "sysmaint", "maint", "multiclip", "mclip", "focussession", "fsess", "quicknote", "qnote", "cscheme", "uischeme", "appcompat", "acompat", "windowrules", "wrules", "spatialaudio", "spatial", "filetransfer", "ftrans", "startupopt", "sopt", "usagetime", "utime", "voicecontrol", "vctl", "devpair", "dpair", "notifgroup", "ngroup", "playmedia", "pmedia", "kbmacro", "macro", "sysresource", "sres", "faceunlock", "face",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
-    "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "du",
+    "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "drvmon", "du",
     "echo", "elog", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "filetype", "find", "findex", "finfo", "fops", "fsel", "ftype", "fold", "free",
     "firewall", "flock", "fontmgr", "fonts", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fstune", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "installer", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "logpersist", "lpersist", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
@@ -4703,6 +4703,7 @@ fn dispatch(line: &str) {
         "elog" => cmd_elog(args),
         "logpersist" | "lpersist" => cmd_logpersist(args),
         "svcstart" | "svcs" => cmd_svcstart(args),
+        "drvmon" => cmd_drvmon(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -33107,6 +33108,124 @@ fn cmd_svcstart(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'svcstart help'.", sub);
+        }
+    }
+}
+
+/// `drvmon` — driver monitor: health, crash detection, auto-restart.
+fn cmd_drvmon(args: &str) {
+    use crate::drvmon;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let st = drvmon::stats();
+            shell_println!("=== Driver Monitor ===");
+            shell_println!("  Monitored:      {}", st.total_drivers);
+            shell_println!("  Healthy:        {}", st.healthy);
+            shell_println!("  Degraded:       {}", st.degraded);
+            shell_println!("  Unresponsive:   {}", st.unresponsive);
+            shell_println!("  Restarting:     {}", st.restarting);
+            shell_println!("  Failed:         {}", st.failed);
+            shell_println!("  Stopped:        {}", st.stopped);
+            shell_println!("  Ticks:          {}", st.tick_count);
+            shell_println!("  Total crashes:  {}", st.total_crashes);
+            shell_println!("  Total restarts: {}", st.total_restarts);
+        }
+        "list" | "ls" => {
+            let drivers = drvmon::list();
+            if drivers.is_empty() {
+                shell_println!("No monitored drivers.");
+            } else {
+                shell_println!("{:>3} {:12} {:8} {:>6} {:12} {:>6} {:>6} {:>4}",
+                    "ID", "Name", "Bus", "PID", "Health", "Crash", "Rstrt", "Mon");
+                for d in &drivers {
+                    shell_println!("{:>3} {:12} {:8} {:>6} {:12} {:>6} {:>6} {:>4}",
+                        d.id, d.name, d.bus.label(), d.pid, d.health.label(),
+                        d.total_crashes, d.total_restarts,
+                        if d.monitoring { "yes" } else { "no" });
+                }
+            }
+        }
+        "register" | "reg" => {
+            use crate::drvmon::{BusType, DriverPolicy};
+            if parts.len() >= 3 {
+                let name = parts.get(1).copied().unwrap_or("");
+                let bus_str = parts.get(2).copied().unwrap_or("pci");
+                let pid = parts.get(3).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                let bus = match bus_str {
+                    "pci" => BusType::Pci,
+                    "usb" => BusType::Usb,
+                    "platform" | "plat" => BusType::Platform,
+                    "virtual" | "virt" => BusType::Virtual,
+                    _ => {
+                        shell_println!("Unknown bus: {}. Use: pci, usb, platform, virtual", bus_str);
+                        return;
+                    }
+                };
+                match drvmon::register(name, name, bus, pid, DriverPolicy::default()) {
+                    Ok(id) => shell_println!("Driver '{}' registered (id={})", name, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: drvmon register <name> <bus> [pid]");
+            }
+        }
+        "crash" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match drvmon::report_crash(id) {
+                        Ok(()) => shell_println!("Crash reported for driver {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid driver ID");
+                }
+            } else {
+                shell_println!("Usage: drvmon crash <id>");
+            }
+        }
+        "restart" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    let new_pid = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                    match drvmon::restart_driver(id, new_pid) {
+                        Ok(()) => shell_println!("Driver {} restarted (pid={})", id, new_pid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid driver ID");
+                }
+            } else {
+                shell_println!("Usage: drvmon restart <id> [new-pid]");
+            }
+        }
+        "tick" => {
+            let needs = drvmon::tick();
+            if needs.is_empty() {
+                shell_println!("All drivers healthy");
+            } else {
+                shell_println!("Drivers needing attention: {:?}", needs);
+            }
+        }
+        "test" => {
+            match drvmon::self_test() {
+                Ok(()) => shell_println!("Driver monitor self-test: PASSED"),
+                Err(e) => shell_println!("Driver monitor self-test: FAILED ({:?})", e),
+            }
+        }
+        "help" => {
+            shell_println!("drvmon — driver monitor (health, crash detection, auto-restart)");
+            shell_println!("  show               Statistics overview");
+            shell_println!("  list               List monitored drivers");
+            shell_println!("  register <name> <bus> [pid]  Register a driver");
+            shell_println!("  crash <id>         Report a driver crash");
+            shell_println!("  restart <id> [pid] Restart a driver");
+            shell_println!("  tick               Run health check cycle");
+            shell_println!("  test               Run self-test");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'drvmon help'.", sub);
         }
     }
 }
@@ -63553,7 +63672,7 @@ fn cmd_type(args: &str) {
 fn is_builtin(name: &str) -> bool {
     matches!(name,
         "help" | "?" | "cd" | "meminfo" | "mem" | "ps" | "tasks" | "clear" | "cls"
-        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
+        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"

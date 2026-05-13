@@ -631,9 +631,14 @@ pub unsafe extern "C" fn pselect(
     // non-zero sub-microsecond timeout doesn't become non-blocking {0,0}).
     // SAFETY: timeout is non-null, caller guarantees validity.
     let ts = unsafe { &*timeout };
+    // Ceiling division: ns→µs so a non-zero sub-microsecond timeout
+    // doesn't become non-blocking {0,0}.  tv_nsec is in [0, 999_999_999]
+    // so adding 999 cannot overflow i64.
+    #[allow(clippy::arithmetic_side_effects)]
+    let usec = (ts.tv_nsec + 999) / 1000;
     let mut tv = Timeval {
         tv_sec: ts.tv_sec,
-        tv_usec: (ts.tv_nsec + 999) / 1000,
+        tv_usec: usec,
     };
 
     unsafe { select(nfds, readfds, writefds, exceptfds, &raw mut tv) }

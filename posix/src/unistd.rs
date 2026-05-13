@@ -564,7 +564,7 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
     // SAFETY: single-address-space, no concurrent writes during read.
     // Use raw pointers to comply with Rust 2024 `static_mut_refs` rules.
     let (hostname_ptr, hlen) = unsafe {
-        (&raw const HOSTNAME_BUF, *(&raw const HOSTNAME_LEN))
+        (&raw const HOSTNAME_BUF, HOSTNAME_LEN)
     };
     let needed = hlen.wrapping_add(1); // +null
     if len < needed {
@@ -577,7 +577,7 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
         // SAFETY: idx < hlen <= HOST_NAME_MAX, HOSTNAME_BUF is HOST_NAME_MAX+1
         // bytes, and name buffer has at least `needed` bytes.
         unsafe {
-            let byte = *(hostname_ptr as *const u8).add(idx);
+            let byte = *hostname_ptr.cast::<u8>().add(idx);
             *name.add(idx) = byte;
         }
         idx = idx.wrapping_add(1);
@@ -604,7 +604,10 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
     }
     let mut i: usize = 0;
     while i < domain.len() {
-        unsafe { *name.add(i) = domain[i]; }
+        if let Some(&b) = domain.get(i) {
+            // SAFETY: i < domain.len() <= len, name is valid for len bytes.
+            unsafe { *name.add(i) = b; }
+        }
         i = i.wrapping_add(1);
     }
     0
@@ -659,20 +662,17 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
             // TODO: Query actual CPU count from kernel.
             1
         }
-        _SC_OPEN_MAX => 256,
+        _SC_OPEN_MAX | _SC_LOGIN_NAME_MAX => 256,  // Max open fds / max login name.
         _SC_CLK_TCK => 100,            // 100 Hz timer tick (Linux default).
         _SC_ARG_MAX => 131_072,         // 128 KiB argument limit.
-        _SC_CHILD_MAX => 1024,          // Max child processes.
+        _SC_CHILD_MAX | _SC_IOV_MAX => 1024,  // Max child processes / max iovec entries.
         _SC_NGROUPS_MAX => 32,          // Max supplementary groups.
-        _SC_VERSION => 200_809,         // POSIX.1-2008.
+        _SC_VERSION | _SC_THREADS => 200_809,  // POSIX.1-2008 / threads supported (version).
         _SC_HOST_NAME_MAX => HOST_NAME_MAX as i64, // Matches our HOSTNAME_BUF size.
-        _SC_LOGIN_NAME_MAX => 256,      // Max login name.
         _SC_LINE_MAX => 2048,           // Max line length.
-        _SC_THREADS => 200_809,         // POSIX threads supported (version).
         _SC_THREAD_STACK_MIN => 65536,  // 64 KiB minimum thread stack.
         _SC_PHYS_PAGES => 8192,         // ~128 MiB at 16 KiB pages (TODO: query kernel).
         _SC_AVPHYS_PAGES => 4096,       // ~64 MiB available (TODO: query kernel).
-        _SC_IOV_MAX => 1024,            // Max iovec entries.
         _ => {
             errno::set_errno(errno::EINVAL);
             -1
@@ -902,7 +902,7 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
     // SAFETY: single-address-space, no concurrent access.
     // Use raw pointers to comply with Rust 2024 `static_mut_refs` rules.
     unsafe {
-        let buf_ptr = &raw mut HOSTNAME_BUF as *mut u8;
+        let buf_ptr = (&raw mut HOSTNAME_BUF).cast::<u8>();
         let mut idx = 0;
         while idx < len {
             *buf_ptr.add(idx) = *name.add(idx);
@@ -910,7 +910,7 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
         }
         // Null-terminate the stored hostname.
         *buf_ptr.add(len) = 0;
-        *(&raw mut HOSTNAME_LEN) = len;
+        HOSTNAME_LEN = len;
     }
     0
 }
@@ -1161,16 +1161,15 @@ pub const PR_GET_SECCOMP: i32 = 21;
 /// Stub: `PR_SET_NAME` and `PR_SET_NO_NEW_PRIVS` succeed silently.
 /// Other operations return -1 with EINVAL.
 #[unsafe(no_mangle)]
-pub extern "C" fn prctl(option: i32, _arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64) -> i32 {
+pub extern "C" fn prctl(option: i32, arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64) -> i32 {
     match option {
-        PR_SET_NAME | PR_SET_NO_NEW_PRIVS => 0,
-        PR_GET_NO_NEW_PRIVS => 0, // Report "not set".
+        PR_SET_NAME | PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS => 0,
         PR_GET_NAME => {
             // Would need to write a name into arg2 as a buffer.
             // Return empty name for now.
-            if _arg2 != 0 {
+            if arg2 != 0 {
                 // SAFETY: Caller provides valid buffer per prctl contract.
-                unsafe { *((_arg2) as *mut u8) = 0; }
+                unsafe { *(arg2 as *mut u8) = 0; }
             }
             0
         }

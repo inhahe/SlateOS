@@ -548,7 +548,9 @@ pub unsafe extern "C" fn asctime_r(tm: *const Tm, buf: *mut u8) -> *mut u8 {
     let copy_len = if len > 25 { 25 } else { len };
     let mut i: usize = 0;
     while i < copy_len {
-        unsafe { *buf.add(i) = tmp[i]; }
+        // SAFETY: i < copy_len <= 25 < 32 = tmp.len(), so this is in-bounds.
+        let byte = *tmp.get(i).unwrap_or(&0);
+        unsafe { *buf.add(i) = byte; }
         i = i.wrapping_add(1);
     }
     // Null-terminate (at most at index 25 = 26th byte).
@@ -573,10 +575,10 @@ pub unsafe extern "C" fn ctime_r(timep: *const TimeT, buf: *mut u8) -> *mut u8 {
         tm_mon: 0, tm_year: 0, tm_wday: 0, tm_yday: 0,
         tm_isdst: 0,
     };
-    if unsafe { gmtime_r(timep, &mut result) }.is_null() {
+    if unsafe { gmtime_r(timep, &raw mut result) }.is_null() {
         return core::ptr::null_mut();
     }
-    unsafe { asctime_r(&result, buf) }
+    unsafe { asctime_r(&raw const result, buf) }
 }
 
 /// Format time according to a format string.
@@ -1022,11 +1024,11 @@ fn tm_to_secs(tm: &mut Tm) -> TimeT {
     let mut mday = i64::from(tm.tm_mday) + carry_day;
 
     // --- Normalize month → year ---
-    let total_mon = i64::from(tm.tm_mon);
-    let norm_mon = total_mon.rem_euclid(12) as i32;
-    let carry_year = total_mon.div_euclid(12) as i32;
+    let mon_raw = i64::from(tm.tm_mon);
+    let norm_mon = mon_raw.rem_euclid(12) as i32;
+    let carry_year = mon_raw.div_euclid(12) as i32;
     tm.tm_mon = norm_mon;
-    tm.tm_year = tm.tm_year + carry_year;
+    tm.tm_year += carry_year;
 
     let mut year = tm.tm_year + 1900;
 
@@ -1665,7 +1667,7 @@ fn ci_match(buf: *const u8, off: usize, pattern: &[u8]) -> bool {
     for (j, &p) in pattern.iter().enumerate() {
         // SAFETY: Caller guarantees buf is valid for off + pattern.len() bytes.
         let c = unsafe { *buf.add(off.wrapping_add(j)) };
-        if c.to_ascii_lowercase() != p.to_ascii_lowercase() {
+        if !c.eq_ignore_ascii_case(&p) {
             return false;
         }
     }

@@ -102,7 +102,7 @@ pub extern "C" fn _exit(status: i32) -> ! {
 ///
 /// Unlike `exit()`, does not call atexit handlers or flush stdio buffers.
 #[unsafe(no_mangle)]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, clippy::used_underscore_items)]
 pub extern "C" fn _Exit(status: i32) -> ! {
     _exit(status);
 }

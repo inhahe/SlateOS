@@ -343,8 +343,10 @@ fn fill_passwd_r(
     let strings: &[u8] = b"root\0x\0root\0/\0/bin/sh\0";
     let mut i: usize = 0;
     while i < NEEDED {
-        // SAFETY: i < NEEDED <= buflen, buf is valid.
-        unsafe { *buf.add(i) = strings[i]; }
+        // SAFETY: i < NEEDED <= buflen, buf is valid.  i < NEEDED = 22
+        // which is less than the byte-string length.
+        let byte = strings.get(i).copied().unwrap_or(0);
+        unsafe { *buf.add(i) = byte; }
         i = i.wrapping_add(1);
     }
 
@@ -390,7 +392,8 @@ fn fill_group_r(
     let strings: &[u8] = b"root\0x\0";
     let mut i: usize = 0;
     while i < STR_BYTES {
-        unsafe { *buf.add(i) = strings[i]; }
+        let byte = strings.get(i).copied().unwrap_or(0);
+        unsafe { *buf.add(i) = byte; }
         i = i.wrapping_add(1);
     }
 
@@ -407,7 +410,12 @@ fn fill_group_r(
         (*grp).gr_passwd = buf.add(5);            // "x" at offset 5
         (*grp).gr_gid = 0;
         // gr_mem points to the null pointer we wrote at PTR_START.
-        (*grp).gr_mem = buf.add(PTR_START).cast::<*const u8>();
+        // SAFETY: buf is from caller's buffer; at PTR_START it's 8-byte
+        // aligned because PTR_START = 8 and buf came from the stack or
+        // a caller-allocated buffer.  We wrote all-zeroes at that offset,
+        // forming a valid null pointer for gr_mem's array.
+        #[allow(clippy::cast_ptr_alignment)]
+        { (*grp).gr_mem = buf.add(PTR_START).cast::<*const u8>(); }
         *result = grp;
     }
 

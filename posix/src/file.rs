@@ -1696,7 +1696,47 @@ pub extern "C" fn sendfile(
     let mut buf = [0u8; 4096];
     let mut total: usize = 0;
 
-    if !offset.is_null() {
+    if offset.is_null() {
+        // No offset — read from current position (advances in_fd).
+        // Because read() advances in_fd's position by the number of
+        // bytes actually read, we must fully drain the buffer before
+        // reading again — otherwise a short write would discard the
+        // unwritten bytes (the file position has already moved past
+        // them and we can't seek back on non-seekable fds like pipes).
+        while total < count {
+            let remaining = count.wrapping_sub(total);
+            let chunk = if remaining < buf.len() { remaining } else { buf.len() };
+
+            let nr = read(in_fd, buf.as_mut_ptr(), chunk);
+            if nr < 0 {
+                if total > 0 { break; }
+                return -1;
+            }
+            if nr == 0 { break; }
+
+            // Write all bytes that were read, retrying on short writes.
+            let mut written: usize = 0;
+            let to_write = nr as usize;
+            while written < to_write {
+                let nw = write(
+                    out_fd,
+                    unsafe { buf.as_ptr().add(written) },
+                    to_write.wrapping_sub(written),
+                );
+                if nw < 0 {
+                    if total > 0 || written > 0 {
+                        total = total.wrapping_add(written);
+                        return total as isize;
+                    }
+                    return -1;
+                }
+                if nw == 0 { break; } // Avoid infinite loop.
+                written = written.wrapping_add(nw as usize);
+            }
+
+            total = total.wrapping_add(written);
+        }
+    } else {
         // Use pread to avoid modifying in_fd's file position.
         // SAFETY: offset is valid (caller contract).
         let mut cur_off = unsafe { *offset };
@@ -1744,46 +1784,6 @@ pub extern "C" fn sendfile(
         // Update caller's offset to reflect bytes transferred.
         // SAFETY: offset is valid.
         unsafe { *offset = cur_off; }
-    } else {
-        // No offset — read from current position (advances in_fd).
-        // Because read() advances in_fd's position by the number of
-        // bytes actually read, we must fully drain the buffer before
-        // reading again — otherwise a short write would discard the
-        // unwritten bytes (the file position has already moved past
-        // them and we can't seek back on non-seekable fds like pipes).
-        while total < count {
-            let remaining = count.wrapping_sub(total);
-            let chunk = if remaining < buf.len() { remaining } else { buf.len() };
-
-            let nr = read(in_fd, buf.as_mut_ptr(), chunk);
-            if nr < 0 {
-                if total > 0 { break; }
-                return -1;
-            }
-            if nr == 0 { break; }
-
-            // Write all bytes that were read, retrying on short writes.
-            let mut written: usize = 0;
-            let to_write = nr as usize;
-            while written < to_write {
-                let nw = write(
-                    out_fd,
-                    unsafe { buf.as_ptr().add(written) },
-                    to_write.wrapping_sub(written),
-                );
-                if nw < 0 {
-                    if total > 0 || written > 0 {
-                        total = total.wrapping_add(written);
-                        return total as isize;
-                    }
-                    return -1;
-                }
-                if nw == 0 { break; } // Avoid infinite loop.
-                written = written.wrapping_add(nw as usize);
-            }
-
-            total = total.wrapping_add(written);
-        }
     }
 
     total as isize
@@ -1816,18 +1816,18 @@ pub extern "C" fn copy_file_range(
     let mut buf = [0u8; 4096];
     let mut total: usize = 0;
 
-    let mut in_pos = if !off_in.is_null() { unsafe { *off_in } } else { 0 };
-    let mut out_pos = if !off_out.is_null() { unsafe { *off_out } } else { 0 };
+    let mut in_pos = if off_in.is_null() { 0 } else { unsafe { *off_in } };
+    let mut out_pos = if off_out.is_null() { 0 } else { unsafe { *off_out } };
 
     while total < len {
         let remaining = len.wrapping_sub(total);
         let chunk = if remaining < buf.len() { remaining } else { buf.len() };
 
         // Read: use pread when off_in is provided, else normal read.
-        let nr = if !off_in.is_null() {
-            pread(fd_in, buf.as_mut_ptr(), chunk, in_pos)
-        } else {
+        let nr = if off_in.is_null() {
             read(fd_in, buf.as_mut_ptr(), chunk)
+        } else {
+            pread(fd_in, buf.as_mut_ptr(), chunk, in_pos)
         };
         if nr <= 0 { break; }
 
@@ -1838,18 +1838,18 @@ pub extern "C" fn copy_file_range(
         let mut written: usize = 0;
         let to_write = nr as usize;
         while written < to_write {
-            let nw = if !off_out.is_null() {
+            let nw = if off_out.is_null() {
+                write(
+                    fd_out,
+                    unsafe { buf.as_ptr().add(written) },
+                    to_write.wrapping_sub(written),
+                )
+            } else {
                 pwrite(
                     fd_out,
                     unsafe { buf.as_ptr().add(written) },
                     to_write.wrapping_sub(written),
                     out_pos.wrapping_add(written as i64),
-                )
-            } else {
-                write(
-                    fd_out,
-                    unsafe { buf.as_ptr().add(written) },
-                    to_write.wrapping_sub(written),
                 )
             };
             if nw < 0 {

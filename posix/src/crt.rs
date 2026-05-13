@@ -517,10 +517,8 @@ pub extern "C" fn getauxval(typ: u64) -> u64 {
     match typ {
         AT_PAGESZ => 16384, // Our 16 KiB page size.
         AT_CLKTCK => 100,   // Jiffy rate (HZ).
-        AT_SECURE => 0,     // Not running in secure mode.
-        AT_HWCAP | AT_HWCAP2 => 0, // No hardware capability flags.
-        AT_UID | AT_EUID => 0, // Root.
-        AT_GID | AT_EGID => 0, // Root group.
+        // Secure mode off, no hwcap flags, root uid/gid.
+        AT_SECURE | AT_HWCAP | AT_HWCAP2 | AT_UID | AT_EUID | AT_GID | AT_EGID => 0,
         _ => {
             crate::errno::set_errno(crate::errno::ENOENT);
             0
@@ -589,11 +587,8 @@ pub extern "C" fn __cxa_guard_acquire(guard: *mut u64) -> i32 {
     // SAFETY: guard points to a compiler-generated static.
     let byte0 = guard.cast::<u8>();
     let val = unsafe { *byte0 };
-    if val != 0 {
-        0 // Already initialized.
-    } else {
-        1 // Caller should initialize.
-    }
+    // Returns 1 if caller should initialize (val == 0), 0 if already done.
+    i32::from(val == 0)
 }
 
 /// Release the initialization guard (mark as initialized).

@@ -261,6 +261,45 @@ pub extern "C" fn alphasort(a: *const *const Dirent, b: *const *const Dirent) ->
     }
 }
 
+/// Insertion sort a `*mut Dirent` array of `count` elements using `cmp`.
+///
+/// # Safety
+///
+/// `arr` must point to `count` valid, writable `*mut Dirent` entries.
+/// `cmp` must be a valid function pointer that never returns from a panic.
+///
+/// # Alignment note
+///
+/// `arr` is cast from a `*mut u8` returned by `malloc`.  Our `malloc`
+/// implementation uses `mmap`, which returns page-aligned memory (≥ 4096
+/// bytes), far exceeding the 8-byte alignment required for `*mut Dirent`.
+#[allow(clippy::cast_ptr_alignment)]
+unsafe fn scandir_sort(
+    arr: *mut u8,
+    count: usize,
+    cmp: extern "C" fn(*const *const Dirent, *const *const Dirent) -> i32,
+) {
+    // SAFETY: caller guarantees arr is page-aligned and has count entries.
+    let arr_typed = arr.cast::<*mut Dirent>();
+    let mut i: usize = 1;
+    while i < count {
+        let mut j = i;
+        while j > 0 {
+            // SAFETY: j and j-1 are valid indices within [0, count).
+            let a = unsafe { arr_typed.add(j.wrapping_sub(1)) };
+            let b = unsafe { arr_typed.add(j) };
+            if cmp(a.cast::<*const Dirent>(), b.cast::<*const Dirent>()) > 0 {
+                // SAFETY: a and b are valid, non-overlapping, aligned pointers.
+                unsafe { core::ptr::swap(a, b); }
+                j = j.wrapping_sub(1);
+            } else {
+                break;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
 /// Scan a directory and return a sorted array of matching entries.
 ///
 /// If `filter` is non-null, only entries for which `filter(entry)` returns
@@ -277,6 +316,13 @@ pub extern "C" fn alphasort(a: *const *const Dirent, b: *const *const Dirent) ->
 ///
 /// `dirname` must be a valid null-terminated path.
 /// `namelist` must point to a valid `*mut *mut Dirent` location.
+///
+/// # Alignment note
+///
+/// Pointer casts from `*mut u8` (returned by `malloc`) to `*mut *mut Dirent`
+/// and `*mut Dirent` are safe because our `malloc` uses `mmap`, which
+/// returns page-aligned memory (≥ 4096 bytes).
+#[allow(clippy::cast_ptr_alignment)]
 #[unsafe(no_mangle)]
 pub extern "C" fn scandir(
     dirname: *const u8,
@@ -295,42 +341,36 @@ pub extern "C" fn scandir(
         return -1; // errno already set by opendir.
     }
 
-    // First pass: count matching entries.
-    let dir = unsafe { &mut *dirp };
-    let total = dir.count;
-    let mut count: usize = 0;
-
-    // We'll do two passes: first count, then collect.  This avoids
+    // First pass: count matching entries.  Two-pass approach avoids
     // over-allocating when a filter rejects many entries.
-    dir.pos = 0;
+    let total = unsafe { (*dirp).count };
+    let mut count: usize = 0;
+    unsafe { (*dirp).pos = 0; }
     for _ in 0..total {
         let entry = readdir(dirp);
         if entry.is_null() {
             break;
         }
-        let include = match filter {
-            Some(f) => f(entry) != 0,
-            None => true,
-        };
-        if include {
+        if filter.is_none_or(|f| f(entry) != 0) {
             count = count.wrapping_add(1);
         }
     }
 
     if count == 0 {
         closedir(dirp);
-        // Allocate an empty array (POSIX allows returning 0 with a valid
+        // Allocate an empty array (POSIX allows returning 0 with a non-null
         // but empty namelist).
         let arr = crate::malloc::malloc(core::mem::size_of::<*mut Dirent>());
         if arr.is_null() {
             errno::set_errno(errno::ENOMEM);
             return -1;
         }
+        // SAFETY: arr is page-aligned (mmap), so align ≥ 8.
         unsafe { *namelist = arr.cast::<*mut Dirent>(); }
         return 0;
     }
 
-    // Allocate the array of pointers.
+    // Allocate the output array.
     let arr_size = count.wrapping_mul(core::mem::size_of::<*mut Dirent>());
     let arr = crate::malloc::malloc(arr_size);
     if arr.is_null() {
@@ -338,45 +378,41 @@ pub extern "C" fn scandir(
         errno::set_errno(errno::ENOMEM);
         return -1;
     }
+    // SAFETY: arr is page-aligned (mmap), align ≥ 8.
     let arr_typed = arr.cast::<*mut Dirent>();
 
-    // Second pass: collect entries.
-    dir.pos = 0;
+    // Second pass: collect matching entries into the array.
+    unsafe { (*dirp).pos = 0; }
     let mut idx: usize = 0;
     for _ in 0..total {
         let entry = readdir(dirp);
         if entry.is_null() {
             break;
         }
-        let include = match filter {
-            Some(f) => f(entry) != 0,
-            None => true,
-        };
-        if include && idx < count {
-            // Allocate a copy of the Dirent.
+        if filter.is_none_or(|f| f(entry) != 0) && idx < count {
             let dup = crate::malloc::malloc(core::mem::size_of::<Dirent>());
             if dup.is_null() {
-                // Free everything allocated so far.
+                // OOM: free everything allocated so far then bail.
                 let mut j: usize = 0;
                 while j < idx {
-                    // SAFETY: we wrote valid pointers at indices < idx.
+                    // SAFETY: valid pointers written at indices < idx.
                     unsafe { crate::malloc::free((*arr_typed.add(j)).cast::<u8>()); }
                     j = j.wrapping_add(1);
                 }
-                // SAFETY: arr was allocated by malloc above.
+                // SAFETY: arr allocated by malloc above.
                 unsafe { crate::malloc::free(arr); }
                 closedir(dirp);
                 errno::set_errno(errno::ENOMEM);
                 return -1;
             }
-            // SAFETY: entry points to dir.current which is valid; dup has
-            // enough space for a Dirent.
+            // SAFETY: entry → dir.current (valid Dirent); dup has correct size.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     entry.cast::<u8>(),
                     dup,
                     core::mem::size_of::<Dirent>(),
                 );
+                // SAFETY: arr_typed is page-aligned; idx < count.
                 *arr_typed.add(idx) = dup.cast::<Dirent>();
             }
             idx = idx.wrapping_add(1);
@@ -385,38 +421,15 @@ pub extern "C" fn scandir(
 
     closedir(dirp);
 
-    let final_count = idx;
-
-    // Sort if comparator provided.
+    // Sort if a comparator was provided.
     if let Some(cmp) = compar {
-        // Simple insertion sort — directories are typically small.
-        let mut i: usize = 1;
-        while i < final_count {
-            let mut j = i;
-            while j > 0 {
-                // SAFETY: j and j-1 are valid indices.
-                let a = unsafe { arr_typed.add(j.wrapping_sub(1)) };
-                let b = unsafe { arr_typed.add(j) };
-                let a_ref = a.cast::<*const Dirent>();
-                let b_ref = b.cast::<*const Dirent>();
-                if cmp(a_ref, b_ref) > 0 {
-                    // Swap.
-                    unsafe {
-                        let tmp = *a.cast::<*mut Dirent>();
-                        *a.cast::<*mut Dirent>() = *b.cast::<*mut Dirent>();
-                        *b.cast::<*mut Dirent>() = tmp;
-                    }
-                    j = j.wrapping_sub(1);
-                } else {
-                    break;
-                }
-            }
-            i = i.wrapping_add(1);
-        }
+        // SAFETY: arr is page-aligned; idx entries have been written.
+        unsafe { scandir_sort(arr, idx, cmp); }
     }
 
+    // SAFETY: arr is page-aligned (align ≥ 8).
     unsafe { *namelist = arr_typed; }
-    final_count as i32
+    idx as i32
 }
 
 // ---------------------------------------------------------------------------

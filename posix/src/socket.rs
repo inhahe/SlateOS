@@ -3575,12 +3575,12 @@ pub extern "C" fn __h_errno_location() -> *mut i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn hstrerror(err: i32) -> *const u8 {
     match err {
-        0 => b"Resolver Error 0 (no error)\0".as_ptr(),
-        HOST_NOT_FOUND => b"Host not found\0".as_ptr(),
-        TRY_AGAIN => b"Try again\0".as_ptr(),
-        NO_RECOVERY => b"Non-recoverable error\0".as_ptr(),
-        NO_DATA => b"No address associated with name\0".as_ptr(),
-        _ => b"Unknown resolver error\0".as_ptr(),
+        0 => c"Resolver Error 0 (no error)".as_ptr().cast::<u8>(),
+        HOST_NOT_FOUND => c"Host not found".as_ptr().cast::<u8>(),
+        TRY_AGAIN => c"Try again".as_ptr().cast::<u8>(),
+        NO_RECOVERY => c"Non-recoverable error".as_ptr().cast::<u8>(),
+        NO_DATA => c"No address associated with name".as_ptr().cast::<u8>(),
+        _ => c"Unknown resolver error".as_ptr().cast::<u8>(),
     }
 }
 

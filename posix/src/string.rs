@@ -1013,7 +1013,9 @@ pub unsafe extern "C" fn strverscmp(s1: *const u8, s2: *const u8) -> i32 {
 
             if !a_dig && !b_dig {
                 // Neither is a digit — normal lexicographic result.
-                return (a as i32) - (b as i32);
+                // SAFETY: a and b are u8, so their i32 values are in [0, 255];
+                // the difference is in [-255, 255] which cannot overflow i32.
+                return i32::from(a).wrapping_sub(i32::from(b));
             }
 
             // At least one is a digit.  Walk back to find the start of
@@ -1064,7 +1066,9 @@ fn strverscmp_frac(s1: *const u8, s2: *const u8, start: usize) -> i32 {
             return 1; // s2 run ended first → s1 > s2.
         }
         if a != b {
-            return (a as i32) - (b as i32);
+            // SAFETY: a and b are u8, so their i32 values are in [0, 255];
+            // the difference is in [-255, 255] which cannot overflow i32.
+            return i32::from(a).wrapping_sub(i32::from(b));
         }
         j = j.wrapping_add(1);
     }
@@ -1094,7 +1098,9 @@ fn strverscmp_int(s1: *const u8, s2: *const u8, start: usize) -> i32 {
             return 1; // s2 run shorter → larger number.
         }
         if a != b && first_diff == 0 {
-            first_diff = (a as i32) - (b as i32);
+            // SAFETY: a and b are u8, so their i32 values are in [0, 255];
+            // the difference is in [-255, 255] which cannot overflow i32.
+            first_diff = i32::from(a).wrapping_sub(i32::from(b));
         }
         j = j.wrapping_add(1);
     }

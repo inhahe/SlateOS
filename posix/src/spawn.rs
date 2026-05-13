@@ -52,6 +52,10 @@ const ACTION_PATH_MAX: usize = 256;
 
 /// A single file action to execute in the child (POSIX order).
 #[derive(Clone, Copy)]
+// ALLOW: The large Open variant is intentional — all storage is inline
+// (no heap) so that FileAction is Copy and fits in fixed-size arrays
+// without dynamic allocation.  The size difference is acceptable here.
+#[allow(clippy::large_enum_variant)]
 #[allow(dead_code)] // Used when posix_spawn actually applies actions in child.
 enum FileAction {
     /// Close a file descriptor.
@@ -114,7 +118,7 @@ impl FileActionSlot {
     }
 
     #[allow(dead_code)] // Used when posix_spawn actually applies actions in child.
-    fn to_action(&self) -> Option<FileAction> {
+    fn to_action(self) -> Option<FileAction> {
         match self.tag {
             1 => Some(FileAction::Close { fd: self.fd }),
             2 => Some(FileAction::Dup2 { fd: self.fd, newfd: self.newfd }),
@@ -142,10 +146,12 @@ pub extern "C" fn posix_spawn_file_actions_init(
     // writable memory of at least `size_of::<PosixSpawnFileActionsT>()`.
     unsafe {
         (*acts).count = 0;
-        let mut i = 0;
+        let mut i: usize = 0;
         while i < MAX_FILE_ACTIONS {
-            (*acts).actions[i] = FileActionSlot::empty();
-            i += 1;
+            if let Some(slot) = (*acts).actions.get_mut(i) {
+                *slot = FileActionSlot::empty();
+            }
+            i = i.wrapping_add(1);
         }
     }
     0
@@ -181,12 +187,10 @@ pub extern "C" fn posix_spawn_file_actions_addclose(
     if a.count >= MAX_FILE_ACTIONS {
         return errno::ENOMEM;
     }
-    a.actions[a.count] = FileActionSlot {
-        tag: 1,
-        fd,
-        ..FileActionSlot::empty()
-    };
-    a.count += 1;
+    if let Some(slot) = a.actions.get_mut(a.count) {
+        *slot = FileActionSlot { tag: 1, fd, ..FileActionSlot::empty() };
+    }
+    a.count = a.count.wrapping_add(1);
     0
 }
 
@@ -207,13 +211,10 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
     if a.count >= MAX_FILE_ACTIONS {
         return errno::ENOMEM;
     }
-    a.actions[a.count] = FileActionSlot {
-        tag: 2,
-        fd,
-        newfd,
-        ..FileActionSlot::empty()
-    };
-    a.count += 1;
+    if let Some(slot) = a.actions.get_mut(a.count) {
+        *slot = FileActionSlot { tag: 2, fd, newfd, ..FileActionSlot::empty() };
+    }
+    a.count = a.count.wrapping_add(1);
     0
 }
 
@@ -246,16 +247,18 @@ pub extern "C" fn posix_spawn_file_actions_addopen(
     unsafe {
         core::ptr::copy_nonoverlapping(path, stored_path.as_mut_ptr(), path_len);
     }
-    a.actions[a.count] = FileActionSlot {
-        tag: 3,
-        fd,
-        oflag,
-        mode,
-        path: stored_path,
-        path_len,
-        ..FileActionSlot::empty()
-    };
-    a.count += 1;
+    if let Some(slot) = a.actions.get_mut(a.count) {
+        *slot = FileActionSlot {
+            tag: 3,
+            fd,
+            oflag,
+            mode,
+            path: stored_path,
+            path_len,
+            ..FileActionSlot::empty()
+        };
+    }
+    a.count = a.count.wrapping_add(1);
     0
 }
 
@@ -405,11 +408,11 @@ pub extern "C" fn posix_spawn(
     // the child process yet because SYS_PROCESS_SPAWN doesn't support
     // fd inheritance.  When the kernel-process zone adds fd passing,
     // we'll iterate file_actions here and pass them to the kernel.
-    let _action_count = if !file_actions.is_null() {
+    let _action_count = if file_actions.is_null() {
+        0
+    } else {
         // SAFETY: file_actions is non-null (checked above).
         unsafe { (*file_actions).count }
-    } else {
-        0
     };
     if path.is_null() {
         return errno::EINVAL;

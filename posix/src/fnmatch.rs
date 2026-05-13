@@ -286,7 +286,8 @@ fn posix_class_matches(pat: *const u8, name_start: usize, name_len: usize, c: u8
         if name_len != expected.len() { return false; }
         let mut k = 0;
         while k < name_len {
-            if unsafe { *pat.add(name_start.wrapping_add(k)) } != expected[k] {
+            let exp_byte = expected.get(k).copied().unwrap_or(0);
+            if unsafe { *pat.add(name_start.wrapping_add(k)) } != exp_byte {
                 return false;
             }
             k = k.wrapping_add(1);

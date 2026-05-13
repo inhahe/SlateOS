@@ -866,8 +866,8 @@ fn scan_float(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> 
     // consume the longest valid prefix, and "1.5e" is not valid — only
     // "1.5" is).
     if count < width && (ctx.peek() == b'e' || ctx.peek() == b'E') && bi < 62 {
-        let save_si = ctx.si;
-        let save_bi = bi;
+        let saved_si = ctx.si;
+        let saved_bi = bi;
         let save_count = count;
 
         buf_put(&mut buf, &mut bi, ctx.peek());
@@ -889,8 +889,8 @@ fn scan_float(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> 
 
         if count == exp_digit_start {
             // No exponent digits after 'e'[sign] — rollback.
-            ctx.si = save_si;
-            bi = save_bi;
+            ctx.si = saved_si;
+            bi = saved_bi;
             let _ = save_count; // count unused after this block.
         }
     }

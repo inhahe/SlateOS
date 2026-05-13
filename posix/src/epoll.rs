@@ -108,7 +108,7 @@ pub extern "C" fn epoll_pwait(
 // ===========================================================================
 
 /// Flags for `eventfd`.
-pub const EFD_CLOEXEC: i32 = 0o2000000;
+pub const EFD_CLOEXEC: i32 = 0o2_000_000;
 /// Non-blocking flag.
 pub const EFD_NONBLOCK: i32 = 0o4000;
 /// Semaphore-mode flag.
@@ -146,7 +146,7 @@ pub extern "C" fn eventfd_write(_fd: i32, _value: u64) -> i32 {
 // ===========================================================================
 
 /// Clock IDs for timerfd_create.
-pub const TFD_CLOEXEC: i32 = 0o2000000;
+pub const TFD_CLOEXEC: i32 = 0o2_000_000;
 /// Non-blocking flag.
 pub const TFD_NONBLOCK: i32 = 0o4000;
 
@@ -243,7 +243,7 @@ pub const IN_MOVE: u32 = IN_MOVED_FROM | IN_MOVED_TO;
 pub const IN_ALL_EVENTS: u32 = 0x0000_0FFF;
 
 /// inotify_init flags.
-pub const IN_CLOEXEC: i32 = 0o2000000;
+pub const IN_CLOEXEC: i32 = 0o2_000_000;
 /// Non-blocking flag.
 pub const IN_NONBLOCK: i32 = 0o4000;
 

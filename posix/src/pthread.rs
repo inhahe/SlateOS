@@ -435,12 +435,12 @@ pub unsafe extern "C" fn pthread_mutex_init(
         return errno::EINVAL;
     }
     // Read kind from attr (default: PTHREAD_MUTEX_NORMAL = 0).
-    let kind: i32 = if !attr.is_null() {
+    let kind: i32 = if attr.is_null() {
+        PTHREAD_MUTEX_NORMAL
+    } else {
         // SAFETY: attr verified non-null.  PthreadMutexattrT is [u8; 8]
         // with first 4 bytes holding the kind (set by mutexattr_settype).
         unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) }
-    } else {
-        PTHREAD_MUTEX_NORMAL
     };
     // SAFETY: caller guarantees mutex is valid.
     unsafe {
@@ -476,19 +476,18 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
     let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
 
     // Recursive / error-checking: check if we already own the lock.
-    if kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK {
-        if m.locked.load(Ordering::Acquire) != 0
-            && m.owner.load(Ordering::Relaxed) == self_id
-        {
-            if kind == PTHREAD_MUTEX_RECURSIVE {
-                // Increment recursion count.
-                let c = m.count.load(Ordering::Relaxed);
-                m.count.store(c.wrapping_add(1), Ordering::Relaxed);
-                return 0;
-            }
-            // Error-checking: double-lock by same thread.
-            return errno::EDEADLK;
+    if (kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK)
+        && m.locked.load(Ordering::Acquire) != 0
+        && m.owner.load(Ordering::Relaxed) == self_id
+    {
+        if kind == PTHREAD_MUTEX_RECURSIVE {
+            // Increment recursion count.
+            let c = m.count.load(Ordering::Relaxed);
+            m.count.store(c.wrapping_add(1), Ordering::Relaxed);
+            return 0;
         }
+        // Error-checking: double-lock by same thread.
+        return errno::EDEADLK;
     }
 
     // Fast path: uncontended acquisition.
@@ -572,13 +571,13 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 
 
     if kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK {
         let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
-        if m.owner.load(Ordering::Relaxed) != self_id {
-            if kind == PTHREAD_MUTEX_ERRORCHECK {
-                return errno::EPERM;
-            }
-            // Normal/recursive: POSIX says UB for non-owner unlock on
-            // normal, but we silently proceed to avoid crashes.
+        if m.owner.load(Ordering::Relaxed) != self_id
+            && kind == PTHREAD_MUTEX_ERRORCHECK
+        {
+            return errno::EPERM;
         }
+        // Normal/recursive: POSIX says UB for non-owner unlock on
+        // normal, but we silently proceed to avoid crashes.
         if kind == PTHREAD_MUTEX_RECURSIVE {
             let c = m.count.load(Ordering::Relaxed);
             if c > 1 {
@@ -804,15 +803,15 @@ pub extern "C" fn pthread_cond_timedwait(
 
     // Get current time and compute deadline with full nanosecond precision.
     let abs = unsafe { &*abstime };
-    let deadline_sec = abs.tv_sec;
-    let deadline_nsec = abs.tv_nsec;
+    let dl_secs = abs.tv_sec;
+    let dl_nanos = abs.tv_nsec;
     let mut now_ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
 
     let mut timed_out = false;
     while c.generation.load(Ordering::Acquire) == current_gen {
         let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now_ts);
-        if now_ts.tv_sec > deadline_sec
-            || (now_ts.tv_sec == deadline_sec && now_ts.tv_nsec >= deadline_nsec)
+        if now_ts.tv_sec > dl_secs
+            || (now_ts.tv_sec == dl_secs && now_ts.tv_nsec >= dl_nanos)
         {
             timed_out = true;
             break;
@@ -1431,17 +1430,16 @@ pub extern "C" fn pthread_mutex_timedlock(
     let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
 
     // Recursive / error-checking: check if we already own the lock.
-    if kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK {
-        if m.locked.load(Ordering::Acquire) != 0
-            && m.owner.load(Ordering::Relaxed) == self_id
-        {
-            if kind == PTHREAD_MUTEX_RECURSIVE {
-                let c = m.count.load(Ordering::Relaxed);
-                m.count.store(c.wrapping_add(1), Ordering::Relaxed);
-                return 0;
-            }
-            return errno::EDEADLK;
+    if (kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK)
+        && m.locked.load(Ordering::Acquire) != 0
+        && m.owner.load(Ordering::Relaxed) == self_id
+    {
+        if kind == PTHREAD_MUTEX_RECURSIVE {
+            let c = m.count.load(Ordering::Relaxed);
+            m.count.store(c.wrapping_add(1), Ordering::Relaxed);
+            return 0;
         }
+        return errno::EDEADLK;
     }
 
     // Fast path: try to acquire immediately.
@@ -1452,16 +1450,16 @@ pub extern "C" fn pthread_mutex_timedlock(
     }
 
     // Spin with timeout check.
-    let deadline_sec = unsafe { (*abstime).tv_sec };
-    let deadline_nsec = unsafe { (*abstime).tv_nsec };
+    let dl_secs = unsafe { (*abstime).tv_sec };
+    let dl_nanos = unsafe { (*abstime).tv_nsec };
 
     loop {
         // Check timeout by reading current time.
         let mut now = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
         let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now);
 
-        if now.tv_sec > deadline_sec
-            || (now.tv_sec == deadline_sec && now.tv_nsec >= deadline_nsec)
+        if now.tv_sec > dl_secs
+            || (now.tv_sec == dl_secs && now.tv_nsec >= dl_nanos)
         {
             return errno::ETIMEDOUT;
         }
@@ -1613,13 +1611,22 @@ pub unsafe extern "C" fn pthread_setname_np(thread: PthreadT, name: *const u8) -
     let idx = (thread as usize) % MAX_NAMED_THREADS;
 
     // SAFETY: Single-threaded access assumption (same as rest of posix crate).
-    let slot = unsafe { &mut THREAD_NAMES[idx] };
+    let slot = unsafe {
+        core::ptr::addr_of_mut!(THREAD_NAMES)
+            .as_mut()
+            .and_then(|names| names.get_mut(idx))
+    };
+    let Some(slot) = slot else { return errno::EINVAL; };
     let mut i: usize = 0;
     while i < name_len {
-        slot[i] = unsafe { *name.add(i) };
+        if let Some(s) = slot.get_mut(i) {
+            *s = unsafe { *name.add(i) };
+        }
         i = i.wrapping_add(1);
     }
-    slot[i] = 0;
+    if let Some(s) = slot.get_mut(i) {
+        *s = 0;
+    }
 
     0
 }
@@ -1641,10 +1648,18 @@ pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len
     let idx = (thread as usize) % MAX_NAMED_THREADS;
 
     // SAFETY: Single-threaded access assumption.
-    let slot = unsafe { &THREAD_NAMES[idx] };
+    let slot = unsafe {
+        core::ptr::addr_of!(THREAD_NAMES)
+            .as_ref()
+            .and_then(|names| names.get(idx))
+    };
+    let Some(slot) = slot else { return errno::EINVAL; };
     let name_len = {
         let mut l: usize = 0;
-        while l < PTHREAD_NAME_MAX && slot[l] != 0 {
+        while l < PTHREAD_NAME_MAX {
+            if slot.get(l).copied().unwrap_or(0) == 0 {
+                break;
+            }
             l = l.wrapping_add(1);
         }
         l
@@ -1656,7 +1671,7 @@ pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len
 
     let mut i: usize = 0;
     while i < name_len {
-        unsafe { *name.add(i) = slot[i]; }
+        unsafe { *name.add(i) = slot.get(i).copied().unwrap_or(0); }
         i = i.wrapping_add(1);
     }
     unsafe { *name.add(i) = 0; }

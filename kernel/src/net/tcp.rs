@@ -1211,6 +1211,8 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.rx_buffer.clear();
         // tx_buffer init is handled below (after sack_block_count).
         conn.remote_closed = false;
+        conn.local_write_closed = false;
+        conn.local_read_closed = false;
         conn.retransmit_timer = 0;
         conn.srtt_ns_x8 = 0;
         conn.rttvar_ns_x4 = 0;
@@ -1240,7 +1242,14 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.ts_ok = false; // Set on SYN-ACK if peer supports timestamps.
         conn.ts_recent = 0;
         conn.ts_recent_age_ns = 0;
+        conn.peer_mss = 0; // Updated from SYN-ACK MSS option.
+        conn.persist_active = false;
+        conn.persist_interval_ns = PERSIST_MIN_NS;
+        conn.persist_last_ns = 0;
         conn.keepalive_enabled = false;
+        conn.keepalive_idle_ns = KEEPALIVE_IDLE_DEFAULT_NS;
+        conn.keepalive_interval_ns = KEEPALIVE_INTERVAL_DEFAULT_NS;
+        conn.keepalive_probes_max = KEEPALIVE_PROBES_DEFAULT;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
         slot
@@ -1396,7 +1405,14 @@ pub fn connect_start(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usiz
         conn.ts_ok = false;
         conn.ts_recent = 0;
         conn.ts_recent_age_ns = 0;
+        conn.peer_mss = 0;
+        conn.persist_active = false;
+        conn.persist_interval_ns = PERSIST_MIN_NS;
+        conn.persist_last_ns = 0;
         conn.keepalive_enabled = false;
+        conn.keepalive_idle_ns = KEEPALIVE_IDLE_DEFAULT_NS;
+        conn.keepalive_interval_ns = KEEPALIVE_INTERVAL_DEFAULT_NS;
+        conn.keepalive_probes_max = KEEPALIVE_PROBES_DEFAULT;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
         slot
@@ -3149,6 +3165,9 @@ fn handle_incoming_syn(
         conn.ooo_buf.clear();
         conn.ooo_base = remote_seq.wrapping_add(1);
         conn.remote_closed = false;
+        conn.local_write_closed = false;
+        conn.local_read_closed = false;
+        conn.dup_ack_count = 0;
         conn.retransmit_timer = 0;
         conn.srtt_ns_x8 = 0;
         conn.rttvar_ns_x4 = 0;
@@ -3189,6 +3208,9 @@ fn handle_incoming_syn(
         conn.ecn_ok = (syn_flags & TCP_ECE != 0) && (syn_flags & TCP_CWR != 0);
         conn.ecn_ce_pending = false;
         conn.ecn_cwr_sent = false;
+        conn.persist_active = false;
+        conn.persist_interval_ns = PERSIST_MIN_NS;
+        conn.persist_last_ns = 0;
 
         // Timestamps (RFC 7323 §3.2): if the client's SYN included a
         // Timestamp option, we negotiate timestamps and store its TSval
@@ -3204,6 +3226,9 @@ fn handle_incoming_syn(
         }
 
         conn.keepalive_enabled = false;
+        conn.keepalive_idle_ns = KEEPALIVE_IDLE_DEFAULT_NS;
+        conn.keepalive_interval_ns = KEEPALIVE_INTERVAL_DEFAULT_NS;
+        conn.keepalive_probes_max = KEEPALIVE_PROBES_DEFAULT;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
         slot

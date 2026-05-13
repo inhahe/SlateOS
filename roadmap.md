@@ -1005,6 +1005,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Interface traffic statistics: lock-free atomic counters (tx/rx bytes, packets, errors); InterfaceStats API + SYS_NET_STAT (825) syscall
   - [x] TCP abort (RST): tcp::abort() + SYS_TCP_ABORT (807) for immediate connection teardown without FIN handshake
   - [x] DHCP ARP flush: ARP cache cleared alongside DNS on lease acquisition and expiry (stale gateway MACs)
+  - [x] DNS cache statistics: atomic hit/miss/eviction counters + DnsCacheStats struct for diagnostics
+  - [x] TCP diagnostics: TcpListenerInfo/all_listeners() for listener enumeration; TcpStats/stats() for subsystem summary (active connections, per-state counts, buffer totals)
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close, abort, peer_addr (SYS_TCP_CONNECT through SYS_TCP_PEER_ADDR)
@@ -1195,6 +1197,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Terminal fd validation: tcsendbreak/tcdrain/tcflow/tcflush validate fd is a terminal (EBADF/ENOTTY) and validate argument ranges (EINVAL)
   - [x] Mutable hostname: gethostname/sethostname use static buffer (default "localhost"); _SC_HOST_NAME_MAX returns 255 (matching buffer size)
   - [x] Process group tracking: PGID, SID, foreground PGRP stored in static variables with lazy init; setpgid/setsid/tcsetpgrp store values; getpgrp/getsid/tcgetpgrp return stored state consistently (was always returning PID)
+  - [x] gethostbyaddr: reverse DNS lookup via SYS_DNS_REVERSE_RESOLVE, returns Hostent with PTR-resolved hostname
+  - [x] h_errno/herror/hstrerror: legacy DNS error reporting (HOST_NOT_FOUND, TRY_AGAIN, NO_RECOVERY, NO_DATA)
+  - [x] getifaddrs/freeifaddrs: interface address enumeration (eth0 + lo with IFF_UP/LOOPBACK/MULTICAST/BROADCAST flags)
+  - [x] getpeername kernel fallback: queries SYS_TCP_PEER_ADDR when cached metadata unavailable (dup'd fds)
 - [-] Translate POSIX calls to native syscalls
 - [ ] /proc, /sys equivalents (for programs that need them)
 - [ ] POSIX signals → translate to native IPC messages

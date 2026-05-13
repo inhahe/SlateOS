@@ -1097,11 +1097,24 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 return -1;
             }
 
-            let ret = syscall2(SYS_TCP_CONNECT, u64::from(ip), u64::from(port));
+            // Non-blocking connect: pass flag bit 0 if O_NONBLOCK is set.
+            let nb_flag: u64 = if fdtable::get_status_flags(fd).unwrap_or(0)
+                & crate::fcntl::O_NONBLOCK != 0
+            {
+                1 // CONNECT_NONBLOCK
+            } else {
+                0
+            };
+
+            let ret = syscall3(SYS_TCP_CONNECT, u64::from(ip), u64::from(port), nb_flag);
             if ret < 0 {
                 errno::set_errno(translate_net_error(ret));
                 return -1;
             }
+
+            // For non-blocking connect, the connection is in progress.
+            // Store the handle and return EINPROGRESS (POSIX requirement).
+            let in_progress = nb_flag != 0;
 
             // Update the fd table with the kernel connection handle.
             // Discarding the old entry is safe: handle was 0 (no kernel resource to close).
@@ -1123,6 +1136,14 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 linger_onoff: meta.linger_onoff,
                 linger_secs: meta.linger_secs,
             });
+
+            if in_progress {
+                // POSIX: non-blocking connect returns -1 / EINPROGRESS
+                // to signal the handshake is underway.  The caller uses
+                // poll/select POLLOUT to detect completion.
+                errno::set_errno(errno::EINPROGRESS);
+                return -1;
+            }
 
             0
         }

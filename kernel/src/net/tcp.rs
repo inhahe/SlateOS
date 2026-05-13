@@ -1307,6 +1307,116 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
     Err(KernelError::TimedOut)
 }
 
+/// Start a TCP connection without waiting for completion (non-blocking).
+///
+/// Allocates a connection slot, sends the initial SYN, and returns the
+/// handle immediately in `SynSent` state.  The caller should use
+/// `poll_status()` to detect when the connection completes:
+///
+/// - `POLL_WRITABLE` → connection established (ESTABLISHED state).
+/// - `POLL_ERROR`    → connection failed (slot deactivated).
+///
+/// Returns `(handle, KernelError::WouldBlock)` — the WouldBlock is the
+/// expected "in progress" signal, not an error.  The caller should map
+/// this to EINPROGRESS at the POSIX layer.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn connect_start(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
+    let local_port = alloc_port();
+    let isn = generate_isn();
+
+    // Find a free slot (same recycling logic as connect()).
+    let handle = {
+        let mut conns = CONNECTIONS.lock();
+        let slot = match conns.iter().position(|c| !c.active) {
+            Some(idx) => idx,
+            None => {
+                let mut best: Option<usize> = None;
+                let mut oldest_activity: u64 = u64::MAX;
+                for (i, c) in conns.iter().enumerate() {
+                    if c.active && c.state == TcpState::TimeWait {
+                        if c.last_activity_ns < oldest_activity {
+                            oldest_activity = c.last_activity_ns;
+                            best = Some(i);
+                        }
+                    }
+                }
+                let idx = best.ok_or(KernelError::OutOfMemory)?;
+                conns[idx].active = false;
+                conns[idx].state = TcpState::Closed;
+                conns[idx].rx_buffer.clear();
+                conns[idx].tx_buffer.clear();
+                conns[idx].nagle_buf.clear();
+                conns[idx].ooo_buf.clear();
+                idx
+            }
+        };
+
+        let conn = &mut conns[slot];
+        conn.active = true;
+        conn.state = TcpState::SynSent;
+        conn.local_port = local_port;
+        conn.remote_ip = remote_ip;
+        conn.remote_port = remote_port;
+        conn.snd_iss = isn;
+        conn.snd_una = isn;
+        conn.snd_nxt = isn.wrapping_add(1);
+        conn.snd_wnd = DEFAULT_WINDOW as u32;
+        conn.rcv_nxt = 0;
+        conn.rcv_irs = 0;
+        conn.rx_buffer.clear();
+        conn.remote_closed = false;
+        conn.local_write_closed = false;
+        conn.local_read_closed = false;
+        conn.retransmit_timer = 0;
+        conn.srtt_ns_x8 = 0;
+        conn.rttvar_ns_x4 = 0;
+        conn.rto_ns = RTO_INITIAL_NS;
+        conn.rtt_initialized = false;
+        conn.rtt_seq = isn;
+        conn.rtt_sent_ns = crate::hrtimer::now_ns();
+        conn.nagle_enabled = NAGLE_DEFAULT;
+        conn.cwnd = INITIAL_CWND_SEGS.saturating_mul(MSS as u32);
+        conn.ssthresh = u32::MAX;
+        conn.wscale_ok = false;
+        conn.snd_wnd_scale = 0;
+        conn.rcv_wnd_scale = OUR_WSCALE;
+        conn.sack_ok = false;
+        conn.sack_blocks = [(0, 0); MAX_SACK_BLOCKS];
+        conn.sack_block_count = 0;
+        conn.ooo_buf.clear();
+        conn.ooo_base = 0;
+        conn.dup_ack_count = 0;
+        conn.tx_buffer.clear();
+        conn.nagle_buf.clear();
+        conn.tx_buf_seq = isn.wrapping_add(1);
+        conn.tx_last_send_ns = 0;
+        conn.ecn_ok = false;
+        conn.ecn_ce_pending = false;
+        conn.ecn_cwr_sent = false;
+        conn.ts_ok = false;
+        conn.ts_recent = 0;
+        conn.ts_recent_age_ns = 0;
+        conn.keepalive_enabled = false;
+        conn.keepalive_probes_sent = 0;
+        conn.last_activity_ns = crate::hrtimer::now_ns();
+        slot
+    };
+
+    // Send the initial SYN.
+    send_syn_segment(
+        local_port, remote_ip, remote_port,
+        isn, 0, TCP_SYN | TCP_ECE | TCP_CWR, DEFAULT_WINDOW, OUR_WSCALE,
+        tcp_now_ms(), 0,
+    )?;
+
+    crate::serial_println!(
+        "[tcp] SYN sent (non-blocking) to {}:{} (handle={})",
+        remote_ip, remote_port, handle
+    );
+
+    Ok(handle)
+}
+
 /// Compute the dynamic receive window to advertise to the peer.
 ///
 /// Returns the value to put in the TCP header's 16-bit window field.
@@ -4010,6 +4120,25 @@ pub fn tick_time_wait_cleanup() {
                     conn.ooo_buf.clear();
                 }
             }
+            TcpState::SynSent => {
+                // Non-blocking connect (connect_start): the initial SYN
+                // was sent but no SYN-ACK arrived.  After 30 seconds,
+                // give up and reclaim the slot.  This prevents slot
+                // exhaustion from abandoned non-blocking connect attempts.
+                let elapsed = now.saturating_sub(conn.last_activity_ns);
+                if elapsed >= SYN_RECEIVED_TIMEOUT_NS {
+                    crate::serial_println!(
+                        "[tcp] SYN_SENT timeout for port {} → {}:{} — reclaiming",
+                        conn.local_port, conn.remote_ip, conn.remote_port
+                    );
+                    conn.active = false;
+                    conn.state = TcpState::Closed;
+                    conn.rx_buffer.clear();
+                    conn.tx_buffer.clear();
+                    conn.nagle_buf.clear();
+                    conn.ooo_buf.clear();
+                }
+            }
             _ => {}
         }
     }
@@ -4033,6 +4162,50 @@ pub fn tick_retransmit() {
     let now = crate::hrtimer::now_ns();
     let mut conns = CONNECTIONS.lock();
 
+    // --- SYN retransmission for non-blocking connects ---
+    // Scan SYN_SENT connections and retransmit the SYN with exponential
+    // backoff.  This is separate from data retransmit because SYN_SENT
+    // connections have no tx_buffer — the SYN is a control segment.
+    for idx in 0..MAX_CONNECTIONS {
+        let conn = &mut conns[idx];
+        if !conn.active || conn.state != TcpState::SynSent {
+            continue;
+        }
+        // Use last_activity_ns as the SYN send timestamp and rto_ns
+        // for the retransmit interval.
+        let elapsed = now.saturating_sub(conn.last_activity_ns);
+        if elapsed < conn.rto_ns {
+            continue;
+        }
+
+        // Retransmit the SYN.
+        let lp = conn.local_port;
+        let ri = conn.remote_ip;
+        let rp = conn.remote_port;
+        let isn = conn.snd_iss;
+        let wscale = conn.rcv_wnd_scale;
+
+        // Exponential backoff (RFC 6298 §5.5).
+        conn.rto_ns = conn.rto_ns.saturating_mul(2).min(RTO_MAX_NS);
+        conn.last_activity_ns = now;
+
+        crate::serial_println!(
+            "[tcp] SYN retransmit to {}:{} (port {}, rto={}ms)",
+            ri, rp, lp, conn.rto_ns / 1_000_000
+        );
+
+        // Drop lock before sending.
+        drop(conns);
+        let _ = send_syn_segment(
+            lp, ri, rp,
+            isn, 0, TCP_SYN | TCP_ECE | TCP_CWR, DEFAULT_WINDOW, wscale,
+            tcp_now_ms(), 0,
+        );
+        // Lock dropped — can't continue scan; next tick handles rest.
+        return;
+    }
+
+    // --- Data retransmission for Established/CloseWait ---
     for idx in 0..MAX_CONNECTIONS {
         let conn = &mut conns[idx];
         if !conn.active {

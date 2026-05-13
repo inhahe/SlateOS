@@ -5203,12 +5203,29 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::net::tcp::connect(ip, port) {
-        Ok(handle) => {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(handle as i64)
+    // arg2 (optional): flags.  Bit 0 = non-blocking (return handle in
+    // SYN_SENT state without waiting for handshake completion).
+    let flags = args.arg2 as u32;
+    const CONNECT_NONBLOCK: u32 = 1;
+
+    if (flags & CONNECT_NONBLOCK) != 0 {
+        // Non-blocking connect: return handle immediately in SYN_SENT.
+        match crate::net::tcp::connect_start(ip, port) {
+            Ok(handle) => {
+                #[allow(clippy::cast_possible_wrap)]
+                SyscallResult::ok(handle as i64)
+            }
+            Err(e) => SyscallResult::err(e),
         }
-        Err(e) => SyscallResult::err(e),
+    } else {
+        // Blocking connect (original behavior).
+        match crate::net::tcp::connect(ip, port) {
+            Ok(handle) => {
+                #[allow(clippy::cast_possible_wrap)]
+                SyscallResult::ok(handle as i64)
+            }
+            Err(e) => SyscallResult::err(e),
+        }
     }
 }
 

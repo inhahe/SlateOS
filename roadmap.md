@@ -1007,6 +1007,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] DHCP ARP flush: ARP cache cleared alongside DNS on lease acquisition and expiry (stale gateway MACs)
   - [x] DNS cache statistics: atomic hit/miss/eviction counters + DnsCacheStats struct for diagnostics
   - [x] TCP diagnostics: TcpListenerInfo/all_listeners() for listener enumeration; TcpStats/stats() for subsystem summary (active connections, per-state counts, buffer totals)
+  - [x] TCP TIME_WAIT slot recycling: when connection table is full, oldest TIME_WAIT connection is evicted for new connects/accepts (matches Linux tcp_tw_reuse)
+  - [x] TCP SYN retransmission: connect() retransmits SYN up to 4 times (1s/2s/4s/8s backoff) instead of single-shot with 5s timeout
+  - [x] Enhanced net self-test: reports interface config, traffic stats, TCP/UDP state, DNS cache, ARP entries
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close, abort, peer_addr (SYS_TCP_CONNECT through SYS_TCP_PEER_ADDR)

@@ -372,6 +372,7 @@ const ROOT_FILES: &[&str] = &[
     "hotplug",
     "devpower",
     "vmguest",
+    "pciids",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7421,6 +7422,10 @@ fn gen_vmguest() -> Vec<u8> {
     crate::vmguest::procfs_content().into_bytes()
 }
 
+fn gen_pciids() -> Vec<u8> {
+    crate::pciids::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10100,6 +10105,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "hotplug" => Ok(gen_hotplug()),
         "devpower" => Ok(gen_devpower()),
         "vmguest" => Ok(gen_vmguest()),
+        "pciids" => Ok(gen_pciids()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

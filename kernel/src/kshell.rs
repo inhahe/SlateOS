@@ -3532,6 +3532,7 @@ const COMMANDS: &[&str] = &[
     "devhotplug", "devhp",
     "devpower", "devpm",
     "vmguest", "vmtools",
+    "pciids", "lspci",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4718,6 +4719,7 @@ fn dispatch(line: &str) {
         "devhotplug" | "devhp" => cmd_devhotplug(args),
         "devpower" | "devpm" => cmd_devpower(args),
         "vmguest" | "vmtools" => cmd_vmguest(args),
+        "pciids" | "lspci" => cmd_pciids(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -7701,19 +7703,22 @@ fn cmd_pci() {
         return;
     }
 
-    crate::console_println!("{:<10} {:<12} {:<8} {:<6}", "BDF", "VENDOR:DEV", "CLASS", "IRQ");
-    crate::console_println!("------------------------------------------");
     for dev in &devices {
+        let desc = crate::pciids::describe(
+            dev.vendor_id,
+            dev.device_id,
+            dev.class,
+            dev.subclass,
+        );
         crate::console_println!(
-            "{:02x}:{:02x}.{}    {:04x}:{:04x}     {:02x}:{:02x}   {}",
+            "{:02x}:{:02x}.{} {:04x}:{:04x} {} (IRQ {})",
             dev.address.bus,
             dev.address.device,
             dev.address.function,
             dev.vendor_id,
             dev.device_id,
-            dev.class,
-            dev.subclass,
-            dev.irq_line
+            desc,
+            dev.irq_line,
         );
     }
     crate::console_println!("{} device(s)", devices.len());
@@ -34115,6 +34120,113 @@ fn cmd_vmguest(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'vmguest help'.", sub);
+        }
+    }
+}
+
+/// `pciids` / `lspci` — PCI device identification database.
+fn cmd_pciids(args: &str) {
+    use crate::pciids;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            // Show PCI devices with human-readable names.
+            let devices = crate::pci::scan_bus0();
+            if devices.is_empty() {
+                shell_println!("No PCI devices found.");
+                return;
+            }
+            for dev in &devices {
+                let desc = pciids::describe(
+                    dev.vendor_id,
+                    dev.device_id,
+                    dev.class,
+                    dev.subclass,
+                );
+                shell_println!(
+                    "{:02x}:{:02x}.{} {}",
+                    dev.address.bus,
+                    dev.address.device,
+                    dev.address.function,
+                    desc,
+                );
+            }
+            shell_println!("{} device(s)", devices.len());
+        }
+        "verbose" | "-v" => {
+            // Detailed view per device.
+            let devices = crate::pci::scan_bus0();
+            for dev in &devices {
+                let vendor = pciids::vendor_name(dev.vendor_id)
+                    .unwrap_or("Unknown vendor");
+                let device = pciids::device_name(dev.vendor_id, dev.device_id)
+                    .unwrap_or("Unknown device");
+                let cls = pciids::class_name(dev.class);
+                let sub = pciids::subclass_name(dev.class, dev.subclass);
+                shell_println!(
+                    "{:02x}:{:02x}.{} {} [{}]",
+                    dev.address.bus,
+                    dev.address.device,
+                    dev.address.function,
+                    sub, cls,
+                );
+                shell_println!("        Vendor: {} [{:04x}]", vendor, dev.vendor_id);
+                shell_println!("        Device: {} [{:04x}]", device, dev.device_id);
+                shell_println!("        IRQ: {}", dev.irq_line);
+            }
+        }
+        "lookup" => {
+            // Look up a specific vendor:device or class:subclass.
+            if parts.len() < 2 {
+                shell_println!("Usage: pciids lookup <vendor:device | class.subclass>");
+                return;
+            }
+            let arg = parts.get(1).copied().unwrap_or("");
+            if let Some((v, d)) = arg.split_once(':') {
+                let vid = u16::from_str_radix(v, 16).unwrap_or(0);
+                let did = u16::from_str_radix(d, 16).unwrap_or(0);
+                shell_println!("Vendor: {}", pciids::vendor_name(vid).unwrap_or("Unknown"));
+                shell_println!("Device: {}", pciids::device_name(vid, did).unwrap_or("Unknown"));
+            } else if let Some((c, s)) = arg.split_once('.') {
+                let cls = u8::from_str_radix(c, 16).unwrap_or(0);
+                let sub = u8::from_str_radix(s, 16).unwrap_or(0);
+                shell_println!("Class:    {}", pciids::class_name(cls));
+                shell_println!("Subclass: {}", pciids::subclass_name(cls, sub));
+            } else {
+                shell_println!("Usage: pciids lookup <vendor:device | class.subclass>");
+            }
+        }
+        "vendors" => {
+            // List all known vendors.
+            let (_, _, vendor_count, _) = pciids::db_stats();
+            shell_println!("{} known vendors:", vendor_count);
+            shell_println!("{}", pciids::procfs_content());
+        }
+        "stats" => {
+            let (c, s, v, d) = pciids::db_stats();
+            shell_println!("PCI ID Database");
+            shell_println!("  Class entries:    {}", c);
+            shell_println!("  Subclass entries: {}", s);
+            shell_println!("  Vendor entries:   {}", v);
+            shell_println!("  Device entries:   {}", d);
+        }
+        "test" => {
+            pciids::self_test();
+            shell_println!("PCI ID database self-test: PASSED");
+        }
+        "help" => {
+            shell_println!("pciids — PCI device identification database");
+            shell_println!("  show            List PCI devices with names");
+            shell_println!("  verbose/-v      Detailed per-device view");
+            shell_println!("  lookup V:D      Look up vendor:device (hex)");
+            shell_println!("  lookup C.S      Look up class.subclass (hex)");
+            shell_println!("  vendors         List all known vendors");
+            shell_println!("  stats           Database statistics");
+            shell_println!("  test            Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'pciids help'.", sub);
         }
     }
 }
@@ -64604,13 +64716,14 @@ fn is_builtin(name: &str) -> bool {
         | "meltdown" | "memacct" | "memmap" | "mempool" | "mempressure" | "memscrub"
         | "memtest" | "memtype" | "migrate" | "migratetype" | "migrations" | "mixer"
         | "mtype" | "nproc" | "numa" | "od" | "pacct" | "pageage" | "pagetables"
-        | "pcid" | "perf" | "pgfault" | "poison" | "pools" | "poweroff" | "pressure"
+        | "pcid" | "pciids" | "perf" | "pgfault" | "poison" | "pools" | "poweroff" | "pressure"
         | "ptwalk" | "report" | "ripsample" | "rmap" | "sar" | "sb" | "sclat"
         | "sclatency" | "scrollback" | "scrub" | "sctrace" | "sed" | "selftest"
         | "shutdown" | "smap" | "smep" | "snap" | "snapshot" | "soundhist"
         | "specmit" | "spectre" | "stackcheck" | "strace" | "strings" | "symbols"
         | "syscallprof" | "syshealth" | "tar" | "temp" | "termtest" | "thermal"
         | "tickjitter" | "tlb" | "tlbgather" | "topo" | "topology" | "vectors"
+        | "lspci"
         | "vm" | "vmalloc" | "vmguest" | "vminfo" | "vmtools" | "warnings" | "watermark" | "wchan" | "wipe"
         | "wmark" | "xsave" | "xz"
     )

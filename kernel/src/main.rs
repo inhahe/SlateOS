@@ -122,6 +122,7 @@ mod netns;
 mod numa;
 mod nvme;
 mod pci;
+mod pciids;
 mod pcspk;
 mod pacct;
 mod pidns;

@@ -5265,9 +5265,9 @@ pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
     };
 
     match crate::net::tcp::send(handle, data) {
-        Ok(()) => {
+        Ok(sent) => {
             #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(len as i64)
+            SyscallResult::ok(sent as i64)
         }
         Err(e) => SyscallResult::err(e),
     }

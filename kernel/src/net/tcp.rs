@@ -1976,7 +1976,7 @@ fn build_sack_option(conn: &TcpConnection) -> ([u8; 34], usize) {
 ///
 /// Returns `Ok(())` even if the effective window truncated the send.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
+pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
     let (local_port, remote_ip, remote_port, seq, ack, eff_wnd, our_wnd,
          nagle, has_unacked, ecn_ok, ecn_cwr, eff_mss,
          ts_ok, ts_recent) = {
@@ -2058,7 +2058,7 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
                 n_ts_ok, n_ts_recent,
             );
         }
-        return Ok(());
+        return Ok(data.len());
     }
 
     // Effective window = min(cwnd, snd_wnd).  Limit data to what we can
@@ -2143,7 +2143,7 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<()> {
         }
     }
 
-    Ok(())
+    Ok(sendable)
 }
 
 /// Enable or disable Nagle's algorithm on a connection.

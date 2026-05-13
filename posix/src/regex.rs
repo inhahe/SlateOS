@@ -259,6 +259,11 @@ pub unsafe extern "C" fn regexec(
                     }
                     gi = gi.wrapping_add(1);
                 }
+                // POSIX: entries beyond MAX_GROUPS must be set to -1.
+                while gi < nmatch {
+                    unsafe { *pmatch.add(gi) = RegMatch { rm_so: -1, rm_eo: -1 }; }
+                    gi = gi.wrapping_add(1);
+                }
             }
             return 0;
         }
@@ -545,9 +550,9 @@ fn compile_atom(
                 *pos = pos.wrapping_add(1);
                 return compile_group(prog, pat, pat_len, pos, extended, group_id);
             }
-            // Literal escaped char.
+            // Literal escaped char — REG_ICASE still applies.
             *pos = pos.wrapping_add(1);
-            if !emit_inst(prog, Inst::Byte(escaped, false)) { return REG_ESPACE; }
+            if !emit_inst(prog, Inst::Byte(escaped, icase)) { return REG_ESPACE; }
         }
         _ => {
             // Literal character.

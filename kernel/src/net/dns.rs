@@ -404,8 +404,14 @@ fn build_ptr_query(ip: Ipv4Addr, query_id: u16) -> Vec<u8> {
 /// Encode a domain name as DNS wire-format labels.
 ///
 /// E.g., `"example.com"` → `\x07example\x03com\x00`.
+///
+/// Handles fully-qualified domain names (trailing dot, e.g.,
+/// `"example.com."`) by filtering out empty labels.  Without this,
+/// `split('.')` on a trailing-dot name produces an empty final label,
+/// which encodes as a zero-length label *before* the root terminator —
+/// an invalid DNS name that servers may reject.
 fn encode_name(pkt: &mut Vec<u8>, name: &str) {
-    for label in name.split('.') {
+    for label in name.split('.').filter(|l| !l.is_empty()) {
         let len = label.len().min(63);
         pkt.push(len as u8);
         pkt.extend_from_slice(&label.as_bytes()[..len]);
@@ -487,7 +493,6 @@ fn parse_response_inner(
     // We store up to MAX_CNAME_HOPS CNAME targets and check for A records.
     let mut cname_target: Option<String> = None;
     let mut a_results: Vec<(String, Ipv4Addr, u32)> = Vec::new();
-    let answer_start = offset;
 
     for _ in 0..ancount {
         if offset >= data.len() {
@@ -669,7 +674,6 @@ static LAST_CNAME: Mutex<Option<String>> = Mutex::new(None);
 fn decode_name(data: &[u8], mut offset: usize) -> KernelResult<(String, usize)> {
     let mut name = String::with_capacity(64);
     let mut jumped = false;
-    let mut jump_return: usize = 0;
     let mut ptr_offset = offset;
     let mut steps = 0;
 
@@ -693,11 +697,11 @@ fn decode_name(data: &[u8], mut offset: usize) -> KernelResult<(String, usize)> 
                 return Err(KernelError::InvalidArgument);
             }
             if !jumped {
+                // Save the position just past the pointer — this is where
+                // the name ends in the original wire data.
                 offset = ptr_offset + 2;
                 jumped = true;
             }
-            let _ = jump_return; // Silence unused warning.
-            jump_return = ptr_offset + 2;
             ptr_offset = (usize::from(len & 0x3F) << 8) | usize::from(data[ptr_offset + 1]);
             continue;
         }
@@ -725,10 +729,16 @@ fn decode_name(data: &[u8], mut offset: usize) -> KernelResult<(String, usize)> 
 
 /// Skip a DNS name at the given offset (handles compression pointers).
 ///
+/// A DNS name in wire format ends when we encounter either:
+/// - A null byte (root label terminator): consume 1 byte.
+/// - A compression pointer (2 bytes, top 2 bits set): consume 2 bytes.
+///
+/// We don't need to follow compression pointers — we just need to know
+/// where the name ends in the original data stream.
+///
 /// Returns the offset after the name.
 #[allow(clippy::arithmetic_side_effects)]
 fn skip_name(data: &[u8], mut offset: usize) -> KernelResult<usize> {
-    let mut jumped = false;
     let mut steps = 0;
 
     loop {
@@ -738,37 +748,24 @@ fn skip_name(data: &[u8], mut offset: usize) -> KernelResult<usize> {
         steps += 1;
 
         let len = data[offset];
+
         if len == 0 {
-            if !jumped {
-                offset += 1;
-            }
-            return Ok(offset);
+            // Root label — name ends here.
+            return Ok(offset + 1);
         }
 
         if len & 0xC0 == 0xC0 {
-            // Compression pointer.
-            if !jumped {
-                offset += 2; // Skip the 2-byte pointer.
-                jumped = true;
+            // Compression pointer (2 bytes) — name ends after the pointer.
+            // We don't follow it; we just advance past it.
+            if offset + 1 >= data.len() {
+                return Err(KernelError::InvalidArgument);
             }
-            // Follow the pointer for further label traversal,
-            // but we only care about advancing the offset past
-            // the name in the original data.
-            if !jumped {
-                return Ok(offset);
-            }
-            // For skip_name, we just need to advance past the pointer.
-            return Ok(offset);
+            return Ok(offset + 2);
         }
 
-        if !jumped {
-            offset += 1 + len as usize;
-        } else {
-            break;
-        }
+        // Regular label: 1 length byte + `len` content bytes.
+        offset += 1 + len as usize;
     }
-
-    Ok(offset)
 }
 
 // ---------------------------------------------------------------------------

@@ -701,8 +701,11 @@ pub extern "C" fn atanf(x: f32) -> f32 {
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn asin(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
-    if x > 1.0 || x < -1.0 { return f64::NAN; }
+    if !(-1.0..=1.0).contains(&x) { return f64::NAN; }
+    // Comparisons against exact boundary constants ±1.0 are intentional.
+    #[allow(clippy::float_cmp)]
     if x == 1.0 { return HALF_PI; }
+    #[allow(clippy::float_cmp)]
     if x == -1.0 { return -HALF_PI; }
     // asin(x) = atan2(x, sqrt(1 - x²))
     atan2(x, sqrt(1.0 - x * x))
@@ -720,8 +723,11 @@ pub extern "C" fn asinf(x: f32) -> f32 {
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn acos(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
-    if x > 1.0 || x < -1.0 { return f64::NAN; }
+    if !(-1.0..=1.0).contains(&x) { return f64::NAN; }
+    // Comparisons against exact boundary constants ±1.0 are intentional.
+    #[allow(clippy::float_cmp)]
     if x == 1.0 { return 0.0; }
+    #[allow(clippy::float_cmp)]
     if x == -1.0 { return PI; }
     // acos(x) = atan2(sqrt(1 - x²), x)
     atan2(sqrt(1.0 - x * x), x)
@@ -841,6 +847,8 @@ pub extern "C" fn log1p(x: f64) -> f64 {
     if x.is_nan() { return f64::NAN; }
     if x == f64::INFINITY { return f64::INFINITY; }
     if x < -1.0 { return f64::NAN; }
+    // Comparison against exact boundary -1.0 is intentional (pole of log1p).
+    #[allow(clippy::float_cmp)]
     if x == -1.0 { return f64::NEG_INFINITY; }
     if fabs(x) < 1e-4 {
         // Taylor: log(1+x) ≈ x - x²/2 + x³/3 - x⁴/4 + ...
@@ -953,6 +961,8 @@ pub extern "C" fn lrint(x: f64) -> i64 {
     let f = floor(x);
     let frac = x - f;
     let fi = f as i64;
+    // Comparison against exact 0.5 is intentional: detects the half-way tie case.
+    #[allow(clippy::float_cmp)]
     if frac == 0.5 {
         // Tie: round to nearest even.  floor(x) is the lower candidate,
         // floor(x)+1 is the upper.  Pick whichever is even.
@@ -981,6 +991,8 @@ pub extern "C" fn rint(x: f64) -> f64 {
 }
 
 #[unsafe(no_mangle)]
+// The guard above ensures |x| < 2^23, so the integer value fits exactly in f32.
+#[allow(clippy::cast_precision_loss)]
 pub extern "C" fn rintf(x: f32) -> f32 {
     if x.is_nan() || x.is_infinite() { return x; }
     if x == 0.0 { return x; }
@@ -1029,6 +1041,7 @@ pub extern "C" fn scalblnf(x: f32, n: i64) -> f32 {
 /// Special: ilogb(0) = `FP_ILOGB0`, ilogb(inf) = `INT_MAX`,
 /// ilogb(NaN) = `FP_ILOGBNAN`.
 #[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn ilogb(x: f64) -> i32 {
     if x.is_nan() { return i32::MAX; } // FP_ILOGBNAN
     if x.is_infinite() { return i32::MAX; }
@@ -1038,9 +1051,11 @@ pub extern "C" fn ilogb(x: f64) -> i32 {
     if exp_field == 0 {
         // Subnormal — count leading zeros in mantissa.
         let mantissa = bits & 0x000F_FFFF_FFFF_FFFF;
+        // leading_zeros() <= 64, minus 12 won't overflow i32.
         let lz = mantissa.leading_zeros() as i32 - 12; // 64 - 52 = 12
         -1023 - lz
     } else {
+        // exp_field is 1..=2046 (0 handled above, 0x7FF is inf/nan).
         exp_field - 1023
     }
 }
@@ -1068,6 +1083,8 @@ pub extern "C" fn logbf(x: f32) -> f32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn nextafter(from: f64, to: f64) -> f64 {
     if from.is_nan() || to.is_nan() { return f64::NAN; }
+    // Exact bit-level equality check is intentional: nextafter(x, x) == x per IEEE 754.
+    #[allow(clippy::float_cmp)]
     if from == to { return to; }
     if from == 0.0 {
         // Smallest subnormal in the direction of `to`.
@@ -1086,6 +1103,8 @@ pub extern "C" fn nextafter(from: f64, to: f64) -> f64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn nextafterf(from: f32, to: f32) -> f32 {
     if from.is_nan() || to.is_nan() { return f32::NAN; }
+    // Exact bit-level equality check is intentional: nextafterf(x, x) == x per IEEE 754.
+    #[allow(clippy::float_cmp)]
     if from == to { return to; }
     if from == 0.0 {
         let bits: u32 = if to > 0.0 { 1 } else { 0x8000_0001 };
@@ -1226,7 +1245,9 @@ pub extern "C" fn lgamma(x: f64) -> f64 {
     if x.is_infinite() {
         return f64::INFINITY;
     }
-    // Poles at 0 and negative integers.
+    // Poles at 0 and negative integers.  Exact comparison is intentional:
+    // floor(x) returns the exact integer, and x must equal it exactly.
+    #[allow(clippy::float_cmp)]
     if x <= 0.0 && x == floor(x) {
         return f64::INFINITY;
     }
@@ -1276,7 +1297,9 @@ pub extern "C" fn tgamma(x: f64) -> f64 {
     if x.is_infinite() {
         return if x > 0.0 { f64::INFINITY } else { f64::NAN };
     }
-    // Poles at 0 and negative integers.
+    // Poles at 0 and negative integers.  Exact comparison is intentional:
+    // floor(x) returns the exact integer, and x must equal it exactly.
+    #[allow(clippy::float_cmp)]
     if x <= 0.0 && x == floor(x) {
         return f64::NAN;
     }
@@ -1372,9 +1395,12 @@ pub extern "C" fn atanh(x: f64) -> f64 {
     if x.is_nan() {
         return x;
     }
+    // Comparisons against exact boundary constants ±1.0 are intentional (poles of atanh).
+    #[allow(clippy::float_cmp)]
     if x == 1.0 {
         return f64::INFINITY;
     }
+    #[allow(clippy::float_cmp)]
     if x == -1.0 {
         return f64::NEG_INFINITY;
     }
@@ -1462,7 +1488,7 @@ pub extern "C" fn remquo(x: f64, y: f64, quo: *mut i32) -> f64 {
         let q_int = q_rounded as i64;
         // POSIX requires at least 3 bits; we provide 31.
         let q_low = (q_int & 0x7FFF_FFFF) as i32;
-        let sign = if (x < 0.0) != (y < 0.0) { -1_i32 } else { 1_i32 };
+        let sign = if (x < 0.0) == (y < 0.0) { 1_i32 } else { -1_i32 };
         // SAFETY: quo verified non-null.
         unsafe {
             *quo = if q_int < 0 { -q_low } else { q_low };
@@ -1524,6 +1550,8 @@ pub extern "C" fn pow10f(x: f32) -> f32 {
 /// the sign is not stored).
 #[unsafe(no_mangle)]
 #[allow(clippy::arithmetic_side_effects)]
+// float_cmp: x == floor(x) intentionally checks exact integer equality (gamma poles).
+#[allow(clippy::float_cmp)]
 pub extern "C" fn lgamma_r(x: f64, signp: *mut i32) -> f64 {
     // Compute the sign of Γ(x).
     // Γ(x) > 0 for x > 0.
@@ -1571,7 +1599,7 @@ pub extern "C" fn finite(x: f64) -> i32 {
 /// `finitef(x)` — f32 variant of `finite`.
 #[unsafe(no_mangle)]
 pub extern "C" fn finitef(x: f32) -> i32 {
-    if x.is_infinite() || x.is_nan() { 0 } else { 1 }
+    i32::from(!(x.is_infinite() || x.is_nan()))
 }
 
 /// `drem(x, y)` — deprecated alias for `remainder(x, y)`.
@@ -1717,6 +1745,9 @@ pub extern "C" fn jn(n: i32, x: f64) -> f64 {
 #[unsafe(no_mangle)]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn y0(x: f64) -> f64 {
+    // Euler-Mascheroni constant γ ≈ 0.5772156649.
+    const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
+
     if x <= 0.0 {
         return if x == 0.0 { f64::NEG_INFINITY } else { f64::NAN };
     }
@@ -1731,8 +1762,6 @@ pub extern "C" fn y0(x: f64) -> f64 {
     }
 
     // Small x: Y0(x) = (2/π) * (J0(x)*(ln(x/2) + γ) + correction).
-    // Euler-Mascheroni constant γ ≈ 0.5772156649.
-    const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
     let j0x = j0(x);
     let ln_term = log(x / 2.0) + EULER_GAMMA;
 
@@ -1747,6 +1776,9 @@ pub extern "C" fn y0(x: f64) -> f64 {
 #[unsafe(no_mangle)]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn y1(x: f64) -> f64 {
+    // Euler-Mascheroni constant γ ≈ 0.5772156649.
+    const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
+
     if x <= 0.0 {
         return if x == 0.0 { f64::NEG_INFINITY } else { f64::NAN };
     }
@@ -1761,7 +1793,6 @@ pub extern "C" fn y1(x: f64) -> f64 {
     }
 
     // Small x: Y1(x) ≈ (2/π) * (J1(x)*ln(x/2) - 1/x).
-    const EULER_GAMMA: f64 = 0.577_215_664_901_532_9;
     let j1x = j1(x);
     let ln_term = log(x / 2.0) + EULER_GAMMA;
     (2.0 / consts::PI) * (j1x * ln_term - 1.0 / x)

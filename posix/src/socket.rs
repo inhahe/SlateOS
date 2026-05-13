@@ -264,6 +264,7 @@ const MAX_SOCKETS: usize = 256;
 /// Contains the socket type and any state needed between `socket()`
 /// and `connect()`/`bind()`.
 #[derive(Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)] // C-compatible struct mirrors BSD socket state; booleans are the natural representation.
 pub(crate) struct SocketMeta {
     /// Socket type (`SOCK_STREAM` or `SOCK_DGRAM`).
     pub(crate) sock_type: i32,
@@ -590,7 +591,7 @@ pub unsafe extern "C" fn inet_pton(af: i32, src: *const u8, dst: *mut u8) -> i32
 ///
 /// `src` must be a valid null-terminated string.
 /// `dst` must point to at least 16 writable bytes.
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)] // Fixed-size arrays indexed within validated bounds (group_count < 8, g < 8, cc_pos+fill+g < 8).
 unsafe fn inet_pton6(src: *const u8, dst: *mut u8) -> i32 {
     let mut groups = [0u16; 8]; // Parsed 16-bit groups.
     let mut group_count: usize = 0;
@@ -821,12 +822,12 @@ fn inet_ntop4(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
 ///
 /// Produces the shortest representation with :: compression for the
 /// longest run of consecutive zero groups (ties broken by earliest).
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)] // Fixed-size [u16;8] and [u8;46] arrays indexed by loop vars bounded to 0..8 / 0..45.
 fn inet_ntop6(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
     // SAFETY: src points to at least 16 bytes (caller contract).
     let mut groups = [0u16; 8];
-    for i in 0..8 {
-        groups[i] = u16::from_be_bytes(unsafe {
+    for (i, group) in groups.iter_mut().enumerate() {
+        *group = u16::from_be_bytes(unsafe {
             [*src.add(i * 2), *src.add(i * 2 + 1)]
         });
     }
@@ -836,8 +837,8 @@ fn inet_ntop6(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
     let mut best_len: usize = 0;
     let mut cur_start: usize = 0;
     let mut cur_len: usize = 0;
-    for i in 0..8 {
-        if groups[i] == 0 {
+    for (i, &group_val) in groups.iter().enumerate() {
+        if group_val == 0 {
             if cur_len == 0 {
                 cur_start = i;
             }
@@ -870,8 +871,8 @@ fn inet_ntop6(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
         if i == best_start {
             // Emit ::
             if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
-            if i == 0 {
-                if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
+            if i == 0 && pos < 45 {
+                tmp[pos] = b':'; pos = pos.wrapping_add(1);
             }
             i = i.wrapping_add(best_len);
             if i >= 8 {
@@ -880,8 +881,10 @@ fn inet_ntop6(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
             }
             continue;
         }
-        if i > 0 && !(i == best_start.wrapping_add(best_len) && best_start < 8) {
-            if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
+        if i > 0 && !(i == best_start.wrapping_add(best_len) && best_start < 8)
+            && pos < 45
+        {
+            tmp[pos] = b':'; pos = pos.wrapping_add(1);
         }
         // Write hex group without leading zeros.
         write_hex16_ntop(&mut tmp, &mut pos, groups[i]);
@@ -910,7 +913,7 @@ fn inet_ntop6(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
 }
 
 /// Write a 16-bit value as lowercase hex without leading zeros.
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)] // nibble is 0..=15, always valid index into 16-byte HEX table.
 fn write_hex16_ntop(buf: &mut [u8; 46], pos: &mut usize, val: u16) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     if val == 0 {
@@ -1105,6 +1108,7 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
 ///
 /// `addr` must point to a valid `SockaddrIn` of at least `addrlen` bytes.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_lines)] // Splitting this function would fragment the connect() logic across TCP/UDP handling.
 pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: SocklenT) -> i32 {
     if addr.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -2267,6 +2271,7 @@ pub(crate) fn tcp_send_wait(
 /// `buf` must be valid for `len` bytes.  `dest_addr` must point to
 /// a valid `SockaddrIn` of at least `addrlen` bytes.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_lines)] // Unified TCP/UDP sendto with implicit bind; splitting would scatter the logic.
 pub unsafe extern "C" fn sendto(
     fd: i32,
     buf: *const u8,
@@ -2381,14 +2386,12 @@ pub unsafe extern "C" fn sendto(
         // If this socket was connected (has a peer set), re-apply the
         // kernel-side peer filter so recvfrom() only returns datagrams
         // from the connected peer.
-        if let Some(meta) = get_meta(fd) {
-            if meta.peer_addr != 0 || meta.peer_port != 0 {
-                let peer_port_host = u16::from_be(meta.peer_port);
-                let _ = syscall3(
-                    SYS_UDP_CONNECT, new_handle,
-                    u64::from(meta.peer_addr), u64::from(peer_port_host),
-                );
-            }
+        if let Some(meta) = get_meta(fd) && (meta.peer_addr != 0 || meta.peer_port != 0) {
+            let peer_port_host = u16::from_be(meta.peer_port);
+            let _ = syscall3(
+                SYS_UDP_CONNECT, new_handle,
+                u64::from(meta.peer_addr), u64::from(peer_port_host),
+            );
         }
         new_handle
     } else {
@@ -2423,6 +2426,7 @@ pub unsafe extern "C" fn sendto(
 /// `buf` must be valid for `len` bytes.  If `src_addr` is non-null,
 /// it must point to a buffer of at least `*addrlen` bytes.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_lines)] // TCP/UDP recvfrom with blocking, timeout, and address fill logic; splitting would fragment the flow.
 pub unsafe extern "C" fn recvfrom(
     fd: i32,
     buf: *mut u8,
@@ -2484,30 +2488,32 @@ pub unsafe extern "C" fn recvfrom(
                 buf as u64, len as u64, u64::from(try_flags),
             );
 
-            let recv_result = if ret > 0 {
-                // MSG_WAITALL: keep receiving until full.
-                if waitall && (ret as usize) < len {
-                    tcp_recv_waitall(
-                        entry.handle, buf, len, kern_flags, timeout_ms, ret as usize,
-                    )
-                } else {
-                    ret as isize
-                }
-            } else if ret == 0 {
-                0 // EOF
-            } else {
-                let err = translate_net_error(ret);
-                if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
-                    if waitall {
+            let recv_result = match ret.cmp(&0) {
+                core::cmp::Ordering::Greater => {
+                    // MSG_WAITALL: keep receiving until full.
+                    if waitall && (ret as usize) < len {
                         tcp_recv_waitall(
-                            entry.handle, buf, len, kern_flags, timeout_ms, 0,
+                            entry.handle, buf, len, kern_flags, timeout_ms, ret as usize,
                         )
                     } else {
-                        tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms)
+                        ret as isize
                     }
-                } else {
-                    errno::set_errno(err);
-                    return -1;
+                }
+                core::cmp::Ordering::Equal => 0, // EOF
+                core::cmp::Ordering::Less => {
+                    let err = translate_net_error(ret);
+                    if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
+                        if waitall {
+                            tcp_recv_waitall(
+                                entry.handle, buf, len, kern_flags, timeout_ms, 0,
+                            )
+                        } else {
+                            tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms)
+                        }
+                    } else {
+                        errno::set_errno(err);
+                        return -1;
+                    }
                 }
             };
 
@@ -2710,6 +2716,7 @@ pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
 /// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
 #[allow(clippy::similar_names)] // tv_sec/tv_usec are standard POSIX field names.
+#[allow(clippy::too_many_lines)] // Large match over socket option levels/names; splitting would scatter related option handling.
 pub extern "C" fn setsockopt(
     fd: i32,
     level: i32,
@@ -2764,11 +2771,11 @@ pub extern "C" fn setsockopt(
             }
             (SOL_SOCKET, SO_RCVBUF) => { meta.rcvbuf = val.max(1); }
             (SOL_SOCKET, SO_SNDBUF) => { meta.sndbuf = val.max(1); }
-            // RCVLOWAT/SNDLOWAT: accept silently. Linux also ignores
-            // SNDLOWAT (always 1) and clamps RCVLOWAT. We accept both as
-            // no-ops since our poll/select doesn't use per-socket watermarks.
-            (SOL_SOCKET, SO_RCVLOWAT) => {}
-            (SOL_SOCKET, SO_SNDLOWAT) => {}
+            // RCVLOWAT/SNDLOWAT, REUSEPORT, multicast TTL/loop:
+            // documented no-ops — intentionally same body as wildcard arm.
+            #[allow(clippy::match_same_arms)]
+            (SOL_SOCKET, SO_RCVLOWAT | SO_SNDLOWAT | SO_REUSEPORT)
+            | (SOL_IP, IP_MULTICAST_TTL | IP_MULTICAST_LOOP) => {}
             (SOL_SOCKET, SO_BROADCAST) => { meta.broadcast = val != 0; }
             (SOL_SOCKET, SO_LINGER) => {
                 // BSD struct linger { int l_onoff; int l_linger; } = 8 bytes.
@@ -2787,10 +2794,6 @@ pub extern "C" fn setsockopt(
                     meta.linger_secs = val;
                 }
             }
-            (SOL_SOCKET, SO_REUSEPORT) => {
-                // Accept silently — reuseport is not meaningful with our
-                // single-socket-per-port kernel model.
-            }
             (SOL_SOCKET, SO_RCVTIMEO) => {
                 // Timeout is a timeval struct: {tv_sec, tv_usec}.
                 // If optlen is >= 16 (sizeof timeval), parse as timeval.
@@ -2806,7 +2809,7 @@ pub extern "C" fn setsockopt(
                     // that any non-zero timeval yields at least 1ms (otherwise
                     // {0, 500us} would store as 0ms = "no timeout" = block forever).
                     (tv_sec.max(0) as u64).saturating_mul(1000)
-                        .saturating_add(((tv_usec.max(0) as u64) + 999) / 1000)
+                        .saturating_add((tv_usec.max(0) as u64).div_ceil(1000))
                 } else {
                     val.max(0) as u64
                 };
@@ -2822,7 +2825,7 @@ pub extern "C" fn setsockopt(
                     };
                     // Ceiling division (same rationale as SO_RCVTIMEO above).
                     (tv_sec.max(0) as u64).saturating_mul(1000)
-                        .saturating_add(((tv_usec.max(0) as u64) + 999) / 1000)
+                        .saturating_add((tv_usec.max(0) as u64).div_ceil(1000))
                 } else {
                     val.max(0) as u64
                 };
@@ -2882,11 +2885,6 @@ pub extern "C" fn setsockopt(
                     );
                 }
             }
-            (SOL_IP, IP_MULTICAST_TTL | IP_MULTICAST_LOOP) => {
-                // Accept silently — no kernel support for these yet,
-                // but programs often set them alongside IP_ADD_MEMBERSHIP.
-                // Note: IPPROTO_IP == SOL_IP == 0, so this arm covers both.
-            }
             _ => {
                 // Accept unknown options silently — many programs set
                 // options we don't implement and don't check the result.
@@ -2932,7 +2930,7 @@ fn setsockopt_multicast(
         SYS_UDP_MCAST_LEAVE
     };
 
-    let ret = syscall2(syscall_nr, entry.handle, group_addr as u64);
+    let ret = syscall2(syscall_nr, entry.handle, u64::from(group_addr));
     if ret < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -2950,6 +2948,7 @@ fn setsockopt_multicast(
 /// Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
 #[allow(clippy::similar_names)] // tv_sec/tv_usec are standard POSIX field names.
+#[allow(clippy::too_many_lines)] // Large match over socket option levels/names; splitting would scatter related option handling.
 pub unsafe extern "C" fn getsockopt(
     fd: i32,
     level: i32,
@@ -3013,7 +3012,10 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_SOCKET, SO_RCVBUF) => meta.map_or(65536, |m| m.rcvbuf),
             (SOL_SOCKET, SO_SNDBUF) => meta.map_or(65536, |m| m.sndbuf),
             (SOL_SOCKET, SO_BROADCAST) => meta.map_or(0, |m| i32::from(m.broadcast)),
-            (SOL_SOCKET, SO_REUSEPORT) => 0,  // Port reuse not supported.
+            // These options all return 0: no port reuse, no user timeout, no DSCP/TOS.
+            (SOL_SOCKET, SO_REUSEPORT)
+            | (SOL_TCP, TCP_USER_TIMEOUT)
+            | (SOL_IP, IP_TOS) => 0,
             (SOL_SOCKET, SO_LINGER) => {
                 // Return struct linger { int l_onoff; int l_linger; } = 8 bytes.
                 if available >= 8 {
@@ -3036,7 +3038,9 @@ pub unsafe extern "C" fn getsockopt(
                 // Return as timeval if buffer is big enough.
                 let ms = meta.map_or(0u64, |m| m.rcvtimeo_ms);
                 if available >= 16 {
+                    #[allow(clippy::arithmetic_side_effects)] // ms%1000 is 0..999; *1000 cannot overflow u64.
                     let tv_sec = (ms / 1000) as i64;
+                    #[allow(clippy::arithmetic_side_effects)]
                     let tv_usec = ((ms % 1000) * 1000) as i64;
                     core::ptr::copy_nonoverlapping(
                         (&raw const tv_sec).cast::<u8>(), optval, 8,
@@ -3053,7 +3057,9 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_SOCKET, SO_SNDTIMEO) => {
                 let ms = meta.map_or(0u64, |m| m.sndtimeo_ms);
                 if available >= 16 {
+                    #[allow(clippy::arithmetic_side_effects)] // ms%1000 is 0..999; *1000 cannot overflow u64.
                     let tv_sec = (ms / 1000) as i64;
+                    #[allow(clippy::arithmetic_side_effects)]
                     let tv_usec = ((ms % 1000) * 1000) as i64;
                     core::ptr::copy_nonoverlapping(
                         (&raw const tv_sec).cast::<u8>(), optval, 8,
@@ -3066,8 +3072,10 @@ pub unsafe extern "C" fn getsockopt(
                 }
                 (ms / 1000) as i32
             }
-            (SOL_SOCKET, SO_RCVLOWAT) => 1, // Default: readable when ≥1 byte available.
-            (SOL_SOCKET, SO_SNDLOWAT) => 1, // Default: writable when ≥1 byte of space.
+            // Default: readable/writable when >=1 byte available/of space.
+            // Multicast TTL defaults to 1; multicast loopback defaults to enabled (1).
+            (SOL_SOCKET, SO_RCVLOWAT | SO_SNDLOWAT)
+            | (SOL_IP, IP_MULTICAST_TTL | IP_MULTICAST_LOOP) => 1,
             (SOL_SOCKET, SO_ACCEPTCONN) => i32::from(entry.kind == HandleKind::TcpListener),
             (SOL_SOCKET, SO_DOMAIN) => AF_INET,
             (SOL_SOCKET, SO_PROTOCOL) => match entry.kind {
@@ -3081,7 +3089,6 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_TCP, TCP_KEEPCNT) => meta.map_or(9, |m| m.keepcnt),
             (SOL_TCP, TCP_MAXSEG) => 1460,   // Default MSS (Ethernet MTU - headers).
             (SOL_TCP, TCP_CORK) => meta.map_or(0, |m| i32::from(m.cork)),
-            (SOL_TCP, TCP_USER_TIMEOUT) => 0, // No user timeout.
             (SOL_TCP, TCP_INFO) => {
                 // TCP_INFO returns a 48-byte struct with connection details.
                 // Query the kernel directly — this is a variable-size option.
@@ -3107,9 +3114,6 @@ pub unsafe extern "C" fn getsockopt(
             // IP-level options: return sensible defaults even though we
             // don't have per-socket kernel storage for these yet.
             (SOL_IP, IP_TTL) => 64,               // Default unicast TTL.
-            (SOL_IP, IP_TOS) => 0,                // Default: no DSCP/TOS.
-            (SOL_IP, IP_MULTICAST_TTL) => 1,      // Default multicast TTL.
-            (SOL_IP, IP_MULTICAST_LOOP) => 1,     // Default: loopback enabled.
             _ => {
                 errno::set_errno(errno::ENOPROTOOPT);
                 return -1;
@@ -3247,7 +3251,12 @@ pub unsafe extern "C" fn getsockname(
     // Determine the local port.  If the metadata has an explicit bound port
     // (from bind()), use it.  Otherwise query the kernel for the ephemeral
     // port assigned during connect() or bind(port=0).
-    let entry = fdtable::get_fd(fd).unwrap(); // Already validated above.
+    // get_fd(fd) was already checked at the top, so this is unreachable
+    // in practice, but we handle the None case gracefully.
+    let Some(entry) = fdtable::get_fd(fd) else {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    };
     let local_port = if meta.bound_port != 0 {
         meta.bound_port
     } else if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
@@ -3719,6 +3728,7 @@ static mut GAI_ADDR2: SockaddrIn = SockaddrIn {
 /// - `node` and `service` must be valid null-terminated strings (or null).
 /// - `res` must be a valid pointer to a `*mut Addrinfo`.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_lines)] // DNS resolution + result assembly; splitting would scatter the getaddrinfo logic.
 pub unsafe extern "C" fn getaddrinfo(
     node: *const u8,
     service: *const u8,
@@ -3814,11 +3824,10 @@ pub unsafe extern "C" fn getaddrinfo(
             if serv.is_null() {
                 // POSIX: service name not found → EAI_SERVICE.
                 return EAI_SERVICE;
-            } else {
-                // s_port is in network byte order.
-                let s = unsafe { &*serv };
-                u16::from_be(s.s_port as u16)
             }
+            // s_port is in network byte order.
+            let s = unsafe { &*serv };
+            u16::from_be(s.s_port as u16)
         }
     };
 
@@ -3960,7 +3969,8 @@ pub const NI_DGRAM: i32 = 16;
 ///
 /// Returns 0 on success, or an EAI_* error code.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // POSIX-defined signature.
+#[allow(clippy::too_many_lines)] // Host + service formatting with reverse DNS; splitting would fragment the logic.
 pub extern "C" fn getnameinfo(
     sa: *const SockaddrIn,
     _salen: SocklenT,
@@ -3994,7 +4004,7 @@ pub extern "C" fn getnameinfo(
             let ip_u32 = u32::from_be_bytes(ip_bytes);
             let ret = crate::syscall::syscall3(
                 crate::syscall::SYS_DNS_REVERSE_RESOLVE,
-                ip_u32 as u64,
+                u64::from(ip_u32),
                 host as u64,
                 // Reserve 1 byte for null terminator.
                 (hostlen as usize).saturating_sub(1) as u64,
@@ -4068,7 +4078,7 @@ pub extern "C" fn getnameinfo(
 
         // Try service name lookup unless NI_NUMERICSERV is set.
         if (flags & NI_NUMERICSERV) == 0 && port > 0 {
-            let port_nbo = addr.sin_port as i32;
+            let port_nbo = i32::from(addr.sin_port);
             let proto = if (flags & NI_DGRAM) != 0 {
                 c"udp".as_ptr().cast::<u8>()
             } else {
@@ -4230,6 +4240,8 @@ pub struct Cmsghdr {
 /// larger messages, sends each iov sequentially.
 /// Ancillary data (`msg_control`) is ignored.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_lines)] // Scatter/gather send with stack buffer consolidation for TCP/UDP; splitting would fragment the iov assembly logic.
+#[allow(clippy::cast_ptr_alignment)] // SAFETY: msg_name is typed as *mut u8 in Msghdr but actually points to a sockaddr; callers guarantee correct alignment.
 pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isize {
     const STACK_BUF: usize = 4096;
     const LARGE_BUF: usize = 16384;
@@ -4435,6 +4447,8 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
 /// receives into a stack buffer and copies out to each iov.
 /// Ancillary data (`msg_control`) is not populated.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_lines)] // Scatter/gather recv with multi-iov distribution and MSG_WAITALL; splitting would fragment the logic.
+#[allow(clippy::cast_ptr_alignment)] // SAFETY: msg_name is typed as *mut u8 in Msghdr but actually points to a sockaddr; callers guarantee correct alignment.
 pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize {
     const STACK_BUF_SMALL: usize = 4096;
     const STACK_BUF_LARGE: usize = 16384; // One 16 KiB page.
@@ -4469,7 +4483,7 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
                     iov.iov_len,
                     flags,
                     m.msg_name.cast::<Sockaddr>(),
-                    &mut addrlen,
+                    &raw mut addrlen,
                 )
             };
             m.msg_namelen = addrlen;
@@ -4511,67 +4525,66 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
     // sequentially, bypassing the 4 KiB stack buffer.  The stack buffer
     // approach would cap the receive at 4096 bytes total, violating
     // MSG_WAITALL semantics when total_cap > 4096.
-    if (flags & MSG_WAITALL) != 0 {
-        if let Some(entry) = fdtable::get_fd(fd) {
-            if entry.kind == HandleKind::TcpStream {
-                let mut total_recv: isize = 0;
-                let want_name = !m.msg_name.is_null() && m.msg_namelen > 0;
-                let mut got_name = false;
-                i = 0;
-                while i < m.msg_iovlen {
-                    // SAFETY: msg_iov is valid for msg_iovlen entries.
-                    let iov = unsafe { &*m.msg_iov.add(i) };
-                    if iov.iov_len > 0 && !iov.iov_base.is_null() {
-                        // Get source address from the first successful recv.
-                        let n = if want_name && !got_name {
-                            let mut addrlen = m.msg_namelen;
-                            let r = unsafe {
-                                recvfrom(
-                                    fd,
-                                    iov.iov_base.cast::<u8>(),
-                                    iov.iov_len,
-                                    flags,
-                                    m.msg_name.cast::<Sockaddr>(),
-                                    &mut addrlen,
-                                )
-                            };
-                            if r > 0 {
-                                m.msg_namelen = addrlen;
-                                got_name = true;
-                            }
-                            r
-                        } else {
-                            unsafe { recv(fd, iov.iov_base, iov.iov_len, flags) }
-                        };
-                        if n < 0 {
-                            // Error: return partial data if any, else propagate.
-                            if total_recv > 0 {
-                                break;
-                            }
-                            m.msg_flags = 0;
-                            m.msg_controllen = 0;
-                            return n;
-                        }
-                        if n == 0 {
-                            // EOF: return what we have (POSIX: short read on EOF).
-                            break;
-                        }
-                        total_recv = total_recv.wrapping_add(n);
-                        // Short recv within this iov means EOF/timeout reached.
-                        if (n as usize) < iov.iov_len {
-                            break;
-                        }
+    if (flags & MSG_WAITALL) != 0
+        && let Some(entry) = fdtable::get_fd(fd)
+        && entry.kind == HandleKind::TcpStream
+    {
+        let mut total_recv: isize = 0;
+        let want_name = !m.msg_name.is_null() && m.msg_namelen > 0;
+        let mut got_name = false;
+        i = 0;
+        while i < m.msg_iovlen {
+            // SAFETY: msg_iov is valid for msg_iovlen entries.
+            let iov = unsafe { &*m.msg_iov.add(i) };
+            if iov.iov_len > 0 && !iov.iov_base.is_null() {
+                // Get source address from the first successful recv.
+                let n = if want_name && !got_name {
+                    let mut addrlen = m.msg_namelen;
+                    let r = unsafe {
+                        recvfrom(
+                            fd,
+                            iov.iov_base.cast::<u8>(),
+                            iov.iov_len,
+                            flags,
+                            m.msg_name.cast::<Sockaddr>(),
+                            &raw mut addrlen,
+                        )
+                    };
+                    if r > 0 {
+                        m.msg_namelen = addrlen;
+                        got_name = true;
                     }
-                    i = i.wrapping_add(1);
+                    r
+                } else {
+                    unsafe { recv(fd, iov.iov_base, iov.iov_len, flags) }
+                };
+                if n < 0 {
+                    // Error: return partial data if any, else propagate.
+                    if total_recv > 0 {
+                        break;
+                    }
+                    m.msg_flags = 0;
+                    m.msg_controllen = 0;
+                    return n;
                 }
-                if !got_name {
-                    m.msg_namelen = 0;
+                if n == 0 {
+                    // EOF: return what we have (POSIX: short read on EOF).
+                    break;
                 }
-                m.msg_flags = 0;
-                m.msg_controllen = 0;
-                return total_recv;
+                total_recv = total_recv.wrapping_add(n);
+                // Short recv within this iov means EOF/timeout reached.
+                if (n as usize) < iov.iov_len {
+                    break;
+                }
             }
+            i = i.wrapping_add(1);
         }
+        if !got_name {
+            m.msg_namelen = 0;
+        }
+        m.msg_flags = 0;
+        m.msg_controllen = 0;
+        return total_recv;
     }
 
     // Receive into a stack buffer, then distribute across iovs.
@@ -4599,7 +4612,7 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
             let r = unsafe {
                 recvfrom(
                     fd, buf.as_mut_ptr(), recv_cap, flags,
-                    m.msg_name.cast::<Sockaddr>(), &mut addrlen,
+                    m.msg_name.cast::<Sockaddr>(), &raw mut addrlen,
                 )
             };
             m.msg_namelen = addrlen;
@@ -4644,7 +4657,7 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
             let r = unsafe {
                 recvfrom(
                     fd, buf.as_mut_ptr(), recv_cap, flags,
-                    m.msg_name.cast::<Sockaddr>(), &mut addrlen,
+                    m.msg_name.cast::<Sockaddr>(), &raw mut addrlen,
                 )
             };
             m.msg_namelen = addrlen;
@@ -5019,8 +5032,8 @@ static mut SERVENT_RESULT: Servent = Servent {
 ///
 /// Modifies static mutable storage.  Not thread-safe.
 unsafe fn fill_servent(entry: &ServiceEntry) -> *const Servent {
-    let name_ptr = core::ptr::addr_of_mut!(SERVENT_NAME) as *mut u8;
-    let proto_ptr = core::ptr::addr_of_mut!(SERVENT_PROTO) as *mut u8;
+    let name_ptr = core::ptr::addr_of_mut!(SERVENT_NAME).cast::<u8>();
+    let proto_ptr = core::ptr::addr_of_mut!(SERVENT_PROTO).cast::<u8>();
     let aliases_ptr = core::ptr::addr_of_mut!(SERVENT_ALIASES);
     let result_ptr = core::ptr::addr_of_mut!(SERVENT_RESULT);
 
@@ -5043,7 +5056,7 @@ unsafe fn fill_servent(entry: &ServiceEntry) -> *const Servent {
         // Assemble result.
         (*result_ptr).s_name = name_ptr;
         (*result_ptr).s_aliases = (*aliases_ptr).as_ptr();
-        (*result_ptr).s_port = entry.port.to_be() as i32;
+        (*result_ptr).s_port = i32::from(entry.port.to_be());
         (*result_ptr).s_proto = proto_ptr;
     }
 
@@ -5078,10 +5091,10 @@ pub unsafe extern "C" fn getservbyname(
     };
 
     for entry in SERVICES {
-        if entry.name == name_slice {
-            if proto_slice.is_empty() || entry.proto == proto_slice {
-                return unsafe { fill_servent(entry) };
-            }
+        if entry.name == name_slice
+            && (proto_slice.is_empty() || entry.proto == proto_slice)
+        {
+            return unsafe { fill_servent(entry) };
         }
     }
     core::ptr::null()
@@ -5109,10 +5122,10 @@ pub unsafe extern "C" fn getservbyport(
     };
 
     for entry in SERVICES {
-        if entry.port == host_port {
-            if proto_slice.is_empty() || entry.proto == proto_slice {
-                return unsafe { fill_servent(entry) };
-            }
+        if entry.port == host_port
+            && (proto_slice.is_empty() || entry.proto == proto_slice)
+        {
+            return unsafe { fill_servent(entry) };
         }
     }
     core::ptr::null()
@@ -5169,9 +5182,9 @@ static mut PROTOENT_RESULT: Protoent = Protoent {
 ///
 /// Modifies static mutable storage.
 unsafe fn fill_protoent(entry: &ProtoEntry) -> *const Protoent {
-    let name_raw = core::ptr::addr_of_mut!(PROTOENT_NAME) as *mut u8;
+    let name_raw = core::ptr::addr_of_mut!(PROTOENT_NAME).cast::<u8>();
     let aliases_ptr = core::ptr::addr_of_mut!(PROTOENT_ALIASES);
-    let alias_buf_raw = core::ptr::addr_of_mut!(PROTOENT_ALIAS_BUF) as *mut u8;
+    let alias_buf_raw = core::ptr::addr_of_mut!(PROTOENT_ALIAS_BUF).cast::<u8>();
     let result_ptr = core::ptr::addr_of_mut!(PROTOENT_RESULT);
 
     // SAFETY: All static buffers are valid for the lifetime of the program,
@@ -5219,18 +5232,12 @@ pub unsafe extern "C" fn getprotobyname(name: *const u8) -> *const Protoent {
 
     for entry in PROTOCOLS {
         // Match by name (case-insensitive).
-        if entry.name.len() == name_slice.len()
-            && entry.name.iter().zip(name_slice.iter())
-                .all(|(&a, &b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
-        {
+        if entry.name.eq_ignore_ascii_case(name_slice) {
             return unsafe { fill_protoent(entry) };
         }
         // Also match against aliases.
         for &alias in entry.aliases {
-            if alias.len() == name_slice.len()
-                && alias.iter().zip(name_slice.iter())
-                    .all(|(&a, &b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
-            {
+            if alias.eq_ignore_ascii_case(name_slice) {
                 return unsafe { fill_protoent(entry) };
             }
         }
@@ -5306,8 +5313,7 @@ pub(crate) fn translate_net_error(code: i64) -> i32 {
         -304 => errno::ENOMEM,       // ResourceExhausted
 
         // Capability / permission.
-        -400 => errno::EACCES,       // PermissionDenied
-        -401 => errno::EACCES,       // InvalidCapability
+        -400 | -401 => errno::EACCES, // PermissionDenied / InvalidCapability
 
         // Filesystem / not-found.
         -500 => errno::ENOENT,       // NotFound  (also ECONNREFUSED for connect)

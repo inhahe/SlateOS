@@ -867,7 +867,7 @@ fn scan_float(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> 
     // "1.5" is).
     if count < width && (ctx.peek() == b'e' || ctx.peek() == b'E') && bi < 62 {
         let saved_si = ctx.si;
-        let saved_bi = bi;
+        let saved_buf_idx = bi;
         let save_count = count;
 
         buf_put(&mut buf, &mut bi, ctx.peek());
@@ -890,7 +890,7 @@ fn scan_float(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> 
         if count == exp_digit_start {
             // No exponent digits after 'e'[sign] — rollback.
             ctx.si = saved_si;
-            bi = saved_bi;
+            bi = saved_buf_idx;
             let _ = save_count; // count unused after this block.
         }
     }
@@ -950,7 +950,10 @@ fn scan_scanset(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
     // not the closing bracket.
     if ctx.fmt_peek() == b']' {
         let c = b']';
-        bitmap[(c >> 3) as usize] |= 1u8 << (c & 7);
+        // SAFETY: c is u8 so c >> 3 <= 31 < 32, always in bounds.
+        if let Some(slot) = bitmap.get_mut((c >> 3) as usize) {
+            *slot |= 1u8 << (c & 7);
+        }
         ctx.fmt_advance();
     }
 
@@ -971,7 +974,10 @@ fn scan_scanset(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
             let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
             let mut ch = lo;
             loop {
-                bitmap[(ch >> 3) as usize] |= 1u8 << (ch & 7);
+                // SAFETY: ch is u8 so ch >> 3 <= 31 < 32, always in bounds.
+                if let Some(slot) = bitmap.get_mut((ch >> 3) as usize) {
+                    *slot |= 1u8 << (ch & 7);
+                }
                 if ch == hi {
                     break;
                 }
@@ -982,7 +988,10 @@ fn scan_scanset(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
             ctx.fmt_advance(); // skip end
         } else {
             // Single character.
-            bitmap[(c >> 3) as usize] |= 1u8 << (c & 7);
+            // SAFETY: c is u8 so c >> 3 <= 31 < 32, always in bounds.
+            if let Some(slot) = bitmap.get_mut((c >> 3) as usize) {
+                *slot |= 1u8 << (c & 7);
+            }
             ctx.fmt_advance();
         }
     }
@@ -1007,7 +1016,8 @@ fn scan_scanset(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
             break;
         }
 
-        let in_set = (bitmap[(c >> 3) as usize] & (1u8 << (c & 7))) != 0;
+        // SAFETY: c is u8 so c >> 3 <= 31 < 32, always in bounds.
+        let in_set = bitmap.get((c >> 3) as usize).is_some_and(|slot| slot & (1u8 << (c & 7)) != 0);
         let matches = if negated { !in_set } else { in_set };
 
         if !matches {

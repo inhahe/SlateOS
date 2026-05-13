@@ -217,6 +217,12 @@ fn stream_to_file(stream: *mut u8) -> *mut File {
         STDIN_SENTINEL => core::ptr::addr_of_mut!(STDIN_FILE),
         STDOUT_SENTINEL => core::ptr::addr_of_mut!(STDOUT_FILE),
         STDERR_SENTINEL => core::ptr::addr_of_mut!(STDERR_FILE),
+        // SAFETY: Non-sentinel FILE* values are real `File` pointers returned
+        // by fopen, which allocates from FILE_POOL (a static [File; MAX_FILES]).
+        // Those slots are naturally aligned to `File`'s alignment (8 bytes).
+        // The u8 sentinel encoding is only applied to values 0/1/2; all other
+        // pointer values come from addr_of_mut! on File-aligned storage.
+        #[allow(clippy::cast_ptr_alignment)]
         _ => stream.cast::<File>(),
     }
 }
@@ -262,7 +268,11 @@ fn file_flush(f: *mut File) -> i32 {
                 let mut j: usize = 0;
                 while j < leftover {
                     // SAFETY: j < leftover, written+j < buf_pos <= BUF_SIZE.
-                    file.buf[j] = file.buf[written.wrapping_add(j)];
+                    let src_idx = written.wrapping_add(j);
+                    let src = file.buf.get(src_idx).copied().unwrap_or(0);
+                    if let Some(slot) = file.buf.get_mut(j) {
+                        *slot = src;
+                    }
                     j = j.wrapping_add(1);
                 }
                 file.buf_pos = leftover;
@@ -347,7 +357,10 @@ fn file_write(f: *mut File, data: *const u8, len: usize) -> i64 {
         // matches the logical position.
         if file.buf_len > file.buf_pos {
             let unread = file.buf_len.wrapping_sub(file.buf_pos);
-            let _ = crate::file::lseek(file.fd, -(unread as i64), 1); // SEEK_CUR
+            // unread fits in i64 (both buf_len and buf_pos < BUF_SIZE = 4096).
+            #[allow(clippy::arithmetic_side_effects)]
+            let neg_unread = -(unread as i64);
+            let _ = crate::file::lseek(file.fd, neg_unread, 1); // SEEK_CUR
         }
         file.buf_pos = 0;
         file.buf_len = 0;
@@ -378,10 +391,8 @@ fn file_write(f: *mut File, data: *const u8, len: usize) -> i64 {
             src = src.wrapping_add(1);
 
             // Flush on newline.
-            if byte == b'\n' {
-                if file_flush(f) == EOF {
-                    return if src > 0 { src as i64 } else { -1 };
-                }
+            if byte == b'\n' && file_flush(f) == EOF {
+                return if src > 0 { src as i64 } else { -1 };
             }
         }
         return len as i64;
@@ -413,10 +424,8 @@ fn file_write(f: *mut File, data: *const u8, len: usize) -> i64 {
         file.buf_pos = file.buf_pos.wrapping_add(chunk);
         src = src.wrapping_add(chunk);
 
-        if file.buf_pos >= BUF_SIZE {
-            if file_flush(f) == EOF {
-                return if src > 0 { src as i64 } else { -1 };
-            }
+        if file.buf_pos >= BUF_SIZE && file_flush(f) == EOF {
+            return if src > 0 { src as i64 } else { -1 };
         }
     }
 
@@ -479,7 +488,7 @@ fn file_read_byte(f: *mut File) -> i32 {
 
     file.buf_len = ret as usize;
     file.buf_pos = 1; // Return byte 0, advance past it.
-    i32::from(file.buf.get(0).copied().unwrap_or(0))
+    i32::from(file.buf.first().copied().unwrap_or(0))
 }
 
 /// Read up to `len` bytes from the FILE buffer.
@@ -1074,7 +1083,7 @@ pub extern "C" fn fseek(stream: *mut u8, offset: i64, whence: i32) -> i32 {
     // past data we buffered but haven't returned to the caller yet.
     if whence == SEEK_CUR && f.buf_dir == BUF_DIR_READ {
         let unread = f.buf_len.wrapping_sub(f.buf_pos) as i64;
-        let ungetc_adj = if f.ungetc_byte >= 0 { 1_i64 } else { 0 };
+        let ungetc_adj = i64::from(f.ungetc_byte >= 0);
         actual_offset = offset.wrapping_sub(unread).wrapping_sub(ungetc_adj);
     }
 
@@ -1109,7 +1118,7 @@ pub extern "C" fn ftell(stream: *mut u8) -> i64 {
         BUF_DIR_READ => {
             // The fd has been read ahead; logical position is behind.
             let unread = f.buf_len.wrapping_sub(f.buf_pos) as i64;
-            let ungetc_adj = if f.ungetc_byte >= 0 { 1_i64 } else { 0 };
+            let ungetc_adj = i64::from(f.ungetc_byte >= 0);
             raw_pos.wrapping_sub(unread).wrapping_sub(ungetc_adj)
         }
         BUF_DIR_WRITE => {
@@ -1238,7 +1247,7 @@ pub extern "C" fn fileno(stream: *mut u8) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn feof(stream: *mut u8) -> i32 {
     let file = stream_to_file(stream);
-    if unsafe { (*file).flags } & FLAG_EOF != 0 { 1 } else { 0 }
+    i32::from(unsafe { (*file).flags } & FLAG_EOF != 0)
 }
 
 /// Check error indicator for a stream.
@@ -1247,7 +1256,7 @@ pub extern "C" fn feof(stream: *mut u8) -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn ferror(stream: *mut u8) -> i32 {
     let file = stream_to_file(stream);
-    if unsafe { (*file).flags } & FLAG_ERR != 0 { 1 } else { 0 }
+    i32::from(unsafe { (*file).flags } & FLAG_ERR != 0)
 }
 
 /// Clear error and EOF indicators for a stream.

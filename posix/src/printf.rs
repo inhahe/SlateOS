@@ -280,7 +280,7 @@ pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64, fargs: *const u
         return n;
     }
     let write_len = if (n as usize) < PRINTF_BUF_SIZE { n as usize } else { PRINTF_BUF_SIZE };
-    let ret = crate::stdio::write_stream(1 as *mut u8, buf.as_ptr(), write_len);
+    let ret = crate::stdio::write_stream(core::ptr::dangling_mut::<u8>(), buf.as_ptr(), write_len);
     if ret < 0 { ret as i32 } else { n }
 }
 
@@ -527,6 +527,7 @@ fn parse_spec(
 /// Dispatch a single conversion specifier.
 ///
 /// Returns the updated `fpos` (past the specifier character).
+#[allow(clippy::too_many_arguments)]
 fn dispatch_spec(
     dst: &mut FmtOutput,
     fmt: *const u8,
@@ -1115,9 +1116,8 @@ fn format_float_sci(
         // Find 'e'/'E' position.
         let mut epos = 0;
         while epos < len {
-            if let Some(&b) = buf.get(epos) {
-                if b == b'e' || b == b'E' { break; }
-            }
+            if let Some(&b) = buf.get(epos)
+                && (b == b'e' || b == b'E') { break; }
             epos = epos.wrapping_add(1);
         }
         if epos < len {
@@ -1202,9 +1202,8 @@ fn format_float_general(
             let mut found = false;
             let mut k = 0;
             while k < len {
-                if let Some(&b) = buf.get(k) {
-                    if b == b'.' { found = true; break; }
-                }
+                if let Some(&b) = buf.get(k)
+                    && b == b'.' { found = true; break; }
                 k = k.wrapping_add(1);
             }
             found
@@ -1214,9 +1213,8 @@ fn format_float_general(
             let mut insert_at = len;
             let mut k = 0;
             while k < len {
-                if let Some(&b) = buf.get(k) {
-                    if b == b'e' || b == b'E' { insert_at = k; break; }
-                }
+                if let Some(&b) = buf.get(k)
+                    && (b == b'e' || b == b'E') { insert_at = k; break; }
                 k = k.wrapping_add(1);
             }
             // Shift [insert_at..len] right by 1.
@@ -1312,7 +1310,7 @@ fn emit_float_padded(
 
 /// Format a non-negative f64 in fixed notation into buf.
 /// Returns number of bytes written.
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
 fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
     // When precision is 0, round the value first so that e.g.
     // printf("%.0f", 3.7) outputs "4" not "3".  The fractional-digit
@@ -1414,7 +1412,7 @@ fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
 
 /// Format a non-negative f64 in scientific notation into buf.
 /// Returns number of bytes written.
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
 fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> usize {
     if val == 0.0 {
         let mut pos: usize = 0;
@@ -1501,11 +1499,10 @@ fn trim_trailing_zeros(buf: &mut [u8], len: usize) -> usize {
     let mut exp_pos = len;
     let mut i = 0;
     while i < len {
-        if let Some(&b) = buf.get(i) {
-            if b == b'e' || b == b'E' {
-                exp_pos = i;
-                break;
-            }
+        if let Some(&b) = buf.get(i)
+            && (b == b'e' || b == b'E') {
+            exp_pos = i;
+            break;
         }
         i = i.wrapping_add(1);
     }
@@ -1514,11 +1511,10 @@ fn trim_trailing_zeros(buf: &mut [u8], len: usize) -> usize {
     let mut dot_pos = exp_pos;
     i = 0;
     while i < exp_pos {
-        if let Some(&b) = buf.get(i) {
-            if b == b'.' {
-                dot_pos = i;
-                break;
-            }
+        if let Some(&b) = buf.get(i)
+            && b == b'.' {
+            dot_pos = i;
+            break;
         }
         i = i.wrapping_add(1);
     }
@@ -1530,9 +1526,8 @@ fn trim_trailing_zeros(buf: &mut [u8], len: usize) -> usize {
     // Trim trailing zeros between dot and exp.
     let mut trim_end = exp_pos;
     while trim_end > dot_pos.wrapping_add(1) {
-        if let Some(&b) = buf.get(trim_end.wrapping_sub(1)) {
-            if b != b'0' { break; }
-        }
+        if let Some(&b) = buf.get(trim_end.wrapping_sub(1))
+            && b != b'0' { break; }
         trim_end = trim_end.wrapping_sub(1);
     }
 
@@ -1548,10 +1543,9 @@ fn trim_trailing_zeros(buf: &mut [u8], len: usize) -> usize {
         while k < exp_len {
             let src_idx = exp_pos.wrapping_add(k);
             let dst_idx = trim_end.wrapping_add(k);
-            if let Some(&src) = buf.get(src_idx) {
-                if let Some(dst_slot) = buf.get_mut(dst_idx) {
-                    *dst_slot = src;
-                }
+            if let Some(&src) = buf.get(src_idx)
+                && let Some(dst_slot) = buf.get_mut(dst_idx) {
+                *dst_slot = src;
             }
             k = k.wrapping_add(1);
         }

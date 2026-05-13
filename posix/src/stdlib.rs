@@ -76,6 +76,11 @@ pub unsafe extern "C" fn strtol(
     endptr: *mut *const u8,
     mut base: i32,
 ) -> i64 {
+    // Check range and apply sign.
+    // i64::MIN magnitude as u64 = 2^63 = (i64::MAX as u64) + 1.
+    const POS_MAX: u64 = i64::MAX as u64;
+    const NEG_MAX: u64 = POS_MAX.wrapping_add(1); // 2^63
+
     if nptr.is_null() {
         if !endptr.is_null() {
             unsafe { *endptr = nptr; }
@@ -84,7 +89,7 @@ pub unsafe extern "C" fn strtol(
     }
 
     // POSIX: base must be 0 or in [2, 36].
-    if base != 0 && (base < 2 || base > 36) {
+    if base != 0 && !(2..=36).contains(&base) {
         crate::errno::set_errno(crate::errno::EINVAL);
         if !endptr.is_null() {
             unsafe { *endptr = nptr; }
@@ -170,10 +175,10 @@ pub unsafe extern "C" fn strtol(
 
     if !endptr.is_null() {
         // POSIX: if no conversion performed, endptr = nptr.
-        if !any_digits {
-            unsafe { *endptr = nptr; }
-        } else {
+        if any_digits {
             unsafe { *endptr = nptr.add(i); }
+        } else {
+            unsafe { *endptr = nptr; }
         }
     }
 
@@ -181,25 +186,21 @@ pub unsafe extern "C" fn strtol(
         return 0;
     }
 
-    // Check range and apply sign.
-    // i64::MIN magnitude as u64 = 2^63 = (i64::MAX as u64) + 1.
-    const POS_MAX: u64 = i64::MAX as u64;
-    const NEG_MAX: u64 = POS_MAX.wrapping_add(1); // 2^63
-
     if overflow {
         crate::errno::set_errno(crate::errno::ERANGE);
         return if negative { i64::MIN } else { i64::MAX };
     }
 
     if negative {
-        if result > NEG_MAX {
-            crate::errno::set_errno(crate::errno::ERANGE);
-            i64::MIN
-        } else if result == NEG_MAX {
-            i64::MIN
-        } else {
+        #[allow(clippy::arithmetic_side_effects)]
+        match result.cmp(&NEG_MAX) {
+            core::cmp::Ordering::Greater => {
+                crate::errno::set_errno(crate::errno::ERANGE);
+                i64::MIN
+            }
+            core::cmp::Ordering::Equal => i64::MIN,
             // SAFETY: result <= i64::MAX, so cast is safe; then negate.
-            -(result as i64)
+            core::cmp::Ordering::Less => -(result as i64),
         }
     } else if result > POS_MAX {
         crate::errno::set_errno(crate::errno::ERANGE);
@@ -234,7 +235,7 @@ pub unsafe extern "C" fn strtoul(
     }
 
     // POSIX: base must be 0 or in [2, 36].
-    if base != 0 && (base < 2 || base > 36) {
+    if base != 0 && !(2..=36).contains(&base) {
         crate::errno::set_errno(crate::errno::EINVAL);
         if !endptr.is_null() {
             unsafe { *endptr = nptr; }
@@ -312,10 +313,10 @@ pub unsafe extern "C" fn strtoul(
     }
 
     if !endptr.is_null() {
-        if !any_digits {
-            unsafe { *endptr = nptr; }
-        } else {
+        if any_digits {
             unsafe { *endptr = nptr.add(i); }
+        } else {
+            unsafe { *endptr = nptr; }
         }
     }
 
@@ -382,7 +383,7 @@ pub unsafe extern "C" fn strtoull(
 ///
 /// `nptr` must be a valid null-terminated string.
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
 pub unsafe extern "C" fn strtod(
     nptr: *const u8,
     endptr: *mut *const u8,
@@ -426,7 +427,8 @@ pub unsafe extern "C" fn strtod(
                 let mut all_match = true;
                 while j < 5 {
                     let ch = unsafe { *nptr.add(i.wrapping_add(j)) };
-                    if ch == 0 || (ch | 0x20) != inity[j] {
+                    let expected = inity.get(j).copied().unwrap_or(0);
+                    if ch == 0 || (ch | 0x20) != expected {
                         all_match = false;
                         break;
                     }
@@ -508,10 +510,7 @@ pub unsafe extern "C" fn strtod(
             i = i.wrapping_add(1);
         }
 
-        if !(unsafe { *nptr.add(i) }).is_ascii_digit() {
-            // No exponent digits — roll back.
-            i = before_exp;
-        } else {
+        if (unsafe { *nptr.add(i) }).is_ascii_digit() {
             let mut exp_val: i32 = 0;
             while (unsafe { *nptr.add(i) }).is_ascii_digit() {
                 exp_val = exp_val
@@ -525,6 +524,9 @@ pub unsafe extern "C" fn strtod(
             }
 
             result *= pow10(exp_val);
+        } else {
+            // No exponent digits — roll back.
+            i = before_exp;
         }
     }
 
@@ -560,9 +562,7 @@ pub unsafe extern "C" fn strtof(
     // POSIX: set ERANGE if the f32 result overflows or underflows.
     // strtod already sets ERANGE for f64 overflow; we additionally check
     // for values that fit in f64 but not f32.
-    if f.is_infinite() && !d.is_infinite() {
-        crate::errno::set_errno(crate::errno::ERANGE);
-    } else if f == 0.0 && d != 0.0 {
+    if (f.is_infinite() && !d.is_infinite()) || (f == 0.0 && d != 0.0) {
         crate::errno::set_errno(crate::errno::ERANGE);
     }
     f
@@ -1009,7 +1009,8 @@ pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
         // Fill the 6 X's with alphanumeric characters from random bytes.
         let mut j: usize = 0;
         while j < 6 {
-            let idx = rand_bytes[j] % 36;
+            let rb = rand_bytes.get(j).copied().unwrap_or(0);
+            let idx = rb % 36;
             let ch = if idx < 10 {
                 b'0'.wrapping_add(idx)
             } else {
@@ -1085,7 +1086,8 @@ pub unsafe extern "C" fn mktemp(template: *mut u8) -> *mut u8 {
 
     let mut j: usize = 0;
     while j < 6 {
-        let idx = rand_bytes[j] % 36;
+        let rb = rand_bytes.get(j).copied().unwrap_or(0);
+        let idx = rb % 36;
         let ch = if idx < 10 {
             b'0'.wrapping_add(idx)
         } else {
@@ -1164,7 +1166,8 @@ pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
 
         let mut j: usize = 0;
         while j < 6 {
-            let idx = rand_bytes[j] % 36;
+            let rb = rand_bytes.get(j).copied().unwrap_or(0);
+            let idx = rb % 36;
             let ch = if idx < 10 {
                 b'0'.wrapping_add(idx)
             } else {
@@ -1243,7 +1246,8 @@ pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
 
         let mut j: usize = 0;
         while j < 6 {
-            let idx = rand_bytes[j] % 36;
+            let rb = rand_bytes.get(j).copied().unwrap_or(0);
+            let idx = rb % 36;
             let ch = if idx < 10 {
                 b'0'.wrapping_add(idx)
             } else {
@@ -1375,7 +1379,7 @@ fn char_to_digit(c: u8, base: i32) -> i32 {
 static mut RAND48_STATE: u64 = 0x330E_ABCD_1234_u64;
 
 /// LCG multiplier (POSIX standard value).
-const RAND48_A: u64 = 0x5DEE_CE66_D;
+const RAND48_A: u64 = 0x0005_DEEC_E66D;
 /// LCG addend (POSIX standard value).
 const RAND48_C: u64 = 0xB;
 /// 48-bit mask.
@@ -1395,10 +1399,10 @@ fn rand48_step() -> u64 {
 ///
 /// Uses the full 48-bit state scaled to a double.
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
 pub extern "C" fn drand48() -> f64 {
     let state = rand48_step();
-    // 2^48 = 281474976710656.0
+    // 2^48 = 281474976710656.0; 48-bit value fits in f64's 52-bit mantissa.
     state as f64 / 281_474_976_710_656.0
 }
 
@@ -1414,7 +1418,7 @@ pub extern "C" fn lrand48() -> i64 {
 pub extern "C" fn mrand48() -> i64 {
     let state = rand48_step();
     // Interpret upper 32 bits as signed.
-    ((state >> 16) as i32) as i64
+    i64::from((state >> 16) as i32)
 }
 
 /// Seed the 48-bit PRNG with a 32-bit value.
@@ -1459,9 +1463,9 @@ pub extern "C" fn seed48(seed16v: *const u16) -> *const u16 {
 
     // Set new state from seed16v[0..3].
     // SAFETY: seed16v verified non-null, caller guarantees 3 elements.
-    let s0 = unsafe { *seed16v } as u64;
-    let s1 = unsafe { *seed16v.add(1) } as u64;
-    let s2 = unsafe { *seed16v.add(2) } as u64;
+    let s0 = u64::from(unsafe { *seed16v });
+    let s1 = u64::from(unsafe { *seed16v.add(1) });
+    let s2 = u64::from(unsafe { *seed16v.add(2) });
     let state = (s2 << 32) | (s1 << 16) | s0;
     unsafe { core::ptr::addr_of_mut!(RAND48_STATE).write(state & RAND48_MASK); }
 
@@ -1482,9 +1486,9 @@ pub extern "C" fn nrand48(xsubi: *mut u16) -> i64 {
     }
 
     // Read state from xsubi.
-    let s0 = unsafe { *xsubi } as u64;
-    let s1 = unsafe { *xsubi.add(1) } as u64;
-    let s2 = unsafe { *xsubi.add(2) } as u64;
+    let s0 = u64::from(unsafe { *xsubi });
+    let s1 = u64::from(unsafe { *xsubi.add(1) });
+    let s2 = u64::from(unsafe { *xsubi.add(2) });
     let state = (s2 << 32) | (s1 << 16) | s0;
 
     // Step.
@@ -1506,15 +1510,15 @@ pub extern "C" fn nrand48(xsubi: *mut u16) -> i64 {
 ///
 /// `xsubi` must point to an array of 3 `u16` values.
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, clippy::cast_precision_loss)]
 pub extern "C" fn erand48(xsubi: *mut u16) -> f64 {
     if xsubi.is_null() {
         return 0.0;
     }
 
-    let s0 = unsafe { *xsubi } as u64;
-    let s1 = unsafe { *xsubi.add(1) } as u64;
-    let s2 = unsafe { *xsubi.add(2) } as u64;
+    let s0 = u64::from(unsafe { *xsubi });
+    let s1 = u64::from(unsafe { *xsubi.add(1) });
+    let s2 = u64::from(unsafe { *xsubi.add(2) });
     let state = (s2 << 32) | (s1 << 16) | s0;
 
     let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
@@ -1525,6 +1529,7 @@ pub extern "C" fn erand48(xsubi: *mut u16) -> f64 {
         *xsubi.add(2) = ((next >> 32) & 0xFFFF) as u16;
     }
 
+    // 48-bit value fits in f64's 52-bit mantissa — no precision loss.
     next as f64 / 281_474_976_710_656.0
 }
 
@@ -1540,9 +1545,9 @@ pub extern "C" fn jrand48(xsubi: *mut u16) -> i64 {
         return 0;
     }
 
-    let s0 = unsafe { *xsubi } as u64;
-    let s1 = unsafe { *xsubi.add(1) } as u64;
-    let s2 = unsafe { *xsubi.add(2) } as u64;
+    let s0 = u64::from(unsafe { *xsubi });
+    let s1 = u64::from(unsafe { *xsubi.add(1) });
+    let s2 = u64::from(unsafe { *xsubi.add(2) });
     let state = (s2 << 32) | (s1 << 16) | s0;
 
     let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
@@ -1553,5 +1558,5 @@ pub extern "C" fn jrand48(xsubi: *mut u16) -> i64 {
         *xsubi.add(2) = ((next >> 32) & 0xFFFF) as u16;
     }
 
-    ((next >> 16) as i32) as i64
+    i64::from((next >> 16) as i32)
 }

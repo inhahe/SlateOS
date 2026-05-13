@@ -339,3 +339,274 @@ pub fn is_handle_referenced(kind: HandleKind, handle: u64) -> bool {
     }
     false
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Allocate an fd and immediately close it, returning the fd number.
+    /// Helper for tests that need a disposable fd.
+    fn alloc_and_close(kind: HandleKind, handle: u64) -> i32 {
+        let fd = alloc_fd(kind, handle).expect("alloc_fd failed");
+        let _ = close_fd(fd);
+        fd
+    }
+
+    // -- Constants --
+
+    #[test]
+    fn test_max_fds_value() {
+        assert_eq!(MAX_FDS, 256);
+    }
+
+    #[test]
+    fn test_fd_cloexec_value() {
+        assert_eq!(FD_CLOEXEC, 1);
+    }
+
+    // -- HandleKind --
+
+    #[test]
+    fn test_handle_kind_equality() {
+        assert_eq!(HandleKind::File, HandleKind::File);
+        assert_ne!(HandleKind::File, HandleKind::Pipe);
+        assert_ne!(HandleKind::Console, HandleKind::TcpStream);
+    }
+
+    // -- Pre-initialized fds 0/1/2 --
+
+    #[test]
+    fn test_stdio_fds_exist() {
+        // fds 0, 1, 2 are pre-initialized as Console handles.
+        let stdin = get_fd(0);
+        assert!(stdin.is_some(), "fd 0 (stdin) should exist");
+        assert_eq!(stdin.unwrap().kind, HandleKind::Console);
+
+        let stdout = get_fd(1);
+        assert!(stdout.is_some(), "fd 1 (stdout) should exist");
+        assert_eq!(stdout.unwrap().kind, HandleKind::Console);
+
+        let stderr = get_fd(2);
+        assert!(stderr.is_some(), "fd 2 (stderr) should exist");
+        assert_eq!(stderr.unwrap().kind, HandleKind::Console);
+    }
+
+    // -- get_fd boundary checks --
+
+    #[test]
+    fn test_get_fd_negative() {
+        assert!(get_fd(-1).is_none());
+        assert!(get_fd(i32::MIN).is_none());
+    }
+
+    #[test]
+    fn test_get_fd_out_of_range() {
+        assert!(get_fd(MAX_FDS as i32).is_none());
+        assert!(get_fd(1000).is_none());
+    }
+
+    #[test]
+    fn test_get_fd_unoccupied() {
+        // A high-numbered fd should be unoccupied in a fresh table.
+        assert!(get_fd(200).is_none());
+    }
+
+    // -- alloc_fd / close_fd --
+
+    #[test]
+    fn test_alloc_fd_uses_lowest_available() {
+        // fds 0, 1, 2 are occupied → first free should be 3.
+        let fd = alloc_fd(HandleKind::File, 100).expect("alloc_fd failed");
+        assert_eq!(fd, 3, "should allocate fd 3 (lowest free)");
+        // Cleanup.
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_alloc_fd_returns_entry_on_close() {
+        let fd = alloc_fd(HandleKind::Pipe, 42).expect("alloc_fd failed");
+        let entry = close_fd(fd).expect("close_fd should return entry");
+        assert_eq!(entry.kind, HandleKind::Pipe);
+        assert_eq!(entry.handle, 42);
+    }
+
+    #[test]
+    fn test_close_fd_makes_slot_reusable() {
+        let fd1 = alloc_fd(HandleKind::File, 10).unwrap();
+        let _ = close_fd(fd1);
+        // Allocating again should reuse the same fd.
+        let fd2 = alloc_fd(HandleKind::File, 20).unwrap();
+        assert_eq!(fd1, fd2, "freed fd should be reusable");
+        let _ = close_fd(fd2);
+    }
+
+    #[test]
+    fn test_close_fd_negative() {
+        assert!(close_fd(-1).is_none());
+    }
+
+    #[test]
+    fn test_close_fd_unoccupied() {
+        assert!(close_fd(200).is_none());
+    }
+
+    // -- alloc_fd_from --
+
+    #[test]
+    fn test_alloc_fd_from_min() {
+        let fd = alloc_fd_from(100, HandleKind::File, 55).unwrap();
+        assert!(fd >= 100);
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_alloc_fd_from_negative() {
+        assert!(alloc_fd_from(-1, HandleKind::File, 0).is_none());
+    }
+
+    // -- alloc_fd_with_flags --
+
+    #[test]
+    fn test_alloc_fd_with_status_flags() {
+        let flags = 0o2000; // O_APPEND
+        let fd = alloc_fd_with_flags(HandleKind::File, 99, flags).unwrap();
+        let entry = get_fd(fd).unwrap();
+        assert_eq!(entry.status_flags, flags);
+        let _ = close_fd(fd);
+    }
+
+    // -- fd flags (FD_CLOEXEC) --
+
+    #[test]
+    fn test_get_set_fd_flags() {
+        let fd = alloc_fd(HandleKind::File, 77).unwrap();
+
+        // Initially 0.
+        assert_eq!(get_fd_flags(fd), Some(0));
+
+        // Set FD_CLOEXEC.
+        assert!(set_fd_flags(fd, FD_CLOEXEC));
+        assert_eq!(get_fd_flags(fd), Some(FD_CLOEXEC));
+
+        // Clear it.
+        assert!(set_fd_flags(fd, 0));
+        assert_eq!(get_fd_flags(fd), Some(0));
+
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_set_fd_flags_bad_fd() {
+        assert!(!set_fd_flags(-1, FD_CLOEXEC));
+        assert!(!set_fd_flags(200, FD_CLOEXEC));
+    }
+
+    // -- status flags (F_GETFL/F_SETFL) --
+
+    #[test]
+    fn test_get_set_status_flags() {
+        // Allocate fd with O_RDWR (2).
+        let fd = alloc_fd_with_flags(HandleKind::File, 88, 2).unwrap();
+        assert_eq!(get_status_flags(fd), Some(2));
+
+        // Set O_APPEND — access mode bits should be preserved.
+        assert!(set_status_flags(fd, 0o2000)); // O_APPEND
+        let flags = get_status_flags(fd).unwrap();
+        assert_eq!(flags & 0x3, 2, "access mode should be preserved");
+        assert_ne!(flags & 0o2000, 0, "O_APPEND should be set");
+
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_set_status_flags_preserves_access_mode() {
+        // O_WRONLY = 1, then try to change access mode to O_RDWR via F_SETFL.
+        let fd = alloc_fd_with_flags(HandleKind::File, 66, 1).unwrap();
+        // Attempt to set O_RDWR (2) via set_status_flags — should NOT change access mode.
+        set_status_flags(fd, 2);
+        let flags = get_status_flags(fd).unwrap();
+        assert_eq!(flags & 0x3, 1, "access mode must be immutable after open");
+
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_set_status_flags_bad_fd() {
+        assert!(!set_status_flags(-1, 0));
+    }
+
+    // -- install_fd --
+
+    #[test]
+    fn test_install_fd_at_specific_slot() {
+        // Install at fd 200 (should be empty).
+        let old = install_fd(200, HandleKind::UdpSocket, 123);
+        assert!(old.is_none(), "slot 200 should have been empty");
+
+        let entry = get_fd(200).unwrap();
+        assert_eq!(entry.kind, HandleKind::UdpSocket);
+        assert_eq!(entry.handle, 123);
+
+        // Cleanup.
+        let _ = close_fd(200);
+    }
+
+    #[test]
+    fn test_install_fd_replaces_existing() {
+        let fd = alloc_fd(HandleKind::File, 50).unwrap();
+        let old = install_fd(fd, HandleKind::Pipe, 60);
+        assert!(old.is_some());
+        let old_entry = old.unwrap();
+        assert_eq!(old_entry.kind, HandleKind::File);
+        assert_eq!(old_entry.handle, 50);
+
+        let new = get_fd(fd).unwrap();
+        assert_eq!(new.kind, HandleKind::Pipe);
+        assert_eq!(new.handle, 60);
+
+        let _ = close_fd(fd);
+    }
+
+    // -- is_handle_referenced --
+
+    #[test]
+    fn test_is_handle_referenced_true() {
+        let fd = alloc_fd(HandleKind::TcpStream, 999).unwrap();
+        assert!(is_handle_referenced(HandleKind::TcpStream, 999));
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_is_handle_referenced_false_after_close() {
+        let fd = alloc_fd(HandleKind::TcpStream, 888).unwrap();
+        let _ = close_fd(fd);
+        assert!(!is_handle_referenced(HandleKind::TcpStream, 888));
+    }
+
+    #[test]
+    fn test_is_handle_referenced_wrong_kind() {
+        let fd = alloc_fd(HandleKind::Pipe, 777).unwrap();
+        // Same handle value but different kind → not referenced.
+        assert!(!is_handle_referenced(HandleKind::File, 777));
+        let _ = close_fd(fd);
+    }
+
+    // -- SETFL_MASK --
+
+    #[test]
+    fn test_setfl_mask_includes_expected_bits() {
+        // O_APPEND = 0o2000, O_NONBLOCK = 0o4000.
+        assert_ne!(SETFL_MASK & 0o2000, 0, "O_APPEND should be changeable");
+        assert_ne!(SETFL_MASK & 0o4000, 0, "O_NONBLOCK should be changeable");
+    }
+
+    #[test]
+    fn test_setfl_mask_excludes_access_mode() {
+        // Access mode bits (low 2 bits) must NOT be in the changeable mask.
+        assert_eq!(SETFL_MASK & 0x3, 0, "O_ACCMODE must not be changeable");
+    }
+}

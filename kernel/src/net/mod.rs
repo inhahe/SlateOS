@@ -16,6 +16,7 @@
 //! device access from user processes.
 
 pub mod arp;
+pub mod bridge;
 pub mod dhcp;
 pub mod dns;
 pub mod ethernet;

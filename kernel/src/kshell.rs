@@ -3555,6 +3555,7 @@ const COMMANDS: &[&str] = &[
     "vlan",
     "qos",
     "socks", "socks5",
+    "brctl", "bridge", "bond",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4764,6 +4765,7 @@ fn dispatch(line: &str) {
         "vlan" => cmd_vlan(args),
         "qos" => cmd_qos(args),
         "socks" | "socks5" => cmd_socks(args),
+        "brctl" | "bridge" | "bond" => cmd_bridge(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35768,6 +35770,165 @@ fn cmd_ndisc(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'ndisc help'.", sub);
+        }
+    }
+}
+
+/// `brctl` / `bridge` / `bond` — Ethernet bridging and link aggregation.
+fn cmd_bridge(args: &str) {
+    use alloc::vec::Vec;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("help");
+
+    match sub {
+        "addbr" | "create" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: brctl addbr <name>");
+                return;
+            }
+            match crate::net::bridge::create_bridge(parts[1]) {
+                Ok(idx) => shell_println!("Bridge '{}' created (index {})", parts[1], idx),
+                Err(e) => shell_println!("brctl: create failed: {:?}", e),
+            }
+        }
+
+        "delbr" | "delete" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: brctl delbr <index>");
+                return;
+            }
+            let idx: usize = match parts[1].parse() {
+                Ok(i) => i,
+                Err(_) => { shell_println!("brctl: invalid index"); return; }
+            };
+            match crate::net::bridge::delete_bridge(idx) {
+                Ok(()) => shell_println!("Bridge {} deleted", idx),
+                Err(e) => shell_println!("brctl: delete failed: {:?}", e),
+            }
+        }
+
+        "addif" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: brctl addif <bridge_idx> <port_id>");
+                return;
+            }
+            let br_idx: usize = match parts[1].parse() {
+                Ok(i) => i,
+                Err(_) => { shell_println!("brctl: invalid bridge index"); return; }
+            };
+            let port_id: u8 = match parts[2].parse() {
+                Ok(p) => p,
+                Err(_) => { shell_println!("brctl: invalid port id"); return; }
+            };
+            match crate::net::bridge::add_port(br_idx, port_id) {
+                Ok(()) => shell_println!("Port {} added to bridge {}", port_id, br_idx),
+                Err(e) => shell_println!("brctl: add port failed: {:?}", e),
+            }
+        }
+
+        "delif" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: brctl delif <bridge_idx> <port_id>");
+                return;
+            }
+            let br_idx: usize = match parts[1].parse() {
+                Ok(i) => i,
+                Err(_) => { shell_println!("brctl: invalid bridge index"); return; }
+            };
+            let port_id: u8 = match parts[2].parse() {
+                Ok(p) => p,
+                Err(_) => { shell_println!("brctl: invalid port id"); return; }
+            };
+            match crate::net::bridge::remove_port(br_idx, port_id) {
+                Ok(()) => shell_println!("Port {} removed from bridge {}", port_id, br_idx),
+                Err(e) => shell_println!("brctl: remove port failed: {:?}", e),
+            }
+        }
+
+        "addbond" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: brctl addbond <name> <mode>");
+                shell_println!("  Modes: active-backup, round-robin, xor-hash");
+                return;
+            }
+            let mode = match parts[2] {
+                "active-backup" | "ab" => crate::net::bridge::BondMode::ActiveBackup,
+                "round-robin" | "rr" => crate::net::bridge::BondMode::RoundRobin,
+                "xor-hash" | "xor" => crate::net::bridge::BondMode::XorHash,
+                _ => {
+                    shell_println!("brctl: unknown mode '{}'", parts[2]);
+                    return;
+                }
+            };
+            match crate::net::bridge::create_bond(parts[1], mode) {
+                Ok(idx) => shell_println!("Bond '{}' created (index {})", parts[1], idx),
+                Err(e) => shell_println!("brctl: create bond failed: {:?}", e),
+            }
+        }
+
+        "delbond" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: brctl delbond <index>");
+                return;
+            }
+            let idx: usize = match parts[1].parse() {
+                Ok(i) => i,
+                Err(_) => { shell_println!("brctl: invalid index"); return; }
+            };
+            match crate::net::bridge::delete_bond(idx) {
+                Ok(()) => shell_println!("Bond {} deleted", idx),
+                Err(e) => shell_println!("brctl: delete failed: {:?}", e),
+            }
+        }
+
+        "show" | "list" | "ls" => {
+            let bridges = crate::net::bridge::list_bridges();
+            let bonds = crate::net::bridge::list_bonds();
+
+            if bridges.is_empty() {
+                shell_println!("No bridges configured");
+            } else {
+                shell_println!("Bridges:");
+                for b in &bridges {
+                    shell_println!("  [{}] {}: {} ports, {} FDB entries, bridged={}, flooded={}",
+                        b.index, b.name, b.port_count, b.fdb_count,
+                        b.frames_bridged, b.frames_flooded);
+                }
+            }
+
+            if bonds.is_empty() {
+                shell_println!("No bonds configured");
+            } else {
+                shell_println!("Bonds:");
+                for b in &bonds {
+                    shell_println!("  [{}] {}: mode={}, {} members, TX={}, RX={}",
+                        b.index, b.name, b.mode, b.member_count, b.total_tx, b.total_rx);
+                }
+            }
+        }
+
+        "test" => {
+            match crate::net::bridge::self_test() {
+                Ok(()) => shell_println!("bridge: all self-tests passed"),
+                Err(e) => shell_println!("bridge: self-test failed: {:?}", e),
+            }
+        }
+
+        _ => {
+            shell_println!("brctl — Ethernet bridging and link aggregation");
+            shell_println!();
+            shell_println!("Bridge commands:");
+            shell_println!("  brctl addbr <name>                — create bridge");
+            shell_println!("  brctl delbr <index>               — delete bridge");
+            shell_println!("  brctl addif <bridge> <port>       — add port");
+            shell_println!("  brctl delif <bridge> <port>       — remove port");
+            shell_println!();
+            shell_println!("Bond commands:");
+            shell_println!("  brctl addbond <name> <mode>       — create bond");
+            shell_println!("  brctl delbond <index>             — delete bond");
+            shell_println!();
+            shell_println!("  brctl show                        — list all");
+            shell_println!("  brctl test                        — run self-tests");
         }
     }
 }
@@ -67540,7 +67701,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

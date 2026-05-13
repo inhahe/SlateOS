@@ -273,7 +273,9 @@ struct SocketMeta {
     sndbuf: i32,
     /// SO_BROADCAST: permit sending to broadcast addresses.
     broadcast: bool,
-    /// SO_LINGER: linger time in seconds (0 = disabled).
+    /// SO_LINGER: whether linger is enabled.
+    linger_onoff: bool,
+    /// SO_LINGER: linger time in seconds (meaningful only when linger_onoff is true).
     linger_secs: i32,
 }
 
@@ -1021,6 +1023,7 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
         rcvbuf: 65536,
         sndbuf: 65536,
         broadcast: false,
+        linger_onoff: false,
         linger_secs: 0,
     });
 
@@ -1115,6 +1118,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 rcvbuf: meta.rcvbuf,
                 sndbuf: meta.sndbuf,
                 broadcast: meta.broadcast,
+                linger_onoff: meta.linger_onoff,
                 linger_secs: meta.linger_secs,
             });
 
@@ -1363,6 +1367,7 @@ pub unsafe extern "C" fn accept(
         rcvbuf: 65536,
         sndbuf: 65536,
         broadcast: false,
+        linger_onoff: false,
         linger_secs: 0,
     });
 
@@ -1849,7 +1854,23 @@ pub extern "C" fn setsockopt(
             (SOL_SOCKET, SO_RCVBUF) => { meta.rcvbuf = val.max(1); }
             (SOL_SOCKET, SO_SNDBUF) => { meta.sndbuf = val.max(1); }
             (SOL_SOCKET, SO_BROADCAST) => { meta.broadcast = val != 0; }
-            (SOL_SOCKET, SO_LINGER) => { meta.linger_secs = val; }
+            (SOL_SOCKET, SO_LINGER) => {
+                // BSD struct linger { int l_onoff; int l_linger; } = 8 bytes.
+                if !optval.is_null() && optlen as usize >= 8 {
+                    let l_onoff = i32::from_ne_bytes(unsafe {
+                        [*optval, *optval.add(1), *optval.add(2), *optval.add(3)]
+                    });
+                    let l_linger = i32::from_ne_bytes(unsafe {
+                        [*optval.add(4), *optval.add(5), *optval.add(6), *optval.add(7)]
+                    });
+                    meta.linger_onoff = l_onoff != 0;
+                    meta.linger_secs = l_linger;
+                } else {
+                    // Fallback: treat as simple int (non-standard but graceful).
+                    meta.linger_onoff = val != 0;
+                    meta.linger_secs = val;
+                }
+            }
             (SOL_SOCKET, SO_REUSEPORT | SO_RCVTIMEO | SO_SNDTIMEO) => {
                 // Accept silently — these are common options that programs
                 // set but we don't implement at the kernel level yet.
@@ -1964,7 +1985,24 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_SOCKET, SO_SNDBUF) => meta.map_or(65536, |m| m.sndbuf),
             (SOL_SOCKET, SO_BROADCAST) => meta.map_or(0, |m| i32::from(m.broadcast)),
             (SOL_SOCKET, SO_REUSEPORT) => 0,  // Port reuse not supported.
-            (SOL_SOCKET, SO_LINGER) => meta.map_or(0, |m| m.linger_secs),
+            (SOL_SOCKET, SO_LINGER) => {
+                // Return struct linger { int l_onoff; int l_linger; } = 8 bytes.
+                if available >= 8 {
+                    let (onoff, secs) = meta.map_or((0i32, 0i32), |m| {
+                        (i32::from(m.linger_onoff), m.linger_secs)
+                    });
+                    core::ptr::copy_nonoverlapping(
+                        (&raw const onoff).cast::<u8>(), optval, 4,
+                    );
+                    core::ptr::copy_nonoverlapping(
+                        (&raw const secs).cast::<u8>(), optval.add(4), 4,
+                    );
+                    *optlen = 8;
+                    return 0;
+                }
+                // Fall back to just returning l_onoff as int.
+                meta.map_or(0, |m| i32::from(m.linger_onoff))
+            }
             (SOL_SOCKET, SO_RCVTIMEO | SO_SNDTIMEO) => 0, // No timeout.
             (SOL_SOCKET, SO_ACCEPTCONN) => i32::from(entry.kind == HandleKind::TcpListener),
             (SOL_SOCKET, SO_DOMAIN) => AF_INET,

@@ -3554,6 +3554,7 @@ const COMMANDS: &[&str] = &[
     "smtp",
     "vlan",
     "qos",
+    "socks", "socks5",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4762,6 +4763,7 @@ fn dispatch(line: &str) {
         "smtp" => cmd_smtp(args),
         "vlan" => cmd_vlan(args),
         "qos" => cmd_qos(args),
+        "socks" | "socks5" => cmd_socks(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35766,6 +35768,117 @@ fn cmd_ndisc(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'ndisc help'.", sub);
+        }
+    }
+}
+
+/// `socks` / `socks5` — SOCKS5 proxy client.
+fn cmd_socks(args: &str) {
+    use alloc::vec::Vec;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("help");
+
+    match sub {
+        "connect" | "c" => {
+            // socks connect <proxy> <proxy_port> <target> <target_port> [user] [pass]
+            if parts.len() < 5 {
+                shell_println!("Usage: socks connect <proxy> <proxy_port> <target> <target_port> [user] [pass]");
+                return;
+            }
+            let proxy_str = parts[1];
+            let proxy_port: u16 = match parts[2].parse() {
+                Ok(p) => p,
+                Err(_) => { shell_println!("socks: invalid proxy port"); return; }
+            };
+            let target_str = parts[3];
+            let target_port: u16 = match parts[4].parse() {
+                Ok(p) => p,
+                Err(_) => { shell_println!("socks: invalid target port"); return; }
+            };
+            let user = parts.get(5).copied().unwrap_or("");
+            let pass = parts.get(6).copied().unwrap_or("");
+
+            let proxy_ip = if let Some(ip) = parse_ipv4(proxy_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(proxy_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("socks: cannot resolve proxy '{}'", proxy_str);
+                        return;
+                    }
+                }
+            };
+
+            // Try IP first, then domain name.
+            if let Some(target_ip) = parse_ipv4(target_str) {
+                shell_println!("Connecting via SOCKS5 proxy {}:{}...", proxy_ip, proxy_port);
+                shell_println!("Target: {}:{}", target_ip, target_port);
+                match crate::net::socks::connect(proxy_ip, proxy_port, target_ip, target_port, user, pass) {
+                    Ok(result) => {
+                        if result.success {
+                            shell_println!("Connected! Handle: {}", result.handle);
+                            shell_println!("Bound: {}:{}", result.bound_addr, result.bound_port);
+                            crate::net::socks::close(result.handle);
+                        } else {
+                            shell_println!("Connection failed: {} ({})",
+                                crate::net::socks::reply_description(result.reply_code),
+                                result.reply_code);
+                        }
+                    }
+                    Err(e) => shell_println!("socks: connect failed: {:?}", e),
+                }
+            } else {
+                shell_println!("Connecting via SOCKS5 proxy {}:{}...", proxy_ip, proxy_port);
+                shell_println!("Target: {}:{} (domain)", target_str, target_port);
+                match crate::net::socks::connect_domain(proxy_ip, proxy_port, target_str, target_port, user, pass) {
+                    Ok(result) => {
+                        if result.success {
+                            shell_println!("Connected! Handle: {}", result.handle);
+                            crate::net::socks::close(result.handle);
+                        } else {
+                            shell_println!("Connection failed: {} ({})",
+                                crate::net::socks::reply_description(result.reply_code),
+                                result.reply_code);
+                        }
+                    }
+                    Err(e) => shell_println!("socks: connect failed: {:?}", e),
+                }
+            }
+        }
+
+        "codes" => {
+            shell_println!("SOCKS5 reply codes:");
+            for code in [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08] {
+                shell_println!("  0x{:02x}  {}", code, crate::net::socks::reply_description(code));
+            }
+        }
+
+        "status" | "stats" => {
+            let s = crate::net::socks::stats();
+            shell_println!("SOCKS5 statistics:");
+            shell_println!("  Connections:   {}", s.connections);
+            shell_println!("  Successful:    {}", s.successful);
+            shell_println!("  Auth attempts: {}", s.auth_attempts);
+            shell_println!("  Errors:        {}", s.errors);
+            shell_println!("  Bytes relayed: {}", s.bytes_relayed);
+        }
+
+        "test" => {
+            match crate::net::socks::self_test() {
+                Ok(()) => shell_println!("socks: all self-tests passed"),
+                Err(e) => shell_println!("socks: self-test failed: {:?}", e),
+            }
+        }
+
+        _ => {
+            shell_println!("socks — SOCKS5 proxy client (RFC 1928)");
+            shell_println!();
+            shell_println!("Usage:");
+            shell_println!("  socks connect <proxy> <pport> <target> <tport> [user] [pass]");
+            shell_println!("  socks codes                — show SOCKS5 reply codes");
+            shell_println!("  socks status               — show statistics");
+            shell_println!("  socks test                 — run self-tests");
         }
     }
 }
@@ -67427,7 +67540,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

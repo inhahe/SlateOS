@@ -34,6 +34,7 @@ pub mod mdns;
 pub mod ntp;
 pub mod smtp;
 pub mod snmp;
+pub mod socks;
 pub mod syslog;
 pub mod telnet;
 pub mod tftp;

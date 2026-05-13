@@ -476,3 +476,50 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// UDP socket diagnostics
+// ---------------------------------------------------------------------------
+
+/// Diagnostic snapshot of one UDP socket.
+#[derive(Debug, Clone, Copy)]
+pub struct UdpSocketInfo {
+    /// Slot index (handle).
+    pub handle: usize,
+    /// Bound local port.
+    pub local_port: u16,
+    /// Number of datagrams queued for receive.
+    pub rx_queue_len: usize,
+    /// Number of multicast groups joined.
+    pub mcast_groups: u8,
+}
+
+/// Return a list of all active UDP sockets.
+///
+/// Useful for `netstat -u` style display in the shell.
+pub fn all_sockets() -> ([UdpSocketInfo; MAX_SOCKETS], usize) {
+    let sockets = SOCKETS.lock();
+    let mut out = [UdpSocketInfo {
+        handle: 0,
+        local_port: 0,
+        rx_queue_len: 0,
+        mcast_groups: 0,
+    }; MAX_SOCKETS];
+    let mut count: usize = 0;
+
+    for (i, sock) in sockets.iter().enumerate() {
+        if sock.active {
+            if let Some(slot) = out.get_mut(count) {
+                *slot = UdpSocketInfo {
+                    handle: i,
+                    local_port: sock.port,
+                    rx_queue_len: sock.rx_queue.len(),
+                    mcast_groups: sock.mcast_count,
+                };
+                count = count.wrapping_add(1);
+            }
+        }
+    }
+
+    (out, count)
+}

@@ -365,3 +365,64 @@ pub fn send_gratuitous() -> KernelResult<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// ARP cache diagnostics
+// ---------------------------------------------------------------------------
+
+/// A snapshot of one ARP cache entry for diagnostic display.
+#[derive(Debug, Clone, Copy)]
+pub struct ArpCacheEntry {
+    /// Resolved IPv4 address.
+    pub ip: Ipv4Addr,
+    /// Corresponding Ethernet MAC address.
+    pub mac: MacAddress,
+    /// Seconds remaining until this entry expires.
+    pub ttl_secs: u64,
+}
+
+/// Return a snapshot of all valid (non-expired) ARP cache entries.
+///
+/// Useful for `arp -a` style display in the shell or userspace diagnostics.
+/// Entries are returned in cache-slot order (not sorted).
+pub fn cache_entries() -> ([ArpCacheEntry; ARP_CACHE_SIZE], usize) {
+    let now = crate::hrtimer::now_ns();
+    let cache = ARP_CACHE.lock();
+
+    let mut out = [ArpCacheEntry {
+        ip: Ipv4Addr::UNSPECIFIED,
+        mac: MacAddress([0; 6]),
+        ttl_secs: 0,
+    }; ARP_CACHE_SIZE];
+    let mut count: usize = 0;
+
+    for entry in cache.iter() {
+        if entry.is_fresh(now) {
+            let age_ns = now.saturating_sub(entry.updated_ns);
+            let remaining_ns = ARP_ENTRY_LIFETIME_NS.saturating_sub(age_ns);
+            if let Some(slot) = out.get_mut(count) {
+                *slot = ArpCacheEntry {
+                    ip: entry.ip,
+                    mac: entry.mac,
+                    ttl_secs: remaining_ns / 1_000_000_000,
+                };
+                count = count.wrapping_add(1);
+            }
+        }
+    }
+
+    (out, count)
+}
+
+/// Flush (invalidate) all ARP cache entries.
+///
+/// Forces re-resolution on the next send to any IP.  Useful after
+/// interface reconfiguration or when a network topology change is
+/// suspected.
+pub fn flush_cache() {
+    let mut cache = ARP_CACHE.lock();
+    for entry in cache.iter_mut() {
+        entry.valid = false;
+    }
+    crate::serial_println!("[arp] Cache flushed");
+}

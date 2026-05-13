@@ -3257,6 +3257,303 @@ pub extern "C" fn freeifaddrs(_ifa: *mut Ifaddrs) {
 }
 
 // ---------------------------------------------------------------------------
+// getservbyname / getservbyport — service database
+// ---------------------------------------------------------------------------
+
+/// Service database entry.
+#[repr(C)]
+pub struct Servent {
+    /// Official service name.
+    pub s_name: *const u8,
+    /// Alias list (NULL-terminated).
+    pub s_aliases: *const *const u8,
+    /// Port number (network byte order).
+    pub s_port: i32,
+    /// Protocol name.
+    pub s_proto: *const u8,
+}
+
+/// Well-known services (subset of /etc/services).
+struct ServiceEntry {
+    name: &'static [u8],
+    port: u16,
+    proto: &'static [u8],
+}
+
+/// Built-in service database — covers the most commonly needed services.
+static SERVICES: &[ServiceEntry] = &[
+    ServiceEntry { name: b"echo",     port: 7,     proto: b"tcp" },
+    ServiceEntry { name: b"echo",     port: 7,     proto: b"udp" },
+    ServiceEntry { name: b"ftp-data", port: 20,    proto: b"tcp" },
+    ServiceEntry { name: b"ftp",      port: 21,    proto: b"tcp" },
+    ServiceEntry { name: b"ssh",      port: 22,    proto: b"tcp" },
+    ServiceEntry { name: b"telnet",   port: 23,    proto: b"tcp" },
+    ServiceEntry { name: b"smtp",     port: 25,    proto: b"tcp" },
+    ServiceEntry { name: b"dns",      port: 53,    proto: b"udp" },
+    ServiceEntry { name: b"domain",   port: 53,    proto: b"udp" },
+    ServiceEntry { name: b"domain",   port: 53,    proto: b"tcp" },
+    ServiceEntry { name: b"http",     port: 80,    proto: b"tcp" },
+    ServiceEntry { name: b"pop3",     port: 110,   proto: b"tcp" },
+    ServiceEntry { name: b"nntp",     port: 119,   proto: b"tcp" },
+    ServiceEntry { name: b"ntp",      port: 123,   proto: b"udp" },
+    ServiceEntry { name: b"imap",     port: 143,   proto: b"tcp" },
+    ServiceEntry { name: b"snmp",     port: 161,   proto: b"udp" },
+    ServiceEntry { name: b"https",    port: 443,   proto: b"tcp" },
+    ServiceEntry { name: b"smtps",    port: 465,   proto: b"tcp" },
+    ServiceEntry { name: b"submission", port: 587, proto: b"tcp" },
+    ServiceEntry { name: b"imaps",    port: 993,   proto: b"tcp" },
+    ServiceEntry { name: b"pop3s",    port: 995,   proto: b"tcp" },
+    ServiceEntry { name: b"socks",    port: 1080,  proto: b"tcp" },
+    ServiceEntry { name: b"mysql",    port: 3306,  proto: b"tcp" },
+    ServiceEntry { name: b"postgresql", port: 5432, proto: b"tcp" },
+    ServiceEntry { name: b"redis",    port: 6379,  proto: b"tcp" },
+    ServiceEntry { name: b"http-alt", port: 8080,  proto: b"tcp" },
+    ServiceEntry { name: b"http-alt", port: 8443,  proto: b"tcp" },
+];
+
+/// Static storage for getservbyname/getservbyport results.
+static mut SERVENT_NAME: [u8; 32] = [0u8; 32];
+static mut SERVENT_PROTO: [u8; 8] = [0u8; 8];
+static mut SERVENT_ALIASES: [*const u8; 1] = [core::ptr::null()];
+static mut SERVENT_RESULT: Servent = Servent {
+    s_name: core::ptr::null(),
+    s_aliases: core::ptr::null(),
+    s_port: 0,
+    s_proto: core::ptr::null(),
+};
+
+/// Fill the static Servent from a ServiceEntry.
+///
+/// # Safety
+///
+/// Modifies static mutable storage.  Not thread-safe.
+unsafe fn fill_servent(entry: &ServiceEntry) -> *const Servent {
+    let name_ptr = core::ptr::addr_of_mut!(SERVENT_NAME) as *mut u8;
+    let proto_ptr = core::ptr::addr_of_mut!(SERVENT_PROTO) as *mut u8;
+    let aliases_ptr = core::ptr::addr_of_mut!(SERVENT_ALIASES);
+    let result_ptr = core::ptr::addr_of_mut!(SERVENT_RESULT);
+
+    // Zero and copy name.
+    let nlen = entry.name.len().min(31);
+    core::ptr::write_bytes(name_ptr, 0, 32);
+    core::ptr::copy_nonoverlapping(entry.name.as_ptr(), name_ptr, nlen);
+
+    // Zero and copy proto.
+    let plen = entry.proto.len().min(7);
+    core::ptr::write_bytes(proto_ptr, 0, 8);
+    core::ptr::copy_nonoverlapping(entry.proto.as_ptr(), proto_ptr, plen);
+
+    // Empty alias list.
+    (*aliases_ptr)[0] = core::ptr::null();
+
+    // Assemble result.
+    (*result_ptr).s_name = name_ptr;
+    (*result_ptr).s_aliases = (*aliases_ptr).as_ptr();
+    (*result_ptr).s_port = entry.port.to_be() as i32;
+    (*result_ptr).s_proto = proto_ptr;
+
+    result_ptr
+}
+
+/// Look up a service by name and protocol.
+///
+/// Returns a pointer to a static `Servent`, or NULL if not found.
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated string.
+/// `proto` may be null (match any protocol) or a null-terminated protocol name.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getservbyname(
+    name: *const u8,
+    proto: *const u8,
+) -> *const Servent {
+    if name.is_null() {
+        return core::ptr::null();
+    }
+
+    let name_len = unsafe { crate::string::strlen(name) };
+    let name_slice = unsafe { core::slice::from_raw_parts(name, name_len) };
+
+    let proto_slice = if proto.is_null() {
+        &[]
+    } else {
+        let plen = unsafe { crate::string::strlen(proto) };
+        unsafe { core::slice::from_raw_parts(proto, plen) }
+    };
+
+    for entry in SERVICES {
+        if entry.name == name_slice {
+            if proto_slice.is_empty() || entry.proto == proto_slice {
+                return unsafe { fill_servent(entry) };
+            }
+        }
+    }
+    core::ptr::null()
+}
+
+/// Look up a service by port number and protocol.
+///
+/// `port` is in network byte order.
+///
+/// # Safety
+///
+/// `proto` may be null (match any protocol) or a null-terminated protocol name.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getservbyport(
+    port: i32,
+    proto: *const u8,
+) -> *const Servent {
+    let host_port = u16::from_be(port as u16);
+
+    let proto_slice = if proto.is_null() {
+        &[]
+    } else {
+        let plen = unsafe { crate::string::strlen(proto) };
+        unsafe { core::slice::from_raw_parts(proto, plen) }
+    };
+
+    for entry in SERVICES {
+        if entry.port == host_port {
+            if proto_slice.is_empty() || entry.proto == proto_slice {
+                return unsafe { fill_servent(entry) };
+            }
+        }
+    }
+    core::ptr::null()
+}
+
+// ---------------------------------------------------------------------------
+// getprotobyname / getprotobynumber — protocol database
+// ---------------------------------------------------------------------------
+
+/// Protocol database entry.
+#[repr(C)]
+pub struct Protoent {
+    /// Official protocol name.
+    pub p_name: *const u8,
+    /// Alias list (NULL-terminated).
+    pub p_aliases: *const *const u8,
+    /// Protocol number.
+    pub p_proto: i32,
+}
+
+/// Well-known protocols (subset of /etc/protocols).
+struct ProtoEntry {
+    name: &'static [u8],
+    number: i32,
+    aliases: &'static [&'static [u8]],
+}
+
+static PROTOCOLS: &[ProtoEntry] = &[
+    ProtoEntry { name: b"ip",       number: 0,   aliases: &[b"IP"] },
+    ProtoEntry { name: b"icmp",     number: 1,   aliases: &[b"ICMP"] },
+    ProtoEntry { name: b"igmp",     number: 2,   aliases: &[b"IGMP"] },
+    ProtoEntry { name: b"tcp",      number: 6,   aliases: &[b"TCP"] },
+    ProtoEntry { name: b"udp",      number: 17,  aliases: &[b"UDP"] },
+    ProtoEntry { name: b"ipv6",     number: 41,  aliases: &[b"IPv6"] },
+    ProtoEntry { name: b"gre",      number: 47,  aliases: &[b"GRE"] },
+    ProtoEntry { name: b"esp",      number: 50,  aliases: &[b"ESP"] },
+    ProtoEntry { name: b"ah",       number: 51,  aliases: &[b"AH"] },
+    ProtoEntry { name: b"icmpv6",   number: 58,  aliases: &[b"ICMPv6"] },
+    ProtoEntry { name: b"sctp",     number: 132, aliases: &[b"SCTP"] },
+];
+
+static mut PROTOENT_NAME: [u8; 16] = [0u8; 16];
+static mut PROTOENT_ALIASES: [*const u8; 2] = [core::ptr::null(); 2];
+static mut PROTOENT_ALIAS_BUF: [u8; 16] = [0u8; 16];
+static mut PROTOENT_RESULT: Protoent = Protoent {
+    p_name: core::ptr::null(),
+    p_aliases: core::ptr::null(),
+    p_proto: 0,
+};
+
+/// Fill the static Protoent from a ProtoEntry.
+///
+/// # Safety
+///
+/// Modifies static mutable storage.
+unsafe fn fill_protoent(entry: &ProtoEntry) -> *const Protoent {
+    let name_raw = core::ptr::addr_of_mut!(PROTOENT_NAME) as *mut u8;
+    let aliases_ptr = core::ptr::addr_of_mut!(PROTOENT_ALIASES);
+    let alias_buf_raw = core::ptr::addr_of_mut!(PROTOENT_ALIAS_BUF) as *mut u8;
+    let result_ptr = core::ptr::addr_of_mut!(PROTOENT_RESULT);
+
+    // Zero and copy name.
+    let nlen = entry.name.len().min(15);
+    core::ptr::write_bytes(name_raw, 0, 16);
+    core::ptr::copy_nonoverlapping(entry.name.as_ptr(), name_raw, nlen);
+
+    // Set up alias list (first alias if available, then NULL).
+    if let Some(&alias) = entry.aliases.first() {
+        let alen = alias.len().min(15);
+        core::ptr::write_bytes(alias_buf_raw, 0, 16);
+        core::ptr::copy_nonoverlapping(alias.as_ptr(), alias_buf_raw, alen);
+        (*aliases_ptr)[0] = alias_buf_raw;
+        (*aliases_ptr)[1] = core::ptr::null();
+    } else {
+        (*aliases_ptr)[0] = core::ptr::null();
+    }
+
+    (*result_ptr).p_name = name_raw;
+    (*result_ptr).p_aliases = (*aliases_ptr).as_ptr();
+    (*result_ptr).p_proto = entry.number;
+
+    result_ptr
+}
+
+/// Look up a protocol by name.
+///
+/// Returns a pointer to a static `Protoent`, or NULL if not found.
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn getprotobyname(name: *const u8) -> *const Protoent {
+    if name.is_null() {
+        return core::ptr::null();
+    }
+
+    let name_len = unsafe { crate::string::strlen(name) };
+    let name_slice = unsafe { core::slice::from_raw_parts(name, name_len) };
+
+    for entry in PROTOCOLS {
+        // Match by name (case-insensitive).
+        if entry.name.len() == name_slice.len()
+            && entry.name.iter().zip(name_slice.iter())
+                .all(|(&a, &b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+        {
+            return unsafe { fill_protoent(entry) };
+        }
+        // Also match against aliases.
+        for &alias in entry.aliases {
+            if alias.len() == name_slice.len()
+                && alias.iter().zip(name_slice.iter())
+                    .all(|(&a, &b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+            {
+                return unsafe { fill_protoent(entry) };
+            }
+        }
+    }
+    core::ptr::null()
+}
+
+/// Look up a protocol by number.
+///
+/// Returns a pointer to a static `Protoent`, or NULL if not found.
+#[unsafe(no_mangle)]
+pub extern "C" fn getprotobynumber(number: i32) -> *const Protoent {
+    for entry in PROTOCOLS {
+        if entry.number == number {
+            // SAFETY: single-threaded static storage.
+            return unsafe { fill_protoent(entry) };
+        }
+    }
+    core::ptr::null()
+}
+
+// ---------------------------------------------------------------------------
 // Error translation
 // ---------------------------------------------------------------------------
 

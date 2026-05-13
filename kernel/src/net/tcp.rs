@@ -2447,24 +2447,52 @@ pub fn read(handle: usize) -> KernelResult<Vec<u8>> {
 ///
 /// Returns the data consumed (may be empty if no data available).
 pub fn read_up_to(handle: usize, max_bytes: usize) -> KernelResult<Vec<u8>> {
-    let mut conns = CONNECTIONS.lock();
-    let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
-    if !conn.active {
-        // Connection was reset — report as closed channel.
-        return Err(KernelError::ChannelClosed);
-    }
-    if conn.local_read_closed {
-        return Ok(Vec::new());
+    let (data, need_wnd_update, lp, ri, rp, snd_nxt, rcv_nxt, wnd) = {
+        let mut conns = CONNECTIONS.lock();
+        let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+        if !conn.active {
+            // Connection was reset — report as closed channel.
+            return Err(KernelError::ChannelClosed);
+        }
+        if conn.local_read_closed {
+            return Ok(Vec::new());
+        }
+
+        if conn.rx_buffer.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Record buffer occupancy before drain (for window update decision).
+        let old_free = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
+
+        let take = max_bytes.min(conn.rx_buffer.len());
+        // Split: take the front `take` bytes, keep the rest.
+        let remainder = conn.rx_buffer.split_off(take);
+        let result = core::mem::replace(&mut conn.rx_buffer, remainder);
+
+        // Window update (RFC 1122 §4.2.3.3): send an ACK with the new
+        // window when we've freed enough buffer space.  Specifically,
+        // if the old free space was less than one MSS and now it's >= MSS,
+        // or if it was 0 and now it's > 0.  This prevents deadlock when
+        // the peer stopped sending due to our zero window.
+        let new_free = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
+        let mss = effective_mss(conn) as usize;
+        let should_update = (old_free < mss && new_free >= mss)
+            || (old_free == 0 && new_free > 0);
+
+        let wnd = if should_update { advertised_window(conn) } else { 0 };
+        (result, should_update,
+         conn.local_port, conn.remote_ip, conn.remote_port,
+         conn.snd_nxt, conn.rcv_nxt, wnd)
+    };
+
+    // Send window update ACK outside the lock.
+    if need_wnd_update {
+        let _ = send_segment_with_window(
+            lp, ri, rp, snd_nxt, rcv_nxt, TCP_ACK, wnd, &[], 0,
+        );
     }
 
-    if conn.rx_buffer.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let take = max_bytes.min(conn.rx_buffer.len());
-    // Split: take the front `take` bytes, keep the rest.
-    let remainder = conn.rx_buffer.split_off(take);
-    let data = core::mem::replace(&mut conn.rx_buffer, remainder);
     Ok(data)
 }
 

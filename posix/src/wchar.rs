@@ -19,10 +19,12 @@
 //!   `iswupper`, `iswlower`, `iswpunct`, `iswcntrl`, `iswgraph`,
 //!   `iswxdigit`, `iswblank` — wide ctype
 //! - `wcscpy`, `wcsncpy`, `wcslen`, `wcscmp`, `wcsncmp`, `wcscat`,
-//!   `wcschr`, `wcsrchr` — wide string operations
+//!   `wcschr`, `wcsrchr`, `wcsstr`, `wcsncat`, `wcsdup` — wide string operations
+//! - `wcsspn`, `wcscspn`, `wcspbrk`, `wcstok` — wide string search/tokenize
 //! - `wcstol`, `wcstoul`, `wcstoll`, `wcstoull` — wide string→integer
 //! - `wcstod`, `wcstof` — wide string→float
-//! - `wmemcpy`, `wmemset`, `wmemcmp` — wide memory operations
+//! - `wmemcpy`, `wmemset`, `wmemcmp`, `wmemmove`, `wmemchr` — wide memory operations
+//! - `mbsrtowcs`, `mbsnrtowcs`, `wcsrtombs`, `wcsnrtombs` — restartable string conversion
 
 /// Wide character type (32-bit Unicode code point).
 pub type WcharT = i32;
@@ -1492,6 +1494,410 @@ pub unsafe extern "C" fn wcsstr(
         h = h.wrapping_add(1);
     }
     core::ptr::null()
+}
+
+// ---------------------------------------------------------------------------
+// Wide string search/span functions
+// ---------------------------------------------------------------------------
+
+/// Find the first wide character in `s` that is in `accept`.
+///
+/// Returns the length of the initial segment of `s` consisting
+/// entirely of wide characters in `accept`.
+///
+/// # Safety
+///
+/// Both strings must be valid null-terminated wide strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcsspn(s: *const WcharT, accept: *const WcharT) -> usize {
+    let mut count: usize = 0;
+    loop {
+        let ch = unsafe { *s.add(count) };
+        if ch == 0 {
+            break;
+        }
+        // Check if ch is in accept.
+        let mut found = false;
+        let mut j: usize = 0;
+        loop {
+            let a = unsafe { *accept.add(j) };
+            if a == 0 {
+                break;
+            }
+            if a == ch {
+                found = true;
+                break;
+            }
+            j = j.wrapping_add(1);
+        }
+        if !found {
+            break;
+        }
+        count = count.wrapping_add(1);
+    }
+    count
+}
+
+/// Find the length of the initial segment of `s` consisting
+/// entirely of wide characters NOT in `reject`.
+///
+/// # Safety
+///
+/// Both strings must be valid null-terminated wide strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcscspn(s: *const WcharT, reject: *const WcharT) -> usize {
+    let mut count: usize = 0;
+    loop {
+        let ch = unsafe { *s.add(count) };
+        if ch == 0 {
+            break;
+        }
+        // Check if ch is in reject.
+        let mut j: usize = 0;
+        loop {
+            let r = unsafe { *reject.add(j) };
+            if r == 0 {
+                break;
+            }
+            if r == ch {
+                return count;
+            }
+            j = j.wrapping_add(1);
+        }
+        count = count.wrapping_add(1);
+    }
+    count
+}
+
+/// Find the first wide character in `s` that is in `accept`.
+///
+/// Returns a pointer to the first matching character, or NULL if none found.
+///
+/// # Safety
+///
+/// Both strings must be valid null-terminated wide strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcspbrk(s: *const WcharT, accept: *const WcharT) -> *const WcharT {
+    let mut i: usize = 0;
+    loop {
+        let ch = unsafe { *s.add(i) };
+        if ch == 0 {
+            return core::ptr::null();
+        }
+        let mut j: usize = 0;
+        loop {
+            let a = unsafe { *accept.add(j) };
+            if a == 0 {
+                break;
+            }
+            if a == ch {
+                return unsafe { s.add(i) };
+            }
+            j = j.wrapping_add(1);
+        }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Tokenize a wide string.
+///
+/// On the first call, `s` is the string to tokenize.  On subsequent
+/// calls, pass NULL as `s` to continue tokenizing the same string.
+/// The `saveptr` state is used (thread-safe version of strtok).
+///
+/// # Safety
+///
+/// `delim` must be a valid null-terminated wide string.
+/// `saveptr` must point to a valid `*mut WcharT` (used as state).
+/// On first call, `s` must be a valid null-terminated wide string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcstok(
+    s: *mut WcharT,
+    delim: *const WcharT,
+    saveptr: *mut *mut WcharT,
+) -> *mut WcharT {
+    // Determine start position.
+    let mut ptr = if !s.is_null() {
+        s
+    } else {
+        let saved = unsafe { *saveptr };
+        if saved.is_null() {
+            return core::ptr::null_mut();
+        }
+        saved
+    };
+
+    // Skip leading delimiters.
+    loop {
+        let ch = unsafe { *ptr };
+        if ch == 0 {
+            unsafe { *saveptr = core::ptr::null_mut(); }
+            return core::ptr::null_mut();
+        }
+        if !wchar_in_set(ch, delim) {
+            break;
+        }
+        ptr = unsafe { ptr.add(1) };
+    }
+
+    // ptr now points to start of token.
+    let token_start = ptr;
+
+    // Find end of token.
+    loop {
+        let ch = unsafe { *ptr };
+        if ch == 0 {
+            unsafe { *saveptr = core::ptr::null_mut(); }
+            break;
+        }
+        if wchar_in_set(ch, delim) {
+            unsafe { *ptr = 0; }
+            unsafe { *saveptr = ptr.add(1); }
+            break;
+        }
+        ptr = unsafe { ptr.add(1) };
+    }
+
+    token_start
+}
+
+/// Helper: check if `wc` is in the null-terminated set.
+fn wchar_in_set(wc: WcharT, set: *const WcharT) -> bool {
+    let mut j: usize = 0;
+    loop {
+        let s = unsafe { *set.add(j) };
+        if s == 0 {
+            return false;
+        }
+        if s == wc {
+            return true;
+        }
+        j = j.wrapping_add(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wcsdup
+// ---------------------------------------------------------------------------
+
+/// Duplicate a wide string.
+///
+/// Allocates memory for a copy of `s` using `malloc`.  The caller
+/// must free the result with `free()`.
+///
+/// # Safety
+///
+/// `s` must be a valid null-terminated wide string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcsdup(s: *const WcharT) -> *mut WcharT {
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    let len = unsafe { wcslen(s) };
+    let size = len.wrapping_add(1).wrapping_mul(core::mem::size_of::<WcharT>());
+
+    let dest = crate::malloc::malloc(size);
+    if dest.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    // Copy including the null terminator.
+    let mut i: usize = 0;
+    let dst = dest.cast::<WcharT>();
+    while i <= len {
+        unsafe { *dst.add(i) = *s.add(i); }
+        i = i.wrapping_add(1);
+    }
+
+    dst
+}
+
+// ---------------------------------------------------------------------------
+// Restartable string conversions: mbsrtowcs / wcsrtombs
+// ---------------------------------------------------------------------------
+
+/// Convert a multibyte string to a wide string (restartable).
+///
+/// Converts at most `len` wide characters from the multibyte string
+/// pointed to by `*src`.  On success, `*src` is updated to point past
+/// the last byte consumed (or set to NULL if the entire string was
+/// converted including the null terminator).
+///
+/// # Safety
+///
+/// `src` must point to a valid `*const u8` pointer to a multibyte string.
+/// `dst` must be valid for `len` wide characters (or may be NULL for counting).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mbsrtowcs(
+    dst: *mut WcharT,
+    src: *mut *const u8,
+    len: usize,
+    ps: *mut MbstateT,
+) -> usize {
+    // Delegate to mbsnrtowcs with nms = SIZE_MAX (no byte limit).
+    unsafe { mbsnrtowcs(dst, src, usize::MAX, len, ps) }
+}
+
+/// Convert a multibyte string to a wide string (restartable, n-limited).
+///
+/// Converts at most `len` wide characters, consuming at most `nms` bytes
+/// from the multibyte string pointed to by `*src`.
+///
+/// # Safety
+///
+/// Same as `mbsrtowcs`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mbsnrtowcs(
+    dst: *mut WcharT,
+    src: *mut *const u8,
+    nms: usize,
+    len: usize,
+    ps: *mut MbstateT,
+) -> usize {
+    if src.is_null() || unsafe { (*src).is_null() } {
+        return 0;
+    }
+
+    let mut s = unsafe { *src };
+    let mut written: usize = 0;
+    let mut bytes_consumed: usize = 0;
+
+    while written < len && bytes_consumed < nms {
+        let remaining_bytes = nms.saturating_sub(bytes_consumed);
+        // Limit n to remaining bytes available.
+        let n = if remaining_bytes > 4 { 4 } else { remaining_bytes };
+        if n == 0 {
+            break;
+        }
+
+        let mut wc: WcharT = 0;
+        let pwc = if dst.is_null() {
+            core::ptr::null_mut()
+        } else {
+            &mut wc as *mut WcharT
+        };
+
+        let ret = unsafe { mbrtowc(pwc, s, n, ps) };
+
+        if ret == 0 {
+            // Null terminator encountered.
+            if !dst.is_null() {
+                unsafe { *dst.add(written) = 0; }
+            }
+            unsafe { *src = core::ptr::null(); }
+            return written;
+        } else if ret == usize::MAX {
+            // Encoding error.
+            crate::errno::set_errno(crate::errno::EILSEQ);
+            return usize::MAX;
+        } else if ret == usize::MAX.wrapping_sub(1) {
+            // Incomplete sequence and we've run out of bytes.
+            break;
+        } else {
+            if !dst.is_null() {
+                unsafe { *dst.add(written) = wc; }
+            }
+            s = unsafe { s.add(ret) };
+            bytes_consumed = bytes_consumed.wrapping_add(ret);
+            written = written.wrapping_add(1);
+        }
+    }
+
+    unsafe { *src = s; }
+    written
+}
+
+/// Convert a wide string to a multibyte string (restartable).
+///
+/// Converts at most `len` bytes worth of wide characters from the
+/// wide string pointed to by `*src`.
+///
+/// # Safety
+///
+/// `src` must point to a valid `*const WcharT` pointer to a wide string.
+/// `dst` must be valid for `len` bytes (or may be NULL for counting).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcsrtombs(
+    dst: *mut u8,
+    src: *mut *const WcharT,
+    len: usize,
+    ps: *mut MbstateT,
+) -> usize {
+    // Delegate to wcsnrtombs with nwc = SIZE_MAX (no character limit).
+    unsafe { wcsnrtombs(dst, src, usize::MAX, len, ps) }
+}
+
+/// Convert a wide string to a multibyte string (restartable, n-limited).
+///
+/// Converts at most `nwc` wide characters, producing at most `len` bytes.
+///
+/// # Safety
+///
+/// Same as `wcsrtombs`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn wcsnrtombs(
+    dst: *mut u8,
+    src: *mut *const WcharT,
+    nwc: usize,
+    len: usize,
+    ps: *mut MbstateT,
+) -> usize {
+    if src.is_null() || unsafe { (*src).is_null() } {
+        return 0;
+    }
+
+    let mut s = unsafe { *src };
+    let mut written: usize = 0;
+    let mut chars_consumed: usize = 0;
+    let mut buf: [u8; 4] = [0; 4];
+
+    while chars_consumed < nwc {
+        let wc = unsafe { *s };
+
+        // Encode into temporary buffer to know the byte count.
+        let out = if dst.is_null() {
+            buf.as_mut_ptr()
+        } else {
+            buf.as_mut_ptr()
+        };
+
+        let ret = unsafe { wcrtomb(out, wc, ps) };
+
+        if ret == usize::MAX {
+            // Encoding error.
+            crate::errno::set_errno(crate::errno::EILSEQ);
+            return usize::MAX;
+        }
+
+        // Check if output would overflow.
+        if written.wrapping_add(ret) > len {
+            break;
+        }
+
+        // Copy to destination.
+        if !dst.is_null() {
+            let mut k: usize = 0;
+            while k < ret {
+                unsafe { *dst.add(written.wrapping_add(k)) = buf[k]; }
+                k = k.wrapping_add(1);
+            }
+        }
+
+        written = written.wrapping_add(ret);
+        chars_consumed = chars_consumed.wrapping_add(1);
+
+        if wc == 0 {
+            // Null terminator — don't count it in written, set src to null.
+            unsafe { *src = core::ptr::null(); }
+            return written.wrapping_sub(ret); // Exclude the null byte from count.
+        }
+
+        s = unsafe { s.add(1) };
+    }
+
+    unsafe { *src = s; }
+    written
 }
 
 // ---------------------------------------------------------------------------

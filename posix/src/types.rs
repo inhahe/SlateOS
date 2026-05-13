@@ -69,3 +69,129 @@ pub type UintptrT = usize;
 
 /// Pointer difference type.
 pub type PtrdiffT = isize;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Type sizes must match LP64 data model (x86_64 Linux) --
+
+    #[test]
+    fn test_pid_t_size() {
+        assert_eq!(core::mem::size_of::<PidT>(), 4);
+    }
+
+    #[test]
+    fn test_uid_gid_size() {
+        assert_eq!(core::mem::size_of::<UidT>(), 4);
+        assert_eq!(core::mem::size_of::<GidT>(), 4);
+    }
+
+    #[test]
+    fn test_mode_t_size() {
+        assert_eq!(core::mem::size_of::<ModeT>(), 4);
+    }
+
+    #[test]
+    fn test_dev_ino_size() {
+        assert_eq!(core::mem::size_of::<DevT>(), 8);
+        assert_eq!(core::mem::size_of::<InoT>(), 8);
+    }
+
+    #[test]
+    fn test_nlink_t_size() {
+        assert_eq!(core::mem::size_of::<NlinkT>(), 8);
+    }
+
+    #[test]
+    fn test_off_t_size() {
+        assert_eq!(core::mem::size_of::<OffT>(), 8);
+    }
+
+    #[test]
+    fn test_ssize_size_t_size() {
+        assert_eq!(core::mem::size_of::<SsizeT>(), 8);
+        assert_eq!(core::mem::size_of::<SizeT>(), 8);
+    }
+
+    #[test]
+    fn test_blksize_blkcnt_size() {
+        assert_eq!(core::mem::size_of::<BlksizeT>(), 8);
+        assert_eq!(core::mem::size_of::<BlkcntT>(), 8);
+    }
+
+    #[test]
+    fn test_time_t_size() {
+        assert_eq!(core::mem::size_of::<TimeT>(), 8);
+    }
+
+    #[test]
+    fn test_suseconds_t_size() {
+        assert_eq!(core::mem::size_of::<SusecondsT>(), 8);
+    }
+
+    #[test]
+    fn test_clockid_t_size() {
+        assert_eq!(core::mem::size_of::<ClockidT>(), 4);
+    }
+
+    #[test]
+    fn test_fd_size() {
+        assert_eq!(core::mem::size_of::<Fd>(), 4);
+    }
+
+    #[test]
+    fn test_id_t_size() {
+        assert_eq!(core::mem::size_of::<IdT>(), 4);
+    }
+
+    #[test]
+    fn test_key_t_size() {
+        assert_eq!(core::mem::size_of::<KeyT>(), 4);
+    }
+
+    #[test]
+    fn test_pointer_types_size() {
+        assert_eq!(core::mem::size_of::<IntptrT>(), 8);
+        assert_eq!(core::mem::size_of::<UintptrT>(), 8);
+        assert_eq!(core::mem::size_of::<PtrdiffT>(), 8);
+    }
+
+    // -- Signedness checks --
+
+    #[test]
+    fn test_pid_t_signed() {
+        let neg: PidT = -1;
+        assert!(neg < 0);
+    }
+
+    #[test]
+    fn test_off_t_signed() {
+        let neg: OffT = -1;
+        assert!(neg < 0);
+    }
+
+    #[test]
+    fn test_ssize_t_signed() {
+        let neg: SsizeT = -1;
+        assert!(neg < 0);
+    }
+
+    #[test]
+    fn test_time_t_signed() {
+        let neg: TimeT = -1;
+        assert!(neg < 0);
+    }
+
+    #[test]
+    fn test_uid_gid_unsigned() {
+        let u: UidT = u32::MAX;
+        let g: GidT = u32::MAX;
+        assert!(u > 0);
+        assert!(g > 0);
+    }
+}

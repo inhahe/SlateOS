@@ -178,6 +178,112 @@ pub extern "C" fn madvise(_addr: *mut core::ffi::c_void, _length: SizeT, _advice
 }
 
 // ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Protection flags match Linux x86_64 --
+
+    #[test]
+    fn test_prot_flags() {
+        assert_eq!(PROT_NONE, 0);
+        assert_eq!(PROT_READ, 1);
+        assert_eq!(PROT_WRITE, 2);
+        assert_eq!(PROT_EXEC, 4);
+    }
+
+    #[test]
+    fn test_prot_flags_composable() {
+        // Common combos must not collide
+        let rw = PROT_READ | PROT_WRITE;
+        assert_eq!(rw, 3);
+        let rwx = PROT_READ | PROT_WRITE | PROT_EXEC;
+        assert_eq!(rwx, 7);
+        let rx = PROT_READ | PROT_EXEC;
+        assert_eq!(rx, 5);
+    }
+
+    // -- Map flags match Linux x86_64 --
+
+    #[test]
+    fn test_map_flags() {
+        assert_eq!(MAP_SHARED, 0x01);
+        assert_eq!(MAP_PRIVATE, 0x02);
+        assert_eq!(MAP_FIXED, 0x10);
+        assert_eq!(MAP_ANONYMOUS, 0x20);
+    }
+
+    #[test]
+    fn test_map_flags_composable() {
+        let anon_priv = MAP_PRIVATE | MAP_ANONYMOUS;
+        assert_eq!(anon_priv, 0x22);
+        let anon_fixed = MAP_ANONYMOUS | MAP_FIXED | MAP_PRIVATE;
+        assert_eq!(anon_fixed, 0x32);
+    }
+
+    #[test]
+    fn test_map_shared_private_disjoint() {
+        assert_eq!(MAP_SHARED & MAP_PRIVATE, 0);
+    }
+
+    // -- MAP_FAILED --
+
+    #[test]
+    fn test_map_failed_is_minus_one() {
+        // MAP_FAILED should be (void*)-1 = usize::MAX
+        assert_eq!(MAP_FAILED as usize, usize::MAX);
+    }
+
+    #[test]
+    fn test_map_failed_not_null() {
+        assert!(!MAP_FAILED.is_null());
+    }
+
+    // -- msync flags match Linux --
+
+    #[test]
+    fn test_msync_flags() {
+        assert_eq!(MS_ASYNC, 1);
+        assert_eq!(MS_SYNC, 4);
+        assert_eq!(MS_INVALIDATE, 2);
+    }
+
+    // -- madvise flags match Linux --
+
+    #[test]
+    fn test_madvise_flags() {
+        assert_eq!(MADV_NORMAL, 0);
+        assert_eq!(MADV_RANDOM, 1);
+        assert_eq!(MADV_SEQUENTIAL, 2);
+        assert_eq!(MADV_WILLNEED, 3);
+        assert_eq!(MADV_DONTNEED, 4);
+    }
+
+    // -- Stub functions succeed --
+
+    #[test]
+    fn test_mlock_stubs_succeed() {
+        assert_eq!(mlock(core::ptr::null(), 4096), 0);
+        assert_eq!(munlock(core::ptr::null(), 4096), 0);
+        assert_eq!(mlockall(0), 0);
+        assert_eq!(munlockall(), 0);
+    }
+
+    #[test]
+    fn test_msync_stub_succeeds() {
+        assert_eq!(msync(core::ptr::null_mut(), 4096, MS_SYNC), 0);
+    }
+
+    #[test]
+    fn test_madvise_stub_succeeds() {
+        assert_eq!(madvise(core::ptr::null_mut(), 4096, MADV_NORMAL), 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POSIX shared memory objects — stubs
 // ---------------------------------------------------------------------------
 

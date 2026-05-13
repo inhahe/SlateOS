@@ -542,3 +542,185 @@ pub extern "C" fn umount2(_target: *const u8, _flags: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Wait flag constants match Linux --
+
+    #[test]
+    fn test_wnohang_value() {
+        assert_eq!(WNOHANG, 1);
+    }
+
+    #[test]
+    fn test_wuntraced_value() {
+        assert_eq!(WUNTRACED, 2);
+    }
+
+    // -- waitid id type constants --
+
+    #[test]
+    fn test_waitid_idtype_constants() {
+        assert_eq!(P_ALL, 0);
+        assert_eq!(P_PID, 1);
+        assert_eq!(P_PGID, 2);
+    }
+
+    // -- wifexited: normal exit has low 7 bits zero --
+
+    #[test]
+    fn test_wifexited_normal_exit_code_0() {
+        // Normal exit with code 0: status = (0 << 8) | 0 = 0
+        let status = 0;
+        assert!(wifexited(status));
+        assert_eq!(wexitstatus(status), 0);
+    }
+
+    #[test]
+    fn test_wifexited_normal_exit_code_1() {
+        // Normal exit with code 1: status = (1 << 8) | 0 = 256
+        let status = 1 << 8;
+        assert!(wifexited(status));
+        assert_eq!(wexitstatus(status), 1);
+    }
+
+    #[test]
+    fn test_wifexited_normal_exit_code_42() {
+        let status = 42 << 8;
+        assert!(wifexited(status));
+        assert_eq!(wexitstatus(status), 42);
+    }
+
+    #[test]
+    fn test_wifexited_normal_exit_code_255() {
+        let status = 255 << 8;
+        assert!(wifexited(status));
+        assert_eq!(wexitstatus(status), 255);
+    }
+
+    // -- wifsignaled: signal death has low 7 bits = signal number --
+
+    #[test]
+    fn test_wifsignaled_signal_2() {
+        // Killed by signal 2 (SIGINT): status = 2
+        let status = 2;
+        assert!(wifsignaled(status));
+        assert!(!wifexited(status));
+        assert_eq!(wtermsig(status), 2);
+    }
+
+    #[test]
+    fn test_wifsignaled_signal_9() {
+        // Killed by signal 9 (SIGKILL): status = 9
+        let status = 9;
+        assert!(wifsignaled(status));
+        assert_eq!(wtermsig(status), 9);
+    }
+
+    #[test]
+    fn test_wifsignaled_signal_15() {
+        // Killed by signal 15 (SIGTERM): status = 15
+        let status = 15;
+        assert!(wifsignaled(status));
+        assert_eq!(wtermsig(status), 15);
+    }
+
+    // -- stopped status: low byte = 0x7f --
+
+    #[test]
+    fn test_stopped_not_exited_or_signaled() {
+        // Stopped by SIGSTOP (19): status = (19 << 8) | 0x7f = 4991
+        let status = (19 << 8) | 0x7f;
+        assert!(!wifexited(status));
+        assert!(!wifsignaled(status)); // 0x7f is excluded from signaled
+    }
+
+    // -- Edge cases --
+
+    #[test]
+    fn test_wifexited_status_zero_all_bits() {
+        // Status 0: exit(0) — wifexited must be true.
+        assert!(wifexited(0));
+        assert_eq!(wexitstatus(0), 0);
+    }
+
+    #[test]
+    fn test_wifexited_false_for_signal_1() {
+        // Signal 1 (SIGHUP): low 7 bits = 1
+        assert!(!wifexited(1));
+    }
+
+    #[test]
+    fn test_wtermsig_masks_low_7_bits() {
+        // Ensure only low 7 bits are returned
+        let status = 0xFF; // low 7 = 0x7F, bit 7 = 1 (core dump)
+        assert_eq!(wtermsig(status), 0x7f);
+    }
+
+    #[test]
+    fn test_wexitstatus_masks_byte() {
+        // Bits 15:8 is the exit code
+        let status = 0xAB_00; // exit code 0xAB = 171
+        assert_eq!(wexitstatus(status), 0xAB);
+    }
+
+    #[test]
+    fn test_wexitstatus_ignores_high_bits() {
+        // Only bits 15:8 matter
+        let status: i32 = 0x12_34_00u32 as i32;
+        assert_eq!(wexitstatus(status), 0x34);
+    }
+
+    // -- Stub functions --
+
+    #[test]
+    fn test_fork_returns_enosys() {
+        assert_eq!(fork(), -1);
+    }
+
+    #[test]
+    fn test_vfork_returns_enosys() {
+        assert_eq!(vfork(), -1);
+    }
+
+    #[test]
+    fn test_getppid_returns_1() {
+        assert_eq!(getppid(), 1);
+    }
+
+    #[test]
+    fn test_clone_returns_enosys() {
+        assert_eq!(clone(core::ptr::null(), core::ptr::null_mut(), 0, core::ptr::null_mut()), -1);
+    }
+
+    #[test]
+    fn test_unshare_returns_enosys() {
+        assert_eq!(unshare(0), -1);
+    }
+
+    #[test]
+    fn test_setns_returns_enosys() {
+        assert_eq!(setns(0, 0), -1);
+    }
+
+    #[test]
+    fn test_mount_returns_enosys() {
+        assert_eq!(mount(core::ptr::null(), core::ptr::null(), core::ptr::null(), 0, core::ptr::null()), -1);
+    }
+
+    #[test]
+    fn test_umount_returns_enosys() {
+        assert_eq!(umount(core::ptr::null()), -1);
+    }
+
+    #[test]
+    fn test_umount2_returns_enosys() {
+        assert_eq!(umount2(core::ptr::null(), 0), -1);
+    }
+}

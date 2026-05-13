@@ -191,3 +191,129 @@ pub static PATH_MAX: i32 = 4096;
 /// Maximum multibyte character length (UTF-8).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static MB_LEN_MAX: i32 = 4;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Character/integer limits (LP64) --
+
+    #[test]
+    fn test_char_bit() {
+        assert_eq!(CHAR_BIT, 8);
+    }
+
+    #[test]
+    fn test_schar_range() {
+        assert_eq!(SCHAR_MIN, -128);
+        assert_eq!(SCHAR_MAX, 127);
+    }
+
+    #[test]
+    fn test_uchar_max() {
+        assert_eq!(UCHAR_MAX, 255);
+    }
+
+    #[test]
+    fn test_short_range() {
+        assert_eq!(SHRT_MIN, -32768);
+        assert_eq!(SHRT_MAX, 32767);
+        assert_eq!(USHRT_MAX, 65535);
+    }
+
+    #[test]
+    fn test_int_range() {
+        assert_eq!(INT_MIN, -2_147_483_648);
+        assert_eq!(INT_MAX, 2_147_483_647);
+        assert_eq!(UINT_MAX, 4_294_967_295);
+    }
+
+    #[test]
+    fn test_long_range() {
+        assert_eq!(LONG_MIN, i64::MIN);
+        assert_eq!(LONG_MAX, i64::MAX);
+        assert_eq!(ULONG_MAX, u64::MAX);
+    }
+
+    #[test]
+    fn test_llong_range() {
+        assert_eq!(LLONG_MIN, i64::MIN);
+        assert_eq!(LLONG_MAX, i64::MAX);
+        assert_eq!(ULLONG_MAX, u64::MAX);
+    }
+
+    // -- Fixed-width integer limits --
+
+    #[test]
+    fn test_fixed_width_max() {
+        assert_eq!(INT8_MAX, 127);
+        assert_eq!(INT16_MAX, 32767);
+        assert_eq!(INT32_MAX, i32::MAX);
+        assert_eq!(INT64_MAX, i64::MAX);
+    }
+
+    #[test]
+    fn test_size_max() {
+        assert_eq!(SIZE_MAX, usize::MAX);
+        assert_eq!(SSIZE_MAX, isize::MAX);
+    }
+
+    // -- POSIX limits --
+
+    #[test]
+    fn test_name_limits() {
+        assert_eq!(HOST_NAME_MAX, 255);
+        assert_eq!(LOGIN_NAME_MAX, 256);
+        assert_eq!(TTY_NAME_MAX, 32);
+        assert_eq!(NAME_MAX, 255);
+    }
+
+    #[test]
+    fn test_path_max() {
+        assert_eq!(PATH_MAX_LIMIT, 4096);
+        assert_eq!(PATH_MAX, 4096);
+        assert_eq!(PATH_MAX, PATH_MAX_LIMIT);
+    }
+
+    #[test]
+    fn test_resource_limits() {
+        assert_eq!(PIPE_BUF, 4096);
+        assert_eq!(OPEN_MAX, 256);
+        assert_eq!(CHILD_MAX, 256);
+        assert_eq!(IOV_MAX, 1024);
+        assert_eq!(LINE_MAX, 2048);
+        assert_eq!(ARG_MAX, 131_072);
+        assert_eq!(NGROUPS_MAX, 32);
+    }
+
+    // -- POSIX minimum values --
+
+    #[test]
+    fn test_posix_minimums() {
+        assert_eq!(_POSIX_PATH_MAX, 256);
+        assert_eq!(_POSIX_NAME_MAX, 14);
+        assert_eq!(_POSIX_OPEN_MAX, 20);
+        assert_eq!(_POSIX_CHILD_MAX, 25);
+        assert_eq!(_POSIX_ARG_MAX, 4096);
+    }
+
+    // -- Limits are at least POSIX minimums --
+
+    #[test]
+    fn test_limits_exceed_posix_minimums() {
+        assert!(PATH_MAX >= _POSIX_PATH_MAX);
+        assert!(NAME_MAX >= _POSIX_NAME_MAX);
+        assert!(OPEN_MAX >= _POSIX_OPEN_MAX);
+        assert!(CHILD_MAX >= _POSIX_CHILD_MAX);
+        assert!(ARG_MAX >= _POSIX_ARG_MAX);
+    }
+
+    #[test]
+    fn test_mb_len_max() {
+        assert_eq!(MB_LEN_MAX, 4); // UTF-8
+    }
+}

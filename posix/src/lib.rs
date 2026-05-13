@@ -59,9 +59,13 @@
 //! - **User/Group**: `getpwnam`, `getpwuid`, `getgrnam`, `getgrgid`,
 //!   `getlogin`, password/group enumeration
 //! - **Math**: `fabs`, `floor`, `ceil`, `round`, `trunc`, `fmod`,
-//!   `sqrt`, `pow`, `exp`/`exp2`, `log`/`log2`/`log10`,
-//!   `sin`, `cos`, `tan`, `atan2`, `frexp`, `ldexp`, `modf`,
-//!   `isnan`, `isinf`, `isfinite`, `copysign`, `fmin`, `fmax`
+//!   `sqrt`, `cbrt`, `hypot`, `pow`, `exp`/`exp2`/`expm1`,
+//!   `log`/`log2`/`log10`/`log1p`, `sin`, `cos`, `tan`,
+//!   `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`,
+//!   `frexp`, `ldexp`, `modf`, `scalbn`, `ilogb`, `logb`,
+//!   `isnan`, `isinf`, `isfinite`, `copysign`, `fmin`, `fmax`,
+//!   `fdim`, `fma`, `remainder`, `rint`, `nearbyint`, `nextafter`,
+//!   `erf`, `erfc`, `lgamma`, `tgamma`
 //!   (and `f32` variants)
 //! - **Wide Characters** (full UTF-8): `mblen`, `mbtowc`, `wctomb`,
 //!   `mbstowcs`, `wcstombs`, `btowc`, `wctob`, `mbsinit`, `mbrtowc`,

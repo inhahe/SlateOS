@@ -1107,3 +1107,142 @@ pub extern "C" fn modff(x: f32, iptr: *mut f32) -> f32 {
 pub extern "C" fn __copysign(x: f64, y: f64) -> f64 {
     copysign(x, y)
 }
+
+// ---------------------------------------------------------------------------
+// Error function and gamma function
+// ---------------------------------------------------------------------------
+
+/// Error function.
+///
+/// Approximation using Abramowitz and Stegun formula 7.1.26.
+/// Accurate to ~1.5e-7 relative error.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn erf(x: f64) -> f64 {
+    // Constants from A&S 7.1.26.
+    const A1: f64 = 0.254_829_592;
+    const A2: f64 = -0.284_496_736;
+    const A3: f64 = 1.421_413_741;
+    const A4: f64 = -1.453_152_027;
+    const A5: f64 = 1.061_405_429;
+    const P: f64 = 0.327_591_1;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let a = fabs(x);
+    let t = 1.0 / (1.0 + P * a);
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let t4 = t3 * t;
+    let t5 = t4 * t;
+    let y = 1.0 - (A1 * t + A2 * t2 + A3 * t3 + A4 * t4 + A5 * t5) * exp(-a * a);
+    sign * y
+}
+
+/// Complementary error function: erfc(x) = 1 - erf(x).
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn erfc(x: f64) -> f64 {
+    1.0 - erf(x)
+}
+
+/// Error function (f32).
+#[unsafe(no_mangle)]
+pub extern "C" fn erff(x: f32) -> f32 {
+    erf(f64::from(x)) as f32
+}
+
+/// Complementary error function (f32).
+#[unsafe(no_mangle)]
+pub extern "C" fn erfcf(x: f32) -> f32 {
+    erfc(f64::from(x)) as f32
+}
+
+/// Natural log of the absolute value of the gamma function.
+///
+/// Uses the Stirling approximation with correction terms for x >= 7,
+/// and the recurrence relation to reduce smaller x to that range.
+/// Returns +∞ for x = 0 and negative integers.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn lgamma(x: f64) -> f64 {
+    // Handle special cases.
+    if x.is_nan() {
+        return x;
+    }
+    if x.is_infinite() {
+        return f64::INFINITY;
+    }
+    // Poles at 0 and negative integers.
+    if x <= 0.0 && x == floor(x) {
+        return f64::INFINITY;
+    }
+
+    // Use reflection formula for x < 0.5:
+    //   Γ(x) * Γ(1-x) = π / sin(πx)
+    //   lgamma(x) = ln(π/sin(πx)) - lgamma(1-x)
+    if x < 0.5 {
+        let reflect = consts::PI / sin(consts::PI * x);
+        return log(fabs(reflect)) - lgamma(1.0 - x);
+    }
+
+    // Use recurrence Γ(x+1) = x*Γ(x) to get x >= 7.
+    let mut xx = x;
+    let mut correction: f64 = 0.0;
+    while xx < 7.0 {
+        correction -= log(xx);
+        xx += 1.0;
+    }
+
+    // Stirling series: ln(Γ(x)) ≈ (x-0.5)*ln(x) - x + 0.5*ln(2π) + Σ B_{2n}/(2n*(2n-1)*x^{2n-1})
+    let x2 = xx * xx;
+    let result = (xx - 0.5) * log(xx) - xx + 0.918_938_533_204_672_7 // 0.5*ln(2π)
+        + 1.0 / (12.0 * xx)
+        - 1.0 / (360.0 * x2 * xx)
+        + 1.0 / (1260.0 * x2 * x2 * xx);
+
+    result + correction
+}
+
+/// f32 version of lgamma.
+#[unsafe(no_mangle)]
+pub extern "C" fn lgammaf(x: f32) -> f32 {
+    lgamma(f64::from(x)) as f32
+}
+
+/// Gamma function: Γ(x) = exp(lgamma(x)).
+///
+/// Returns the true gamma function value, handling sign correctly.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn tgamma(x: f64) -> f64 {
+    // Special cases.
+    if x.is_nan() {
+        return x;
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { f64::INFINITY } else { f64::NAN };
+    }
+    // Poles at 0 and negative integers.
+    if x <= 0.0 && x == floor(x) {
+        return f64::NAN;
+    }
+
+    // For positive x, Γ(x) = exp(lgamma(x)).
+    if x > 0.0 {
+        return exp(lgamma(x));
+    }
+
+    // Negative x: use reflection formula.
+    // Γ(x) = π / (sin(πx) * Γ(1-x))
+    let sin_pi_x = sin(consts::PI * x);
+    if fabs(sin_pi_x) < 1e-15 {
+        return f64::NAN; // Near a pole.
+    }
+    consts::PI / (sin_pi_x * tgamma(1.0 - x))
+}
+
+/// f32 version of tgamma.
+#[unsafe(no_mangle)]
+pub extern "C" fn tgammaf(x: f32) -> f32 {
+    tgamma(f64::from(x)) as f32
+}

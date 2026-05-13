@@ -388,6 +388,7 @@ const ROOT_FILES: &[&str] = &[
     "netstat",
     "ndisc",
     "netcat",
+    "iperf",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7501,6 +7502,10 @@ fn gen_netcat() -> Vec<u8> {
     crate::net::netcat::procfs_content().into_bytes()
 }
 
+fn gen_iperf() -> Vec<u8> {
+    crate::net::iperf::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10196,6 +10201,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "netstat" => Ok(gen_netstat()),
         "ndisc" => Ok(gen_ndisc()),
         "netcat" => Ok(gen_netcat()),
+        "iperf" => Ok(gen_iperf()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

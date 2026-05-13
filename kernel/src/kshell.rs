@@ -3548,6 +3548,7 @@ const COMMANDS: &[&str] = &[
     "netstat", "ss",
     "ndisc", "arpscan",
     "nc", "netcat",
+    "iperf",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4750,6 +4751,7 @@ fn dispatch(line: &str) {
         "netstat" | "ss" => cmd_netstat(args),
         "ndisc" | "arpscan" => cmd_ndisc(args),
         "nc" | "netcat" => cmd_nc(args),
+        "iperf" => cmd_iperf(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35758,6 +35760,170 @@ fn cmd_ndisc(args: &str) {
     }
 }
 
+/// `iperf` — network bandwidth measurement tool.
+fn cmd_iperf(args: &str) {
+    use alloc::format;
+    use alloc::vec::Vec;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("help");
+
+    match sub {
+        "client" | "c" => {
+            // iperf client <host> <port> [duration_polls]
+            if parts.len() < 3 {
+                shell_println!("Usage: iperf client <host> <port> [duration]");
+                return;
+            }
+            let host_str = parts[1];
+            let port_str = parts[2];
+            let duration: u32 = parts.get(3)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("iperf: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            let port: u16 = match port_str.parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("iperf: invalid port '{}'", port_str);
+                    return;
+                }
+            };
+
+            shell_println!("Connecting to {}:{}...", ip, port);
+            shell_println!("Running TCP throughput test...");
+            match crate::net::iperf::tcp_client_test(ip, port, duration) {
+                Ok(result) => {
+                    shell_println!("--- TCP Throughput Test ---");
+                    shell_println!("  Transferred: {}", crate::net::iperf::format_bytes(result.bytes_transferred));
+                    shell_println!("  Duration:    {}", crate::net::iperf::format_duration(result.duration_ns));
+                    shell_println!("  Throughput:  {}", crate::net::iperf::format_bandwidth(result.throughput_bps));
+                }
+                Err(e) => shell_println!("iperf: test failed: {:?}", e),
+            }
+        }
+
+        "server" | "s" => {
+            // iperf server <port> [max_polls]
+            if parts.len() < 2 {
+                shell_println!("Usage: iperf server <port> [max_polls]");
+                return;
+            }
+            let port: u16 = match parts[1].parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("iperf: invalid port '{}'", parts[1]);
+                    return;
+                }
+            };
+            let max_polls: u32 = parts.get(2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+
+            shell_println!("Listening on port {}...", port);
+            match crate::net::iperf::tcp_server_test(port, max_polls) {
+                Ok(result) => {
+                    shell_println!("--- TCP Server Result ---");
+                    shell_println!("  Received:    {}", crate::net::iperf::format_bytes(result.bytes_transferred));
+                    shell_println!("  Duration:    {}", crate::net::iperf::format_duration(result.duration_ns));
+                    shell_println!("  Throughput:  {}", crate::net::iperf::format_bandwidth(result.throughput_bps));
+                }
+                Err(e) => shell_println!("iperf: server failed: {:?}", e),
+            }
+        }
+
+        "udp" | "u" => {
+            // iperf udp <host> <port> [count] [size]
+            if parts.len() < 3 {
+                shell_println!("Usage: iperf udp <host> <port> [count] [size]");
+                return;
+            }
+            let host_str = parts[1];
+            let port_str = parts[2];
+            let count: u32 = parts.get(3)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100);
+            let size: usize = parts.get(4)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1400);
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("iperf: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            let port: u16 = match port_str.parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("iperf: invalid port '{}'", port_str);
+                    return;
+                }
+            };
+
+            shell_println!("Running UDP throughput test to {}:{}...", ip, port);
+            shell_println!("  {} packets x {} bytes", count, size);
+            match crate::net::iperf::udp_client_test(ip, port, count, size) {
+                Ok(result) => {
+                    shell_println!("--- UDP Throughput Test ---");
+                    shell_println!("  Transferred: {}", crate::net::iperf::format_bytes(result.bytes_transferred));
+                    shell_println!("  Duration:    {}", crate::net::iperf::format_duration(result.duration_ns));
+                    shell_println!("  Throughput:  {}", crate::net::iperf::format_bandwidth(result.throughput_bps));
+                    shell_println!("  Packets:     {}/{} sent", result.packets_received, result.packets_sent);
+                    shell_println!("  Loss:        {:.1}%", result.loss_percent);
+                    shell_println!("  Avg jitter:  {}", crate::net::iperf::format_duration(result.avg_jitter_ns));
+                }
+                Err(e) => shell_println!("iperf: test failed: {:?}", e),
+            }
+        }
+
+        "status" | "stats" => {
+            let s = crate::net::iperf::stats();
+            shell_println!("iperf statistics:");
+            shell_println!("  Tests run:       {}", s.tests_run);
+            shell_println!("  TCP tests:       {}", s.tcp_tests);
+            shell_println!("  UDP tests:       {}", s.udp_tests);
+            shell_println!("  Server sessions: {}", s.server_sessions);
+            shell_println!("  Total TX:        {}", crate::net::iperf::format_bytes(s.total_bytes_tx));
+            shell_println!("  Total RX:        {}", crate::net::iperf::format_bytes(s.total_bytes_rx));
+        }
+
+        "test" => {
+            match crate::net::iperf::self_test() {
+                Ok(()) => shell_println!("iperf: all self-tests passed"),
+                Err(e) => shell_println!("iperf: self-test failed: {:?}", e),
+            }
+        }
+
+        _ => {
+            shell_println!("iperf — network bandwidth measurement tool");
+            shell_println!();
+            shell_println!("Usage:");
+            shell_println!("  iperf client <host> <port> [duration]  — TCP throughput test");
+            shell_println!("  iperf server <port> [max_polls]        — TCP server mode");
+            shell_println!("  iperf udp <host> <port> [count] [size] — UDP throughput test");
+            shell_println!("  iperf status                           — show statistics");
+            shell_println!("  iperf test                             — run self-tests");
+        }
+    }
+}
+
 /// `nc` / `netcat` — TCP/UDP networking swiss army knife.
 fn cmd_nc(args: &str) {
     use alloc::format;
@@ -66525,7 +66691,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

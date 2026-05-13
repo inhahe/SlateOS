@@ -24,6 +24,7 @@ pub mod frag;
 pub mod http;
 pub mod icmp;
 pub mod igmp;
+pub mod iperf;
 pub mod lldp;
 pub mod ndisc;
 pub mod netcat;

@@ -1133,6 +1133,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] SMTP client (RFC 5321, EHLO, MAIL FROM/RCPT TO/DATA, dot stuffing)
   - [x] 802.1Q VLAN support (tag/untag frames, VLAN interface management, PCP priority)
   - [x] QoS traffic classification (DSCP, port/protocol rules, token bucket rate limiting)
+  - [x] SOCKS5 proxy client (RFC 1928, CONNECT, no-auth/userpass, IPv4/domain targets)
+  - [x] Ethernet bridging (MAC learning FDB, STP port states, flooding) and link aggregation (active-backup, round-robin, XOR-hash bonding)
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 
 ### 2.5 POSIX compatibility layer

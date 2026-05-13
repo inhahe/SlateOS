@@ -251,7 +251,12 @@ pub type SocklenT = u32;
 // ---------------------------------------------------------------------------
 
 /// Maximum sockets tracked in the metadata table.
-const MAX_SOCKETS: usize = 64;
+///
+/// Must be >= MAX_FDS (256) so that socket metadata can be stored for
+/// any valid fd index.  If a socket gets fd >= MAX_SOCKETS, all
+/// metadata operations (setsockopt, timeouts, keepalive, etc.) silently
+/// fail — which is why this must match the fd table capacity.
+const MAX_SOCKETS: usize = 256;
 
 /// Per-fd socket state that the kernel doesn't track for us.
 ///
@@ -2188,20 +2193,35 @@ pub(crate) fn tcp_send_wait(
         u64::MAX
     };
 
-    loop {
-        let ret = syscall3(SYS_TCP_SEND, handle, buf as u64, len as u64);
+    // Linux's blocking send() on TCP loops internally until ALL bytes
+    // are accepted into the send buffer (or an error/signal occurs).
+    // Many programs depend on this "full-write" behavior for blocking
+    // sockets and don't handle short writes.  We match Linux here.
+    let mut sent: usize = 0;
+
+    while sent < len {
+        let remaining = len.saturating_sub(sent);
+        // SAFETY: buf is valid for `len` bytes; buf.add(sent) is in bounds.
+        let ptr = unsafe { buf.add(sent) };
+
+        let ret = syscall3(SYS_TCP_SEND, handle, ptr as u64, remaining as u64);
         if ret > 0 {
-            return ret as isize;
+            sent = sent.saturating_add(ret as usize);
+            continue;
         }
         if ret == 0 {
             // 0 bytes sent — connection may be closing.
-            return 0;
+            break;
         }
         // Negative: check if it's just WouldBlock (window still closed).
         let err = translate_net_error(ret);
         if err != errno::EAGAIN && err != errno::EWOULDBLOCK {
             // Real error — distinguish RST (ECONNRESET) from local
             // shutdown/graceful close (EPIPE).
+            if sent > 0 {
+                // Partial data already accepted — return that count.
+                break;
+            }
             if err == errno::ECONNRESET {
                 let last = crate::syscall::syscall1(
                     crate::syscall::SYS_TCP_LAST_ERROR, handle,
@@ -2216,12 +2236,17 @@ pub(crate) fn tcp_send_wait(
         if deadline != u64::MAX {
             let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
             if now >= deadline {
+                if sent > 0 {
+                    break;
+                }
                 errno::set_errno(errno::EAGAIN);
                 return -1;
             }
         }
         let _ = syscall1(SYS_SLEEP, POLL_NS);
     }
+
+    sent as isize
 }
 
 // ---------------------------------------------------------------------------

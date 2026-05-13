@@ -1539,7 +1539,7 @@ pub unsafe extern "C" fn send(
     fd: i32,
     buf: *const u8,
     len: usize,
-    _flags: i32,
+    flags: i32,
 ) -> isize {
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
@@ -1551,6 +1551,10 @@ pub unsafe extern "C" fn send(
         return -1;
     };
 
+    // MSG_NOSIGNAL (0x4000) is a no-op — we have no SIGPIPE.
+    // MSG_DONTWAIT (0x40) — non-blocking hint (also triggered by O_NONBLOCK).
+    let _ = flags; // Accepted flags: MSG_NOSIGNAL, MSG_DONTWAIT.
+
     match entry.kind {
         HandleKind::TcpStream => {
             if entry.handle == 0 {
@@ -1559,7 +1563,14 @@ pub unsafe extern "C" fn send(
             }
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
             if ret < 0 {
-                errno::set_errno(translate_net_error(ret));
+                // Map ChannelClosed to EPIPE for TCP send (broken pipe).
+                let posix_err = translate_net_error(ret);
+                if posix_err == errno::ECONNRESET {
+                    // Remote sent FIN/RST — writing is EPIPE.
+                    errno::set_errno(errno::EPIPE);
+                } else {
+                    errno::set_errno(posix_err);
+                }
                 return -1;
             }
             ret as isize
@@ -1856,7 +1867,7 @@ pub unsafe extern "C" fn sendto(
     fd: i32,
     buf: *const u8,
     len: usize,
-    _flags: i32,
+    flags: i32,
     dest_addr: *const Sockaddr,
     addrlen: SocklenT,
 ) -> isize {
@@ -1870,6 +1881,9 @@ pub unsafe extern "C" fn sendto(
         return -1;
     };
 
+    // MSG_NOSIGNAL (0x4000) is a no-op — we have no SIGPIPE.
+    let _ = flags;
+
     // TCP sendto: works like send() — destination addr is ignored
     // (connection-oriented protocol already knows the peer).
     if entry.kind == HandleKind::TcpStream {
@@ -1879,7 +1893,13 @@ pub unsafe extern "C" fn sendto(
         }
         let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, len as u64);
         if ret < 0 {
-            errno::set_errno(translate_net_error(ret));
+            let posix_err = translate_net_error(ret);
+            // Map ChannelClosed to EPIPE for TCP send (broken pipe).
+            if posix_err == errno::ECONNRESET {
+                errno::set_errno(errno::EPIPE);
+            } else {
+                errno::set_errno(posix_err);
+            }
             return -1;
         }
         return ret as isize;

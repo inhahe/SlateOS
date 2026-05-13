@@ -330,6 +330,51 @@ pub extern "C" fn difftime(time1: TimeT, time0: TimeT) -> f64 {
 }
 
 // ---------------------------------------------------------------------------
+// Timezone globals (POSIX)
+// ---------------------------------------------------------------------------
+
+/// Sync wrapper for `*const u8` in static arrays.
+///
+/// Our pointers are to static string literals — safe to share.
+#[repr(transparent)]
+pub struct TzPtr(*const u8);
+
+// SAFETY: Points to static c-string literals with program lifetime.
+unsafe impl Sync for TzPtr {}
+
+/// Timezone name strings: [standard, daylight].
+///
+/// POSIX requires `tzname` to be a `char *[2]`.  Since we have no
+/// timezone support, both are "UTC".  `repr(transparent)` on `TzPtr`
+/// ensures the layout matches `[*const u8; 2]` for C interop.
+#[unsafe(no_mangle)]
+pub static tzname: [TzPtr; 2] = [
+    TzPtr(c"UTC".as_ptr().cast::<u8>()),
+    TzPtr(c"UTC".as_ptr().cast::<u8>()),
+];
+
+/// Seconds west of UTC.
+///
+/// POSIX/BSD variable.  Always 0 since we are always UTC.
+#[unsafe(no_mangle)]
+pub static timezone: i64 = 0;
+
+/// Whether daylight saving is ever in effect.
+///
+/// Always 0 — our OS has no DST support.
+#[unsafe(no_mangle)]
+pub static daylight: i32 = 0;
+
+/// Initialize timezone information from the TZ environment variable.
+///
+/// Since our OS doesn't support timezones, this is a no-op.  Programs
+/// call this early in main() per POSIX convention.
+#[unsafe(no_mangle)]
+pub extern "C" fn tzset() {
+    // No-op: we are always UTC.
+}
+
+// ---------------------------------------------------------------------------
 // Broken-down time
 // ---------------------------------------------------------------------------
 
@@ -942,11 +987,73 @@ fn secs_to_tm(secs: TimeT, tm: &mut Tm) {
 }
 
 /// Convert broken-down time to seconds since epoch.
+///
+/// Per POSIX, `mktime` normalizes all fields of the `Tm` structure:
+/// - Seconds overflow into minutes, minutes into hours, etc.
+/// - Negative values borrow from the next-higher unit.
+/// - Month values > 11 or < 0 adjust the year.
+/// - After normalization, `tm_wday` and `tm_yday` are set.
 #[allow(clippy::arithmetic_side_effects)]
 fn tm_to_secs(tm: &mut Tm) -> TimeT {
-    let year = tm.tm_year + 1900;
+    // --- Normalize time-of-day fields (bottom up) ---
 
-    // Count days from 1970 to the start of `year`.
+    // Seconds → minutes.
+    let total_sec = i64::from(tm.tm_sec);
+    tm.tm_sec = total_sec.rem_euclid(60) as i32;
+    let carry_min = total_sec.div_euclid(60);
+
+    // Minutes → hours.
+    let total_min = i64::from(tm.tm_min) + carry_min;
+    tm.tm_min = total_min.rem_euclid(60) as i32;
+    let carry_hour = total_min.div_euclid(60);
+
+    // Hours → days.
+    let total_hour = i64::from(tm.tm_hour) + carry_hour;
+    tm.tm_hour = total_hour.rem_euclid(24) as i32;
+    let carry_day = total_hour.div_euclid(24);
+
+    // Adjust mday with carry from hours.
+    let mut mday = i64::from(tm.tm_mday) + carry_day;
+
+    // --- Normalize month → year ---
+    let total_mon = i64::from(tm.tm_mon);
+    let norm_mon = total_mon.rem_euclid(12) as i32;
+    let carry_year = total_mon.div_euclid(12) as i32;
+    tm.tm_mon = norm_mon;
+    tm.tm_year = tm.tm_year + carry_year;
+
+    let mut year = tm.tm_year + 1900;
+
+    // --- Normalize day-of-month into month/year ---
+    // Handle overflow (mday > days-in-month) and underflow (mday < 1).
+    // Loop because adjusting the month may change the days-in-month
+    // (e.g., stepping from March into February changes the limit).
+    loop {
+        let dim = i64::from(days_in_month(tm.tm_mon, year));
+        if mday > dim {
+            mday -= dim;
+            tm.tm_mon += 1;
+            if tm.tm_mon > 11 {
+                tm.tm_mon = 0;
+                tm.tm_year += 1;
+                year += 1;
+            }
+        } else if mday < 1 {
+            tm.tm_mon -= 1;
+            if tm.tm_mon < 0 {
+                tm.tm_mon = 11;
+                tm.tm_year -= 1;
+                year -= 1;
+            }
+            mday += i64::from(days_in_month(tm.tm_mon, year));
+        } else {
+            break;
+        }
+    }
+
+    tm.tm_mday = mday as i32;
+
+    // --- Compute total days from epoch ---
     let mut days: i64 = 0;
     if year > 1970 {
         let mut y = 1970;
@@ -955,7 +1062,6 @@ fn tm_to_secs(tm: &mut Tm) -> TimeT {
             y += 1;
         }
     } else if year < 1970 {
-        // Pre-epoch: count backward from 1970.
         let mut y = 1969;
         while y >= year {
             days -= if is_leap(y) { 366 } else { 365 };
@@ -973,7 +1079,7 @@ fn tm_to_secs(tm: &mut Tm) -> TimeT {
     // Day of month (1-based).
     days += i64::from(tm.tm_mday - 1);
 
-    // Update tm_yday and tm_wday.
+    // Update tm_yday.
     tm.tm_yday = 0;
     let mut m2 = 0;
     while m2 < tm.tm_mon {
@@ -982,6 +1088,7 @@ fn tm_to_secs(tm: &mut Tm) -> TimeT {
     }
     tm.tm_yday += tm.tm_mday - 1;
 
+    // Update tm_wday: 1970-01-01 was Thursday (wday=4).
     tm.tm_wday = ((days + 4).rem_euclid(7)) as i32;
 
     days * 86400 + i64::from(tm.tm_hour) * 3600 + i64::from(tm.tm_min) * 60 + i64::from(tm.tm_sec)

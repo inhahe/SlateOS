@@ -3543,6 +3543,7 @@ const COMMANDS: &[&str] = &[
     "wol", "wakeonlan",
     "pcap", "tcpdump",
     "traceroute", "tracert",
+    "igmp",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4740,6 +4741,7 @@ fn dispatch(line: &str) {
         "wol" | "wakeonlan" => cmd_wol(args),
         "pcap" | "tcpdump" => cmd_pcap(args),
         "traceroute" | "tracert" => cmd_traceroute(args),
+        "igmp" => cmd_igmp(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35395,6 +35397,81 @@ fn cmd_traceroute(args: &str) {
     }
 }
 
+/// `igmp` — IGMP multicast group management.
+fn cmd_igmp(args: &str) {
+    use crate::net::igmp;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("igmp — IGMP multicast group management");
+            shell_println!("  igmp status         Show IGMP statistics");
+            shell_println!("  igmp groups         List active group memberships");
+            shell_println!("  igmp join <IP>      Join a multicast group");
+            shell_println!("  igmp leave <IP>     Leave a multicast group");
+            shell_println!("  igmp test           Run self-tests");
+        }
+        "status" | "stats" => {
+            let s = igmp::stats();
+            shell_println!("IGMP Statistics");
+            shell_println!("  Active groups:    {}", s.active_groups);
+            shell_println!("  Reports sent:     {}", s.reports_sent);
+            shell_println!("  Leaves sent:      {}", s.leaves_sent);
+            shell_println!("  Queries received: {}", s.queries_received);
+            shell_println!("  Errors:           {}", s.errors);
+        }
+        "groups" | "list" => {
+            let (groups, count) = igmp::list_groups();
+            if count == 0 {
+                shell_println!("No active IGMP group memberships");
+            } else {
+                shell_println!("Active IGMP groups ({}):", count);
+                for info in &groups {
+                    shell_println!("  {}  ({})", info.addr, info.state);
+                }
+            }
+        }
+        "join" => {
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            match parse_ipv4(ip_str) {
+                Some(ip) => {
+                    if !ip.is_multicast() {
+                        shell_println!("{} is not a multicast address (224.0.0.0/4)", ip);
+                        return;
+                    }
+                    igmp::join(ip);
+                    shell_println!("Joined multicast group {}", ip);
+                }
+                None => {
+                    shell_println!("Usage: igmp join <multicast-IP>");
+                    shell_println!("  e.g.: igmp join 239.1.1.1");
+                }
+            }
+        }
+        "leave" => {
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            match parse_ipv4(ip_str) {
+                Some(ip) => {
+                    igmp::leave(ip);
+                    shell_println!("Left multicast group {}", ip);
+                }
+                None => {
+                    shell_println!("Usage: igmp leave <multicast-IP>");
+                }
+            }
+        }
+        "test" => {
+            match igmp::self_test() {
+                Ok(()) => shell_println!("IGMP self-test: PASSED"),
+                Err(e) => shell_println!("IGMP self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Unknown subcommand '{}'. Try 'igmp help'.", sub);
+        }
+    }
+}
+
 /// `inputa11y` / `ia11y` — input accessibility features.
 fn cmd_inputa11y(args: &str) {
     use crate::fs::inputa11y;
@@ -65849,7 +65926,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

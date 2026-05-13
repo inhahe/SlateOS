@@ -23,6 +23,7 @@ pub mod firewall;
 pub mod frag;
 pub mod http;
 pub mod icmp;
+pub mod igmp;
 pub mod mdns;
 pub mod ntp;
 pub mod syslog;
@@ -93,6 +94,7 @@ pub fn poll() {
         frag::tick_expire();
         firewall::tick_conntrack_cleanup();
         ntp::tick();
+        igmp::tick();
         mdns::tick();
         syslog::tick();
         telnet::tick();

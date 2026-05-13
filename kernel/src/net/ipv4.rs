@@ -515,6 +515,7 @@ pub fn process_ipv4(data: &[u8]) -> KernelResult<()> {
         PROTO_TCP => super::tcp::process_tcp(&packet),
         PROTO_UDP => super::udp::process_udp(&packet),
         PROTO_ICMP => super::icmp::process_icmp(&packet),
+        super::igmp::PROTO_IGMP => super::igmp::process(&packet, packet.payload),
         _ => {
             // Unknown protocol — drop.
             Ok(())
@@ -562,6 +563,7 @@ fn dispatch_reassembled(
         PROTO_TCP => super::tcp::process_tcp(&ip_pkt),
         PROTO_UDP => super::udp::process_udp(&ip_pkt),
         PROTO_ICMP => super::icmp::process_icmp(&ip_pkt),
+        super::igmp::PROTO_IGMP => super::igmp::process(&ip_pkt, ip_pkt.payload),
         _ => Ok(()),
     }
 }

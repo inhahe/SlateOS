@@ -383,6 +383,7 @@ const ROOT_FILES: &[&str] = &[
     "wol",
     "pcap",
     "traceroute",
+    "igmp",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7476,6 +7477,10 @@ fn gen_traceroute() -> Vec<u8> {
     crate::net::traceroute::procfs_content().into_bytes()
 }
 
+fn gen_igmp() -> Vec<u8> {
+    crate::net::igmp::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10166,6 +10171,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "wol" => Ok(gen_wol()),
         "pcap" => Ok(gen_pcap()),
         "traceroute" => Ok(gen_traceroute()),
+        "igmp" => Ok(gen_igmp()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

@@ -791,4 +791,104 @@ mod tests {
         let pb: *const Dirent = &b;
         assert!(alphasort(&pa, &pb) < 0); // "ab\0" < "abc\0"
     }
+
+    // -- Dirent struct size and offsets --
+
+    #[test]
+    fn test_dirent_struct_size() {
+        // d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + padding(5) + d_name(256)
+        // = 280 bytes on x86_64.
+        let size = core::mem::size_of::<Dirent>();
+        assert!(size >= 275, "Dirent too small: {size}"); // at least the fields
+        // d_ino must be at offset 0.
+        assert_eq!(core::mem::offset_of!(Dirent, d_ino), 0);
+        // d_name must be inside the struct and fit 256 bytes.
+        let name_offset = core::mem::offset_of!(Dirent, d_name);
+        assert!(name_offset + 256 <= size, "d_name doesn't fit in Dirent");
+    }
+
+    // -- versionsort (pure function — can test without kernel) --
+
+    #[test]
+    fn test_versionsort_numeric_ordering() {
+        // "file2" < "file10" under version sorting.
+        let mut a = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let mut b = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let name_a = b"file2\0";
+        let name_b = b"file10\0";
+        a.d_name[..name_a.len()].copy_from_slice(name_a);
+        b.d_name[..name_b.len()].copy_from_slice(name_b);
+        let pa: *const Dirent = &a;
+        let pb: *const Dirent = &b;
+        // Under version sort, file2 < file10.
+        assert!(versionsort(&pa, &pb) < 0, "file2 should sort before file10");
+    }
+
+    #[test]
+    fn test_versionsort_equal() {
+        let mut a = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let mut b = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        a.d_name[0] = b'x'; a.d_name[1] = b'1';
+        b.d_name[0] = b'x'; b.d_name[1] = b'1';
+        let pa: *const Dirent = &a;
+        let pb: *const Dirent = &b;
+        assert_eq!(versionsort(&pa, &pb), 0);
+    }
+
+    #[test]
+    fn test_versionsort_null_outer() {
+        let d = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let pd: *const Dirent = &d;
+        assert_eq!(versionsort(core::ptr::null(), &pd), 0);
+        assert_eq!(versionsort(&pd, core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_versionsort_vs_alphasort() {
+        // alphasort("file10", "file2") > 0 (lexicographic: '1' < '2')
+        // versionsort("file10", "file2") > 0 (numeric: 10 > 2)
+        // Both agree on ordering direction here, but the reason differs.
+        let mut a = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let mut b = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let name_a = b"file10\0";
+        let name_b = b"file2\0";
+        a.d_name[..name_a.len()].copy_from_slice(name_a);
+        b.d_name[..name_b.len()].copy_from_slice(name_b);
+        let pa: *const Dirent = &a;
+        let pb: *const Dirent = &b;
+
+        // versionsort: file10 > file2 (numeric 10 > 2)
+        assert!(versionsort(&pa, &pb) > 0, "versionsort: file10 > file2");
+
+        // alphasort: "file10" < "file2" (lexicographic: '1' < '2')
+        assert!(alphasort(&pa, &pb) < 0, "alphasort: file10 < file2 (lexicographic)");
+    }
+
+    // -- Dir pool constants --
+
+    #[test]
+    fn test_max_open_dirs() {
+        assert_eq!(MAX_OPEN_DIRS, 8);
+    }
 }

@@ -53,7 +53,7 @@ fn capture_stop() -> String {
 /// saving and restoring the previous capture state (since a command
 /// substitution can appear inside a pipeline or redirect that's already
 /// capturing).
-fn capture_command(cmd: &str) -> String {
+pub fn capture_command(cmd: &str) -> String {
     // Save any existing capture state (supports nesting).
     let prev = SHELL_OUTPUT.lock().take();
 
@@ -3537,6 +3537,7 @@ const COMMANDS: &[&str] = &[
     "httpc", "curl",
     "ntp", "ntpdate",
     "mdns", "dnssd",
+    "telnetd", "telnet",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4728,6 +4729,7 @@ fn dispatch(line: &str) {
         "httpc" | "curl" => cmd_httpc(args),
         "ntp" | "ntpdate" => cmd_ntp(args),
         "mdns" | "dnssd" => cmd_mdns(args),
+        "telnetd" | "telnet" => cmd_telnetd(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -34746,6 +34748,116 @@ fn cmd_mdns(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'mdns help'.", sub);
+        }
+    }
+}
+
+/// `telnetd` / `telnet` — telnet server for remote kshell access.
+fn cmd_telnetd(args: &str) {
+    use crate::net::telnet;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", telnet::procfs_content());
+        }
+        "status" | "stats" => {
+            let s = telnet::stats();
+            shell_println!("Telnet Server");
+            shell_println!("  Status:      {}",
+                if s.initialized {
+                    if s.enabled { "running" } else { "disabled" }
+                } else { "not started" }
+            );
+            shell_println!("  Port:        {}", s.port);
+            shell_println!("  Sessions:    {}/4", s.active_sessions);
+            shell_println!("  Connections: {} ({} rejected)", s.total_connections, s.rejected_connections);
+            shell_println!("  Commands:    {}", s.total_commands);
+            shell_println!("  Traffic:     {} TX / {} RX bytes", s.total_bytes_tx, s.total_bytes_rx);
+        }
+        "start" | "init" => {
+            match telnet::init() {
+                Ok(()) => shell_println!("Telnet server started"),
+                Err(e) => shell_println!("Failed to start: {:?}", e),
+            }
+        }
+        "stop" | "shutdown" => {
+            telnet::shutdown();
+            shell_println!("Telnet server stopped");
+        }
+        "enable" => {
+            telnet::set_enabled(true);
+            shell_println!("Telnet server enabled");
+        }
+        "disable" => {
+            telnet::set_enabled(false);
+            shell_println!("Telnet server disabled (sessions disconnected)");
+        }
+        "port" => {
+            let port_str = parts.get(1).copied().unwrap_or("");
+            if port_str.is_empty() {
+                shell_println!("Listening port: {}", telnet::stats().port);
+            } else {
+                let port: u16 = port_str.parse().unwrap_or(0);
+                if port == 0 {
+                    shell_println!("Invalid port");
+                } else {
+                    telnet::set_port(port);
+                    shell_println!("Port set to {} (restart server to apply)", port);
+                }
+            }
+        }
+        "sessions" | "who" => {
+            let sessions = telnet::active_sessions();
+            if sessions.is_empty() {
+                shell_println!("No active sessions");
+            } else {
+                shell_println!("{:<4} {:<20} {:<8} {:<10} {:<12} {}",
+                    "#", "Remote", "Cmds", "Uptime", "TX/RX", "");
+                for s in &sessions {
+                    shell_println!("{:<4} {}:{:<12} {:<8} {}s {:<6}/{:<6}",
+                        s.index,
+                        s.remote_ip, s.remote_port,
+                        s.commands_run,
+                        s.connected_secs,
+                        s.bytes_tx, s.bytes_rx,
+                    );
+                }
+            }
+        }
+        "kick" | "disconnect" => {
+            let idx_str = parts.get(1).copied().unwrap_or("");
+            if idx_str.is_empty() {
+                shell_println!("Usage: telnetd kick <session#>");
+                return;
+            }
+            let idx: usize = idx_str.parse().unwrap_or(usize::MAX);
+            if telnet::disconnect_session(idx) {
+                shell_println!("Disconnected session #{}", idx);
+            } else {
+                shell_println!("Session #{} not found or inactive", idx);
+            }
+        }
+        "test" => {
+            match telnet::self_test() {
+                Ok(()) => shell_println!("Telnet self-test: PASSED"),
+                Err(e) => shell_println!("Telnet self-test FAILED: {:?}", e),
+            }
+        }
+        "help" => {
+            shell_println!("telnetd — remote kernel shell server");
+            shell_println!("  show              Full status overview");
+            shell_println!("  status            Summary statistics");
+            shell_println!("  start             Start the server");
+            shell_println!("  stop              Stop and disconnect all");
+            shell_println!("  enable/disable    Toggle without restart");
+            shell_println!("  port [num]        Get/set listening port");
+            shell_println!("  sessions          List connected clients");
+            shell_println!("  kick <#>          Disconnect a session");
+            shell_println!("  test              Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'telnetd help'.", sub);
         }
     }
 }
@@ -65204,7 +65316,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

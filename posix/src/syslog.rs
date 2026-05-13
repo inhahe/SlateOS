@@ -249,3 +249,153 @@ fn write_u32(mut val: u32, buf: &mut [u8; 16]) -> usize {
 
     buf.len().wrapping_sub(pos)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Pure helper tests --
+
+    #[test]
+    fn test_log_pri_extracts_priority() {
+        // Priority is the low 3 bits.
+        assert_eq!(log_pri(LOG_ERR), LOG_ERR);
+        assert_eq!(log_pri(LOG_DEBUG), LOG_DEBUG);
+        assert_eq!(log_pri(LOG_EMERG), LOG_EMERG);
+    }
+
+    #[test]
+    fn test_log_pri_strips_facility() {
+        // LOG_USER | LOG_ERR = (1<<3) | 3 = 11
+        assert_eq!(log_pri(LOG_USER | LOG_ERR), LOG_ERR);
+        // LOG_DAEMON | LOG_WARNING = (3<<3) | 4 = 28
+        assert_eq!(log_pri(LOG_DAEMON | LOG_WARNING), LOG_WARNING);
+        // LOG_LOCAL7 | LOG_DEBUG = (23<<3) | 7 = 191
+        assert_eq!(log_pri(LOG_LOCAL7 | LOG_DEBUG), LOG_DEBUG);
+    }
+
+    #[test]
+    fn test_log_mask_single_priority() {
+        assert_eq!(log_mask(LOG_EMERG), 1);    // 1 << 0
+        assert_eq!(log_mask(LOG_ERR), 1 << 3); // 1 << 3
+        assert_eq!(log_mask(LOG_DEBUG), 1 << 7);
+    }
+
+    #[test]
+    fn test_log_upto_includes_lower() {
+        // LOG_UPTO(LOG_ERR) should include EMERG, ALERT, CRIT, ERR
+        let mask = log_upto(LOG_ERR);
+        assert_ne!(mask & log_mask(LOG_EMERG), 0);
+        assert_ne!(mask & log_mask(LOG_ALERT), 0);
+        assert_ne!(mask & log_mask(LOG_CRIT), 0);
+        assert_ne!(mask & log_mask(LOG_ERR), 0);
+        // But not WARNING or above.
+        assert_eq!(mask & log_mask(LOG_WARNING), 0);
+        assert_eq!(mask & log_mask(LOG_INFO), 0);
+        assert_eq!(mask & log_mask(LOG_DEBUG), 0);
+    }
+
+    #[test]
+    fn test_log_upto_all() {
+        let mask = log_upto(LOG_DEBUG); // All priorities
+        for p in 0..=7 {
+            assert_ne!(mask & log_mask(p), 0, "priority {p} should be set");
+        }
+    }
+
+    // -- write_u32 tests --
+
+    #[test]
+    fn test_write_u32_zero() {
+        let mut buf = [0u8; 16];
+        let len = write_u32(0, &mut buf);
+        assert_eq!(len, 1);
+        assert_eq!(buf[15], b'0');
+    }
+
+    #[test]
+    fn test_write_u32_single_digit() {
+        let mut buf = [0u8; 16];
+        let len = write_u32(7, &mut buf);
+        assert_eq!(len, 1);
+        assert_eq!(buf[15], b'7');
+    }
+
+    #[test]
+    fn test_write_u32_multi_digit() {
+        let mut buf = [0u8; 16];
+        let len = write_u32(12345, &mut buf);
+        assert_eq!(len, 5);
+        assert_eq!(&buf[11..16], b"12345");
+    }
+
+    #[test]
+    fn test_write_u32_max() {
+        let mut buf = [0u8; 16];
+        let len = write_u32(u32::MAX, &mut buf);
+        // 4294967295 = 10 digits
+        assert_eq!(len, 10);
+        assert_eq!(&buf[6..16], b"4294967295");
+    }
+
+    // -- setlogmask tests --
+
+    #[test]
+    fn test_setlogmask_returns_previous() {
+        // Reset to known state.
+        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+
+        let old = setlogmask(log_upto(LOG_ERR));
+        assert_eq!(old, 0xFF);
+
+        let old2 = setlogmask(0xFF);
+        assert_eq!(old2, log_upto(LOG_ERR));
+    }
+
+    #[test]
+    fn test_setlogmask_zero_queries() {
+        // setlogmask(0) queries without changing.
+        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        let mask = setlogmask(0);
+        assert_eq!(mask, 0xFF);
+        // Should still be 0xFF.
+        let mask2 = setlogmask(0);
+        assert_eq!(mask2, 0xFF);
+    }
+
+    // -- Constants match glibc values --
+
+    #[test]
+    fn test_syslog_priority_values() {
+        assert_eq!(LOG_EMERG, 0);
+        assert_eq!(LOG_ALERT, 1);
+        assert_eq!(LOG_CRIT, 2);
+        assert_eq!(LOG_ERR, 3);
+        assert_eq!(LOG_WARNING, 4);
+        assert_eq!(LOG_NOTICE, 5);
+        assert_eq!(LOG_INFO, 6);
+        assert_eq!(LOG_DEBUG, 7);
+    }
+
+    #[test]
+    fn test_syslog_facility_values() {
+        assert_eq!(LOG_KERN, 0);
+        assert_eq!(LOG_USER, 8);
+        assert_eq!(LOG_MAIL, 16);
+        assert_eq!(LOG_DAEMON, 24);
+        assert_eq!(LOG_AUTH, 32);
+        assert_eq!(LOG_LOCAL0, 128);
+        assert_eq!(LOG_LOCAL7, 184);
+    }
+
+    #[test]
+    fn test_syslog_option_values() {
+        assert_eq!(LOG_PID, 0x01);
+        assert_eq!(LOG_NDELAY, 0x08);
+        assert_eq!(LOG_PERROR, 0x20);
+    }
+}

@@ -160,3 +160,121 @@ pub const LC_MESSAGES_MASK: i32 = 1 << LC_MESSAGES;
 /// Mask for all categories (LC_CTYPE through LC_MESSAGES).
 #[allow(clippy::cast_possible_truncation)]
 pub const LC_ALL_MASK: i32 = (1 << LC_ALL) - 1;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- setlocale always returns "C" --
+
+    #[test]
+    fn test_setlocale_returns_c() {
+        let result = setlocale(LC_ALL, core::ptr::null());
+        assert!(!result.is_null());
+        // Should point to "C\0".
+        assert_eq!(unsafe { *result }, b'C');
+        assert_eq!(unsafe { *result.add(1) }, 0);
+    }
+
+    #[test]
+    fn test_setlocale_ignores_locale_arg() {
+        let result = setlocale(LC_ALL, b"en_US.UTF-8\0".as_ptr());
+        assert!(!result.is_null());
+        assert_eq!(unsafe { *result }, b'C');
+    }
+
+    #[test]
+    fn test_setlocale_all_categories() {
+        for cat in [LC_CTYPE, LC_NUMERIC, LC_TIME, LC_COLLATE, LC_MONETARY, LC_MESSAGES, LC_ALL] {
+            let result = setlocale(cat, core::ptr::null());
+            assert!(!result.is_null());
+            assert_eq!(unsafe { *result }, b'C');
+        }
+    }
+
+    // -- localeconv returns valid C locale --
+
+    #[test]
+    fn test_localeconv_not_null() {
+        let lc = localeconv();
+        assert!(!lc.is_null());
+    }
+
+    #[test]
+    fn test_localeconv_decimal_point() {
+        let lc = localeconv();
+        let dp = unsafe { (*lc).decimal_point };
+        assert!(!dp.is_null());
+        assert_eq!(unsafe { *dp }, b'.');
+    }
+
+    #[test]
+    fn test_localeconv_frac_digits_char_max() {
+        let lc = localeconv();
+        // C locale: monetary fields are CHAR_MAX = 127 = "not available"
+        assert_eq!(unsafe { (*lc).int_frac_digits }, 127);
+        assert_eq!(unsafe { (*lc).frac_digits }, 127);
+    }
+
+    // -- Extended locale (xlocale) functions --
+
+    #[test]
+    fn test_newlocale_returns_c() {
+        let loc = newlocale(LC_ALL_MASK, b"C\0".as_ptr(), 0);
+        assert_eq!(loc, C_LOCALE_TAG);
+    }
+
+    #[test]
+    fn test_duplocale_returns_c() {
+        let loc = duplocale(C_LOCALE_TAG);
+        assert_eq!(loc, C_LOCALE_TAG);
+    }
+
+    #[test]
+    fn test_freelocale_no_panic() {
+        // Should be a no-op without panicking.
+        freelocale(C_LOCALE_TAG);
+        freelocale(0);
+    }
+
+    #[test]
+    fn test_uselocale_returns_c() {
+        let prev = uselocale(C_LOCALE_TAG);
+        assert_eq!(prev, C_LOCALE_TAG);
+    }
+
+    // -- Constants --
+
+    #[test]
+    fn test_category_values() {
+        // Values must match glibc.
+        assert_eq!(LC_CTYPE, 0);
+        assert_eq!(LC_NUMERIC, 1);
+        assert_eq!(LC_TIME, 2);
+        assert_eq!(LC_COLLATE, 3);
+        assert_eq!(LC_MONETARY, 4);
+        assert_eq!(LC_MESSAGES, 5);
+        assert_eq!(LC_ALL, 6);
+    }
+
+    #[test]
+    fn test_category_masks() {
+        assert_eq!(LC_CTYPE_MASK, 1);    // 1 << 0
+        assert_eq!(LC_NUMERIC_MASK, 2);  // 1 << 1
+        assert_eq!(LC_TIME_MASK, 4);     // 1 << 2
+        assert_eq!(LC_COLLATE_MASK, 8);  // 1 << 3
+        assert_eq!(LC_MONETARY_MASK, 16); // 1 << 4
+        assert_eq!(LC_MESSAGES_MASK, 32); // 1 << 5
+        // LC_ALL_MASK should cover all categories.
+        assert_eq!(LC_ALL_MASK, 63);     // (1 << 6) - 1 = 63
+    }
+
+    #[test]
+    fn test_lc_global_locale_sentinel() {
+        assert_eq!(LC_GLOBAL_LOCALE, usize::MAX);
+    }
+}

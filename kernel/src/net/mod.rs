@@ -44,6 +44,7 @@ pub mod udp;
 pub mod pcap;
 pub mod traceroute;
 pub mod upnp;
+pub mod vlan;
 pub mod wol;
 
 use alloc::vec::Vec;

@@ -3552,6 +3552,7 @@ const COMMANDS: &[&str] = &[
     "snmp",
     "ftp",
     "smtp",
+    "vlan",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4758,6 +4759,7 @@ fn dispatch(line: &str) {
         "snmp" => cmd_snmp(args),
         "ftp" => cmd_ftp(args),
         "smtp" => cmd_smtp(args),
+        "vlan" => cmd_vlan(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35762,6 +35764,104 @@ fn cmd_ndisc(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'ndisc help'.", sub);
+        }
+    }
+}
+
+/// `vlan` — IEEE 802.1Q VLAN management.
+fn cmd_vlan(args: &str) {
+    use alloc::vec::Vec;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("help");
+
+    match sub {
+        "add" | "create" => {
+            // vlan add <vid> [name]
+            if parts.len() < 2 {
+                shell_println!("Usage: vlan add <vid> [name]");
+                return;
+            }
+            let vid: u16 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    shell_println!("vlan: invalid VLAN ID '{}'", parts[1]);
+                    return;
+                }
+            };
+            let name = if parts.len() > 2 { parts[2] } else { "" };
+
+            match crate::net::vlan::add_vlan(vid, name) {
+                Ok(()) => shell_println!("VLAN {} added", vid),
+                Err(e) => shell_println!("vlan: add failed: {:?}", e),
+            }
+        }
+
+        "remove" | "del" | "delete" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: vlan remove <vid>");
+                return;
+            }
+            let vid: u16 = match parts[1].parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    shell_println!("vlan: invalid VLAN ID '{}'", parts[1]);
+                    return;
+                }
+            };
+
+            match crate::net::vlan::remove_vlan(vid) {
+                Ok(()) => shell_println!("VLAN {} removed", vid),
+                Err(e) => shell_println!("vlan: remove failed: {:?}", e),
+            }
+        }
+
+        "list" | "ls" | "show" => {
+            let vlans = crate::net::vlan::list_vlans();
+            if vlans.is_empty() {
+                shell_println!("No VLANs configured");
+            } else {
+                shell_println!("Configured VLANs:");
+                shell_println!("  {:>5}  {:16}  {:>10} RX  {:>10} TX", "VID", "Name", "Frames", "Frames");
+                for v in &vlans {
+                    shell_println!("  {:>5}  {:16}  {:>10}     {:>10}", v.vid, v.name, v.rx_frames, v.tx_frames);
+                }
+            }
+        }
+
+        "pcp" => {
+            shell_println!("802.1Q Priority Code Point (PCP) values:");
+            for i in 0u8..8 {
+                shell_println!("  {}: {}", i, crate::net::vlan::pcp_name(i));
+            }
+        }
+
+        "status" | "stats" => {
+            let s = crate::net::vlan::stats();
+            shell_println!("VLAN statistics:");
+            shell_println!("  Configured VLANs: {}", s.configured_vlans);
+            shell_println!("  Tagged RX:        {}", s.tagged_rx);
+            shell_println!("  Tagged TX:        {}", s.tagged_tx);
+            shell_println!("  Untagged RX:      {}", s.untagged_rx);
+            shell_println!("  Unknown drops:    {}", s.unknown_vlan_drops);
+        }
+
+        "test" => {
+            match crate::net::vlan::self_test() {
+                Ok(()) => shell_println!("vlan: all self-tests passed"),
+                Err(e) => shell_println!("vlan: self-test failed: {:?}", e),
+            }
+        }
+
+        _ => {
+            shell_println!("vlan — IEEE 802.1Q VLAN management");
+            shell_println!();
+            shell_println!("Usage:");
+            shell_println!("  vlan add <vid> [name]      — add VLAN interface");
+            shell_println!("  vlan remove <vid>           — remove VLAN interface");
+            shell_println!("  vlan list                   — list configured VLANs");
+            shell_println!("  vlan pcp                    — show PCP priority values");
+            shell_println!("  vlan status                 — show statistics");
+            shell_println!("  vlan test                   — run self-tests");
         }
     }
 }
@@ -67142,7 +67242,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

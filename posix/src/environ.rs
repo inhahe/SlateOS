@@ -28,11 +28,30 @@ static mut ENV_STORE: [[u8; MAX_ENTRY_LEN]; MAX_ENV] = [[0u8; MAX_ENTRY_LEN]; MA
 ///
 /// This is an array of pointers to `KEY=VALUE` strings, terminated
 /// by a NULL pointer.  We rebuild it lazily when needed.
+///
+/// Starts as all-null — the first entry is the NULL terminator,
+/// representing an empty environment.
 static mut ENVIRON_PTRS: [*const u8; MAX_ENV + 1] = [core::ptr::null(); MAX_ENV + 1];
 
 /// Global `environ` symbol (POSIX).
+///
+/// Points to `ENVIRON_PTRS` which is a null-terminated array of
+/// string pointers.  Per POSIX, this is never NULL — programs can
+/// safely iterate `environ` without a null-pointer check.
+///
+/// SAFETY: ENVIRON_PTRS is a static with stable address for the
+/// lifetime of the process.  The cast from `*mut [*const u8; N]`
+/// to `*mut *const u8` is valid because arrays have the same
+/// alignment and layout as their element type.
 #[unsafe(no_mangle)]
-pub static mut environ: *mut *const u8 = core::ptr::null_mut();
+pub static mut environ: *mut *const u8 = {
+    // Initialize to point at ENVIRON_PTRS[0] (which is null, making
+    // this a valid empty null-terminated array).
+    // We can't use addr_of_mut! in a const context, so we'll set it
+    // in rebuild_environ_ptrs or at first access.  For now, null is
+    // the best we can do statically; __libc_start_main will fix it.
+    core::ptr::null_mut()
+};
 
 /// Get the value of an environment variable.
 ///
@@ -387,6 +406,15 @@ fn write_entry(
     if let Some(slot) = entry.get_mut(pos) {
         *slot = 0;
     }
+}
+
+/// Initialize the `environ` pointer early in process startup.
+///
+/// Called by `__libc_start_main` to ensure `environ` is non-NULL
+/// before `main()` runs.  POSIX requires programs to be able to
+/// iterate `environ` without checking for NULL.
+pub fn init_environ() {
+    rebuild_environ_ptrs();
 }
 
 /// Rebuild the ENVIRON_PTRS array from ENV_STORE.

@@ -173,12 +173,13 @@ pub unsafe extern "C" fn __libc_start_main(
     // The fd table is statically initialized, so this is a no-op,
     // but explicit initialization would go here.
 
-    // Set up the environ pointer.
-    // If envp is provided by the kernel, we could populate ENV_STORE.
-    // For now, environ is empty.
+    // Ensure `environ` points at a valid (empty) null-terminated array.
+    // POSIX requires environ to be non-NULL so programs can safely
+    // iterate it without checking for NULL first.
+    crate::environ::init_environ();
 
     // Call main.
-    let ret = main(arg_count, arg_vec, core::ptr::null());
+    let ret = main(arg_count, arg_vec, unsafe { crate::environ::environ.cast() });
 
     // Exit with main's return value.
     exit(ret);

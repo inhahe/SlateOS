@@ -11,7 +11,8 @@
 //! `strcat`, `strncat`, `strstr`, `strspn`, `strcspn`, `strpbrk`,
 //! `strtok`, `strtok_r`, `strsep`, `strerror`, `strerror_r`,
 //! `strdup`, `strndup`, `bcopy`, `bzero`, `strcasecmp`, `strncasecmp`,
-//! `strcoll`, `strxfrm`, `strverscmp`, `strlcpy`, `strlcat`
+//! `strcoll`, `strxfrm`, `strverscmp`, `strlcpy`, `strlcat`,
+//! `sys_errlist`, `sys_nerr`
 //!
 //! Exported as `extern "C"` with standard names so the linker finds
 //! them when C code calls `memcpy`, `memset`, `strlen`, etc.
@@ -1542,6 +1543,150 @@ pub unsafe extern "C" fn rawmemchr(s: *const u8, c: i32) -> *const u8 {
     }
     p
 }
+
+// ---------------------------------------------------------------------------
+// sys_errlist / sys_nerr — deprecated but widely referenced
+// ---------------------------------------------------------------------------
+
+/// Number of entries in `sys_errlist` (one past the highest defined errno).
+///
+/// Deprecated since POSIX.1-2001, removed in POSIX.1-2008, but many
+/// programs and libraries still reference it for link compatibility.
+/// Our highest errno is 131 (ENOTRECOVERABLE), so sys_nerr = 132.
+#[unsafe(no_mangle)]
+pub static sys_nerr: i32 = 132;
+
+/// Wrapper to make `*const u8` usable in a static array.
+///
+/// Raw pointers are not `Sync`, but our pointers all point to static
+/// string literals with `'static` lifetime, so sharing is safe.
+#[repr(transparent)]
+pub struct SyncPtr(*const u8);
+
+// SAFETY: All wrapped pointers point to static c-string literals
+// that live for the entire program lifetime and are never mutated.
+unsafe impl Sync for SyncPtr {}
+
+/// Array of error message strings indexed by errno value.
+///
+/// `sys_errlist[n]` points to the same static string that `strerror(n)`
+/// returns.  Entries for undefined errno values point to "Unknown error".
+///
+/// Deprecated since POSIX.1-2001 — use `strerror()` instead.  Provided
+/// for link compatibility with programs that reference the symbol.
+///
+/// SAFETY: All pointers are to static `c"..."` literals with `'static`
+/// lifetime.  The array itself is a static, so the pointer is stable.
+/// The `SyncPtr` wrapper is `repr(transparent)` so the array layout
+/// matches `[*const u8; 132]` exactly — C code sees a plain pointer
+/// array.
+#[unsafe(no_mangle)]
+pub static sys_errlist: [SyncPtr; 132] = {
+    // Inline const: build the table.  Every index maps to a c-string.
+    // Indices with no defined errno get "Unknown error".
+    const UNK: SyncPtr = SyncPtr(c"Unknown error".as_ptr().cast::<u8>());
+
+    let mut table: [SyncPtr; 132] = [UNK; 132];
+
+    table[0] = SyncPtr(c"Success".as_ptr().cast::<u8>());
+    table[1] = SyncPtr(c"Operation not permitted".as_ptr().cast::<u8>());
+    table[2] = SyncPtr(c"No such file or directory".as_ptr().cast::<u8>());
+    table[3] = SyncPtr(c"No such process".as_ptr().cast::<u8>());
+    table[4] = SyncPtr(c"Interrupted system call".as_ptr().cast::<u8>());
+    table[5] = SyncPtr(c"Input/output error".as_ptr().cast::<u8>());
+    table[6] = SyncPtr(c"No such device or address".as_ptr().cast::<u8>());
+    table[7] = SyncPtr(c"Argument list too long".as_ptr().cast::<u8>());
+    table[8] = SyncPtr(c"Exec format error".as_ptr().cast::<u8>());
+    table[9] = SyncPtr(c"Bad file descriptor".as_ptr().cast::<u8>());
+    table[10] = SyncPtr(c"No child processes".as_ptr().cast::<u8>());
+    table[11] = SyncPtr(c"Resource temporarily unavailable".as_ptr().cast::<u8>());
+    table[12] = SyncPtr(c"Cannot allocate memory".as_ptr().cast::<u8>());
+    table[13] = SyncPtr(c"Permission denied".as_ptr().cast::<u8>());
+    table[14] = SyncPtr(c"Bad address".as_ptr().cast::<u8>());
+    // 15: ENOTBLK — not defined in our errno.rs
+    table[16] = SyncPtr(c"Device or resource busy".as_ptr().cast::<u8>());
+    table[17] = SyncPtr(c"File exists".as_ptr().cast::<u8>());
+    table[18] = SyncPtr(c"Invalid cross-device link".as_ptr().cast::<u8>());
+    table[19] = SyncPtr(c"No such device".as_ptr().cast::<u8>());
+    table[20] = SyncPtr(c"Not a directory".as_ptr().cast::<u8>());
+    table[21] = SyncPtr(c"Is a directory".as_ptr().cast::<u8>());
+    table[22] = SyncPtr(c"Invalid argument".as_ptr().cast::<u8>());
+    table[23] = SyncPtr(c"Too many open files in system".as_ptr().cast::<u8>());
+    table[24] = SyncPtr(c"Too many open files".as_ptr().cast::<u8>());
+    table[25] = SyncPtr(c"Inappropriate ioctl for device".as_ptr().cast::<u8>());
+    table[26] = SyncPtr(c"Text file busy".as_ptr().cast::<u8>());
+    table[27] = SyncPtr(c"File too large".as_ptr().cast::<u8>());
+    table[28] = SyncPtr(c"No space left on device".as_ptr().cast::<u8>());
+    table[29] = SyncPtr(c"Illegal seek".as_ptr().cast::<u8>());
+    table[30] = SyncPtr(c"Read-only file system".as_ptr().cast::<u8>());
+    table[31] = SyncPtr(c"Too many links".as_ptr().cast::<u8>());
+    table[32] = SyncPtr(c"Broken pipe".as_ptr().cast::<u8>());
+    table[33] = SyncPtr(c"Numerical argument out of domain".as_ptr().cast::<u8>());
+    table[34] = SyncPtr(c"Numerical result out of range".as_ptr().cast::<u8>());
+    table[35] = SyncPtr(c"Resource deadlock avoided".as_ptr().cast::<u8>());
+    table[36] = SyncPtr(c"File name too long".as_ptr().cast::<u8>());
+    table[37] = SyncPtr(c"No locks available".as_ptr().cast::<u8>());
+    table[38] = SyncPtr(c"Function not implemented".as_ptr().cast::<u8>());
+    table[39] = SyncPtr(c"Directory not empty".as_ptr().cast::<u8>());
+    table[40] = SyncPtr(c"Too many levels of symbolic links".as_ptr().cast::<u8>());
+    // 41: unused on Linux
+    table[42] = SyncPtr(c"No message of desired type".as_ptr().cast::<u8>());
+    table[43] = SyncPtr(c"Identifier removed".as_ptr().cast::<u8>());
+    // 44-59: various Linux errnos not in our set
+    table[60] = SyncPtr(c"Device not a stream".as_ptr().cast::<u8>());
+    table[61] = SyncPtr(c"No data available".as_ptr().cast::<u8>());
+    table[62] = SyncPtr(c"Timer expired".as_ptr().cast::<u8>());
+    table[63] = SyncPtr(c"Out of streams resources".as_ptr().cast::<u8>());
+    // 64-66: unused in our set
+    table[67] = SyncPtr(c"Link has been severed".as_ptr().cast::<u8>());
+    // 68-70: unused in our set
+    table[71] = SyncPtr(c"Protocol error".as_ptr().cast::<u8>());
+    table[72] = SyncPtr(c"Multihop attempted".as_ptr().cast::<u8>());
+    // 73: unused
+    table[74] = SyncPtr(c"Bad message".as_ptr().cast::<u8>());
+    table[75] = SyncPtr(c"Value too large for defined data type".as_ptr().cast::<u8>());
+    // 76-83: unused in our set
+    table[84] = SyncPtr(c"Invalid or incomplete multibyte or wide character".as_ptr().cast::<u8>());
+    // 85-87: unused
+    table[88] = SyncPtr(c"Socket operation on non-socket".as_ptr().cast::<u8>());
+    table[89] = SyncPtr(c"Destination address required".as_ptr().cast::<u8>());
+    table[90] = SyncPtr(c"Message too long".as_ptr().cast::<u8>());
+    table[91] = SyncPtr(c"Protocol wrong type for socket".as_ptr().cast::<u8>());
+    table[92] = SyncPtr(c"Protocol not available".as_ptr().cast::<u8>());
+    table[93] = SyncPtr(c"Protocol not supported".as_ptr().cast::<u8>());
+    // 94: ESOCKTNOSUPPORT
+    table[95] = SyncPtr(c"Operation not supported".as_ptr().cast::<u8>());
+    // 96: EPFNOSUPPORT
+    table[97] = SyncPtr(c"Address family not supported by protocol".as_ptr().cast::<u8>());
+    table[98] = SyncPtr(c"Address already in use".as_ptr().cast::<u8>());
+    table[99] = SyncPtr(c"Cannot assign requested address".as_ptr().cast::<u8>());
+    table[100] = SyncPtr(c"Network is down".as_ptr().cast::<u8>());
+    table[101] = SyncPtr(c"Network is unreachable".as_ptr().cast::<u8>());
+    table[102] = SyncPtr(c"Network dropped connection on reset".as_ptr().cast::<u8>());
+    table[103] = SyncPtr(c"Software caused connection abort".as_ptr().cast::<u8>());
+    table[104] = SyncPtr(c"Connection reset by peer".as_ptr().cast::<u8>());
+    table[105] = SyncPtr(c"No buffer space available".as_ptr().cast::<u8>());
+    table[106] = SyncPtr(c"Transport endpoint is already connected".as_ptr().cast::<u8>());
+    table[107] = SyncPtr(c"Transport endpoint is not connected".as_ptr().cast::<u8>());
+    table[108] = SyncPtr(c"Cannot send after transport endpoint shutdown".as_ptr().cast::<u8>());
+    // 109: ETOOMANYREFS
+    table[110] = SyncPtr(c"Connection timed out".as_ptr().cast::<u8>());
+    table[111] = SyncPtr(c"Connection refused".as_ptr().cast::<u8>());
+    table[112] = SyncPtr(c"Host is down".as_ptr().cast::<u8>());
+    table[113] = SyncPtr(c"No route to host".as_ptr().cast::<u8>());
+    table[114] = SyncPtr(c"Operation already in progress".as_ptr().cast::<u8>());
+    table[115] = SyncPtr(c"Operation now in progress".as_ptr().cast::<u8>());
+    table[116] = SyncPtr(c"Stale file handle".as_ptr().cast::<u8>());
+    // 117-122: unused in our set
+    table[123] = SyncPtr(c"No medium found".as_ptr().cast::<u8>());
+    // 124: EMEDIUMTYPE
+    table[125] = SyncPtr(c"Operation canceled".as_ptr().cast::<u8>());
+    // 126-129: unused in our set
+    table[130] = SyncPtr(c"Owner died".as_ptr().cast::<u8>());
+    table[131] = SyncPtr(c"State not recoverable".as_ptr().cast::<u8>());
+
+    table
+};
 
 // ---------------------------------------------------------------------------
 // Unit tests

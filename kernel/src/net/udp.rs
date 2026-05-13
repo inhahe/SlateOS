@@ -362,6 +362,28 @@ pub fn rx_ready(handle: usize) -> usize {
     }
 }
 
+/// Return the byte length of the first deliverable datagram.
+///
+/// For FIONREAD: POSIX specifies this returns the size of the first
+/// pending datagram that would be returned by recv().  In connected
+/// mode, skips non-matching datagrams (but does not discard them —
+/// this is a pure query).
+/// Returns 0 if no matching datagram is queued.
+pub fn rx_front_bytes(handle: usize) -> usize {
+    let sockets = SOCKETS.lock();
+    let Some(sock) = sockets.get(handle) else { return 0 };
+    if !sock.active {
+        return 0;
+    }
+    // Find first datagram that matches the peer filter.
+    for dg in &sock.rx_queue {
+        if sock.matches_peer(dg.src_ip, dg.src_port) {
+            return dg.data.len();
+        }
+    }
+    0
+}
+
 /// Receive a datagram from a bound socket.
 ///
 /// If the socket is in connected mode, skips (discards) datagrams

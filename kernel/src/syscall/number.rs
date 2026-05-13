@@ -2232,6 +2232,16 @@ pub const SYS_TCP_LISTENER_READY: u64 = 846;
 /// Returns: number of queued datagrams (≥0), or negative error code.
 pub const SYS_UDP_RX_READY: u64 = 847;
 
+/// Get the byte size of the first deliverable UDP datagram.
+///
+/// `arg0`: socket handle.
+///
+/// Returns the payload size (in bytes) of the front datagram that
+/// would be returned by the next recv().  In connected mode, skips
+/// non-matching datagrams.  Returns 0 if the queue is empty.
+/// Used for FIONREAD on UDP sockets.
+pub const SYS_UDP_RX_FRONT_BYTES: u64 = 848;
+
 /// Shut down part of a TCP connection (half-close).
 ///
 /// `arg0`: connection handle.

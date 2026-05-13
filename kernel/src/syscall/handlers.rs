@@ -7166,6 +7166,17 @@ pub fn sys_udp_rx_ready(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(count as i64)
 }
 
+/// `SYS_UDP_RX_FRONT_BYTES` — get byte size of first deliverable datagram.
+///
+/// `arg0`: socket handle.
+///
+/// Used for FIONREAD on UDP sockets.
+pub fn sys_udp_rx_front_bytes(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    let bytes = crate::net::udp::rx_front_bytes(handle);
+    SyscallResult::ok(bytes as i64)
+}
+
 /// SYS_TCP_INFO — query detailed TCP connection information.
 ///
 /// arg0: connection handle

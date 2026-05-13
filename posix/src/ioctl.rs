@@ -375,13 +375,27 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             }
             0
         }
-        HandleKind::TcpListener | HandleKind::UdpSocket => {
+        HandleKind::TcpListener => {
             // For listeners: number of pending connections (1 or 0).
-            // For UDP: number of queued datagrams.
-            // Both are simplistically reported as 0 for now.
+            // Simplistically reported as 0 for now.
             // SAFETY: arg must be at least sizeof(i32).
             unsafe {
                 core::ptr::write_unaligned(arg.cast::<i32>(), 0);
+            }
+            0
+        }
+        HandleKind::UdpSocket => {
+            // FIONREAD on UDP returns byte size of the first deliverable
+            // datagram (POSIX semantics), not total queued bytes.
+            use crate::syscall::{syscall1, SYS_UDP_RX_FRONT_BYTES};
+            let bytes = if handle == 0 {
+                0
+            } else {
+                syscall1(SYS_UDP_RX_FRONT_BYTES, handle) as i32
+            };
+            // SAFETY: arg must be at least sizeof(i32).
+            unsafe {
+                core::ptr::write_unaligned(arg.cast::<i32>(), bytes);
             }
             0
         }

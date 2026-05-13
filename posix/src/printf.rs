@@ -467,14 +467,17 @@ fn parse_spec(
         let w = consume_arg(args, arg_idx) as i64;
         if w < 0 {
             flags.left_align = true;
-            width = (w.wrapping_neg()) as usize;
+            // Negate safely: wrapping_neg of i64::MIN is still negative,
+            // so saturate at i64::MAX to avoid a huge spurious width.
+            let pos = w.wrapping_neg();
+            width = (if pos < 0 { i64::MAX } else { pos }) as usize;
         } else {
             width = w as usize;
         }
         *fpos = fpos.wrapping_add(1);
     } else {
         while unsafe { *fmt.add(*fpos) }.is_ascii_digit() {
-            width = width.wrapping_mul(10).wrapping_add(
+            width = width.saturating_mul(10).saturating_add(
                 (unsafe { *fmt.add(*fpos) }.wrapping_sub(b'0')) as usize,
             );
             *fpos = fpos.wrapping_add(1);
@@ -494,7 +497,7 @@ fn parse_spec(
         } else {
             let mut p: usize = 0;
             while unsafe { *fmt.add(*fpos) }.is_ascii_digit() {
-                p = p.wrapping_mul(10).wrapping_add(
+                p = p.saturating_mul(10).saturating_add(
                     (unsafe { *fmt.add(*fpos) }.wrapping_sub(b'0')) as usize,
                 );
                 *fpos = fpos.wrapping_add(1);

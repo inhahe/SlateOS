@@ -362,6 +362,7 @@ const ROOT_FILES: &[&str] = &[
     "eventlog",
     "sysevents",
     "logpersist",
+    "svcstart",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7371,6 +7372,10 @@ fn gen_logpersist() -> Vec<u8> {
     crate::logpersist::procfs_content().into_bytes()
 }
 
+fn gen_svcstart() -> Vec<u8> {
+    crate::svcstart::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10040,6 +10045,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "eventlog" => Ok(gen_eventlog()),
         "sysevents" => Ok(gen_sysevents()),
         "logpersist" => Ok(gen_logpersist()),
+        "svcstart" => Ok(gen_svcstart()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

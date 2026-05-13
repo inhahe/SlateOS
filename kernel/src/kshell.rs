@@ -3458,7 +3458,7 @@ const COMMANDS: &[&str] = &[
     "policyengine", "pengine", "fontpreview", "fprev", "wifiscan", "wifi", "splitview", "split",
     "iotdevice", "iot", "prochistory", "phist", "notiffilter", "nfilter", "colorblind", "cvd",
     "clipaction", "caction", "energysaver", "esaver", "filerules", "frules", "secureboot", "sboot",
-    "eventlog", "elog", "systemimage", "simg", "raidmgr", "raid", "networkbridge", "nbridge",
+    "eventlog", "elog", "svcstart", "svcs", "systemimage", "simg", "raidmgr", "raid", "networkbridge", "nbridge",
     "secureerase", "serase", "dnssettings", "dns", "backupsched", "bsched", "displaycal", "dcal",
     "vpnprofile", "vpnp", "diskhealth", "dhealth", "recoverypart", "rpart",
     "userprofile", "uprof", "diskclean", "dclean",
@@ -4702,6 +4702,7 @@ fn dispatch(line: &str) {
         "dmesg" => cmd_dmesg(args),
         "elog" => cmd_elog(args),
         "logpersist" | "lpersist" => cmd_logpersist(args),
+        "svcstart" | "svcs" => cmd_svcstart(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -32876,6 +32877,172 @@ fn cmd_logpersist(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'logpersist help'.", sub);
+        }
+    }
+}
+
+/// `svcstart` / `svcs` — service startup orchestration.
+///
+/// Manages dependency-based parallel service startup, crash restart
+/// with exponential backoff, and the startup app list.
+fn cmd_svcstart(args: &str) {
+    use crate::svcstart;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "show" | "" => {
+            let st = svcstart::stats();
+            shell_println!("=== Service Startup Orchestrator ===");
+            shell_println!("  Phase:          {}", st.phase.label());
+            shell_println!("  Max dep level:  {}", st.max_level);
+            shell_println!("  Graph size:     {} services", st.graph_size);
+            shell_println!("  Svc started:    {}", st.services_started);
+            shell_println!("  Apps launched:  {}", st.apps_launched);
+            shell_println!("  Total restarts: {}", st.total_restarts);
+            shell_println!("  Max retries:    {}", st.max_retries);
+            shell_println!("  Backoff:        {} ms initial, {} ms max",
+                st.initial_backoff_ms, st.max_backoff_ms);
+            if st.boot_end_ns > st.boot_start_ns {
+                let boot_ms = st.boot_end_ns.saturating_sub(st.boot_start_ns) / 1_000_000;
+                shell_println!("  Boot time:      {} ms", boot_ms);
+            }
+        }
+        "levels" => {
+            let levels = svcstart::start_levels();
+            if levels.is_empty() {
+                shell_println!("No start levels resolved. Run 'svcstart resolve' first.");
+            } else {
+                for (i, level) in levels.iter().enumerate() {
+                    let names: Vec<&str> = level.iter().map(|(_, n)| n.as_str()).collect();
+                    shell_println!("Level {}: {}", i, names.join(", "));
+                }
+            }
+        }
+        "resolve" => {
+            match svcstart::resolve_dependencies() {
+                Ok(()) => {
+                    let levels = svcstart::start_levels();
+                    shell_println!("Dependency graph resolved: {} levels", levels.len());
+                    for (i, level) in levels.iter().enumerate() {
+                        let names: Vec<&str> = level.iter().map(|(_, n)| n.as_str()).collect();
+                        shell_println!("  Level {}: {}", i, names.join(", "));
+                    }
+                }
+                Err(e) => shell_println!("Resolve failed: {:?}", e),
+            }
+        }
+        "boot" => {
+            match svcstart::boot_services() {
+                Ok(n) => shell_println!("Boot sequence complete: {} services started", n),
+                Err(e) => shell_println!("Boot failed: {:?}", e),
+            }
+        }
+        "crash" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match svcstart::report_crash(id) {
+                        Ok(delay) => shell_println!("Crash recorded, restart scheduled (backoff: {} ms)",
+                            delay / 1_000_000),
+                        Err(e) => shell_println!("Crash report error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid service ID");
+                }
+            } else {
+                shell_println!("Usage: svcstart crash <service-id>");
+            }
+        }
+        "crashes" => {
+            let records = svcstart::crash_records();
+            if records.is_empty() {
+                shell_println!("No crash records.");
+            } else {
+                shell_println!("{:16} {:>6} {:>8} {:>8} {:>8}",
+                    "Service", "Consec", "Total", "Backoff", "Status");
+                for (name, consec, total, backoff_ms, perm) in &records {
+                    let status = if *perm { "FAILED" } else { "active" };
+                    shell_println!("{:16} {:>6} {:>8} {:>5} ms {:>8}",
+                        name, consec, total, backoff_ms, status);
+                }
+            }
+        }
+        "reset" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    svcstart::reset_crash_count(id);
+                    shell_println!("Crash count reset for service {}", id);
+                } else {
+                    shell_println!("Invalid service ID");
+                }
+            } else {
+                shell_println!("Usage: svcstart reset <service-id>");
+            }
+        }
+        "apps" => {
+            let apps = svcstart::list_startup_apps();
+            if apps.is_empty() {
+                shell_println!("No startup apps configured.");
+            } else {
+                shell_println!("{:>3} {:>4} {:20} {:30} {:>5} {:>7}",
+                    "ID", "Ord", "Name", "Path", "Wait", "On");
+                for app in &apps {
+                    shell_println!("{:>3} {:>4} {:20} {:30} {:>5} {:>7}",
+                        app.id, app.order, app.display_name, app.path,
+                        if app.wait_for_ready { "yes" } else { "no" },
+                        if app.enabled { "yes" } else { "no" });
+                }
+            }
+        }
+        "addapp" => {
+            if let (Some(path), Some(name)) = (parts.get(1), parts.get(2)) {
+                let wait = parts.get(3).copied() == Some("wait");
+                let id = svcstart::add_startup_app(path, "", name, wait);
+                shell_println!("Startup app {} added: {} ({})", id, name, path);
+            } else {
+                shell_println!("Usage: svcstart addapp <path> <name> [wait]");
+            }
+        }
+        "rmapp" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match svcstart::remove_startup_app(id) {
+                        Ok(()) => shell_println!("Startup app {} removed", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid app ID");
+                }
+            } else {
+                shell_println!("Usage: svcstart rmapp <id>");
+            }
+        }
+        "init" => {
+            svcstart::init();
+            shell_println!("Startup orchestrator initialized");
+        }
+        "test" => {
+            match svcstart::self_test() {
+                Ok(()) => shell_println!("Service startup self-test: PASSED"),
+                Err(e) => shell_println!("Service startup self-test: FAILED ({:?})", e),
+            }
+        }
+        "help" => {
+            shell_println!("svcstart — service startup orchestration");
+            shell_println!("  show               Status and statistics");
+            shell_println!("  levels             Show resolved start levels");
+            shell_println!("  resolve            Resolve dependency graph");
+            shell_println!("  boot               Run full boot sequence");
+            shell_println!("  crash <id>         Report a service crash");
+            shell_println!("  crashes            Show crash records");
+            shell_println!("  reset <id>         Reset crash counter for service");
+            shell_println!("  apps               List startup apps");
+            shell_println!("  addapp <path> <name> [wait]  Add a startup app");
+            shell_println!("  rmapp <id>         Remove a startup app");
+            shell_println!("  init               Initialize orchestrator");
+            shell_println!("  test               Run self-test");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'svcstart help'.", sub);
         }
     }
 }
@@ -63322,7 +63489,7 @@ fn cmd_type(args: &str) {
 fn is_builtin(name: &str) -> bool {
     matches!(name,
         "help" | "?" | "cd" | "meminfo" | "mem" | "ps" | "tasks" | "clear" | "cls"
-        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
+        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"

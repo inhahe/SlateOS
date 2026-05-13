@@ -143,6 +143,7 @@ mod smep_smap;
 mod smp;
 mod spectre;
 mod softirq;
+mod svcstart;
 mod sync;
 mod syscall;
 mod sysctl;

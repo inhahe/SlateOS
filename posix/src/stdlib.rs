@@ -835,9 +835,9 @@ pub unsafe extern "C" fn bsearch(
     nmemb: usize,
     size: usize,
     compar: unsafe extern "C" fn(*const u8, *const u8) -> i32,
-) -> *const u8 {
+) -> *mut u8 {
     if nmemb == 0 || size == 0 {
-        return core::ptr::null();
+        return core::ptr::null_mut();
     }
 
     let mut lo: usize = 0;
@@ -845,16 +845,20 @@ pub unsafe extern "C" fn bsearch(
 
     while lo < hi {
         let mid = lo.wrapping_add(hi.wrapping_sub(lo) / 2);
+        // SAFETY: mid < nmemb, so base + mid*size is within the array.
         let elem = unsafe { base.add(mid.wrapping_mul(size)) };
         let cmp = unsafe { compar(key, elem) };
         match cmp.cmp(&0) {
             core::cmp::Ordering::Less => hi = mid,
             core::cmp::Ordering::Greater => lo = mid.wrapping_add(1),
-            core::cmp::Ordering::Equal => return elem,
+            // POSIX: bsearch returns void* (mutable).  We cast here because
+            // the array was received as *const but POSIX semantics permit
+            // the caller to write through the returned pointer.
+            core::cmp::Ordering::Equal => return elem as *mut u8,
         }
     }
 
-    core::ptr::null()
+    core::ptr::null_mut()
 }
 
 // ---------------------------------------------------------------------------

@@ -735,13 +735,25 @@ pub extern "C" fn brk(_addr: *mut u8) -> i32 {
 // pathconf / fpathconf / confstr
 // ---------------------------------------------------------------------------
 
-/// POSIX _PC_* constants for pathconf.
-pub const PC_LINK_MAX: i32 = 0;
-pub const PC_MAX_CANON: i32 = 1;
-pub const PC_MAX_INPUT: i32 = 2;
-pub const PC_NAME_MAX: i32 = 3;
-pub const PC_PATH_MAX: i32 = 4;
-pub const PC_PIPE_BUF: i32 = 5;
+/// POSIX `_PC_*` constants for `pathconf`/`fpathconf`.
+#[allow(non_upper_case_globals)]
+pub const _PC_LINK_MAX: i32 = 0;
+#[allow(non_upper_case_globals)]
+pub const _PC_MAX_CANON: i32 = 1;
+#[allow(non_upper_case_globals)]
+pub const _PC_MAX_INPUT: i32 = 2;
+#[allow(non_upper_case_globals)]
+pub const _PC_NAME_MAX: i32 = 3;
+#[allow(non_upper_case_globals)]
+pub const _PC_PATH_MAX: i32 = 4;
+#[allow(non_upper_case_globals)]
+pub const _PC_PIPE_BUF: i32 = 5;
+#[allow(non_upper_case_globals)]
+pub const _PC_CHOWN_RESTRICTED: i32 = 6;
+#[allow(non_upper_case_globals)]
+pub const _PC_NO_TRUNC: i32 = 7;
+#[allow(non_upper_case_globals)]
+pub const _PC_VDISABLE: i32 = 8;
 
 /// Get configurable pathname variables.
 ///
@@ -752,10 +764,13 @@ pub extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
     // Return the same values regardless of path — we don't have
     // per-filesystem limits yet.
     match name {
-        PC_LINK_MAX => 127,                                 // Max hard links.
-        PC_MAX_CANON | PC_MAX_INPUT | PC_NAME_MAX => 255,   // Terminal/filename limits.
-        PC_PATH_MAX => PATH_MAX as i64,
-        PC_PIPE_BUF => 4096,                                // Atomic pipe write size.
+        _PC_LINK_MAX => 127,                                      // Max hard links.
+        _PC_MAX_CANON | _PC_MAX_INPUT | _PC_NAME_MAX => 255,      // Terminal/filename limits.
+        _PC_PATH_MAX => PATH_MAX as i64,
+        _PC_PIPE_BUF => 4096,                                     // Atomic pipe write size.
+        _PC_CHOWN_RESTRICTED => 1,                                // chown restricted to root.
+        _PC_NO_TRUNC => 1,                                        // Long names cause error.
+        _PC_VDISABLE => 0,                                        // Characters can be disabled.
         _ => {
             errno::set_errno(errno::EINVAL);
             -1
@@ -771,8 +786,9 @@ pub extern "C" fn fpathconf(_fd: i32, name: i32) -> i64 {
     pathconf(core::ptr::null(), name)
 }
 
-/// _CS_* constants for confstr.
-pub const CS_PATH: i32 = 0;
+/// `_CS_*` constants for `confstr`.
+#[allow(non_upper_case_globals)]
+pub const _CS_PATH: i32 = 0;
 
 /// Get configuration-defined string values.
 ///
@@ -781,7 +797,7 @@ pub const CS_PATH: i32 = 0;
 /// null), or 0 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn confstr(name: i32, buf: *mut u8, len: usize) -> usize {
-    let value: &[u8] = if name == CS_PATH {
+    let value: &[u8] = if name == _CS_PATH {
         b"/bin:/usr/bin"
     } else {
         errno::set_errno(errno::EINVAL);
@@ -1034,6 +1050,13 @@ pub const GRND_RANDOM: u32 = 2;
 pub extern "C" fn getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> isize {
     if buf.is_null() {
         errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // Guard against buflen > isize::MAX to avoid returning a negative
+    // value that callers would interpret as an error.
+    if buflen > isize::MAX as usize {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
 

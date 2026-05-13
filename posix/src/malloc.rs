@@ -440,3 +440,214 @@ pub extern "C" fn __libc_calloc(nmemb: usize, size: usize) -> *mut u8 {
 pub extern "C" fn __libc_memalign(alignment: usize, size: usize) -> *mut u8 {
     memalign(alignment, size)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // malloc boundary cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn malloc_zero_returns_null() {
+        // POSIX: malloc(0) may return NULL.
+        let ptr = malloc(0);
+        assert!(ptr.is_null(), "malloc(0) should return NULL");
+    }
+
+    #[test]
+    fn malloc_overflow_returns_null() {
+        // size + HEADER_SIZE overflows → NULL.
+        let ptr = malloc(usize::MAX);
+        assert!(ptr.is_null(), "malloc(usize::MAX) should return NULL");
+    }
+
+    #[test]
+    fn malloc_near_overflow_returns_null() {
+        // size + 16 would overflow.
+        let ptr = malloc(usize::MAX - 8);
+        assert!(ptr.is_null(), "malloc(MAX - 8) should return NULL");
+    }
+
+    // -----------------------------------------------------------------------
+    // calloc boundary cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn calloc_zero_nmemb() {
+        let ptr = calloc(0, 100);
+        assert!(ptr.is_null(), "calloc(0, 100) should return NULL");
+    }
+
+    #[test]
+    fn calloc_zero_size() {
+        let ptr = calloc(100, 0);
+        assert!(ptr.is_null(), "calloc(100, 0) should return NULL");
+    }
+
+    #[test]
+    fn calloc_overflow_returns_null() {
+        // nmemb * size overflows.
+        let ptr = calloc(usize::MAX, 2);
+        assert!(ptr.is_null(), "calloc(MAX, 2) should return NULL");
+    }
+
+    #[test]
+    fn calloc_large_overflow() {
+        // Just below MAX for each, product overflows.
+        let ptr = calloc(usize::MAX / 2 + 1, 3);
+        assert!(ptr.is_null(), "calloc with overflow should return NULL");
+    }
+
+    // -----------------------------------------------------------------------
+    // free(NULL)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn free_null_is_noop() {
+        // Must not crash.
+        unsafe { free(core::ptr::null_mut()); }
+    }
+
+    // -----------------------------------------------------------------------
+    // realloc boundary cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn realloc_null_is_malloc() {
+        // realloc(NULL, size) should behave like malloc(size).
+        // We test the degenerate case: realloc(NULL, 0) = malloc(0) = NULL.
+        let ptr = unsafe { realloc(core::ptr::null_mut(), 0) };
+        assert!(ptr.is_null(), "realloc(NULL, 0) should return NULL");
+    }
+
+    // -----------------------------------------------------------------------
+    // posix_memalign validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn posix_memalign_null_memptr() {
+        let ret = posix_memalign(core::ptr::null_mut(), 16, 100);
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn posix_memalign_alignment_not_power_of_two() {
+        let mut ptr: *mut u8 = core::ptr::null_mut();
+        let ret = posix_memalign(&raw mut ptr, 3, 100);
+        assert_eq!(ret, crate::errno::EINVAL);
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn posix_memalign_alignment_too_small() {
+        // Alignment must be >= sizeof(void*) = 8 on x86_64.
+        let mut ptr: *mut u8 = core::ptr::null_mut();
+        let ret = posix_memalign(&raw mut ptr, 4, 100);
+        assert_eq!(ret, crate::errno::EINVAL);
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn posix_memalign_zero_size() {
+        // POSIX: posix_memalign with size=0 stores NULL in *memptr.
+        let mut ptr: *mut u8 = 0x1234_usize as *mut u8; // garbage
+        let ret = posix_memalign(&raw mut ptr, 8, 0);
+        assert_eq!(ret, 0);
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn posix_memalign_alignment_one() {
+        // alignment=1 is a power of two but < sizeof(void*).
+        let mut ptr: *mut u8 = core::ptr::null_mut();
+        let ret = posix_memalign(&raw mut ptr, 1, 100);
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn posix_memalign_alignment_two() {
+        // alignment=2 is a power of two but < sizeof(void*) on 64-bit.
+        let mut ptr: *mut u8 = core::ptr::null_mut();
+        let ret = posix_memalign(&raw mut ptr, 2, 100);
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // aligned_alloc validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn aligned_alloc_zero_alignment() {
+        let ptr = aligned_alloc(0, 100);
+        assert!(ptr.is_null(), "aligned_alloc(0, 100) should fail");
+    }
+
+    #[test]
+    fn aligned_alloc_non_power_of_two() {
+        let ptr = aligned_alloc(3, 100);
+        assert!(ptr.is_null(), "aligned_alloc(3, 100) should fail");
+
+        let ptr = aligned_alloc(6, 100);
+        assert!(ptr.is_null(), "aligned_alloc(6, 100) should fail");
+    }
+
+    #[test]
+    fn aligned_alloc_zero_size() {
+        // aligned_alloc with size=0: our impl returns NULL.
+        let ptr = aligned_alloc(16, 0);
+        assert!(ptr.is_null(), "aligned_alloc(16, 0) should return NULL");
+    }
+
+    // -----------------------------------------------------------------------
+    // valloc
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn valloc_zero_size() {
+        let ptr = valloc(0);
+        assert!(ptr.is_null(), "valloc(0) should return NULL");
+    }
+
+    // -----------------------------------------------------------------------
+    // reallocarray overflow
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reallocarray_overflow() {
+        let ptr = reallocarray(core::ptr::null_mut(), usize::MAX, 2);
+        assert!(ptr.is_null(), "reallocarray overflow should return NULL");
+    }
+
+    #[test]
+    fn reallocarray_zero() {
+        // reallocarray(NULL, 0, 100) = realloc(NULL, 0) = malloc(0) = NULL.
+        let ptr = reallocarray(core::ptr::null_mut(), 0, 100);
+        assert!(ptr.is_null(), "reallocarray(NULL, 0, 100) → NULL");
+    }
+
+    // -----------------------------------------------------------------------
+    // malloc_usable_size
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn malloc_usable_size_null() {
+        let size = unsafe { malloc_usable_size(core::ptr::null_mut()) };
+        assert_eq!(size, 0, "malloc_usable_size(NULL) should be 0");
+    }
+
+    // -----------------------------------------------------------------------
+    // Header size constant
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn header_size_is_16() {
+        // Must be 16 for ABI compliance (16-byte aligned user pointers).
+        assert_eq!(HEADER_SIZE, 16);
+    }
+}

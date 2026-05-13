@@ -2542,4 +2542,157 @@ mod tests {
         assert_eq!(v, u64::MAX);
         assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
     }
+
+    // -----------------------------------------------------------------------
+    // drand48 / lrand48 / mrand48 — LCG PRNG
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn drand48_range() {
+        // After seeding, drand48 must return values in [0.0, 1.0).
+        srand48(12345);
+        for _ in 0..100 {
+            let v = drand48();
+            assert!(v >= 0.0 && v < 1.0, "drand48 returned {v}, expected [0, 1)");
+        }
+    }
+
+    #[test]
+    fn lrand48_range() {
+        // lrand48 returns values in [0, 2^31).
+        srand48(42);
+        for _ in 0..100 {
+            let v = lrand48();
+            assert!(v >= 0, "lrand48 returned negative {v}");
+            assert!(v < (1_i64 << 31), "lrand48 returned {v} >= 2^31");
+        }
+    }
+
+    #[test]
+    fn mrand48_full_signed_range() {
+        // mrand48 returns values in [-2^31, 2^31).  After many calls,
+        // we should see at least one negative and one positive value.
+        srand48(99);
+        let mut seen_neg = false;
+        let mut seen_pos = false;
+        for _ in 0..1000 {
+            let v = mrand48();
+            assert!(v >= i64::from(i32::MIN), "mrand48 out of range: {v}");
+            assert!(v <= i64::from(i32::MAX), "mrand48 out of range: {v}");
+            if v < 0 { seen_neg = true; }
+            if v > 0 { seen_pos = true; }
+        }
+        assert!(seen_neg, "mrand48 never returned negative");
+        assert!(seen_pos, "mrand48 never returned positive");
+    }
+
+    #[test]
+    fn srand48_deterministic() {
+        // Same seed must produce same sequence.
+        srand48(777);
+        let a1 = drand48();
+        let a2 = drand48();
+        let a3 = drand48();
+
+        srand48(777);
+        let b1 = drand48();
+        let b2 = drand48();
+        let b3 = drand48();
+
+        assert_eq!(a1.to_bits(), b1.to_bits());
+        assert_eq!(a2.to_bits(), b2.to_bits());
+        assert_eq!(a3.to_bits(), b3.to_bits());
+    }
+
+    #[test]
+    fn srand48_different_seeds_diverge() {
+        srand48(1);
+        let a = drand48();
+        srand48(2);
+        let b = drand48();
+        assert_ne!(a.to_bits(), b.to_bits(), "different seeds should produce different values");
+    }
+
+    // -----------------------------------------------------------------------
+    // nrand48 / erand48 / jrand48 — caller-provided state
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nrand48_range_and_state_update() {
+        let mut state: [u16; 3] = [0x1234, 0x5678, 0x9ABC];
+        let original = state;
+        let v = nrand48(state.as_mut_ptr());
+        assert!(v >= 0, "nrand48 returned negative {v}");
+        assert!(v < (1_i64 << 31), "nrand48 returned {v} >= 2^31");
+        // State should have been updated.
+        assert_ne!(state, original, "nrand48 should update state");
+    }
+
+    #[test]
+    fn nrand48_null_returns_zero() {
+        let v = nrand48(core::ptr::null_mut());
+        assert_eq!(v, 0, "nrand48(NULL) should return 0");
+    }
+
+    #[test]
+    fn erand48_range() {
+        let mut state: [u16; 3] = [0x0001, 0x0002, 0x0003];
+        for _ in 0..100 {
+            let v = erand48(state.as_mut_ptr());
+            assert!(v >= 0.0 && v < 1.0, "erand48 returned {v}, expected [0, 1)");
+        }
+    }
+
+    #[test]
+    fn erand48_null_returns_zero() {
+        let v = erand48(core::ptr::null_mut());
+        assert_eq!(v, 0.0);
+    }
+
+    #[test]
+    fn jrand48_signed_range() {
+        let mut state: [u16; 3] = [0xFFFF, 0xFFFF, 0x7FFF];
+        let v = jrand48(state.as_mut_ptr());
+        // jrand48 returns i32-range signed values extended to i64.
+        assert!(v >= i64::from(i32::MIN), "jrand48 out of range: {v}");
+        assert!(v <= i64::from(i32::MAX), "jrand48 out of range: {v}");
+    }
+
+    #[test]
+    fn jrand48_null_returns_zero() {
+        let v = jrand48(core::ptr::null_mut());
+        assert_eq!(v, 0);
+    }
+
+    #[test]
+    fn nrand48_deterministic() {
+        // Same initial state must produce same sequence.
+        let mut s1: [u16; 3] = [0xDEAD, 0xBEEF, 0xCAFE];
+        let mut s2: [u16; 3] = [0xDEAD, 0xBEEF, 0xCAFE];
+        let a = nrand48(s1.as_mut_ptr());
+        let b = nrand48(s2.as_mut_ptr());
+        assert_eq!(a, b, "same state should produce same result");
+        assert_eq!(s1, s2, "same state should produce same next state");
+    }
+
+    // -----------------------------------------------------------------------
+    // seed48 — full 48-bit seeding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn seed48_basic() {
+        let seed: [u16; 3] = [0x1111, 0x2222, 0x3333];
+        let old_ptr = seed48(seed.as_ptr());
+        assert!(!old_ptr.is_null(), "seed48 should return non-null");
+
+        // After seeding, drand48 should produce deterministic results.
+        let v = drand48();
+        assert!(v >= 0.0 && v < 1.0);
+    }
+
+    #[test]
+    fn seed48_null_returns_old_pointer() {
+        let ptr = seed48(core::ptr::null());
+        assert!(!ptr.is_null());
+    }
 }

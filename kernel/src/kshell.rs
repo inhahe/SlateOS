@@ -3524,6 +3524,7 @@ const COMMANDS: &[&str] = &[
     "vmalloc", "vm", "rmap", "pcid", "poison", "watermark", "wmark", "tlbgather", "gather", "migratetype", "mtype", "pageage", "aging", "ptwalk", "pagetables", "scrub", "memscrub", "faultinject", "finject", "frameowner", "fowner", "alloctrace", "atrace", "alloclat", "alat", "heapprofile", "hprof", "syscallprof", "sprof", "capaudit", "capa", "checkpoint", "ckpt", "strace", "sctrace", "ipcstat", "ipc", "kobjects", "kobj", "fraghist", "fragtrend", "selftest", "watch", "snapshot", "snap", "ripsample", "perf", "invariant", "invar", "migrate", "migrations", "wchan", "bench", "benchmark", "diag2", "report", "hypervisor", "vminfo", "fairness", "jfi", "cet", "cfi", "smap", "smep",
     "fpu", "hda", "xsave", "spectre", "meltdown", "specmit", "hrtimer", "hrtimers",
     "ktimer", "ktrace", "lockdep", "lz4", "lz4cat", "rng", "supervisor", "sv", "timers", "trace", "unlz4", "xattr", "xxd", "zip", "zstd", "zstdcat",
+    "mousedev", "usbdev", "nslookup", "fw",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -62974,7 +62975,7 @@ fn is_builtin(name: &str) -> bool {
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
-        | "mkelf" | "net" | "ifconfig" | "mousedev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
+        | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

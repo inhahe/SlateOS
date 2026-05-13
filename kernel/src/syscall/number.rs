@@ -2100,6 +2100,47 @@ pub const SYS_ICMP_PING: u64 = 830;
 /// ping timed out (`TimedOut`).
 pub const SYS_ICMP_PING_WAIT: u64 = 831;
 
+// Diagnostic / listing syscalls (840-849)
+
+/// List active TCP connections.
+///
+/// Writes an array of 20-byte connection records to the caller's buffer.
+///
+/// Each record layout:
+/// ```text
+/// [0..4]   = local IP (network order, always our IP)
+/// [4..6]   = local port (network order)
+/// [6..10]  = remote IP (network order)
+/// [10..12] = remote port (network order)
+/// [12]     = state (TcpState as u8)
+/// [13..16] = rx_buffered (u24 LE, capped at 0xFFFFFF)
+/// [16..19] = tx_buffered (u24 LE, capped at 0xFFFFFF)
+/// [19]     = flags (bit 0=keepalive, bit 1=nagle, bit 2=ecn, bit 3=sack)
+/// ```
+///
+/// - `arg0`: pointer to output buffer
+/// - `arg1`: buffer length in bytes
+///
+/// Returns: number of connections written (may be < total if buffer too small).
+pub const SYS_TCP_LIST: u64 = 840;
+
+/// List active TCP listeners.
+///
+/// Writes an array of 4-byte listener records to the caller's buffer.
+///
+/// Each record layout:
+/// ```text
+/// [0..2] = local port (network order)
+/// [2]    = backlog used count
+/// [3]    = backlog max capacity
+/// ```
+///
+/// - `arg0`: pointer to output buffer
+/// - `arg1`: buffer length in bytes
+///
+/// Returns: number of listeners written.
+pub const SYS_TCP_LISTENER_LIST: u64 = 841;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

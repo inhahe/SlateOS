@@ -6724,3 +6724,149 @@ pub fn sys_system_set_profile(args: &SyscallArgs) -> SyscallResult {
         SyscallResult::err(KernelError::InvalidArgument)
     }
 }
+
+// ---------------------------------------------------------------------------
+// TCP diagnostic syscalls (840–849)
+// ---------------------------------------------------------------------------
+
+/// `SYS_TCP_LIST` — list active TCP connections.
+///
+/// `arg0`: pointer to output buffer.
+/// `arg1`: buffer length in bytes.
+///
+/// Writes 20-byte records per connection.  Returns the number of
+/// connections written.
+pub fn sys_tcp_list(args: &SyscallArgs) -> SyscallResult {
+    let buf_ptr = args.arg0 as usize;
+    let buf_len = args.arg1 as usize;
+
+    if buf_ptr == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    const RECORD_SIZE: usize = 20;
+    let max_records = buf_len / RECORD_SIZE;
+    if max_records == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    // Get our local IP for the records.
+    let local_ip = crate::net::interface::info().ip;
+
+    let conns = crate::net::tcp::all_connections();
+    let mut written: usize = 0;
+
+    for conn in &conns {
+        if written >= max_records {
+            break;
+        }
+
+        let mut record = [0u8; RECORD_SIZE];
+
+        // [0..4] local IP (network order — already stored as octets).
+        record[0] = local_ip.0[0];
+        record[1] = local_ip.0[1];
+        record[2] = local_ip.0[2];
+        record[3] = local_ip.0[3];
+
+        // [4..6] local port (network order = big-endian).
+        let lport_be = conn.local_port.to_be_bytes();
+        record[4] = lport_be[0];
+        record[5] = lport_be[1];
+
+        // [6..10] remote IP.
+        record[6] = conn.remote_ip.0[0];
+        record[7] = conn.remote_ip.0[1];
+        record[8] = conn.remote_ip.0[2];
+        record[9] = conn.remote_ip.0[3];
+
+        // [10..12] remote port (network order).
+        let rport_be = conn.remote_port.to_be_bytes();
+        record[10] = rport_be[0];
+        record[11] = rport_be[1];
+
+        // [12] state.
+        record[12] = conn.state as u8;
+
+        // [13..16] rx_buffered (u24 LE, capped).
+        let rx = conn.rx_buffered.min(0xFF_FFFF) as u32;
+        record[13] = rx as u8;
+        record[14] = (rx >> 8) as u8;
+        record[15] = (rx >> 16) as u8;
+
+        // [16..19] tx_buffered (u24 LE, capped).
+        let tx = conn.tx_buffered.min(0xFF_FFFF) as u32;
+        record[16] = tx as u8;
+        record[17] = (tx >> 8) as u8;
+        record[18] = (tx >> 16) as u8;
+
+        // [19] flags.
+        let mut flags: u8 = 0;
+        if conn.keepalive { flags |= 1; }
+        if conn.nagle { flags |= 2; }
+        if conn.ecn_ok { flags |= 4; }
+        if conn.sack_ok { flags |= 8; }
+        record[19] = flags;
+
+        // SAFETY: buf_ptr is a userspace pointer validated by the caller.
+        let dst = (buf_ptr + written * RECORD_SIZE) as *mut u8;
+        unsafe {
+            core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE);
+        }
+        written = written.wrapping_add(1);
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(written as i64)
+}
+
+/// `SYS_TCP_LISTENER_LIST` — list active TCP listeners.
+///
+/// `arg0`: pointer to output buffer.
+/// `arg1`: buffer length in bytes.
+///
+/// Writes 4-byte records per listener.  Returns the number of
+/// listeners written.
+pub fn sys_tcp_listener_list(args: &SyscallArgs) -> SyscallResult {
+    let buf_ptr = args.arg0 as usize;
+    let buf_len = args.arg1 as usize;
+
+    if buf_ptr == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    const RECORD_SIZE: usize = 4;
+    let max_records = buf_len / RECORD_SIZE;
+    if max_records == 0 {
+        return SyscallResult::ok(0);
+    }
+
+    let (listeners, count) = crate::net::tcp::all_listeners();
+    let mut written: usize = 0;
+
+    for i in 0..count {
+        if written >= max_records {
+            break;
+        }
+        if let Some(listener) = listeners.get(i) {
+            let mut record = [0u8; RECORD_SIZE];
+            // [0..2] local port (network order).
+            let port_be = listener.port.to_be_bytes();
+            record[0] = port_be[0];
+            record[1] = port_be[1];
+            // [2] backlog used.
+            record[2] = listener.backlog_used as u8;
+            // [3] backlog max.
+            record[3] = listener.backlog_max as u8;
+
+            let dst = (buf_ptr + written * RECORD_SIZE) as *mut u8;
+            unsafe {
+                core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE);
+            }
+            written = written.wrapping_add(1);
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(written as i64)
+}

@@ -33,6 +33,7 @@ pub mod ipv4;
 pub mod tcp;
 pub mod udp;
 pub mod upnp;
+pub mod wol;
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};

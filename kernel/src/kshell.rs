@@ -3540,6 +3540,7 @@ const COMMANDS: &[&str] = &[
     "telnetd", "telnet",
     "tftp", "tftpd",
     "netsyslog", "rsyslog",
+    "wol", "wakeonlan",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4734,6 +4735,7 @@ fn dispatch(line: &str) {
         "telnetd" | "telnet" => cmd_telnetd(args),
         "tftp" | "tftpd" => cmd_tftp(args),
         "netsyslog" | "rsyslog" => cmd_netsyslog(args),
+        "wol" | "wakeonlan" => cmd_wol(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35113,6 +35115,52 @@ fn cmd_netsyslog(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'syslog help'.", sub);
+        }
+    }
+}
+
+/// `wol` / `wakeonlan` — Wake-on-LAN magic packet sender.
+fn cmd_wol(args: &str) {
+    use crate::net::wol;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("wol — Wake-on-LAN magic packet sender");
+            shell_println!("  wol <MAC>              Send wake packet (broadcast)");
+            shell_println!("  wol <MAC> <broadcast>  Send to specific broadcast IP");
+            shell_println!("  wol status             Show statistics");
+            shell_println!("  wol test               Run self-tests");
+            shell_println!("");
+            shell_println!("MAC format: AA:BB:CC:DD:EE:FF or AA-BB-CC-DD-EE-FF");
+        }
+        "status" | "stats" => {
+            let (sent, errors) = wol::stats();
+            shell_println!("WoL packets sent: {}", sent);
+            shell_println!("WoL send errors:  {}", errors);
+        }
+        "test" => {
+            match wol::self_test() {
+                Ok(()) => shell_println!("WoL self-test: PASSED"),
+                Err(e) => shell_println!("WoL self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            // Treat first arg as MAC address.
+            let mac = match wol::MacAddress::parse(sub) {
+                Some(m) => m,
+                None => {
+                    shell_println!("Invalid MAC address: {}", sub);
+                    shell_println!("Use format: AA:BB:CC:DD:EE:FF");
+                    return;
+                }
+            };
+            let broadcast = parts.get(1).and_then(|s| parse_ipv4(s));
+            shell_println!("Sending WoL magic packet to {} ...", mac);
+            match wol::wake(mac, broadcast) {
+                Ok(()) => shell_println!("Magic packet sent"),
+                Err(e) => shell_println!("Failed: {:?}", e),
+            }
         }
     }
 }
@@ -65571,7 +65619,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

@@ -45,6 +45,16 @@ pub unsafe extern "C" fn atol(nptr: *const u8) -> i64 {
     unsafe { strtol(nptr, core::ptr::null_mut(), 10) }
 }
 
+/// Convert a C string to a long long integer.
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn atoll(nptr: *const u8) -> i64 {
+    unsafe { strtoll(nptr, core::ptr::null_mut(), 10) }
+}
+
 /// Convert a C string to a long integer with base and end pointer.
 ///
 /// Skips leading whitespace, handles optional `+`/`-` sign, and
@@ -885,6 +895,54 @@ pub unsafe extern "C" fn rand_r(seed: *mut u32) -> i32 {
 /// Maximum value returned by rand().
 #[unsafe(no_mangle)]
 pub static RAND_MAX: i32 = 0x7FFF_FFFF;
+
+/// POSIX: Seed the better random number generator.
+///
+/// For our purposes, this is identical to `srand`.  POSIX specifies
+/// `random()`/`srandom()` as a better-quality RNG than `rand()`/`srand()`,
+/// but our implementation uses the same LCG for both.
+#[unsafe(no_mangle)]
+pub extern "C" fn srandom(seed: u32) {
+    srand(seed);
+}
+
+/// POSIX: Generate a pseudo-random integer in [0, 2^31).
+///
+/// Better-quality RNG than `rand()` per POSIX, but our implementation
+/// delegates to the same LCG.  Returns a `i64` (`long`) per POSIX.
+#[unsafe(no_mangle)]
+pub extern "C" fn random() -> i64 {
+    i64::from(rand())
+}
+
+/// POSIX: Initialize random state for `random_r`.
+///
+/// Stub — stores the seed in the state buffer for compatibility.
+///
+/// # Safety
+///
+/// `statebuf` must be a valid pointer to at least 8 bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn initstate(seed: u32, statebuf: *mut u8, n: usize) -> *mut u8 {
+    if statebuf.is_null() || n < 8 {
+        return core::ptr::null_mut();
+    }
+    srand(seed);
+    statebuf
+}
+
+/// POSIX: Set the random state buffer.
+///
+/// Stub — accepts the state pointer for API compatibility.
+///
+/// # Safety
+///
+/// `statebuf` must have been returned by a prior `initstate` call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn setstate(statebuf: *mut u8) -> *mut u8 {
+    // No-op: we use a global state regardless.
+    statebuf
+}
 
 // ---------------------------------------------------------------------------
 // Temporary files

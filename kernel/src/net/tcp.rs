@@ -1987,11 +1987,14 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
         if !conn.active
             || (conn.state != TcpState::Established && conn.state != TcpState::CloseWait)
         {
-            return Err(KernelError::InvalidArgument);
+            // Connection was reset or is in a closing state — report
+            // as "channel closed" which maps to ECONNRESET/EPIPE at
+            // the POSIX layer.
+            return Err(KernelError::ChannelClosed);
         }
         // Reject sends after shutdown(SHUT_WR).
         if conn.local_write_closed {
-            return Err(KernelError::InvalidArgument);
+            return Err(KernelError::ChannelClosed);
         }
         let unacked = conn.snd_nxt != conn.snd_una;
         (conn.local_port, conn.remote_ip, conn.remote_port,
@@ -2447,7 +2450,8 @@ pub fn read_up_to(handle: usize, max_bytes: usize) -> KernelResult<Vec<u8>> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
     if !conn.active {
-        return Err(KernelError::InvalidArgument);
+        // Connection was reset — report as closed channel.
+        return Err(KernelError::ChannelClosed);
     }
     if conn.local_read_closed {
         return Ok(Vec::new());
@@ -2473,7 +2477,7 @@ pub fn peek(handle: usize, max_bytes: usize) -> KernelResult<Vec<u8>> {
     let conns = CONNECTIONS.lock();
     let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
     if !conn.active {
-        return Err(KernelError::InvalidArgument);
+        return Err(KernelError::ChannelClosed);
     }
     if conn.local_read_closed {
         return Ok(Vec::new());

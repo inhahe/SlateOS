@@ -2270,6 +2270,18 @@ pub unsafe extern "C" fn sendto(
         let _ = fdtable::install_fd_with_flags(
             fd, HandleKind::UdpSocket, new_handle, prev_flags,
         );
+        // If this socket was connected (has a peer set), re-apply the
+        // kernel-side peer filter so recvfrom() only returns datagrams
+        // from the connected peer.
+        if let Some(meta) = get_meta(fd) {
+            if meta.peer_addr != 0 || meta.peer_port != 0 {
+                let peer_port_host = u16::from_be(meta.peer_port);
+                let _ = syscall3(
+                    SYS_UDP_CONNECT, new_handle,
+                    u64::from(meta.peer_addr), u64::from(peer_port_host),
+                );
+            }
+        }
         new_handle
     } else {
         entry.handle

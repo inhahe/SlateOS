@@ -239,14 +239,11 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             return -1;
         }
         HandleKind::UdpSocket => {
-            // POSIX: read() on a connected UDP socket behaves like recv().
-            let meta = crate::socket::get_meta(fd);
-            let is_connected = meta.is_some_and(|m| m.peer_addr != 0 || m.peer_port != 0);
-            if !is_connected {
-                errno::set_errno(errno::EDESTADDRREQ);
-                return -1;
-            }
-            // Delegate to recv() with flags=0.
+            // read() on UDP behaves like recv(flags=0).  If the socket
+            // is bound (has a handle), it receives the next datagram.
+            // If unbound (handle==0), recv() will return EINVAL.
+            // Unlike write(), read() does NOT require connect() — the
+            // source address is simply discarded (use recvfrom() to get it).
             return unsafe {
                 crate::socket::recv(fd, buf, count, 0)
             } as SsizeT;

@@ -368,6 +368,7 @@ const ROOT_FILES: &[&str] = &[
     "reslimit",
     "initproc",
     "syshealth",
+    "udriver",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7401,6 +7402,10 @@ fn gen_syshealth() -> Vec<u8> {
     crate::syshealth::procfs_content().into_bytes()
 }
 
+fn gen_udriver() -> Vec<u8> {
+    crate::udriver::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10076,6 +10081,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "reslimit" => Ok(gen_reslimit()),
         "initproc" => Ok(gen_initproc()),
         "syshealth" => Ok(gen_syshealth()),
+        "udriver" => Ok(gen_udriver()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

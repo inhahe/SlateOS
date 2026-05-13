@@ -155,6 +155,7 @@ mod syshealth;
 mod thermal;
 mod timekeeping;
 mod tlb;
+mod udriver;
 mod unicode;
 mod userns;
 mod virtio;

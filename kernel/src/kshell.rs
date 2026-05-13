@@ -3528,6 +3528,7 @@ const COMMANDS: &[&str] = &[
     "reslimit", "rlimit",
     "initproc",
     "healthmon", "hmon",
+    "udriver", "udrvfw",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4710,6 +4711,7 @@ fn dispatch(line: &str) {
         "reslimit" | "rlimit" => cmd_reslimit(args),
         "initproc" | "init" => cmd_initproc(args),
         "healthmon" | "hmon" => cmd_healthmon(args),
+        "udriver" | "udrvfw" => cmd_udriver(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -33720,6 +33722,114 @@ fn cmd_healthmon(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'syshealth help'.", sub);
+        }
+    }
+}
+
+/// `udriver` / `udrvfw` — userspace driver framework status and control.
+fn cmd_udriver(args: &str) {
+    use crate::udriver;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", udriver::procfs_content());
+        }
+        "stats" => {
+            let st = udriver::stats();
+            shell_println!("Userspace Driver Framework");
+            shell_println!("  IOMMU:             {}", if st.iommu_available { "yes" } else { "no" });
+            shell_println!("  Total drivers:     {}", st.total_drivers);
+            shell_println!("  Active drivers:    {}", st.active_drivers);
+            shell_println!("  Unclaimed devices: {}", st.unclaimed_devices);
+            shell_println!("  MMIO mapped:       {} KiB", st.total_mmio_bytes / 1024);
+            shell_println!("  DMA allocated:     {} KiB", st.total_dma_bytes / 1024);
+            shell_println!("  Registrations:     {}", st.total_registrations);
+            shell_println!("  Crashes:           {}", st.total_crashes);
+            shell_println!("  Cleanups:          {}", st.total_cleanups);
+        }
+        "unclaimed" | "devices" => {
+            let devs = udriver::unclaimed_devices();
+            if devs.is_empty() {
+                shell_println!("No unclaimed devices");
+            } else {
+                shell_println!("{:<14} {:<12} {:<12} {}", "Address", "Vendor", "Device", "Class");
+                for d in &devs {
+                    shell_println!(
+                        "{:02x}:{:02x}.{:<8} {:04x}         {:04x}         {:02x}:{:02x}",
+                        d.addr.bus, d.addr.device, d.addr.function,
+                        d.id.vendor_id, d.id.device_id,
+                        d.id.class, d.id.subclass,
+                    );
+                }
+            }
+        }
+        "drivers" | "list" => {
+            let drivers = udriver::all_drivers();
+            if drivers.is_empty() {
+                shell_println!("No registered drivers");
+            } else {
+                shell_println!("{:<6} {:<20} {:<8} {:<14} {}", "ID", "Name", "PID", "Device", "State");
+                for d in &drivers {
+                    let state_str = match d.state {
+                        udriver::DriverState::Registered => "registered",
+                        udriver::DriverState::Binding => "binding",
+                        udriver::DriverState::Active => "active",
+                        udriver::DriverState::ShuttingDown => "shutting-down",
+                        udriver::DriverState::Crashed => "crashed",
+                        udriver::DriverState::Unregistered => "unregistered",
+                    };
+                    shell_println!(
+                        "{:<6} {:<20} {:<8} {:02x}:{:02x}.{:<8} {}",
+                        d.id, d.name, d.pid,
+                        d.device_addr.bus, d.device_addr.device, d.device_addr.function,
+                        state_str,
+                    );
+                }
+            }
+        }
+        "info" => {
+            let id_str = parts.get(1).copied().unwrap_or("");
+            if let Ok(id) = id_str.parse::<u32>() {
+                if let Some(d) = udriver::get_driver(id) {
+                    shell_println!("Driver #{} '{}'", d.id, d.name);
+                    shell_println!("  PID:    {}", d.pid);
+                    shell_println!("  Device: {:02x}:{:02x}.{} (vendor={:04x} device={:04x})",
+                        d.device_addr.bus, d.device_addr.device, d.device_addr.function,
+                        d.device_id.vendor_id, d.device_id.device_id);
+                    shell_println!("  State:  {:?}", d.state);
+                    shell_println!("  MMIO mappings: {}", d.mmio_mappings.len());
+                    for m in &d.mmio_mappings {
+                        shell_println!("    BAR{}: phys={:#010x} virt={:#010x} size={:#x} {}",
+                            m.bar_index, m.phys_base, m.virt_base, m.size,
+                            if m.perms.write { "RW" } else { "RO" });
+                    }
+                    shell_println!("  DMA buffers: {} ({} KiB)", d.dma_buffers.len(), d.total_dma_bytes / 1024);
+                    shell_println!("  IRQs: {:?}", d.irq_lines);
+                    shell_println!("  IOMMU domain: {:?}", d.iommu_domain);
+                    shell_println!("  I/O served: {}", d.io_requests_served);
+                } else {
+                    shell_println!("Driver #{} not found", id);
+                }
+            } else {
+                shell_println!("Usage: udriver info <id>");
+            }
+        }
+        "test" => {
+            udriver::self_test();
+            shell_println!("Userspace driver framework self-test: PASSED");
+        }
+        "help" => {
+            shell_println!("udriver — userspace driver framework");
+            shell_println!("  show               Full status overview");
+            shell_println!("  stats              Summary statistics");
+            shell_println!("  unclaimed/devices   List unclaimed devices");
+            shell_println!("  drivers/list        List registered drivers");
+            shell_println!("  info <id>           Detailed driver info");
+            shell_println!("  test                Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'udriver help'.", sub);
         }
     }
 }
@@ -64166,7 +64276,7 @@ fn cmd_type(args: &str) {
 fn is_builtin(name: &str) -> bool {
     matches!(name,
         "help" | "?" | "cd" | "meminfo" | "mem" | "ps" | "tasks" | "clear" | "cls"
-        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "reslimit" | "rlimit" | "initproc" | "init" | "healthmon" | "hmon" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
+        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "reslimit" | "rlimit" | "initproc" | "init" | "healthmon" | "hmon" | "udriver" | "udrvfw" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"

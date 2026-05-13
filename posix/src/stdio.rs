@@ -1243,6 +1243,27 @@ pub extern "C" fn setbuf(stream: *mut u8, buf: *mut u8) {
     }
 }
 
+/// Set stream buffering with explicit buffer size (BSD extension).
+///
+/// Like `setbuf`, but allows specifying the buffer size.
+/// If `buf` is null, sets the stream to unbuffered.
+#[unsafe(no_mangle)]
+pub extern "C" fn setbuffer(stream: *mut u8, buf: *mut u8, size: usize) {
+    if buf.is_null() {
+        setvbuf(stream, core::ptr::null_mut(), 2 /* _IONBF */, 0);
+    } else {
+        setvbuf(stream, buf, 0 /* _IOFBF */, size);
+    }
+}
+
+/// Set line-buffered mode for a stream (BSD extension).
+///
+/// Equivalent to `setvbuf(stream, NULL, _IOLBF, 0)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn setlinebuf(stream: *mut u8) {
+    setvbuf(stream, core::ptr::null_mut(), 1 /* _IOLBF */, 0);
+}
+
 /// Buffering mode constants.
 ///
 /// Exported as global symbols so C programs can reference `_IONBF`,

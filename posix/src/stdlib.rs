@@ -408,48 +408,60 @@ pub unsafe extern "C" fn strtod(
     }
 
     // Check for "inf", "infinity", "nan" (case-insensitive).
-    let c0 = unsafe { *nptr.add(i) } | 0x20; // ASCII lowercase
-    if c0 == b'i' {
+    // Important: check bytes one at a time to avoid reading past null
+    // terminator (which could be at the end of a mapped page).
+    let c0 = unsafe { *nptr.add(i) };
+    if c0 == 0 {
+        // Empty subject string — fall through to digit parsing.
+    } else if (c0 | 0x20) == b'i' {
         // Possible "inf" or "infinity".
-        let c1 = unsafe { *nptr.add(i.wrapping_add(1)) } | 0x20;
-        let c2 = unsafe { *nptr.add(i.wrapping_add(2)) } | 0x20;
-        if c1 == b'n' && c2 == b'f' {
-            i = i.wrapping_add(3);
-            // Check for full "infinity".
-            let rest = [
-                unsafe { *nptr.add(i) } | 0x20,
-                unsafe { *nptr.add(i.wrapping_add(1)) } | 0x20,
-                unsafe { *nptr.add(i.wrapping_add(2)) } | 0x20,
-                unsafe { *nptr.add(i.wrapping_add(3)) } | 0x20,
-                unsafe { *nptr.add(i.wrapping_add(4)) } | 0x20,
-            ];
-            if rest == [b'i', b'n', b'i', b't', b'y'] {
-                i = i.wrapping_add(5);
-            }
-            if !endptr.is_null() {
-                unsafe { *endptr = nptr.add(i); }
-            }
-            return if negative { f64::NEG_INFINITY } else { f64::INFINITY };
-        }
-    } else if c0 == b'n' {
-        let c1 = unsafe { *nptr.add(i.wrapping_add(1)) } | 0x20;
-        let c2 = unsafe { *nptr.add(i.wrapping_add(2)) } | 0x20;
-        if c1 == b'a' && c2 == b'n' {
-            i = i.wrapping_add(3);
-            // Skip optional (chars) payload per C99.
-            if unsafe { *nptr.add(i) } == b'(' {
-                let mut j = i.wrapping_add(1);
-                while unsafe { *nptr.add(j) } != 0 && unsafe { *nptr.add(j) } != b')' {
+        let c1 = unsafe { *nptr.add(i.wrapping_add(1)) };
+        if c1 != 0 {
+            let c2 = unsafe { *nptr.add(i.wrapping_add(2)) };
+            if c2 != 0 && (c1 | 0x20) == b'n' && (c2 | 0x20) == b'f' {
+                i = i.wrapping_add(3);
+                // Check for full "infinity" — one byte at a time.
+                let inity: [u8; 5] = [b'i', b'n', b'i', b't', b'y'];
+                let mut j: usize = 0;
+                let mut all_match = true;
+                while j < 5 {
+                    let ch = unsafe { *nptr.add(i.wrapping_add(j)) };
+                    if ch == 0 || (ch | 0x20) != inity[j] {
+                        all_match = false;
+                        break;
+                    }
                     j = j.wrapping_add(1);
                 }
-                if unsafe { *nptr.add(j) } == b')' {
-                    i = j.wrapping_add(1);
+                if all_match {
+                    i = i.wrapping_add(5);
                 }
+                if !endptr.is_null() {
+                    unsafe { *endptr = nptr.add(i); }
+                }
+                return if negative { f64::NEG_INFINITY } else { f64::INFINITY };
             }
-            if !endptr.is_null() {
-                unsafe { *endptr = nptr.add(i); }
+        }
+    } else if (c0 | 0x20) == b'n' {
+        let c1 = unsafe { *nptr.add(i.wrapping_add(1)) };
+        if c1 != 0 {
+            let c2 = unsafe { *nptr.add(i.wrapping_add(2)) };
+            if c2 != 0 && (c1 | 0x20) == b'a' && (c2 | 0x20) == b'n' {
+                i = i.wrapping_add(3);
+                // Skip optional (chars) payload per C99.
+                if unsafe { *nptr.add(i) } == b'(' {
+                    let mut j = i.wrapping_add(1);
+                    while unsafe { *nptr.add(j) } != 0 && unsafe { *nptr.add(j) } != b')' {
+                        j = j.wrapping_add(1);
+                    }
+                    if unsafe { *nptr.add(j) } == b')' {
+                        i = j.wrapping_add(1);
+                    }
+                }
+                if !endptr.is_null() {
+                    unsafe { *endptr = nptr.add(i); }
+                }
+                return f64::NAN;
             }
-            return f64::NAN;
         }
     }
 

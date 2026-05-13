@@ -472,3 +472,73 @@ pub extern "C" fn tcsetpgrp(_fd: crate::types::Fd, pgrp: PidT) -> i32 {
     unsafe { FG_PGRP = pgrp; }
     0
 }
+
+// ===========================================================================
+// Linux-specific process control stubs
+// ===========================================================================
+
+/// Linux `clone` — create a new process/thread.
+///
+/// Stub: returns -1 with ENOSYS.  Our OS uses `posix_spawn` for
+/// process creation and doesn't support Linux-style clone flags.
+#[unsafe(no_mangle)]
+pub extern "C" fn clone(
+    _fn_ptr: *const u8,
+    _child_stack: *mut u8,
+    _flags: i32,
+    _arg: *mut u8,
+) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Linux `unshare` — disassociate parts of the execution context.
+///
+/// Stub: returns -1 with ENOSYS (namespaces not implemented).
+#[unsafe(no_mangle)]
+pub extern "C" fn unshare(_flags: i32) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Linux `setns` — reassociate a thread with a namespace.
+///
+/// Stub: returns -1 with ENOSYS.
+#[unsafe(no_mangle)]
+pub extern "C" fn setns(_fd: i32, _nstype: i32) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Mount a filesystem.
+///
+/// Stub: returns -1 with ENOSYS.
+#[unsafe(no_mangle)]
+pub extern "C" fn mount(
+    _source: *const u8,
+    _target: *const u8,
+    _fstype: *const u8,
+    _flags: u64,
+    _data: *const u8,
+) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Unmount a filesystem.
+///
+/// Stub: returns -1 with ENOSYS.
+#[unsafe(no_mangle)]
+pub extern "C" fn umount(_target: *const u8) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Unmount a filesystem with flags.
+///
+/// Stub: returns -1 with ENOSYS.
+#[unsafe(no_mangle)]
+pub extern "C" fn umount2(_target: *const u8, _flags: i32) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}

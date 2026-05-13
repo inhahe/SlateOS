@@ -23,13 +23,14 @@
 //!
 //! ## Architecture
 //!
-//! 1. Assembly wrappers (`printf`, `fprintf`, `dprintf`, `sprintf`, `snprintf`)
-//!    capture register args (rsi–r9) into a stack array and call
-//!    the corresponding `_*_impl` Rust function.
+//! 1. Assembly wrappers (`printf`, `fprintf`, `dprintf`, `sprintf`,
+//!    `snprintf`, `asprintf`) capture register args (rsi-r9) into a
+//!    stack array and call the corresponding `_*_impl` Rust function.
 //! 2. All `_*_impl` functions call `format_core()` which parses the
 //!    format string and consumes args from the array.
 //! 3. Output goes to a buffer (snprintf/sprintf), a `FILE*` stream
-//!    (printf/fprintf), or a raw fd (dprintf).
+//!    (printf/fprintf), a raw fd (dprintf), or a malloc'd buffer
+//!    (asprintf).
 
 // ---------------------------------------------------------------------------
 // Assembly trampolines
@@ -222,6 +223,42 @@ core::arch::global_asm!(
     "add rsp, 128",
     "pop rbp",
     "ret",
+
+    // asprintf(strp, fmt, ...) → _asprintf_impl(strp, fmt, int_args, float_args)
+    // Same register layout as fprintf: 2 fixed args (strp, fmt), rest varargs.
+    ".global asprintf",
+    ".type asprintf, @function",
+    "asprintf:",
+    "push rbp",
+    "mov rbp, rsp",
+    "sub rsp, 128",
+    "mov [rsp], rdx",        // int vararg 0
+    "mov [rsp+8], rcx",      // int vararg 1
+    "mov [rsp+16], r8",      // int vararg 2
+    "mov [rsp+24], r9",      // int vararg 3
+    "mov rax, [rbp+16]",     // int vararg 4 (stack)
+    "mov [rsp+32], rax",
+    "mov rax, [rbp+24]",     // int vararg 5
+    "mov [rsp+40], rax",
+    "mov rax, [rbp+32]",     // int vararg 6
+    "mov [rsp+48], rax",
+    "mov rax, [rbp+40]",     // int vararg 7
+    "mov [rsp+56], rax",
+    "movsd [rsp+64], xmm0",
+    "movsd [rsp+72], xmm1",
+    "movsd [rsp+80], xmm2",
+    "movsd [rsp+88], xmm3",
+    "movsd [rsp+96], xmm4",
+    "movsd [rsp+104], xmm5",
+    "movsd [rsp+112], xmm6",
+    "movsd [rsp+120], xmm7",
+    // rdi = strp, rsi = fmt (already set)
+    "mov rdx, rsp",          // int_args array
+    "lea rcx, [rsp+64]",    // float_args array
+    "call _asprintf_impl",
+    "add rsp, 128",
+    "pop rbp",
+    "ret",
 );
 
 // ---------------------------------------------------------------------------
@@ -309,6 +346,54 @@ pub extern "C" fn _snprintf_impl(
 pub extern "C" fn _sprintf_impl(buf: *mut u8, fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
     // No size limit — dangerous but matches C semantics.
     format_core(buf, usize::MAX, fmt, args, fargs)
+}
+
+/// `asprintf(strp, fmt, ...)` — allocate and format a string.
+///
+/// Allocates a buffer large enough to hold the formatted output
+/// (including null terminator) and stores a pointer to it in `*strp`.
+/// Returns the number of characters written (excluding null), or -1
+/// on allocation failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn _asprintf_impl(
+    strp: *mut *mut u8,
+    fmt: *const u8,
+    args: *const u64,
+    fargs: *const u64,
+) -> i32 {
+    if strp.is_null() {
+        return -1;
+    }
+
+    // First pass: count required bytes (format to null buffer).
+    let n = format_core(core::ptr::null_mut(), 0, fmt, args, fargs);
+    if n < 0 {
+        unsafe { *strp = core::ptr::null_mut(); }
+        return -1;
+    }
+
+    let alloc_size = (n as usize).wrapping_add(1); // +1 for NUL
+    let buf = crate::malloc::malloc(alloc_size);
+    if buf.is_null() {
+        unsafe { *strp = core::ptr::null_mut(); }
+        return -1;
+    }
+
+    // Second pass: format into the allocated buffer.
+    let written = format_core(buf, alloc_size, fmt, args, fargs);
+
+    // Null-terminate.
+    let term_pos = if written >= 0 && (written as usize) < alloc_size {
+        written as usize
+    } else {
+        alloc_size.wrapping_sub(1)
+    };
+    // SAFETY: term_pos < alloc_size, buf is non-null.
+    unsafe { *buf.add(term_pos) = 0; }
+
+    // SAFETY: strp verified non-null.
+    unsafe { *strp = buf; }
+    n
 }
 
 // ---------------------------------------------------------------------------

@@ -1620,6 +1620,30 @@ pub extern "C" fn flock(_fd: Fd, _operation: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// lockf — POSIX file locking
+// ---------------------------------------------------------------------------
+
+/// Lock command: lock a section for exclusive use.
+pub const F_LOCK: i32 = 1;
+/// Lock command: non-blocking lock attempt.
+pub const F_TLOCK: i32 = 2;
+/// Lock command: unlock a section.
+pub const F_ULOCK: i32 = 0;
+/// Lock command: test if a section is locked.
+pub const F_TEST: i32 = 3;
+
+/// Lock a section of a file (POSIX `lockf`).
+///
+/// Stub: always succeeds.  Like `flock`, advisory file locking is not
+/// yet enforced by the kernel.  Programs that use `lockf` for lock
+/// files or serialization will proceed normally.
+#[unsafe(no_mangle)]
+pub extern "C" fn lockf(_fd: Fd, _cmd: i32, _len: OffT) -> i32 {
+    // Advisory locking not yet implemented.
+    0
+}
+
+// ---------------------------------------------------------------------------
 // sendfile
 // ---------------------------------------------------------------------------
 

@@ -49,6 +49,7 @@ pub const EDOM: i32 = 33;          // Numerical argument out of domain
 pub const ERANGE: i32 = 34;        // Numerical result out of range
 pub const EDEADLK: i32 = 35;       // Resource deadlock avoided
 pub const ENAMETOOLONG: i32 = 36;   // File name too long
+pub const ENOLCK: i32 = 37;        // No locks available
 pub const ENOSYS: i32 = 38;        // Function not implemented
 pub const ENOTEMPTY: i32 = 39;      // Directory not empty
 pub const ELOOP: i32 = 40;         // Too many levels of symbolic links
@@ -80,6 +81,16 @@ pub const EINPROGRESS: i32 = 115;  // Operation now in progress
 pub const ECANCELED: i32 = 125;    // Operation canceled
 pub const ENOMEDIUM: i32 = 123;    // No medium found
 pub const EILSEQ: i32 = 84;        // Invalid or incomplete multibyte/wide character
+pub const EOWNERDEAD: i32 = 130;   // Owner died
+pub const ENOTRECOVERABLE: i32 = 131; // State not recoverable
+pub const ENOLINK: i32 = 67;       // Link has been severed
+pub const EPROTO: i32 = 71;        // Protocol error
+pub const EMULTIHOP: i32 = 72;     // Multihop attempted
+pub const EBADMSG: i32 = 74;       // Bad message
+pub const EIDRM: i32 = 43;         // Identifier removed
+pub const ENOSR: i32 = 63;         // Out of streams resources
+pub const ENOSTR: i32 = 60;        // Device not a stream
+pub const ESTALE: i32 = 116;       // Stale file handle
 pub const EMSGSIZE: i32 = 90;      // Message too long
 pub const EPROTOTYPE: i32 = 91;    // Protocol wrong type for socket
 pub const ENETDOWN: i32 = 100;     // Network is down
@@ -115,8 +126,6 @@ pub fn get_errno() -> i32 {
 /// via `*__errno_location()`.  This is the glibc/musl convention.
 #[unsafe(no_mangle)]
 pub extern "C" fn __errno_location() -> *mut i32 {
-    // SAFETY: AtomicI32 has the same layout as i32.
-    // The pointer is valid for the lifetime of the program.
     // SAFETY: AtomicI32 has the same layout as i32.
     // The pointer is valid for the lifetime of the program.
     // Using &raw const to avoid borrow_as_ptr lint (Rust 2024 idiom).

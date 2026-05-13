@@ -131,7 +131,10 @@ fn split_pattern(pattern: *const u8) -> PatternParts {
 
 /// Collect matching entries from a directory into a match array.
 ///
-/// Returns the number of matches found, or -1 on allocation failure.
+/// Returns:
+/// - `>= 0`: number of matches found
+/// - `-1`: allocation failure
+/// - `-2`: directory open failure
 fn collect_matches(
     pattern: *const u8,
     parts: &PatternParts,
@@ -142,7 +145,7 @@ fn collect_matches(
 
     let dirp = dirent::opendir(parts.dir_buf.as_ptr());
     if dirp.is_null() {
-        return 0; // Couldn't open — no matches.
+        return -2; // Distinct from -1 (alloc failure): dir open error.
     }
 
     let mut count: usize = 0;
@@ -350,17 +353,26 @@ pub unsafe extern "C" fn glob(
     let mut match_ptrs: [*mut u8; MAX_MATCHES] = [core::ptr::null_mut(); MAX_MATCHES];
     let match_result = collect_matches(pattern, &parts, flags, &mut match_ptrs);
 
-    if match_result < 0 {
+    if match_result == -1 {
         return GLOB_NOSPACE;
+    }
+
+    // -2 = directory open failure (distinct from "no matches").
+    if match_result == -2 {
+        if flags & GLOB_ERR != 0 {
+            return GLOB_ABORTED;
+        }
+        // Treat unreadable dir same as no matches.
+        if flags & GLOB_NOCHECK != 0 {
+            return add_single_path(glob_res, pattern, parts.pat_len);
+        }
+        return GLOB_NOMATCH;
     }
 
     let match_count = match_result as usize;
 
     if match_count == 0 {
-        // Couldn't open dir, or no matches.
-        if flags & GLOB_ERR != 0 {
-            return GLOB_ABORTED;
-        }
+        // Directory opened fine but nothing matched the pattern.
         if flags & GLOB_NOCHECK != 0 {
             return add_single_path(glob_res, pattern, parts.pat_len);
         }
@@ -402,7 +414,10 @@ pub unsafe extern "C" fn globfree(pglob: *mut GlobT) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Add the pattern itself as the only match (for `GLOB_NOCHECK`).
+/// Add the pattern itself as a match (for `GLOB_NOCHECK`).
+///
+/// Appends to existing results when `GLOB_APPEND` was used, rather
+/// than replacing them.
 fn add_single_path(glob_res: &mut GlobT, pattern: *const u8, pat_len: usize) -> i32 {
     let alloc_len = pat_len.wrapping_add(1);
     let path = malloc::malloc(alloc_len);
@@ -417,7 +432,11 @@ fn add_single_path(glob_res: &mut GlobT, pattern: *const u8, pat_len: usize) -> 
     }
     unsafe { *path.add(pat_len) = 0; }
 
-    let array_bytes = 2_usize.wrapping_mul(core::mem::size_of::<*mut u8>());
+    let old_count = glob_res.gl_pathc;
+    let new_count = old_count.wrapping_add(1);
+    // Allocate space for existing entries + new entry + null sentinel.
+    let array_bytes = new_count.wrapping_add(1).wrapping_mul(core::mem::size_of::<*mut u8>());
+
     let pathv_raw = if glob_res.gl_pathv.is_null() {
         malloc::malloc(array_bytes)
     } else {
@@ -434,13 +453,14 @@ fn add_single_path(glob_res: &mut GlobT, pattern: *const u8, pat_len: usize) -> 
     // SAFETY: malloc returns 8-byte aligned on x86_64.
     #[allow(clippy::cast_ptr_alignment)]
     let pathv = pathv_raw.cast::<*mut u8>();
+    // Place new entry after existing entries (preserves GLOB_APPEND data).
     unsafe {
-        *pathv = path;
-        *pathv.add(1) = core::ptr::null_mut();
+        *pathv.add(old_count) = path;
+        *pathv.add(new_count) = core::ptr::null_mut();
     }
 
     glob_res.gl_pathv = pathv;
-    glob_res.gl_pathc = 1;
+    glob_res.gl_pathc = new_count;
 
     0
 }

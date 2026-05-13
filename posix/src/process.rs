@@ -98,6 +98,15 @@ pub extern "C" fn _exit(status: i32) -> ! {
     }
 }
 
+/// C11 `_Exit` — immediate process termination (same as POSIX `_exit`).
+///
+/// Unlike `exit()`, does not call atexit handlers or flush stdio buffers.
+#[unsafe(no_mangle)]
+#[allow(non_snake_case)]
+pub extern "C" fn _Exit(status: i32) -> ! {
+    _exit(status);
+}
+
 /// Get the process ID of the calling process.
 #[unsafe(no_mangle)]
 pub extern "C" fn getpid() -> PidT {

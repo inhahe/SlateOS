@@ -85,16 +85,19 @@ pub extern "C" fn fstatvfs(_fd: i32, buf: *mut Statvfs) -> i32 {
 }
 
 /// Fill a Statvfs with reasonable defaults.
+///
+/// Uses 16 KiB block size to match the OS page size.
 fn fill_defaults(buf: *mut Statvfs) {
     // SAFETY: Caller verified buf is non-null.
     let s = unsafe { &mut *buf };
-    s.f_bsize = 4096;
-    s.f_frsize = 4096;
-    // 10 GiB filesystem.
+    // Our OS uses 16 KiB pages; filesystem block size matches.
+    s.f_bsize = 16384;
+    s.f_frsize = 16384;
+    // 10 GiB filesystem with 16 KiB blocks.
     #[allow(clippy::arithmetic_side_effects)]
     {
-        s.f_blocks = 10 * 1024 * 1024 * 1024 / 4096; // 10 GiB
-        s.f_bfree = 1024 * 1024 * 1024 / 4096;       // 1 GiB
+        s.f_blocks = 10 * 1024 * 1024 * 1024 / 16384; // 10 GiB
+        s.f_bfree = 1024 * 1024 * 1024 / 16384;       // 1 GiB
     }
     s.f_bavail = s.f_bfree;
     s.f_files = 1_000_000;

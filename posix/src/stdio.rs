@@ -790,6 +790,13 @@ pub extern "C" fn fgets(buf: *mut u8, size: i32, stream: *mut u8) -> *mut u8 {
         return core::ptr::null_mut();
     }
 
+    // POSIX: if size is 1, write NUL and return buf (empty string, no read).
+    if size == 1 {
+        // SAFETY: buf verified non-null, size >= 1.
+        unsafe { *buf = 0; }
+        return buf;
+    }
+
     let file = stream_to_file(stream);
 
     // Flush stdout if reading from stdin.
@@ -817,7 +824,7 @@ pub extern "C" fn fgets(buf: *mut u8, size: i32, stream: *mut u8) -> *mut u8 {
     }
 
     if pos == 0 {
-        return core::ptr::null_mut(); // Nothing read.
+        return core::ptr::null_mut(); // EOF before reading anything.
     }
 
     // Null-terminate.

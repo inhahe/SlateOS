@@ -1,6 +1,7 @@
 //! C runtime startup and exit handlers.
 //!
-//! Provides `atexit`, `exit`, `__libc_start_main`, and C++ ABI stubs.
+//! Provides `atexit`, `at_quick_exit`, `exit`, `quick_exit`,
+//! `__libc_start_main`, and C++ ABI stubs.
 //!
 //! ## C Program Startup
 //!
@@ -10,10 +11,10 @@
 //! returns, `exit(main_retval)` is called, which runs `atexit` handlers
 //! and then calls `_exit`.
 //!
-//! ## atexit
+//! ## atexit / at_quick_exit
 //!
 //! Registered functions are called in reverse order (LIFO) during
-//! `exit()`.  Maximum 32 handlers.
+//! `exit()` or `quick_exit()` respectively.  Maximum 32 handlers each.
 //!
 //! ## C++ ABI Stubs
 //!
@@ -34,6 +35,11 @@ type AtexitFn = extern "C" fn();
 static mut ATEXIT_FUNCS: [Option<AtexitFn>; MAX_ATEXIT] = [None; MAX_ATEXIT];
 /// Number of registered handlers.
 static mut ATEXIT_COUNT: usize = 0;
+
+/// Registered at_quick_exit handlers (C11), in registration order.
+static mut QUICKEXIT_FUNCS: [Option<AtexitFn>; MAX_ATEXIT] = [None; MAX_ATEXIT];
+/// Number of registered quick-exit handlers.
+static mut QUICKEXIT_COUNT: usize = 0;
 
 /// Register a function to be called at normal process termination.
 ///
@@ -87,6 +93,57 @@ pub extern "C" fn exit(status: i32) -> ! {
 
     #[allow(clippy::used_underscore_items)]
     crate::process::_exit(status);
+}
+
+/// C11: Register a function to be called by `quick_exit`.
+///
+/// Unlike `atexit`, these handlers are only called by `quick_exit`,
+/// not by normal `exit`.  Returns 0 on success, -1 if full.
+#[unsafe(no_mangle)]
+pub extern "C" fn at_quick_exit(func: AtexitFn) -> i32 {
+    // SAFETY: Single-threaded access.
+    let count = unsafe { addr_of_mut!(QUICKEXIT_COUNT).read() };
+    if count >= MAX_ATEXIT {
+        return -1;
+    }
+
+    unsafe {
+        let funcs = addr_of_mut!(QUICKEXIT_FUNCS);
+        if let Some(slot) = (*funcs).get_mut(count) {
+            *slot = Some(func);
+        }
+        addr_of_mut!(QUICKEXIT_COUNT).write(count.wrapping_add(1));
+    }
+    0
+}
+
+/// C11: Terminate the process, running `at_quick_exit` handlers.
+///
+/// Unlike `exit`, does NOT call `atexit` handlers or flush stdio.
+/// Calls handlers registered with `at_quick_exit` in LIFO order,
+/// then calls `_Exit`.
+#[unsafe(no_mangle)]
+pub extern "C" fn quick_exit(status: i32) -> ! {
+    // Run at_quick_exit handlers in LIFO order.
+    let count = unsafe { addr_of_mut!(QUICKEXIT_COUNT).read() };
+
+    let mut i = count;
+    while i > 0 {
+        i = i.wrapping_sub(1);
+        let func = unsafe {
+            let funcs = addr_of_mut!(QUICKEXIT_FUNCS);
+            (*funcs).get(i).copied().flatten()
+        };
+        if let Some(f) = func {
+            f();
+        }
+    }
+
+    unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+
+    // quick_exit calls _Exit (not exit), skipping atexit handlers.
+    #[allow(clippy::used_underscore_items, non_snake_case)]
+    crate::process::_Exit(status);
 }
 
 /// C runtime entry point (glibc convention).

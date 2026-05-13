@@ -432,6 +432,10 @@ const ROOT_FILES: &[&str] = &[
     "schedclass",
     "cpuidle",
     "futexstat",
+    "writeback",
+    "iolatency",
+    "taskstats",
+    "kprobes",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8405,6 +8409,75 @@ fn gen_futexstat() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_writeback() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (devs, dirty, written, flushes, threshold, ops) = crate::fs::writeback::stats();
+    out.push_str(&format!("devices: {}\n", devs));
+    out.push_str(&format!("total_dirty_pages: {}\n", dirty));
+    out.push_str(&format!("total_written_pages: {}\n", written));
+    out.push_str(&format!("total_flushes: {}\n", flushes));
+    out.push_str(&format!("dirty_threshold_pct: {}\n", threshold));
+    out.push_str(&format!("ops: {}\n", ops));
+    for d in crate::fs::writeback::device_stats() {
+        out.push_str(&format!("{}: dirty={} wb={} written={} bytes={} flushes={} cong={}\n",
+            d.device, d.dirty_pages, d.writeback_pages, d.written_pages,
+            d.written_bytes, d.flushes, d.congestion_count));
+    }
+    out.into_bytes()
+}
+
+fn gen_iolatency() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (devs, ios, slow, threshold, ops) = crate::fs::iolatency::stats();
+    out.push_str(&format!("devices: {}\n", devs));
+    out.push_str(&format!("total_ios: {}\n", ios));
+    out.push_str(&format!("total_slow: {}\n", slow));
+    out.push_str(&format!("slow_threshold_ns: {}\n", threshold));
+    out.push_str(&format!("ops: {}\n", ops));
+    for d in crate::fs::iolatency::per_device() {
+        out.push_str(&format!("{}: rd={}/{} wr={}/{} max_rd={} max_wr={} slow={}\n",
+            d.device, d.read_count, d.read_avg_ns, d.write_count, d.write_avg_ns,
+            d.read_max_ns, d.write_max_ns, d.slow_count));
+    }
+    out.into_bytes()
+}
+
+fn gen_taskstats() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (tasks, cpu, io, delays, ops) = crate::fs::taskstats::stats();
+    out.push_str(&format!("tasks: {}\n", tasks));
+    out.push_str(&format!("total_cpu_ns: {}\n", cpu));
+    out.push_str(&format!("total_io_bytes: {}\n", io));
+    out.push_str(&format!("total_delays_ns: {}\n", delays));
+    out.push_str(&format!("ops: {}\n", ops));
+    for t in crate::fs::taskstats::top_cpu(10) {
+        out.push_str(&format!("pid={} {}: cpu={}ns usr={}ns sys={}ns rd={} wr={}\n",
+            t.pid, t.name, t.cpu_time_ns, t.user_time_ns, t.sys_time_ns,
+            t.read_bytes, t.write_bytes));
+    }
+    out.into_bytes()
+}
+
+fn gen_kprobes() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (probes, hits, misses, overhead, ops) = crate::fs::kprobes::stats();
+    out.push_str(&format!("probes: {}\n", probes));
+    out.push_str(&format!("total_hits: {}\n", hits));
+    out.push_str(&format!("total_misses: {}\n", misses));
+    out.push_str(&format!("total_overhead_ns: {}\n", overhead));
+    out.push_str(&format!("ops: {}\n", ops));
+    for p in crate::fs::kprobes::list() {
+        out.push_str(&format!("[{}] {} {:#x}: hits={} misses={} overhead={}ns {}\n",
+            p.probe_type.label(), p.name, p.address, p.hits, p.misses,
+            p.overhead_ns, if p.enabled { "enabled" } else { "disabled" }));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9002,6 +9075,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "schedclass" => Ok(gen_schedclass()),
         "cpuidle" => Ok(gen_cpuidle()),
         "futexstat" => Ok(gen_futexstat()),
+        "writeback" => Ok(gen_writeback()),
+        "iolatency" => Ok(gen_iolatency()),
+        "taskstats" => Ok(gen_taskstats()),
+        "kprobes" => Ok(gen_kprobes()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

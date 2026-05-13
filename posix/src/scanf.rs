@@ -1,8 +1,11 @@
-//! Scanf implementation via assembly trampoline.
+//! Scanf family: `sscanf`, `scanf`, `fscanf` via assembly trampoline.
 //!
 //! Like printf, scanf is variadic in C.  We use assembly wrappers
 //! to capture the variadic output-pointer arguments into an array,
 //! then pass that to a Rust scanning engine.
+//!
+//! `scanf` and `fscanf` read a line from stdin/stream into a stack
+//! buffer, then scan it with the same engine as `sscanf`.
 //!
 //! ## Supported Format Specifiers
 //!
@@ -60,6 +63,59 @@ core::arch::global_asm!(
     "add rsp, 64",
     "pop rbp",
     "ret",
+
+    // scanf(fmt, ...) → _scanf_impl(fmt, args_ptr)
+    // Like printf: rdi = fmt, rsi..r9 = first 5 varargs.
+    ".global scanf",
+    ".type scanf, @function",
+    "scanf:",
+    "push rbp",
+    "mov rbp, rsp",
+    "sub rsp, 64",
+    "mov [rsp], rsi",        // vararg 0
+    "mov [rsp+8], rdx",      // vararg 1
+    "mov [rsp+16], rcx",     // vararg 2
+    "mov [rsp+24], r8",      // vararg 3
+    "mov [rsp+32], r9",      // vararg 4
+    "mov rax, [rbp+16]",     // vararg 5 (stack)
+    "mov [rsp+40], rax",
+    "mov rax, [rbp+24]",     // vararg 6
+    "mov [rsp+48], rax",
+    "mov rax, [rbp+32]",     // vararg 7
+    "mov [rsp+56], rax",
+    // rdi = fmt (already set)
+    "mov rsi, rsp",          // args array
+    "call _scanf_impl",
+    "add rsp, 64",
+    "pop rbp",
+    "ret",
+
+    // fscanf(stream, fmt, ...) → _fscanf_impl(stream, fmt, args_ptr)
+    // rdi = stream, rsi = fmt, rdx..r9 = first 4 varargs.
+    ".global fscanf",
+    ".type fscanf, @function",
+    "fscanf:",
+    "push rbp",
+    "mov rbp, rsp",
+    "sub rsp, 64",
+    "mov [rsp], rdx",        // vararg 0
+    "mov [rsp+8], rcx",      // vararg 1
+    "mov [rsp+16], r8",      // vararg 2
+    "mov [rsp+24], r9",      // vararg 3
+    "mov rax, [rbp+16]",     // vararg 4 (stack)
+    "mov [rsp+32], rax",
+    "mov rax, [rbp+24]",     // vararg 5
+    "mov [rsp+40], rax",
+    "mov rax, [rbp+32]",     // vararg 6
+    "mov [rsp+48], rax",
+    "mov rax, [rbp+40]",     // vararg 7
+    "mov [rsp+56], rax",
+    // rdi = stream, rsi = fmt (already set)
+    "mov rdx, rsp",          // args array
+    "call _fscanf_impl",
+    "add rsp, 64",
+    "pop rbp",
+    "ret",
 );
 
 // ---------------------------------------------------------------------------
@@ -92,6 +148,114 @@ pub extern "C" fn _sscanf_impl(
     };
 
     scan_core(&mut ctx)
+}
+
+/// Buffer size for reading a line from stdin/stream for scanf/fscanf.
+const SCANF_LINE_BUF: usize = 4096;
+
+/// `scanf(fmt, ...)` — parse formatted input from stdin.
+///
+/// Reads a line from stdin, then scans it using the same engine as
+/// `sscanf`.  Returns the number of items successfully assigned,
+/// or EOF (-1) if stdin is at end-of-file.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn _scanf_impl(
+    fmt: *const u8,
+    args: *const u64,
+) -> i32 {
+    if fmt.is_null() {
+        return -1;
+    }
+
+    // Read a line from stdin (fd 0) into a stack buffer.
+    let mut buf = [0u8; SCANF_LINE_BUF];
+    let n = read_line_from_fd(0, &mut buf);
+    if n == 0 {
+        return -1; // EOF
+    }
+
+    let mut ctx = ScanCtx {
+        input: buf.as_ptr(),
+        fmt,
+        args,
+        si: 0,
+        fi: 0,
+        ai: 0,
+        assigned: 0,
+    };
+
+    scan_core(&mut ctx)
+}
+
+/// `fscanf(stream, fmt, ...)` — parse formatted input from a stream.
+///
+/// Reads a line from the given stream, then scans it.  The stream
+/// pointer is interpreted as a FILE* (our stdio fd encoding).
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn _fscanf_impl(
+    stream: *mut u8,
+    fmt: *const u8,
+    args: *const u64,
+) -> i32 {
+    if fmt.is_null() {
+        return -1;
+    }
+
+    // Extract fd from FILE*.
+    let fd = crate::stdio::fileno(stream);
+    if fd < 0 {
+        return -1;
+    }
+
+    let mut buf = [0u8; SCANF_LINE_BUF];
+    let n = read_line_from_fd(fd, &mut buf);
+    if n == 0 {
+        return -1; // EOF
+    }
+
+    let mut ctx = ScanCtx {
+        input: buf.as_ptr(),
+        fmt,
+        args,
+        si: 0,
+        fi: 0,
+        ai: 0,
+        assigned: 0,
+    };
+
+    scan_core(&mut ctx)
+}
+
+/// Read bytes from a file descriptor until newline or buffer full.
+///
+/// Returns the number of bytes read (0 on EOF/error).  The buffer
+/// is always null-terminated.
+fn read_line_from_fd(fd: i32, buf: &mut [u8; SCANF_LINE_BUF]) -> usize {
+    let mut pos: usize = 0;
+    let max = SCANF_LINE_BUF.wrapping_sub(1); // Leave room for NUL.
+
+    while pos < max {
+        let mut byte = 0u8;
+        let ret = crate::file::read(fd, &raw mut byte, 1);
+        if ret <= 0 {
+            break; // EOF or error.
+        }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = byte;
+        }
+        pos = pos.wrapping_add(1);
+        if byte == b'\n' {
+            break;
+        }
+    }
+
+    // Null-terminate.
+    if let Some(slot) = buf.get_mut(pos) {
+        *slot = 0;
+    }
+    pos
 }
 
 // ---------------------------------------------------------------------------

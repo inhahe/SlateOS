@@ -109,23 +109,29 @@ pub extern "C" fn sem_trywait(sem: *mut SemT) -> i32 {
     }
 
     let atomic = unsafe { &(*sem).value };
-    let current = atomic.load(core::sync::atomic::Ordering::Acquire);
 
-    if current > 0
-        && atomic
-            .compare_exchange(
+    // Retry loop: a failed CAS doesn't mean value is zero — another
+    // thread may have concurrently modified it.  Only give up when the
+    // value is genuinely non-positive.
+    loop {
+        let current = atomic.load(core::sync::atomic::Ordering::Acquire);
+        if current <= 0 {
+            errno::set_errno(errno::EAGAIN);
+            return -1;
+        }
+        if atomic
+            .compare_exchange_weak(
                 current,
                 current.wrapping_sub(1),
                 core::sync::atomic::Ordering::AcqRel,
                 core::sync::atomic::Ordering::Relaxed,
             )
             .is_ok()
-    {
-        return 0;
+        {
+            return 0;
+        }
+        // CAS failed — value changed. Retry with fresh load.
     }
-
-    errno::set_errno(errno::EAGAIN);
-    -1
 }
 
 /// Unlock (increment) a semaphore.

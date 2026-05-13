@@ -958,6 +958,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Sched Class (fs::schedclass): Scheduler class tracking with 5 classes (RT/DL/Normal/Batch/Idle), per-task info, context switches, time slices, migrations; `schedclass`/`sclass` kshell command; /proc/schedclass; 8 self-tests
   - [x] CPU Idle (fs::cpuidle): CPU C-state monitoring with 7 idle states, per-CPU residency tracking, transition counts, idle percentage; `cpuidle`/`cidle` kshell command; /proc/cpuidle; 8 self-tests
   - [x] Futex Stats (fs::futexstat): Futex contention monitoring with per-address wait/wake/timeout tracking, hotspot detection, per-process stats; `futexstat`/`fxstat` kshell command; /proc/futexstat; 8 self-tests
+  - [x] Writeback (fs::writeback): Dirty page writeback monitoring with per-device stats, flusher threads, flush triggers (6 reasons), congestion tracking; `writeback`/`wback` kshell command; /proc/writeback; 8 self-tests
+  - [x] I/O Latency (fs::iolatency): Block I/O latency monitoring with 8-bucket histograms, per-device stats, slow I/O detection, configurable threshold; `iolatency`/`iolat` kshell command; /proc/iolatency; 8 self-tests
+  - [x] Task Stats (fs::taskstats): Per-task comprehensive accounting with CPU/IO/memory/scheduling stats, 6 delay types, top-CPU ranking; `taskstats`/`tstats` kshell command; /proc/taskstats; 8 self-tests
+  - [x] Kernel Probes (fs::kprobes): Dynamic tracing with 5 probe types (kprobe/kretprobe/tracepoint/uprobe/uretprobe), hit/miss counting, overhead tracking, enable/disable; `kprobes`/`kprb` kshell command; /proc/kprobes; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

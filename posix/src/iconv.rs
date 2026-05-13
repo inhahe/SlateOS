@@ -27,52 +27,37 @@ pub const ICONV_OPEN_ERR: IconvT = -1;
 
 /// Check if a C string matches an encoding name (case-insensitive).
 ///
+/// Normalises the input by stripping hyphens/underscores and
+/// upper-casing, then compares against each alias.
+///
 /// Returns `true` if `s` matches any of the aliases.
 fn matches_encoding(s: *const u8, aliases: &[&[u8]]) -> bool {
     if s.is_null() {
         return false;
     }
 
-    // Read the C string into a stack buffer (max 32 bytes).
-    let mut buf = [0u8; 32];
-    let mut len = 0usize;
-    loop {
-        if len >= buf.len() {
-            return false; // Too long to be a known encoding name.
-        }
-        // SAFETY: caller guarantees s is a valid C string; we stop at NUL.
-        let byte = unsafe { *s.add(len) };
-        if byte == 0 {
-            break;
-        }
-        // Convert to uppercase for comparison, strip hyphens and underscores.
-        if byte == b'-' || byte == b'_' {
-            len = len.wrapping_add(1);
-            continue;
-        }
-        if let Some(slot) = buf.get_mut(len) {
-            *slot = byte.to_ascii_uppercase();
-        }
-        len = len.wrapping_add(1);
-    }
-
-    // Re-read without skipped chars to get normalized uppercase version.
+    // Read the C string, stripping hyphens/underscores and uppercasing.
     let mut normalized = [0u8; 32];
     let mut norm_len = 0usize;
     let mut i = 0usize;
-    while i < len {
-        // SAFETY: same bounds as above.
+    loop {
+        // SAFETY: caller guarantees s is a valid C string; we stop at NUL.
         let byte = unsafe { *s.add(i) };
         if byte == 0 {
             break;
         }
-        if byte != b'-' && byte != b'_' {
-            if let Some(slot) = normalized.get_mut(norm_len) {
-                *slot = byte.to_ascii_uppercase();
-            }
-            norm_len = norm_len.wrapping_add(1);
-        }
         i = i.wrapping_add(1);
+        // Skip hyphens and underscores for fuzzy matching.
+        if byte == b'-' || byte == b'_' {
+            continue;
+        }
+        if norm_len >= normalized.len() {
+            return false; // Too long to be a known encoding name.
+        }
+        if let Some(slot) = normalized.get_mut(norm_len) {
+            *slot = byte.to_ascii_uppercase();
+        }
+        norm_len = norm_len.wrapping_add(1);
     }
 
     for alias in aliases {
@@ -93,10 +78,9 @@ fn matches_encoding(s: *const u8, aliases: &[&[u8]]) -> bool {
     false
 }
 
-/// UTF-8 encoding aliases (normalized to uppercase, no hyphens).
+/// UTF-8 encoding aliases (normalized to uppercase, no hyphens/underscores).
 const UTF8_ALIASES: &[&[u8]] = &[
     b"UTF8",
-    b"UTF8",  // already normalized
 ];
 
 /// ASCII encoding aliases.

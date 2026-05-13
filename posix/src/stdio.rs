@@ -1134,6 +1134,94 @@ pub extern "C" fn rewind(stream: *mut u8) {
 }
 
 // ---------------------------------------------------------------------------
+// fseeko / ftello — off_t variants (LP64: same as fseek/ftell)
+// ---------------------------------------------------------------------------
+
+/// Seek in a stream using `off_t` offset.
+///
+/// On LP64 platforms this is identical to `fseek`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fseeko(stream: *mut u8, offset: crate::types::OffT, whence: i32) -> i32 {
+    fseek(stream, offset, whence)
+}
+
+/// Get stream position as `off_t`.
+///
+/// On LP64 platforms this is identical to `ftell`.
+#[unsafe(no_mangle)]
+pub extern "C" fn ftello(stream: *mut u8) -> crate::types::OffT {
+    ftell(stream)
+}
+
+/// `fseeko64` — LP64 alias.
+#[unsafe(no_mangle)]
+pub extern "C" fn fseeko64(stream: *mut u8, offset: crate::types::OffT, whence: i32) -> i32 {
+    fseek(stream, offset, whence)
+}
+
+/// `ftello64` — LP64 alias.
+#[unsafe(no_mangle)]
+pub extern "C" fn ftello64(stream: *mut u8) -> crate::types::OffT {
+    ftell(stream)
+}
+
+// ---------------------------------------------------------------------------
+// fgetpos / fsetpos
+// ---------------------------------------------------------------------------
+
+/// File position type.
+///
+/// On LP64 Linux this is an opaque struct containing the offset and
+/// multibyte conversion state.  We simplify to just the offset since
+/// our multibyte state is stateless (UTF-8).
+pub type FposT = i64;
+
+/// Store the current position of a stream.
+///
+/// The stored value can later be passed to `fsetpos` to restore
+/// the position.
+#[unsafe(no_mangle)]
+pub extern "C" fn fgetpos(stream: *mut u8, pos: *mut FposT) -> i32 {
+    if pos.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    let offset = ftell(stream);
+    if offset < 0 {
+        return -1;
+    }
+    // SAFETY: pos verified non-null.
+    unsafe { *pos = offset; }
+    0
+}
+
+/// Restore the position of a stream.
+///
+/// Restores to a position previously stored by `fgetpos`.
+#[unsafe(no_mangle)]
+pub extern "C" fn fsetpos(stream: *mut u8, pos: *const FposT) -> i32 {
+    if pos.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: pos verified non-null.
+    let offset = unsafe { *pos };
+    fseek(stream, offset, SEEK_SET)
+}
+
+/// `fgetpos64` — LP64 alias.
+#[unsafe(no_mangle)]
+pub extern "C" fn fgetpos64(stream: *mut u8, pos: *mut FposT) -> i32 {
+    fgetpos(stream, pos)
+}
+
+/// `fsetpos64` — LP64 alias.
+#[unsafe(no_mangle)]
+pub extern "C" fn fsetpos64(stream: *mut u8, pos: *const FposT) -> i32 {
+    fsetpos(stream, pos)
+}
+
+// ---------------------------------------------------------------------------
 // Stream status
 // ---------------------------------------------------------------------------
 

@@ -1763,3 +1763,145 @@ mod tests {
         assert!(ver(b"1.2.30\0", b"1.2.4\0") > 0);
     }
 }
+
+// ===========================================================================
+// glibc FORTIFY_SOURCE _chk functions
+// ===========================================================================
+//
+// Programs compiled with `-D_FORTIFY_SOURCE=2` (default on many distros)
+// call these `__*_chk` wrappers instead of the plain functions.  The
+// `destlen` parameter enables runtime buffer overflow detection.  We
+// ignore it and delegate to the underlying function — our runtime is
+// the only code running, so any overflow is our own bug.
+
+/// `__memcpy_chk` — fortified `memcpy`.
+///
+/// # Safety
+///
+/// Same as `memcpy`.  `destlen` is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __memcpy_chk(
+    dest: *mut u8,
+    src: *const u8,
+    n: usize,
+    _destlen: usize,
+) -> *mut u8 {
+    unsafe { memcpy(dest, src, n) }
+}
+
+/// `__memmove_chk` — fortified `memmove`.
+///
+/// # Safety
+///
+/// Same as `memmove`.  `destlen` is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __memmove_chk(
+    dest: *mut u8,
+    src: *const u8,
+    n: usize,
+    _destlen: usize,
+) -> *mut u8 {
+    unsafe { memmove(dest, src, n) }
+}
+
+/// `__memset_chk` — fortified `memset`.
+///
+/// # Safety
+///
+/// Same as `memset`.  `destlen` is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __memset_chk(
+    dest: *mut u8,
+    c: i32,
+    n: usize,
+    _destlen: usize,
+) -> *mut u8 {
+    unsafe { memset(dest, c, n) }
+}
+
+/// `__strcpy_chk` — fortified `strcpy`.
+///
+/// # Safety
+///
+/// Same as `strcpy`.  `destlen` is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __strcpy_chk(
+    dest: *mut u8,
+    src: *const u8,
+    _destlen: usize,
+) -> *mut u8 {
+    unsafe { strcpy(dest, src) }
+}
+
+/// `__strncpy_chk` — fortified `strncpy`.
+///
+/// # Safety
+///
+/// Same as `strncpy`.  `destlen` is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __strncpy_chk(
+    dest: *mut u8,
+    src: *const u8,
+    n: usize,
+    _destlen: usize,
+) -> *mut u8 {
+    unsafe { strncpy(dest, src, n) }
+}
+
+/// `__strcat_chk` — fortified `strcat`.
+///
+/// # Safety
+///
+/// Same as `strcat`.  `destlen` is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __strcat_chk(
+    dest: *mut u8,
+    src: *const u8,
+    _destlen: usize,
+) -> *mut u8 {
+    unsafe { strcat(dest, src) }
+}
+
+/// `__strncat_chk` — fortified `strncat`.
+///
+/// # Safety
+///
+/// Same as `strncat`.  `destlen` is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __strncat_chk(
+    dest: *mut u8,
+    src: *const u8,
+    n: usize,
+    _destlen: usize,
+) -> *mut u8 {
+    unsafe { strncat(dest, src, n) }
+}
+
+/// `__stpcpy_chk` — fortified `stpcpy`.
+///
+/// # Safety
+///
+/// Same as `stpcpy`.  `destlen` is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __stpcpy_chk(
+    dest: *mut u8,
+    src: *const u8,
+    _destlen: usize,
+) -> *mut u8 {
+    unsafe { stpcpy(dest, src) }
+}
+
+/// `__stpncpy_chk` — fortified `stpncpy`.
+///
+/// # Safety
+///
+/// Same as `stpncpy`.  `destlen` is ignored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn __stpncpy_chk(
+    dest: *mut u8,
+    src: *const u8,
+    n: usize,
+    _destlen: usize,
+) -> *mut u8 {
+    unsafe { stpncpy(dest, src, n) }
+}

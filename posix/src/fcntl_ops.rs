@@ -177,6 +177,12 @@ pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
     }
 }
 
+/// `fcntl64` — LP64 alias for `fcntl` (off_t is already 64-bit).
+#[unsafe(no_mangle)]
+pub extern "C" fn fcntl64(fd: Fd, cmd: i32, arg: i64) -> i32 {
+    fcntl(fd, cmd, arg)
+}
+
 /// Duplicate fd to lowest available >= `min_fd`.
 fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
     // POSIX: F_DUPFD with negative arg or arg >= OPEN_MAX → EINVAL.

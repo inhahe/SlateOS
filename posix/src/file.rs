@@ -1408,6 +1408,27 @@ pub extern "C" fn renameat(
     rename(oldpath, newpath)
 }
 
+/// Rename a file with flags (Linux extension).
+///
+/// `flags` can include `RENAME_NOREPLACE` (1), `RENAME_EXCHANGE` (2).
+/// Our kernel doesn't support these flags yet, so non-zero flags
+/// return EINVAL.  Zero flags delegates to `renameat`.
+#[unsafe(no_mangle)]
+pub extern "C" fn renameat2(
+    olddirfd: i32,
+    oldpath: *const u8,
+    newdirfd: i32,
+    newpath: *const u8,
+    flags: u32,
+) -> i32 {
+    if flags != 0 {
+        // RENAME_NOREPLACE and RENAME_EXCHANGE require kernel support.
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    renameat(olddirfd, oldpath, newdirfd, newpath)
+}
+
 /// Create a directory relative to a directory fd.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
@@ -1980,4 +2001,61 @@ pub extern "C" fn __fxstat64(_ver: i32, fd: Fd, statbuf: *mut crate::stat::Stat)
 #[unsafe(no_mangle)]
 pub extern "C" fn __lxstat64(_ver: i32, path: *const u8, statbuf: *mut crate::stat::Stat) -> i32 {
     lstat(path, statbuf)
+}
+
+// ===========================================================================
+// FORTIFY_SOURCE _chk wrappers
+// ===========================================================================
+
+/// `__read_chk` — fortified `read`.
+///
+/// `buflen` is the size of the buffer `buf` points to.  We ignore it
+/// (no runtime overflow check) and delegate to `read`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __read_chk(fd: Fd, buf: *mut u8, count: SizeT, _buflen: SizeT) -> SsizeT {
+    read(fd, buf, count)
+}
+
+/// `__pread_chk` — fortified `pread`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __pread_chk(
+    fd: Fd,
+    buf: *mut u8,
+    count: SizeT,
+    offset: OffT,
+    _buflen: SizeT,
+) -> SsizeT {
+    pread(fd, buf, count, offset)
+}
+
+/// `__pread64_chk` — LP64 alias for `__pread_chk`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __pread64_chk(
+    fd: Fd,
+    buf: *mut u8,
+    count: SizeT,
+    offset: OffT,
+    buflen: SizeT,
+) -> SsizeT {
+    __pread_chk(fd, buf, count, offset, buflen)
+}
+
+/// `__getcwd_chk` — fortified `getcwd`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __getcwd_chk(
+    buf: *mut u8,
+    size: SizeT,
+    _buflen: SizeT,
+) -> *mut u8 {
+    crate::unistd::getcwd(buf, size)
+}
+
+/// `__realpath_chk` — fortified `realpath`.
+#[unsafe(no_mangle)]
+pub extern "C" fn __realpath_chk(
+    path: *const u8,
+    resolved: *mut u8,
+    _resolved_len: SizeT,
+) -> *mut u8 {
+    crate::unistd::realpath(path, resolved)
 }

@@ -1712,14 +1712,33 @@ pub extern "C" fn sendfile(
             }
             if nr == 0 { break; }
 
-            let nw = write(out_fd, buf.as_ptr(), nr as usize);
-            if nw < 0 {
-                if total > 0 { break; }
-                return -1;
+            // Write all bytes that were read, retrying on short writes.
+            // Without this loop, a short write discards the unwritten
+            // bytes — pread on the next iteration reads NEW data from
+            // cur_off, not the leftover bytes from buf.
+            let mut written: usize = 0;
+            let to_write = nr as usize;
+            while written < to_write {
+                let nw = write(
+                    out_fd,
+                    unsafe { buf.as_ptr().add(written) },
+                    to_write.wrapping_sub(written),
+                );
+                if nw < 0 {
+                    if total > 0 || written > 0 {
+                        total = total.wrapping_add(written);
+                        cur_off = cur_off.wrapping_add(written as i64);
+                        unsafe { *offset = cur_off; }
+                        return total as isize;
+                    }
+                    return -1;
+                }
+                if nw == 0 { break; } // Avoid infinite loop.
+                written = written.wrapping_add(nw as usize);
             }
 
-            total = total.wrapping_add(nw as usize);
-            cur_off = cur_off.wrapping_add(nw as i64);
+            total = total.wrapping_add(written);
+            cur_off = cur_off.wrapping_add(written as i64);
         }
 
         // Update caller's offset to reflect bytes transferred.

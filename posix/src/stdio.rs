@@ -1674,7 +1674,10 @@ pub unsafe extern "C" fn getdelim(
 
         // Grow buffer if needed (leave room for null terminator).
         if pos >= cap.wrapping_sub(1) {
-            let new_cap = cap.wrapping_mul(2);
+            let Some(new_cap) = cap.checked_mul(2) else {
+                crate::errno::set_errno(crate::errno::ENOMEM);
+                return -1;
+            };
             // SAFETY: realloc is unsafe extern "C".
             let new_buf = unsafe {
                 crate::malloc::realloc(buf.cast::<u8>(), new_cap)

@@ -127,6 +127,7 @@ mod port;
 mod power;
 mod proc;
 mod ratelimit;
+mod reslimit;
 mod rcu;
 mod rip_sample;
 mod rng;

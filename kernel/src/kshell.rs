@@ -3525,6 +3525,7 @@ const COMMANDS: &[&str] = &[
     "fpu", "hda", "xsave", "spectre", "meltdown", "specmit", "hrtimer", "hrtimers",
     "ktimer", "ktrace", "lockdep", "lz4", "lz4cat", "rng", "supervisor", "sv", "timers", "trace", "unlz4", "xattr", "xxd", "zip", "zstd", "zstdcat",
     "mousedev", "usbdev", "nslookup", "fw",
+    "reslimit", "rlimit",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4704,6 +4705,7 @@ fn dispatch(line: &str) {
         "logpersist" | "lpersist" => cmd_logpersist(args),
         "svcstart" | "svcs" => cmd_svcstart(args),
         "drvmon" => cmd_drvmon(args),
+        "reslimit" | "rlimit" => cmd_reslimit(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -33226,6 +33228,284 @@ fn cmd_drvmon(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'drvmon help'.", sub);
+        }
+    }
+}
+
+/// `reslimit` / `rlimit` — per-service resource limits (cgroup-equivalent).
+fn cmd_reslimit(args: &str) {
+    use crate::reslimit;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", reslimit::procfs_content());
+        }
+        "list" => {
+            let groups = reslimit::list_groups();
+            if groups.is_empty() {
+                shell_println!("No resource groups (run 'reslimit init' first)");
+            } else {
+                shell_println!("{:<6} {:<20} {:<8} {:<8} {}",
+                    "ID", "Name", "Parent", "Members", "Enforce");
+                for (id, name, parent, members, enforce) in &groups {
+                    shell_println!("{:<6} {:<20} {:<8} {:<8} {}",
+                        id, name, parent, members,
+                        if *enforce { "yes" } else { "no" });
+                }
+            }
+        }
+        "create" => {
+            if let Some(name) = parts.get(1) {
+                let parent: u32 = parts.get(2)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                match reslimit::create_group(name, parent) {
+                    Ok(id) => shell_println!("Created group '{}' (id={})", name, id),
+                    Err(e) => shell_println!("Error: {:?}", e),
+                }
+            } else {
+                shell_println!("Usage: reslimit create <name> [parent-id]");
+            }
+        }
+        "remove" => {
+            if let Some(id_str) = parts.get(1) {
+                if let Ok(id) = id_str.parse::<u32>() {
+                    match reslimit::remove_group(id) {
+                        Ok(()) => shell_println!("Removed group {}", id),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid group ID");
+                }
+            } else {
+                shell_println!("Usage: reslimit remove <group-id>");
+            }
+        }
+        "assign" => {
+            if let (Some(pid_str), Some(gid_str)) = (parts.get(1), parts.get(2)) {
+                if let (Ok(pid), Ok(gid)) = (pid_str.parse::<u32>(), gid_str.parse::<u32>()) {
+                    match reslimit::assign_process(pid, gid) {
+                        Ok(()) => shell_println!("Assigned pid {} to group {}", pid, gid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid pid or group ID");
+                }
+            } else {
+                shell_println!("Usage: reslimit assign <pid> <group-id>");
+            }
+        }
+        "unassign" => {
+            if let Some(pid_str) = parts.get(1) {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    match reslimit::unassign_process(pid) {
+                        Ok(()) => shell_println!("Unassigned pid {}", pid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid pid");
+                }
+            } else {
+                shell_println!("Usage: reslimit unassign <pid>");
+            }
+        }
+        "setmem" => {
+            // reslimit setmem <group-id> <max-rss-mib> [soft-rss-mib]
+            if let Some(gid_str) = parts.get(1) {
+                if let Ok(gid) = gid_str.parse::<u32>() {
+                    let max_mib: u64 = parts.get(2)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let soft_mib: u64 = parts.get(3)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let max_rss = if max_mib == 0 { reslimit::UNLIMITED }
+                        else { max_mib.saturating_mul(1024 * 1024) };
+                    let soft_rss = if soft_mib == 0 { reslimit::UNLIMITED }
+                        else { soft_mib.saturating_mul(1024 * 1024) };
+                    let limits = reslimit::MemoryLimits {
+                        max_rss,
+                        max_virtual: reslimit::UNLIMITED,
+                        max_kernel_memory: reslimit::UNLIMITED,
+                        soft_rss,
+                        oom_kill: true,
+                        oom_score_adj: 0,
+                    };
+                    match reslimit::set_memory_limits(gid, limits) {
+                        Ok(()) => shell_println!("Memory limits set for group {}", gid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid group ID");
+                }
+            } else {
+                shell_println!("Usage: reslimit setmem <group-id> <max-rss-mib> [soft-rss-mib]");
+                shell_println!("  0 = unlimited");
+            }
+        }
+        "setcpu" => {
+            // reslimit setcpu <group-id> <max-percent> [weight]
+            if let Some(gid_str) = parts.get(1) {
+                if let Ok(gid) = gid_str.parse::<u32>() {
+                    let max_pct: u64 = parts.get(2)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let weight: u32 = parts.get(3)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(100);
+                    let limits = reslimit::CpuLimits {
+                        max_cpu_percent: max_pct,
+                        affinity_mask: 0,
+                        weight,
+                        soft: false,
+                    };
+                    match reslimit::set_cpu_limits(gid, limits) {
+                        Ok(()) => shell_println!("CPU limits set for group {}", gid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid group ID");
+                }
+            } else {
+                shell_println!("Usage: reslimit setcpu <group-id> <max-percent> [weight]");
+                shell_println!("  0 = unlimited, weight default = 100");
+            }
+        }
+        "setio" => {
+            // reslimit setio <group-id> <read-mbps> <write-mbps> [low-priority]
+            if let Some(gid_str) = parts.get(1) {
+                if let Ok(gid) = gid_str.parse::<u32>() {
+                    let read_mbps: u64 = parts.get(2)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let write_mbps: u64 = parts.get(3)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let low_pri = parts.get(4).map_or(false, |s| *s == "low");
+                    let read_bps = if read_mbps == 0 { reslimit::UNLIMITED }
+                        else { read_mbps.saturating_mul(1_000_000) };
+                    let write_bps = if write_mbps == 0 { reslimit::UNLIMITED }
+                        else { write_mbps.saturating_mul(1_000_000) };
+                    let limits = reslimit::IoLimits {
+                        max_read_bps: read_bps,
+                        max_write_bps: write_bps,
+                        max_read_iops: reslimit::UNLIMITED,
+                        max_write_iops: reslimit::UNLIMITED,
+                        weight: 100,
+                        low_priority: low_pri,
+                    };
+                    match reslimit::set_io_limits(gid, limits) {
+                        Ok(()) => shell_println!("I/O limits set for group {}", gid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid group ID");
+                }
+            } else {
+                shell_println!("Usage: reslimit setio <group-id> <read-mbps> <write-mbps> [low]");
+                shell_println!("  0 = unlimited");
+            }
+        }
+        "setproc" => {
+            // reslimit setproc <group-id> <max-procs> <max-threads> <max-files>
+            if let Some(gid_str) = parts.get(1) {
+                if let Ok(gid) = gid_str.parse::<u32>() {
+                    let max_procs: u64 = parts.get(2)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let max_threads: u64 = parts.get(3)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let max_files: u64 = parts.get(4)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    let limits = reslimit::ProcessLimits {
+                        max_processes: if max_procs == 0 { reslimit::UNLIMITED } else { max_procs },
+                        max_threads: if max_threads == 0 { reslimit::UNLIMITED } else { max_threads },
+                        max_open_files: if max_files == 0 { reslimit::UNLIMITED } else { max_files },
+                    };
+                    match reslimit::set_process_limits(gid, limits) {
+                        Ok(()) => shell_println!("Process limits set for group {}", gid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid group ID");
+                }
+            } else {
+                shell_println!("Usage: reslimit setproc <group-id> <max-procs> <max-threads> <max-files>");
+                shell_println!("  0 = unlimited");
+            }
+        }
+        "enforce" => {
+            if let (Some(gid_str), Some(val)) = (parts.get(1), parts.get(2)) {
+                if let Ok(gid) = gid_str.parse::<u32>() {
+                    let on = matches!(*val, "on" | "true" | "yes" | "1");
+                    match reslimit::set_enforce(gid, on) {
+                        Ok(()) => shell_println!("Enforcement {} for group {}",
+                            if on { "enabled" } else { "disabled" }, gid),
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid group ID");
+                }
+            } else {
+                shell_println!("Usage: reslimit enforce <group-id> <on|off>");
+            }
+        }
+        "info" => {
+            if let Some(gid_str) = parts.get(1) {
+                if let Ok(gid) = gid_str.parse::<u32>() {
+                    match reslimit::get_group(gid) {
+                        Ok(g) => {
+                            shell_println!("Group '{}' (id={}, parent={})", g.name, g.id, g.parent_id);
+                            shell_println!("  Active: {}, Members: {}, Enforce: {}",
+                                g.active, g.member_count, g.enforce);
+                            shell_println!("  CPU: max {}%, weight={}", g.cpu.max_cpu_percent, g.cpu.weight);
+                            shell_println!("  Memory: RSS used={} bytes", g.usage.rss_bytes);
+                            shell_println!("  Processes: {}, Threads: {}, Files: {}",
+                                g.usage.process_count, g.usage.thread_count, g.usage.open_files);
+                        }
+                        Err(e) => shell_println!("Error: {:?}", e),
+                    }
+                } else {
+                    shell_println!("Invalid group ID");
+                }
+            } else {
+                shell_println!("Usage: reslimit info <group-id>");
+            }
+        }
+        "init" => {
+            reslimit::init();
+            shell_println!("Resource limits subsystem initialized");
+        }
+        "test" => {
+            let ok = reslimit::self_test();
+            if ok {
+                shell_println!("Resource limits self-test: PASSED");
+            } else {
+                shell_println!("Resource limits self-test: FAILED");
+            }
+        }
+        "help" => {
+            shell_println!("reslimit — per-service resource limits (cgroup-equivalent)");
+            shell_println!("  show                          Overview of all groups");
+            shell_println!("  list                          List groups (compact)");
+            shell_println!("  create <name> [parent-id]     Create a resource group");
+            shell_println!("  remove <group-id>             Remove an empty group");
+            shell_println!("  assign <pid> <group-id>       Assign process to group");
+            shell_println!("  unassign <pid>                Remove process from group");
+            shell_println!("  info <group-id>               Detailed group info");
+            shell_println!("  setmem <gid> <max-mib> [soft] Set memory limits (MiB)");
+            shell_println!("  setcpu <gid> <max-%> [weight] Set CPU limits");
+            shell_println!("  setio <gid> <r-mbps> <w-mbps> Set I/O bandwidth limits");
+            shell_println!("  setproc <gid> <procs> <thr> <files> Set process/thread/file limits");
+            shell_println!("  enforce <gid> <on|off>        Toggle enforcement");
+            shell_println!("  init                          Initialize subsystem");
+            shell_println!("  test                          Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'reslimit help'.", sub);
         }
     }
 }
@@ -63672,7 +63952,7 @@ fn cmd_type(args: &str) {
 fn is_builtin(name: &str) -> bool {
     matches!(name,
         "help" | "?" | "cd" | "meminfo" | "mem" | "ps" | "tasks" | "clear" | "cls"
-        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
+        | "uptime" | "dmesg" | "elog" | "logpersist" | "lpersist" | "svcstart" | "svcs" | "drvmon" | "reslimit" | "rlimit" | "echo" | "time" | "date" | "reboot" | "irq" | "pci" | "disk"
         | "blkinfo" | "blkread" | "ls" | "dir" | "cat" | "type" | "write" | "rm"
         | "del" | "mkdir" | "rmdir" | "stat" | "ln" | "link" | "df" | "cp" | "copy"
         | "mv" | "move" | "ren" | "chmod" | "chown" | "touch" | "append" | "tree"

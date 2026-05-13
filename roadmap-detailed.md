@@ -480,7 +480,7 @@ _The debugging suite is NEVER granted to normal applications. These are for debu
   - [ ] MMIO mapping into driver process address space
   - [x] Interrupt delivery via IPC — SYS_IRQ_REGISTER/WAIT/RELEASE
   - [ ] DMA mapping setup syscalls
-  - [ ] Driver crash detection and automatic restart
+  - [x] Driver crash detection and automatic restart _(drvmon.rs: heartbeat/process-alive health modes, exponential backoff restart, configurable policies)_
 - [ ] Ada/SPARK FFI bridge for kernel-space safety-critical drivers
 - [-] virtio drivers (disk, network, GPU) for VM development/testing — virtio-blk and virtio-net done (in-kernel, legacy PCI transport); GPU pending
 - [ ] VMware tools equivalent for VM-friendliness

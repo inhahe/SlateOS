@@ -365,6 +365,7 @@ const ROOT_FILES: &[&str] = &[
     "svcstart",
     "sockactivation",
     "drvmon",
+    "reslimit",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7386,6 +7387,10 @@ fn gen_drvmon() -> Vec<u8> {
     crate::drvmon::procfs_content().into_bytes()
 }
 
+fn gen_reslimit() -> Vec<u8> {
+    crate::reslimit::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10058,6 +10063,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "svcstart" => Ok(gen_svcstart()),
         "sockactivation" => Ok(gen_sockactivation()),
         "drvmon" => Ok(gen_drvmon()),
+        "reslimit" => Ok(gen_reslimit()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

@@ -1285,3 +1285,264 @@ pub extern "C" fn pthread_mutexattr_gettype(attr: *const PthreadMutexattrT, kind
     unsafe { *kind = core::ptr::read_unaligned(attr.cast::<i32>()); }
     0
 }
+
+// ---------------------------------------------------------------------------
+// pthread_mutex_timedlock
+// ---------------------------------------------------------------------------
+
+/// Lock a mutex with a timeout.
+///
+/// Attempts to lock the mutex.  If the mutex is already locked, blocks
+/// until the mutex becomes available or the absolute timeout `abstime`
+/// expires.
+///
+/// Returns 0 on success, ETIMEDOUT on timeout, EINVAL on error.
+///
+/// # Safety
+///
+/// `mutex` must point to a valid initialized mutex.
+/// `abstime` must point to a valid `timespec`.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_mutex_timedlock(
+    mutex: *mut PthreadMutexT,
+    abstime: *const crate::stat::Timespec,
+) -> i32 {
+    if mutex.is_null() || abstime.is_null() {
+        return errno::EINVAL;
+    }
+
+    // SAFETY: mutex verified non-null.
+    let lock = unsafe { &(*mutex).locked };
+
+    // Fast path: try to acquire immediately.
+    if lock.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        return 0;
+    }
+
+    // Spin with timeout check.
+    let deadline_sec = unsafe { (*abstime).tv_sec };
+    let deadline_nsec = unsafe { (*abstime).tv_nsec };
+
+    loop {
+        // Check timeout by reading current time.
+        let mut now = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now);
+
+        if now.tv_sec > deadline_sec
+            || (now.tv_sec == deadline_sec && now.tv_nsec >= deadline_nsec)
+        {
+            return errno::ETIMEDOUT;
+        }
+
+        // Try to acquire.
+        if lock.compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            return 0;
+        }
+
+        // Yield to avoid burning CPU.
+        sched_yield();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Condition variable attributes
+// ---------------------------------------------------------------------------
+
+/// Initialize a condition variable attribute object.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_condattr_init(attr: *mut PthreadCondattrT) -> i32 {
+    if attr.is_null() {
+        return errno::EINVAL;
+    }
+    // SAFETY: attr verified non-null; zeroing a [u8; 8] is safe.
+    unsafe { core::ptr::write_bytes(attr.cast::<u8>(), 0, core::mem::size_of::<PthreadCondattrT>()); }
+    0
+}
+
+/// Destroy a condition variable attribute object.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_condattr_destroy(_attr: *mut PthreadCondattrT) -> i32 {
+    0
+}
+
+/// Set the clock for a condition variable attribute.
+///
+/// Stores the clock ID for use by `pthread_cond_timedwait`.
+/// We accept any valid clock but our timedwait currently only uses
+/// the real-time clock.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_condattr_setclock(attr: *mut PthreadCondattrT, clock_id: i32) -> i32 {
+    if attr.is_null() {
+        return errno::EINVAL;
+    }
+    // Validate clock_id.
+    if clock_id != crate::time::CLOCK_REALTIME && clock_id != crate::time::CLOCK_MONOTONIC {
+        return errno::EINVAL;
+    }
+    // Store in first 4 bytes.
+    unsafe { core::ptr::write_unaligned(attr.cast::<i32>(), clock_id); }
+    0
+}
+
+/// Get the clock for a condition variable attribute.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_condattr_getclock(attr: *const PthreadCondattrT, clock_id: *mut i32) -> i32 {
+    if attr.is_null() || clock_id.is_null() {
+        return errno::EINVAL;
+    }
+    unsafe { *clock_id = core::ptr::read_unaligned(attr.cast::<i32>()); }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Read-write lock attributes
+// ---------------------------------------------------------------------------
+
+/// Initialize a rwlock attribute object.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_rwlockattr_init(attr: *mut PthreadRwlockattrT) -> i32 {
+    if attr.is_null() {
+        return errno::EINVAL;
+    }
+    unsafe { core::ptr::write_bytes(attr.cast::<u8>(), 0, core::mem::size_of::<PthreadRwlockattrT>()); }
+    0
+}
+
+/// Destroy a rwlock attribute object.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_rwlockattr_destroy(_attr: *mut PthreadRwlockattrT) -> i32 {
+    0
+}
+
+/// Set the process-shared attribute for a rwlock.
+///
+/// We only support `PTHREAD_PROCESS_PRIVATE` (0).
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_rwlockattr_setpshared(attr: *mut PthreadRwlockattrT, pshared: i32) -> i32 {
+    if attr.is_null() {
+        return errno::EINVAL;
+    }
+    if pshared != 0 {
+        // PTHREAD_PROCESS_SHARED not supported.
+        return errno::ENOTSUP;
+    }
+    unsafe { core::ptr::write_unaligned(attr.cast::<i32>(), pshared); }
+    0
+}
+
+/// Get the process-shared attribute for a rwlock.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_rwlockattr_getpshared(attr: *const PthreadRwlockattrT, pshared: *mut i32) -> i32 {
+    if attr.is_null() || pshared.is_null() {
+        return errno::EINVAL;
+    }
+    unsafe { *pshared = core::ptr::read_unaligned(attr.cast::<i32>()); }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// pthread_setname_np / pthread_getname_np (GNU extensions)
+// ---------------------------------------------------------------------------
+
+/// Maximum thread name length (including null terminator).
+/// Linux limit is 16 bytes.
+const PTHREAD_NAME_MAX: usize = 16;
+
+/// Thread name storage.
+///
+/// Simple global array indexed by task ID modulo array size.
+/// Not ideal (collisions possible) but sufficient for basic use.
+/// A real implementation would store names per-thread in TLS.
+const MAX_NAMED_THREADS: usize = 64;
+static mut THREAD_NAMES: [[u8; PTHREAD_NAME_MAX]; MAX_NAMED_THREADS] =
+    [[0u8; PTHREAD_NAME_MAX]; MAX_NAMED_THREADS];
+
+/// Set the name of a thread (GNU extension).
+///
+/// `name` must be a null-terminated string of at most 15 characters
+/// (plus null).  Returns 0 on success, ERANGE if too long.
+///
+/// # Safety
+///
+/// `name` must be a valid null-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_setname_np(thread: PthreadT, name: *const u8) -> i32 {
+    if name.is_null() {
+        return errno::EINVAL;
+    }
+
+    let name_len = unsafe { crate::string::strlen(name) };
+    if name_len >= PTHREAD_NAME_MAX {
+        return errno::ERANGE;
+    }
+
+    let idx = (thread as usize) % MAX_NAMED_THREADS;
+
+    // SAFETY: Single-threaded access assumption (same as rest of posix crate).
+    let slot = unsafe { &mut THREAD_NAMES[idx] };
+    let mut i: usize = 0;
+    while i < name_len {
+        slot[i] = unsafe { *name.add(i) };
+        i = i.wrapping_add(1);
+    }
+    slot[i] = 0;
+
+    0
+}
+
+/// Get the name of a thread (GNU extension).
+///
+/// Copies the thread name into `name` (at most `len` bytes including null).
+/// Returns 0 on success, ERANGE if buffer too small.
+///
+/// # Safety
+///
+/// `name` must be valid for `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len: usize) -> i32 {
+    if name.is_null() || len == 0 {
+        return errno::EINVAL;
+    }
+
+    let idx = (thread as usize) % MAX_NAMED_THREADS;
+
+    // SAFETY: Single-threaded access assumption.
+    let slot = unsafe { &THREAD_NAMES[idx] };
+    let name_len = {
+        let mut l: usize = 0;
+        while l < PTHREAD_NAME_MAX && slot[l] != 0 {
+            l = l.wrapping_add(1);
+        }
+        l
+    };
+
+    if name_len.wrapping_add(1) > len {
+        return errno::ERANGE;
+    }
+
+    let mut i: usize = 0;
+    while i < name_len {
+        unsafe { *name.add(i) = slot[i]; }
+        i = i.wrapping_add(1);
+    }
+    unsafe { *name.add(i) = 0; }
+
+    0
+}
+
+// ---------------------------------------------------------------------------
+// pthread_atfork
+// ---------------------------------------------------------------------------
+
+/// Register handlers to be called before/after fork.
+///
+/// Since our OS doesn't have fork() yet, this is a stub that accepts
+/// handlers but never calls them.  Returns 0 (success) always.
+#[unsafe(no_mangle)]
+pub extern "C" fn pthread_atfork(
+    _prepare: Option<extern "C" fn()>,
+    _parent: Option<extern "C" fn()>,
+    _child: Option<extern "C" fn()>,
+) -> i32 {
+    0
+}

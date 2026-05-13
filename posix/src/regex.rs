@@ -1946,4 +1946,274 @@ mod tests {
         assert_eq!(core::mem::size_of::<RegMatch>(), 8);
         assert_eq!(core::mem::align_of::<RegMatch>(), 4);
     }
+
+    // -------------------------------------------------------------------
+    // 21. Stress tests — complex patterns and edge cases
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn stress_nested_groups() {
+        // ((a)(b)) — nested capturing groups.
+        let mut prog = new_program(REG_EXTENDED);
+        let result = compile(&mut prog, b"((a)(b))\0");
+        assert_eq!(result, 0);
+        let groups = run_match_groups(&prog, b"ab\0", 0);
+        assert!(groups.is_some());
+        let g = groups.unwrap();
+        // Group 0: whole match "ab".
+        assert_eq!(g[0].rm_so, 0);
+        assert_eq!(g[0].rm_eo, 2);
+        // Group 1: outer group "ab".
+        assert_eq!(g[1].rm_so, 0);
+        assert_eq!(g[1].rm_eo, 2);
+        // Group 2: inner "a".
+        assert_eq!(g[2].rm_so, 0);
+        assert_eq!(g[2].rm_eo, 1);
+        // Group 3: inner "b".
+        assert_eq!(g[3].rm_so, 1);
+        assert_eq!(g[3].rm_eo, 2);
+    }
+
+    #[test]
+    fn stress_alternation_three_branches() {
+        assert!(matches_ere(b"cat|dog|bird\0", b"I have a dog\0"));
+        assert!(matches_ere(b"cat|dog|bird\0", b"feed the cat\0"));
+        assert!(matches_ere(b"cat|dog|bird\0", b"a bird flew\0"));
+        assert!(!matches_ere(b"cat|dog|bird\0", b"a fish swam\0"));
+    }
+
+    #[test]
+    fn stress_alternation_with_anchors() {
+        assert!(matches_ere(b"^(foo|bar)$\0", b"foo\0"));
+        assert!(matches_ere(b"^(foo|bar)$\0", b"bar\0"));
+        assert!(!matches_ere(b"^(foo|bar)$\0", b"foobar\0"));
+        assert!(!matches_ere(b"^(foo|bar)$\0", b"baz\0"));
+    }
+
+    #[test]
+    fn stress_star_greedy_longest() {
+        // "a*" should match as many 'a's as possible.
+        let mut prog = new_program(REG_EXTENDED);
+        assert_eq!(compile(&mut prog, b"a*\0"), 0);
+        let m = run_match(&prog, b"aaaa\0", 0);
+        assert!(m.is_some());
+        let (start, end) = m.unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 4); // Greedy: all 4 a's.
+    }
+
+    #[test]
+    fn stress_plus_requires_one() {
+        assert!(matches_ere(b"a+\0", b"a\0"));
+        assert!(matches_ere(b"a+\0", b"aaaa\0"));
+        assert!(!matches_ere(b"a+\0", b"\0")); // empty string - no 'a'
+        assert!(!matches_ere(b"a+\0", b"bbb\0"));
+    }
+
+    #[test]
+    fn stress_question_optional() {
+        // "ab?c" matches "ac" and "abc" but not "abbc".
+        assert!(matches_ere(b"ab?c\0", b"ac\0"));
+        assert!(matches_ere(b"ab?c\0", b"abc\0"));
+        assert!(!matches_ere(b"ab?c\0", b"abbc\0"));
+    }
+
+    #[test]
+    fn stress_dot_star_anchor() {
+        // "^.*$" matches any single line.
+        assert!(matches_ere(b"^.*$\0", b"\0"));
+        assert!(matches_ere(b"^.*$\0", b"hello world\0"));
+        assert!(matches_ere(b"^.*$\0", b"12345\0"));
+    }
+
+    #[test]
+    fn stress_complex_char_class() {
+        // [a-zA-Z0-9_] — common identifier character class.
+        assert!(matches_ere(b"^[a-zA-Z0-9_]+$\0", b"hello_World123\0"));
+        assert!(!matches_ere(b"^[a-zA-Z0-9_]+$\0", b"hello world\0"));
+        assert!(!matches_ere(b"^[a-zA-Z0-9_]+$\0", b"hello-world\0"));
+    }
+
+    #[test]
+    fn stress_negated_char_class() {
+        // [^0-9] — matches non-digit.
+        assert!(matches_ere(b"[^0-9]\0", b"abc\0"));
+        assert!(!matches_ere(b"^[^0-9]+$\0", b"12345\0"));
+        assert!(matches_ere(b"^[^0-9]+$\0", b"hello\0"));
+    }
+
+    #[test]
+    fn stress_multiple_quantifiers() {
+        // a+b+c+ — one or more of each.
+        assert!(matches_ere(b"a+b+c+\0", b"abc\0"));
+        assert!(matches_ere(b"a+b+c+\0", b"aaabbbccc\0"));
+        assert!(!matches_ere(b"a+b+c+\0", b"ac\0")); // missing b
+        assert!(!matches_ere(b"a+b+c+\0", b"ab\0")); // missing c
+    }
+
+    #[test]
+    fn stress_dot_not_newline_default() {
+        // Without REG_NEWLINE, '.' matches newline.
+        let mut prog = new_program(REG_EXTENDED);
+        assert_eq!(compile(&mut prog, b"a.b\0"), 0);
+        let m = run_match(&prog, b"a\nb\0", 0);
+        assert!(m.is_some()); // dot matches \n without REG_NEWLINE
+    }
+
+    #[test]
+    fn stress_dot_not_newline_with_flag() {
+        // With REG_NEWLINE, '.' should NOT match newline.
+        let mut prog = new_program(REG_EXTENDED | REG_NEWLINE);
+        assert_eq!(compile(&mut prog, b"a.b\0"), 0);
+        let m = run_match(&prog, b"a\nb\0", 0);
+        assert!(m.is_none()); // dot does not match \n with REG_NEWLINE
+    }
+
+    #[test]
+    fn stress_case_insensitive_pattern() {
+        let mut prog = new_program(REG_EXTENDED | REG_ICASE);
+        assert_eq!(compile(&mut prog, b"hello\0"), 0);
+        assert!(run_match(&prog, b"HELLO\0", 0).is_some());
+        assert!(run_match(&prog, b"Hello\0", 0).is_some());
+        assert!(run_match(&prog, b"hElLo\0", 0).is_some());
+    }
+
+    #[test]
+    fn stress_case_insensitive_char_class() {
+        let mut prog = new_program(REG_EXTENDED | REG_ICASE);
+        assert_eq!(compile(&mut prog, b"[a-z]+\0"), 0);
+        assert!(run_match(&prog, b"ABC\0", 0).is_some());
+        assert!(run_match(&prog, b"XyZ\0", 0).is_some());
+    }
+
+    #[test]
+    fn stress_bre_vs_ere_parens() {
+        // In BRE, \( and \) are grouping; ( and ) are literals.
+        assert!(matches_bre(b"\\(ab\\)\0", b"ab\0"));
+        assert!(matches_bre(b"(ab)\0", b"(ab)\0")); // literal parens in BRE
+        assert!(!matches_bre(b"(ab)\0", b"ab\0")); // no match without literal parens
+    }
+
+    #[test]
+    fn stress_bre_vs_ere_quantifiers() {
+        // BRE: * works but + and ? are literals.
+        assert!(matches_bre(b"ab*c\0", b"ac\0")); // b* matches zero b's
+        assert!(matches_bre(b"ab*c\0", b"abbc\0")); // b* matches two b's
+    }
+
+    #[test]
+    fn stress_notbol_noteol() {
+        // With REG_NOTBOL, ^ shouldn't match start.
+        let mut prog = new_program(REG_EXTENDED);
+        assert_eq!(compile(&mut prog, b"^hello\0"), 0);
+        assert!(run_match(&prog, b"hello\0", 0).is_some());
+        assert!(run_match(&prog, b"hello\0", REG_NOTBOL).is_none());
+
+        // With REG_NOTEOL, $ shouldn't match end.
+        let mut prog2 = new_program(REG_EXTENDED);
+        assert_eq!(compile(&mut prog2, b"hello$\0"), 0);
+        assert!(run_match(&prog2, b"hello\0", 0).is_some());
+        assert!(run_match(&prog2, b"hello\0", REG_NOTEOL).is_none());
+    }
+
+    #[test]
+    fn stress_empty_pattern() {
+        // Empty pattern should match anything.
+        assert!(matches_ere(b"\0", b"hello\0"));
+        assert!(matches_ere(b"\0", b"\0")); // empty text too
+    }
+
+    #[test]
+    fn stress_pattern_with_escape() {
+        // Literal dot via backslash.
+        assert!(matches_ere(b"a\\.b\0", b"a.b\0"));
+        assert!(!matches_ere(b"a\\.b\0", b"axb\0")); // dot is literal
+    }
+
+    #[test]
+    fn stress_compile_error_unmatched_paren() {
+        let mut prog = new_program(REG_EXTENDED);
+        let result = compile(&mut prog, b"(abc\0");
+        assert_eq!(result, REG_EPAREN);
+    }
+
+    #[test]
+    fn stress_compile_error_unmatched_bracket() {
+        let mut prog = new_program(REG_EXTENDED);
+        let result = compile(&mut prog, b"[abc\0");
+        assert_eq!(result, REG_EBRACK);
+    }
+
+    #[test]
+    fn stress_compile_error_trailing_backslash() {
+        let mut prog = new_program(REG_EXTENDED);
+        let result = compile(&mut prog, b"abc\\\0");
+        assert_eq!(result, REG_EESCAPE);
+    }
+
+    #[test]
+    fn stress_posix_class_alpha() {
+        assert!(matches_ere(b"^[[:alpha:]]+$\0", b"Hello\0"));
+        assert!(!matches_ere(b"^[[:alpha:]]+$\0", b"Hello123\0"));
+    }
+
+    #[test]
+    fn stress_posix_class_digit() {
+        assert!(matches_ere(b"^[[:digit:]]+$\0", b"12345\0"));
+        assert!(!matches_ere(b"^[[:digit:]]+$\0", b"123a5\0"));
+    }
+
+    #[test]
+    fn stress_posix_class_alnum() {
+        assert!(matches_ere(b"^[[:alnum:]]+$\0", b"Hello123\0"));
+        assert!(!matches_ere(b"^[[:alnum:]]+$\0", b"Hello 123\0"));
+    }
+
+    #[test]
+    fn stress_posix_class_space() {
+        assert!(matches_ere(b"^[[:space:]]+$\0", b" \t\n\0"));
+        assert!(!matches_ere(b"^[[:space:]]+$\0", b"hello\0"));
+    }
+
+    #[test]
+    fn stress_match_position() {
+        // Verify match positions are correct.
+        let mut prog = new_program(REG_EXTENDED);
+        assert_eq!(compile(&mut prog, b"world\0"), 0);
+        let m = run_match(&prog, b"hello world\0", 0);
+        assert!(m.is_some());
+        let (start, end) = m.unwrap();
+        assert_eq!(start, 6);
+        assert_eq!(end, 11);
+    }
+
+    #[test]
+    fn stress_group_capture_positions() {
+        let mut prog = new_program(REG_EXTENDED);
+        assert_eq!(compile(&mut prog, b"(a+)(b+)\0"), 0);
+        let groups = run_match_groups(&prog, b"aaabbb\0", 0);
+        assert!(groups.is_some());
+        let g = groups.unwrap();
+        // Group 0: whole match.
+        assert_eq!(g[0].rm_so, 0);
+        assert_eq!(g[0].rm_eo, 6);
+        // Group 1: "aaa".
+        assert_eq!(g[1].rm_so, 0);
+        assert_eq!(g[1].rm_eo, 3);
+        // Group 2: "bbb".
+        assert_eq!(g[2].rm_so, 3);
+        assert_eq!(g[2].rm_eo, 6);
+    }
+
+    #[test]
+    fn stress_alternation_group_capture() {
+        // (cat|dog) in "the dog ran" — verify group captures.
+        let mut prog = new_program(REG_EXTENDED);
+        assert_eq!(compile(&mut prog, b"(cat|dog)\0"), 0);
+        let groups = run_match_groups(&prog, b"the dog ran\0", 0);
+        assert!(groups.is_some());
+        let g = groups.unwrap();
+        assert_eq!(g[1].rm_so, 4);
+        assert_eq!(g[1].rm_eo, 7);
+    }
 }

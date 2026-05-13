@@ -903,4 +903,165 @@ mod tests {
         let result = unsafe { fnmatch(b"abc\0".as_ptr(), b"xyz\0".as_ptr(), 0) };
         assert_eq!(result, FNM_NOMATCH);
     }
+
+    // -------------------------------------------------------------------
+    // Stress tests — fnmatch additional edge cases
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn stress_star_empty_string() {
+        // "*" should match empty string.
+        assert!(matches(b"*\0", b"\0", 0));
+    }
+
+    #[test]
+    fn stress_question_single_char() {
+        assert!(matches(b"?\0", b"a\0", 0));
+        assert!(!matches(b"?\0", b"\0", 0)); // ? requires exactly one char
+        assert!(!matches(b"?\0", b"ab\0", 0)); // ? matches one, not two
+    }
+
+    #[test]
+    fn stress_multiple_stars() {
+        // "**" should still work like "*".
+        assert!(matches(b"**\0", b"hello\0", 0));
+        assert!(matches(b"**\0", b"\0", 0));
+    }
+
+    #[test]
+    fn stress_star_question_combo() {
+        // "*?" matches at least one character.
+        assert!(matches(b"*?\0", b"x\0", 0));
+        assert!(matches(b"*?\0", b"hello\0", 0));
+        assert!(!matches(b"*?\0", b"\0", 0)); // needs at least one char
+    }
+
+    #[test]
+    fn stress_bracket_range_digits() {
+        assert!(matches(b"[0-9]\0", b"5\0", 0));
+        assert!(!matches(b"[0-9]\0", b"a\0", 0));
+        assert!(matches(b"[0-9][0-9]\0", b"42\0", 0));
+        assert!(!matches(b"[0-9][0-9]\0", b"4a\0", 0));
+    }
+
+    #[test]
+    fn stress_bracket_literal_dash() {
+        // Dash at start of bracket expr is literal.
+        assert!(matches(b"[-abc]\0", b"-\0", 0));
+        assert!(matches(b"[-abc]\0", b"a\0", 0));
+        assert!(!matches(b"[-abc]\0", b"x\0", 0));
+    }
+
+    #[test]
+    fn stress_bracket_literal_close_bracket() {
+        // ] at start of bracket expr is literal.
+        assert!(matches(b"[]abc]\0", b"]\0", 0));
+        assert!(matches(b"[]abc]\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn stress_negated_bracket_caret() {
+        // [^...] is synonym for [!...]
+        assert!(matches(b"[^abc]\0", b"x\0", 0));
+        assert!(!matches(b"[^abc]\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn stress_pathname_star_no_slash() {
+        // With FNM_PATHNAME, * doesn't match /.
+        assert!(!matches(b"a*c\0", b"a/c\0", FNM_PATHNAME));
+        assert!(matches(b"a*c\0", b"abc\0", FNM_PATHNAME));
+    }
+
+    #[test]
+    fn stress_pathname_question_no_slash() {
+        // With FNM_PATHNAME, ? doesn't match /.
+        assert!(!matches(b"a?c\0", b"a/c\0", FNM_PATHNAME));
+        assert!(matches(b"a?c\0", b"abc\0", FNM_PATHNAME));
+    }
+
+    #[test]
+    fn stress_period_leading_dot() {
+        // With FNM_PERIOD, leading . must be matched explicitly.
+        assert!(!matches(b"*\0", b".hidden\0", FNM_PERIOD));
+        assert!(matches(b".*\0", b".hidden\0", FNM_PERIOD));
+        assert!(!matches(b"?\0", b".\0", FNM_PERIOD));
+        assert!(matches(b".\0", b".\0", FNM_PERIOD));
+    }
+
+    #[test]
+    fn stress_period_after_slash_pathname() {
+        // With FNM_PATHNAME | FNM_PERIOD, dot after / must be explicit.
+        let flags = FNM_PATHNAME | FNM_PERIOD;
+        assert!(!matches(b"dir/*\0", b"dir/.hidden\0", flags));
+        assert!(matches(b"dir/.*\0", b"dir/.hidden\0", flags));
+    }
+
+    #[test]
+    fn stress_escape_special_chars() {
+        // Without NOESCAPE, backslash escapes *, ?, [.
+        assert!(matches(b"\\*\0", b"*\0", 0));
+        assert!(!matches(b"\\*\0", b"abc\0", 0));
+        assert!(matches(b"\\?\0", b"?\0", 0));
+        assert!(!matches(b"\\?\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn stress_noescape_backslash_literal() {
+        // With FNM_NOESCAPE, backslash is literal.
+        assert!(matches(b"a\\b\0", b"a\\b\0", FNM_NOESCAPE));
+        assert!(!matches(b"a\\b\0", b"ab\0", FNM_NOESCAPE));
+    }
+
+    #[test]
+    fn stress_exact_long_pattern() {
+        // Exact match of a long string.
+        let pattern = b"abcdefghijklmnopqrstuvwxyz\0";
+        let text = b"abcdefghijklmnopqrstuvwxyz\0";
+        assert!(matches(pattern, text, 0));
+    }
+
+    #[test]
+    fn stress_star_in_middle() {
+        assert!(matches(b"hello*world\0", b"hello beautiful world\0", 0));
+        assert!(matches(b"hello*world\0", b"helloworld\0", 0));
+        assert!(!matches(b"hello*world\0", b"hello beautiful place\0", 0));
+    }
+
+    #[test]
+    fn stress_multiple_bracket_expressions() {
+        assert!(matches(b"[abc][def][ghi]\0", b"adg\0", 0));
+        assert!(matches(b"[abc][def][ghi]\0", b"beh\0", 0));
+        assert!(!matches(b"[abc][def][ghi]\0", b"aaa\0", 0));
+    }
+
+    #[test]
+    fn stress_posix_class_lower() {
+        assert!(matches(b"[[:lower:]]\0", b"a\0", 0));
+        assert!(!matches(b"[[:lower:]]\0", b"A\0", 0));
+        assert!(!matches(b"[[:lower:]]\0", b"1\0", 0));
+    }
+
+    #[test]
+    fn stress_posix_class_upper() {
+        assert!(matches(b"[[:upper:]]\0", b"A\0", 0));
+        assert!(!matches(b"[[:upper:]]\0", b"a\0", 0));
+    }
+
+    #[test]
+    fn stress_posix_class_digit_in_combo() {
+        // Mix POSIX class with range.
+        assert!(matches(b"[[:digit:]a-f]\0", b"0\0", 0));
+        assert!(matches(b"[[:digit:]a-f]\0", b"a\0", 0));
+        assert!(matches(b"[[:digit:]a-f]\0", b"f\0", 0));
+        assert!(!matches(b"[[:digit:]a-f]\0", b"g\0", 0));
+    }
+
+    #[test]
+    fn stress_pattern_literal_only() {
+        // Pattern with no wildcards is exact match.
+        assert!(matches(b"hello\0", b"hello\0", 0));
+        assert!(!matches(b"hello\0", b"Hello\0", 0));
+        assert!(!matches(b"hello\0", b"hello world\0", 0));
+    }
 }

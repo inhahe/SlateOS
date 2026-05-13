@@ -2570,4 +2570,181 @@ mod tests {
         assert_eq!(s.len(), 20, "should be padded to width 20: '{s}'");
         assert!(s.contains("0xff"), "should contain 0xff: '{s}'");
     }
+
+    // -------------------------------------------------------------------
+    // 35. Stress tests — multiple specifiers in one format string
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn stress_multiple_specifiers() {
+        let text = b"world\0";
+        let (s, _) = snprintf_str(
+            b"hello %s %d\0",
+            &[text.as_ptr() as u64, 42],
+            &[],
+        );
+        assert_eq!(s, "hello world 42");
+    }
+
+    #[test]
+    fn stress_mixed_int_and_float() {
+        let f = 3.14f64;
+        let (s, _) = snprintf_str(
+            b"%d and %.2f\0",
+            &[99],
+            &[f.to_bits()],
+        );
+        assert_eq!(s, "99 and 3.14");
+    }
+
+    #[test]
+    fn stress_percent_literal() {
+        let (s, _) = snprintf_str(b"100%%\0", &[], &[]);
+        assert_eq!(s, "100%");
+    }
+
+    #[test]
+    fn stress_width_and_precision_combined() {
+        let (s, _) = snprintf_str(b"%10.3d\0", &[42], &[]);
+        // Width 10, precision 3 for integer: "       042"
+        assert_eq!(s.len(), 10);
+        assert!(s.ends_with("042"), "got: '{s}'");
+    }
+
+    #[test]
+    fn stress_left_align_with_width() {
+        let (s, _) = snprintf_str(b"%-10d|\0", &[42], &[]);
+        assert_eq!(s, "42        |");
+    }
+
+    #[test]
+    fn stress_zero_padded() {
+        let (s, _) = snprintf_str(b"%05d\0", &[42], &[]);
+        assert_eq!(s, "00042");
+    }
+
+    #[test]
+    fn stress_plus_sign() {
+        let (s, _) = snprintf_str(b"%+d\0", &[42], &[]);
+        assert_eq!(s, "+42");
+    }
+
+    #[test]
+    fn stress_space_sign() {
+        let (s, _) = snprintf_str(b"% d\0", &[42], &[]);
+        assert_eq!(s, " 42");
+    }
+
+    #[test]
+    fn stress_hex_alternate() {
+        let (s, _) = snprintf_str(b"%#x\0", &[255], &[]);
+        assert_eq!(s, "0xff");
+    }
+
+    #[test]
+    fn stress_hex_uppercase_alternate() {
+        let (s, _) = snprintf_str(b"%#X\0", &[255], &[]);
+        assert_eq!(s, "0XFF");
+    }
+
+    #[test]
+    fn stress_octal_alternate() {
+        let (s, _) = snprintf_str(b"%#o\0", &[8], &[]);
+        assert_eq!(s, "010");
+    }
+
+    #[test]
+    fn stress_string_precision_truncate() {
+        let text = b"hello world\0";
+        let (s, _) = snprintf_str(b"%.5s\0", &[text.as_ptr() as u64], &[]);
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn stress_string_width_right_align() {
+        let text = b"hi\0";
+        let (s, _) = snprintf_str(b"%10s\0", &[text.as_ptr() as u64], &[]);
+        assert_eq!(s.len(), 10);
+        assert!(s.ends_with("hi"));
+    }
+
+    #[test]
+    fn stress_string_width_left_align() {
+        let text = b"hi\0";
+        let (s, _) = snprintf_str(b"%-10s\0", &[text.as_ptr() as u64], &[]);
+        assert_eq!(s, "hi        ");
+    }
+
+    #[test]
+    fn stress_float_large_value() {
+        let f = 1234567.89f64;
+        let (s, _) = snprintf_str(b"%.2f\0", &[], &[f.to_bits()]);
+        assert_eq!(s, "1234567.89");
+    }
+
+    #[test]
+    fn stress_float_zero_precision() {
+        let f = 3.7f64;
+        let (s, _) = snprintf_str(b"%.0f\0", &[], &[f.to_bits()]);
+        assert_eq!(s, "4"); // rounds up
+    }
+
+    #[test]
+    fn stress_float_negative_zero_precision() {
+        let f = -3.7f64;
+        let (s, _) = snprintf_str(b"%.0f\0", &[], &[f.to_bits()]);
+        assert_eq!(s, "-4");
+    }
+
+    #[test]
+    fn stress_unsigned_max() {
+        let val = u32::MAX as u64;
+        let (s, _) = snprintf_str(b"%u\0", &[val], &[]);
+        assert_eq!(s, "4294967295");
+    }
+
+    #[test]
+    fn stress_hex_zero() {
+        let (s, _) = snprintf_str(b"%x\0", &[0], &[]);
+        assert_eq!(s, "0");
+    }
+
+    #[test]
+    fn stress_snprintf_truncation() {
+        // snprintf with small buffer should truncate but return full length.
+        let mut buf = [0u8; 6]; // room for 5 chars + NUL
+        let n = _snprintf_impl(
+            buf.as_mut_ptr(),
+            buf.len(),
+            b"hello world\0".as_ptr(),
+            [].as_ptr(),
+            [].as_ptr(),
+        );
+        // Should return 11 (length of "hello world") even though buffer is only 6.
+        assert_eq!(n, 11);
+        // Buffer should contain "hello\0".
+        assert_eq!(&buf[..5], b"hello");
+        assert_eq!(buf[5], 0);
+    }
+
+    #[test]
+    fn stress_g_format_removes_trailing_zeros() {
+        let f = 1.5f64;
+        let (s, _) = snprintf_str(b"%g\0", &[], &[f.to_bits()]);
+        assert_eq!(s, "1.5");
+    }
+
+    #[test]
+    fn stress_g_format_integer_like() {
+        let f = 100.0f64;
+        let (s, _) = snprintf_str(b"%g\0", &[], &[f.to_bits()]);
+        assert_eq!(s, "100");
+    }
+
+    #[test]
+    fn stress_e_format_small_number() {
+        let f = 0.001f64;
+        let (s, _) = snprintf_str(b"%.2e\0", &[], &[f.to_bits()]);
+        assert_eq!(s, "1.00e-03");
+    }
 }

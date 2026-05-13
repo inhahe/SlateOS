@@ -3013,4 +3013,606 @@ mod tests {
         assert_eq!(result.quot, i64::MAX / 2);
         assert_eq!(result.rem, 1);
     }
+
+    // -------------------------------------------------------------------
+    // Stress tests — qsort
+    // -------------------------------------------------------------------
+
+    /// Comparison function for i32 elements (stress tests).
+    unsafe extern "C" fn cmp_i32_stress(a: *const u8, b: *const u8) -> i32 {
+        let va = unsafe { *(a as *const i32) };
+        let vb = unsafe { *(b as *const i32) };
+        va.cmp(&vb) as i32
+    }
+
+    #[test]
+    fn test_qsort_all_same() {
+        let mut arr = [42i32; 100];
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                100,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            );
+        }
+        for &v in &arr {
+            assert_eq!(v, 42);
+        }
+    }
+
+    #[test]
+    fn test_qsort_descending_to_ascending() {
+        let mut arr: [i32; 64] = core::array::from_fn(|i| (64 - i) as i32);
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                64,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            );
+        }
+        for i in 0..64 {
+            assert_eq!(arr[i], (i + 1) as i32);
+        }
+    }
+
+    #[test]
+    fn test_qsort_already_sorted_large() {
+        let mut arr: [i32; 128] = core::array::from_fn(|i| i as i32);
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                128,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            );
+        }
+        for i in 0..128 {
+            assert_eq!(arr[i], i as i32);
+        }
+    }
+
+    #[test]
+    fn test_qsort_two_values_alternating() {
+        // Array alternating between 0 and 1.
+        let mut arr: [i32; 80] = core::array::from_fn(|i| (i & 1) as i32);
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                80,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            );
+        }
+        // First 40 should be 0, last 40 should be 1.
+        for i in 0..40 {
+            assert_eq!(arr[i], 0);
+        }
+        for i in 40..80 {
+            assert_eq!(arr[i], 1);
+        }
+    }
+
+    #[test]
+    fn test_qsort_negative_values() {
+        let mut arr = [-5i32, -1, -100, -50, 0, 10, -3, 7, -999, 42];
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                10,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            );
+        }
+        assert_eq!(arr, [-999, -100, -50, -5, -3, -1, 0, 7, 10, 42]);
+    }
+
+    #[test]
+    fn test_qsort_two_elements_swap() {
+        let mut arr = [2i32, 1];
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                2,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            );
+        }
+        assert_eq!(arr, [1, 2]);
+    }
+
+    #[test]
+    fn test_qsort_organ_pipe() {
+        // "Organ pipe" pattern: ascending then descending.
+        let mut arr: [i32; 50] = core::array::from_fn(|i| {
+            if i < 25 { i as i32 } else { (50 - i) as i32 }
+        });
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                50,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            );
+        }
+        // Verify sorted.
+        for i in 1..50 {
+            assert!(arr[i] >= arr[i - 1]);
+        }
+    }
+
+    #[test]
+    fn test_qsort_with_large_elements() {
+        // Elements larger than the 256-byte stack buffer.
+        // Use 128-byte structs (would still fit, but tests the path).
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Big {
+            key: i32,
+            _pad: [u8; 60],
+        }
+
+        unsafe extern "C" fn cmp_big(a: *const u8, b: *const u8) -> i32 {
+            let va = unsafe { (*(a as *const Big)).key };
+            let vb = unsafe { (*(b as *const Big)).key };
+            va.cmp(&vb) as i32
+        }
+
+        let mut arr: [Big; 10] = core::array::from_fn(|i| Big {
+            key: (10 - i) as i32,
+            _pad: [0; 60],
+        });
+
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                10,
+                core::mem::size_of::<Big>(),
+                cmp_big,
+            );
+        }
+
+        for i in 0..10 {
+            assert_eq!(arr[i].key, (i + 1) as i32);
+        }
+    }
+
+    #[test]
+    fn test_qsort_sawtooth_pattern() {
+        // Repeating ascending sequences: 0,1,2,3,0,1,2,3,...
+        let mut arr: [i32; 60] = core::array::from_fn(|i| (i % 4) as i32);
+        unsafe {
+            qsort(
+                arr.as_mut_ptr().cast(),
+                60,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            );
+        }
+        for i in 1..60 {
+            assert!(arr[i] >= arr[i - 1]);
+        }
+        // Should have 15 zeros, 15 ones, 15 twos, 15 threes.
+        assert_eq!(arr[0], 0);
+        assert_eq!(arr[14], 0);
+        assert_eq!(arr[15], 1);
+        assert_eq!(arr[59], 3);
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — bsearch
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_bsearch_first_element() {
+        let arr = [1i32, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let key: i32 = 1;
+        let ret = unsafe {
+            bsearch(
+                (&raw const key).cast(),
+                arr.as_ptr().cast(),
+                10,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            )
+        };
+        assert!(!ret.is_null());
+        assert_eq!(unsafe { *(ret as *const i32) }, 1);
+    }
+
+    #[test]
+    fn test_bsearch_last_element() {
+        let arr = [1i32, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        let key: i32 = 10;
+        let ret = unsafe {
+            bsearch(
+                (&raw const key).cast(),
+                arr.as_ptr().cast(),
+                10,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            )
+        };
+        assert!(!ret.is_null());
+        assert_eq!(unsafe { *(ret as *const i32) }, 10);
+    }
+
+    #[test]
+    fn test_bsearch_middle_element() {
+        let arr = [10i32, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+        let key: i32 = 50;
+        let ret = unsafe {
+            bsearch(
+                (&raw const key).cast(),
+                arr.as_ptr().cast(),
+                10,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            )
+        };
+        assert!(!ret.is_null());
+        assert_eq!(unsafe { *(ret as *const i32) }, 50);
+    }
+
+    #[test]
+    fn test_bsearch_not_found_below_range() {
+        let arr = [10i32, 20, 30, 40, 50];
+        let key: i32 = 5;
+        let ret = unsafe {
+            bsearch(
+                (&raw const key).cast(),
+                arr.as_ptr().cast(),
+                5,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            )
+        };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_bsearch_not_found_above_range() {
+        let arr = [10i32, 20, 30, 40, 50];
+        let key: i32 = 55;
+        let ret = unsafe {
+            bsearch(
+                (&raw const key).cast(),
+                arr.as_ptr().cast(),
+                5,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            )
+        };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_bsearch_not_found_between_elements() {
+        let arr = [10i32, 20, 30, 40, 50];
+        let key: i32 = 25;
+        let ret = unsafe {
+            bsearch(
+                (&raw const key).cast(),
+                arr.as_ptr().cast(),
+                5,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            )
+        };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_bsearch_single_element_found() {
+        let arr = [42i32];
+        let key: i32 = 42;
+        let ret = unsafe {
+            bsearch(
+                (&raw const key).cast(),
+                arr.as_ptr().cast(),
+                1,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            )
+        };
+        assert!(!ret.is_null());
+        assert_eq!(unsafe { *(ret as *const i32) }, 42);
+    }
+
+    #[test]
+    fn test_bsearch_single_element_not_found() {
+        let arr = [42i32];
+        let key: i32 = 99;
+        let ret = unsafe {
+            bsearch(
+                (&raw const key).cast(),
+                arr.as_ptr().cast(),
+                1,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            )
+        };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_bsearch_large_array() {
+        // Search through a 256-element array.
+        let arr: [i32; 256] = core::array::from_fn(|i| (i * 3) as i32);
+        // Search for element at index 200 (value 600).
+        let key: i32 = 600;
+        let ret = unsafe {
+            bsearch(
+                (&raw const key).cast(),
+                arr.as_ptr().cast(),
+                256,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            )
+        };
+        assert!(!ret.is_null());
+        assert_eq!(unsafe { *(ret as *const i32) }, 600);
+    }
+
+    #[test]
+    fn test_bsearch_large_array_not_found() {
+        let arr: [i32; 256] = core::array::from_fn(|i| (i * 3) as i32);
+        // Value 601 doesn't exist (only multiples of 3).
+        let key: i32 = 601;
+        let ret = unsafe {
+            bsearch(
+                (&raw const key).cast(),
+                arr.as_ptr().cast(),
+                256,
+                core::mem::size_of::<i32>(),
+                cmp_i32_stress,
+            )
+        };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_bsearch_two_elements() {
+        let arr = [5i32, 10];
+        let key1: i32 = 5;
+        let key2: i32 = 10;
+        let key3: i32 = 7;
+
+        let r1 = unsafe {
+            bsearch((&raw const key1).cast(), arr.as_ptr().cast(), 2, 4, cmp_i32_stress)
+        };
+        let r2 = unsafe {
+            bsearch((&raw const key2).cast(), arr.as_ptr().cast(), 2, 4, cmp_i32_stress)
+        };
+        let r3 = unsafe {
+            bsearch((&raw const key3).cast(), arr.as_ptr().cast(), 2, 4, cmp_i32_stress)
+        };
+
+        assert!(!r1.is_null());
+        assert!(!r2.is_null());
+        assert!(r3.is_null());
+        assert_eq!(unsafe { *(r1 as *const i32) }, 5);
+        assert_eq!(unsafe { *(r2 as *const i32) }, 10);
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — strtol edge cases
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_strtol_base0_hex_prefix() {
+        let s = b"0x1F\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 0x1F);
+    }
+
+    #[test]
+    fn test_strtol_base0_octal_prefix() {
+        let s = b"0777\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 0o777);
+    }
+
+    #[test]
+    fn test_strtol_base0_decimal() {
+        let s = b"123\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 123);
+    }
+
+    #[test]
+    fn test_strtol_base36() {
+        // "z" in base 36 = 35.
+        let s = b"z\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 36) };
+        assert_eq!(val, 35);
+    }
+
+    #[test]
+    fn test_strtol_base36_multidigit() {
+        // "10" in base 36 = 36.
+        let s = b"10\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 36) };
+        assert_eq!(val, 36);
+    }
+
+    #[test]
+    fn test_strtol_leading_whitespace() {
+        let s = b"  \t  42\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn test_strtol_stress_neg_overflow() {
+        // i64::MIN = -9223372036854775808
+        let s = b"-9223372036854775809\0";
+        let mut end: *const u8 = core::ptr::null();
+        crate::errno::set_errno(0);
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, i64::MIN);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_strtol_stress_pos_overflow() {
+        // i64::MAX = 9223372036854775807
+        let s = b"9223372036854775808\0";
+        let mut end: *const u8 = core::ptr::null();
+        crate::errno::set_errno(0);
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, i64::MAX);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_strtol_just_sign_no_digits() {
+        let s = b"+\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, 0);
+    }
+
+    #[test]
+    fn test_strtol_endptr_stops_at_invalid() {
+        let s = b"123abc\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtol(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, 123);
+        assert!(!end.is_null());
+        // end should point to 'a'.
+        assert_eq!(unsafe { *end }, b'a');
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — strtod edge cases
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_strtod_scientific_large_exponent() {
+        let s = b"1.5e10\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        let expected = 1.5e10;
+        let rel = (val - expected).abs() / expected;
+        assert!(rel < 1e-10);
+    }
+
+    #[test]
+    fn test_strtod_scientific_negative_exponent() {
+        let s = b"3.14e-5\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        let expected = 3.14e-5;
+        let rel = (val - expected).abs() / expected;
+        assert!(rel < 1e-10);
+    }
+
+    #[test]
+    fn test_strtod_just_zero() {
+        let s = b"0.0\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert_eq!(val, 0.0);
+    }
+
+    #[test]
+    fn test_strtod_stress_negative_val() {
+        let s = b"-2.718\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        let expected = -2.718;
+        let diff = (val - expected).abs();
+        assert!(diff < 1e-10);
+    }
+
+    #[test]
+    fn test_strtod_stress_leading_dot() {
+        let s = b".5\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert!((val - 0.5).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_strtod_trailing_garbage() {
+        let s = b"3.14xyz\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert!((val - 3.14).abs() < 1e-10);
+        assert_eq!(unsafe { *end }, b'x');
+    }
+
+    #[test]
+    fn test_strtod_stress_infinity() {
+        let s = b"inf\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert!(val.is_infinite() && val > 0.0);
+    }
+
+    #[test]
+    fn test_strtod_stress_nan_val() {
+        let s = b"nan\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtod(s.as_ptr(), &raw mut end) };
+        assert!(val.is_nan());
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — abs/labs edge cases
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_abs_min_saturates() {
+        // abs(i32::MIN) would overflow. Our impl uses saturating_neg.
+        let result = abs(i32::MIN);
+        assert_eq!(result, i32::MAX);
+    }
+
+    #[test]
+    fn test_labs_min_saturates() {
+        let result = labs(i64::MIN);
+        assert_eq!(result, i64::MAX);
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — div edge cases
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_div_zero_denominator() {
+        let result = div(42, 0);
+        assert_eq!(result.quot, 0);
+        assert_eq!(result.rem, 0);
+    }
+
+    #[test]
+    fn test_div_min_by_neg_one() {
+        // i32::MIN / -1 overflows in C (UB). We return MIN.
+        let result = div(i32::MIN, -1);
+        assert_eq!(result.quot, i32::MIN);
+        assert_eq!(result.rem, 0);
+    }
+
+    #[test]
+    fn test_ldiv_zero_denominator() {
+        let result = ldiv(42, 0);
+        assert_eq!(result.quot, 0);
+        assert_eq!(result.rem, 0);
+    }
+
+    #[test]
+    fn test_ldiv_min_by_neg_one() {
+        let result = ldiv(i64::MIN, -1);
+        assert_eq!(result.quot, i64::MIN);
+        assert_eq!(result.rem, 0);
+    }
 }

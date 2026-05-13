@@ -3325,6 +3325,496 @@ mod tests {
         let ret = unsafe { strpbrk(s.as_ptr(), accept.as_ptr()) };
         assert_eq!(ret, s.as_ptr());
     }
+
+    // -------------------------------------------------------------------
+    // Stress tests — strstr
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_strstr_needle_repeated_in_haystack() {
+        // Needle appears multiple times — must find the first.
+        let hay = b"abcabcabcabc\0";
+        let needle = b"abc\0";
+        let ret = unsafe { strstr(hay.as_ptr(), needle.as_ptr()) };
+        assert_eq!(ret, hay.as_ptr()); // first occurrence at pos 0
+    }
+
+    #[test]
+    fn test_strstr_needle_at_various_positions() {
+        // Build a 200-byte haystack with needle at position 150.
+        let mut buf = [b'x'; 201];
+        buf[150] = b'N';
+        buf[151] = b'D';
+        buf[152] = b'L';
+        buf[200] = 0;
+        let needle = b"NDL\0";
+        let ret = unsafe { strstr(buf.as_ptr(), needle.as_ptr()) };
+        assert!(!ret.is_null());
+        // Check offset.
+        let offset = ret as usize - buf.as_ptr() as usize;
+        assert_eq!(offset, 150);
+    }
+
+    #[test]
+    fn test_strstr_partial_match_then_full() {
+        // "aab" in "aaab" — the first "aa" is a partial match for "aab",
+        // actual match starts at position 1.
+        let hay = b"aaab\0";
+        let needle = b"aab\0";
+        let ret = unsafe { strstr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(!ret.is_null());
+        let offset = ret as usize - hay.as_ptr() as usize;
+        assert_eq!(offset, 1);
+    }
+
+    #[test]
+    fn test_strstr_needle_equals_haystack() {
+        let s = b"hello\0";
+        let ret = unsafe { strstr(s.as_ptr(), s.as_ptr()) };
+        assert_eq!(ret, s.as_ptr());
+    }
+
+    #[test]
+    fn test_strstr_needle_longer_than_haystack() {
+        let hay = b"hi\0";
+        let needle = b"hello\0";
+        let ret = unsafe { strstr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_strstr_single_char_needle() {
+        let hay = b"abcde\0";
+        let needle = b"d\0";
+        let ret = unsafe { strstr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(!ret.is_null());
+        let offset = ret as usize - hay.as_ptr() as usize;
+        assert_eq!(offset, 3);
+    }
+
+    #[test]
+    fn test_strstr_repeated_partial_prefix() {
+        // Pathological case: many near-matches before real match.
+        // 101 'a's followed by 'b' then NUL: "aaa...aab\0"
+        let mut buf = [b'a'; 103];
+        buf[101] = b'b';
+        buf[102] = 0;
+        let needle = b"ab\0";
+        let ret = unsafe { strstr(buf.as_ptr(), needle.as_ptr()) };
+        assert!(!ret.is_null());
+        // "ab" first occurs at position 100 (the 'a' at [100] followed by 'b' at [101]).
+        let offset = ret as usize - buf.as_ptr() as usize;
+        assert_eq!(offset, 100);
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — strcasestr
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_strcasestr_stress_full_uppercase() {
+        let hay = b"Hello World\0";
+        let needle = b"WORLD\0";
+        let ret = unsafe { strcasestr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(!ret.is_null());
+        let offset = ret as usize - hay.as_ptr() as usize;
+        assert_eq!(offset, 6);
+    }
+
+    #[test]
+    fn test_strcasestr_stress_alternating_case() {
+        let hay = b"ABCDEFG\0";
+        let needle = b"cDe\0";
+        let ret = unsafe { strcasestr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(!ret.is_null());
+        let offset = ret as usize - hay.as_ptr() as usize;
+        assert_eq!(offset, 2);
+    }
+
+    #[test]
+    fn test_strcasestr_stress_no_match() {
+        let hay = b"hello world\0";
+        let needle = b"xyz\0";
+        let ret = unsafe { strcasestr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_strcasestr_stress_empty() {
+        let hay = b"test\0";
+        let needle = b"\0";
+        let ret = unsafe { strcasestr(hay.as_ptr(), needle.as_ptr()) };
+        assert_eq!(ret, hay.as_ptr().cast_mut());
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — strtok_r comprehensive
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_strtok_r_consecutive_delimiters() {
+        // Multiple consecutive delimiters should be treated as one.
+        let mut buf = *b"a,,b,,c\0";
+        let delim = b",\0";
+        let mut save: *mut u8 = core::ptr::null_mut();
+
+        let t1 = unsafe { strtok_r(buf.as_mut_ptr(), delim.as_ptr(), &raw mut save) };
+        assert!(!t1.is_null());
+        assert_eq!(unsafe { *t1 }, b'a');
+
+        let t2 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(!t2.is_null());
+        assert_eq!(unsafe { *t2 }, b'b');
+
+        let t3 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(!t3.is_null());
+        assert_eq!(unsafe { *t3 }, b'c');
+
+        let t4 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(t4.is_null());
+    }
+
+    #[test]
+    fn test_strtok_r_leading_trailing_delimiters() {
+        let mut buf = *b",,hello,,world,,\0";
+        let delim = b",\0";
+        let mut save: *mut u8 = core::ptr::null_mut();
+
+        let t1 = unsafe { strtok_r(buf.as_mut_ptr(), delim.as_ptr(), &raw mut save) };
+        assert!(!t1.is_null());
+        assert_eq!(unsafe { cstr_eq(t1, b"hello") }, true);
+
+        let t2 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(!t2.is_null());
+        assert_eq!(unsafe { cstr_eq(t2, b"world") }, true);
+
+        let t3 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(t3.is_null());
+    }
+
+    #[test]
+    fn test_strtok_r_all_delimiters_only() {
+        let mut buf = *b",,,\0";
+        let delim = b",\0";
+        let mut save: *mut u8 = core::ptr::null_mut();
+
+        let t1 = unsafe { strtok_r(buf.as_mut_ptr(), delim.as_ptr(), &raw mut save) };
+        assert!(t1.is_null());
+    }
+
+    #[test]
+    fn test_strtok_r_varying_delimiters() {
+        // Change delimiter set between calls.
+        let mut buf = *b"a,b:c\0";
+        let mut save: *mut u8 = core::ptr::null_mut();
+
+        let t1 = unsafe { strtok_r(buf.as_mut_ptr(), b",\0".as_ptr(), &raw mut save) };
+        assert!(!t1.is_null());
+        assert_eq!(unsafe { *t1 }, b'a');
+
+        // Now use ':' as delimiter.
+        let t2 = unsafe { strtok_r(core::ptr::null_mut(), b":\0".as_ptr(), &raw mut save) };
+        assert!(!t2.is_null());
+        assert_eq!(unsafe { cstr_eq(t2, b"b") }, true);
+
+        let t3 = unsafe { strtok_r(core::ptr::null_mut(), b":\0".as_ptr(), &raw mut save) };
+        assert!(!t3.is_null());
+        assert_eq!(unsafe { *t3 }, b'c');
+    }
+
+    #[test]
+    fn test_strtok_r_multi_char_delimiters() {
+        // Multiple characters in delimiter set.
+        let mut buf = *b"one two\tthree\nfour\0";
+        let delim = b" \t\n\0";
+        let mut save: *mut u8 = core::ptr::null_mut();
+
+        let t1 = unsafe { strtok_r(buf.as_mut_ptr(), delim.as_ptr(), &raw mut save) };
+        assert!(unsafe { cstr_eq(t1, b"one") });
+
+        let t2 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(unsafe { cstr_eq(t2, b"two") });
+
+        let t3 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(unsafe { cstr_eq(t3, b"three") });
+
+        let t4 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(unsafe { cstr_eq(t4, b"four") });
+
+        let t5 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(t5.is_null());
+    }
+
+    #[test]
+    fn test_strtok_r_empty_string() {
+        let mut buf = *b"\0";
+        let delim = b",\0";
+        let mut save: *mut u8 = core::ptr::null_mut();
+
+        let t1 = unsafe { strtok_r(buf.as_mut_ptr(), delim.as_ptr(), &raw mut save) };
+        assert!(t1.is_null());
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — strspn / strcspn exhaustive
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_strspn_entire_string_accepted() {
+        let s = b"aaabbbccc\0";
+        let accept = b"abc\0";
+        let ret = unsafe { strspn(s.as_ptr(), accept.as_ptr()) };
+        assert_eq!(ret, 9);
+    }
+
+    #[test]
+    fn test_strspn_reject_at_position_zero() {
+        let s = b"xyz\0";
+        let accept = b"abc\0";
+        let ret = unsafe { strspn(s.as_ptr(), accept.as_ptr()) };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_strspn_empty_accept_set() {
+        let s = b"hello\0";
+        let accept = b"\0";
+        let ret = unsafe { strspn(s.as_ptr(), accept.as_ptr()) };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_strcspn_entire_string_no_reject() {
+        let s = b"hello\0";
+        let reject = b"xyz\0";
+        let ret = unsafe { strcspn(s.as_ptr(), reject.as_ptr()) };
+        assert_eq!(ret, 5);
+    }
+
+    #[test]
+    fn test_strcspn_first_char_in_reject() {
+        let s = b"hello\0";
+        let reject = b"h\0";
+        let ret = unsafe { strcspn(s.as_ptr(), reject.as_ptr()) };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_strcspn_last_char_in_reject() {
+        let s = b"hello\0";
+        let reject = b"o\0";
+        let ret = unsafe { strcspn(s.as_ptr(), reject.as_ptr()) };
+        assert_eq!(ret, 4);
+    }
+
+    #[test]
+    fn test_strspn_binary_values() {
+        // Test with non-ASCII byte values in accept set.
+        let s: &[u8] = &[0x80, 0x81, 0x82, b'A', 0];
+        let accept: &[u8] = &[0x80, 0x81, 0x82, 0];
+        let ret = unsafe { strspn(s.as_ptr(), accept.as_ptr()) };
+        assert_eq!(ret, 3);
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — strpbrk additional
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_strpbrk_last_char_matches() {
+        let s = b"abcde\0";
+        let accept = b"e\0";
+        let ret = unsafe { strpbrk(s.as_ptr(), accept.as_ptr()) };
+        assert!(!ret.is_null());
+        let offset = ret as usize - s.as_ptr() as usize;
+        assert_eq!(offset, 4);
+    }
+
+    #[test]
+    fn test_strpbrk_multiple_matches_returns_first() {
+        let s = b"hello world\0";
+        let accept = b"ow\0";
+        let ret = unsafe { strpbrk(s.as_ptr(), accept.as_ptr()) };
+        assert!(!ret.is_null());
+        // 'o' appears at position 4, 'w' at position 6.
+        let offset = ret as usize - s.as_ptr() as usize;
+        assert_eq!(offset, 4);
+    }
+
+    #[test]
+    fn test_strpbrk_empty_accept() {
+        let s = b"hello\0";
+        let accept = b"\0";
+        let ret = unsafe { strpbrk(s.as_ptr(), accept.as_ptr()) };
+        assert!(ret.is_null());
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — memmove with various overlaps
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_memmove_no_overlap() {
+        let src = [1u8, 2, 3, 4, 5];
+        let mut dest = [0u8; 5];
+        unsafe { memmove(dest.as_mut_ptr(), src.as_ptr(), 5); }
+        assert_eq!(dest, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_memmove_overlap_one_byte_forward() {
+        // [1,2,3,4,5] — copy [0..4] to [1..5].
+        let mut buf = [1u8, 2, 3, 4, 5];
+        unsafe { memmove(buf.as_mut_ptr().add(1), buf.as_ptr(), 4); }
+        assert_eq!(buf, [1, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_memmove_overlap_one_byte_backward() {
+        // [1,2,3,4,5] — copy [1..5] to [0..4].
+        let mut buf = [1u8, 2, 3, 4, 5];
+        unsafe { memmove(buf.as_mut_ptr(), buf.as_ptr().add(1), 4); }
+        assert_eq!(buf, [2, 3, 4, 5, 5]);
+    }
+
+    #[test]
+    fn test_memmove_complete_overlap() {
+        // Copy region onto itself — should be no-op.
+        let mut buf = [10u8, 20, 30, 40, 50];
+        unsafe { memmove(buf.as_mut_ptr(), buf.as_ptr(), 5); }
+        assert_eq!(buf, [10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn test_memmove_large_region() {
+        // 512-byte overlapping copy (bigger than cache line).
+        let mut buf = [0u8; 1024];
+        for i in 0..512 {
+            buf[i] = (i & 0xFF) as u8;
+        }
+        // Copy first 512 bytes to offset 256 (overlap of 256 bytes).
+        unsafe { memmove(buf.as_mut_ptr().add(256), buf.as_ptr(), 512); }
+        // Verify: buf[256..768] should equal original [0..512].
+        for i in 0..512 {
+            assert_eq!(buf[256 + i], (i & 0xFF) as u8);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — strsep edge cases
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_strsep_single_char_tokens() {
+        let mut buf = *b"a,b,c\0";
+        let mut ptr: *mut u8 = buf.as_mut_ptr();
+        let delim = b",\0";
+
+        let t1 = unsafe { strsep(&raw mut ptr, delim.as_ptr()) };
+        assert!(unsafe { cstr_eq(t1, b"a") });
+
+        let t2 = unsafe { strsep(&raw mut ptr, delim.as_ptr()) };
+        assert!(unsafe { cstr_eq(t2, b"b") });
+
+        let t3 = unsafe { strsep(&raw mut ptr, delim.as_ptr()) };
+        assert!(unsafe { cstr_eq(t3, b"c") });
+
+        // ptr should be null after exhausting.
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn test_strsep_preserves_empty_fields() {
+        // Unlike strtok, strsep returns empty strings for consecutive delims.
+        let mut buf = *b"a,,b\0";
+        let mut ptr: *mut u8 = buf.as_mut_ptr();
+        let delim = b",\0";
+
+        let t1 = unsafe { strsep(&raw mut ptr, delim.as_ptr()) };
+        assert!(unsafe { cstr_eq(t1, b"a") });
+
+        let t2 = unsafe { strsep(&raw mut ptr, delim.as_ptr()) };
+        // Should be empty string (the field between two commas).
+        assert!(unsafe { cstr_eq(t2, b"") });
+
+        let t3 = unsafe { strsep(&raw mut ptr, delim.as_ptr()) };
+        assert!(unsafe { cstr_eq(t3, b"b") });
+    }
+
+    #[test]
+    fn test_strsep_trailing_delimiter() {
+        let mut buf = *b"hello,\0";
+        let mut ptr: *mut u8 = buf.as_mut_ptr();
+        let delim = b",\0";
+
+        let t1 = unsafe { strsep(&raw mut ptr, delim.as_ptr()) };
+        assert!(unsafe { cstr_eq(t1, b"hello") });
+
+        let t2 = unsafe { strsep(&raw mut ptr, delim.as_ptr()) };
+        // Empty field after trailing comma.
+        assert!(unsafe { cstr_eq(t2, b"") });
+
+        assert!(ptr.is_null());
+    }
+
+    // -------------------------------------------------------------------
+    // Stress tests — swab
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_swab_stress_six_bytes() {
+        let src = [1u8, 2, 3, 4, 5, 6];
+        let mut dest = [0u8; 6];
+        unsafe { swab(src.as_ptr(), dest.as_mut_ptr(), 6); }
+        assert_eq!(dest, [2, 1, 4, 3, 6, 5]);
+    }
+
+    #[test]
+    fn test_swab_stress_odd_drops_last() {
+        // Odd nbytes: last byte ignored.
+        let src = [1u8, 2, 3, 4, 5];
+        let mut dest = [0u8; 5];
+        unsafe { swab(src.as_ptr(), dest.as_mut_ptr(), 5); }
+        // Only first 4 bytes swapped, 5th untouched.
+        assert_eq!(dest[0], 2);
+        assert_eq!(dest[1], 1);
+        assert_eq!(dest[2], 4);
+        assert_eq!(dest[3], 3);
+        assert_eq!(dest[4], 0); // not written
+    }
+
+    #[test]
+    fn test_swab_stress_empty() {
+        let src = [1u8, 2];
+        let mut dest = [0u8; 2];
+        unsafe { swab(src.as_ptr(), dest.as_mut_ptr(), 0); }
+        assert_eq!(dest, [0, 0]); // untouched
+    }
+
+    #[test]
+    fn test_swab_stress_single_pair() {
+        let src = [0xAB_u8, 0xCD];
+        let mut dest = [0u8; 2];
+        unsafe { swab(src.as_ptr(), dest.as_mut_ptr(), 2); }
+        assert_eq!(dest, [0xCD, 0xAB]);
+    }
+
+    // -------------------------------------------------------------------
+    // Helper for strtok_r / strsep tests
+    // -------------------------------------------------------------------
+
+    /// Check if a C string pointer equals an expected byte slice.
+    unsafe fn cstr_eq(p: *const u8, expected: &[u8]) -> bool {
+        if p.is_null() {
+            return false;
+        }
+        for (i, &b) in expected.iter().enumerate() {
+            if unsafe { *p.add(i) } != b {
+                return false;
+            }
+        }
+        unsafe { *p.add(expected.len()) == 0 }
+    }
 }
 
 // ===========================================================================

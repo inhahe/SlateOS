@@ -3131,21 +3131,45 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
     listener.port = 0;
     drop(listeners);
 
-    // Reset unaccepted connections.
-    let mut conns = CONNECTIONS.lock();
-    for handle in pending_handles.into_iter().flatten() {
-        if let Some(conn) = conns.get_mut(handle) {
-            if conn.active {
-                conn.active = false;
-                conn.state = TcpState::Closed;
-                conn.rx_buffer.clear();
-                conn.tx_buffer.clear();
-                conn.nagle_buf.clear();
-                conn.ooo_buf.clear();
+    // Collect connection metadata for RST, then deactivate.
+    struct RstInfo {
+        local_port: u16,
+        remote_ip: Ipv4Addr,
+        remote_port: u16,
+        seq: u32,
+        ack: u32,
+    }
+    let mut rst_targets: [Option<RstInfo>; MAX_BACKLOG] = [const { None }; MAX_BACKLOG];
+    {
+        let mut conns = CONNECTIONS.lock();
+        for (i, handle) in pending_handles.into_iter().enumerate() {
+            let Some(h) = handle else { continue };
+            if let Some(conn) = conns.get_mut(h) {
+                if conn.active {
+                    rst_targets[i] = Some(RstInfo {
+                        local_port: conn.local_port,
+                        remote_ip: conn.remote_ip,
+                        remote_port: conn.remote_port,
+                        seq: conn.snd_nxt,
+                        ack: conn.rcv_nxt,
+                    });
+                    conn.active = false;
+                    conn.state = TcpState::Closed;
+                    conn.rx_buffer.clear();
+                    conn.tx_buffer.clear();
+                    conn.nagle_buf.clear();
+                    conn.ooo_buf.clear();
+                }
             }
         }
     }
-    drop(conns);
+    // Send RSTs to peers of unaccepted connections.
+    for info in rst_targets.iter().flatten() {
+        let _ = send_segment(
+            info.local_port, info.remote_ip, info.remote_port,
+            info.seq, info.ack, TCP_RST | TCP_ACK, &[],
+        );
+    }
 
     crate::serial_println!("[tcp] Listener on port {} closed", port);
     Ok(())

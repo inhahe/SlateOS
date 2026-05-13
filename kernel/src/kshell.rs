@@ -3546,6 +3546,7 @@ const COMMANDS: &[&str] = &[
     "igmp",
     "lldp",
     "netstat", "ss",
+    "ndisc", "arpscan",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4746,6 +4747,7 @@ fn dispatch(line: &str) {
         "igmp" => cmd_igmp(args),
         "lldp" => cmd_lldp(args),
         "netstat" | "ss" => cmd_netstat(args),
+        "ndisc" | "arpscan" => cmd_ndisc(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35651,6 +35653,109 @@ fn cmd_netstat(args: &str) {
     }
 }
 
+/// `ndisc` / `arpscan` — Network discovery via ARP scanning.
+fn cmd_ndisc(args: &str) {
+    use alloc::format;
+    use crate::net::ndisc;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("ndisc — network discovery (ARP scan)");
+            shell_println!("  ndisc scan          ARP scan local subnet");
+            shell_println!("  ndisc probe <IP>    Probe a specific host");
+            shell_println!("  ndisc hosts         Show hosts from ARP cache");
+            shell_println!("  ndisc subnet        Show subnet information");
+            shell_println!("  ndisc status        Show scan statistics");
+            shell_println!("  ndisc test          Run self-tests");
+        }
+        "scan" => {
+            shell_println!("Scanning local subnet...");
+            match ndisc::scan_subnet() {
+                Ok(result) => {
+                    shell_println!("Probed {} hosts, {} responded:\n", result.probed, result.responding);
+                    shell_println!("{:<16}  {:<18}  {}", "IP Address", "MAC Address", "Hostname");
+                    shell_println!("{:<16}  {:<18}  {}", "──────────────", "─────────────────", "────────");
+                    for host in &result.hosts {
+                        let name = if host.hostname.is_empty() { "-" } else { &host.hostname };
+                        shell_println!("{:<16}  {:<18}  {}", host.ip, host.mac, name);
+                    }
+                }
+                Err(e) => shell_println!("Scan failed: {:?}", e),
+            }
+        }
+        "probe" => {
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            match parse_ipv4(ip_str) {
+                Some(ip) => {
+                    shell_println!("Probing {}...", ip);
+                    match ndisc::probe_host(ip) {
+                        Ok(Some(host)) => {
+                            shell_println!("  IP:       {}", host.ip);
+                            shell_println!("  MAC:      {}", host.mac);
+                            if !host.hostname.is_empty() {
+                                shell_println!("  Hostname: {}", host.hostname);
+                            }
+                        }
+                        Ok(None) => shell_println!("  No response from {}", ip),
+                        Err(e) => shell_println!("  Probe failed: {:?}", e),
+                    }
+                }
+                None => shell_println!("Usage: ndisc probe <IP>"),
+            }
+        }
+        "hosts" => {
+            // Show ARP cache as host list.
+            let (entries, count) = crate::net::arp::cache_entries();
+            if count == 0 {
+                shell_println!("No hosts in ARP cache");
+            } else {
+                shell_println!("Discovered hosts ({}):", count);
+                shell_println!("{:<16}  {:<18}  {}", "IP Address", "MAC Address", "TTL(s)");
+                shell_println!("{:<16}  {:<18}  {}", "──────────────", "─────────────────", "──────");
+                for i in 0..count {
+                    if let Some(e) = entries.get(i) {
+                        shell_println!("{:<16}  {:<18}  {}", e.ip, e.mac, e.ttl_secs);
+                    }
+                }
+            }
+        }
+        "subnet" => {
+            let info = crate::net::interface::info();
+            if info.ip.is_unspecified() {
+                shell_println!("No network interface configured");
+                return;
+            }
+            let net = ndisc::network_addr(info.ip, info.subnet_mask);
+            let bcast = ndisc::broadcast_addr(info.ip, info.subnet_mask);
+            let hosts = ndisc::host_count(info.subnet_mask);
+            shell_println!("Subnet Information");
+            shell_println!("  Interface IP: {}", info.ip);
+            shell_println!("  Subnet mask:  {}", info.subnet_mask);
+            shell_println!("  Network:      {}", net);
+            shell_println!("  Broadcast:    {}", bcast);
+            shell_println!("  Host range:   {} addresses", hosts);
+        }
+        "status" | "stats" => {
+            let s = ndisc::stats();
+            shell_println!("Network Discovery Statistics");
+            shell_println!("  Scanning:    {}", if s.scanning { "yes" } else { "no" });
+            shell_println!("  Total scans: {}", s.total_scans);
+            shell_println!("  Probes sent: {}", s.total_probes);
+            shell_println!("  Discovered:  {}", s.total_discovered);
+        }
+        "test" => {
+            match ndisc::self_test() {
+                Ok(()) => shell_println!("ndisc self-test: PASSED"),
+                Err(e) => shell_println!("ndisc self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Unknown subcommand '{}'. Try 'ndisc help'.", sub);
+        }
+    }
+}
+
 /// `inputa11y` / `ia11y` — input accessibility features.
 fn cmd_inputa11y(args: &str) {
     use crate::fs::inputa11y;
@@ -66105,7 +66210,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

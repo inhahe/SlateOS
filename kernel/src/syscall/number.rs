@@ -2251,7 +2251,7 @@ pub const SYS_UDP_RX_FRONT_BYTES: u64 = 848;
 /// SHUT_RD discards incoming data; further reads return EOF.
 ///
 /// Returns: 0 on success, negative error code.
-pub const SYS_TCP_SHUTDOWN: u64 = 848;
+pub const SYS_TCP_SHUTDOWN: u64 = 855;
 
 /// Query detailed TCP connection information (for getsockopt TCP_INFO).
 ///

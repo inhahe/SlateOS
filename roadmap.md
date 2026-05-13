@@ -1126,6 +1126,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] LLDP neighbor discovery (IEEE 802.1AB, TLV parsing, neighbor table, periodic advertisements)
   - [x] Netstat unified network status (TCP/UDP/listeners, interface stats, routing, protocol summary)
   - [x] ARP-based network discovery (subnet scanning, host enumeration, reverse DNS)
+  - [x] Netcat (nc) TCP/UDP swiss army knife (connect, listen, send, port scan, service lookup)
+  - [x] iperf network bandwidth measurement (TCP/UDP throughput, jitter, packet loss)
+  - [x] SNMP v1/v2c client (ASN.1/BER encoding, GET/GET-NEXT/WALK, OID database)
+  - [x] FTP client (RFC 959, PASV mode, LIST, RETR, reply code parsing)
+  - [x] SMTP client (RFC 5321, EHLO, MAIL FROM/RCPT TO/DATA, dot stuffing)
+  - [x] 802.1Q VLAN support (tag/untag frames, VLAN interface management, PCP priority)
+  - [x] QoS traffic classification (DSCP, port/protocol rules, token bucket rate limiting)
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 
 ### 2.5 POSIX compatibility layer

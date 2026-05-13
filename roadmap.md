@@ -1001,13 +1001,18 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ARP cache diagnostics: cache_entries() returns all valid entries with IP/MAC/TTL; flush_cache() invalidates all entries for forced re-resolution
   - [x] UDP socket diagnostics: UdpSocketInfo struct + all_sockets() listing for netstat-style display
   - [x] ICMP ping syscalls: SYS_ICMP_PING (830) sends echo request, SYS_ICMP_PING_WAIT (831) blocks until reply with RTT; enables userspace ping utilities
+  - [x] TCP SYN_RECEIVED timeout (30s): half-open server connections cleaned up after 30s (SYN flood / crashed client protection)
+  - [x] Interface traffic statistics: lock-free atomic counters (tx/rx bytes, packets, errors); InterfaceStats API + SYS_NET_STAT (825) syscall
+  - [x] TCP abort (RST): tcp::abort() + SYS_TCP_ABORT (807) for immediate connection teardown without FIN handshake
+  - [x] DHCP ARP flush: ARP cache cleared alongside DNS on lease acquisition and expiry (stale gateway MACs)
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
-  - [x] TCP syscalls: connect, send, recv, close (SYS_TCP_CONNECT through SYS_TCP_CLOSE)
+  - [x] TCP syscalls: connect, send, recv, close, abort (SYS_TCP_CONNECT through SYS_TCP_ABORT)
   - [x] TCP server syscalls: bind, accept, close_listener (SYS_TCP_BIND 804, SYS_TCP_ACCEPT 805, SYS_TCP_CLOSE_LISTENER 806)
   - [x] UDP syscalls: bind, send, recv, close (SYS_UDP_BIND through SYS_UDP_CLOSE)
   - [x] DNS resolution syscall (SYS_DNS_RESOLVE)
   - [x] DNS reverse resolution syscall (SYS_DNS_REVERSE_RESOLVE 821): PTR lookup exposed to userspace; getnameinfo() in POSIX layer wired to use it
+  - [x] Network statistics syscall (SYS_NET_STAT 825): 48-byte interface counters for userspace ifconfig
 - [x] Firewall (basic packet filtering)
   - [x] Rule-based inbound/outbound filtering (allow/deny, protocol, IP/prefix, port, priority)
   - [x] Default policy (accept/drop), first-match-wins evaluation

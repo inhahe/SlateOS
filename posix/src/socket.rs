@@ -43,24 +43,46 @@ use crate::syscall::*;
 // Constants
 // ---------------------------------------------------------------------------
 
+/// Unspecified address family (used to disconnect UDP, or as wildcard).
+pub const AF_UNSPEC: i32 = 0;
+/// Unix domain sockets (local IPC).
+pub const AF_UNIX: i32 = 1;
+/// Synonym for `AF_UNIX`.
+pub const AF_LOCAL: i32 = AF_UNIX;
 /// IPv4 Internet protocols.
 pub const AF_INET: i32 = 2;
 /// IPv6 Internet protocols.
 pub const AF_INET6: i32 = 10;
+/// Protocol family aliases.
+pub const PF_UNIX: i32 = AF_UNIX;
 /// IPv4 (alias).
 pub const PF_INET: i32 = AF_INET;
+/// IPv6 (alias).
+pub const PF_INET6: i32 = AF_INET6;
 
 /// Sequenced, reliable, connection-based byte streams (TCP).
 pub const SOCK_STREAM: i32 = 1;
 /// Connectionless, unreliable datagrams (UDP).
 pub const SOCK_DGRAM: i32 = 2;
+/// Raw network protocol access.
+pub const SOCK_RAW: i32 = 3;
+/// Sequenced, reliable, connection-based, fixed-length datagrams.
+pub const SOCK_SEQPACKET: i32 = 5;
 
+/// Default protocol (auto-select based on socket type).
+pub const IPPROTO_IP: i32 = 0;
+/// ICMP protocol number.
+pub const IPPROTO_ICMP: i32 = 1;
 /// TCP protocol number.
 pub const IPPROTO_TCP: i32 = 6;
 /// UDP protocol number.
 pub const IPPROTO_UDP: i32 = 17;
-/// Default protocol (auto-select based on socket type).
-pub const IPPROTO_IP: i32 = 0;
+/// IPv6 protocol number (for `setsockopt` level).
+pub const IPPROTO_IPV6: i32 = 41;
+/// ICMPv6 protocol number.
+pub const IPPROTO_ICMPV6: i32 = 58;
+/// Raw IP protocol number.
+pub const IPPROTO_RAW: i32 = 255;
 
 /// Address to bind to all interfaces.
 pub const INADDR_ANY: u32 = 0;
@@ -159,6 +181,20 @@ pub const IP_MULTICAST_TTL: i32 = 33;
 /// Set the loopback mode for multicast packets.
 pub const IP_MULTICAST_LOOP: i32 = 34;
 
+// IPv6-level socket options (IPPROTO_IPV6).
+/// Restrict socket to IPv6-only (no IPv4-mapped addresses).
+pub const IPV6_V6ONLY: i32 = 26;
+/// Unicast hop limit.
+pub const IPV6_UNICAST_HOPS: i32 = 16;
+/// Multicast hop limit.
+pub const IPV6_MULTICAST_HOPS: i32 = 18;
+/// Multicast loopback.
+pub const IPV6_MULTICAST_LOOP: i32 = 19;
+/// Join a multicast group (IPv6).
+pub const IPV6_JOIN_GROUP: i32 = 20;
+/// Leave a multicast group (IPv6).
+pub const IPV6_LEAVE_GROUP: i32 = 21;
+
 // MSG flags for send/recv.
 /// Out-of-band data.
 pub const MSG_OOB: i32 = 1;
@@ -242,6 +278,67 @@ pub struct InAddr {
     /// IPv4 address as a 32-bit value in network byte order.
     pub s_addr: u32,
 }
+
+/// IPv6 address (128 bits, network byte order).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct In6Addr {
+    /// 16 bytes of IPv6 address in network byte order.
+    pub s6_addr: [u8; 16],
+}
+
+/// IPv6 socket address.
+///
+/// Layout matches Linux `struct sockaddr_in6` (28 bytes):
+///   sin6_family(2) + sin6_port(2) + sin6_flowinfo(4) +
+///   sin6_addr(16) + sin6_scope_id(4) = 28.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SockaddrIn6 {
+    /// Address family — always `AF_INET6`.
+    pub sin6_family: u16,
+    /// Port number in network byte order.
+    pub sin6_port: u16,
+    /// IPv6 flow label and traffic class.
+    pub sin6_flowinfo: u32,
+    /// IPv6 address.
+    pub sin6_addr: In6Addr,
+    /// Scope ID (e.g., link-local interface index).
+    pub sin6_scope_id: u32,
+}
+
+/// Unix domain socket address.
+///
+/// Layout matches Linux `struct sockaddr_un` (110 bytes):
+///   sun_family(2) + sun_path(108) = 110.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SockaddrUn {
+    /// Address family — always `AF_UNIX`.
+    pub sun_family: u16,
+    /// Pathname (null-terminated, or abstract with leading NUL).
+    pub sun_path: [u8; 108],
+}
+
+/// Generic socket address storage, large enough for any address family.
+///
+/// Layout matches Linux `struct sockaddr_storage` (128 bytes):
+///   ss_family(2) + __ss_padding(126) = 128, aligned to 8 bytes.
+#[repr(C, align(8))]
+#[derive(Clone, Copy)]
+pub struct SockaddrStorage {
+    /// Address family.
+    pub ss_family: u16,
+    /// Padding (implementation detail — do not access directly).
+    __ss_padding: [u8; 126],
+}
+
+/// IPv6 "any" address (all zeros).
+pub const IN6ADDR_ANY_INIT: In6Addr = In6Addr { s6_addr: [0; 16] };
+/// IPv6 loopback address (::1).
+pub const IN6ADDR_LOOPBACK_INIT: In6Addr = In6Addr {
+    s6_addr: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+};
 
 /// Size type used for address lengths.
 pub type SocklenT = u32;
@@ -5540,6 +5637,78 @@ mod tests {
     fn test_sockaddr_size() {
         // sockaddr should also be 16 bytes.
         assert_eq!(core::mem::size_of::<Sockaddr>(), 16);
+    }
+
+    #[test]
+    fn test_sockaddr_in6_layout() {
+        // Linux struct sockaddr_in6 = 28 bytes.
+        assert_eq!(core::mem::size_of::<SockaddrIn6>(), 28);
+        assert_eq!(core::mem::offset_of!(SockaddrIn6, sin6_family), 0);
+        assert_eq!(core::mem::offset_of!(SockaddrIn6, sin6_port), 2);
+        assert_eq!(core::mem::offset_of!(SockaddrIn6, sin6_flowinfo), 4);
+        assert_eq!(core::mem::offset_of!(SockaddrIn6, sin6_addr), 8);
+        assert_eq!(core::mem::offset_of!(SockaddrIn6, sin6_scope_id), 24);
+    }
+
+    #[test]
+    fn test_in6_addr_size() {
+        assert_eq!(core::mem::size_of::<In6Addr>(), 16);
+    }
+
+    #[test]
+    fn test_sockaddr_un_layout() {
+        // Linux struct sockaddr_un = 110 bytes.
+        assert_eq!(core::mem::size_of::<SockaddrUn>(), 110);
+        assert_eq!(core::mem::offset_of!(SockaddrUn, sun_family), 0);
+        assert_eq!(core::mem::offset_of!(SockaddrUn, sun_path), 2);
+    }
+
+    #[test]
+    fn test_sockaddr_storage_layout() {
+        // Linux struct sockaddr_storage = 128 bytes, 8-byte aligned.
+        assert_eq!(core::mem::size_of::<SockaddrStorage>(), 128);
+        assert_eq!(core::mem::align_of::<SockaddrStorage>(), 8);
+    }
+
+    // -- Address family and protocol constants --
+
+    #[test]
+    fn test_af_constants() {
+        assert_eq!(AF_UNSPEC, 0);
+        assert_eq!(AF_UNIX, 1);
+        assert_eq!(AF_LOCAL, AF_UNIX);
+        assert_eq!(AF_INET, 2);
+        assert_eq!(AF_INET6, 10);
+        assert_eq!(PF_UNIX, AF_UNIX);
+        assert_eq!(PF_INET, AF_INET);
+        assert_eq!(PF_INET6, AF_INET6);
+    }
+
+    #[test]
+    fn test_sock_type_constants() {
+        assert_eq!(SOCK_STREAM, 1);
+        assert_eq!(SOCK_DGRAM, 2);
+        assert_eq!(SOCK_RAW, 3);
+        assert_eq!(SOCK_SEQPACKET, 5);
+    }
+
+    #[test]
+    fn test_ipproto_constants() {
+        assert_eq!(IPPROTO_IP, 0);
+        assert_eq!(IPPROTO_ICMP, 1);
+        assert_eq!(IPPROTO_TCP, 6);
+        assert_eq!(IPPROTO_UDP, 17);
+        assert_eq!(IPPROTO_IPV6, 41);
+        assert_eq!(IPPROTO_ICMPV6, 58);
+        assert_eq!(IPPROTO_RAW, 255);
+    }
+
+    #[test]
+    fn test_in6addr_constants() {
+        assert_eq!(IN6ADDR_ANY_INIT.s6_addr, [0u8; 16]);
+        let mut expected = [0u8; 16];
+        expected[15] = 1;
+        assert_eq!(IN6ADDR_LOOPBACK_INIT.s6_addr, expected);
     }
 
     // -- inet_pton IPv4 tests --

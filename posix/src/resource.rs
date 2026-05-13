@@ -304,3 +304,45 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
     unsafe { core::ptr::addr_of_mut!(NICE_VALUE).write(val); }
     0
 }
+
+/// Linux-specific: get and/or set resource limits for any process.
+///
+/// `pid` is the target process (0 = calling process).
+/// If `new_limit` is non-null, sets the new limit.
+/// If `old_limit` is non-null, stores the old limit.
+///
+/// Since our kernel doesn't track per-process resource limits, this
+/// delegates to the global getrlimit/setrlimit.
+#[unsafe(no_mangle)]
+pub extern "C" fn prlimit(
+    _pid: i32,
+    resource: i32,
+    new_limit: *const Rlimit,
+    old_limit: *mut Rlimit,
+) -> i32 {
+    // Get old limit first (if requested).
+    if !old_limit.is_null() {
+        let ret = getrlimit(resource, old_limit);
+        if ret != 0 {
+            return ret;
+        }
+    }
+
+    // Set new limit (if requested).
+    if !new_limit.is_null() {
+        return setrlimit(resource, new_limit);
+    }
+
+    0
+}
+
+/// Alias: `prlimit64` — same as `prlimit` on 64-bit systems.
+#[unsafe(no_mangle)]
+pub extern "C" fn prlimit64(
+    pid: i32,
+    resource: i32,
+    new_limit: *const Rlimit,
+    old_limit: *mut Rlimit,
+) -> i32 {
+    prlimit(pid, resource, new_limit, old_limit)
+}

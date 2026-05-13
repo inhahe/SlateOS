@@ -420,6 +420,97 @@ pub extern "C" fn scandir(
 }
 
 // ---------------------------------------------------------------------------
+// versionsort — GNU extension
+// ---------------------------------------------------------------------------
+
+/// Compare two directory entries using version-number sorting.
+///
+/// Uses `strverscmp` on the `d_name` fields.  Like `alphasort`, this is
+/// intended as a comparator for `scandir`.
+#[unsafe(no_mangle)]
+pub extern "C" fn versionsort(a: *const *const Dirent, b: *const *const Dirent) -> i32 {
+    if a.is_null() || b.is_null() {
+        return 0;
+    }
+    // SAFETY: a and b point to valid Dirent pointers.
+    let da = unsafe { &**a };
+    let db = unsafe { &**b };
+    // SAFETY: d_name arrays are valid null-terminated strings within
+    // allocated Dirent structs.
+    unsafe { crate::string::strverscmp(da.d_name.as_ptr(), db.d_name.as_ptr()) }
+}
+
+// ---------------------------------------------------------------------------
+// readdir_r — thread-safe readdir (POSIX, deprecated in POSIX.1-2008)
+// ---------------------------------------------------------------------------
+
+/// Thread-safe version of `readdir`.
+///
+/// Reads the next directory entry into caller-supplied `entry`, and
+/// stores a pointer to `entry` in `*result` on success, or sets
+/// `*result` to NULL when the directory is exhausted.
+///
+/// Returns 0 on success, or an error number on failure.
+///
+/// Note: deprecated in POSIX.1-2008 (readdir is thread-safe if each
+/// thread uses its own Dir*), but still needed for legacy code.
+///
+/// # Safety
+///
+/// `dirp`, `entry`, and `result` must all be valid, non-null pointers.
+#[unsafe(no_mangle)]
+pub extern "C" fn readdir_r(
+    dirp: *mut Dir,
+    entry: *mut Dirent,
+    result: *mut *mut Dirent,
+) -> i32 {
+    if dirp.is_null() || entry.is_null() || result.is_null() {
+        return errno::EINVAL;
+    }
+
+    let ent = readdir(dirp);
+    if ent.is_null() {
+        // End of directory — not an error.
+        // SAFETY: result verified non-null.
+        unsafe { *result = core::ptr::null_mut(); }
+        return 0;
+    }
+
+    // Copy the entry into caller's buffer.
+    // SAFETY: ent points to a valid Dirent (inside Dir.current),
+    // and entry is caller-supplied valid storage.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            ent.cast::<u8>(),
+            entry.cast::<u8>(),
+            core::mem::size_of::<Dirent>(),
+        );
+        *result = entry;
+    }
+
+    0
+}
+
+// ---------------------------------------------------------------------------
+// fdopendir — open directory stream from file descriptor
+// ---------------------------------------------------------------------------
+
+/// Open a directory stream from a file descriptor.
+///
+/// This is a stub that always returns NULL with ENOSYS, because our
+/// Dir implementation buffers the entire directory at open time using
+/// `SYS_FS_LIST_DIR` with a path (not an fd).  Supporting fd-based
+/// directory streams would require kernel support for listing a
+/// directory by fd.
+#[unsafe(no_mangle)]
+pub extern "C" fn fdopendir(_fd: i32) -> *mut Dir {
+    // Our kernel's SYS_FS_LIST_DIR takes a path, not an fd.
+    // Without fd-to-path resolution support, we can't implement this.
+    errno::set_errno(errno::ENOSYS);
+    core::ptr::null_mut()
+}
+
+// ---------------------------------------------------------------------------
 // Static Dir pool (no heap allocator)
 // ---------------------------------------------------------------------------
 

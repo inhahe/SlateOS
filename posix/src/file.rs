@@ -1875,3 +1875,17 @@ fn translate_open_flags(posix_flags: i32) -> u64 {
 
     native
 }
+
+// ---------------------------------------------------------------------------
+// creat — create a new file (POSIX, equivalent to open with O_CREAT|O_WRONLY|O_TRUNC)
+// ---------------------------------------------------------------------------
+
+/// Create a new file or truncate an existing file.
+///
+/// Equivalent to `open(path, O_CREAT | O_WRONLY | O_TRUNC, mode)`.
+/// This is a POSIX function retained for compatibility; new code should
+/// use `open()` directly.
+#[unsafe(no_mangle)]
+pub extern "C" fn creat(path: *const u8, mode: ModeT) -> Fd {
+    open(path, fcntl::O_CREAT | fcntl::O_WRONLY | fcntl::O_TRUNC, mode)
+}

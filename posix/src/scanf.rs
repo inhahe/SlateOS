@@ -1044,3 +1044,567 @@ fn scan_scanset(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
     }
     true
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- %d signed integer tests --
+
+    #[test]
+    fn scan_d_basic() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"42\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn scan_d_negative() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"-17\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, -17);
+    }
+
+    #[test]
+    fn scan_d_positive_sign() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"+99\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 99);
+    }
+
+    #[test]
+    fn scan_d_leading_whitespace() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"   123\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 123);
+    }
+
+    #[test]
+    fn scan_d_zero() {
+        let mut val: i32 = 99;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"0\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 0);
+    }
+
+    #[test]
+    fn scan_d_multiple() {
+        let mut a: i32 = 0;
+        let mut b: i32 = 0;
+        let args = [&raw mut a as u64, &raw mut b as u64];
+        let n = _sscanf_impl(b"10 20\0".as_ptr(), b"%d %d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 2);
+        assert_eq!(a, 10);
+        assert_eq!(b, 20);
+    }
+
+    #[test]
+    fn scan_d_stops_at_non_digit() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"42abc\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn scan_d_empty_input_eof() {
+        let mut val: i32 = 99;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, -1); // EOF
+        assert_eq!(val, 99); // Unchanged.
+    }
+
+    #[test]
+    fn scan_d_no_digits() {
+        let mut val: i32 = 99;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"abc\0".as_ptr(), b"%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 0);
+        assert_eq!(val, 99);
+    }
+
+    #[test]
+    fn scan_d_with_width() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"12345\0".as_ptr(), b"%3d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 123);
+    }
+
+    #[test]
+    fn scan_ld_long() {
+        let mut val: i64 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"999999999999\0".as_ptr(), b"%ld\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 999_999_999_999i64);
+    }
+
+    // -- %u unsigned integer tests --
+
+    #[test]
+    fn scan_u_basic() {
+        let mut val: u32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"65535\0".as_ptr(), b"%u\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 65535);
+    }
+
+    // -- %x hex tests --
+
+    #[test]
+    fn scan_x_basic() {
+        let mut val: u32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"ff\0".as_ptr(), b"%x\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 0xFF);
+    }
+
+    #[test]
+    fn scan_x_prefix() {
+        let mut val: u32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"0xFF\0".as_ptr(), b"%x\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 0xFF);
+    }
+
+    #[test]
+    fn scan_x_upper() {
+        let mut val: u32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"DEADBEEF\0".as_ptr(), b"%X\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 0xDEAD_BEEFu32);
+    }
+
+    // -- %o octal tests --
+
+    #[test]
+    fn scan_o_basic() {
+        let mut val: u32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"77\0".as_ptr(), b"%o\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 0o77);
+    }
+
+    // -- %i auto-detect base --
+
+    #[test]
+    fn scan_i_decimal() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"42\0".as_ptr(), b"%i\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn scan_i_hex() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"0xff\0".as_ptr(), b"%i\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 255);
+    }
+
+    #[test]
+    fn scan_i_octal() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"010\0".as_ptr(), b"%i\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 8);
+    }
+
+    #[test]
+    fn scan_i_negative_hex() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"-0x10\0".as_ptr(), b"%i\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, -16);
+    }
+
+    // -- %s string tests --
+
+    #[test]
+    fn scan_s_basic() {
+        let mut buf = [0u8; 64];
+        let args = [buf.as_mut_ptr() as u64];
+        let n = _sscanf_impl(b"hello\0".as_ptr(), b"%s\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..5], b"hello");
+        assert_eq!(buf[5], 0);
+    }
+
+    #[test]
+    fn scan_s_stops_at_whitespace() {
+        let mut buf = [0u8; 64];
+        let args = [buf.as_mut_ptr() as u64];
+        let n = _sscanf_impl(b"hello world\0".as_ptr(), b"%s\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..5], b"hello");
+        assert_eq!(buf[5], 0);
+    }
+
+    #[test]
+    fn scan_s_with_width() {
+        let mut buf = [0u8; 64];
+        let args = [buf.as_mut_ptr() as u64];
+        let n = _sscanf_impl(b"longstring\0".as_ptr(), b"%4s\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..4], b"long");
+        assert_eq!(buf[4], 0);
+    }
+
+    #[test]
+    fn scan_s_multiple() {
+        let mut buf1 = [0u8; 64];
+        let mut buf2 = [0u8; 64];
+        let args = [buf1.as_mut_ptr() as u64, buf2.as_mut_ptr() as u64];
+        let n = _sscanf_impl(
+            b"hello world\0".as_ptr(),
+            b"%s %s\0".as_ptr(),
+            args.as_ptr(),
+        );
+        assert_eq!(n, 2);
+        assert_eq!(&buf1[..5], b"hello");
+        assert_eq!(&buf2[..5], b"world");
+    }
+
+    #[test]
+    fn scan_s_leading_whitespace() {
+        let mut buf = [0u8; 64];
+        let args = [buf.as_mut_ptr() as u64];
+        let n = _sscanf_impl(b"  \t  foo\0".as_ptr(), b"%s\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..3], b"foo");
+    }
+
+    // -- %c character tests --
+
+    #[test]
+    fn scan_c_single() {
+        let mut ch: u8 = 0;
+        let args = [&raw mut ch as u64];
+        let n = _sscanf_impl(b"A\0".as_ptr(), b"%c\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(ch, b'A');
+    }
+
+    #[test]
+    fn scan_c_no_whitespace_skip() {
+        let mut ch: u8 = 0;
+        let args = [&raw mut ch as u64];
+        let n = _sscanf_impl(b" X\0".as_ptr(), b"%c\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(ch, b' ');
+    }
+
+    #[test]
+    fn scan_c_with_width() {
+        let mut buf = [0u8; 8];
+        let args = [buf.as_mut_ptr() as u64];
+        let n = _sscanf_impl(b"ABCDE\0".as_ptr(), b"%3c\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..3], b"ABC");
+    }
+
+    // -- %n position tests --
+
+    #[test]
+    fn scan_n_position() {
+        let mut val: i32 = 0;
+        let mut pos: i32 = 0;
+        let args = [&raw mut val as u64, &raw mut pos as u64];
+        let n = _sscanf_impl(b"hello 42\0".as_ptr(), b"%*s %d%n\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 42);
+        assert_eq!(pos, 8);
+    }
+
+    // -- %% literal percent --
+
+    #[test]
+    fn scan_percent_literal() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"%42\0".as_ptr(), b"%%%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn scan_percent_mismatch() {
+        let mut val: i32 = 99;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"X42\0".as_ptr(), b"%%%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 0);
+        assert_eq!(val, 99);
+    }
+
+    // -- Literal character matching --
+
+    #[test]
+    fn scan_literal_match() {
+        let mut a: i32 = 0;
+        let mut b: i32 = 0;
+        let args = [&raw mut a as u64, &raw mut b as u64];
+        let n = _sscanf_impl(b"10,20\0".as_ptr(), b"%d,%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 2);
+        assert_eq!(a, 10);
+        assert_eq!(b, 20);
+    }
+
+    #[test]
+    fn scan_literal_mismatch() {
+        let mut a: i32 = 0;
+        let mut b: i32 = 99;
+        let args = [&raw mut a as u64, &raw mut b as u64];
+        let n = _sscanf_impl(b"10;20\0".as_ptr(), b"%d,%d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(a, 10);
+        assert_eq!(b, 99);
+    }
+
+    // -- Suppression (*) --
+
+    #[test]
+    fn scan_suppression() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"ignored 42\0".as_ptr(), b"%*s %d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn scan_suppression_int() {
+        let mut val: i32 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"100 200\0".as_ptr(), b"%*d %d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(val, 200);
+    }
+
+    // -- Null input/format --
+
+    #[test]
+    fn scan_null_input() {
+        let n = _sscanf_impl(core::ptr::null(), b"%d\0".as_ptr(), [].as_ptr());
+        assert_eq!(n, -1);
+    }
+
+    #[test]
+    fn scan_null_format() {
+        let n = _sscanf_impl(b"42\0".as_ptr(), core::ptr::null(), [].as_ptr());
+        assert_eq!(n, -1);
+    }
+
+    // -- %f float tests --
+
+    #[test]
+    fn scan_f_basic() {
+        let mut val: f32 = 0.0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"3.14\0".as_ptr(), b"%f\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert!((val - 3.14).abs() < 0.001, "got {val}");
+    }
+
+    #[test]
+    fn scan_lf_double() {
+        let mut val: f64 = 0.0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"2.718281828\0".as_ptr(), b"%lf\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert!((val - 2.718281828).abs() < 1e-9, "got {val}");
+    }
+
+    #[test]
+    fn scan_f_negative() {
+        let mut val: f32 = 0.0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"-1.5\0".as_ptr(), b"%f\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert!((val - (-1.5)).abs() < 0.001, "got {val}");
+    }
+
+    #[test]
+    fn scan_f_scientific() {
+        let mut val: f64 = 0.0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"1.5e3\0".as_ptr(), b"%lf\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert!((val - 1500.0).abs() < 0.001, "got {val}");
+    }
+
+    #[test]
+    fn scan_f_integer() {
+        let mut val: f32 = 0.0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(b"42\0".as_ptr(), b"%f\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert!((val - 42.0).abs() < 0.001, "got {val}");
+    }
+
+    // -- %[...] scanset tests --
+
+    #[test]
+    fn scan_scanset_basic() {
+        let mut buf = [0u8; 64];
+        let args = [buf.as_mut_ptr() as u64];
+        let n = _sscanf_impl(b"abc123\0".as_ptr(), b"%[abc]\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..3], b"abc");
+        assert_eq!(buf[3], 0);
+    }
+
+    #[test]
+    fn scan_scanset_negated() {
+        let mut buf = [0u8; 64];
+        let args = [buf.as_mut_ptr() as u64];
+        let n = _sscanf_impl(b"hello world\0".as_ptr(), b"%[^ ]\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..5], b"hello");
+        assert_eq!(buf[5], 0);
+    }
+
+    #[test]
+    fn scan_scanset_range() {
+        let mut buf = [0u8; 64];
+        let args = [buf.as_mut_ptr() as u64];
+        let n = _sscanf_impl(b"abcXYZ\0".as_ptr(), b"%[a-z]\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..3], b"abc");
+        assert_eq!(buf[3], 0);
+    }
+
+    #[test]
+    fn scan_scanset_leading_bracket() {
+        let mut buf = [0u8; 64];
+        let args = [buf.as_mut_ptr() as u64];
+        let n = _sscanf_impl(b"]ab\0".as_ptr(), b"%[]ab]\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..3], b"]ab");
+    }
+
+    #[test]
+    fn scan_scanset_digits() {
+        let mut buf = [0u8; 64];
+        let args = [buf.as_mut_ptr() as u64];
+        let n = _sscanf_impl(b"12345abc\0".as_ptr(), b"%[0-9]\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(&buf[..5], b"12345");
+        assert_eq!(buf[5], 0);
+    }
+
+    // -- Mixed conversions --
+
+    #[test]
+    fn scan_mixed_types() {
+        let mut name = [0u8; 64];
+        let mut age: i32 = 0;
+        let mut score: f32 = 0.0;
+        let args = [
+            name.as_mut_ptr() as u64,
+            &raw mut age as u64,
+            &raw mut score as u64,
+        ];
+        let n = _sscanf_impl(
+            b"Alice 30 95.5\0".as_ptr(),
+            b"%s %d %f\0".as_ptr(),
+            args.as_ptr(),
+        );
+        assert_eq!(n, 3);
+        assert_eq!(&name[..5], b"Alice");
+        assert_eq!(age, 30);
+        assert!((score - 95.5).abs() < 0.1, "got {score}");
+    }
+
+    #[test]
+    fn scan_partial_match() {
+        let mut a: i32 = 0;
+        let mut b: i32 = 99;
+        let args = [&raw mut a as u64, &raw mut b as u64];
+        let n = _sscanf_impl(b"42 xyz\0".as_ptr(), b"%d %d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 1);
+        assert_eq!(a, 42);
+        assert_eq!(b, 99);
+    }
+
+    // -- Whitespace matching --
+
+    #[test]
+    fn scan_whitespace_in_format() {
+        let mut a: i32 = 0;
+        let mut b: i32 = 0;
+        let args = [&raw mut a as u64, &raw mut b as u64];
+        let n = _sscanf_impl(
+            b"10\t\t\n  20\0".as_ptr(),
+            b"%d %d\0".as_ptr(),
+            args.as_ptr(),
+        );
+        assert_eq!(n, 2);
+        assert_eq!(a, 10);
+        assert_eq!(b, 20);
+    }
+
+    // -- Edge cases --
+
+    #[test]
+    fn scan_empty_format() {
+        let n = _sscanf_impl(b"hello\0".as_ptr(), b"\0".as_ptr(), [].as_ptr());
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn scan_three_ints() {
+        let mut a: i32 = 0;
+        let mut b: i32 = 0;
+        let mut c: i32 = 0;
+        let args = [
+            &raw mut a as u64,
+            &raw mut b as u64,
+            &raw mut c as u64,
+        ];
+        let n = _sscanf_impl(b"1 2 3\0".as_ptr(), b"%d %d %d\0".as_ptr(), args.as_ptr());
+        assert_eq!(n, 3);
+        assert_eq!(a, 1);
+        assert_eq!(b, 2);
+        assert_eq!(c, 3);
+    }
+
+    #[test]
+    fn scan_hex_long() {
+        let mut val: u64 = 0;
+        let args = [&raw mut val as u64];
+        let n = _sscanf_impl(
+            b"0xDEADBEEFCAFE\0".as_ptr(),
+            b"%lx\0".as_ptr(),
+            args.as_ptr(),
+        );
+        assert_eq!(n, 1);
+        assert_eq!(val, 0xDEAD_BEEF_CAFEu64);
+    }
+}

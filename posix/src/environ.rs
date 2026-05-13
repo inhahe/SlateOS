@@ -204,18 +204,24 @@ pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
     let store = unsafe { core::ptr::addr_of_mut!(ENV_STORE).as_mut() };
     let Some(store) = store else { return 0 };
 
+    // POSIX requires removing ALL entries with the given name, not just
+    // the first.  Duplicates shouldn't arise through normal setenv/putenv
+    // use, but external manipulation of `environ` could create them.
+    let mut removed = false;
     for entry in store.iter_mut() {
         if entry[0] == 0 {
             continue;
         }
         if entry_matches_name(entry, name, name_len) {
             entry[0] = 0; // Mark as empty.
-            rebuild_environ_ptrs();
-            return 0;
+            removed = true;
         }
     }
+    if removed {
+        rebuild_environ_ptrs();
+    }
 
-    0 // Variable didn't exist — not an error.
+    0 // Success (even if variable didn't exist).
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +267,12 @@ pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
     }
 
     let name_len = eq_pos;
+
+    // POSIX: name portion must not be empty.
+    if name_len == 0 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
     let value_ptr = unsafe { string.add(eq_pos.wrapping_add(1)) };
     let value_len = total_len.wrapping_sub(eq_pos).wrapping_sub(1);
 

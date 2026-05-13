@@ -49,6 +49,13 @@ pub extern "C" fn sem_init(sem: *mut SemT, _pshared: i32, value: u32) -> i32 {
         return -1;
     }
 
+    // Guard against u32 values that would wrap to negative when cast
+    // to i32.  Our SEM_VALUE_MAX is i32::MAX.
+    if value > i32::MAX as u32 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     // SAFETY: Caller guarantees sem is valid and writable.
     unsafe {
         core::ptr::addr_of_mut!((*sem).value)
@@ -145,8 +152,28 @@ pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
     }
 
     let atomic = unsafe { &(*sem).value };
-    atomic.fetch_add(1, core::sync::atomic::Ordering::Release);
-    0
+
+    // POSIX: return EOVERFLOW if incrementing would exceed SEM_VALUE_MAX.
+    // Without this check, wrapping past i32::MAX produces a negative value,
+    // which sem_wait interprets as "no resources", causing deadlock.
+    loop {
+        let current = atomic.load(core::sync::atomic::Ordering::Relaxed);
+        if current == i32::MAX {
+            errno::set_errno(errno::EOVERFLOW);
+            return -1;
+        }
+        if atomic
+            .compare_exchange_weak(
+                current,
+                current.wrapping_add(1),
+                core::sync::atomic::Ordering::Release,
+                core::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            return 0;
+        }
+    }
 }
 
 /// Lock a semaphore with a timeout.

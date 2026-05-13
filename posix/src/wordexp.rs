@@ -23,25 +23,25 @@
 // ---------------------------------------------------------------------------
 
 /// Append to previous result (not supported — ignored).
-pub const WRDE_APPEND: i32 = 1;
+pub const WRDE_APPEND: i32 = 2;
 /// Do not run commands (`` `cmd` `` and `$(cmd)` cause `WRDE_CMDSUB`).
-pub const WRDE_NOCMD: i32 = 2;
+pub const WRDE_NOCMD: i32 = 4;
 /// Reuse a previous `wordexp_t` result.
-pub const WRDE_REUSE: i32 = 4;
+pub const WRDE_REUSE: i32 = 8;
 /// Report errors on stderr (ignored — we set errno instead).
-pub const WRDE_SHOWERR: i32 = 8;
+pub const WRDE_SHOWERR: i32 = 16;
 /// Treat undefined variables as errors.
-pub const WRDE_UNDEF: i32 = 16;
+pub const WRDE_UNDEF: i32 = 32;
 
-// Error return codes.
-/// Illegal NUL byte in word.
-pub const WRDE_BADCHAR: i32 = 1;
-/// Undefined shell variable (with `WRDE_UNDEF`).
-pub const WRDE_BADVAL: i32 = 2;
-/// Command substitution requested with `WRDE_NOCMD`.
-pub const WRDE_CMDSUB: i32 = 3;
+// Error return codes (values match glibc/musl).
 /// Out of memory.
-pub const WRDE_NOSPACE: i32 = 4;
+pub const WRDE_NOSPACE: i32 = 1;
+/// Illegal NUL byte in word.
+pub const WRDE_BADCHAR: i32 = 2;
+/// Undefined shell variable (with `WRDE_UNDEF`).
+pub const WRDE_BADVAL: i32 = 3;
+/// Command substitution requested with `WRDE_NOCMD`.
+pub const WRDE_CMDSUB: i32 = 4;
 /// Shell syntax error.
 #[allow(dead_code)]
 pub const WRDE_SYNTAX: i32 = 5;

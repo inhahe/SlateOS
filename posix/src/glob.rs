@@ -29,12 +29,12 @@ use crate::string;
 
 /// Return on read error (stop scanning).
 pub const GLOB_ERR: i32 = 1;
-/// Append results to an existing `glob_t`.
-pub const GLOB_APPEND: i32 = 2;
-/// Return the pattern itself if no matches.
-pub const GLOB_NOCHECK: i32 = 8;
 /// Mark directories with a trailing slash.
-pub const GLOB_MARK: i32 = 32;
+pub const GLOB_MARK: i32 = 2;
+/// Return the pattern itself if no matches.
+pub const GLOB_NOCHECK: i32 = 16;
+/// Append results to an existing `glob_t`.
+pub const GLOB_APPEND: i32 = 32;
 
 /// No matches found.
 pub const GLOB_NOMATCH: i32 = 3;

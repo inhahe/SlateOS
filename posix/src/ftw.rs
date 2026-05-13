@@ -40,14 +40,14 @@ pub const FTW_DP: i32 = 5;
 /// Symbolic link pointing to nonexistent file (nftw with FTW_PHYS).
 pub const FTW_SLN: i32 = 6;
 
-/// `nftw` flag: do a depth-first search (call callback after children).
-pub const FTW_DEPTH: i32 = 1;
+/// `nftw` flag: do not follow symbolic links.
+pub const FTW_PHYS: i32 = 1;
 /// `nftw` flag: stay on the same filesystem.
 pub const FTW_MOUNT: i32 = 2;
-/// `nftw` flag: do not follow symbolic links.
-pub const FTW_PHYS: i32 = 4;
 /// `nftw` flag: change to each directory before reading it.
-pub const FTW_CHDIR: i32 = 8;
+pub const FTW_CHDIR: i32 = 4;
+/// `nftw` flag: do a depth-first search (call callback after children).
+pub const FTW_DEPTH: i32 = 8;
 
 /// Extra info passed to the `nftw` callback.
 #[repr(C)]

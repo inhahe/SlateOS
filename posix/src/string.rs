@@ -2131,6 +2131,207 @@ mod tests {
         assert_eq!(len, 11); // 5 + 6
         assert_eq!(&dst[..12], b"hello world\0");
     }
+
+    // -----------------------------------------------------------------------
+    // memcpy / memmove edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_memcpy_zero_length() {
+        let src = [1u8, 2, 3];
+        let mut dst = [0u8; 3];
+        unsafe { memcpy(dst.as_mut_ptr(), src.as_ptr(), 0) };
+        assert_eq!(dst, [0, 0, 0], "zero-length memcpy should not modify dst");
+    }
+
+    #[test]
+    fn test_memmove_zero_length() {
+        let mut buf = [1u8, 2, 3];
+        unsafe { memmove(buf.as_mut_ptr(), buf.as_ptr(), 0) };
+        assert_eq!(buf, [1, 2, 3], "zero-length memmove should not modify");
+    }
+
+    #[test]
+    fn test_memmove_overlap_forward() {
+        // Overlapping copy where dst > src.
+        let mut buf = [1u8, 2, 3, 4, 5, 0, 0];
+        unsafe { memmove(buf.as_mut_ptr().add(2), buf.as_ptr(), 5) };
+        assert_eq!(buf, [1, 2, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_memmove_overlap_backward() {
+        // Overlapping copy where dst < src.
+        let mut buf = [0u8, 0, 1, 2, 3, 4, 5];
+        unsafe { memmove(buf.as_mut_ptr(), buf.as_ptr().add(2), 5) };
+        assert_eq!(buf, [1, 2, 3, 4, 5, 4, 5]);
+    }
+
+    #[test]
+    fn test_memcpy_single_byte() {
+        let src = [0xABu8];
+        let mut dst = [0u8];
+        unsafe { memcpy(dst.as_mut_ptr(), src.as_ptr(), 1) };
+        assert_eq!(dst[0], 0xAB);
+    }
+
+    // -----------------------------------------------------------------------
+    // strncpy edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strncpy_pads_with_nuls() {
+        // POSIX: strncpy pads remainder with NUL bytes.
+        let mut dst = [0xFFu8; 10];
+        let src = b"hi\0";
+        unsafe { strncpy(dst.as_mut_ptr(), src.as_ptr(), 10) };
+        assert_eq!(&dst, b"hi\0\0\0\0\0\0\0\0");
+    }
+
+    #[test]
+    fn test_strncpy_exact_length_no_nul() {
+        // POSIX: strncpy does NOT add NUL if src is >= n chars long.
+        let mut dst = [0xFFu8; 3];
+        let src = b"abcde\0";
+        unsafe { strncpy(dst.as_mut_ptr(), src.as_ptr(), 3) };
+        assert_eq!(dst, [b'a', b'b', b'c']);
+    }
+
+    #[test]
+    fn test_strncpy_zero_n() {
+        let mut dst = [0xFFu8; 3];
+        let src = b"abc\0";
+        unsafe { strncpy(dst.as_mut_ptr(), src.as_ptr(), 0) };
+        assert_eq!(dst, [0xFF, 0xFF, 0xFF], "zero n should not modify dst");
+    }
+
+    // -----------------------------------------------------------------------
+    // strncat edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strncat_always_nul_terminates() {
+        let mut dst = [0u8; 10];
+        dst[0] = b'A';
+        dst[1] = 0;
+        let src = b"BCDEF\0";
+        unsafe { strncat(dst.as_mut_ptr(), src.as_ptr(), 3) };
+        assert_eq!(&dst[..5], b"ABCD\0");
+    }
+
+    #[test]
+    fn test_strncat_zero_n() {
+        let mut dst = [0u8; 10];
+        dst[..4].copy_from_slice(b"abc\0");
+        let src = b"xyz\0";
+        unsafe { strncat(dst.as_mut_ptr(), src.as_ptr(), 0) };
+        assert_eq!(&dst[..4], b"abc\0", "zero n should append nothing");
+    }
+
+    // -----------------------------------------------------------------------
+    // memcmp edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_memcmp_same_bytes() {
+        let a = b"hello";
+        let b = b"hello";
+        assert_eq!(unsafe { memcmp(a.as_ptr(), b.as_ptr(), 5) }, 0);
+    }
+
+    #[test]
+    fn test_memcmp_ordering_less() {
+        let a = b"abcde";
+        let b = b"abcdf";
+        assert!(unsafe { memcmp(a.as_ptr(), b.as_ptr(), 5) } < 0);
+    }
+
+    #[test]
+    fn test_memcmp_ordering_greater() {
+        let a = b"abcdf";
+        let b = b"abcde";
+        assert!(unsafe { memcmp(a.as_ptr(), b.as_ptr(), 5) } > 0);
+    }
+
+    #[test]
+    fn test_memcmp_zero_len() {
+        let a = b"abc";
+        let b = b"xyz";
+        assert_eq!(
+            unsafe { memcmp(a.as_ptr(), b.as_ptr(), 0) },
+            0,
+            "zero-length memcmp should return 0"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // strstr additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strstr_needle_at_start() {
+        let hay = b"hello world\0";
+        let needle = b"hello\0";
+        let result = unsafe { strstr(hay.as_ptr(), needle.as_ptr()) };
+        assert_eq!(result, hay.as_ptr());
+    }
+
+    #[test]
+    fn test_strstr_needle_at_end() {
+        let hay = b"hello world\0";
+        let needle = b"world\0";
+        let result = unsafe { strstr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(!result.is_null());
+        assert_eq!(unsafe { *result }, b'w');
+    }
+
+    // -----------------------------------------------------------------------
+    // memset edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_memset_zero_length() {
+        let mut buf = [0xFFu8; 4];
+        unsafe { memset(buf.as_mut_ptr(), 0, 0) };
+        assert_eq!(buf, [0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn test_memset_full_buffer() {
+        let mut buf = [0u8; 8];
+        unsafe { memset(buf.as_mut_ptr(), 0xAB, 8) };
+        assert_eq!(buf, [0xAB; 8]);
+    }
+
+    // -----------------------------------------------------------------------
+    // swab
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_swab_basic() {
+        let src = [1u8, 2, 3, 4];
+        let mut dst = [0u8; 4];
+        unsafe { swab(src.as_ptr(), dst.as_mut_ptr(), 4) };
+        assert_eq!(dst, [2, 1, 4, 3]);
+    }
+
+    #[test]
+    fn test_swab_odd_length() {
+        // Odd trailing byte is not swapped.
+        let src = [1u8, 2, 3, 4, 5];
+        let mut dst = [0u8; 5];
+        unsafe { swab(src.as_ptr(), dst.as_mut_ptr(), 5) };
+        // Only 2 complete pairs swapped.
+        assert_eq!(&dst[..4], &[2, 1, 4, 3]);
+    }
+
+    #[test]
+    fn test_swab_zero_length() {
+        let src = [1u8, 2];
+        let mut dst = [0xFFu8; 2];
+        unsafe { swab(src.as_ptr(), dst.as_mut_ptr(), 0) };
+        assert_eq!(dst, [0xFF, 0xFF], "zero length should not modify dst");
+    }
 }
 
 // ===========================================================================

@@ -1832,3 +1832,227 @@ fn mode_to_flags(mode: *const u8) -> i32 {
         _ => -1,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::undocumented_unsafe_blocks)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Constants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_eof_value() {
+        assert_eq!(EOF, -1, "EOF must be -1");
+    }
+
+    #[test]
+    fn test_buffering_mode_constants() {
+        // _IOFBF = 0, _IOLBF = 1, _IONBF = 2 (POSIX/glibc values).
+        assert_eq!(BUF_MODE_FULL, 0);
+        assert_eq!(BUF_MODE_LINE, 1);
+        assert_eq!(BUF_MODE_NONE, 2);
+    }
+
+    #[test]
+    fn test_buf_size() {
+        // Internal buffer should be at least 256 bytes for reasonable perf.
+        assert!(BUF_SIZE >= 256, "BUF_SIZE too small: {BUF_SIZE}");
+    }
+
+    // -----------------------------------------------------------------------
+    // File struct layout
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_file_struct_default_state() {
+        let f = File::new(42, BUF_MODE_FULL);
+        assert_eq!(f.fd, 42);
+        assert_eq!(f.buf_pos, 0);
+        assert_eq!(f.buf_len, 0);
+        assert_eq!(f.buf_dir, BUF_DIR_IDLE);
+        assert_eq!(f.buf_mode, BUF_MODE_FULL);
+        assert_eq!(f.flags, 0);
+        assert_eq!(f.ungetc_byte, -1, "no pushed-back byte initially");
+    }
+
+    #[test]
+    fn test_standard_stream_modes() {
+        // stdin: line-buffered.
+        let f_in = File::new(STDIN_FD, BUF_MODE_LINE);
+        assert_eq!(f_in.fd, 0);
+        assert_eq!(f_in.buf_mode, BUF_MODE_LINE);
+
+        // stdout: line-buffered.
+        let f_out = File::new(STDOUT_FD, BUF_MODE_LINE);
+        assert_eq!(f_out.fd, 1);
+        assert_eq!(f_out.buf_mode, BUF_MODE_LINE);
+
+        // stderr: unbuffered.
+        let f_err = File::new(STDERR_FD, BUF_MODE_NONE);
+        assert_eq!(f_err.fd, 2);
+        assert_eq!(f_err.buf_mode, BUF_MODE_NONE);
+    }
+
+    // -----------------------------------------------------------------------
+    // mode_to_flags
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mode_to_flags_read() {
+        let flags = mode_to_flags(b"r\0".as_ptr());
+        assert_eq!(flags, crate::fcntl::O_RDONLY);
+    }
+
+    #[test]
+    fn test_mode_to_flags_write() {
+        let flags = mode_to_flags(b"w\0".as_ptr());
+        assert_eq!(
+            flags,
+            crate::fcntl::O_WRONLY | crate::fcntl::O_CREAT | crate::fcntl::O_TRUNC
+        );
+    }
+
+    #[test]
+    fn test_mode_to_flags_append() {
+        let flags = mode_to_flags(b"a\0".as_ptr());
+        assert_eq!(
+            flags,
+            crate::fcntl::O_WRONLY | crate::fcntl::O_CREAT | crate::fcntl::O_APPEND
+        );
+    }
+
+    #[test]
+    fn test_mode_to_flags_read_plus() {
+        assert_eq!(
+            mode_to_flags(b"r+\0".as_ptr()),
+            crate::fcntl::O_RDWR
+        );
+    }
+
+    #[test]
+    fn test_mode_to_flags_write_plus() {
+        assert_eq!(
+            mode_to_flags(b"w+\0".as_ptr()),
+            crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_TRUNC
+        );
+    }
+
+    #[test]
+    fn test_mode_to_flags_append_plus() {
+        assert_eq!(
+            mode_to_flags(b"a+\0".as_ptr()),
+            crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_APPEND
+        );
+    }
+
+    #[test]
+    fn test_mode_to_flags_binary_variants() {
+        // "rb" = read binary (binary flag is a no-op, still O_RDONLY).
+        assert_eq!(mode_to_flags(b"rb\0".as_ptr()), crate::fcntl::O_RDONLY);
+        // "wb" = write binary.
+        assert_eq!(
+            mode_to_flags(b"wb\0".as_ptr()),
+            crate::fcntl::O_WRONLY | crate::fcntl::O_CREAT | crate::fcntl::O_TRUNC
+        );
+        // "ab" = append binary.
+        assert_eq!(
+            mode_to_flags(b"ab\0".as_ptr()),
+            crate::fcntl::O_WRONLY | crate::fcntl::O_CREAT | crate::fcntl::O_APPEND
+        );
+    }
+
+    #[test]
+    fn test_mode_to_flags_binary_plus() {
+        // "rb+" and "r+b" should both yield O_RDWR.
+        assert_eq!(
+            mode_to_flags(b"rb+\0".as_ptr()),
+            crate::fcntl::O_RDWR
+        );
+        assert_eq!(
+            mode_to_flags(b"r+b\0".as_ptr()),
+            crate::fcntl::O_RDWR
+        );
+        // "wb+" and "w+b" should both yield O_RDWR|O_CREAT|O_TRUNC.
+        let expected_w = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_TRUNC;
+        assert_eq!(mode_to_flags(b"wb+\0".as_ptr()), expected_w);
+        assert_eq!(mode_to_flags(b"w+b\0".as_ptr()), expected_w);
+        // "ab+" and "a+b".
+        let expected_a = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_APPEND;
+        assert_eq!(mode_to_flags(b"ab+\0".as_ptr()), expected_a);
+        assert_eq!(mode_to_flags(b"a+b\0".as_ptr()), expected_a);
+    }
+
+    #[test]
+    fn test_mode_to_flags_invalid() {
+        assert_eq!(mode_to_flags(b"x\0".as_ptr()), -1);
+        assert_eq!(mode_to_flags(b"z\0".as_ptr()), -1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Sentinel system
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sentinel_values() {
+        assert_eq!(STDIN_SENTINEL, 0);
+        assert_eq!(STDOUT_SENTINEL, 1);
+        assert_eq!(STDERR_SENTINEL, 2);
+    }
+
+    #[test]
+    fn test_stream_to_file_sentinel_stdin() {
+        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        assert!(!file.is_null());
+        let f = unsafe { &*file };
+        assert_eq!(f.fd, STDIN_FD);
+    }
+
+    #[test]
+    fn test_stream_to_file_sentinel_stdout() {
+        let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
+        assert!(!file.is_null());
+        let f = unsafe { &*file };
+        assert_eq!(f.fd, STDOUT_FD);
+    }
+
+    #[test]
+    fn test_stream_to_file_sentinel_stderr() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        assert!(!file.is_null());
+        let f = unsafe { &*file };
+        assert_eq!(f.fd, STDERR_FD);
+    }
+
+    // -----------------------------------------------------------------------
+    // FILE flags
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_flag_bits_distinct() {
+        assert_eq!(FLAG_EOF & FLAG_ERR, 0, "EOF and ERR flags must not overlap");
+    }
+
+    #[test]
+    fn test_ungetc_byte_sentinel() {
+        // -1 means no byte pushed back.
+        let f = File::new(0, BUF_MODE_LINE);
+        assert!(f.ungetc_byte < 0, "no pushed byte initially");
+    }
+
+    // -----------------------------------------------------------------------
+    // File pool
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_file_slot_empty() {
+        let slot = FileSlot::EMPTY;
+        assert!(!slot.in_use);
+        assert_eq!(slot.file.fd, -1);
+    }
+}

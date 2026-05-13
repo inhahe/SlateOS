@@ -161,6 +161,7 @@ mod udriver;
 mod unicode;
 mod userns;
 mod virtio;
+mod vmguest;
 mod watchdog;
 #[allow(dead_code)]
 mod xhci;

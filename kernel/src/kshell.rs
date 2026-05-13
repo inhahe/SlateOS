@@ -3531,6 +3531,7 @@ const COMMANDS: &[&str] = &[
     "udriver", "udrvfw",
     "devhotplug", "devhp",
     "devpower", "devpm",
+    "vmguest", "vmtools",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4716,6 +4717,7 @@ fn dispatch(line: &str) {
         "udriver" | "udrvfw" => cmd_udriver(args),
         "devhotplug" | "devhp" => cmd_devhotplug(args),
         "devpower" | "devpm" => cmd_devpower(args),
+        "vmguest" | "vmtools" => cmd_vmguest(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -33990,6 +33992,129 @@ fn cmd_devpower(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'devpower help'.", sub);
+        }
+    }
+}
+
+/// `vmguest` / `vmtools` — VM guest integration services.
+fn cmd_vmguest(args: &str) {
+    use crate::vmguest;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", vmguest::procfs_content());
+        }
+        "status" => {
+            let (init, hv, supported, active, ticks) = vmguest::stats();
+            shell_println!("VM Guest Integration");
+            shell_println!("  Hypervisor:   {}", hv);
+            shell_println!("  Initialized:  {}", init);
+            shell_println!("  Features:     {}/{} active", active, supported);
+            shell_println!("  Ticks:        {}", ticks);
+            shell_println!("  Clock source: {}", vmguest::clock_source());
+        }
+        "features" => {
+            use crate::vmguest::GuestFeature;
+            let features = [
+                GuestFeature::ParavirtClock,
+                GuestFeature::GracefulShutdown,
+                GuestFeature::DisplayResize,
+                GuestFeature::MemoryBalloon,
+                GuestFeature::Heartbeat,
+                GuestFeature::GuestInfo,
+                GuestFeature::ClipboardSync,
+                GuestFeature::TimeSynchronization,
+            ];
+            shell_println!("{:<22} {:<12} {}", "Feature", "Supported", "Active");
+            for f in &features {
+                let sup = vmguest::is_feature_supported(*f);
+                let act = vmguest::is_feature_active(*f);
+                shell_println!(
+                    "{:<22} {:<12} {}",
+                    f.label(),
+                    if sup { "yes" } else { "no" },
+                    if act { "active" } else { "-" },
+                );
+            }
+        }
+        "balloon" => {
+            let (inflated, target, tot_in, tot_out, max_pg, auto) = vmguest::balloon_info();
+            shell_println!("Memory Balloon");
+            shell_println!("  Inflated pages:  {} ({} KiB)", inflated, inflated.saturating_mul(16));
+            shell_println!("  Target pages:    {} ({} KiB)", target, target.saturating_mul(16));
+            shell_println!("  Max pages:       {} ({} KiB)", max_pg, max_pg.saturating_mul(16));
+            shell_println!("  Total inflated:  {}", tot_in);
+            shell_println!("  Total deflated:  {}", tot_out);
+            shell_println!("  Auto-balance:    {}", if auto { "on" } else { "off" });
+        }
+        "heartbeat" => {
+            let (sent, failed, last_ns, ack) = vmguest::heartbeat_stats();
+            shell_println!("Heartbeat");
+            shell_println!("  Sent:      {}", sent);
+            shell_println!("  Failed:    {}", failed);
+            shell_println!("  Last (ns): {}", last_ns);
+            shell_println!("  Host ack:  {}", ack);
+        }
+        "clock" => {
+            let (reads, drift, corrections) = vmguest::clock_stats();
+            shell_println!("Paravirt Clock");
+            shell_println!("  Source:       {}", vmguest::clock_source());
+            shell_println!("  Reads:        {}", reads);
+            shell_println!("  Drift (ns):   {}", drift);
+            shell_println!("  Corrections:  {}", corrections);
+        }
+        "info" => {
+            let (os_name, os_ver, kver, cpus, mem, host, reports) = vmguest::guest_info();
+            shell_println!("Guest Info (reported to host)");
+            shell_println!("  OS:       {} {}", os_name, os_ver);
+            shell_println!("  Kernel:   {}", kver);
+            shell_println!("  CPUs:     {}", cpus);
+            shell_println!("  Memory:   {} bytes ({} MiB)", mem, mem / (1024 * 1024));
+            shell_println!("  Hostname: {}", host);
+            shell_println!("  Reports:  {}", reports);
+        }
+        "display" => {
+            let (w, h) = vmguest::display_resolution();
+            if w > 0 {
+                shell_println!("Display: {}x{}", w, h);
+            } else {
+                shell_println!("Display: not managed by guest tools");
+            }
+        }
+        "resize" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: vmguest resize <width> <height>");
+            } else {
+                let w: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                let h: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                if w == 0 || h == 0 {
+                    shell_println!("Invalid dimensions");
+                } else {
+                    let (ew, eh) = vmguest::request_display_resize(w, h);
+                    shell_println!("Requested: {}x{}, effective: {}x{}", w, h, ew, eh);
+                }
+            }
+        }
+        "test" => {
+            vmguest::self_test();
+            shell_println!("VM guest integration self-test: PASSED");
+        }
+        "help" => {
+            shell_println!("vmguest — VM guest integration services");
+            shell_println!("  show            Full status overview");
+            shell_println!("  status          Summary status");
+            shell_println!("  features        Feature support matrix");
+            shell_println!("  balloon         Memory balloon state");
+            shell_println!("  heartbeat       Heartbeat statistics");
+            shell_println!("  clock           Paravirt clock info");
+            shell_println!("  info            Guest info reported to host");
+            shell_println!("  display         Current display resolution");
+            shell_println!("  resize W H      Request display resize");
+            shell_println!("  test            Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'vmguest help'.", sub);
         }
     }
 }
@@ -64486,7 +64611,7 @@ fn is_builtin(name: &str) -> bool {
         | "specmit" | "spectre" | "stackcheck" | "strace" | "strings" | "symbols"
         | "syscallprof" | "syshealth" | "tar" | "temp" | "termtest" | "thermal"
         | "tickjitter" | "tlb" | "tlbgather" | "topo" | "topology" | "vectors"
-        | "vm" | "vmalloc" | "vminfo" | "warnings" | "watermark" | "wchan" | "wipe"
+        | "vm" | "vmalloc" | "vmguest" | "vminfo" | "vmtools" | "warnings" | "watermark" | "wchan" | "wipe"
         | "wmark" | "xsave" | "xz"
     )
 }

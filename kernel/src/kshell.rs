@@ -3533,6 +3533,7 @@ const COMMANDS: &[&str] = &[
     "devpower", "devpm",
     "vmguest", "vmtools",
     "pciids", "lspci",
+    "upnp", "portfwd",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4720,6 +4721,7 @@ fn dispatch(line: &str) {
         "devpower" | "devpm" => cmd_devpower(args),
         "vmguest" | "vmtools" => cmd_vmguest(args),
         "pciids" | "lspci" => cmd_pciids(args),
+        "upnp" | "portfwd" => cmd_upnp(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -34227,6 +34229,113 @@ fn cmd_pciids(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'pciids help'.", sub);
+        }
+    }
+}
+
+/// `upnp` / `portfwd` — UPnP IGD / NAT-PMP port forwarding.
+fn cmd_upnp(args: &str) {
+    use crate::net::upnp;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", upnp::procfs_content());
+        }
+        "status" => {
+            let (init, method, ext_ip, count, created, removed, renewals, failures) = upnp::stats();
+            shell_println!("UPnP/NAT-PMP Port Forwarding");
+            shell_println!("  Initialized:  {}", init);
+            shell_println!("  Method:       {}", method.label());
+            shell_println!("  External IP:  {}", if ext_ip != 0 { alloc::format!("{}.{}.{}.{}", (ext_ip >> 24) & 0xFF, (ext_ip >> 16) & 0xFF, (ext_ip >> 8) & 0xFF, ext_ip & 0xFF) } else { String::from("unknown") });
+            shell_println!("  Active:       {}", count);
+            shell_println!("  Created:      {}", created);
+            shell_println!("  Removed:      {}", removed);
+            shell_println!("  Renewals:     {}", renewals);
+            shell_println!("  Failures:     {}", failures);
+        }
+        "list" => {
+            let mappings = upnp::all_mappings();
+            if mappings.is_empty() {
+                shell_println!("No active port mappings");
+            } else {
+                shell_println!("{:<6} {:<10} {:<10} {:<10} {}", "Proto", "Internal", "External", "State", "Description");
+                for m in &mappings {
+                    shell_println!(
+                        "{:<6} {:<10} {:<10} {:<10} {}",
+                        m.protocol.label(),
+                        m.internal_port,
+                        m.external_port,
+                        m.state.label(),
+                        m.description,
+                    );
+                }
+            }
+        }
+        "add" => {
+            // upnp add <tcp|udp> <internal_port> [external_port] [lifetime] [description]
+            if parts.len() < 3 {
+                shell_println!("Usage: upnp add <tcp|udp> <port> [ext_port] [lifetime] [desc]");
+                return;
+            }
+            let proto = match parts.get(1).copied().unwrap_or("") {
+                "tcp" | "TCP" => upnp::Protocol::Tcp,
+                "udp" | "UDP" => upnp::Protocol::Udp,
+                _ => {
+                    shell_println!("Protocol must be 'tcp' or 'udp'");
+                    return;
+                }
+            };
+            let int_port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            if int_port == 0 {
+                shell_println!("Invalid port");
+                return;
+            }
+            let ext_port: u16 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(int_port);
+            let lifetime: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(3600);
+            let desc = parts.get(5..).map(|s| s.join(" ")).unwrap_or_default();
+            let desc = if desc.is_empty() { String::from("kshell") } else { desc };
+
+            match upnp::add_mapping(proto, int_port, ext_port, lifetime, &desc) {
+                Some(idx) => shell_println!("Added mapping #{}: {} {}→{} ({}s)", idx, proto.label(), int_port, ext_port, lifetime),
+                None => shell_println!("Failed to add mapping"),
+            }
+        }
+        "remove" | "rm" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: upnp remove <tcp|udp> <port>");
+                return;
+            }
+            let proto = match parts.get(1).copied().unwrap_or("") {
+                "tcp" | "TCP" => upnp::Protocol::Tcp,
+                "udp" | "UDP" => upnp::Protocol::Udp,
+                _ => {
+                    shell_println!("Protocol must be 'tcp' or 'udp'");
+                    return;
+                }
+            };
+            let port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            if upnp::remove_mapping(proto, port) {
+                shell_println!("Removed mapping for {} port {}", proto.label(), port);
+            } else {
+                shell_println!("No mapping found for {} port {}", proto.label(), port);
+            }
+        }
+        "test" => {
+            upnp::self_test();
+            shell_println!("UPnP/NAT-PMP self-test: PASSED");
+        }
+        "help" => {
+            shell_println!("upnp — UPnP IGD / NAT-PMP port forwarding");
+            shell_println!("  show            Full status overview");
+            shell_println!("  status          Summary statistics");
+            shell_println!("  list            List active mappings");
+            shell_println!("  add P PORT [EP] [LT] [DESC]  Add mapping");
+            shell_println!("  remove P PORT   Remove mapping");
+            shell_println!("  test            Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'upnp help'.", sub);
         }
     }
 }
@@ -64685,6 +64794,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
+        | "upnp" | "portfwd"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

@@ -424,7 +424,7 @@ pub extern "C" fn posix_spawn(
     };
 
     // Load the ELF binary using the resolved absolute path.
-    let (buf_ptr, elf_len) = match load_elf(resolved.as_ptr(), resolved_len) {
+    let (buf_ptr, alloc_size, data_size) = match load_elf(resolved.as_ptr(), resolved_len) {
         Ok(result) => result,
         Err(err) => return err,
     };
@@ -433,13 +433,14 @@ pub extern "C" fn posix_spawn(
     let ret = syscall4(
         SYS_PROCESS_SPAWN,
         buf_ptr as u64,
-        elf_len as u64,
+        data_size as u64,
         resolved.as_ptr() as u64,  // Use resolved path as the process name.
         resolved_len as u64,
     );
 
-    // Free the ELF buffer.
-    let _ = mman::munmap(buf_ptr.cast::<core::ffi::c_void>(), elf_len);
+    // Free the ELF buffer (must use alloc_size, not data_size, to
+    // unmap the entire mmap'd region and avoid memory leaks).
+    let _ = mman::munmap(buf_ptr.cast::<core::ffi::c_void>(), alloc_size);
 
     if ret < 0 {
         return native_to_posix_err(ret);
@@ -522,7 +523,7 @@ pub extern "C" fn execve(
     };
 
     // Load the ELF binary using the resolved absolute path.
-    let (buf_ptr, elf_len) = match load_elf(resolved.as_ptr(), resolved_len) {
+    let (buf_ptr, alloc_size, data_size) = match load_elf(resolved.as_ptr(), resolved_len) {
         Ok(result) => result,
         Err(err) => {
             errno::set_errno(err);
@@ -534,11 +535,12 @@ pub extern "C" fn execve(
     let ret = syscall2(
         SYS_PROCESS_EXEC,
         buf_ptr as u64,
-        elf_len as u64,
+        data_size as u64,
     );
 
-    // If we get here, exec failed.  Free the buffer.
-    let _ = mman::munmap(buf_ptr.cast::<core::ffi::c_void>(), elf_len);
+    // If we get here, exec failed.  Free the buffer (must use
+    // alloc_size to unmap the entire mmap'd region).
+    let _ = mman::munmap(buf_ptr.cast::<core::ffi::c_void>(), alloc_size);
     let _ = errno::translate(ret);
     -1
 }
@@ -606,9 +608,11 @@ pub extern "C" fn execv(
 
 /// Load an ELF binary from the filesystem into an mmap'd buffer.
 ///
-/// Returns `(buffer_ptr, file_size)` on success, or a POSIX error
-/// number on failure.
-fn load_elf(path: *const u8, path_len: usize) -> Result<(*mut u8, usize), i32> {
+/// Returns `(buffer_ptr, alloc_size, data_size)` on success, or a POSIX
+/// error number on failure.  `alloc_size` is the mmap allocation size
+/// (must be used for munmap); `data_size` is the number of bytes
+/// actually read (pass to the kernel as the ELF size).
+fn load_elf(path: *const u8, path_len: usize) -> Result<(*mut u8, usize, usize), i32> {
     // Stat the file to get its size.
     let mut stat_buf = crate::stat::Stat::zeroed();
     let stat_ret = syscall3(
@@ -663,7 +667,7 @@ fn load_elf(path: *const u8, path_len: usize) -> Result<(*mut u8, usize), i32> {
         return Err(errno::ENOEXEC);
     }
 
-    Ok((buf_ptr, bytes_read))
+    Ok((buf_ptr, file_size, bytes_read))
 }
 
 /// Convert a native kernel error code to a POSIX errno value.

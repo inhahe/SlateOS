@@ -28,6 +28,18 @@ pub static SCHAR_MAX: i32 = 127;
 #[unsafe(no_mangle)]
 pub static UCHAR_MAX: i32 = 255;
 
+/// Minimum value of a short.
+#[unsafe(no_mangle)]
+pub static SHRT_MIN: i16 = i16::MIN;
+
+/// Maximum value of a short.
+#[unsafe(no_mangle)]
+pub static SHRT_MAX: i16 = i16::MAX;
+
+/// Maximum value of an unsigned short.
+#[unsafe(no_mangle)]
+pub static USHRT_MAX: u16 = u16::MAX;
+
 /// Minimum value of an int.
 #[unsafe(no_mangle)]
 pub static INT_MIN: i32 = i32::MIN;
@@ -135,3 +147,47 @@ pub static IOV_MAX: i32 = 1024;
 /// Number of bytes in a line for utilities that process text.
 #[unsafe(no_mangle)]
 pub static LINE_MAX: i32 = 2048;
+
+/// Maximum length of arguments to exec.
+#[unsafe(no_mangle)]
+pub static ARG_MAX: i32 = 131_072; // 128 KiB.
+
+/// Maximum number of supplementary group IDs.
+#[unsafe(no_mangle)]
+pub static NGROUPS_MAX: i32 = 32;
+
+/// POSIX minimum: maximum pathname length.
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_PATH_MAX: i32 = 256;
+
+/// POSIX minimum: maximum filename length.
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_NAME_MAX: i32 = 14;
+
+/// POSIX minimum: maximum number of open files.
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_OPEN_MAX: i32 = 20;
+
+/// POSIX minimum: maximum number of child processes.
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_CHILD_MAX: i32 = 25;
+
+/// POSIX minimum: maximum length of arguments to exec.
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_ARG_MAX: i32 = 4096;
+
+/// Standard PATH_MAX symbol (same as PATH_MAX_LIMIT).
+///
+/// Some programs reference `PATH_MAX` directly rather than through
+/// the `_LIMIT` suffixed version.
+#[unsafe(no_mangle)]
+pub static PATH_MAX: i32 = 4096;
+
+/// Maximum multibyte character length (UTF-8).
+#[unsafe(no_mangle)]
+pub static MB_LEN_MAX: i32 = 4;

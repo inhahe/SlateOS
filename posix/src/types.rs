@@ -51,3 +51,21 @@ pub type ClockidT = i32;
 
 /// File descriptor.
 pub type Fd = i32;
+
+/// Generic ID type (used by waitid, etc.).
+pub type IdT = u32;
+
+/// IPC key (System V IPC).
+pub type KeyT = i32;
+
+/// Microseconds type (for usleep, etc.).
+pub type UsecT = u32;
+
+/// Pointer-sized signed integer.
+pub type IntptrT = isize;
+
+/// Pointer-sized unsigned integer.
+pub type UintptrT = usize;
+
+/// Pointer difference type.
+pub type PtrdiffT = isize;

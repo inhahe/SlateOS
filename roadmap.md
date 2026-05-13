@@ -970,6 +970,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Page Cache (fs::pagecache): File-backed page cache monitoring with per-device hit/miss/eviction stats, readahead effectiveness tracking, hit rate calculation; `pagecache`/`pcache` kshell command; /proc/pagecache; 8 self-tests
   - [x] Net Device (fs::netdev): NIC-level statistics with per-interface RX/TX bytes/packets, errors, drops, link state, 6 NIC types; `netdev`/`ndev` kshell command; /proc/netdev; 8 self-tests
   - [x] CPU Stats (fs::cpustat): Per-CPU utilization breakdown with 8 time modes (user/nice/system/idle/iowait/irq/softirq/steal), context switches, interrupts, utilization %; `cpustat`/`cpust` kshell command; /proc/cpustat; 8 self-tests
+  - [x] File Lock (fs::filelock): File lock monitoring with 5 lock types (flock/posix_rd/posix_wr/lease/ofd), contention tracking, deadlock detection, per-PID filtering; `filelock`/`flkstat` kshell command; /proc/filelock; 8 self-tests
+  - [x] PID Stats (fs::pidstat): PID allocation/namespace monitoring with namespace hierarchy, high watermark tracking, reuse detection; `pidstat`/`pidst` kshell command; /proc/pidstat; 8 self-tests
+  - [x] Binary Format (fs::binfmt): Executable loader stats with 6 formats (elf64/elf32/script/flat/wasm/unknown), load time tracking, 6 error categories; `binfmt`/`bfmt` kshell command; /proc/binfmt; 8 self-tests
+  - [x] Pipe Stats (fs::pipestat): Pipe/FIFO I/O monitoring with buffer utilization, read/write blocking events, per-PID filtering, anonymous/named pipe types; `pipestat`/`pipest` kshell command; /proc/pipestat; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

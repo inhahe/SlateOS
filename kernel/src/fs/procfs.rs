@@ -444,6 +444,10 @@ const ROOT_FILES: &[&str] = &[
     "pagecache",
     "netdev",
     "cpustat",
+    "filelock",
+    "pidstat",
+    "binfmt",
+    "pipestat",
     "columnview",
     "pathbar",
     "viewstate",
@@ -8641,6 +8645,80 @@ fn gen_cpustat() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_filelock() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (active, acquired, released, contentions, deadlocks, ops) = crate::fs::filelock::stats();
+    out.push_str(&format!("active_locks: {}\n", active));
+    out.push_str(&format!("total_acquired: {}\n", acquired));
+    out.push_str(&format!("total_released: {}\n", released));
+    out.push_str(&format!("total_contentions: {}\n", contentions));
+    out.push_str(&format!("total_deadlocks: {}\n", deadlocks));
+    out.push_str(&format!("ops: {}\n", ops));
+    for l in crate::fs::filelock::active_locks() {
+        out.push_str(&format!("[{}] pid={} {} {}-{} {} cont={}\n",
+            l.lock_type.label(), l.pid, l.path, l.start,
+            if l.end == u64::MAX { String::from("EOF") } else { format!("{}", l.end) },
+            if l.blocking { "BLOCK" } else { "NONBLOCK" }, l.contentions));
+    }
+    out.into_bytes()
+}
+
+fn gen_pidstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (nss, alloc, freed, reuses, ops) = crate::fs::pidstat::stats();
+    out.push_str(&format!("namespaces: {}\n", nss));
+    out.push_str(&format!("total_allocated: {}\n", alloc));
+    out.push_str(&format!("total_freed: {}\n", freed));
+    out.push_str(&format!("total_reuses: {}\n", reuses));
+    out.push_str(&format!("ops: {}\n", ops));
+    for ns in crate::fs::pidstat::ns_list() {
+        out.push_str(&format!("ns{}: parent={} active={} max={} alloc={} free={} hwm={}\n",
+            ns.ns_id, ns.parent_id.map_or(String::from("none"), |p| format!("{}", p)),
+            ns.active_pids, ns.max_pid, ns.allocated, ns.freed, ns.high_watermark));
+    }
+    out.into_bytes()
+}
+
+fn gen_binfmt() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (fmts, loads, errors, ops) = crate::fs::binfmt::stats();
+    out.push_str(&format!("formats: {}\n", fmts));
+    out.push_str(&format!("total_loads: {}\n", loads));
+    out.push_str(&format!("total_errors: {}\n", errors));
+    out.push_str(&format!("ops: {}\n", ops));
+    for f in crate::fs::binfmt::format_stats() {
+        out.push_str(&format!("{}: loads={} errors={} avg={}ns max={}ns\n",
+            f.format.label(), f.loads, f.errors, f.avg_load_ns, f.max_load_ns));
+    }
+    for (err, count) in crate::fs::binfmt::error_breakdown() {
+        if count > 0 {
+            out.push_str(&format!("err_{}: {}\n", err.label(), count));
+        }
+    }
+    out.into_bytes()
+}
+
+fn gen_pipestat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (active, created, destroyed, bytes, blocks, ops) = crate::fs::pipestat::stats();
+    out.push_str(&format!("active_pipes: {}\n", active));
+    out.push_str(&format!("total_created: {}\n", created));
+    out.push_str(&format!("total_destroyed: {}\n", destroyed));
+    out.push_str(&format!("total_bytes: {}\n", bytes));
+    out.push_str(&format!("total_blocks: {}\n", blocks));
+    out.push_str(&format!("ops: {}\n", ops));
+    for p in crate::fs::pipestat::list() {
+        out.push_str(&format!("[{}] {} rd={} wr={} buf={}/{} written={} read={}\n",
+            p.pipe_type.label(), p.id, p.reader_pid, p.writer_pid,
+            p.buffered_bytes, p.buffer_size, p.bytes_written, p.bytes_read));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -9250,6 +9328,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "pagecache" => Ok(gen_pagecache()),
         "netdev" => Ok(gen_netdev()),
         "cpustat" => Ok(gen_cpustat()),
+        "filelock" => Ok(gen_filelock()),
+        "pidstat" => Ok(gen_pidstat()),
+        "binfmt" => Ok(gen_binfmt()),
+        "pipestat" => Ok(gen_pipestat()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

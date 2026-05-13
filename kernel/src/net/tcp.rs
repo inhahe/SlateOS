@@ -2670,6 +2670,7 @@ pub fn close(handle: usize) -> KernelResult<()> {
             let mut conns = CONNECTIONS.lock();
             conns[handle].state = TcpState::FinWait1;
             conns[handle].snd_nxt = seq.wrapping_add(1);
+            conns[handle].last_activity_ns = crate::hrtimer::now_ns();
 
             // Brief wait for FIN-ACK (non-blocking).
             drop(conns);
@@ -2683,6 +2684,22 @@ pub fn close(handle: usize) -> KernelResult<()> {
                     core::hint::spin_loop();
                 }
             }
+
+            // If the connection completed its teardown (Closed or TimeWait),
+            // or timed out in FinWait1, force-deactivate the slot.
+            // TimeWait cleanup and FIN retransmission for in-progress
+            // teardowns are handled by tick_retransmit / tick_time_wait_cleanup.
+            let mut conns = CONNECTIONS.lock();
+            let final_state = conns[handle].state;
+            if final_state == TcpState::Closed {
+                conns[handle].active = false;
+                conns[handle].rx_buffer.clear();
+                conns[handle].tx_buffer.clear();
+                conns[handle].nagle_buf.clear();
+                conns[handle].ooo_buf.clear();
+            }
+            // If still FinWait1/FinWait2/TimeWait, leave slot active for
+            // the timer-based handlers (FIN retransmit, TIME_WAIT cleanup).
         }
         TcpState::CloseWait => {
             // Remote already sent FIN; send our FIN.
@@ -2690,18 +2707,31 @@ pub fn close(handle: usize) -> KernelResult<()> {
             let mut conns = CONNECTIONS.lock();
             conns[handle].state = TcpState::LastAck;
             conns[handle].snd_nxt = seq.wrapping_add(1);
+            conns[handle].last_activity_ns = crate::hrtimer::now_ns();
+            // Leave slot active — tick_retransmit() handles FIN retransmission
+            // if the ACK is lost, and deactivation happens when the ACK arrives.
         }
-        _ => {}
+        TcpState::SynSent => {
+            // Connection never established — just deactivate.
+            let mut conns = CONNECTIONS.lock();
+            conns[handle].active = false;
+            conns[handle].state = TcpState::Closed;
+            conns[handle].rx_buffer.clear();
+            conns[handle].tx_buffer.clear();
+            conns[handle].nagle_buf.clear();
+            conns[handle].ooo_buf.clear();
+        }
+        _ => {
+            // Already closing or other state — force deactivate.
+            let mut conns = CONNECTIONS.lock();
+            conns[handle].active = false;
+            conns[handle].state = TcpState::Closed;
+            conns[handle].rx_buffer.clear();
+            conns[handle].tx_buffer.clear();
+            conns[handle].nagle_buf.clear();
+            conns[handle].ooo_buf.clear();
+        }
     }
-
-    // Force-close after timeout.
-    let mut conns = CONNECTIONS.lock();
-    conns[handle].active = false;
-    conns[handle].state = TcpState::Closed;
-    conns[handle].rx_buffer.clear();
-    conns[handle].tx_buffer.clear();
-    conns[handle].nagle_buf.clear();
-    conns[handle].ooo_buf.clear();
 
     Ok(())
 }

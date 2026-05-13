@@ -2130,7 +2130,11 @@ pub fn send(handle: usize, data: &[u8]) -> KernelResult<usize> {
                 n_ts_ok, n_ts_recent,
             );
         }
-        return Ok(data.len());
+        // Return the number of bytes actually buffered, not data.len().
+        // When the Nagle buffer is nearly full, copy_len < data.len() and
+        // the remaining bytes haven't been accepted — the caller must
+        // retry with the remainder (standard POSIX send semantics).
+        return Ok(copy_len);
     }
 
     // Effective window = min(cwnd, snd_wnd).  Limit data to what we can

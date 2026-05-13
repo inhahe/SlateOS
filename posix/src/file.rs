@@ -120,12 +120,39 @@ pub extern "C" fn close(fd: Fd) -> i32 {
         HandleKind::Console => return 0, // Console fds don't need kernel close.
         HandleKind::TcpStream => {
             if entry.handle == 0 { return 0; } // Unconnected socket, nothing to close.
-            // SO_LINGER with timeout 0: send RST (abortive close).
-            let linger_abort = socket_meta
-                .map_or(false, |m| m.linger_onoff && m.linger_secs == 0);
-            if linger_abort {
+            let (linger_on, linger_secs) = socket_meta
+                .map_or((false, 0i32), |m| (m.linger_onoff, m.linger_secs));
+            if linger_on && linger_secs == 0 {
+                // SO_LINGER with timeout 0: send RST (abortive close).
                 syscall1(SYS_TCP_ABORT, entry.handle)
+            } else if linger_on && linger_secs > 0 {
+                // SO_LINGER with positive timeout: initiate graceful close,
+                // then block until close completes or timeout expires.
+                let ret = syscall1(SYS_TCP_CLOSE, entry.handle);
+                if ret < 0 {
+                    return errno::translate(ret) as i32;
+                }
+                // Wait for connection to reach CLOSED/TIME_WAIT.
+                let deadline_ns = (syscall0(SYS_CLOCK_MONOTONIC) as u64)
+                    .saturating_add((linger_secs as u64).saturating_mul(1_000_000_000));
+                const POLL_NS: u64 = 10_000_000; // 10ms
+                loop {
+                    let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+                    if now >= deadline_ns {
+                        // Timeout expired — abort any remaining state.
+                        let _ = syscall1(SYS_TCP_ABORT, entry.handle);
+                        break;
+                    }
+                    // Check if connection is fully closed (POLL_HANGUP set).
+                    let status = syscall1(SYS_TCP_POLL_STATUS, entry.handle) as u16;
+                    if (status & 0x0010) != 0 {
+                        break; // POLL_HANGUP: close handshake completed.
+                    }
+                    let _ = syscall1(SYS_SLEEP, POLL_NS);
+                }
+                ret
             } else {
+                // No linger (default): non-blocking graceful close.
                 syscall1(SYS_TCP_CLOSE, entry.handle)
             }
         }

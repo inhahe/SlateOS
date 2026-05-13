@@ -1112,9 +1112,26 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
             let port = u16::from_be(sin.sin_port);
 
             // If we already have a kernel handle, the socket was already
-            // connected (or is a listener).
+            // connected or has a connect in progress.
             if entry.handle != 0 {
-                errno::set_errno(errno::EISCONN);
+                // POSIX: EISCONN if established, EALREADY if still connecting.
+                let status = crate::syscall::syscall1(
+                    crate::syscall::SYS_TCP_POLL_STATUS, entry.handle,
+                ) as u16;
+                // POLL_WRITABLE(0x04) without POLL_ERROR(0x08) = established.
+                if (status & 0x0004) != 0 && (status & 0x0008) == 0 {
+                    errno::set_errno(errno::EISCONN);
+                } else if (status & 0x0008) != 0 {
+                    // Connection failed — allow re-use is not POSIX, but some
+                    // implementations return ECONNREFUSED here.  We follow Linux
+                    // which returns ECONNABORTED for a failed non-blocking connect
+                    // on a second connect() call.  However the simplest correct
+                    // behavior is EISCONN (socket is consumed).
+                    errno::set_errno(errno::EISCONN);
+                } else {
+                    // Still in SYN_SENT — handshake in progress.
+                    errno::set_errno(errno::EALREADY);
+                }
                 return -1;
             }
 

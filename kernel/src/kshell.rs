@@ -55562,7 +55562,7 @@ fn cmd_wget(args: &str) {
 
     let mut total = 0usize;
     loop {
-        match crate::net::tcp::read_blocking(conn, 3000) {
+        match crate::net::tcp::read_blocking(conn, 3000, 4096) {
             Ok(data) => {
                 if data.is_empty() {
                     // Check if connection closed.

@@ -2293,10 +2293,14 @@ pub fn get_rtt_ns(handle: usize) -> KernelResult<u64> {
     Ok(conn.srtt_ns_x8 >> SRTT_ALPHA_SHIFT)
 }
 
-/// Read data from a TCP connection.
+/// Read data from a TCP connection (drain entire buffer).
 ///
 /// Returns available data (may be empty if nothing received yet).
 /// Call `poll()` first to process incoming packets.
+///
+/// **Prefer `read_up_to()` from syscall handlers** — this function
+/// drains the entire rx_buffer and the caller is responsible for all
+/// of the returned data.  If only part is consumed, the rest is lost.
 pub fn read(handle: usize) -> KernelResult<Vec<u8>> {
     let mut conns = CONNECTIONS.lock();
     let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
@@ -2313,11 +2317,63 @@ pub fn read(handle: usize) -> KernelResult<Vec<u8>> {
     Ok(data)
 }
 
+/// Read up to `max_bytes` from a TCP connection's receive buffer.
+///
+/// Consumes only as many bytes as requested; the remainder stays
+/// in the buffer for subsequent reads.  This matches POSIX recv()
+/// semantics where the caller specifies a buffer length.
+///
+/// Returns the data consumed (may be empty if no data available).
+pub fn read_up_to(handle: usize, max_bytes: usize) -> KernelResult<Vec<u8>> {
+    let mut conns = CONNECTIONS.lock();
+    let conn = conns.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    if !conn.active {
+        return Err(KernelError::InvalidArgument);
+    }
+    if conn.local_read_closed {
+        return Ok(Vec::new());
+    }
+
+    if conn.rx_buffer.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let take = max_bytes.min(conn.rx_buffer.len());
+    // Split: take the front `take` bytes, keep the rest.
+    let remainder = conn.rx_buffer.split_off(take);
+    let data = core::mem::replace(&mut conn.rx_buffer, remainder);
+    Ok(data)
+}
+
+/// Peek at data in a TCP connection's receive buffer without consuming.
+///
+/// Returns a copy of up to `max_bytes` from the buffer.  The data
+/// remains in the buffer for a subsequent `read_up_to()`.  Supports
+/// the POSIX `MSG_PEEK` flag.
+pub fn peek(handle: usize, max_bytes: usize) -> KernelResult<Vec<u8>> {
+    let conns = CONNECTIONS.lock();
+    let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
+    if !conn.active {
+        return Err(KernelError::InvalidArgument);
+    }
+    if conn.local_read_closed {
+        return Ok(Vec::new());
+    }
+
+    let take = max_bytes.min(conn.rx_buffer.len());
+    let mut data = Vec::new();
+    if let Some(slice) = conn.rx_buffer.get(..take) {
+        data.extend_from_slice(slice);
+    }
+    Ok(data)
+}
+
 /// Read data from a TCP connection, blocking until data arrives or
 /// the connection closes.
 ///
-/// Returns the received data, or empty Vec if the connection closed.
-pub fn read_blocking(handle: usize, timeout_polls: u32) -> KernelResult<Vec<u8>> {
+/// Returns the received data (up to `max_bytes`), or empty Vec if
+/// the connection closed.
+pub fn read_blocking(handle: usize, timeout_polls: u32, max_bytes: usize) -> KernelResult<Vec<u8>> {
     for _ in 0..timeout_polls {
         super::poll();
 
@@ -2338,7 +2394,7 @@ pub fn read_blocking(handle: usize, timeout_polls: u32) -> KernelResult<Vec<u8>>
         }
     }
 
-    read(handle)
+    read_up_to(handle, max_bytes)
 }
 
 /// Close a TCP connection.

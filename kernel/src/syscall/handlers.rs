@@ -5261,6 +5261,10 @@ pub fn sys_tcp_send(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: socket handle.
 /// `arg1`: pointer to receive buffer.
 /// `arg2`: buffer capacity.
+/// `arg3`: flags (optional, default 0).
+///     - bit 1 (0x02): MSG_PEEK — copy data without consuming it.
+///     - bit 6 (0x40): MSG_DONTWAIT — non-blocking (return immediately
+///       with WouldBlock if no data available).
 pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires Socket capability with READ rights.
     if let Err(e) = require_cap_type(
@@ -5273,6 +5277,11 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0 as usize;
     let buf_ptr = args.arg1 as *mut u8;
     let buf_cap = args.arg2 as usize;
+    let flags = args.arg3 as u32;
+
+    // Flag constants (match POSIX MSG_* values).
+    const MSG_PEEK: u32 = 0x02;
+    const MSG_DONTWAIT: u32 = 0x40;
 
     if buf_ptr.is_null() && buf_cap > 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -5284,29 +5293,52 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
         }
     }
 
-    // Use blocking read with a generous timeout (~5 seconds at 100Hz).
-    match crate::net::tcp::read_blocking(handle, 500) {
-        Ok(data) => {
-            if data.is_empty() {
-                // Connection closed — EOF.
-                return SyscallResult::ok(0);
-            }
-            let copy_len = data.len().min(buf_cap);
-            if copy_len > 0 {
-                // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        data.as_ptr(),
-                        buf_ptr,
-                        copy_len,
-                    );
-                }
-            }
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(copy_len as i64)
+    let peek = (flags & MSG_PEEK) != 0;
+    let dontwait = (flags & MSG_DONTWAIT) != 0;
+
+    let data = if peek {
+        // MSG_PEEK: copy data without consuming it.
+        match crate::net::tcp::peek(handle, buf_cap) {
+            Ok(d) => d,
+            Err(e) => return SyscallResult::err(e),
         }
-        Err(e) => SyscallResult::err(e),
+    } else if dontwait {
+        // MSG_DONTWAIT: non-blocking read — return immediately.
+        match crate::net::tcp::read_up_to(handle, buf_cap) {
+            Ok(d) => d,
+            Err(e) => return SyscallResult::err(e),
+        }
+    } else {
+        // Normal blocking read with a generous timeout (~5 seconds).
+        match crate::net::tcp::read_blocking(handle, 500, buf_cap) {
+            Ok(d) => d,
+            Err(e) => return SyscallResult::err(e),
+        }
+    };
+
+    if data.is_empty() {
+        // Check if we should return 0 (EOF/closed) or EAGAIN (non-blocking
+        // with nothing available).
+        if dontwait && !crate::net::tcp::is_remote_closed(handle) {
+            return SyscallResult::err(KernelError::WouldBlock);
+        }
+        // Connection closed or timed out — return 0 (EOF).
+        return SyscallResult::ok(0);
     }
+
+    let copy_len = data.len().min(buf_cap);
+    if copy_len > 0 {
+        // SAFETY: Validated above — buf_ptr is in user space, mapped, and writable.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                buf_ptr,
+                copy_len,
+            );
+        }
+    }
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(copy_len as i64)
 }
 
 /// `SYS_TCP_CLOSE` — close a TCP socket.

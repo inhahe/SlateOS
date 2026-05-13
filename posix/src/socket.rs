@@ -1521,7 +1521,7 @@ pub unsafe extern "C" fn recv(
     fd: i32,
     buf: *mut u8,
     len: usize,
-    _flags: i32,
+    flags: i32,
 ) -> isize {
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
@@ -1533,13 +1533,28 @@ pub unsafe extern "C" fn recv(
         return -1;
     };
 
+    // Build kernel flags from POSIX MSG_* constants.
+    // MSG_PEEK (0x02) and MSG_DONTWAIT (0x40) are passed through
+    // directly since we use matching numeric values.
+    let kern_flags = (flags as u32) & (MSG_PEEK as u32 | MSG_DONTWAIT as u32);
+
+    // If the socket has O_NONBLOCK set, add MSG_DONTWAIT automatically.
+    let kern_flags = if fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0 {
+        kern_flags | (MSG_DONTWAIT as u32)
+    } else {
+        kern_flags
+    };
+
     match entry.kind {
         HandleKind::TcpStream => {
             if entry.handle == 0 {
                 errno::set_errno(errno::ENOTCONN);
                 return -1;
             }
-            let ret = syscall3(SYS_TCP_RECV, entry.handle, buf as u64, len as u64);
+            let ret = syscall4(
+                SYS_TCP_RECV, entry.handle,
+                buf as u64, len as u64, kern_flags as u64,
+            );
             if ret < 0 {
                 errno::set_errno(translate_net_error(ret));
                 return -1;
@@ -3647,16 +3662,64 @@ pub extern "C" fn getprotobynumber(number: i32) -> *const Protoent {
 ///
 /// The kernel returns negative error codes; this converts them to
 /// the appropriate socket-specific errno.
+/// Translate a kernel error code (negative i64 from syscall return) to
+/// a POSIX errno value.
+///
+/// Kernel error codes are the discriminant values of `KernelError`:
+///
+/// | Code | KernelError       | POSIX errno     |
+/// |------|-------------------|-----------------|
+/// | -1   | InternalError     | EIO             |
+/// | -2   | NotSupported      | ENOTSUP         |
+/// | -3   | InvalidArgument   | EINVAL          |
+/// | -4   | WouldBlock        | EAGAIN          |
+/// | -5   | Cancelled         | ECANCELED       |
+/// | -6   | TimedOut          | ETIMEDOUT       |
+/// | -100 | OutOfMemory       | ENOMEM          |
+/// | -200 | NoSuchProcess     | ESRCH           |
+/// | -300 | ChannelClosed     | ECONNRESET      |
+/// | -301 | ChannelFull       | EAGAIN          |
+/// | -304 | ResourceExhausted | ENOMEM          |
+/// | -400 | PermissionDenied  | EACCES          |
+/// | -500 | NotFound          | ENOENT          |
+/// | -501 | AlreadyExists     | EADDRINUSE      |
+/// | -505 | InvalidHandle     | EBADF           |
+/// | -600 | IoError           | EIO             |
+/// | -601 | NoSuchDevice      | ENODEV          |
 fn translate_net_error(code: i64) -> i32 {
     match code {
-        -100 => errno::ECONNREFUSED, // NOT_FOUND → connection refused / host not found
-        -101 => errno::EADDRINUSE,   // ALREADY_EXISTS → address in use
-        -102 => errno::EINVAL,       // INVALID_ARGUMENT
-        -103 => errno::EBADF,        // BAD_HANDLE
-        -200 => errno::ENOMEM,       // OUT_OF_MEMORY
-        -202 => errno::EAGAIN,       // WOULD_BLOCK
-        -300 => errno::ENOTSUP,      // NOT_SUPPORTED
-        -400 => errno::EACCES,       // PERMISSION_DENIED
+        // General.
+        -1  => errno::EIO,           // InternalError
+        -2  => errno::ENOTSUP,       // NotSupported
+        -3  => errno::EINVAL,        // InvalidArgument
+        -4  => errno::EAGAIN,        // WouldBlock
+        -5  => errno::ECANCELED,     // Cancelled
+        -6  => errno::ETIMEDOUT,     // TimedOut
+
+        // Memory.
+        -100 => errno::ENOMEM,       // OutOfMemory
+
+        // Process.
+        -200 => errno::ESRCH,        // NoSuchProcess
+
+        // IPC.
+        -300 => errno::ECONNRESET,   // ChannelClosed
+        -301 => errno::EAGAIN,       // ChannelFull
+        -304 => errno::ENOMEM,       // ResourceExhausted
+
+        // Capability / permission.
+        -400 => errno::EACCES,       // PermissionDenied
+        -401 => errno::EACCES,       // InvalidCapability
+
+        // Filesystem / not-found.
+        -500 => errno::ENOENT,       // NotFound  (also ECONNREFUSED for connect)
+        -501 => errno::EADDRINUSE,   // AlreadyExists
+        -505 => errno::EBADF,        // InvalidHandle
+
+        // Device / I/O.
+        -600 => errno::EIO,          // IoError
+        -601 => errno::ENODEV,       // NoSuchDevice
+
         _ => errno::EIO,             // Unknown → generic I/O error
     }
 }
@@ -3814,18 +3877,28 @@ mod tests {
 
     #[test]
     fn test_translate_net_error_known() {
-        assert_eq!(translate_net_error(-100), errno::ECONNREFUSED);
-        assert_eq!(translate_net_error(-101), errno::EADDRINUSE);
-        assert_eq!(translate_net_error(-102), errno::EINVAL);
-        assert_eq!(translate_net_error(-200), errno::ENOMEM);
-        assert_eq!(translate_net_error(-202), errno::EAGAIN);
-        assert_eq!(translate_net_error(-400), errno::EACCES);
+        // General errors.
+        assert_eq!(translate_net_error(-1), errno::EIO);            // InternalError
+        assert_eq!(translate_net_error(-2), errno::ENOTSUP);        // NotSupported
+        assert_eq!(translate_net_error(-3), errno::EINVAL);         // InvalidArgument
+        assert_eq!(translate_net_error(-4), errno::EAGAIN);         // WouldBlock
+        assert_eq!(translate_net_error(-5), errno::ECANCELED);      // Cancelled
+        assert_eq!(translate_net_error(-6), errno::ETIMEDOUT);      // TimedOut
+        // Memory.
+        assert_eq!(translate_net_error(-100), errno::ENOMEM);       // OutOfMemory
+        // Capability / permission.
+        assert_eq!(translate_net_error(-400), errno::EACCES);       // PermissionDenied
+        // Filesystem.
+        assert_eq!(translate_net_error(-500), errno::ENOENT);       // NotFound
+        assert_eq!(translate_net_error(-501), errno::EADDRINUSE);   // AlreadyExists
+        // Device.
+        assert_eq!(translate_net_error(-601), errno::ENODEV);       // NoSuchDevice
     }
 
     #[test]
     fn test_translate_net_error_unknown() {
         assert_eq!(translate_net_error(-999), errno::EIO);
-        assert_eq!(translate_net_error(-1), errno::EIO);
+        assert_eq!(translate_net_error(-42), errno::EIO);
     }
 
     // -- SockaddrIn layout tests --

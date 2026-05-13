@@ -2919,7 +2919,9 @@ fn setsockopt_multicast(
     }
 
     // SAFETY: optval is non-null and points to at least sizeof(IpMreq) bytes.
-    let mreq = unsafe { &*(optval.cast::<IpMreq>()) };
+    // Use read_unaligned because optval is *const u8 (alignment 1) but
+    // IpMreq requires alignment 4.
+    let mreq = unsafe { core::ptr::read_unaligned(optval.cast::<IpMreq>()) };
     let group_addr = mreq.imr_multiaddr.s_addr; // Network byte order u32.
 
     let syscall_nr = if optname == IP_ADD_MEMBERSHIP {
@@ -3962,10 +3964,26 @@ pub extern "C" fn getnameinfo(
                 (hostlen as usize).saturating_sub(1) as u64,
             );
             if ret > 0 {
-                let name_len = ret as usize;
+                let mut name_len = ret as usize;
+                // NI_NOFQDN: strip the domain part, keeping only the
+                // hostname component (everything before the first '.').
+                // e.g. "server.example.com" → "server".
+                if (flags & NI_NOFQDN) != 0 {
+                    let mut dot_pos: usize = 0;
+                    while dot_pos < name_len {
+                        // SAFETY: host[0..name_len] was just written by
+                        // the kernel and is valid.
+                        if unsafe { *host.add(dot_pos) } == b'.' {
+                            name_len = dot_pos;
+                            break;
+                        }
+                        dot_pos = dot_pos.wrapping_add(1);
+                    }
+                }
                 // Null-terminate the hostname.
-                // SAFETY: ret < hostlen-1 (kernel ensures copy_len <= buffer),
-                // and host is valid for hostlen bytes.
+                // SAFETY: name_len <= original ret <= hostlen-1 (kernel
+                // ensures copy_len <= buffer), so host[name_len] is in
+                // bounds.
                 unsafe { *host.add(name_len) = 0; }
                 used_reverse = true;
             }

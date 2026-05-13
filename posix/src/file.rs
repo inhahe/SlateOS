@@ -294,6 +294,19 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
 
     let ret = match entry.kind {
         HandleKind::File => {
+            // O_APPEND: seek to EOF before each write so the data is
+            // appended atomically (w.r.t. single-process).  This handles
+            // the case where O_APPEND was added via fcntl(F_SETFL) after
+            // open() — the kernel handle doesn't know about the flag
+            // change, so we must seek explicitly.  When O_APPEND was in
+            // the original open() flags the kernel already appends, but
+            // the redundant seek is harmless (it targets the same offset
+            // the kernel would use).
+            let status = fdtable::get_status_flags(fd).unwrap_or(0);
+            if status & crate::fcntl::O_APPEND != 0 {
+                // SEEK_END(2), offset 0 → position at EOF.
+                let _ = syscall3(SYS_FS_SEEK, entry.handle, 0, 2);
+            }
             syscall3(SYS_FS_WRITE, entry.handle, buf as u64, count as u64)
         }
         HandleKind::Pipe => {

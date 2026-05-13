@@ -84,7 +84,13 @@ pub extern "C" fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32 {
     // SAFETY: Caller guarantees req is valid.
     let ts = unsafe { *req };
 
-    // Convert to nanoseconds.
+    // POSIX: EINVAL if tv_nsec not in [0, 999_999_999] or tv_sec < 0.
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec > 999_999_999 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Convert to nanoseconds (both values are now non-negative, cast is safe).
     let ns: u64 = (ts.tv_sec as u64)
         .saturating_mul(1_000_000_000)
         .saturating_add(ts.tv_nsec as u64);
@@ -213,6 +219,13 @@ pub extern "C" fn clock_nanosleep(
     }
 
     if clk_id != CLOCK_MONOTONIC && clk_id != CLOCK_REALTIME {
+        return errno::EINVAL;
+    }
+
+    // POSIX: EINVAL if tv_nsec not in [0, 999_999_999].
+    // SAFETY: request is non-null (checked above).
+    let req = unsafe { &*request };
+    if req.tv_nsec < 0 || req.tv_nsec > 999_999_999 {
         return errno::EINVAL;
     }
 

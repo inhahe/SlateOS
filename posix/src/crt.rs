@@ -22,6 +22,7 @@
 //! functions.  `__stack_chk_fail` and `__stack_chk_guard` support
 //! stack canary protection (GCC/Clang -fstack-protector).
 
+#[cfg(target_os = "none")]
 use core::arch::global_asm;
 use core::ptr::addr_of_mut;
 

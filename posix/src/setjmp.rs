@@ -26,6 +26,7 @@
 //! jmp_buf[7] = RIP (return address)
 //! ```
 
+#[cfg(target_os = "none")]
 use core::arch::global_asm;
 
 /// Jump buffer: 8 x u64 = 64 bytes.

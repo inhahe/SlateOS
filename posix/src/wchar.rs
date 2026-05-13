@@ -1334,7 +1334,7 @@ pub unsafe extern "C" fn wcstol(
 
     let (actual_base, new_i, before_prefix) = unsafe { wc_detect_base(nptr, i, base) };
     i = new_i;
-    let start = i;
+    let _start = i;
 
     // Accumulate in negative space to correctly handle LONG_MIN
     // (whose absolute value exceeds LONG_MAX by one).
@@ -1421,7 +1421,7 @@ pub unsafe extern "C" fn wcstoul(
 
     let (actual_base, new_i, before_prefix) = unsafe { wc_detect_base(nptr, i, base) };
     i = new_i;
-    let start = i;
+    let _start = i;
     let mut result: u64 = 0;
     let base_u64 = actual_base as u64;
     let cutoff = u64::MAX / base_u64;

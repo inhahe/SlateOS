@@ -194,7 +194,14 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             syscall3(SYS_FS_READ, entry.handle, buf as u64, count as u64)
         }
         HandleKind::Pipe => {
-            syscall3(SYS_PIPE_READ, entry.handle, buf as u64, count as u64)
+            // Use non-blocking read when O_NONBLOCK is set on the fd.
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
+                & crate::fcntl::O_NONBLOCK != 0;
+            if is_nb {
+                syscall3(SYS_PIPE_TRY_READ, entry.handle, buf as u64, count as u64)
+            } else {
+                syscall3(SYS_PIPE_READ, entry.handle, buf as u64, count as u64)
+            }
         }
         HandleKind::Console => {
             // Console read: one character at a time via SYS_CONSOLE_READ_CHAR.
@@ -280,7 +287,14 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             syscall3(SYS_FS_WRITE, entry.handle, buf as u64, count as u64)
         }
         HandleKind::Pipe => {
-            let ret = syscall3(SYS_PIPE_WRITE, entry.handle, buf as u64, count as u64);
+            // Use non-blocking write when O_NONBLOCK is set on the fd.
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
+                & crate::fcntl::O_NONBLOCK != 0;
+            let ret = if is_nb {
+                syscall3(SYS_PIPE_TRY_WRITE, entry.handle, buf as u64, count as u64)
+            } else {
+                syscall3(SYS_PIPE_WRITE, entry.handle, buf as u64, count as u64)
+            };
             if ret == errno::native::CHANNEL_CLOSED {
                 // Reader has closed — POSIX mandates EPIPE (not ECONNRESET).
                 errno::set_errno(errno::EPIPE);

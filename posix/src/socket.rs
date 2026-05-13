@@ -470,8 +470,11 @@ pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
     }
     octets[3] = cur_val as u8;
 
-    // Return in network byte order (big-endian): octets[0] is MSB.
-    u32::from_be_bytes(octets)
+    // Return in network byte order: the u32's memory layout matches
+    // the octet sequence [first, second, third, fourth].  This is the
+    // standard POSIX `in_addr_t` convention, consistent with
+    // htonl(INADDR_LOOPBACK) and kernel-sourced addresses.
+    u32::from_ne_bytes(octets)
 }
 
 /// Convert a network-order IPv4 address to a dotted-decimal string.
@@ -485,7 +488,7 @@ pub unsafe extern "C" fn inet_addr(cp: *const u8) -> u32 {
 pub extern "C" fn inet_ntoa(addr: InAddr) -> *const u8 {
     static mut NTOA_BUF: [u8; 16] = [0u8; 16];
 
-    let octets = addr.s_addr.to_be_bytes();
+    let octets = addr.s_addr.to_ne_bytes();
     let mut pos: usize = 0;
 
     // SAFETY: Single-threaded access; buffer is 16 bytes, max output
@@ -556,7 +559,9 @@ pub unsafe extern "C" fn inet_pton(af: i32, src: *const u8, dst: *mut u8) -> i32
                 return 0;
             }
 
-            // Store in network byte order.
+            // Store in network byte order.  inet_addr returns the address
+            // in POSIX NBO (from_ne_bytes), so to_ne_bytes() recovers the
+            // original octet sequence [first, second, third, fourth].
             let bytes = addr.to_ne_bytes();
             // SAFETY: dst points to at least 4 bytes (caller contract).
             unsafe {
@@ -605,7 +610,15 @@ unsafe fn inet_pton6(src: *const u8, dst: *mut u8) -> i32 {
     if unsafe { *src } == b':' && unsafe { *src.add(1) } == b':' {
         coloncolon_pos = Some(0);
         i = 2;
+    } else if unsafe { *src } == b':' {
+        // A leading single ':' (not '::') is invalid IPv6 syntax.
+        return 0;
     }
+
+    // Track whether the last consumed token was a single ':' separator
+    // (not part of '::').  If the string ends with a trailing single
+    // colon (e.g. "::ffff:"), the address is invalid.
+    let mut trailing_colon = false;
 
     loop {
         let c = unsafe { *src.add(i) };
@@ -633,12 +646,16 @@ unsafe fn inet_pton6(src: *const u8, dst: *mut u8) -> i32 {
                     return 0; // Only one :: allowed.
                 }
                 coloncolon_pos = Some(group_count);
+                trailing_colon = false; // :: at end is valid (e.g. "fe80::")
                 i = i.wrapping_add(2);
                 continue;
             }
+            trailing_colon = true;
             i = i.wrapping_add(1);
             continue;
         }
+
+        trailing_colon = false;
 
         // Parse hex digit.
         let digit = match c {
@@ -656,6 +673,12 @@ unsafe fn inet_pton6(src: *const u8, dst: *mut u8) -> i32 {
         }
 
         i = i.wrapping_add(1);
+    }
+
+    // A trailing single ':' (e.g. "::ffff:") is invalid — it implies
+    // another group should follow.  Trailing '::' is fine (handled above).
+    if trailing_colon {
+        return 0;
     }
 
     // Save last group.
@@ -869,16 +892,12 @@ fn inet_ntop6(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
     let mut i: usize = 0;
     while i < 8 {
         if i == best_start {
-            // Emit ::
+            // Emit :: — always exactly two colons regardless of position.
+            // This covers leading (::1), trailing (fe80::), middle (1::2),
+            // and all-zeros (::) uniformly.
             if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
-            if i == 0 && pos < 45 {
-                tmp[pos] = b':'; pos = pos.wrapping_add(1);
-            }
+            if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
             i = i.wrapping_add(best_len);
-            if i >= 8 {
-                // Trailing :: — already emitted one ':'
-                if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
-            }
             continue;
         }
         if i > 0 && !(i == best_start.wrapping_add(best_len) && best_start < 8)
@@ -5376,8 +5395,10 @@ mod tests {
     #[test]
     fn test_inet_addr_valid() {
         let addr = unsafe { inet_addr(c"127.0.0.1".as_ptr().cast::<u8>()) };
-        // 127.0.0.1 in network byte order = 0x7F000001 big-endian.
-        assert_eq!(addr, u32::from_be_bytes([127, 0, 0, 1]));
+        // 127.0.0.1 in POSIX network byte order: memory layout = [127, 0, 0, 1].
+        assert_eq!(addr, u32::from_ne_bytes([127, 0, 0, 1]));
+        // Must match htonl(INADDR_LOOPBACK).
+        assert_eq!(addr, htonl(INADDR_LOOPBACK));
     }
 
     #[test]
@@ -5389,13 +5410,13 @@ mod tests {
     #[test]
     fn test_inet_addr_broadcast() {
         let addr = unsafe { inet_addr(c"255.255.255.255".as_ptr().cast::<u8>()) };
-        assert_eq!(addr, u32::from_be_bytes([255, 255, 255, 255]));
+        assert_eq!(addr, u32::from_ne_bytes([255, 255, 255, 255]));
     }
 
     #[test]
     fn test_inet_addr_typical() {
         let addr = unsafe { inet_addr(c"192.168.1.1".as_ptr().cast::<u8>()) };
-        assert_eq!(addr, u32::from_be_bytes([192, 168, 1, 1]));
+        assert_eq!(addr, u32::from_ne_bytes([192, 168, 1, 1]));
     }
 
     #[test]
@@ -5424,7 +5445,7 @@ mod tests {
 
     #[test]
     fn test_inet_ntoa_loopback() {
-        let addr = InAddr { s_addr: u32::from_be_bytes([127, 0, 0, 1]) };
+        let addr = InAddr { s_addr: u32::from_ne_bytes([127, 0, 0, 1]) };
         let ptr = inet_ntoa(addr);
         let s = unsafe { c_str_to_slice(ptr) };
         assert_eq!(s, b"127.0.0.1");
@@ -5440,7 +5461,7 @@ mod tests {
 
     #[test]
     fn test_inet_ntoa_broadcast() {
-        let addr = InAddr { s_addr: u32::from_be_bytes([255, 255, 255, 255]) };
+        let addr = InAddr { s_addr: u32::from_ne_bytes([255, 255, 255, 255]) };
         let ptr = inet_ntoa(addr);
         let s = unsafe { c_str_to_slice(ptr) };
         assert_eq!(s, b"255.255.255.255");
@@ -5519,6 +5540,379 @@ mod tests {
     fn test_sockaddr_size() {
         // sockaddr should also be 16 bytes.
         assert_eq!(core::mem::size_of::<Sockaddr>(), 16);
+    }
+
+    // -- inet_pton IPv4 tests --
+
+    #[test]
+    fn test_inet_pton4_loopback() {
+        let mut dst = [0u8; 4];
+        let ret = unsafe { inet_pton(AF_INET, c"127.0.0.1".as_ptr().cast(), dst.as_mut_ptr()) };
+        assert_eq!(ret, 1);
+        assert_eq!(dst, [127, 0, 0, 1]);
+    }
+
+    #[test]
+    fn test_inet_pton4_zeros() {
+        let mut dst = [0u8; 4];
+        let ret = unsafe { inet_pton(AF_INET, c"0.0.0.0".as_ptr().cast(), dst.as_mut_ptr()) };
+        assert_eq!(ret, 1);
+        assert_eq!(dst, [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_inet_pton4_broadcast() {
+        let mut dst = [0u8; 4];
+        let ret = unsafe { inet_pton(AF_INET, c"255.255.255.255".as_ptr().cast(), dst.as_mut_ptr()) };
+        assert_eq!(ret, 1);
+        assert_eq!(dst, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn test_inet_pton4_invalid() {
+        let mut dst = [0u8; 4];
+        // Too few octets.
+        assert_eq!(unsafe { inet_pton(AF_INET, c"127.0.1".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        // Too many.
+        assert_eq!(unsafe { inet_pton(AF_INET, c"1.2.3.4.5".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        // Octet > 255.
+        assert_eq!(unsafe { inet_pton(AF_INET, c"256.0.0.1".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        // Empty.
+        assert_eq!(unsafe { inet_pton(AF_INET, c"".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_inet_pton_unsupported_af() {
+        let mut dst = [0u8; 16];
+        let ret = unsafe { inet_pton(99, c"::1".as_ptr().cast(), dst.as_mut_ptr()) };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_inet_pton_null() {
+        let mut dst = [0u8; 4];
+        assert_eq!(unsafe { inet_pton(AF_INET, core::ptr::null(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { inet_pton(AF_INET, c"1.2.3.4".as_ptr().cast(), core::ptr::null_mut()) }, 0);
+    }
+
+    // -- inet_pton IPv6 tests --
+
+    #[test]
+    fn test_inet_pton6_loopback() {
+        let mut dst = [0u8; 16];
+        let ret = unsafe { inet_pton(AF_INET6, c"::1".as_ptr().cast(), dst.as_mut_ptr()) };
+        assert_eq!(ret, 1);
+        let mut expected = [0u8; 16];
+        expected[15] = 1;
+        assert_eq!(dst, expected);
+    }
+
+    #[test]
+    fn test_inet_pton6_all_zeros() {
+        let mut dst = [0u8; 16];
+        let ret = unsafe { inet_pton(AF_INET6, c"::".as_ptr().cast(), dst.as_mut_ptr()) };
+        assert_eq!(ret, 1);
+        assert_eq!(dst, [0u8; 16]);
+    }
+
+    #[test]
+    fn test_inet_pton6_full_form() {
+        let mut dst = [0u8; 16];
+        let ret = unsafe { inet_pton(AF_INET6, c"2001:0db8:0000:0000:0000:0000:0000:0001".as_ptr().cast(), dst.as_mut_ptr()) };
+        assert_eq!(ret, 1);
+        assert_eq!(dst[0..2], [0x20, 0x01]); // 2001
+        assert_eq!(dst[2..4], [0x0d, 0xb8]); // 0db8
+        assert_eq!(dst[4..14], [0u8; 10]);    // zeros
+        assert_eq!(dst[14..16], [0x00, 0x01]); // 0001
+    }
+
+    #[test]
+    fn test_inet_pton6_compressed() {
+        let mut dst = [0u8; 16];
+        let ret = unsafe { inet_pton(AF_INET6, c"fe80::1".as_ptr().cast(), dst.as_mut_ptr()) };
+        assert_eq!(ret, 1);
+        assert_eq!(dst[0..2], [0xfe, 0x80]); // fe80
+        assert_eq!(dst[2..14], [0u8; 12]);    // zeros (6 groups)
+        assert_eq!(dst[14..16], [0x00, 0x01]); // 1
+    }
+
+    #[test]
+    fn test_inet_pton6_middle_compression() {
+        let mut dst = [0u8; 16];
+        let ret = unsafe { inet_pton(AF_INET6, c"2001:db8::1".as_ptr().cast(), dst.as_mut_ptr()) };
+        assert_eq!(ret, 1);
+        assert_eq!(dst[0..2], [0x20, 0x01]);
+        assert_eq!(dst[2..4], [0x0d, 0xb8]);
+        assert_eq!(dst[4..14], [0u8; 10]);
+        assert_eq!(dst[14..16], [0x00, 0x01]);
+    }
+
+    #[test]
+    fn test_inet_pton6_trailing_compression() {
+        let mut dst = [0u8; 16];
+        let ret = unsafe { inet_pton(AF_INET6, c"fe80::".as_ptr().cast(), dst.as_mut_ptr()) };
+        assert_eq!(ret, 1);
+        assert_eq!(dst[0..2], [0xfe, 0x80]);
+        assert_eq!(dst[2..16], [0u8; 14]);
+    }
+
+    #[test]
+    fn test_inet_pton6_invalid_trailing_single_colon() {
+        // Bug regression: "::ffff:" has a trailing single colon — invalid.
+        let mut dst = [0u8; 16];
+        assert_eq!(unsafe { inet_pton(AF_INET6, c"::ffff:".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        // Also test other trailing colon cases.
+        assert_eq!(unsafe { inet_pton(AF_INET6, c"1::2:".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { inet_pton(AF_INET6, c"1:2:3:4:5:6:7:8:".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_inet_pton6_invalid_leading_single_colon() {
+        // Bug regression: ":1:2:3:4:5:6:7:8" has a leading single colon — invalid.
+        let mut dst = [0u8; 16];
+        assert_eq!(unsafe { inet_pton(AF_INET6, c":1:2:3:4:5:6:7:8".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(unsafe { inet_pton(AF_INET6, c":1".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_inet_pton6_invalid_multiple_coloncolon() {
+        let mut dst = [0u8; 16];
+        assert_eq!(unsafe { inet_pton(AF_INET6, c"::1::2".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_inet_pton6_invalid_triple_colon() {
+        let mut dst = [0u8; 16];
+        assert_eq!(unsafe { inet_pton(AF_INET6, c":::1".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_inet_pton6_too_many_groups() {
+        let mut dst = [0u8; 16];
+        assert_eq!(unsafe { inet_pton(AF_INET6, c"1:2:3:4:5:6:7:8:9".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_inet_pton6_too_few_groups() {
+        let mut dst = [0u8; 16];
+        assert_eq!(unsafe { inet_pton(AF_INET6, c"1:2:3".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_inet_pton6_group_too_long() {
+        let mut dst = [0u8; 16];
+        assert_eq!(unsafe { inet_pton(AF_INET6, c"12345::1".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_inet_pton6_uppercase() {
+        let mut dst = [0u8; 16];
+        let ret = unsafe { inet_pton(AF_INET6, c"::FFFF".as_ptr().cast(), dst.as_mut_ptr()) };
+        assert_eq!(ret, 1);
+        assert_eq!(dst[14..16], [0xFF, 0xFF]);
+    }
+
+    // -- inet_ntop IPv4 tests --
+
+    #[test]
+    fn test_inet_ntop4_loopback() {
+        let src: [u8; 4] = [127, 0, 0, 1];
+        let mut buf = [0u8; 16];
+        let ret = inet_ntop(AF_INET, src.as_ptr(), buf.as_mut_ptr(), 16);
+        assert!(!ret.is_null());
+        let s = unsafe { c_str_to_slice(ret) };
+        assert_eq!(s, b"127.0.0.1");
+    }
+
+    #[test]
+    fn test_inet_ntop4_buf_too_small() {
+        let src: [u8; 4] = [192, 168, 1, 1];
+        let mut buf = [0u8; 4]; // too small for "192.168.1.1\0"
+        let ret = inet_ntop(AF_INET, src.as_ptr(), buf.as_mut_ptr(), 4);
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_inet_ntop4_null() {
+        let mut buf = [0u8; 16];
+        assert!(inet_ntop(AF_INET, core::ptr::null(), buf.as_mut_ptr(), 16).is_null());
+        let src: [u8; 4] = [1, 2, 3, 4];
+        assert!(inet_ntop(AF_INET, src.as_ptr(), core::ptr::null_mut(), 16).is_null());
+    }
+
+    // -- inet_ntop IPv6 tests --
+
+    #[test]
+    fn test_inet_ntop6_loopback() {
+        let mut src = [0u8; 16];
+        src[15] = 1;
+        let mut buf = [0u8; 46];
+        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
+        assert!(!ret.is_null());
+        let s = unsafe { c_str_to_slice(ret) };
+        assert_eq!(s, b"::1");
+    }
+
+    #[test]
+    fn test_inet_ntop6_all_zeros() {
+        // Bug regression: all-zeros must produce "::" not ":::".
+        let src = [0u8; 16];
+        let mut buf = [0u8; 46];
+        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
+        assert!(!ret.is_null());
+        let s = unsafe { c_str_to_slice(ret) };
+        assert_eq!(s, b"::");
+    }
+
+    #[test]
+    fn test_inet_ntop6_fe80_loopback() {
+        // Bug regression: fe80::1 was formatted as "fe80:1" (missing colon).
+        let mut src = [0u8; 16];
+        src[0] = 0xfe; src[1] = 0x80;
+        src[15] = 1;
+        let mut buf = [0u8; 46];
+        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
+        assert!(!ret.is_null());
+        let s = unsafe { c_str_to_slice(ret) };
+        assert_eq!(s, b"fe80::1");
+    }
+
+    #[test]
+    fn test_inet_ntop6_trailing_compression() {
+        // fe80:: (all trailing groups zero)
+        let mut src = [0u8; 16];
+        src[0] = 0xfe; src[1] = 0x80;
+        let mut buf = [0u8; 46];
+        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
+        assert!(!ret.is_null());
+        let s = unsafe { c_str_to_slice(ret) };
+        assert_eq!(s, b"fe80::");
+    }
+
+    #[test]
+    fn test_inet_ntop6_middle_compression() {
+        // 2001:db8::1
+        let mut src = [0u8; 16];
+        src[0] = 0x20; src[1] = 0x01;
+        src[2] = 0x0d; src[3] = 0xb8;
+        src[15] = 1;
+        let mut buf = [0u8; 46];
+        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
+        assert!(!ret.is_null());
+        let s = unsafe { c_str_to_slice(ret) };
+        assert_eq!(s, b"2001:db8::1");
+    }
+
+    #[test]
+    fn test_inet_ntop6_full_no_compression() {
+        // 1:2:3:4:5:6:7:8 — no zero runs >= 2
+        let src: [u8; 16] = [
+            0x00, 0x01,  // group 0 = 1
+            0x00, 0x02,  // group 1 = 2
+            0x00, 0x03,  // group 2 = 3
+            0x00, 0x04,  // group 3 = 4
+            0x00, 0x05,  // group 4 = 5
+            0x00, 0x06,  // group 5 = 6
+            0x00, 0x07,  // group 6 = 7
+            0x00, 0x08,  // group 7 = 8
+        ];
+        let mut buf = [0u8; 46];
+        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
+        assert!(!ret.is_null());
+        let s = unsafe { c_str_to_slice(ret) };
+        assert_eq!(s, b"1:2:3:4:5:6:7:8");
+    }
+
+    #[test]
+    fn test_inet_ntop6_single_zero_no_compression() {
+        // Per RFC 5952: a single zero group must NOT use ::
+        // 1:0:3:4:5:6:7:8
+        let src: [u8; 16] = [
+            0x00, 0x01,
+            0x00, 0x00,  // group 1 = 0
+            0x00, 0x03,
+            0x00, 0x04,
+            0x00, 0x05,
+            0x00, 0x06,
+            0x00, 0x07,
+            0x00, 0x08,
+        ];
+        let mut buf = [0u8; 46];
+        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
+        assert!(!ret.is_null());
+        let s = unsafe { c_str_to_slice(ret) };
+        assert_eq!(s, b"1:0:3:4:5:6:7:8");
+    }
+
+    #[test]
+    fn test_inet_ntop6_buf_too_small() {
+        let src = [0u8; 16];
+        let mut buf = [0u8; 2]; // way too small for "::\0"
+        let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 2);
+        assert!(ret.is_null());
+    }
+
+    // -- inet_pton / inet_ntop IPv6 roundtrip --
+
+    #[test]
+    fn test_inet_pton6_ntop6_roundtrip() {
+        let addrs: &[&[u8]] = &[
+            b"::1\0",
+            b"::\0",
+            b"fe80::1\0",
+            b"2001:db8::1\0",
+            b"fe80::\0",
+        ];
+        for &addr_bytes in addrs {
+            let mut bin = [0u8; 16];
+            let ret = unsafe { inet_pton(AF_INET6, addr_bytes.as_ptr(), bin.as_mut_ptr()) };
+            assert_eq!(ret, 1, "inet_pton failed for {:?}", core::str::from_utf8(&addr_bytes[..addr_bytes.len()-1]));
+
+            let mut buf = [0u8; 46];
+            let ret = inet_ntop(AF_INET6, bin.as_ptr(), buf.as_mut_ptr(), 46);
+            assert!(!ret.is_null());
+            let result = unsafe { c_str_to_slice(ret) };
+            let expected = &addr_bytes[..addr_bytes.len() - 1]; // strip null
+            assert_eq!(result, expected,
+                "roundtrip mismatch: input={:?} output={:?}",
+                core::str::from_utf8(expected),
+                core::str::from_utf8(result));
+        }
+    }
+
+    // -- is_valid_ipv4 tests --
+
+    #[test]
+    fn test_is_valid_ipv4_basic() {
+        assert!(unsafe { is_valid_ipv4(c"0.0.0.0".as_ptr().cast()) });
+        assert!(unsafe { is_valid_ipv4(c"255.255.255.255".as_ptr().cast()) });
+        assert!(unsafe { is_valid_ipv4(c"192.168.1.1".as_ptr().cast()) });
+        assert!(!unsafe { is_valid_ipv4(c"".as_ptr().cast()) });
+        assert!(!unsafe { is_valid_ipv4(c"abc".as_ptr().cast()) });
+        assert!(!unsafe { is_valid_ipv4(c"1.2.3".as_ptr().cast()) });
+        assert!(!unsafe { is_valid_ipv4(c"256.0.0.1".as_ptr().cast()) });
+    }
+
+    // -- inet_aton tests --
+
+    #[test]
+    fn test_inet_aton_valid() {
+        let mut addr: u32 = 0;
+        assert_eq!(unsafe { inet_aton(c"127.0.0.1".as_ptr().cast(), &mut addr) }, 1);
+        assert_eq!(addr, u32::from_ne_bytes([127, 0, 0, 1]));
+    }
+
+    #[test]
+    fn test_inet_aton_invalid() {
+        let mut addr: u32 = 0;
+        assert_eq!(unsafe { inet_aton(c"not.an.ip".as_ptr().cast(), &mut addr) }, 0);
+    }
+
+    #[test]
+    fn test_inet_aton_null() {
+        let mut addr: u32 = 0;
+        assert_eq!(unsafe { inet_aton(core::ptr::null(), &mut addr) }, 0);
+        assert_eq!(unsafe { inet_aton(c"1.2.3.4".as_ptr().cast(), core::ptr::null_mut()) }, 0);
     }
 
     // -- Helper --

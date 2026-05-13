@@ -597,13 +597,55 @@ static LISTENERS: Mutex<[TcpListener; MAX_LISTENERS]> = Mutex::new({
 /// Next ephemeral port.
 static NEXT_PORT: Mutex<u16> = Mutex::new(49200);
 
-/// Allocate an ephemeral port.
+const EPHEMERAL_TCP_START: u16 = 49200;
+const EPHEMERAL_TCP_END: u16 = 65000;
+
+/// Allocate an ephemeral port that doesn't conflict with an existing
+/// connection to the same remote endpoint (4-tuple uniqueness).
+///
+/// Must be called while holding the CONNECTIONS lock — the caller passes
+/// a slice of connections to check against.
 #[allow(clippy::arithmetic_side_effects)]
-fn alloc_port() -> u16 {
-    let mut port = NEXT_PORT.lock();
-    let p = *port;
-    *port = if p >= 65000 { 49200 } else { p + 1 };
-    p
+fn alloc_port_for(
+    conns: &[TcpConnection; MAX_CONNECTIONS],
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+) -> KernelResult<u16> {
+    let mut port_guard = NEXT_PORT.lock();
+    let start = *port_guard;
+    let mut candidate = start;
+
+    loop {
+        // Check if this candidate creates a duplicate 4-tuple.
+        let conflicts = conns.iter().any(|c| {
+            c.active
+                && c.local_port == candidate
+                && c.remote_ip == remote_ip
+                && c.remote_port == remote_port
+        });
+
+        if !conflicts {
+            // Advance the counter past this candidate for next call.
+            *port_guard = if candidate >= EPHEMERAL_TCP_END {
+                EPHEMERAL_TCP_START
+            } else {
+                candidate + 1
+            };
+            return Ok(candidate);
+        }
+
+        // Advance to next candidate.
+        candidate = if candidate >= EPHEMERAL_TCP_END {
+            EPHEMERAL_TCP_START
+        } else {
+            candidate + 1
+        };
+
+        // If we've wrapped all the way around, no port is available.
+        if candidate == start {
+            return Err(KernelError::OutOfMemory);
+        }
+    }
 }
 
 /// Generate a cryptographically-random initial sequence number.
@@ -1158,14 +1200,18 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
 /// Returns a connection handle on success.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
-    let local_port = alloc_port();
     let isn = generate_isn();
 
     // Find a free slot. If all slots are occupied, try to recycle the
     // oldest TIME_WAIT connection (safest to evict since the connection
     // is fully closed and only waiting to absorb stale duplicate segments).
-    let handle = {
+    let (handle, local_port) = {
         let mut conns = CONNECTIONS.lock();
+
+        // Allocate a port that won't conflict with existing connections
+        // to the same remote endpoint (ensures 4-tuple uniqueness).
+        let local_port = alloc_port_for(&conns, remote_ip, remote_port)?;
+
         let slot = match conns.iter().position(|c| !c.active) {
             Some(idx) => idx,
             None => {
@@ -1252,7 +1298,7 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.keepalive_probes_max = KEEPALIVE_PROBES_DEFAULT;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
-        slot
+        (slot, local_port)
     };
 
     // Send SYN with MSS + WScale + Timestamp options (RFC 7323).
@@ -1330,12 +1376,16 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
 /// this to EINPROGRESS at the POSIX layer.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn connect_start(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
-    let local_port = alloc_port();
     let isn = generate_isn();
 
     // Find a free slot (same recycling logic as connect()).
-    let handle = {
+    let (handle, local_port) = {
         let mut conns = CONNECTIONS.lock();
+
+        // Allocate a port that won't conflict with existing connections
+        // to the same remote endpoint (ensures 4-tuple uniqueness).
+        let local_port = alloc_port_for(&conns, remote_ip, remote_port)?;
+
         let slot = match conns.iter().position(|c| !c.active) {
             Some(idx) => idx,
             None => {
@@ -1415,7 +1465,7 @@ pub fn connect_start(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usiz
         conn.keepalive_probes_max = KEEPALIVE_PROBES_DEFAULT;
         conn.keepalive_probes_sent = 0;
         conn.last_activity_ns = crate::hrtimer::now_ns();
-        slot
+        (slot, local_port)
     };
 
     // Send the initial SYN.

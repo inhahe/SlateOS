@@ -634,6 +634,35 @@ pub extern "C" fn getpagesize() -> i32 {
     16384
 }
 
+/// Adjust the program break (legacy heap interface).
+///
+/// Our OS uses mmap-based allocation exclusively — there is no
+/// traditional brk/sbrk heap.  `sbrk(0)` returns a dummy address,
+/// and `sbrk(n)` with `n != 0` fails with `ENOMEM`.
+///
+/// This stub exists for link compatibility with programs that
+/// reference `sbrk`.
+#[unsafe(no_mangle)]
+pub extern "C" fn sbrk(increment: isize) -> *mut u8 {
+    if increment == 0 {
+        // Return a non-NULL but meaningless address.
+        // Some programs call sbrk(0) to find the "current break".
+        return 0x1000_0000_usize as *mut u8;
+    }
+    // Cannot grow the heap — we use mmap.
+    crate::errno::set_errno(crate::errno::ENOMEM);
+    usize::MAX as *mut u8 // (void *)-1 signals failure
+}
+
+/// Set the program break (legacy heap interface).
+///
+/// Always fails — our OS uses mmap exclusively.
+#[unsafe(no_mangle)]
+pub extern "C" fn brk(_addr: *mut u8) -> i32 {
+    crate::errno::set_errno(crate::errno::ENOMEM);
+    -1
+}
+
 // ---------------------------------------------------------------------------
 // pathconf / fpathconf / confstr
 // ---------------------------------------------------------------------------

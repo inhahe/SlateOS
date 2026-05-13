@@ -97,13 +97,15 @@ pub extern "C" fn close(fd: Fd) -> i32 {
         return -1;
     };
 
-    // Clear per-fd socket metadata regardless of sharing.
-    match entry.kind {
+    // Read socket metadata BEFORE clearing (need it for SO_LINGER check).
+    let socket_meta = match entry.kind {
         HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+            let m = crate::socket::get_meta(fd);
             crate::socket::clear_meta(fd);
+            m
         }
-        _ => {}
-    }
+        _ => None,
+    };
 
     // If another fd still references the same kernel handle (from
     // dup on handle types without kernel-level duplication), skip
@@ -119,7 +121,7 @@ pub extern "C" fn close(fd: Fd) -> i32 {
         HandleKind::TcpStream => {
             if entry.handle == 0 { return 0; } // Unconnected socket, nothing to close.
             // SO_LINGER with timeout 0: send RST (abortive close).
-            let linger_abort = crate::socket::get_meta(fd)
+            let linger_abort = socket_meta
                 .map_or(false, |m| m.linger_onoff && m.linger_secs == 0);
             if linger_abort {
                 syscall1(SYS_TCP_ABORT, entry.handle)

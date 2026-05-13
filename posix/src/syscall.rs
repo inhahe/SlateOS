@@ -82,6 +82,7 @@ pub const SYS_PIPE_READ: u64 = 222;
 pub const SYS_PIPE_TRY_WRITE: u64 = 223;
 pub const SYS_PIPE_TRY_READ: u64 = 224;
 pub const SYS_PIPE_CLOSE: u64 = 225;
+pub const SYS_PIPE_POLL: u64 = 228;
 
 // Networking (800-999)
 pub const SYS_TCP_CONNECT: u64 = 800;

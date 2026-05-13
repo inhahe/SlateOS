@@ -50,7 +50,7 @@ use super::number::{
     SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI,
     SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
     SYS_IRQ_REGISTER, SYS_IRQ_RELEASE,
-    SYS_IRQ_WAIT, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_READ,
+    SYS_IRQ_WAIT, SYS_PIPE_CLOSE, SYS_PIPE_CREATE, SYS_PIPE_POLL, SYS_PIPE_READ,
     SYS_PIPE_TRY_READ, SYS_PIPE_TRY_WRITE, SYS_PIPE_WRITE,
     SYS_PORT_READ, SYS_PORT_WRITE,
     SYS_DMA_ALLOC, SYS_DMA_FREE,
@@ -270,6 +270,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PIPE_TRY_WRITE as usize] = Some(handlers::sys_pipe_try_write);
     handlers[SYS_PIPE_TRY_READ as usize] = Some(handlers::sys_pipe_try_read);
     handlers[SYS_PIPE_CLOSE as usize] = Some(handlers::sys_pipe_close);
+    handlers[SYS_PIPE_POLL as usize] = Some(handlers::sys_pipe_poll);
     handlers[SYS_PIPE_READ_TIMEOUT as usize] = Some(handlers::sys_pipe_read_timeout);
     handlers[SYS_PIPE_WRITE_TIMEOUT as usize] = Some(handlers::sys_pipe_write_timeout);
     handlers[SYS_SHM_CREATE as usize] = Some(handlers::sys_shm_create);

@@ -1660,6 +1660,20 @@ pub fn sys_pipe_close(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `SYS_PIPE_POLL` — query pipe readiness for poll/select.
+///
+/// `arg0`: pipe handle (either end).
+///
+/// Returns a bitmask:
+/// - bit 0 (0x01): readable
+/// - bit 2 (0x04): writable
+/// - bit 4 (0x10): hangup (other end closed)
+pub fn sys_pipe_poll(args: &SyscallArgs) -> SyscallResult {
+    let handle = PipeHandle::from_raw(args.arg0);
+    let flags = pipe::poll_status(handle);
+    SyscallResult::ok(flags as i64)
+}
+
 /// `SYS_PIPE_READ_TIMEOUT` — read from a pipe with a deadline.
 ///
 /// `arg0`: pipe handle (read end).

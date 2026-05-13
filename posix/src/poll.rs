@@ -344,8 +344,19 @@ fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool,
     match kind {
         // Console: always ready (framebuffer writable, keyboard might have input).
         // File: always ready (POSIX says regular files are always "ready").
-        // Pipe: assumed ready (can't non-destructively check without peek syscall).
-        HandleKind::Console | HandleKind::File | HandleKind::Pipe => (true, true, false, false),
+        HandleKind::Console | HandleKind::File => (true, true, false, false),
+
+        // Pipe: query kernel for actual readiness.
+        HandleKind::Pipe => {
+            if handle == 0 {
+                return (false, false, true, true);
+            }
+            let status = syscall1(SYS_PIPE_POLL, handle) as u16;
+            let readable = (status & 0x0001) != 0;
+            let writable = (status & 0x0004) != 0;
+            let hangup = (status & 0x0010) != 0;
+            (readable, writable, hangup, false)
+        }
 
         // TCP stream: query kernel for actual rx/tx readiness.
         HandleKind::TcpStream => {

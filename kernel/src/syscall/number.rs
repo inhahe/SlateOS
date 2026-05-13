@@ -659,6 +659,19 @@ pub const SYS_PIPE_READ_TIMEOUT: u64 = 226;
 /// Returns: bytes written, `TimedOut` if deadline expires.
 pub const SYS_PIPE_WRITE_TIMEOUT: u64 = 227;
 
+/// `SYS_PIPE_POLL` — query pipe readiness for poll/select.
+///
+/// `arg0`: pipe handle (either read or write end).
+///
+/// Returns a bitmask:
+/// - bit 0 (0x01): readable (data available, or write-end closed)
+/// - bit 2 (0x04): writable (buffer has space, or read-end closed)
+/// - bit 4 (0x10): hangup (other end closed)
+///
+/// The caller should check the appropriate bit based on whether
+/// this is a read-end or write-end handle.
+pub const SYS_PIPE_POLL: u64 = 228;
+
 /// Create a shared memory region.
 ///
 /// `arg0`: requested size in bytes (rounded up to frame boundary).

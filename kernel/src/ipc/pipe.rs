@@ -111,7 +111,7 @@ impl PipeHandle {
     }
 
     /// Extract which end this handle refers to.
-    fn end(self) -> PipeEnd {
+    pub fn end(self) -> PipeEnd {
         if self.0 & 1 == 0 {
             PipeEnd::Read
         } else {
@@ -122,7 +122,7 @@ impl PipeHandle {
 
 /// Which end of the pipe a handle refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PipeEnd {
+pub enum PipeEnd {
     Read,
     Write,
 }
@@ -788,6 +788,43 @@ pub fn writable(handle: PipeHandle) -> bool {
     };
     // Writable if there's space, or if reader closed (broken pipe).
     (pipe.buf.len() - pipe.len) > 0 || pipe.read_closed
+}
+
+/// Poll a pipe handle for readiness (used by SYS_PIPE_POLL).
+///
+/// Returns a bitmask:
+/// - bit 0 (0x01): readable (data available or writer closed)
+/// - bit 2 (0x04): writable (buffer space available or reader closed)
+/// - bit 4 (0x10): hangup (other end closed)
+pub fn poll_status(handle: PipeHandle) -> u16 {
+    let mut flags: u16 = 0;
+    let table = PIPES.lock();
+    let Some(pipe) = table.get(&handle.pipe_id()) else {
+        // Pipe not found — report error/hangup.
+        return 0x10; // POLL_HANGUP
+    };
+
+    let is_read_end = handle.end() == PipeEnd::Read;
+
+    if is_read_end {
+        // Read end: readable if data available or writer closed (EOF).
+        if pipe.len > 0 || pipe.write_closed {
+            flags |= 0x01; // POLL_READABLE
+        }
+        if pipe.write_closed {
+            flags |= 0x10; // POLL_HANGUP (writer gone)
+        }
+    } else {
+        // Write end: writable if space available or reader closed (EPIPE).
+        if (pipe.buf.len() - pipe.len) > 0 || pipe.read_closed {
+            flags |= 0x04; // POLL_WRITABLE
+        }
+        if pipe.read_closed {
+            flags |= 0x10; // POLL_HANGUP (reader gone → broken pipe)
+        }
+    }
+
+    flags
 }
 
 // ---------------------------------------------------------------------------

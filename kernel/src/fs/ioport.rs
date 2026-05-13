@@ -203,7 +203,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] boundaries: OK");
 
     // 8: Stats.
-    let (regions, reads, writes, ur, uw, ops) = stats();
+    let (regions, reads, writes, ur, _uw, ops) = stats();
     assert!(regions >= 6);
     assert!(reads > 16_600_000);
     assert!(writes > 9_750_000);

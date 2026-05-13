@@ -466,7 +466,7 @@ pub fn self_test() {
     crate::serial_println!("  [10/11] remove device: OK");
 
     // Test 11: Stats.
-    let (total, ok, no_drv, hotplug, ops) = stats();
+    let (total, ok, _no_drv, hotplug, ops) = stats();
     assert!(total >= 3);
     assert!(ok >= 3);
     assert!(hotplug >= 1);

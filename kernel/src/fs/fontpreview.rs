@@ -305,7 +305,7 @@ pub fn self_test() {
     crate::serial_println!("  [6/8] category: OK");
 
     // 7: Add font.
-    let id = add_font("Roboto", FontStyle::Regular, FontCategory::SansSerif, "/fonts/roboto.ttf", "3.0", 1500).expect("add");
+    let _id = add_font("Roboto", FontStyle::Regular, FontCategory::SansSerif, "/fonts/roboto.ttf", "3.0", 1500).expect("add");
     assert_eq!(list_fonts().len(), 6);
     crate::serial_println!("  [7/8] add: OK");
 

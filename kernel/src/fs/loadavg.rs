@@ -187,7 +187,7 @@ pub fn self_test() {
     for _ in 0..10 {
         update(5, 200).expect("update");
     }
-    let (a1, a5, a15, _, _) = get();
+    let (a1, _a5, a15, _, _) = get();
     // 1m average should be closer to 5000 (5.000) than the 15m.
     assert!(a1 > a15);
     crate::serial_println!("  [4/8] convergence: OK");

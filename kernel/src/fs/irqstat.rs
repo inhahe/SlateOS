@@ -267,7 +267,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] not found: OK");
 
     // 8: Stats.
-    let (irqs, cpus, total, spurious, samples, ops) = stats();
+    let (irqs, cpus, total, spurious, _samples, ops) = stats();
     assert_eq!(irqs, 6);
     assert_eq!(cpus, 4);
     assert!(total > 12_650_000);

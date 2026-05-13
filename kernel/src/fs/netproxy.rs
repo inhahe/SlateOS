@@ -476,7 +476,7 @@ pub fn self_test() {
     crate::serial_println!("  [10/11] remove proxy: OK");
 
     // Test 11: Stats.
-    let (proxy_count, bypass_count, mode_label, overrides, ops) = stats();
+    let (proxy_count, bypass_count, mode_label, _overrides, ops) = stats();
     assert_eq!(proxy_count, 0);
     assert!(bypass_count >= 3);
     assert_eq!(mode_label, "Manual");

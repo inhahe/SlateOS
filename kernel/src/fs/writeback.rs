@@ -158,7 +158,7 @@ pub fn record_written(device: &str, pages: u64) -> KernelResult<()> {
 }
 
 /// Start a flush cycle.
-pub fn start_flush(device: &str, reason: FlushReason) -> KernelResult<()> {
+pub fn start_flush(device: &str, _reason: FlushReason) -> KernelResult<()> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         if let Some(dev) = state.devices.iter_mut().find(|d| d.device == device) {

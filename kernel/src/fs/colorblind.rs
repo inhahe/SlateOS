@@ -292,7 +292,7 @@ pub fn self_test() {
     crate::serial_println!("  [6/8] apply preset: OK");
 
     // 7: Custom preset.
-    let pid = add_preset("My Filter", CvdType::Protanomaly, 50, "Custom red-weak filter").expect("custom");
+    let _pid = add_preset("My Filter", CvdType::Protanomaly, 50, "Custom red-weak filter").expect("custom");
     assert_eq!(list_presets().len(), 5);
     crate::serial_println!("  [7/8] custom preset: OK");
 

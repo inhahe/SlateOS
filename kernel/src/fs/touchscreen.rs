@@ -341,7 +341,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] disable gesture: OK");
 
     // 8: Stats.
-    let (devices, gestures, touches, gest_count, cals, ops) = stats();
+    let (devices, gestures, _touches, gest_count, cals, ops) = stats();
     assert_eq!(devices, 1);
     assert!(gestures >= 6);
     assert!(gest_count >= 2);

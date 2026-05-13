@@ -244,7 +244,7 @@ fn gather_general(path: &str, meta: &crate::fs::FileMeta) -> KernelResult<Genera
 }
 
 /// Gather security properties.
-fn gather_security(path: &str, meta: &crate::fs::FileMeta) -> SecurityProperties {
+fn gather_security(_path: &str, meta: &crate::fs::FileMeta) -> SecurityProperties {
     let perms = format_permissions(meta.permissions);
     let xattrs: Vec<(String, String)> = meta.xattrs.iter()
         .map(|(k, v)| {

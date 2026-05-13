@@ -470,7 +470,7 @@ pub fn self_test() {
     crate::serial_println!("  [10/11] focused element: OK");
 
     // 11: Stats.
-    let (elems, announcements, queue, enabled, rate, ops) = stats();
+    let (elems, announcements, _queue, enabled, rate, ops) = stats();
     assert_eq!(elems, 2);
     assert!(announcements >= 3);
     assert!(enabled);

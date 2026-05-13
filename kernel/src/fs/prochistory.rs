@@ -226,8 +226,8 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty: OK");
 
     // 2: Record start.
-    let id1 = record_start("browser", 100, "--new-window").expect("start1");
-    let id2 = record_start("editor", 101, "file.txt").expect("start2");
+    let _id1 = record_start("browser", 100, "--new-window").expect("start1");
+    let _id2 = record_start("editor", 101, "file.txt").expect("start2");
     assert_eq!(recent(10).len(), 2);
     crate::serial_println!("  [2/8] start: OK");
 

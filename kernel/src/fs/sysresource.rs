@@ -316,7 +316,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] clear: OK");
 
     // 8: Stats.
-    let (samples, hist_size, alert_count, total_alerts, ops) = stats();
+    let (samples, hist_size, _alert_count, total_alerts, ops) = stats();
     assert_eq!(samples, 2);
     assert_eq!(hist_size, 0); // Cleared.
     assert_eq!(total_alerts, 1);

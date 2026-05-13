@@ -339,7 +339,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] reset: OK");
 
     // 8: Stats.
-    let (apps, sessions, tracked_ms, limited, ops) = stats();
+    let (apps, _sessions, _tracked_ms, limited, ops) = stats();
     assert_eq!(apps, 2);
     assert_eq!(limited, 1);
     assert!(ops > 0);

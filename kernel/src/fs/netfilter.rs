@@ -314,7 +314,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] drop stats: OK");
 
     // 8: Stats.
-    let (rules, ct, packets, accepted, dropped, ops) = stats();
+    let (rules, ct, packets, accepted, _dropped, ops) = stats();
     assert_eq!(rules, 4);
     assert_eq!(ct, 2);
     assert!(packets > 9_150_000);

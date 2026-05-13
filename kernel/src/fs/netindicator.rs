@@ -623,7 +623,7 @@ pub fn self_test() -> KernelResult<()> {
     let (mode2, _) = dns_config();
     assert_eq!(mode2, DnsMode::Auto);
 
-    let (ic, wc, pc, sc, cc) = stats();
+    let (ic, _wc, _pc, sc, cc) = stats();
     assert_eq!(ic, 2);
     assert!(sc > 0);
     assert!(cc > 0);

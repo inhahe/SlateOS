@@ -464,7 +464,7 @@ pub fn self_test() {
     crate::serial_println!("  [10/11] clear reports: OK");
 
     // Test 11: Stats.
-    let (count, total, fatal, enabled, ops) = stats();
+    let (count, total, _fatal, enabled, ops) = stats();
     assert_eq!(count, 0);
     assert!(total >= 3);
     assert!(enabled);

@@ -289,7 +289,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] remove: OK");
 
     // 8: Stats.
-    let (rules, evals, matches, applied, ops) = stats();
+    let (rules, evals, matches, _applied, ops) = stats();
     assert_eq!(rules, 3);
     assert!(evals >= 5);
     assert!(matches >= 2);

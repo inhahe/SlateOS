@@ -294,7 +294,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] finish without start: OK");
 
     // 8: Stats.
-    let (zones, attempts, migrations, stalls, stall_ns, ops) = stats();
+    let (zones, attempts, migrations, _stalls, _stall_ns, ops) = stats();
     assert_eq!(zones, 3);
     assert!(attempts > 650);
     assert!(migrations > 103000);

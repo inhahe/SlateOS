@@ -208,7 +208,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] refill cap: OK");
 
     // 8: Stats.
-    let (limiters, allows, denies, bursts, ops) = stats();
+    let (limiters, allows, denies, _bursts, ops) = stats();
     assert!(limiters >= 4);
     assert!(allows > 6_050_000);
     assert!(denies > 800_000);

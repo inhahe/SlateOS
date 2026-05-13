@@ -295,7 +295,7 @@ pub fn self_test() {
     crate::serial_println!("  [3/8] storage ask: OK");
 
     // 4: Add deny rule for specific vendor.
-    let rid = add_rule("Block BadUSB", Some(0xDEAD), None, None, Decision::Deny).expect("add");
+    let _rid = add_rule("Block BadUSB", Some(0xDEAD), None, None, Decision::Deny).expect("add");
     let d = check_device(0xDEAD, 0x0001, UsbClass::Other, "BadUSB").expect("check3");
     assert_eq!(d, Decision::Deny);
     crate::serial_println!("  [4/8] deny rule: OK");
@@ -317,7 +317,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] log: OK");
 
     // 8: Stats.
-    let (rules, log_size, allowed, denied, ops) = stats();
+    let (rules, _log_size, allowed, denied, ops) = stats();
     assert_eq!(rules, 4);
     assert!(allowed >= 1);
     assert!(denied >= 2);

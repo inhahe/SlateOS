@@ -264,7 +264,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] not found: OK");
 
     // 8: Stats.
-    let (zones, allocs, frees, reclaims, fails, ops) = stats();
+    let (zones, allocs, frees, reclaims, _fails, ops) = stats();
     assert_eq!(zones, 4);
     assert!(allocs > 12_600_000);
     assert!(frees > 11_977_000);

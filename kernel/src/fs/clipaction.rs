@@ -246,7 +246,7 @@ pub fn self_test() {
     crate::serial_println!("  [6/8] execute: OK");
 
     // 7: Add custom action.
-    let aid = add_action("Shorten URL", ContentType::Url, "url:shorten").expect("add");
+    let _aid = add_action("Shorten URL", ContentType::Url, "url:shorten").expect("add");
     let actions = get_actions(ContentType::Url);
     assert_eq!(actions.len(), 3);
     crate::serial_println!("  [7/8] add action: OK");

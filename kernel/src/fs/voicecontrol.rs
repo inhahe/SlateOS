@@ -366,7 +366,7 @@ pub fn self_test() {
     crate::serial_println!("  [5/8] low confidence: OK");
 
     // 6: Add custom command.
-    let id = add_command("lock screen", CommandCategory::Settings, "screen.lock").expect("add");
+    let _id = add_command("lock screen", CommandCategory::Settings, "screen.lock").expect("add");
     let action = recognize("lock screen", Confidence::High).expect("rec4");
     assert_eq!(action, Some(String::from("screen.lock")));
     crate::serial_println!("  [6/8] custom: OK");

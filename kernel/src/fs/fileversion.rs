@@ -458,7 +458,7 @@ pub fn self_test() {
     crate::serial_println!("  [10/11] purge file versions: OK");
 
     // Test 11: Stats.
-    let (ver_count, file_count, captured, restored, watch_count, ops) = stats();
+    let (ver_count, _file_count, captured, restored, watch_count, ops) = stats();
     assert_eq!(ver_count, 0);
     assert!(captured >= 2);
     assert!(restored >= 1);

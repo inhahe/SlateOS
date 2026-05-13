@@ -256,7 +256,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] destroy: OK");
 
     // 8: Stats.
-    let (count, creates, waits, events, timeouts, ops) = stats();
+    let (count, creates, waits, events, _timeouts, ops) = stats();
     assert_eq!(count, 2);
     assert!(creates >= 3);
     assert!(waits > 150000);

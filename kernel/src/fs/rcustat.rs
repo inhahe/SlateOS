@@ -129,7 +129,7 @@ pub fn init_defaults() {
 }
 
 /// Begin a new grace period.
-pub fn begin_gp(flavor: RcuFlavor) -> KernelResult<u64> {
+pub fn begin_gp(_flavor: RcuFlavor) -> KernelResult<u64> {
     with_state(|state| {
         let now = crate::hpet::elapsed_ns();
         state.current_gp_id += 1;
@@ -188,7 +188,7 @@ pub fn quiescent(cpu: u32) -> KernelResult<()> {
 }
 
 /// Report a stall.
-pub fn report_stall(cpu: u32) -> KernelResult<()> {
+pub fn report_stall(_cpu: u32) -> KernelResult<()> {
     with_state(|state| {
         state.total_stalls += 1;
         Ok(())
@@ -268,7 +268,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] stall: OK");
 
     // 8: Stats.
-    let (cpus, gp, total_gp, total_cb, stalls, ops) = stats();
+    let (cpus, gp, total_gp, total_cb, _stalls, ops) = stats();
     assert_eq!(cpus, 4);
     assert_eq!(gp, 101);
     assert!(total_gp >= 101);

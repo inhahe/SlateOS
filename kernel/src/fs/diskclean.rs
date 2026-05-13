@@ -176,7 +176,7 @@ pub fn clean(categories: &[CleanCategory]) -> KernelResult<(u64, u64)> {
     with_state(|state| {
         let mut cleaned_bytes: u64 = 0;
         let mut cleaned_items: u64 = 0;
-        let before = state.items.len();
+        let _before = state.items.len();
         state.items.retain(|item| {
             if categories.contains(&item.category) && item.safe_to_remove {
                 cleaned_bytes += item.size_bytes;

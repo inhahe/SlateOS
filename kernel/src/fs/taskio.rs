@@ -239,7 +239,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] unregister: OK");
 
     // 8: Stats.
-    let (tasks, rb, wb, cancelled, io_wait, ops) = stats();
+    let (tasks, rb, wb, cancelled, _io_wait, ops) = stats();
     assert_eq!(tasks, 3);
     assert!(rb > 2_600_000_000);
     assert!(wb > 1_250_000_000);

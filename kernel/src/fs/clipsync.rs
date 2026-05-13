@@ -329,7 +329,7 @@ pub fn self_test() {
     crate::serial_println!("  [2/8] device: OK");
 
     // 3: Queue content.
-    let eid = on_copy(SyncContentType::Text, "Hello world", 11).expect("copy");
+    let _eid = on_copy(SyncContentType::Text, "Hello world", 11).expect("copy");
     let queue = get_queue(10);
     assert_eq!(queue.len(), 1);
     assert!(!queue[0].synced);

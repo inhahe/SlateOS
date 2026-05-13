@@ -278,7 +278,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] hotspot ordering: OK");
 
     // 8: Stats.
-    let (addrs, procs, waits, wakes, timeouts, ops) = stats();
+    let (addrs, procs, waits, wakes, _timeouts, ops) = stats();
     assert_eq!(addrs, 3);
     assert_eq!(procs, 2);
     assert!(waits > 600000);

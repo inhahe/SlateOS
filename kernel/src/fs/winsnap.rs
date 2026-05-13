@@ -522,7 +522,7 @@ pub fn self_test() -> KernelResult<()> {
     assert_eq!(cfg.edge_distance, 30);
     assert!(!cfg.corner_snap);
 
-    let (sc, lc, ops) = stats();
+    let (sc, _lc, ops) = stats();
     assert!(sc > 0 || ops > 0);
 
     clear_all();

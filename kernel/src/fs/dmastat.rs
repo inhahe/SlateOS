@@ -164,7 +164,7 @@ pub fn record_map(device_id: u32, size: u64, _direction: DmaDirection) -> Kernel
 }
 
 /// Record a DMA unmap.
-pub fn record_unmap(device_id: u32, size: u64) -> KernelResult<()> {
+pub fn record_unmap(device_id: u32, _size: u64) -> KernelResult<()> {
     with_state(|state| {
         let dev = state.devices.iter_mut().find(|d| d.device_id == device_id)
             .ok_or(KernelError::NotFound)?;

@@ -398,7 +398,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] remove: OK");
 
     // 8: Stats.
-    let (devices, sent, received, bytes_sent, bytes_recv, ops) = stats();
+    let (devices, sent, _received, bytes_sent, _bytes_recv, ops) = stats();
     assert_eq!(devices, 1);
     assert_eq!(sent, 1);
     assert_eq!(bytes_sent, 1024000);

@@ -237,7 +237,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] merge: OK");
 
     // 8: Stats.
-    let (devs, reads, writes, rb, wb, ops) = stats();
+    let (devs, reads, writes, rb, _wb, ops) = stats();
     assert!(devs >= 3);
     assert!(reads > 150_000_000);
     assert!(writes > 110_000_000);

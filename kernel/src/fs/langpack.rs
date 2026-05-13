@@ -345,7 +345,7 @@ pub fn self_test() {
     crate::serial_println!("  [10/11] uninstall: OK");
 
     // 11: Stats.
-    let (total, installed, lang, lookups, misses, ops) = stats();
+    let (total, installed, _lang, lookups, misses, ops) = stats();
     assert!(total >= 3);
     assert!(installed >= 2);
     assert!(lookups >= 2);

@@ -356,7 +356,7 @@ pub fn self_test() {
     crate::serial_println!("  [6/8] next/prev: OK");
 
     // 7: Multiple sessions.
-    let s2 = register_session("podcast_app", MediaType::Podcast).expect("reg2");
+    let _s2 = register_session("podcast_app", MediaType::Podcast).expect("reg2");
     assert_eq!(list_sessions().len(), 2);
     crate::serial_println!("  [7/8] multi-session: OK");
 

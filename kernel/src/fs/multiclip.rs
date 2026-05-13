@@ -295,9 +295,9 @@ pub fn self_test() {
     crate::serial_println!("  [1/8] empty: OK");
 
     // 2: Push entries.
-    let id1 = push("Hello", ContentType::PlainText).expect("push1");
+    let _id1 = push("Hello", ContentType::PlainText).expect("push1");
     let id2 = push("World", ContentType::PlainText).expect("push2");
-    let id3 = push("<b>Bold</b>", ContentType::Html).expect("push3");
+    let _id3 = push("<b>Bold</b>", ContentType::Html).expect("push3");
     assert_eq!(list_history(10).len(), 3);
     crate::serial_println!("  [2/8] push: OK");
 

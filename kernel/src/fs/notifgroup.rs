@@ -342,7 +342,7 @@ pub fn self_test() {
 
     // 2: Add notifications (same app = same group).
     let (g1, n1) = add_notification("mail", "New email", "From Alice", NotifPriority::Normal).expect("add1");
-    let (g2, n2) = add_notification("mail", "New email", "From Bob", NotifPriority::Normal).expect("add2");
+    let (g2, _n2) = add_notification("mail", "New email", "From Bob", NotifPriority::Normal).expect("add2");
     assert_eq!(g1, g2); // Same group.
     assert_eq!(get_groups().len(), 1);
     assert_eq!(unread_count(), 2);
@@ -381,7 +381,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] dismiss: OK");
 
     // 8: Stats.
-    let (groups, total, unread, dismissed, ops) = stats();
+    let (groups, total, _unread, dismissed, ops) = stats();
     assert_eq!(groups, 1);
     assert_eq!(total, 3);
     assert_eq!(dismissed, 2);

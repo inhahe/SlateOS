@@ -5640,8 +5640,8 @@ fn gen_location() -> Vec<u8> {
     out.push_str(&format!("ops: {}\n", ops));
 
     if let Some(fix) = super::location::current_location() {
-        let lat = fix.latitude_ud as f64 / 1_000_000.0;
-        let lon = fix.longitude_ud as f64 / 1_000_000.0;
+        let _lat = fix.latitude_ud as f64 / 1_000_000.0;
+        let _lon = fix.longitude_ud as f64 / 1_000_000.0;
         // Use integer division to show approximate coordinates without float formatting.
         let lat_deg = fix.latitude_ud / 1_000_000;
         let lat_frac = (fix.latitude_ud % 1_000_000).unsigned_abs();
@@ -6783,7 +6783,7 @@ fn gen_colorscheme() -> Vec<u8> {
     for s in &schemes {
         out.push_str(&format!("  [{}] {} ({:?})\n", s.id, s.name, s.mode));
     }
-    let (count, changes, ops) = super::colorscheme::stats();
+    let (_count, changes, ops) = super::colorscheme::stats();
     out.push_str(&format!("total_changes: {}\n", changes));
     out.push_str(&format!("ops: {}\n", ops));
     out.into_bytes()
@@ -6867,7 +6867,7 @@ fn gen_filetransfer() -> Vec<u8> {
                 t.id, dir, t.device_name, t.file_name, t.status.label()));
         }
     }
-    let (devs, sent, recv, bytes_s, bytes_r, ops) = super::filetransfer::stats();
+    let (_devs, sent, recv, _bytes_s, _bytes_r, ops) = super::filetransfer::stats();
     out.push_str(&format!("total_sent: {}\n", sent));
     out.push_str(&format!("total_received: {}\n", recv));
     out.push_str(&format!("ops: {}\n", ops));
@@ -7033,7 +7033,7 @@ fn gen_sysresource() -> Vec<u8> {
         out.push_str(&format!("gpu: {}%\n", snap.gpu_percent));
         out.push_str(&format!("processes: {}, threads: {}\n", snap.process_count, snap.thread_count));
     }
-    let (samples, hist_size, alerts, total_alerts, ops) = super::sysresource::stats();
+    let (samples, hist_size, _alerts, total_alerts, ops) = super::sysresource::stats();
     out.push_str(&format!("total_samples: {}\n", samples));
     out.push_str(&format!("history_size: {}\n", hist_size));
     out.push_str(&format!("total_alerts: {}\n", total_alerts));
@@ -7055,7 +7055,7 @@ fn gen_faceunlock() -> Vec<u8> {
         out.push_str(&format!("  user {} ({}) — verified={}, failed={}\n",
             e.user_id, e.user_name, e.verify_count, e.fail_count));
     }
-    let (enr, verifications, matches, rejections, ops) = super::faceunlock::stats();
+    let (_enr, verifications, matches, rejections, ops) = super::faceunlock::stats();
     out.push_str(&format!("total_verifications: {}\n", verifications));
     out.push_str(&format!("total_matches: {}\n", matches));
     out.push_str(&format!("total_rejections: {}\n", rejections));
@@ -8334,7 +8334,7 @@ fn gen_compstat() -> Vec<u8> {
 fn gen_irqstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
-    let (irqs, cpus, total, spurious, samples, ops) = crate::fs::irqstat::stats();
+    let (irqs, cpus, total, spurious, _samples, ops) = crate::fs::irqstat::stats();
     out.push_str(&format!("irq_lines: {}\n", irqs));
     out.push_str(&format!("cpus: {}\n", cpus));
     out.push_str(&format!("total_irqs: {}\n", total));
@@ -8806,7 +8806,7 @@ fn gen_mempress() -> Vec<u8> {
     out.push_str(&format!("oom_proximity: {}%\n", c.oom_proximity));
     out.push_str(&format!("total_stall_ns: {}\n", c.total_stall_ns));
     out.push_str(&format!("total_reclaim_pages: {}\n", c.total_reclaim_pages));
-    let (stalls, reclaims, stall_ns, pages, changes, oom, ops) = crate::fs::mempress::stats();
+    let (stalls, reclaims, _stall_ns, _pages, changes, _oom, ops) = crate::fs::mempress::stats();
     out.push_str(&format!("stall_events: {}\n", stalls));
     out.push_str(&format!("reclaim_events: {}\n", reclaims));
     out.push_str(&format!("level_changes: {}\n", changes));
@@ -9002,7 +9002,7 @@ fn gen_clocksrc() -> Vec<u8> {
     out.push_str(&format!("Sources: {}  Reads: {}  Skew corrections: {}  Ops: {}\n\n", sources, reads, skews, ops));
     for s in super::clocksrc::list() {
         let cur = if s.is_current { " [CURRENT]" } else { "" };
-        let avg_skew = if s.skew_corrections > 0 { s.total_skew_ns / s.skew_corrections } else { 0 };
+        let _avg_skew = if s.skew_corrections > 0 { s.total_skew_ns / s.skew_corrections } else { 0 };
         out.push_str(&format!("  [{}] {:<10} {}Hz rating={} reads={} skew_corr={} max_skew={}ns latency={}ns{}\n",
             s.id, s.name, s.freq_hz, s.rating.label(), s.reads, s.skew_corrections, s.max_skew_ns, s.read_latency_ns, cur));
     }

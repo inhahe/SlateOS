@@ -433,7 +433,7 @@ pub fn self_test() {
     crate::serial_println!("  [10/11] disable clears current: OK");
 
     // Test 11: Stats.
-    let (enabled, perm_count, requests, denied, hist_len, ops) = stats();
+    let (enabled, perm_count, requests, denied, _hist_len, ops) = stats();
     assert!(!enabled);
     assert_eq!(perm_count, 2);
     assert!(requests >= 2);

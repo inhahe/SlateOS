@@ -350,7 +350,7 @@ pub fn self_test() {
     crate::serial_println!("  [7/8] forget: OK");
 
     // 8: Stats.
-    let (networks, saved, scans, connections, failures, ops) = stats();
+    let (networks, saved, _scans, connections, _failures, ops) = stats();
     assert_eq!(networks, 3);
     assert_eq!(saved, 0);
     assert_eq!(connections, 1);

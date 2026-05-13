@@ -744,7 +744,7 @@ fn test_diff() {
         .expect("snapshot 2 create failed");
 
     let id1 = find_by_name("test-snap").expect("should find test-snap");
-    let (added, removed, modified) = diff(id1, id2).expect("diff failed");
+    let (added, _removed, modified) = diff(id1, id2).expect("diff failed");
 
     assert!(!added.is_empty() || !modified.is_empty(), "should detect changes");
     // hello.txt was modified.

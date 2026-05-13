@@ -486,8 +486,8 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 1: install fonts.
     serial_println!("fontmgr::self_test 1: install fonts");
-    let f1 = install_font("TestSans", FontStyle::Regular, FontFormat::TrueType, FontCategory::SansSerif, "/fonts/test.ttf", "1.0", 500)?;
-    let f2 = install_font("TestSans", FontStyle::Bold, FontFormat::TrueType, FontCategory::SansSerif, "/fonts/test-bold.ttf", "1.0", 500)?;
+    let _f1 = install_font("TestSans", FontStyle::Regular, FontFormat::TrueType, FontCategory::SansSerif, "/fonts/test.ttf", "1.0", 500)?;
+    let _f2 = install_font("TestSans", FontStyle::Bold, FontFormat::TrueType, FontCategory::SansSerif, "/fonts/test-bold.ttf", "1.0", 500)?;
     let f3 = install_font("TestMono", FontStyle::Regular, FontFormat::OpenType, FontCategory::Monospace, "/fonts/mono.otf", "2.0", 300)?;
     assert_eq!(list_fonts(None).len(), 3);
 

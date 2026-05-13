@@ -460,7 +460,7 @@ pub fn self_test() {
     crate::serial_println!("  [10/11] stop listening: OK");
 
     // 11: Stats.
-    let (state_label, lang_code, transcriptions, words, vocab, ops) = stats();
+    let (state_label, lang_code, transcriptions, words, _vocab, ops) = stats();
     assert_eq!(state_label, "Idle");
     assert_eq!(lang_code, "de-DE");
     assert!(transcriptions >= 1);

@@ -4533,14 +4533,6 @@ fn execute_pipe_chain(segments: &[&str]) {
 ///
 /// Returns `(first_word, remaining)`.  If there is no second word,
 /// `remaining` is an empty string.
-fn split_first_word(s: &str) -> (&str, &str) {
-    let s = s.trim_start();
-    match s.find(|c: char| c.is_whitespace()) {
-        Some(pos) => (&s[..pos], s[pos..].trim_start()),
-        None => (s, ""),
-    }
-}
-
 fn dispatch_with_input(line: &str, input: &str) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
@@ -4696,7 +4688,7 @@ fn dispatch(line: &str) {
         "latency" | "lathist" => cmd_latency(),
         "pressure" | "mempressure" => cmd_pressure(),
         "jitter" | "tickjitter" => cmd_jitter(),
-        "heapwm" | "watermark" => cmd_heapwm(),
+        "heapwm" => cmd_heapwm(),
         "memmap" => cmd_memmap(),
         "supervisor" | "sv" => cmd_supervisor(),
         "ps" | "tasks" => cmd_ps(),
@@ -4714,7 +4706,6 @@ fn dispatch(line: &str) {
         "nproc" => cmd_nproc(),
         "strings" => cmd_strings(args),
         "cal" => cmd_cal(args),
-        "reboot" => cmd_reboot(),
         "irq" => cmd_irq(),
         "pci" => cmd_pci(),
         "disk" | "blkinfo" => cmd_disk(),
@@ -4860,11 +4851,11 @@ fn dispatch(line: &str) {
         "perfmon" | "resmon" => cmd_perfmon(args),
         "focusassist" | "dnd" => cmd_focusassist(args),
         "storageclean" | "sclean" => cmd_storageclean(args),
-        "sysdiag" | "diag" => cmd_sysdiag(args),
+        "sysdiag" => cmd_sysdiag(args),
         "nightlight" | "nlight" => cmd_nightlight(args),
         "tasksched" | "schtask" => cmd_tasksched(args),
         "envvars" | "envmgr" => cmd_envvars(args),
-        "bluetooth" | "bt" => cmd_bluetooth(args),
+        "bluetooth" => cmd_bluetooth(args),
         "printmgr" | "lp" => cmd_printmgr(args),
         "screenrec" | "srec" => cmd_screenrec(args),
         "datausage" | "dusage" => cmd_datausage(args),
@@ -4983,7 +4974,7 @@ fn dispatch(line: &str) {
         "faceunlock" | "face" => cmd_faceunlock(args),
         "usbpolicy" | "usbpol" => cmd_usbpolicy(args),
         "applaunch" | "alaunch" => cmd_applaunch(args),
-        "sysprofiler" | "sprof" => cmd_sysprofiler(args),
+        "sysprofiler" => cmd_sysprofiler(args),
         "clipsync" | "clsync" => cmd_clipsync(args),
         "netusage" | "nusage" => cmd_netusage(args),
         "touchscreen" | "tscreen" => cmd_touchscreen(args),
@@ -5026,7 +5017,6 @@ fn dispatch(line: &str) {
         "sysctlfs" | "sctlfs" => cmd_sysctlfs(args),
         "cputopo" | "ctopo" => cmd_cputopo(args),
         "memlayout" | "mlayout" => cmd_memlayout(args),
-        "irqbal" => cmd_irqbal(args),
         "lavg" => cmd_lavg(args),
         "kernlog" | "klog" => cmd_kernlog(args),
         "coredump" | "cdump" => cmd_coredump(args),
@@ -5059,7 +5049,7 @@ fn dispatch(line: &str) {
         "slabstat" | "slab" => cmd_slabstat(args),
         "timerq" | "tq" => cmd_timerq(args),
         "fdtable" | "fdt" => cmd_fdtable(args),
-        "rcustat" | "rcu" => cmd_rcustat(args),
+        "rcustat" => cmd_rcustat(args),
         "kconsole" | "kcon" => cmd_kconsole(args),
         "signalq" | "sigq" => cmd_signalq(args),
         "memcg" | "mcg" => cmd_memcg(args),
@@ -5117,7 +5107,7 @@ fn dispatch(line: &str) {
         "acpistat" | "acpi" => cmd_acpistat(args),
         "userfault" | "uffd" => cmd_userfault(args),
         "ioport" | "iop" => cmd_ioport(args),
-        "msivec" | "msi" => cmd_msivec(args),
+        "msivec" => cmd_msivec(args),
         "cpuset" | "cset" => cmd_cpuset(args),
         "ftrace" | "ftr" => cmd_ftrace(args),
         "kstack" | "kstk" => cmd_kstack(args),
@@ -5169,13 +5159,11 @@ fn dispatch(line: &str) {
         "vmstat" => cmd_vmstat(),
         "label" => cmd_label(args),
         "flock" => cmd_flock(args),
-        "split" => cmd_split(args),
         "lsblk" | "blkdev" => cmd_lsblk(),
         "glob" => cmd_glob(args),
         "readlink" => cmd_readlink(args),
         "symlink" | "mklink" => cmd_symlink(args),
         "xattr" => cmd_xattr(args),
-        "watch" => cmd_watch(args),
         "trash" => cmd_trash(args),
         "basename" => cmd_basename(args),
         "dirname" => cmd_dirname(args),
@@ -5228,21 +5216,21 @@ fn dispatch(line: &str) {
         "run" | "exec" => cmd_run(args),
         "mkelf" => cmd_mkelf(),
         "net" | "ifconfig" => cmd_net(),
-        "mouse" => cmd_mouse(),
+        "mousedev" => cmd_mouse(),
         "audio" | "hda" => cmd_audio(args),
         "mixer" => cmd_mixer(args),
         "soundhist" => cmd_soundhist(),
         "gfx" => cmd_gfx(args),
         "gpu" => cmd_gpu(args),
-        "usb" => cmd_usb(args),
+        "usbdev" => cmd_usb(args),
         "desktop" | "startx" => cmd_desktop(),
         "dhcp" => cmd_dhcp(),
         "ping" => cmd_ping(args),
-        "dns" | "nslookup" => cmd_dns(args),
+        "nslookup" => cmd_dns(args),
         "wget" | "http" => cmd_wget(args),
-        "firewall" | "fw" => cmd_firewall(args),
+        "fw" => cmd_firewall(args),
         "capgroups" | "cg" => cmd_cap_groups(args),
-        "captags" | "ct" => cmd_cap_tags(args),
+        "captags" => cmd_cap_tags(args),
         "sockact" | "sa" => cmd_socket_activation(args),
         "slimit" | "sl" => cmd_service_limits(args),
         "iommu" => cmd_iommu(),
@@ -5250,7 +5238,7 @@ fn dispatch(line: &str) {
         "pidns" => cmd_pidns(args),
         "userns" => cmd_userns(args),
         "netns" => cmd_netns(args),
-        "container" | "ct" => cmd_container(args),
+        "container" => cmd_container(args),
         "scfilter" | "seccomp" => cmd_scfilter(args),
         "capreq" | "cr" => cmd_cap_request(args),
         "version" | "ver" => cmd_version(),
@@ -6595,7 +6583,7 @@ fn cmd_scrollback(args: &str) {
             // Try to parse as a number.
             if let Ok(n) = sub.parse::<usize>() {
                 let count = crate::console::scrollback_count();
-                let start = count.saturating_sub(n);
+                let _start = count.saturating_sub(n);
                 if count == 0 {
                     shell_println!("(scrollback empty)");
                     return;
@@ -16687,7 +16675,6 @@ fn cmd_fileops(args: &str) {
                 return;
             }
             let mut sources = Vec::new();
-            let mut dest = "";
             let mut policy = fileops::ConflictPolicy::AutoRename;
 
             // Parse: everything except last non-flag arg is a source, last non-flag is dest.
@@ -16707,7 +16694,7 @@ fn cmd_fileops(args: &str) {
                 return;
             }
 
-            dest = non_flags.last().copied().unwrap_or("");
+            let dest = non_flags.last().copied().unwrap_or("");
             for &nf in non_flags.iter().take(non_flags.len().saturating_sub(1)) {
                 sources.push(resolve_path(nf));
             }
@@ -26375,7 +26362,7 @@ fn cmd_envvars(args: &str) {
             }
         }
         "set" => {
-            if let (Some(name), Some(value)) = (parts.get(1), parts.get(2)) {
+            if let (Some(name), Some(_value)) = (parts.get(1), parts.get(2)) {
                 let full_value = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
                 match envvars::set_system(name, &full_value) {
                     Ok(()) => shell_println!("{}={}", name, full_value),
@@ -26724,7 +26711,7 @@ fn cmd_bluetooth(args: &str) {
             }
         }
         "name" => {
-            if let Some(new_name) = parts.get(1) {
+            if let Some(_new_name) = parts.get(1) {
                 let full = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
                 match bluetooth::set_adapter_name(&full) {
                     Ok(()) => shell_println!("Adapter name set to: {}", full),
@@ -27018,7 +27005,7 @@ fn cmd_screenrec(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "show" | "" => {
-            let (count, active, total, total_sec, total_bytes, _) = screenrec::stats();
+            let (count, active, total, total_sec, _total_bytes, _) = screenrec::stats();
             let recording = screenrec::is_recording();
             shell_println!("Screen Recording: {}", if recording { "RECORDING" } else { "idle" });
             if let Ok(cfg) = screenrec::get_config() {
@@ -30007,7 +29994,7 @@ fn cmd_fileversion(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "show" | "" => {
-            let (ver_count, file_count, captured, restored, watch_count, ops) = fileversion::stats();
+            let (ver_count, file_count, captured, restored, watch_count, _ops) = fileversion::stats();
             shell_println!("File Versioning");
             shell_println!("  Versions stored:  {}", ver_count);
             shell_println!("  Files versioned:  {}", file_count);
@@ -30365,7 +30352,7 @@ fn cmd_location(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "show" | "" => {
-            let (enabled, perm_count, requests, denied, hist_len, ops) = location::stats();
+            let (enabled, perm_count, requests, denied, hist_len, _ops) = location::stats();
             shell_println!("Location Services");
             shell_println!("  Enabled:   {}", enabled);
             shell_println!("  Apps:      {} with permissions", perm_count);
@@ -40745,7 +40732,7 @@ fn cmd_startupopt(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "show" | "status" => {
-            let (stages, boots, last_ms, fastest_ms, analyses, ops) = startupopt::stats();
+            let (stages, boots, last_ms, fastest_ms, analyses, _ops) = startupopt::stats();
             shell_println!("Boot count: {}", boots);
             shell_println!("Last boot: {}ms", last_ms);
             shell_println!("Fastest boot: {}ms", fastest_ms);
@@ -41048,7 +41035,7 @@ fn cmd_voicecontrol(args: &str) {
             }
         }
         "wake" => {
-            if let Some(word) = parts.get(1) {
+            if let Some(_word) = parts.get(1) {
                 let phrase = parts[1..].join(" ");
                 match voicecontrol::set_wake_word(&phrase) {
                     Ok(()) => shell_println!("Wake word set to '{}'.", phrase),
@@ -47097,87 +47084,6 @@ fn cmd_memlayout(args: &str) {
         _ => {
             shell_println!("Usage: memlayout [show|regions|stats]");
         }
-    }
-}
-
-/// `irqbal` — IRQ affinity balancing (fs::irqbalance).
-fn cmd_irqbal(args: &str) {
-    use crate::fs::irqbalance;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    match sub {
-        "" | "show" => {
-            irqbalance::init_defaults();
-            let irqs = irqbalance::list_irqs();
-            shell_println!("{:<6} {:<12} {:>8} {:>6}", "IRQ", "Name", "Count", "CPU");
-            for i in &irqs {
-                shell_println!("{:<6} {:<12} {:>8} {:>6}", i.irq, i.name, i.count, i.assigned_cpu);
-            }
-            if let Some(policy) = irqbalance::get_policy() {
-                shell_println!("\nPolicy: {}", policy.label());
-            }
-        }
-        "cpuload" => {
-            irqbalance::init_defaults();
-            let loads = irqbalance::cpu_loads();
-            shell_println!("{:<6} {:>10} {:>10}", "CPU", "Total IRQs", "Assigned");
-            for l in &loads {
-                shell_println!("{:<6} {:>10} {:>10}", l.cpu_id, l.total_irqs, l.assigned_irqs);
-            }
-        }
-        "balance" => {
-            irqbalance::init_defaults();
-            match irqbalance::balance() {
-                Ok(migrations) => shell_println!("Rebalanced: {} migrations", migrations),
-                Err(e) => shell_println!("Error: {:?}", e),
-            }
-        }
-        "policy" => {
-            if let Some(pol) = parts.get(1) {
-                irqbalance::init_defaults();
-                let policy = parse_irqbal_policy(pol);
-                match irqbalance::set_policy(policy) {
-                    Ok(()) => shell_println!("Policy set to {}", policy.label()),
-                    Err(e) => shell_println!("Error: {:?}", e),
-                }
-            } else {
-                if let Some(p) = irqbalance::get_policy() {
-                    shell_println!("Current policy: {}", p.label());
-                }
-            }
-        }
-        "affinity" => {
-            if let (Some(irq_str), Some(cpu_str)) = (parts.get(1), parts.get(2)) {
-                if let (Ok(irq), Ok(cpu)) = (irq_str.parse::<u32>(), cpu_str.parse::<u32>()) {
-                    match irqbalance::set_affinity(irq, cpu) {
-                        Ok(()) => shell_println!("IRQ {} → CPU {}", irq, cpu),
-                        Err(e) => shell_println!("Error: {:?}", e),
-                    }
-                } else { shell_println!("Invalid arguments"); }
-            } else { shell_println!("Usage: irqbalance affinity <irq> <cpu>"); }
-        }
-        "stats" => {
-            let (irqs, rebalances, migrations, ops) = irqbalance::stats();
-            shell_println!("=== IRQ Balance Stats ===");
-            shell_println!("  IRQs:        {}", irqs);
-            shell_println!("  Rebalances:  {}", rebalances);
-            shell_println!("  Migrations:  {}", migrations);
-            shell_println!("  Ops:         {}", ops);
-        }
-        _ => {
-            shell_println!("Usage: irqbalance [show|cpuload|balance|policy|affinity|stats]");
-        }
-    }
-}
-
-fn parse_irqbal_policy(s: &str) -> crate::fs::irqbalance::BalancePolicy {
-    use crate::fs::irqbalance::BalancePolicy;
-    match s {
-        "roundrobin" | "rr" => BalancePolicy::RoundRobin,
-        "leastloaded" | "ll" => BalancePolicy::LeastLoaded,
-        "manual" => BalancePolicy::Manual,
-        "disabled" | "off" => BalancePolicy::Disabled,
-        _ => BalancePolicy::LeastLoaded,
     }
 }
 
@@ -63059,12 +62965,12 @@ fn is_builtin(name: &str) -> bool {
         | "du" | "file" | "find" | "locate" | "updatedb" | "dedup" | "integrity" | "intercept" | "fhist" | "filehist" | "mime" | "mimetype" | "assoc" | "openwith" | "quota" | "getfacl" | "setfacl" | "ulimit" | "overlay" | "mkfifo" | "lspipe" | "pipes" | "tmpwatch" | "audit" | "namespace" | "ns" | "fssnapshot" | "fssnap" | "reclaim" | "fstx" | "changetrack" | "ct" | "fcompress" | "fc" | "encrypt" | "fsearch" | "tag" | "diskuse" | "fshealth" | "fswatch" | "dirsync" | "backup" | "undelete" | "archive" | "batch" | "linkcheck" | "fsprofile" | "fspolicy" | "fsbench" | "ionice" | "atime" | "prefetch" | "splice" | "directio" | "fstrim" | "fstune" | "fontmgr" | "fonts" | "sparse" | "lsplus" | "fsfreeze" | "seal" | "recent" | "fileinfo" | "finfo" | "fswalk" | "walk" | "findex" | "thumbcache" | "tcache" | "bookmark" | "bm" | "clipboard" | "clip" | "dragdrop" | "contextmenu" | "ctxmenu" | "deskicons" | "fileops" | "filetype" | "ftype" | "openw" | "sidebar" | "statusbar" | "toolbar" | "queryable" | "qattr" | "fflags" | "fcomment" | "rundialog" | "rund" | "notifcenter" | "notif" | "appregistry" | "appreg" | "systray" | "tray" | "taskbar" | "startmenu" | "smenu" | "filepicker" | "fpick" | "theme" | "hotkey" | "widgets" | "widget" | "soundmixer" | "smixer" | "wallpaper" | "wp" | "credentials" | "cred" | "power" | "display" | "vdesktop" | "vd" | "keylayout" | "kbl" | "screenshot" | "scap" | "a11y" | "accessibility" | "ime" | "netindicator" | "netind" | "winsnap" | "wsnap" | "colorpicker" | "cpick" | "cursorsettings" | "cursor" | "kbsettings" | "kbs" | "detailcols" | "dcols" | "partmgr" | "pmgr" | "locale" | "lcl" | "useracct" | "uacct" | "progmgr" | "prog" | "scriptlang" | "slang" | "osreset" | "reset" | "bootcfg" | "boot" | "swapcfg" | "swap" | "certmgr" | "cert" | "installer" | "timezone" | "tz" | "autostart" | "astart" | "schedtune" | "stune" | "mmtune" | "mtune" | "capsettings" | "caps" | "vpn" | "dyndns" | "ddns" | "loginscreen" | "logscr" | "appnotify" | "anotify" | "kernelbuild" | "kbuild" | "wakesensor" | "wsensor" | "netsettings" | "netcfg" | "sysinfo" | "hwinfo" | "perfmon" | "resmon" | "focusassist" | "dnd" | "storageclean" | "sclean" | "sysdiag" | "diag" | "nightlight" | "nlight" | "tasksched" | "schtask" | "envvars" | "envmgr" | "bluetooth" | "bt" | "printmgr" | "lp" | "screenrec" | "srec" | "datausage" | "dusage" | "mousesettings" | "mouse" | "touchpad" | "tpad" | "powerprofile" | "pprofile" | "defaultapps" | "defapp" | "monitors" | "monitor" | "fwsettings" | "firewall" | "updatemgr" | "updates" | "notifprefs" | "nprefs" | "fileshare" | "share" | "parental" | "pctl" | "audiodevice" | "adev" | "sessionmgr" | "session" | "crashreport" | "crash" | "netproxy" | "proxy" | "fileversion" | "fver" | "devicemgr" | "devmgr" | "location" | "loc" | "diskencrypt" | "dencrypt" | "pkgmgr" | "pkg" | "remotedesktop" | "rdp" | "restorepoint" | "rpoint" | "battery" | "batt" | "dictation" | "dict" | "screenreader" | "sr" | "langpack" | "lpack" | "spellcheck" | "spell" | "screentime" | "stime" | "disksmart" | "smart" | "magnifier" | "mag" | "cloudsync" | "csync" | "gestures" | "gesture" | "soundevents" | "sevents" | "usbmgr" | "usb" | "cliphistory" | "cliphist" | "displaycolor" | "dcolor" | "syslog" | "slog" | "inputa11y" | "ia11y" | "driverupdate" | "dupdate" | "netshare" | "nshare" | "startuprepair" | "srepair" | "remoteassist" | "rassist" | "taskmon" | "tmon" | "printqueue" | "pqueue" | "servicemgr" | "svcmgr" | "hwmonitor" | "hwmon" | "appsandbox" | "sandbox" | "gamepadinput" | "gamepad" | "sysrestore" | "srestore" | "audiomux" | "amux" | "netthrottle" | "nthrottle" | "dumpanalyzer" | "dump" | "memdiag" | "mdiag" | "parentaltime" | "ptime" | "mediakeys" | "mkeys" | "webcam" | "cam" | "speechio" | "speech" | "mobilelink" | "mlink" | "screenlock" | "slock" | "appstore" | "store" | "wintiling" | "tile" | "peninput" | "pen" | "brightness" | "bright" | "quicksettings" | "qs" | "volumeosd" | "vosd" | "netdiag" | "ndiag" | "sharesheet" | "ssheet" | "oobe" | "setup" | "hdrdisplay" | "hdr" | "surroundsound" | "ssound" | "audioeq" | "aeq" | "screensaver" | "ssaver" | "colortemp" | "ctemp" | "gamemode" | "gmode" | "dpiscaling" | "dpi" | "netprofile" | "nprof" | "apppermissions" | "apperm" | "kbshortcuts" | "kbsc" | "displayarrange" | "darr" | "sysanimations" | "sanim" | "filevault" | "fvault" | "mousegestures" | "mgest" | "fontsettings" | "fntset" | "notifbadge" | "nbadge" | "lockwallpaper" | "lwp" | "systemsounds" | "ssounds" | "hotcorners" | "hcorn" | "dynlock" | "dlock" | "snaplayout" | "snlayout" | "haptfeedback" | "haptic" | "eyeprotect" | "eye" | "pinnedapps" | "pinned" | "inputmethod" | "imf" | "storagesense" | "ssense" | "autofix" | "afix" | "recentsearch" | "rsearch" | "sysmaint" | "maint" | "multiclip" | "mclip" | "focussession" | "fsess" | "quicknote" | "qnote" | "cscheme" | "uischeme" | "appcompat" | "acompat" | "windowrules" | "wrules" | "spatialaudio" | "spatial" | "filetransfer" | "ftrans" | "startupopt" | "sopt" | "usagetime" | "utime" | "voicecontrol" | "vctl" | "devpair" | "dpair" | "notifgroup" | "ngroup" | "playmedia" | "pmedia" | "kbmacro" | "macro" | "sysresource" | "sres" | "faceunlock" | "face" | "usbpolicy" | "usbpol" | "applaunch" | "alaunch" | "sysprofiler" | "sprof" | "clipsync" | "clsync" | "netusage" | "nusage" | "touchscreen" | "tscreen" | "diskquota" | "dquota" | "appdefaults" | "adef" | "policyengine" | "pengine" | "fontpreview" | "fprev" | "wifiscan" | "wifi" | "splitview" | "split" | "iotdevice" | "iot" | "prochistory" | "phist" | "notiffilter" | "nfilter" | "colorblind" | "cvd" | "clipaction" | "caction" | "energysaver" | "esaver" | "filerules" | "frules" | "secureboot" | "sboot" | "eventlog" | "elog" | "systemimage" | "simg" | "raidmgr" | "raid" | "networkbridge" | "nbridge" | "secureerase" | "serase" | "dnssettings" | "dns" | "backupsched" | "bsched" | "displaycal" | "dcal" | "vpnprofile" | "vpnp" | "diskhealth" | "dhealth" | "recoverypart" | "rpart" | "userprofile" | "uprof" | "diskclean" | "dclean" | "cas" | "logrotate" | "lrot" | "powerwake" | "pwake" | "diskio" | "dio" | "sysuptime" | "suptime" | "netspeed" | "nspeed" | "cfreq" | "therm" | "swapmon" | "smon" | "sysctlfs" | "sctlfs" | "cputopo" | "ctopo" | "memlayout" | "mlayout" | "irqbal" | "lavg" | "kernlog" | "klog" | "coredump" | "cdump" | "fwupdate" | "fwup" | "timesync" | "tsync" | "kmod" | "entropy" | "epool" | "iosched" | "ioq" | "netmon" | "nmon" | "groupmgr" | "grp" | "sysrq" | "telemetry" | "telem" | "fscache" | "fcache" | "nameservice" | "nsvc" | "oomkiller" | "oom" | "blktrace" | "btrace" | "cgroupfs" | "cgrp" | "secpolicy" | "spol" | "procstat" | "pstat" | "kernparam" | "kparam" | "tracemon" | "trcmon" | "authbroker" | "abroker" | "prociso" | "piso" | "dmevent" | "dmev" | "pftrack" | "pft" | "ipclog" | "ipcl" | "numastat" | "nstat" | "shmem" | "shm" | "wqstat" | "wqs" | "slabstat" | "slab" | "timerq" | "tq" | "fdtable" | "fdt" | "rcustat" | "rcu" | "kconsole" | "kcon" | "signalq" | "sigq" | "memcg" | "mcg" | "tlbstat" | "tstat" | "pagestat" | "pgstat" | "dmastat" | "dma" | "compstat" | "cstat" | "irqstat" | "istat" | "epollstat" | "epoll" | "vmmap" | "vmap" | "softirq" | "sirq" | "netfilter" | "nfilt" | "schedclass" | "sclass" | "cpuidle" | "cidle" | "futexstat" | "fxstat" | "writeback" | "wback" | "iolatency" | "iolat" | "taskstats" | "tstats" | "kprobes" | "kprb" | "netsock" | "nsock" | "blkqueue" | "bqueue" | "powerstat" | "pwstat" | "inodestat" | "icache" | "migstat" | "mig" | "pagecache" | "pcache" | "netdev" | "ndev" | "cpustat" | "cpust" | "filelock" | "flkstat" | "pidstat" | "pidst" | "binfmt" | "bfmt" | "pipestat" | "pipest" | "sockbuf" | "sbuf" | "schedlat" | "slat" | "mempress" | "mpress" | "cpucache" | "ccache" | "aiostat" | "aio" | "kthread" | "kthr" | "mmapstat" | "mmap" | "rqstat" | "runq" | "thpstat" | "thp" | "cgiostat" | "cgio" | "bpfstat" | "bpf" | "pgtable" | "pgtbl" | "zramstat" | "zram" | "ksmstat" | "ksm" | "clocksrc" | "clksrc" | "pmcstat" | "pmc" | "cputhr" | "cthr" | "ipcns" | "ipcn" | "netqueue" | "nq" | "secmod" | "smod" | "vmballoon" | "vbal" | "devfreq" | "dfreq" | "hwrng" | "hrng" | "acpistat" | "acpi" | "userfault" | "uffd" | "ioport" | "iop" | "msivec" | "msi" | "cpuset" | "cset" | "ftrace" | "ftr" | "kstack" | "kstk" | "fnotify" | "fnot" | "netlat" | "nlat" | "diskstat" | "dstat" | "taskio" | "tio" | "ttystat" | "ttys" | "swapact" | "swact" | "schedwait" | "swait" | "ratestat" | "rstat" | "iomem" | "imem" | "vmzone" | "vzone" | "buddyinfo" | "binfo" | "cgmem" | "cgm" | "vmfrag" | "vfrag" | "pidfd" | "pfd" | "fops" | "fileselect" | "fsel" | "preview" | "template" | "columnview" | "colview" | "pathbar" | "viewstate" | "properties" | "prop" | "sync" | "mount" | "umount" | "unmount" | "wc" | "head"
         | "tail" | "hexdump" | "xxd" | "lsof" | "lsp" | "grep" | "cmp" | "diff"
         | "fallocate" | "sort" | "uniq" | "tee" | "truncate" | "sha256" | "hash"
-        | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock" | "split"
+        | "sysctl" | "hostname" | "dd" | "free" | "vmstat" | "flock"
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
-        | "mkelf" | "net" | "ifconfig" | "mouse" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "dns" | "nslookup"
-        | "wget" | "http" | "firewall" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "mkelf" | "net" | "ifconfig" | "mousedev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
+        | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"
@@ -63510,101 +63416,6 @@ fn cmd_xattr(args: &str) {
 /// as they occur. Press any key to stop monitoring.
 ///
 /// Options:
-///   -r — recursive: watch subdirectories too
-///
-/// Events shown: Created, Deleted, Modified, Renamed, MetadataChanged.
-fn cmd_watch(args: &str) {
-    let args = args.trim();
-    if args.is_empty() {
-        crate::console_println!("Usage: watch <path> [-r]");
-        crate::console_println!("  Monitor filesystem changes. Press any key to stop.");
-        return;
-    }
-
-    // Parse arguments: path and optional -r flag.
-    let mut recursive = false;
-    let mut path_arg = args;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    if parts.len() >= 2 {
-        for &p in &parts[1..] {
-            if p == "-r" || p == "--recursive" {
-                recursive = true;
-            }
-        }
-        if let Some(&first) = parts.first() {
-            path_arg = first;
-        }
-    }
-
-    let path = resolve_path(path_arg);
-
-    // Verify the path exists.
-    if crate::fs::Vfs::stat(&path).is_err() {
-        crate::console_println!("watch: {}: not found", path);
-        return;
-    }
-
-    // Create the watch with all change event types.
-    let mask = crate::fs::notify::FsEventMask::ALL_CHANGES;
-    let watch_id = match crate::fs::notify::create_watch(&path, mask, recursive) {
-        Ok(id) => id,
-        Err(e) => {
-            crate::console_println!("watch: failed to create watch: {:?}", e);
-            return;
-        }
-    };
-
-    crate::console_println!(
-        "Watching {} {}(press any key to stop)",
-        path,
-        if recursive { "[recursive] " } else { "" },
-    );
-
-    // Poll loop: check for events and keyboard input.
-    let mut event_count = 0u64;
-    loop {
-        // Check for keyboard input to stop.
-        if crate::keyboard::try_read_char().is_some() {
-            break;
-        }
-
-        // Read pending events (up to 16 per poll).
-        match crate::fs::notify::read_events(watch_id, 16) {
-            Ok(events) if !events.is_empty() => {
-                for ev in &events {
-                    let type_str = match ev.event_type {
-                        crate::fs::notify::FsEventType::Created => "CREATE",
-                        crate::fs::notify::FsEventType::Deleted => "DELETE",
-                        crate::fs::notify::FsEventType::Modified => "MODIFY",
-                        crate::fs::notify::FsEventType::Renamed => "RENAME",
-                        crate::fs::notify::FsEventType::MetadataChanged => "META  ",
-                        crate::fs::notify::FsEventType::Accessed => "ACCESS",
-                        crate::fs::notify::FsEventType::Overflow => "OVERFLOW",
-                    };
-
-                    if let Some(ref new_path) = ev.new_path {
-                        crate::console_println!(
-                            "[{}] {} -> {}", type_str, ev.path, new_path
-                        );
-                    } else {
-                        crate::console_println!("[{}] {}", type_str, ev.path);
-                    }
-                    event_count = event_count.saturating_add(1);
-                }
-            }
-            _ => {
-                // No events — sleep briefly to avoid busy-spinning.
-                crate::cpu::hlt();
-            }
-        }
-    }
-
-    // Clean up the watch.
-    let _ = crate::fs::notify::close_watch(watch_id);
-
-    crate::console_println!("\nStopped. {} events captured.", event_count);
-}
-
 /// Display filesystem change journal entries.
 ///
 /// Usage:
@@ -68738,162 +68549,6 @@ fn cmd_flock(args: &str) {
             }
         }
     }
-}
-
-/// `split` — split a file into pieces.
-///
-/// Usage: `split [-l N] [-b SIZE] FILE [PREFIX]`
-///   -l N     Split by N lines per piece (default 1000)
-///   -b SIZE  Split by byte size per piece (K/M/G suffix)
-fn cmd_split(args: &str) {
-    let mut line_count: Option<usize> = None;
-    let mut byte_size: Option<usize> = None;
-    let mut file_path = "";
-    let mut prefix = "x";
-
-    let mut words = args.split_whitespace();
-    while let Some(w) = words.next() {
-        match w {
-            "-l" | "--lines" => {
-                if let Some(val) = words.next() {
-                    match val.parse::<usize>() {
-                        Ok(n) if n > 0 => line_count = Some(n),
-                        _ => {
-                            crate::console_println!("split: invalid line count '{}'", val);
-                            set_exit(1);
-                            return;
-                        }
-                    }
-                }
-            }
-            "-b" | "--bytes" => {
-                if let Some(val) = words.next() {
-                    match parse_size_suffix(val) {
-                        Some(n) if n > 0 => byte_size = Some(n as usize),
-                        _ => {
-                            crate::console_println!("split: invalid byte size '{}'", val);
-                            set_exit(1);
-                            return;
-                        }
-                    }
-                }
-            }
-            _ => {
-                if file_path.is_empty() {
-                    file_path = w;
-                } else {
-                    prefix = w;
-                }
-            }
-        }
-    }
-
-    if file_path.is_empty() {
-        crate::console_println!("Usage: split [-l N] [-b SIZE] FILE [PREFIX]");
-        crate::console_println!("  -l N     Lines per piece (default 1000)");
-        crate::console_println!("  -b SIZE  Bytes per piece (K/M/G suffix)");
-        crate::console_println!("  PREFIX   Output file prefix (default 'x', produces xaa, xab, ...)");
-        set_exit(1);
-        return;
-    }
-
-    let path = resolve_path(file_path);
-    let data = match crate::fs::Vfs::read_file(&path) {
-        Ok(d) => d,
-        Err(e) => {
-            crate::console_println!("split: cannot read '{}': {:?}", file_path, e);
-            set_exit(1);
-            return;
-        }
-    };
-
-    // Determine the parent directory for output files.
-    let out_dir = get_cwd();
-    let mut piece_num: u32 = 0;
-    let mut total_written: usize = 0;
-
-    // Generate suffix: aa, ab, ac, ..., az, ba, bb, ...
-    let suffix_for = |n: u32| -> alloc::string::String {
-        let a = (n / 26) as u8;
-        let b = (n % 26) as u8;
-        let mut s = alloc::string::String::with_capacity(2);
-        s.push((b'a' + a) as char);
-        s.push((b'a' + b) as char);
-        s
-    };
-
-    if let Some(bsize) = byte_size {
-        // Split by byte size.
-        let mut offset = 0;
-        while offset < data.len() {
-            let end = (offset + bsize).min(data.len());
-            let chunk = data.get(offset..end).unwrap_or(&[]);
-            let suf = suffix_for(piece_num);
-            let out_path = alloc::format!("{}/{}{}", out_dir, prefix, suf);
-            match crate::fs::Vfs::write_file(&out_path, chunk) {
-                Ok(()) => {}
-                Err(e) => {
-                    crate::console_println!("split: cannot write '{}': {:?}", out_path, e);
-                    set_exit(1);
-                    return;
-                }
-            }
-            piece_num = piece_num.saturating_add(1);
-            total_written = total_written.saturating_add(chunk.len());
-            offset = end;
-        }
-    } else {
-        // Split by line count (default 1000).
-        let lines_per = line_count.unwrap_or(1000);
-        let mut lines_in_piece = 0;
-        let mut piece_start = 0;
-
-        for (i, &b) in data.iter().enumerate() {
-            if b == b'\n' {
-                lines_in_piece += 1;
-                if lines_in_piece >= lines_per {
-                    let end = i + 1; // Include the newline.
-                    let chunk = data.get(piece_start..end).unwrap_or(&[]);
-                    let suf = suffix_for(piece_num);
-                    let out_path = alloc::format!("{}/{}{}", out_dir, prefix, suf);
-                    match crate::fs::Vfs::write_file(&out_path, chunk) {
-                        Ok(()) => {}
-                        Err(e) => {
-                            crate::console_println!("split: cannot write '{}': {:?}", out_path, e);
-                            set_exit(1);
-                            return;
-                        }
-                    }
-                    piece_num = piece_num.saturating_add(1);
-                    total_written = total_written.saturating_add(chunk.len());
-                    piece_start = end;
-                    lines_in_piece = 0;
-                }
-            }
-        }
-
-        // Write remaining data (last piece, possibly less than lines_per lines).
-        if piece_start < data.len() {
-            let chunk = data.get(piece_start..).unwrap_or(&[]);
-            let suf = suffix_for(piece_num);
-            let out_path = alloc::format!("{}/{}{}", out_dir, prefix, suf);
-            match crate::fs::Vfs::write_file(&out_path, chunk) {
-                Ok(()) => {}
-                Err(e) => {
-                    crate::console_println!("split: cannot write '{}': {:?}", out_path, e);
-                    set_exit(1);
-                    return;
-                }
-            }
-            piece_num = piece_num.saturating_add(1);
-            total_written = total_written.saturating_add(chunk.len());
-        }
-    }
-
-    crate::console_println!(
-        "Split '{}' into {} pieces ({} bytes total)",
-        file_path, piece_num, total_written
-    );
 }
 
 /// `lsblk` — list block devices with capacity.

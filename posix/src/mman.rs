@@ -260,7 +260,7 @@ pub extern "C" fn mmap64(
     length: SizeT,
     prot: i32,
     flags: i32,
-    fd: i32,
+    fd: Fd,
     offset: OffT,
 ) -> *mut core::ffi::c_void {
     mmap(addr, length, prot, flags, fd, offset)

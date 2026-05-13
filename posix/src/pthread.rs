@@ -18,8 +18,8 @@
 //!
 //! ## Synchronization Primitives
 //!
-//! - **Mutexes**: atomic CAS with spin-yield.  Attributes accepted
-//!   (normal/recursive/error-checking) but type is always normal.
+//! - **Mutexes**: atomic CAS with spin-yield.  Supports normal,
+//!   recursive (reentrant), and error-checking mutex types.
 //! - **Condition variables**: generation counter with spin-yield wait.
 //! - **Read-write locks**: atomic state (0=unlocked, N=readers, -1=writer).
 //! - **Barriers**: arrival counter with generation-based release.
@@ -55,8 +55,8 @@
 //! - Mutex is a spinlock (no futex-based blocking).
 //! - Condition variables use spin-yield (1ms intervals) watching a
 //!   generation counter.  Correct but not efficient.
-//! - Recursive/error-checking mutex types are accepted but behave
-//!   as normal mutexes.
+//! - Recursive/error-checking mutexes track owner via syscall per
+//!   lock/unlock (no futex-based blocking yet).
 
 use crate::errno;
 use crate::syscall;
@@ -72,11 +72,26 @@ pub type PthreadAttrT = [u8; 64];
 ///
 /// Binary-compatible with C: `AtomicI32` has the same size and
 /// alignment as `i32`.
+///
+/// Supports normal, recursive, and error-checking mutex types:
+/// - **Normal** (default): deadlock on double-lock, UB on unlock by
+///   non-owner (matches POSIX default).
+/// - **Recursive**: same thread can lock multiple times; each lock
+///   increments a recursion count that must be matched by unlocks.
+/// - **Error-checking**: returns EDEADLK on double-lock, EPERM on
+///   unlock by non-owner.
 #[repr(C)]
 pub struct PthreadMutexT {
+    /// 0 = unlocked, 1 = locked.
     locked: AtomicI32,
-    // Padding to match typical libc struct size.
-    _pad: [u8; 36],
+    /// Mutex type (PTHREAD_MUTEX_NORMAL / RECURSIVE / ERRORCHECK).
+    kind: AtomicI32,
+    /// Task ID of the owning thread (valid when locked).
+    owner: AtomicI32,
+    /// Recursion count (for PTHREAD_MUTEX_RECURSIVE; 0 when unlocked).
+    count: AtomicI32,
+    // Padding to match typical libc struct size (40 - 16 = 24 bytes).
+    _pad: [u8; 24],
 }
 
 /// Pthread mutex attribute type.
@@ -128,7 +143,10 @@ pub const PTHREAD_ONCE_INIT: PthreadOnceT = PthreadOnceT {
 #[allow(clippy::declare_interior_mutable_const)]
 pub const PTHREAD_MUTEX_INITIALIZER: PthreadMutexT = PthreadMutexT {
     locked: AtomicI32::new(0),
-    _pad: [0; 36],
+    kind: AtomicI32::new(0),    // PTHREAD_MUTEX_NORMAL
+    owner: AtomicI32::new(0),
+    count: AtomicI32::new(0),
+    _pad: [0; 24],
 };
 
 // ---------------------------------------------------------------------------
@@ -405,16 +423,32 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
 const MUTEX_SPIN_LIMIT: u32 = 100;
 
 /// Initialize a mutex.
+///
+/// Reads the mutex type from `attr` (if non-null) to determine whether
+/// the mutex is normal, recursive, or error-checking.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_init(
     mutex: *mut PthreadMutexT,
-    _attr: *const PthreadMutexattrT,
+    attr: *const PthreadMutexattrT,
 ) -> i32 {
     if mutex.is_null() {
         return errno::EINVAL;
     }
+    // Read kind from attr (default: PTHREAD_MUTEX_NORMAL = 0).
+    let kind: i32 = if !attr.is_null() {
+        // SAFETY: attr verified non-null.  PthreadMutexattrT is [u8; 8]
+        // with first 4 bytes holding the kind (set by mutexattr_settype).
+        unsafe { core::ptr::read_unaligned(attr.cast::<i32>()) }
+    } else {
+        PTHREAD_MUTEX_NORMAL
+    };
     // SAFETY: caller guarantees mutex is valid.
-    unsafe { (*mutex).locked.store(0, Ordering::Release); }
+    unsafe {
+        (*mutex).locked.store(0, Ordering::Release);
+        (*mutex).kind.store(kind, Ordering::Release);
+        (*mutex).owner.store(0, Ordering::Release);
+        (*mutex).count.store(0, Ordering::Release);
+    }
     0
 }
 
@@ -422,6 +456,14 @@ pub unsafe extern "C" fn pthread_mutex_init(
 ///
 /// Uses atomic CAS for thread safety.  On contention, spins briefly
 /// then yields via `SYS_SLEEP(1ms)` to avoid wasting CPU time.
+///
+/// Behavior depends on mutex type:
+/// - **Normal**: blocks until lock is acquired (deadlock if already
+///   held by calling thread).
+/// - **Recursive**: if already held by calling thread, increments
+///   recursion count and returns 0.
+/// - **Error-checking**: if already held by calling thread, returns
+///   EDEADLK without blocking.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
@@ -429,23 +471,45 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
     }
 
     // SAFETY: caller guarantees mutex is valid.
-    let locked = unsafe { &(*mutex).locked };
+    let m = unsafe { &*mutex };
+    let kind = m.kind.load(Ordering::Relaxed);
+    let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
+
+    // Recursive / error-checking: check if we already own the lock.
+    if kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK {
+        if m.locked.load(Ordering::Acquire) != 0
+            && m.owner.load(Ordering::Relaxed) == self_id
+        {
+            if kind == PTHREAD_MUTEX_RECURSIVE {
+                // Increment recursion count.
+                let c = m.count.load(Ordering::Relaxed);
+                m.count.store(c.wrapping_add(1), Ordering::Relaxed);
+                return 0;
+            }
+            // Error-checking: double-lock by same thread.
+            return errno::EDEADLK;
+        }
+    }
 
     // Fast path: uncontended acquisition.
-    if locked
+    if m.locked
         .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
     {
+        m.owner.store(self_id, Ordering::Relaxed);
+        m.count.store(1, Ordering::Relaxed);
         return 0;
     }
 
     // Slow path: spin briefly, then yield.
     loop {
         for _ in 0..MUTEX_SPIN_LIMIT {
-            if locked
+            if m.locked
                 .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
             {
+                m.owner.store(self_id, Ordering::Relaxed);
+                m.count.store(1, Ordering::Relaxed);
                 return 0;
             }
             core::hint::spin_loop();
@@ -457,18 +521,35 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
 
 /// Try to lock a mutex without blocking.
 ///
-/// Returns 0 on success, `EBUSY` if the mutex is already locked.
+/// Returns 0 on success, `EBUSY` if the mutex is already locked
+/// (by another thread).  For recursive mutexes, succeeds if the
+/// calling thread already holds the lock.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
         return errno::EINVAL;
     }
     // SAFETY: caller guarantees mutex is valid.
-    let locked = unsafe { &(*mutex).locked };
-    if locked
+    let m = unsafe { &*mutex };
+    let kind = m.kind.load(Ordering::Relaxed);
+    let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
+
+    // Recursive: if we already own it, increment count.
+    if kind == PTHREAD_MUTEX_RECURSIVE
+        && m.locked.load(Ordering::Acquire) != 0
+        && m.owner.load(Ordering::Relaxed) == self_id
+    {
+        let c = m.count.load(Ordering::Relaxed);
+        m.count.store(c.wrapping_add(1), Ordering::Relaxed);
+        return 0;
+    }
+
+    if m.locked
         .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
     {
+        m.owner.store(self_id, Ordering::Relaxed);
+        m.count.store(1, Ordering::Relaxed);
         0
     } else {
         errno::EBUSY
@@ -476,13 +557,44 @@ pub unsafe extern "C" fn pthread_mutex_trylock(mutex: *mut PthreadMutexT) -> i32
 }
 
 /// Unlock a mutex.
+///
+/// For recursive mutexes, decrements the recursion count; the mutex
+/// is only released when the count reaches zero.  For error-checking
+/// mutexes, returns EPERM if the calling thread does not own the lock.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 {
     if mutex.is_null() {
         return errno::EINVAL;
     }
     // SAFETY: caller guarantees mutex is valid.
-    unsafe { (*mutex).locked.store(0, Ordering::Release); }
+    let m = unsafe { &*mutex };
+    let kind = m.kind.load(Ordering::Relaxed);
+
+    if kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK {
+        let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
+        if m.owner.load(Ordering::Relaxed) != self_id {
+            if kind == PTHREAD_MUTEX_ERRORCHECK {
+                return errno::EPERM;
+            }
+            // Normal/recursive: POSIX says UB for non-owner unlock on
+            // normal, but we silently proceed to avoid crashes.
+        }
+        if kind == PTHREAD_MUTEX_RECURSIVE {
+            let c = m.count.load(Ordering::Relaxed);
+            if c > 1 {
+                // Still recursed — decrement count, keep lock held.
+                m.count.store(c.wrapping_sub(1), Ordering::Relaxed);
+                return 0;
+            }
+        }
+    }
+
+    // Release the lock.
+    unsafe {
+        (*mutex).owner.store(0, Ordering::Relaxed);
+        (*mutex).count.store(0, Ordering::Relaxed);
+        (*mutex).locked.store(0, Ordering::Release);
+    }
     0
 }
 
@@ -1257,8 +1369,8 @@ pub extern "C" fn pthread_mutexattr_destroy(_attr: *mut PthreadMutexattrT) -> i3
 
 /// Set the mutex type attribute.
 ///
-/// Our implementation only supports normal mutexes.  Setting recursive
-/// or error-checking type is accepted but has no effect.
+/// Supported types: `PTHREAD_MUTEX_NORMAL` (default),
+/// `PTHREAD_MUTEX_RECURSIVE`, `PTHREAD_MUTEX_ERRORCHECK`.
 #[unsafe(no_mangle)]
 pub extern "C" fn pthread_mutexattr_settype(attr: *mut PthreadMutexattrT, kind: i32) -> i32 {
     if attr.is_null() {
@@ -1297,6 +1409,8 @@ pub extern "C" fn pthread_mutexattr_gettype(attr: *const PthreadMutexattrT, kind
 /// expires.
 ///
 /// Returns 0 on success, ETIMEDOUT on timeout, EINVAL on error.
+/// For recursive mutexes, succeeds immediately if already held by
+/// calling thread.  For error-checking, returns EDEADLK.
 ///
 /// # Safety
 ///
@@ -1312,10 +1426,28 @@ pub extern "C" fn pthread_mutex_timedlock(
     }
 
     // SAFETY: mutex verified non-null.
-    let lock = unsafe { &(*mutex).locked };
+    let m = unsafe { &*mutex };
+    let kind = m.kind.load(Ordering::Relaxed);
+    let self_id = syscall::syscall0(syscall::SYS_TASK_ID) as i32;
+
+    // Recursive / error-checking: check if we already own the lock.
+    if kind == PTHREAD_MUTEX_RECURSIVE || kind == PTHREAD_MUTEX_ERRORCHECK {
+        if m.locked.load(Ordering::Acquire) != 0
+            && m.owner.load(Ordering::Relaxed) == self_id
+        {
+            if kind == PTHREAD_MUTEX_RECURSIVE {
+                let c = m.count.load(Ordering::Relaxed);
+                m.count.store(c.wrapping_add(1), Ordering::Relaxed);
+                return 0;
+            }
+            return errno::EDEADLK;
+        }
+    }
 
     // Fast path: try to acquire immediately.
-    if lock.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+    if m.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        m.owner.store(self_id, Ordering::Relaxed);
+        m.count.store(1, Ordering::Relaxed);
         return 0;
     }
 
@@ -1335,7 +1467,9 @@ pub extern "C" fn pthread_mutex_timedlock(
         }
 
         // Try to acquire.
-        if lock.compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        if m.locked.compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            m.owner.store(self_id, Ordering::Relaxed);
+            m.count.store(1, Ordering::Relaxed);
             return 0;
         }
 

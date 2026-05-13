@@ -380,6 +380,13 @@ pub extern "C" fn pow(base: f64, exponent: f64) -> f64 {
         return ipow(base, e_trunc);
     }
 
+    // Negative base with fractional exponent → domain error (NaN).
+    // log(negative) is undefined in the reals; we make this explicit
+    // rather than relying on NaN propagation through log→exp.
+    if base < 0.0 {
+        return f64::NAN;
+    }
+
     // General case: base^exp = exp(exp * ln(base)).
     exp(exponent * log(base))
 }
@@ -586,7 +593,19 @@ pub extern "C" fn ldexp(x: f64, exp: i32) -> f64 {
         return if x > 0.0 { f64::INFINITY } else { f64::NEG_INFINITY };
     }
     if new_exp <= 0 {
-        return 0.0; // Underflow to zero (don't handle denormals).
+        // Subnormal result: shift the mantissa right to encode the value
+        // in the IEEE 754 subnormal range (biased exponent = 0).
+        // The implicit leading 1 bit becomes explicit in the mantissa.
+        let shift = 1 - new_exp; // Number of positions to shift right.
+        if shift > 52 {
+            // Shifted entirely out of the 52-bit mantissa — flush to zero.
+            return 0.0;
+        }
+        let sign = bits & 0x8000_0000_0000_0000;
+        // Add the implicit leading 1 (bit 52) back into the mantissa.
+        let mantissa = (bits & 0x000F_FFFF_FFFF_FFFF) | 0x0010_0000_0000_0000;
+        let shifted = mantissa >> (shift as u64);
+        return f64::from_bits(sign | shifted);
     }
 
     let new_bits = (bits & 0x800F_FFFF_FFFF_FFFF) | ((new_exp as u64) << 52);
@@ -2965,5 +2984,89 @@ mod tests {
         let mut q: i32 = 0;
         let r = remquo(f64::NAN, 1.0, &mut q);
         assert!(r.is_nan(), "remquo(NaN,1) should be NaN");
+    }
+
+    // -----------------------------------------------------------------------
+    // pow — negative base edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pow_negative_base_integer_exponent() {
+        // Negative base with integer exponent is valid.
+        assert_approx(pow(-2.0, 3.0), -8.0, EPS, "(-2)^3");
+        assert_approx(pow(-2.0, 2.0), 4.0, EPS, "(-2)^2");
+        assert_approx(pow(-3.0, 0.0), 1.0, EPS, "(-3)^0");
+        assert_approx(pow(-1.0, 5.0), -1.0, EPS, "(-1)^5");
+    }
+
+    #[test]
+    fn pow_negative_base_fractional_exponent_is_nan() {
+        // Negative base with non-integer exponent → NaN (domain error).
+        assert!(pow(-2.0, 0.5).is_nan(), "(-2)^0.5 should be NaN");
+        assert!(pow(-1.0, 1.5).is_nan(), "(-1)^1.5 should be NaN");
+        assert!(pow(-4.0, 0.25).is_nan(), "(-4)^0.25 should be NaN");
+    }
+
+    #[test]
+    fn pow_special_values() {
+        assert!(pow(f64::NAN, 2.0).is_nan(), "NaN^2 should be NaN");
+        assert!(pow(2.0, f64::NAN).is_nan(), "2^NaN should be NaN");
+        assert_approx(pow(0.0, 5.0), 0.0, EPS, "0^5");
+        assert_eq!(pow(0.0, -1.0), f64::INFINITY, "0^-1 should be +inf");
+    }
+
+    // -----------------------------------------------------------------------
+    // ldexp — subnormal results
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ldexp_normal_scaling() {
+        assert_approx(ldexp(1.0, 10), 1024.0, EPS, "ldexp(1, 10)");
+        assert_approx(ldexp(0.5, 1), 1.0, EPS, "ldexp(0.5, 1)");
+        assert_approx(ldexp(3.0, -1), 1.5, EPS, "ldexp(3, -1)");
+    }
+
+    #[test]
+    fn ldexp_overflow() {
+        assert_eq!(ldexp(1.0, 1024), f64::INFINITY, "ldexp(1, 1024) overflow");
+        assert_eq!(ldexp(-1.0, 1024), f64::NEG_INFINITY, "ldexp(-1, 1024) overflow");
+    }
+
+    #[test]
+    fn ldexp_subnormal_results() {
+        // ldexp(1.0, -1074) should produce the smallest positive subnormal.
+        let smallest_subnormal = f64::from_bits(1); // 5e-324
+        let result = ldexp(1.0, -1074);
+        assert_eq!(
+            result.to_bits(),
+            smallest_subnormal.to_bits(),
+            "ldexp(1, -1074) should be smallest subnormal"
+        );
+
+        // ldexp(1.0, -1023) should produce the largest subnormal.
+        let result2 = ldexp(1.0, -1023);
+        assert!(result2 > 0.0, "ldexp(1, -1023) should be positive");
+        // Biased exponent should be 0 (subnormal).
+        let exp_field = (result2.to_bits() >> 52) & 0x7FF;
+        assert_eq!(exp_field, 0, "ldexp(1, -1023) should be subnormal");
+
+        // ldexp(1.0, -1075) should underflow to 0.0.
+        assert_eq!(ldexp(1.0, -1075), 0.0, "ldexp(1, -1075) flush to zero");
+    }
+
+    #[test]
+    fn ldexp_negative_subnormal() {
+        // Negative subnormal should preserve sign.
+        let result = ldexp(-1.0, -1074);
+        assert!(result < 0.0 || result.to_bits() != 0, "negative subnormal should preserve sign");
+        let sign_bit = result.to_bits() >> 63;
+        assert_eq!(sign_bit, 1, "ldexp(-1, -1074) should have sign bit set");
+    }
+
+    #[test]
+    fn ldexp_special_inputs() {
+        assert_eq!(ldexp(0.0, 100), 0.0, "ldexp(0, 100)");
+        assert!(ldexp(f64::NAN, 5).is_nan(), "ldexp(NaN, 5)");
+        assert_eq!(ldexp(f64::INFINITY, -5), f64::INFINITY, "ldexp(inf, -5)");
     }
 }

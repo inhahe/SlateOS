@@ -306,6 +306,12 @@ pub unsafe extern "C" fn iconv(
                         return usize::MAX;
                     }
                     let cp = (((byte & 0x1F) as u32) << 6) | ((b2 & 0x3F) as u32);
+                    if cp < 0x80 {
+                        // Overlong encoding (e.g. 0xC0 0x80 for U+0000):
+                        // must reject per Unicode security guidelines.
+                        errno::set_errno(errno::EILSEQ);
+                        return usize::MAX;
+                    }
                     if cp > 0xFF {
                         // Code point not representable in Latin-1.
                         errno::set_errno(errno::EILSEQ);
@@ -1065,5 +1071,52 @@ mod tests {
         let (output, replacements) = convert(6, input).expect("0xE9 + AB");
         assert_eq!(&output, b"?AB");
         assert_eq!(replacements, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // UTF-8 → Latin-1: overlong encoding rejection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_utf8_to_latin1_overlong_c0_80_rejected() {
+        // 0xC0 0x80 is an overlong encoding of U+0000 (NUL).
+        // Must be rejected per Unicode security guidelines.
+        let input = &[0xC0u8, 0x80];
+        let result = convert(5, input);
+        assert!(result.is_none(), "overlong 0xC0 0x80 should be rejected");
+    }
+
+    #[test]
+    fn test_utf8_to_latin1_overlong_c1_bf_rejected() {
+        // 0xC1 0xBF is an overlong encoding of U+007F (DEL).
+        // Must be rejected — valid encoding is the 1-byte form 0x7F.
+        let input = &[0xC1u8, 0xBF];
+        let result = convert(5, input);
+        assert!(result.is_none(), "overlong 0xC1 0xBF should be rejected");
+    }
+
+    #[test]
+    fn test_utf8_to_latin1_overlong_c0_af_rejected() {
+        // 0xC0 0xAF is an overlong encoding of U+002F ('/').
+        let input = &[0xC0u8, 0xAF];
+        let result = convert(5, input);
+        assert!(result.is_none(), "overlong 0xC0 0xAF should be rejected");
+    }
+
+    #[test]
+    fn test_utf8_to_latin1_minimal_2byte_c2_80_accepted() {
+        // 0xC2 0x80 = U+0080 — the smallest valid 2-byte sequence.
+        // Should be accepted (U+0080 is within Latin-1 range).
+        let input = &[0xC2u8, 0x80];
+        let (output, _) = convert(5, input).expect("0xC2 0x80 should be accepted");
+        assert_eq!(&output, &[0x80u8]);
+    }
+
+    #[test]
+    fn test_utf8_to_latin1_invalid_continuation_byte() {
+        // 0xC3 followed by non-continuation byte (0x41 = 'A').
+        let input = &[0xC3u8, 0x41];
+        let result = convert(5, input);
+        assert!(result.is_none(), "invalid continuation byte should be rejected");
     }
 }

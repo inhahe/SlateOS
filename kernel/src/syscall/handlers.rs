@@ -5349,6 +5349,45 @@ pub fn sys_tcp_abort(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_TCP_PEER_ADDR` — get the remote peer address of a TCP connection.
+///
+/// `arg0`: connection handle.
+/// `arg1`: pointer to 6-byte output buffer (4 bytes IP + 2 bytes port).
+pub fn sys_tcp_peer_addr(args: &SyscallArgs) -> SyscallResult {
+    // Capability check: requires Socket capability with READ rights.
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::READ,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let handle = args.arg0 as usize;
+    let out_ptr = args.arg1 as *mut u8;
+
+    if out_ptr.is_null() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Output: 4 bytes IP + 2 bytes port = 6 bytes.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 6) {
+        return SyscallResult::err(e);
+    }
+
+    match crate::net::tcp::peer_addr(handle) {
+        Some((ip, port)) => {
+            // SAFETY: out_ptr validated for 6 bytes above.
+            unsafe {
+                core::ptr::copy_nonoverlapping(ip.0.as_ptr(), out_ptr, 4);
+                let port_bytes = port.to_be_bytes();
+                core::ptr::copy_nonoverlapping(port_bytes.as_ptr(), out_ptr.add(4), 2);
+            }
+            SyscallResult::ok(0)
+        }
+        None => SyscallResult::err(KernelError::InvalidArgument),
+    }
+}
+
 /// `SYS_TCP_BIND` — bind a TCP listener to a local port.
 ///
 /// `arg0`: local port (1–65535).

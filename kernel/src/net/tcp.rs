@@ -2286,6 +2286,28 @@ pub fn abort(handle: usize) -> KernelResult<()> {
     Ok(())
 }
 
+/// Get the peer (remote) address and port for a connection.
+///
+/// Returns `(ip, port)` if the handle is valid and active.
+pub fn peer_addr(handle: usize) -> Option<(Ipv4Addr, u16)> {
+    let conns = CONNECTIONS.lock();
+    let conn = conns.get(handle)?;
+    if !conn.active {
+        return None;
+    }
+    Some((conn.remote_ip, conn.remote_port))
+}
+
+/// Get the local port for a connection.
+pub fn local_port(handle: usize) -> Option<u16> {
+    let conns = CONNECTIONS.lock();
+    let conn = conns.get(handle)?;
+    if !conn.active {
+        return None;
+    }
+    Some(conn.local_port)
+}
+
 /// Check if a connection's remote end has closed.
 pub fn is_remote_closed(handle: usize) -> bool {
     let conns = CONNECTIONS.lock();

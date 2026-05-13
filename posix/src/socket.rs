@@ -1302,16 +1302,28 @@ pub unsafe extern "C" fn accept(
         return -1;
     };
 
+    // Query peer address from the kernel.
+    let mut peer_buf = [0u8; 6]; // 4 bytes IP + 2 bytes port (network order)
+    let peer_ret = syscall2(
+        SYS_TCP_PEER_ADDR,
+        conn_handle,
+        peer_buf.as_mut_ptr() as u64,
+    );
+    let (peer_ip_nbo, peer_port_nbo) = if peer_ret == 0 {
+        let ip = u32::from_ne_bytes([peer_buf[0], peer_buf[1], peer_buf[2], peer_buf[3]]);
+        let port = u16::from_be_bytes([peer_buf[4], peer_buf[5]]);
+        (ip, port.to_be()) // Store in network byte order for sockaddr_in
+    } else {
+        (0u32, 0u16)
+    };
+
     // Store metadata for the new connected socket.
-    // Our kernel doesn't return peer info from accept yet, so peer
-    // address fields are zeroed.  When the kernel adds connection
-    // info to the accept response, update these.
     let listener_meta = get_meta(fd);
     set_meta(new_fd, SocketMeta {
         sock_type: SOCK_STREAM,
         bound_port: listener_meta.map_or(0, |m| m.bound_port),
-        peer_addr: 0,
-        peer_port: 0,
+        peer_addr: peer_ip_nbo,
+        peer_port: peer_port_nbo,
         local_addr: listener_meta.map_or(0, |m| m.local_addr),
         keepalive: false,
         nodelay: false,
@@ -1323,20 +1335,22 @@ pub unsafe extern "C" fn accept(
     });
 
     // Fill in the peer address if requested.
-    // Our kernel doesn't return peer info from accept yet, so zero it.
     if !addr.is_null() && !addrlen.is_null() {
+        let sin = SockaddrIn {
+            sin_family: AF_INET as u16,
+            sin_port: peer_port_nbo,
+            sin_addr: InAddr { s_addr: peer_ip_nbo },
+            sin_zero: [0u8; 8],
+        };
         // SAFETY: caller guarantees addr/addrlen validity.
         unsafe {
-            let alen = *addrlen;
-            let fill = core::cmp::min(
-                alen as usize,
-                core::mem::size_of::<SockaddrIn>(),
+            let alen = *addrlen as usize;
+            let copy_len = alen.min(core::mem::size_of::<SockaddrIn>());
+            core::ptr::copy_nonoverlapping(
+                (&raw const sin).cast::<u8>(),
+                addr.cast::<u8>(),
+                copy_len,
             );
-            core::ptr::write_bytes(addr.cast::<u8>(), 0, fill);
-            // Write the family at minimum.
-            if fill >= 2 {
-                (*addr).sa_family = AF_INET as u16;
-            }
             *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
         }
     }

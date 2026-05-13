@@ -92,6 +92,7 @@ pub const SYS_TCP_BIND: u64 = 804;
 pub const SYS_TCP_ACCEPT: u64 = 805;
 pub const SYS_TCP_CLOSE_LISTENER: u64 = 806;
 pub const SYS_TCP_ABORT: u64 = 807;
+pub const SYS_TCP_PEER_ADDR: u64 = 808;
 
 pub const SYS_UDP_BIND: u64 = 810;
 pub const SYS_UDP_SEND: u64 = 811;

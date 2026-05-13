@@ -1967,6 +1967,19 @@ pub const SYS_TCP_CLOSE_LISTENER: u64 = 806;
 /// Returns: 0 on success.
 pub const SYS_TCP_ABORT: u64 = 807;
 
+/// Get the remote peer address of a TCP connection.
+///
+/// `arg0`: connection handle.
+/// `arg1`: pointer to 6-byte output buffer for peer address.
+///
+/// Writes the peer IPv4 address (4 bytes, network byte order)
+/// followed by the peer port (2 bytes, network byte order):
+///   [0..4]  IPv4 address
+///   [4..6]  port
+///
+/// Returns: 0 on success, negative error on failure.
+pub const SYS_TCP_PEER_ADDR: u64 = 808;
+
 /// Bind a UDP socket to a local port.
 ///
 /// `arg0`: local port (0–65535).

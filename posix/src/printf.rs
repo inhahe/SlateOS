@@ -1597,6 +1597,7 @@ mod tests {
     }
 
     /// Format via `format_core` and return the output as a `String`.
+    #[allow(dead_code)]
     fn fmt_str(fmt: &[u8], args: &[u64], fargs: &[u64]) -> (String, i32) {
         let mut buf = [0u8; 512];
         let n = format_core(
@@ -1945,7 +1946,7 @@ mod tests {
 
     #[test]
     fn fmt_f_negative() {
-        let val = (-2.5f64);
+        let val = -2.5f64;
         let (s, _) = snprintf_str(b"%f\0", &[], &[val.to_bits()]);
         assert_eq!(s, "-2.500000");
     }

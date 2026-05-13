@@ -3222,10 +3222,30 @@ pub unsafe extern "C" fn getaddrinfo(
     };
 
     // Parse the port from the service string.
+    // Try numeric first, then look up as a service name.
     let port: u16 = if service.is_null() {
         0
     } else {
-        parse_port_string(service)
+        let numeric = parse_port_string(service);
+        if numeric > 0 {
+            numeric
+        } else {
+            // Try service name lookup (e.g., "http" → 80).
+            // Match protocol: use "tcp" for SOCK_STREAM, "udp" for SOCK_DGRAM.
+            let proto_filter = match want_socktype {
+                SOCK_STREAM => c"tcp".as_ptr().cast::<u8>(),
+                SOCK_DGRAM => c"udp".as_ptr().cast::<u8>(),
+                _ => core::ptr::null(), // Any protocol.
+            };
+            let serv = unsafe { getservbyname(service, proto_filter) };
+            if serv.is_null() {
+                0
+            } else {
+                // s_port is in network byte order.
+                let s = unsafe { &*serv };
+                u16::from_be(s.s_port as u16)
+            }
+        }
     };
 
     // Determine socket type(s) and protocol.

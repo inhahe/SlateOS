@@ -1963,10 +1963,31 @@ pub unsafe extern "C" fn recvfrom(
                 src_info.as_mut_ptr() as u64,
                 u64::from(kern_flags),
             );
-            if ret < 0 {
-                errno::set_errno(translate_net_error(ret));
-                return -1;
-            }
+
+            let ret = if ret < 0 {
+                let err = translate_net_error(ret);
+                if err == errno::EAGAIN || err == errno::EWOULDBLOCK {
+                    let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
+                    if is_nb {
+                        errno::set_errno(errno::EAGAIN);
+                        return -1;
+                    }
+                    // Blocking mode: poll-wait with SO_RCVTIMEO.
+                    let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
+                    let waited = udp_recv_wait(
+                        entry.handle, buf, len, &mut src_info, kern_flags, timeout_ms,
+                    );
+                    if waited < 0 {
+                        return waited;
+                    }
+                    waited as i64
+                } else {
+                    errno::set_errno(err);
+                    return -1;
+                }
+            } else {
+                ret
+            };
 
             // Fill in the source address if requested.
             if !src_addr.is_null() && !addrlen.is_null() {

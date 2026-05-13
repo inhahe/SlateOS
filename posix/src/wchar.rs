@@ -456,10 +456,17 @@ pub extern "C" fn wctob(wc: WcharT) -> i32 {
 
 /// Check if `*ps` is the initial shift state.
 ///
-/// Always returns 1 (we only support stateless encoding).
+/// Returns non-zero if `ps` is null or describes the initial shift
+/// state.  Returns 0 if a partial multi-byte sequence is buffered
+/// (e.g. mid-way through a `mbrtowc` call).
 #[unsafe(no_mangle)]
-pub extern "C" fn mbsinit(_ps: *const MbstateT) -> i32 {
-    1 // Stateless.
+pub extern "C" fn mbsinit(ps: *const MbstateT) -> i32 {
+    if ps.is_null() {
+        return 1; // Null pointer → initial state per POSIX.
+    }
+    // SAFETY: ps is non-null (checked above), caller guarantees validity.
+    let state = unsafe { &*ps };
+    i32::from(state.is_initial())
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,7 +1224,13 @@ pub unsafe extern "C" fn wcstoul(
     }
 
     let mut i = unsafe { wc_skip_ws(nptr, 0) };
-    if unsafe { *nptr.add(i) } == 0x2b { i = i.wrapping_add(1); }
+
+    // POSIX: strtoul/wcstoul accept an optional sign.  A '-' means
+    // the result is the unsigned wrapping negation of the parsed value.
+    let negative = unsafe { *nptr.add(i) } == 0x2d; // '-'
+    if negative || unsafe { *nptr.add(i) } == 0x2b { // '+'
+        i = i.wrapping_add(1);
+    }
 
     let (actual_base, new_i) = unsafe { wc_detect_base(nptr, i, base) };
     i = new_i;
@@ -1237,7 +1250,7 @@ pub unsafe extern "C" fn wcstoul(
         unsafe { *endptr = if i == start { nptr } else { nptr.add(i) }; }
     }
 
-    result
+    if negative { result.wrapping_neg() } else { result }
 }
 
 /// `wcstoll` — convert a wide string to `long long` (`i64`).

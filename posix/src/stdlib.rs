@@ -128,6 +128,10 @@ pub unsafe extern "C" fn strtol(
 
 /// Convert a C string to an unsigned long integer.
 ///
+/// POSIX: if the subject sequence begins with a minus sign, the value
+/// resulting from the conversion is negated (wrapping to the unsigned
+/// range).  So `strtoul("-1", NULL, 10)` returns `ULONG_MAX`.
+///
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
@@ -151,8 +155,10 @@ pub unsafe extern "C" fn strtoul(
         i = i.wrapping_add(1);
     }
 
-    // Skip optional '+'.
-    if unsafe { *nptr.add(i) } == b'+' {
+    // Handle optional sign.  POSIX: a leading '-' negates the result
+    // in the unsigned domain (wrapping).
+    let negative = unsafe { *nptr.add(i) } == b'-';
+    if negative || unsafe { *nptr.add(i) } == b'+' {
         i = i.wrapping_add(1);
     }
 
@@ -195,7 +201,8 @@ pub unsafe extern "C" fn strtoul(
         unsafe { *endptr = nptr.add(i); }
     }
 
-    result
+    // POSIX: negate in the unsigned domain for '-' prefix.
+    if negative { result.wrapping_neg() } else { result }
 }
 
 /// Convert a C string to a long long integer (`strtoll`).
@@ -464,12 +471,20 @@ pub struct LldivT {
 }
 
 /// Compute quotient and remainder simultaneously.
+///
+/// Division by zero returns `{ 0, 0 }` (C UB — we choose a safe
+/// fallback).  `MIN / -1` returns `{ MIN, 0 }` (wrapping) instead of
+/// panicking, matching the behavior of C on two's-complement hardware.
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn div(numer: i32, denom: i32) -> DivT {
     if denom == 0 {
         return DivT { quot: 0, rem: 0 };
     }
+    if numer == i32::MIN && denom == -1 {
+        // Overflow: wrapping_div gives MIN (two's complement wrap).
+        return DivT { quot: i32::MIN, rem: 0 };
+    }
+    #[allow(clippy::arithmetic_side_effects)]
     DivT {
         quot: numer / denom,
         rem: numer % denom,
@@ -478,11 +493,14 @@ pub extern "C" fn div(numer: i32, denom: i32) -> DivT {
 
 /// Compute quotient and remainder for long integers.
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn ldiv(numer: i64, denom: i64) -> LdivT {
     if denom == 0 {
         return LdivT { quot: 0, rem: 0 };
     }
+    if numer == i64::MIN && denom == -1 {
+        return LdivT { quot: i64::MIN, rem: 0 };
+    }
+    #[allow(clippy::arithmetic_side_effects)]
     LdivT {
         quot: numer / denom,
         rem: numer % denom,
@@ -491,11 +509,14 @@ pub extern "C" fn ldiv(numer: i64, denom: i64) -> LdivT {
 
 /// Compute quotient and remainder for long long integers.
 #[unsafe(no_mangle)]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn lldiv(numer: i64, denom: i64) -> LldivT {
     if denom == 0 {
         return LldivT { quot: 0, rem: 0 };
     }
+    if numer == i64::MIN && denom == -1 {
+        return LldivT { quot: i64::MIN, rem: 0 };
+    }
+    #[allow(clippy::arithmetic_side_effects)]
     LldivT {
         quot: numer / denom,
         rem: numer % denom,

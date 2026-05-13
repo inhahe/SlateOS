@@ -1627,9 +1627,11 @@ pub extern "C" fn flock(_fd: Fd, _operation: i32) -> i32 {
 ///
 /// Copies up to `count` bytes from `in_fd` to `out_fd`.  If `offset`
 /// is non-null, it specifies the starting offset in `in_fd` (and is
-/// updated to reflect the new position).
+/// updated to reflect the new position); the file offset of `in_fd`
+/// is NOT modified (matching Linux sendfile semantics).  If `offset`
+/// is null, reads from the current file position and advances it.
 ///
-/// Stub: performs the copy in userspace via read+write loop.
+/// Stub: performs the copy in userspace via pread/read + write loop.
 #[unsafe(no_mangle)]
 pub extern "C" fn sendfile(
     out_fd: Fd,
@@ -1637,51 +1639,58 @@ pub extern "C" fn sendfile(
     offset: *mut i64,
     count: usize,
 ) -> isize {
-    // If an offset is specified, seek to it first.
-    if !offset.is_null() {
-        // SAFETY: offset is valid (caller contract).
-        let off = unsafe { *offset };
-        let ret = lseek(in_fd, off, 0); // SEEK_SET = 0
-        if ret < 0 {
-            return -1;
-        }
-    }
-
-    // Copy in chunks via a stack buffer.
     let mut buf = [0u8; 4096];
     let mut total: usize = 0;
 
-    while total < count {
-        let remaining = count.wrapping_sub(total);
-        let chunk = if remaining < buf.len() { remaining } else { buf.len() };
-
-        let nr = read(in_fd, buf.as_mut_ptr(), chunk);
-        if nr < 0 {
-            if total > 0 {
-                break; // Return partial transfer.
-            }
-            return -1;
-        }
-        if nr == 0 {
-            break; // EOF.
-        }
-
-        let nw = write(out_fd, buf.as_ptr(), nr as usize);
-        if nw < 0 {
-            if total > 0 {
-                break;
-            }
-            return -1;
-        }
-
-        total = total.wrapping_add(nw as usize);
-    }
-
-    // Update offset if provided.
     if !offset.is_null() {
+        // Use pread to avoid modifying in_fd's file position.
+        // SAFETY: offset is valid (caller contract).
+        let mut cur_off = unsafe { *offset };
+
+        while total < count {
+            let remaining = count.wrapping_sub(total);
+            let chunk = if remaining < buf.len() { remaining } else { buf.len() };
+
+            let nr = pread(in_fd, buf.as_mut_ptr(), chunk, cur_off);
+            if nr < 0 {
+                if total > 0 { break; }
+                return -1;
+            }
+            if nr == 0 { break; }
+
+            let nw = write(out_fd, buf.as_ptr(), nr as usize);
+            if nw < 0 {
+                if total > 0 { break; }
+                return -1;
+            }
+
+            total = total.wrapping_add(nw as usize);
+            cur_off = cur_off.wrapping_add(nw as i64);
+        }
+
+        // Update caller's offset to reflect bytes transferred.
         // SAFETY: offset is valid.
-        unsafe {
-            *offset = (*offset).wrapping_add(total as i64);
+        unsafe { *offset = cur_off; }
+    } else {
+        // No offset — read from current position (advances in_fd).
+        while total < count {
+            let remaining = count.wrapping_sub(total);
+            let chunk = if remaining < buf.len() { remaining } else { buf.len() };
+
+            let nr = read(in_fd, buf.as_mut_ptr(), chunk);
+            if nr < 0 {
+                if total > 0 { break; }
+                return -1;
+            }
+            if nr == 0 { break; }
+
+            let nw = write(out_fd, buf.as_ptr(), nr as usize);
+            if nw < 0 {
+                if total > 0 { break; }
+                return -1;
+            }
+
+            total = total.wrapping_add(nw as usize);
         }
     }
 
@@ -1697,7 +1706,12 @@ pub extern "C" fn sendfile(
 /// Like `sendfile` but works between any two regular files.  `flags`
 /// is reserved and must be 0.
 ///
-/// Stub: performs userspace read+write copy (no kernel optimization).
+/// When `off_in`/`off_out` is non-null, the corresponding fd's file
+/// position is NOT modified (uses pread/pwrite internally); the offset
+/// is updated to reflect the bytes transferred.  When null, reads/writes
+/// from the current fd position and advances it.
+///
+/// Stub: performs userspace pread/read + pwrite/write copy.
 #[unsafe(no_mangle)]
 pub extern "C" fn copy_file_range(
     fd_in: Fd,
@@ -1707,40 +1721,48 @@ pub extern "C" fn copy_file_range(
     len: usize,
     _flags: u32,
 ) -> isize {
-    // Seek input if offset provided.
-    if !off_in.is_null() {
-        // SAFETY: off_in is valid.
-        let off = unsafe { *off_in };
-        if lseek(fd_in, off, 0) < 0 { return -1; }
-    }
-    // Seek output if offset provided.
-    if !off_out.is_null() {
-        let off = unsafe { *off_out };
-        if lseek(fd_out, off, 0) < 0 { return -1; }
-    }
-
     let mut buf = [0u8; 4096];
     let mut total: usize = 0;
+
+    let mut in_pos = if !off_in.is_null() { unsafe { *off_in } } else { 0 };
+    let mut out_pos = if !off_out.is_null() { unsafe { *off_out } } else { 0 };
 
     while total < len {
         let remaining = len.wrapping_sub(total);
         let chunk = if remaining < buf.len() { remaining } else { buf.len() };
 
-        let nr = read(fd_in, buf.as_mut_ptr(), chunk);
+        // Read: use pread when off_in is provided, else normal read.
+        let nr = if !off_in.is_null() {
+            pread(fd_in, buf.as_mut_ptr(), chunk, in_pos)
+        } else {
+            read(fd_in, buf.as_mut_ptr(), chunk)
+        };
         if nr <= 0 { break; }
 
-        let nw = write(fd_out, buf.as_ptr(), nr as usize);
-        if nw < 0 { if total > 0 { break; } return -1; }
+        // Write: use pwrite when off_out is provided, else normal write.
+        let nw = if !off_out.is_null() {
+            pwrite(fd_out, buf.as_ptr(), nr as usize, out_pos)
+        } else {
+            write(fd_out, buf.as_ptr(), nr as usize)
+        };
+        if nw < 0 {
+            if total > 0 { break; }
+            return -1;
+        }
 
         total = total.wrapping_add(nw as usize);
+        in_pos = in_pos.wrapping_add(nw as i64);
+        out_pos = out_pos.wrapping_add(nw as i64);
     }
 
-    // Update offsets if provided.
+    // Update caller's offsets to reflect bytes transferred.
     if !off_in.is_null() {
-        unsafe { *off_in = (*off_in).wrapping_add(total as i64); }
+        // SAFETY: off_in is valid.
+        unsafe { *off_in = in_pos; }
     }
     if !off_out.is_null() {
-        unsafe { *off_out = (*off_out).wrapping_add(total as i64); }
+        // SAFETY: off_out is valid.
+        unsafe { *off_out = out_pos; }
     }
 
     total as isize

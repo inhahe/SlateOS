@@ -51,13 +51,17 @@ pub static HUGE_VALF: f32 = f32::INFINITY;
 // ---------------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn fabs(x: f64) -> f64 {
-    if x < 0.0 { -x } else { x }
+    // Bit manipulation handles -0.0 correctly (IEEE 754: -0.0 < 0.0 is false,
+    // so a comparison-based approach would return -0.0 unchanged).
+    f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
 }
 
 #[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn fabsf(x: f32) -> f32 {
-    if x < 0.0 { -x } else { x }
+    f32::from_bits(x.to_bits() & 0x7FFF_FFFF)
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +71,10 @@ pub extern "C" fn fabsf(x: f32) -> f32 {
 #[unsafe(no_mangle)]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn floor(x: f64) -> f64 {
-    // Precision loss on cast is acceptable: we want the nearest integer.
+    if x.is_nan() || x.is_infinite() { return x; }
+    // All f64 values with |x| >= 2^52 are already exact integers;
+    // casting them to i64 would saturate and corrupt the value.
+    if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 { return x; }
     let i = x as i64;
     let f = i as f64;
     if x < f { f - 1.0 } else { f }
@@ -76,6 +83,9 @@ pub extern "C" fn floor(x: f64) -> f64 {
 #[unsafe(no_mangle)]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn floorf(x: f32) -> f32 {
+    if x.is_nan() || x.is_infinite() { return x; }
+    // All f32 values with |x| >= 2^23 are already exact integers.
+    if x >= 8_388_608.0 || x <= -8_388_608.0 { return x; }
     let i = x as i32;
     let f = i as f32;
     if x < f { f - 1.0 } else { f }
@@ -84,6 +94,8 @@ pub extern "C" fn floorf(x: f32) -> f32 {
 #[unsafe(no_mangle)]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn ceil(x: f64) -> f64 {
+    if x.is_nan() || x.is_infinite() { return x; }
+    if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 { return x; }
     let i = x as i64;
     let f = i as f64;
     if x > f { f + 1.0 } else { f }
@@ -92,6 +104,8 @@ pub extern "C" fn ceil(x: f64) -> f64 {
 #[unsafe(no_mangle)]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn ceilf(x: f32) -> f32 {
+    if x.is_nan() || x.is_infinite() { return x; }
+    if x >= 8_388_608.0 || x <= -8_388_608.0 { return x; }
     let i = x as i32;
     let f = i as f32;
     if x > f { f + 1.0 } else { f }
@@ -99,24 +113,31 @@ pub extern "C" fn ceilf(x: f32) -> f32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn round(x: f64) -> f64 {
-    floor(x + 0.5)
+    // POSIX: round halfway cases away from zero.
+    // floor(x + 0.5) alone gives wrong results for negative halves:
+    // round(-0.5) would be floor(0.0) = 0.0 instead of -1.0.
+    if x >= 0.0 { floor(x + 0.5) } else { ceil(x - 0.5) }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn roundf(x: f32) -> f32 {
-    floorf(x + 0.5)
+    if x >= 0.0 { floorf(x + 0.5) } else { ceilf(x - 0.5) }
 }
 
 #[unsafe(no_mangle)]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn trunc(x: f64) -> f64 {
-    // Precision loss on cast is acceptable: truncation to integer is the goal.
+    if x.is_nan() || x.is_infinite() { return x; }
+    // All f64 values with |x| >= 2^52 are already exact integers.
+    if x >= 4_503_599_627_370_496.0 || x <= -4_503_599_627_370_496.0 { return x; }
     x as i64 as f64
 }
 
 #[unsafe(no_mangle)]
 #[allow(clippy::cast_precision_loss)]
 pub extern "C" fn truncf(x: f32) -> f32 {
+    if x.is_nan() || x.is_infinite() { return x; }
+    if x >= 8_388_608.0 || x <= -8_388_608.0 { return x; }
     x as i32 as f32
 }
 
@@ -302,9 +323,13 @@ pub extern "C" fn log10f(x: f32) -> f32 {
 #[allow(clippy::float_cmp)] // Exact comparisons are intentional for special-value handling.
 pub extern "C" fn pow(base: f64, exponent: f64) -> f64 {
     if exponent == 0.0 { return 1.0; }
-    if base == 0.0 { return 0.0; }
     if base == 1.0 { return 1.0; }
     if base.is_nan() || exponent.is_nan() { return f64::NAN; }
+    if base == 0.0 {
+        // pow(0, positive) = 0; pow(0, negative) = ∞ (pole error).
+        if exponent > 0.0 { return 0.0; }
+        return f64::INFINITY;
+    }
 
     // Integer exponents: use repeated squaring.
     #[allow(clippy::cast_precision_loss)]

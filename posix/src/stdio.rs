@@ -900,6 +900,10 @@ pub extern "C" fn fdopen(fd: i32, _mode: *const u8) -> *mut u8 {
 ///
 /// If `path` is non-null, closes the old stream and opens the new path.
 /// If `path` is null, attempts to change the mode (not fully supported).
+///
+/// POSIX: "The original stream shall be closed regardless of whether
+/// the subsequent open succeeds."  On failure, the stream is closed
+/// and NULL is returned.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn freopen(
     path: *const u8,
@@ -930,21 +934,38 @@ pub unsafe extern "C" fn freopen(
     }
 
     let old_fd = f.fd;
+    let is_std = old_fd <= STDERR_FD;
+
+    // POSIX: close the old stream BEFORE attempting the new open.
+    // Standard streams (0/1/2) are not truly closed — their fd will
+    // be reused via dup2 below (or left closed on failure).
+    if !is_std {
+        crate::file::close(old_fd);
+        f.fd = -1; // Mark as closed to prevent double-close.
+    }
 
     let flags = mode_to_flags(mode);
     if flags < 0 {
         crate::errno::set_errno(crate::errno::EINVAL);
+        // Stream is already closed; release pool slot for non-standard.
+        if !is_std {
+            free_file(file);
+        }
         return core::ptr::null_mut();
     }
 
     let new_fd = crate::file::open(path, flags, 0o666);
     if new_fd < 0 {
+        // Open failed; stream is closed per POSIX.
+        if !is_std {
+            free_file(file);
+        }
         return core::ptr::null_mut();
     }
 
     // For standard streams, dup2 the new fd onto the old one so the
     // File struct keeps using fd 0/1/2.
-    if old_fd <= STDERR_FD {
+    if is_std {
         if new_fd != old_fd {
             let duped = crate::file::dup2(new_fd, old_fd);
             crate::file::close(new_fd);
@@ -954,8 +975,8 @@ pub unsafe extern "C" fn freopen(
         }
         // fd unchanged (still 0/1/2).
     } else {
-        // For pool files, close old fd and use new one.
-        crate::file::close(old_fd);
+        // Pool file: use the new fd.
+        let f = unsafe { &mut *file };
         f.fd = new_fd;
     }
 

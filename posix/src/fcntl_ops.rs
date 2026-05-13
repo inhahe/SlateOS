@@ -179,6 +179,12 @@ pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
 
 /// Duplicate fd to lowest available >= `min_fd`.
 fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
+    // POSIX: F_DUPFD with negative arg or arg >= OPEN_MAX → EINVAL.
+    if min_fd < 0 || min_fd as usize >= fdtable::MAX_FDS {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     let Some(entry) = fdtable::get_fd(oldfd) else {
         errno::set_errno(errno::EBADF);
         return -1;

@@ -7,10 +7,11 @@
 //! ## Design
 //!
 //! This is a simple allocator that prepends a header to each allocation
-//! recording the size (so `free` and `realloc` know how much to unmap).
-//! Every allocation is its own mmap region.  This is correct but not
-//! efficient — a real allocator (dlmalloc, jemalloc) would batch small
-//! allocations into larger arenas.  This is intentionally simple because:
+//! recording the mmap base address and size (so `free` and `realloc`
+//! know what to unmap).  Every allocation is its own mmap region.  This
+//! is correct but not efficient — a real allocator (dlmalloc, jemalloc)
+//! would batch small allocations into larger arenas.  This is
+//! intentionally simple because:
 //!
 //! - Correctness matters more than performance at this stage
 //! - Programs needing a real allocator can link one in later
@@ -19,19 +20,25 @@
 //! ## Header Layout
 //!
 //! ```text
-//! +----------+------------------+
-//! | size: u64 | user data...    |
-//! +----------+------------------+
-//! ^           ^
-//! mmap addr   returned pointer
+//! +-----------+-----------+------------------+
+//! | base: u64 | size: u64 | user data...     |
+//! +-----------+-----------+------------------+
+//! ^                        ^
+//! (may differ for aligned)  returned pointer
 //! ```
+//!
+//! For standard malloc, the header is at `mmap_base` and the user
+//! pointer is at `mmap_base + 16`.  For aligned allocations with
+//! alignment > 16, the header is placed just before the aligned user
+//! pointer — `base` stores the actual mmap start address so `free()`
+//! can always unmap the correct region regardless of pointer alignment.
 //!
 //! The header is 16 bytes (aligned to 16 for ABI compliance).
 
 use crate::mman;
 
-/// Header size, aligned to 16 bytes for ABI compliance.
-/// Stores the total mmap region size (header + payload).
+/// Header size: 16 bytes (u64 mmap_base + u64 total_size).
+/// Placed immediately before the user pointer.
 const HEADER_SIZE: usize = 16;
 
 /// Allocate `size` bytes of memory.
@@ -64,17 +71,20 @@ pub extern "C" fn malloc(size: usize) -> *mut u8 {
         return core::ptr::null_mut();
     }
 
-    // Write the total region size into the header.
+    // Write the header: [mmap_base_addr, total_region_size].
     // SAFETY: mmap returned valid memory of at least `total` bytes.
-    // mmap always returns page-aligned addresses, so alignment is guaranteed,
-    // but we use write_unaligned to satisfy clippy's cast_ptr_alignment.
-    unsafe { ptr.cast::<u64>().write_unaligned(total as u64); }
+    let base = ptr.cast::<u8>();
+    unsafe {
+        // Store the mmap base address (= ptr itself for standard malloc).
+        core::ptr::write_unaligned(base.cast::<u64>(), base as u64);
+        // Store the total mmap region size.
+        core::ptr::write_unaligned(base.add(8).cast::<u64>(), total as u64);
+    }
 
     // Return pointer past the header.
-    // SAFETY: ptr is a valid mmap return (at least `total` bytes),
-    // and total >= HEADER_SIZE (checked_add above), so ptr + HEADER_SIZE
+    // SAFETY: total >= HEADER_SIZE (checked_add above), so base + 16
     // is within the mapped region.
-    unsafe { ptr.cast::<u8>().add(HEADER_SIZE) }
+    unsafe { base.add(HEADER_SIZE) }
 }
 
 /// Allocate and zero-initialize memory for `nmemb` elements of `size` bytes.
@@ -115,11 +125,15 @@ pub unsafe extern "C" fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
         return core::ptr::null_mut();
     }
 
-    // Read the old size from the header.
-    // SAFETY: ptr was returned by malloc, so ptr - HEADER_SIZE is the
-    // mmap base, which is page-aligned and valid for u64 read.
-    let old_total = unsafe { ptr.sub(HEADER_SIZE).cast::<u64>().read_unaligned() } as usize;
-    let old_payload = old_total.saturating_sub(HEADER_SIZE);
+    // Read the header: [mmap_base, total_mmap_size] at ptr - HEADER_SIZE.
+    // SAFETY: ptr was returned by malloc/aligned_alloc, so the header is valid.
+    let header = unsafe { ptr.sub(HEADER_SIZE) };
+    let mmap_base = unsafe { core::ptr::read_unaligned(header.cast::<u64>()) } as usize;
+    let mmap_total = unsafe { core::ptr::read_unaligned(header.add(8).cast::<u64>()) } as usize;
+    // Compute usable bytes: from user pointer to end of mapped region.
+    // This works correctly for both standard malloc (base + total - ptr = size)
+    // and aligned allocations (base + total - aligned_ptr = remaining bytes).
+    let old_payload = (mmap_base.wrapping_add(mmap_total)).saturating_sub(ptr as usize);
 
     // If the existing region is already big enough, keep it.
     if size <= old_payload {
@@ -158,13 +172,17 @@ pub unsafe extern "C" fn free(ptr: *mut u8) {
         return;
     }
 
-    // Read total size from header.
-    let base = unsafe { ptr.sub(HEADER_SIZE) };
-    // SAFETY: base was the original mmap return address (page-aligned, valid).
-    let total = unsafe { base.cast::<u64>().read_unaligned() } as usize;
+    // Read header: [mmap_base, total_size] at ptr - HEADER_SIZE.
+    // SAFETY: ptr was returned by malloc/calloc/realloc/aligned_alloc,
+    // so the 16 bytes before ptr contain the valid header fields.
+    let header = unsafe { ptr.sub(HEADER_SIZE) };
+    let mmap_base = unsafe { core::ptr::read_unaligned(header.cast::<u64>()) } as usize;
+    let total = unsafe { core::ptr::read_unaligned(header.add(8).cast::<u64>()) } as usize;
 
-    // Unmap the entire region.
-    let _ = mman::munmap(base.cast::<core::ffi::c_void>(), total);
+    // Unmap the entire region using the stored base address.
+    // For standard malloc, mmap_base == header.  For aligned allocations,
+    // mmap_base points to the original mmap start (before alignment padding).
+    let _ = mman::munmap(mmap_base as *mut core::ffi::c_void, total);
 }
 
 // ---------------------------------------------------------------------------
@@ -245,29 +263,19 @@ pub extern "C" fn aligned_alloc(alignment: usize, size: usize) -> *mut u8 {
 }
 
 /// Allocate page-aligned memory (obsolete but still used).
+///
+/// The returned pointer can be passed to `free()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn valloc(size: usize) -> *mut u8 {
-    // mmap always returns page-aligned memory; our malloc uses
-    // a 16-byte header, so the user pointer is at page+16.
-    // For true page alignment, use mmap directly.
     if size == 0 {
         return core::ptr::null_mut();
     }
-
-    let ptr = mman::mmap(
-        core::ptr::null_mut(),
-        size,
-        mman::PROT_READ | mman::PROT_WRITE,
-        mman::MAP_PRIVATE | mman::MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-
-    if ptr == mman::MAP_FAILED {
-        return core::ptr::null_mut();
-    }
-
-    ptr.cast::<u8>()
+    // Page-aligned allocation.  Our OS uses 16 KiB (16384-byte) pages.
+    // Delegate to aligned_alloc_impl so the returned pointer has a valid
+    // header that free() can use.  The previous implementation returned
+    // a raw mmap pointer with no header, which caused memory corruption
+    // when free() tried to read the nonexistent header.
+    aligned_alloc_impl(16384, size)
 }
 
 /// Allocate aligned memory (obsolete but still used by some programs).
@@ -300,8 +308,10 @@ pub extern "C" fn reallocarray(
 
 /// Internal aligned allocation implementation.
 ///
-/// Over-allocates and adjusts the returned pointer to satisfy alignment.
-/// Uses a secondary header to track the real base for free().
+/// Allocates via mmap with extra space for alignment padding, then places
+/// the standard `[mmap_base, total_size]` header just before the aligned
+/// user pointer.  This means `free()` works uniformly — it always reads
+/// the header at `ptr - 16` regardless of alignment.
 fn aligned_alloc_impl(alignment: usize, size: usize) -> *mut u8 {
     if size == 0 {
         return core::ptr::null_mut();
@@ -313,30 +323,47 @@ fn aligned_alloc_impl(alignment: usize, size: usize) -> *mut u8 {
         return malloc(size);
     }
 
-    // Over-allocate: size + alignment + header space for the real base pointer.
-    let extra = alignment.wrapping_add(core::mem::size_of::<usize>());
-    let Some(total) = size.checked_add(extra) else {
+    // Allocate via mmap directly with extra space for alignment padding
+    // and the 16-byte header.  Worst case: (alignment - 1) bytes of
+    // padding plus HEADER_SIZE for the header before the aligned address.
+    let Some(total) = size
+        .checked_add(alignment.wrapping_sub(1))
+        .and_then(|v| v.checked_add(HEADER_SIZE))
+    else {
+        crate::errno::set_errno(crate::errno::ENOMEM);
         return core::ptr::null_mut();
     };
 
-    let raw = malloc(total);
-    if raw.is_null() {
+    let ptr = mman::mmap(
+        core::ptr::null_mut(),
+        total,
+        mman::PROT_READ | mman::PROT_WRITE,
+        mman::MAP_PRIVATE | mman::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+
+    if ptr == mman::MAP_FAILED {
+        crate::errno::set_errno(crate::errno::ENOMEM);
         return core::ptr::null_mut();
     }
 
-    // Align the user pointer.
-    let raw_addr = raw as usize;
-    // Reserve space for the back-pointer (one usize before the aligned addr).
-    let min_addr = raw_addr.wrapping_add(core::mem::size_of::<usize>());
-    let aligned_addr = min_addr.wrapping_add(alignment.wrapping_sub(1)) & !alignment.wrapping_sub(1);
+    let base = ptr as usize;
+    // The user pointer must be aligned AND have HEADER_SIZE bytes before
+    // it for the [mmap_base, total_size] header.
+    let min_user = base.wrapping_add(HEADER_SIZE);
+    let aligned_user = (min_user.wrapping_add(alignment.wrapping_sub(1)))
+        & !alignment.wrapping_sub(1);
 
-    // Store the original malloc pointer just before the aligned address.
-    // SAFETY: aligned_addr - sizeof(usize) >= raw_addr, so this is within
-    // the malloc'd region.
+    // Write the standard header at aligned_user - HEADER_SIZE.
+    // SAFETY: aligned_user >= base + HEADER_SIZE (by construction of min_user),
+    // so the header write is within the mmap'd region.  aligned_user + size
+    // <= base + total by the checked_add above.
     unsafe {
-        let back_ptr = (aligned_addr.wrapping_sub(core::mem::size_of::<usize>())) as *mut usize;
-        core::ptr::write_unaligned(back_ptr, raw_addr);
+        let header = aligned_user.wrapping_sub(HEADER_SIZE) as *mut u8;
+        core::ptr::write_unaligned(header.cast::<u64>(), base as u64);
+        core::ptr::write_unaligned(header.add(8).cast::<u64>(), total as u64);
     }
 
-    aligned_addr as *mut u8
+    aligned_user as *mut u8
 }

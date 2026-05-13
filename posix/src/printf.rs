@@ -590,7 +590,11 @@ fn format_signed(
 
     // Convert to digits.
     let mut num_buf = [0u8; NUM_BUF_SIZE];
-    let num_len = u64_to_dec(abs_val, &mut num_buf);
+    let mut num_len = u64_to_dec(abs_val, &mut num_buf);
+    // POSIX/C99: precision 0 with value 0 produces no digit output.
+    if precision == Some(0) && abs_val == 0 {
+        num_len = 0;
+    }
     let digits = if let Some(p) = precision {
         if p > num_len { p } else { num_len }
     } else {
@@ -663,7 +667,11 @@ fn format_unsigned(
     precision: Option<usize>,
 ) {
     let mut num_buf = [0u8; NUM_BUF_SIZE];
-    let num_len = u64_to_base(val, base, upper, &mut num_buf);
+    let mut num_len = u64_to_base(val, base, upper, &mut num_buf);
+    // POSIX/C99: precision 0 with value 0 produces no digit output.
+    if precision == Some(0) && val == 0 {
+        num_len = 0;
+    }
     let digits = if let Some(p) = precision {
         if p > num_len { p } else { num_len }
     } else {

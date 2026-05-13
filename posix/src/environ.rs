@@ -165,6 +165,16 @@ pub unsafe extern "C" fn unsetenv(name: *const u8) -> i32 {
         return -1;
     }
 
+    // POSIX: name must not contain '='.
+    let mut k: usize = 0;
+    while k < name_len {
+        if unsafe { *name.add(k) } == b'=' {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        k = k.wrapping_add(1);
+    }
+
     // SAFETY: Single-threaded access.
     let store = unsafe { core::ptr::addr_of_mut!(ENV_STORE).as_mut() };
     let Some(store) = store else { return 0 };

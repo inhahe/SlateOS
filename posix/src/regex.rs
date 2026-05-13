@@ -203,7 +203,7 @@ pub unsafe extern "C" fn regcomp(
         return REG_ESPACE;
     }
 
-    reg.re_nsub = if p.num_groups > 0 { p.num_groups.wrapping_sub(1) } else { 0 };
+    reg.re_nsub = p.num_groups;
     reg.program = program;
 
     0
@@ -348,7 +348,9 @@ fn compile_pattern(
     extended: bool,
 ) -> i32 {
     let mut pos: usize = 0;
-    let mut group_id: u8 = 0;
+    // Group 0 is reserved for the whole match (set by regexec, not by
+    // instructions).  Explicit sub-expressions start at group 1.
+    let mut group_id: u8 = 1;
 
     compile_alternation(prog, pat, pat_len, &mut pos, extended, &mut group_id)
 }

@@ -202,8 +202,10 @@ pub unsafe extern "C" fn wcstoumax(
         i = i.wrapping_add(1);
     }
 
-    // Skip optional '+'.
-    if unsafe { *nptr.add(i) } == 0x2b {
+    // Handle sign.  POSIX: if the subject sequence begins with a
+    // minus sign, the resulting value is negated (wrapping).
+    let negative = unsafe { *nptr.add(i) } == 0x2d; // '-'
+    if negative || unsafe { *nptr.add(i) } == 0x2b { // '+'
         i = i.wrapping_add(1);
     }
 
@@ -252,7 +254,8 @@ pub unsafe extern "C" fn wcstoumax(
         }
     }
 
-    result
+    // POSIX: negative sign means wrapping negation of the unsigned result.
+    if negative { result.wrapping_neg() } else { result }
 }
 
 // ---------------------------------------------------------------------------

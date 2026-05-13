@@ -675,10 +675,8 @@ pub extern "C" fn strerror(errnum: i32) -> *const u8 {
 
 /// Duplicate a string.
 ///
-/// Allocates memory for a copy of `s` using `mmap`.  The caller must
-/// free the result with `free()` (when we have a heap) or `munmap`.
-///
-/// Note: This is a no_std stub — returns NULL since we have no heap.
+/// Allocates memory for a copy of `s` using `malloc`.  The caller
+/// must free the result with `free()`.
 ///
 /// # Safety
 ///
@@ -692,23 +690,17 @@ pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
     let len = unsafe { strlen(s) };
     let size = len.wrapping_add(1);
 
-    // Allocate via mmap (anonymous mapping).
-    let ptr = crate::mman::mmap(
-        core::ptr::null_mut(),
-        size,
-        crate::mman::PROT_READ | crate::mman::PROT_WRITE,
-        crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-
-    if ptr == crate::mman::MAP_FAILED {
+    // Allocate via malloc so the pointer has a valid header for free().
+    // The previous implementation used mmap directly, which produced
+    // pointers incompatible with free() (no [mmap_base, total_size]
+    // header), causing memory corruption on free(strdup(...)).
+    let dest = crate::malloc::malloc(size);
+    if dest.is_null() {
         return core::ptr::null_mut();
     }
 
-    let dest = ptr.cast::<u8>();
-    // SAFETY: mmap returned valid memory of sufficient size.
-    unsafe { strcpy(dest, s); }
+    // SAFETY: malloc returned valid memory of at least `size` bytes.
+    unsafe { memcpy(dest, s, size); }
     dest
 }
 
@@ -716,6 +708,7 @@ pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
 ///
 /// Allocates memory for a copy of at most `n` bytes from `s`,
 /// plus a null terminator.  The result is always null-terminated.
+/// The caller must free the result with `free()`.
 ///
 /// # Safety
 ///
@@ -730,21 +723,13 @@ pub unsafe extern "C" fn strndup(s: *const u8, n: usize) -> *mut u8 {
     let len = unsafe { strnlen(s, n) };
     let size = len.wrapping_add(1);
 
-    let ptr = crate::mman::mmap(
-        core::ptr::null_mut(),
-        size,
-        crate::mman::PROT_READ | crate::mman::PROT_WRITE,
-        crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
-        -1,
-        0,
-    );
-
-    if ptr == crate::mman::MAP_FAILED {
+    // Allocate via malloc so the pointer has a valid header for free().
+    let dest = crate::malloc::malloc(size);
+    if dest.is_null() {
         return core::ptr::null_mut();
     }
 
-    let dest = ptr.cast::<u8>();
-    // SAFETY: mmap returned valid memory, len bytes + null.
+    // SAFETY: malloc returned valid memory of at least `size` bytes.
     unsafe { memcpy(dest, s, len); }
     unsafe { *dest.add(len) = 0; }
     dest

@@ -92,3 +92,108 @@ fn format_u32(mut val: u32, buf: &mut [u8; 10]) -> usize {
     }
     len
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- format_u32 --
+
+    #[test]
+    fn test_format_u32_zero() {
+        let mut buf = [0u8; 10];
+        let len = format_u32(0, &mut buf);
+        assert_eq!(len, 1);
+        assert_eq!(buf[0], b'0');
+    }
+
+    #[test]
+    fn test_format_u32_one() {
+        let mut buf = [0u8; 10];
+        let len = format_u32(1, &mut buf);
+        assert_eq!(len, 1);
+        assert_eq!(buf[0], b'1');
+    }
+
+    #[test]
+    fn test_format_u32_single_digit() {
+        for d in 0..=9u32 {
+            let mut buf = [0u8; 10];
+            let len = format_u32(d, &mut buf);
+            assert_eq!(len, 1);
+            assert_eq!(buf[0], b'0' + d as u8);
+        }
+    }
+
+    #[test]
+    fn test_format_u32_two_digits() {
+        let mut buf = [0u8; 10];
+        let len = format_u32(42, &mut buf);
+        assert_eq!(len, 2);
+        assert_eq!(&buf[..2], b"42");
+    }
+
+    #[test]
+    fn test_format_u32_three_digits() {
+        let mut buf = [0u8; 10];
+        let len = format_u32(123, &mut buf);
+        assert_eq!(len, 3);
+        assert_eq!(&buf[..3], b"123");
+    }
+
+    #[test]
+    fn test_format_u32_large() {
+        let mut buf = [0u8; 10];
+        let len = format_u32(999_999_999, &mut buf);
+        assert_eq!(len, 9);
+        assert_eq!(&buf[..9], b"999999999");
+    }
+
+    #[test]
+    fn test_format_u32_max() {
+        // u32::MAX = 4294967295 (10 digits — exactly fills the buffer)
+        let mut buf = [0u8; 10];
+        let len = format_u32(u32::MAX, &mut buf);
+        assert_eq!(len, 10);
+        assert_eq!(&buf[..10], b"4294967295");
+    }
+
+    #[test]
+    fn test_format_u32_powers_of_ten() {
+        let cases: &[(u32, &[u8])] = &[
+            (10, b"10"),
+            (100, b"100"),
+            (1000, b"1000"),
+            (10_000, b"10000"),
+            (100_000, b"100000"),
+            (1_000_000, b"1000000"),
+        ];
+        for &(val, expected) in cases {
+            let mut buf = [0u8; 10];
+            let len = format_u32(val, &mut buf);
+            assert_eq!(len, expected.len(), "format_u32({val})");
+            assert_eq!(&buf[..len], expected, "format_u32({val})");
+        }
+    }
+
+    #[test]
+    fn test_format_u32_typical_line_numbers() {
+        // Line numbers are the primary use case for format_u32.
+        let cases: &[(u32, &[u8])] = &[
+            (1, b"1"),
+            (25, b"25"),
+            (256, b"256"),
+            (1024, b"1024"),
+            (65535, b"65535"),
+        ];
+        for &(val, expected) in cases {
+            let mut buf = [0u8; 10];
+            let len = format_u32(val, &mut buf);
+            assert_eq!(&buf[..len], expected);
+        }
+    }
+}

@@ -448,3 +448,192 @@ pub extern "C" fn nftw64(
 ) -> i32 {
     nftw(path, callback, maxfds, flags)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- FTW type flag constants --
+
+    #[test]
+    fn test_ftw_type_flags() {
+        assert_eq!(FTW_F, 0);
+        assert_eq!(FTW_D, 1);
+        assert_eq!(FTW_DNR, 2);
+        assert_eq!(FTW_NS, 3);
+        assert_eq!(FTW_SL, 4);
+        assert_eq!(FTW_DP, 5);
+        assert_eq!(FTW_SLN, 6);
+    }
+
+    #[test]
+    fn test_ftw_flag_constants() {
+        assert_eq!(FTW_PHYS, 1);
+        assert_eq!(FTW_MOUNT, 2);
+        assert_eq!(FTW_CHDIR, 4);
+        assert_eq!(FTW_DEPTH, 8);
+    }
+
+    #[test]
+    fn test_ftw_flags_are_distinct_bits() {
+        // Each flag should be a distinct power of 2.
+        let all = FTW_PHYS | FTW_MOUNT | FTW_CHDIR | FTW_DEPTH;
+        assert_eq!(all, 15);
+    }
+
+    // -- is_dot_or_dotdot --
+
+    #[test]
+    fn test_is_dot() {
+        assert!(is_dot_or_dotdot(b".\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_is_dotdot() {
+        assert!(is_dot_or_dotdot(b"..\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_not_dot_regular_name() {
+        assert!(!is_dot_or_dotdot(b"hello\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_not_dot_dotfile() {
+        // ".bashrc" starts with '.' but is not "." or "..".
+        assert!(!is_dot_or_dotdot(b".bashrc\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_not_dot_triple_dot() {
+        // "..." is not "." or "..".
+        assert!(!is_dot_or_dotdot(b"...\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_is_dot_or_dotdot_null() {
+        assert!(!is_dot_or_dotdot(core::ptr::null()));
+    }
+
+    // -- find_basename_offset --
+
+    #[test]
+    fn test_basename_offset_no_slash() {
+        assert_eq!(find_basename_offset(b"file.txt\0".as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_basename_offset_simple() {
+        assert_eq!(find_basename_offset(b"/foo/bar\0".as_ptr()), 5);
+    }
+
+    #[test]
+    fn test_basename_offset_root() {
+        assert_eq!(find_basename_offset(b"/file\0".as_ptr()), 1);
+    }
+
+    #[test]
+    fn test_basename_offset_nested() {
+        assert_eq!(find_basename_offset(b"/a/b/c/d\0".as_ptr()), 7);
+    }
+
+    #[test]
+    fn test_basename_offset_trailing_slash() {
+        // "/foo/" → basename offset is 5 (empty basename after last /).
+        assert_eq!(find_basename_offset(b"/foo/\0".as_ptr()), 5);
+    }
+
+    #[test]
+    fn test_basename_offset_empty() {
+        assert_eq!(find_basename_offset(b"\0".as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_basename_offset_null() {
+        assert_eq!(find_basename_offset(core::ptr::null()), 0);
+    }
+
+    // -- build_child_path --
+
+    #[test]
+    fn test_build_child_path_simple() {
+        let mut buf = [0u8; PATH_MAX];
+        let len = build_child_path(
+            b"/foo\0".as_ptr(),
+            b"bar\0".as_ptr(),
+            &mut buf,
+        );
+        assert_eq!(len, 8); // "/foo/bar"
+        assert_eq!(&buf[..8], b"/foo/bar");
+        assert_eq!(buf[8], 0);
+    }
+
+    #[test]
+    fn test_build_child_path_trailing_slash() {
+        let mut buf = [0u8; PATH_MAX];
+        let len = build_child_path(
+            b"/foo/\0".as_ptr(),
+            b"bar\0".as_ptr(),
+            &mut buf,
+        );
+        // Parent already ends with '/', so no extra separator.
+        assert_eq!(len, 8); // "/foo/bar"
+        assert_eq!(&buf[..8], b"/foo/bar");
+    }
+
+    #[test]
+    fn test_build_child_path_root() {
+        let mut buf = [0u8; PATH_MAX];
+        let len = build_child_path(
+            b"/\0".as_ptr(),
+            b"etc\0".as_ptr(),
+            &mut buf,
+        );
+        assert_eq!(len, 4); // "/etc"
+        assert_eq!(&buf[..4], b"/etc");
+    }
+
+    #[test]
+    fn test_build_child_path_empty_parent() {
+        let mut buf = [0u8; PATH_MAX];
+        let len = build_child_path(
+            b"\0".as_ptr(),
+            b"file\0".as_ptr(),
+            &mut buf,
+        );
+        // Empty parent, no separator needed (parent_len == 0).
+        assert_eq!(len, 4);
+        assert_eq!(&buf[..4], b"file");
+    }
+
+    // -- FTW struct layout --
+
+    #[test]
+    fn test_ftw_struct_size() {
+        // FTW has two i32 fields = 8 bytes.
+        assert_eq!(core::mem::size_of::<FTW>(), 8);
+    }
+
+    #[test]
+    fn test_ftw_struct_fields() {
+        let f = FTW { base: 5, level: 3 };
+        assert_eq!(f.base, 5);
+        assert_eq!(f.level, 3);
+    }
+
+    // -- PATH_MAX and MAX_DEPTH constants --
+
+    #[test]
+    fn test_path_max() {
+        assert_eq!(PATH_MAX, 4096);
+    }
+
+    #[test]
+    fn test_max_depth() {
+        assert_eq!(MAX_DEPTH, 32);
+    }
+}

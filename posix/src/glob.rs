@@ -508,3 +508,228 @@ fn sort_paths(ptrs: &mut [*mut u8; MAX_MATCHES], count: usize) {
         outer = outer.wrapping_add(1);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Flag constants match glibc --
+
+    #[test]
+    fn test_glob_input_flags() {
+        assert_eq!(GLOB_ERR, 1);       // (1 << 0)
+        assert_eq!(GLOB_MARK, 2);      // (1 << 1)
+        assert_eq!(GLOB_NOCHECK, 16);  // (1 << 4)
+        assert_eq!(GLOB_APPEND, 32);   // (1 << 5)
+    }
+
+    #[test]
+    fn test_glob_error_codes() {
+        assert_eq!(GLOB_NOSPACE, 1);
+        assert_eq!(GLOB_ABORTED, 2);
+        assert_eq!(GLOB_NOMATCH, 3);
+    }
+
+    #[test]
+    fn test_glob_error_codes_distinct() {
+        // Error codes must be distinct from each other.
+        assert_ne!(GLOB_NOSPACE, GLOB_ABORTED);
+        assert_ne!(GLOB_NOSPACE, GLOB_NOMATCH);
+        assert_ne!(GLOB_ABORTED, GLOB_NOMATCH);
+    }
+
+    // -- GlobT layout --
+
+    #[test]
+    fn test_glob_t_initial() {
+        let g = GlobT {
+            gl_pathc: 0,
+            gl_pathv: core::ptr::null_mut(),
+            gl_offs: 0,
+        };
+        assert_eq!(g.gl_pathc, 0);
+        assert!(g.gl_pathv.is_null());
+        assert_eq!(g.gl_offs, 0);
+    }
+
+    // -- split_pattern --
+
+    #[test]
+    fn test_split_pattern_no_slash() {
+        let parts = split_pattern(b"*.txt\0".as_ptr());
+        assert!(!parts.has_slash);
+        assert_eq!(parts.file_start, 0);
+        assert_eq!(parts.pat_len, 5);
+        // dir_buf should be "."
+        assert_eq!(parts.dir_buf[0], b'.');
+        assert_eq!(parts.dir_buf[1], 0);
+    }
+
+    #[test]
+    fn test_split_pattern_with_dir() {
+        let parts = split_pattern(b"/foo/*.txt\0".as_ptr());
+        assert!(parts.has_slash);
+        assert_eq!(parts.last_slash, 4); // Position of second '/'
+        assert_eq!(parts.file_start, 5); // "*.txt" starts at 5
+        assert_eq!(parts.pat_len, 10);
+        // dir_buf should be "/foo/"
+        assert_eq!(&parts.dir_buf[..5], b"/foo/");
+        assert_eq!(parts.dir_buf[5], 0);
+    }
+
+    #[test]
+    fn test_split_pattern_root() {
+        let parts = split_pattern(b"/*.txt\0".as_ptr());
+        assert!(parts.has_slash);
+        assert_eq!(parts.last_slash, 0);
+        assert_eq!(parts.file_start, 1);
+        assert_eq!(&parts.dir_buf[..1], b"/");
+        assert_eq!(parts.dir_buf[1], 0);
+    }
+
+    #[test]
+    fn test_split_pattern_nested() {
+        // "/a/b/c/d.txt" — positions: /=0, a=1, /=2, b=3, /=4, c=5, /=6, d=7...
+        let parts = split_pattern(b"/a/b/c/d.txt\0".as_ptr());
+        assert!(parts.has_slash);
+        assert_eq!(parts.last_slash, 6); // Last '/' at position 6
+        assert_eq!(parts.file_start, 7); // "d.txt" starts at 7
+        assert_eq!(&parts.dir_buf[..7], b"/a/b/c/");
+    }
+
+    // -- should_skip_dot --
+
+    #[test]
+    fn test_skip_dot_entry() {
+        // Pattern does NOT start with '.', so skip "."
+        assert!(should_skip_dot(b".\0".as_ptr(), b"*\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_skip_dotdot_entry() {
+        // Pattern does NOT start with '.', so skip ".."
+        assert!(should_skip_dot(b"..\0".as_ptr(), b"*\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_dont_skip_dot_when_pattern_starts_with_dot() {
+        // Pattern starts with '.', so do NOT skip "."
+        assert!(!should_skip_dot(b".\0".as_ptr(), b".*\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_dont_skip_dotdot_when_pattern_starts_with_dot() {
+        assert!(!should_skip_dot(b"..\0".as_ptr(), b"..\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_dont_skip_normal_name() {
+        // Regular name (doesn't start with '.') is never skipped.
+        assert!(!should_skip_dot(b"hello\0".as_ptr(), b"*\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_dont_skip_dotfile() {
+        // ".bashrc" starts with '.' but is not "." or ".."
+        assert!(!should_skip_dot(b".bashrc\0".as_ptr(), b"*\0".as_ptr()));
+    }
+
+    // -- sort_paths --
+
+    #[test]
+    fn test_sort_paths_empty() {
+        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
+        sort_paths(&mut ptrs, 0); // Should not crash.
+    }
+
+    #[test]
+    fn test_sort_paths_single() {
+        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
+        let mut s = *b"hello\0";
+        ptrs[0] = s.as_mut_ptr();
+        sort_paths(&mut ptrs, 1); // Should not crash.
+        assert_eq!(ptrs[0], s.as_mut_ptr());
+    }
+
+    #[test]
+    fn test_sort_paths_already_sorted() {
+        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
+        let mut a = *b"alpha\0";
+        let mut b = *b"beta\0\0";
+        let mut c = *b"gamma\0";
+        ptrs[0] = a.as_mut_ptr();
+        ptrs[1] = b.as_mut_ptr();
+        ptrs[2] = c.as_mut_ptr();
+        sort_paths(&mut ptrs, 3);
+        // Should remain in order: alpha, beta, gamma.
+        assert_eq!(ptrs[0], a.as_mut_ptr());
+        assert_eq!(ptrs[1], b.as_mut_ptr());
+        assert_eq!(ptrs[2], c.as_mut_ptr());
+    }
+
+    #[test]
+    fn test_sort_paths_reverse() {
+        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
+        let mut c = *b"gamma\0";
+        let mut b = *b"beta\0\0";
+        let mut a = *b"alpha\0";
+        ptrs[0] = c.as_mut_ptr();
+        ptrs[1] = b.as_mut_ptr();
+        ptrs[2] = a.as_mut_ptr();
+        sort_paths(&mut ptrs, 3);
+        // Should now be: alpha, beta, gamma.
+        assert_eq!(ptrs[0], a.as_mut_ptr());
+        assert_eq!(ptrs[1], b.as_mut_ptr());
+        assert_eq!(ptrs[2], c.as_mut_ptr());
+    }
+
+    // -- MAX_MATCHES --
+
+    #[test]
+    fn test_max_matches() {
+        assert_eq!(MAX_MATCHES, 512);
+    }
+
+    // -- glob null checks --
+
+    #[test]
+    fn test_glob_null_pattern() {
+        let mut g = GlobT {
+            gl_pathc: 0,
+            gl_pathv: core::ptr::null_mut(),
+            gl_offs: 0,
+        };
+        let ret = unsafe { glob(core::ptr::null(), 0, None, &raw mut g) };
+        assert_eq!(ret, GLOB_ABORTED);
+    }
+
+    #[test]
+    fn test_glob_null_pglob() {
+        let ret = unsafe { glob(b"*\0".as_ptr(), 0, None, core::ptr::null_mut()) };
+        assert_eq!(ret, GLOB_ABORTED);
+    }
+
+    // -- globfree null safety --
+
+    #[test]
+    fn test_globfree_null() {
+        // Should not crash.
+        unsafe { globfree(core::ptr::null_mut()); }
+    }
+
+    #[test]
+    fn test_globfree_empty() {
+        let mut g = GlobT {
+            gl_pathc: 0,
+            gl_pathv: core::ptr::null_mut(),
+            gl_offs: 0,
+        };
+        unsafe { globfree(&raw mut g); }
+        assert_eq!(g.gl_pathc, 0);
+        assert!(g.gl_pathv.is_null());
+    }
+}

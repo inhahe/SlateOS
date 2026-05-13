@@ -812,3 +812,430 @@ fn file_exists(path: *const u8, path_len: usize) -> bool {
     );
     ret >= 0
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- FileActionSlot --
+
+    #[test]
+    fn test_file_action_slot_empty() {
+        let slot = FileActionSlot::empty();
+        assert_eq!(slot.tag, 0);
+        assert_eq!(slot.fd, 0);
+        assert_eq!(slot.newfd, 0);
+        assert_eq!(slot.oflag, 0);
+        assert_eq!(slot.mode, 0);
+        assert_eq!(slot.path_len, 0);
+    }
+
+    #[test]
+    fn test_file_action_slot_to_action_empty() {
+        let slot = FileActionSlot::empty();
+        assert!(slot.to_action().is_none());
+    }
+
+    #[test]
+    fn test_file_action_slot_to_action_close() {
+        let slot = FileActionSlot { tag: 1, fd: 5, ..FileActionSlot::empty() };
+        let action = slot.to_action();
+        assert!(action.is_some());
+        match action.unwrap() {
+            FileAction::Close { fd } => assert_eq!(fd, 5),
+            _ => panic!("expected Close"),
+        }
+    }
+
+    #[test]
+    fn test_file_action_slot_to_action_dup2() {
+        let slot = FileActionSlot { tag: 2, fd: 3, newfd: 7, ..FileActionSlot::empty() };
+        let action = slot.to_action();
+        match action.unwrap() {
+            FileAction::Dup2 { fd, newfd } => {
+                assert_eq!(fd, 3);
+                assert_eq!(newfd, 7);
+            }
+            _ => panic!("expected Dup2"),
+        }
+    }
+
+    #[test]
+    fn test_file_action_slot_to_action_open() {
+        let mut path = [0u8; ACTION_PATH_MAX];
+        path[0] = b'/';
+        path[1] = b'f';
+        path[2] = b'o';
+        path[3] = b'o';
+        let slot = FileActionSlot {
+            tag: 3, fd: 1, oflag: 0x42, mode: 0o644, path, path_len: 4,
+            ..FileActionSlot::empty()
+        };
+        let action = slot.to_action();
+        match action.unwrap() {
+            FileAction::Open { fd, path: p, path_len, oflag, mode } => {
+                assert_eq!(fd, 1);
+                assert_eq!(path_len, 4);
+                assert_eq!(&p[..4], b"/foo");
+                assert_eq!(oflag, 0x42);
+                assert_eq!(mode, 0o644);
+            }
+            _ => panic!("expected Open"),
+        }
+    }
+
+    #[test]
+    fn test_file_action_slot_to_action_invalid_tag() {
+        let slot = FileActionSlot { tag: 99, ..FileActionSlot::empty() };
+        assert!(slot.to_action().is_none());
+    }
+
+    // -- posix_spawn_file_actions_init/destroy --
+
+    #[test]
+    fn test_file_actions_init() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let ret = posix_spawn_file_actions_init(&raw mut acts);
+        assert_eq!(ret, 0);
+        assert_eq!(acts.count, 0);
+    }
+
+    #[test]
+    fn test_file_actions_init_null() {
+        let ret = posix_spawn_file_actions_init(core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_file_actions_destroy() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_destroy(&raw mut acts);
+        assert_eq!(ret, 0);
+        assert_eq!(acts.count, 0);
+    }
+
+    #[test]
+    fn test_file_actions_destroy_null() {
+        // Destroying null should not crash, returns 0.
+        let ret = posix_spawn_file_actions_destroy(core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    // -- posix_spawn_file_actions_addclose --
+
+    #[test]
+    fn test_file_actions_addclose() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_addclose(&raw mut acts, 3);
+        assert_eq!(ret, 0);
+        assert_eq!(acts.count, 1);
+        assert_eq!(acts.actions[0].tag, 1); // Close
+        assert_eq!(acts.actions[0].fd, 3);
+    }
+
+    #[test]
+    fn test_file_actions_addclose_null() {
+        let ret = posix_spawn_file_actions_addclose(core::ptr::null_mut(), 3);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_file_actions_addclose_negative_fd() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_addclose(&raw mut acts, -1);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_file_actions_addclose_full() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        // Fill to capacity.
+        for i in 0..MAX_FILE_ACTIONS {
+            let ret = posix_spawn_file_actions_addclose(&raw mut acts, i as Fd);
+            assert_eq!(ret, 0);
+        }
+        assert_eq!(acts.count, MAX_FILE_ACTIONS);
+        // One more should fail.
+        let ret = posix_spawn_file_actions_addclose(&raw mut acts, 99);
+        assert_eq!(ret, errno::ENOMEM);
+    }
+
+    // -- posix_spawn_file_actions_adddup2 --
+
+    #[test]
+    fn test_file_actions_adddup2() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_adddup2(&raw mut acts, 3, 1);
+        assert_eq!(ret, 0);
+        assert_eq!(acts.count, 1);
+        assert_eq!(acts.actions[0].tag, 2); // Dup2
+        assert_eq!(acts.actions[0].fd, 3);
+        assert_eq!(acts.actions[0].newfd, 1);
+    }
+
+    #[test]
+    fn test_file_actions_adddup2_null() {
+        let ret = posix_spawn_file_actions_adddup2(core::ptr::null_mut(), 3, 1);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_file_actions_adddup2_negative_fd() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_adddup2(&raw mut acts, -1, 1);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_file_actions_adddup2_negative_newfd() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_adddup2(&raw mut acts, 1, -1);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    // -- posix_spawn_file_actions_addopen --
+
+    #[test]
+    fn test_file_actions_addopen() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let path = b"/dev/null\0";
+        let ret = posix_spawn_file_actions_addopen(
+            &raw mut acts, 0, path.as_ptr(), 0, 0o644,
+        );
+        assert_eq!(ret, 0);
+        assert_eq!(acts.count, 1);
+        assert_eq!(acts.actions[0].tag, 3); // Open
+        assert_eq!(acts.actions[0].fd, 0);
+        assert_eq!(acts.actions[0].oflag, 0);
+        assert_eq!(acts.actions[0].mode, 0o644);
+        assert_eq!(acts.actions[0].path_len, 9); // "/dev/null"
+    }
+
+    #[test]
+    fn test_file_actions_addopen_null_acts() {
+        let path = b"/dev/null\0";
+        let ret = posix_spawn_file_actions_addopen(
+            core::ptr::null_mut(), 0, path.as_ptr(), 0, 0,
+        );
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_file_actions_addopen_null_path() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_addopen(
+            &raw mut acts, 0, core::ptr::null(), 0, 0,
+        );
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_file_actions_addopen_negative_fd() {
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let path = b"/dev/null\0";
+        let ret = posix_spawn_file_actions_addopen(
+            &raw mut acts, -1, path.as_ptr(), 0, 0,
+        );
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    // -- posix_spawn_file_actions ordering --
+
+    #[test]
+    fn test_file_actions_ordering() {
+        // POSIX requires actions to be applied in order.
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+
+        posix_spawn_file_actions_addclose(&raw mut acts, 3);
+        posix_spawn_file_actions_adddup2(&raw mut acts, 4, 1);
+        posix_spawn_file_actions_addclose(&raw mut acts, 5);
+
+        assert_eq!(acts.count, 3);
+        // Verify order preserved.
+        assert_eq!(acts.actions[0].tag, 1); // Close(3)
+        assert_eq!(acts.actions[0].fd, 3);
+        assert_eq!(acts.actions[1].tag, 2); // Dup2(4, 1)
+        assert_eq!(acts.actions[1].fd, 4);
+        assert_eq!(acts.actions[1].newfd, 1);
+        assert_eq!(acts.actions[2].tag, 1); // Close(5)
+        assert_eq!(acts.actions[2].fd, 5);
+    }
+
+    // -- posix_spawnattr_init/destroy --
+
+    #[test]
+    fn test_spawnattr_init() {
+        let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
+        let ret = posix_spawnattr_init(&raw mut attr);
+        assert_eq!(ret, 0);
+        assert_eq!(attr.flags, 0);
+        assert_eq!(attr.pgroup, 0);
+    }
+
+    #[test]
+    fn test_spawnattr_init_null() {
+        let ret = posix_spawnattr_init(core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_spawnattr_destroy() {
+        let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
+        posix_spawnattr_init(&raw mut attr);
+        let ret = posix_spawnattr_destroy(&raw mut attr);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_spawnattr_destroy_null() {
+        let ret = posix_spawnattr_destroy(core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    // -- posix_spawnattr_setflags/getflags --
+
+    #[test]
+    fn test_spawnattr_setflags() {
+        let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
+        posix_spawnattr_init(&raw mut attr);
+        let ret = posix_spawnattr_setflags(&raw mut attr, 0x02); // POSIX_SPAWN_SETPGROUP
+        assert_eq!(ret, 0);
+        assert_eq!(attr.flags, 0x02);
+    }
+
+    #[test]
+    fn test_spawnattr_setflags_null() {
+        let ret = posix_spawnattr_setflags(core::ptr::null_mut(), 0);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_spawnattr_getflags() {
+        let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
+        posix_spawnattr_init(&raw mut attr);
+        posix_spawnattr_setflags(&raw mut attr, 0x05);
+        let mut flags: i16 = 0;
+        let ret = posix_spawnattr_getflags(&raw const attr, &raw mut flags);
+        assert_eq!(ret, 0);
+        assert_eq!(flags, 0x05);
+    }
+
+    #[test]
+    fn test_spawnattr_getflags_null_attr() {
+        let mut flags: i16 = 0;
+        let ret = posix_spawnattr_getflags(core::ptr::null(), &raw mut flags);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_spawnattr_getflags_null_out() {
+        let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
+        posix_spawnattr_init(&raw mut attr);
+        let ret = posix_spawnattr_getflags(&raw const attr, core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    // -- posix_spawnattr_setpgroup/getpgroup --
+
+    #[test]
+    fn test_spawnattr_setpgroup() {
+        let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
+        posix_spawnattr_init(&raw mut attr);
+        let ret = posix_spawnattr_setpgroup(&raw mut attr, 42);
+        assert_eq!(ret, 0);
+        assert_eq!(attr.pgroup, 42);
+    }
+
+    #[test]
+    fn test_spawnattr_setpgroup_null() {
+        let ret = posix_spawnattr_setpgroup(core::ptr::null_mut(), 42);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_spawnattr_getpgroup() {
+        let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
+        posix_spawnattr_init(&raw mut attr);
+        posix_spawnattr_setpgroup(&raw mut attr, 99);
+        let mut pg: PidT = 0;
+        let ret = posix_spawnattr_getpgroup(&raw const attr, &raw mut pg);
+        assert_eq!(ret, 0);
+        assert_eq!(pg, 99);
+    }
+
+    #[test]
+    fn test_spawnattr_getpgroup_null_attr() {
+        let mut pg: PidT = 0;
+        let ret = posix_spawnattr_getpgroup(core::ptr::null(), &raw mut pg);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_spawnattr_getpgroup_null_out() {
+        let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
+        posix_spawnattr_init(&raw mut attr);
+        let ret = posix_spawnattr_getpgroup(&raw const attr, core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    // -- contains_slash --
+
+    #[test]
+    fn test_contains_slash_empty() {
+        assert!(!contains_slash(b"\0".as_ptr(), 0));
+    }
+
+    #[test]
+    fn test_contains_slash_no_slash() {
+        assert!(!contains_slash(b"hello\0".as_ptr(), 5));
+    }
+
+    #[test]
+    fn test_contains_slash_has_slash() {
+        assert!(contains_slash(b"/bin/sh\0".as_ptr(), 7));
+    }
+
+    #[test]
+    fn test_contains_slash_only_slash() {
+        assert!(contains_slash(b"/\0".as_ptr(), 1));
+    }
+
+    #[test]
+    fn test_contains_slash_trailing() {
+        assert!(contains_slash(b"foo/\0".as_ptr(), 4));
+    }
+
+    // -- Spawn flag constants --
+
+    #[test]
+    fn test_spawn_flag_constants() {
+        // Verify flag values match POSIX.
+        assert_eq!(POSIX_SPAWN_RESETIDS, 0x01);
+        assert_eq!(POSIX_SPAWN_SETPGROUP, 0x02);
+        assert_eq!(POSIX_SPAWN_SETSIGDEF, 0x04);
+        assert_eq!(POSIX_SPAWN_SETSIGMASK, 0x08);
+    }
+
+    #[test]
+    fn test_spawn_flags_no_overlap() {
+        let all = POSIX_SPAWN_RESETIDS | POSIX_SPAWN_SETPGROUP
+                 | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
+        // Each flag should be a distinct bit.
+        assert_eq!(all, 0x0F);
+    }
+}

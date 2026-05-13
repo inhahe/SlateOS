@@ -707,3 +707,308 @@ pub extern "C" fn _Unwind_Resume(_exception_object: *mut u8) -> ! {
 pub extern "C" fn __stack_chk_fail_local() -> ! {
     __stack_chk_fail()
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Constants --
+
+    #[test]
+    fn test_max_atexit() {
+        // POSIX minimum is 32 for atexit handlers.
+        assert!(MAX_ATEXIT >= 32);
+    }
+
+    #[test]
+    fn test_stack_chk_guard_nonzero() {
+        // Stack canary must be non-zero (otherwise trivially guessable).
+        assert_ne!(__stack_chk_guard, 0);
+    }
+
+    #[test]
+    fn test_dso_handle_exists() {
+        // __dso_handle just needs to exist; value doesn't matter.
+        let _ = __dso_handle;
+    }
+
+    // -- getauxval --
+
+    #[test]
+    fn test_getauxval_page_size() {
+        assert_eq!(getauxval(6), 16384); // AT_PAGESZ = 6; our 16 KiB pages.
+    }
+
+    #[test]
+    fn test_getauxval_clk_tck() {
+        assert_eq!(getauxval(17), 100); // AT_CLKTCK = 17; 100 Hz.
+    }
+
+    #[test]
+    fn test_getauxval_secure() {
+        assert_eq!(getauxval(23), 0); // AT_SECURE = 23; not in secure mode.
+    }
+
+    #[test]
+    fn test_getauxval_hwcap() {
+        assert_eq!(getauxval(16), 0); // AT_HWCAP = 16; no hw caps.
+    }
+
+    #[test]
+    fn test_getauxval_hwcap2() {
+        assert_eq!(getauxval(26), 0); // AT_HWCAP2 = 26.
+    }
+
+    #[test]
+    fn test_getauxval_uid_gid() {
+        assert_eq!(getauxval(11), 0); // AT_UID
+        assert_eq!(getauxval(12), 0); // AT_EUID
+        assert_eq!(getauxval(13), 0); // AT_GID
+        assert_eq!(getauxval(14), 0); // AT_EGID
+    }
+
+    #[test]
+    fn test_getauxval_unknown_sets_enoent() {
+        // Unknown type should return 0 and set errno to ENOENT.
+        crate::errno::set_errno(0);
+        let val = getauxval(9999);
+        assert_eq!(val, 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_getauxval_known_does_not_set_enoent() {
+        // Known types should NOT set ENOENT.
+        crate::errno::set_errno(0);
+        let _ = getauxval(6); // AT_PAGESZ
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    // -- gnu_get_libc_version / release --
+
+    #[test]
+    fn test_libc_version_not_null() {
+        let ver = gnu_get_libc_version();
+        assert!(!ver.is_null());
+    }
+
+    #[test]
+    fn test_libc_version_is_2_38() {
+        let ver = gnu_get_libc_version();
+        let len = unsafe { crate::string::strlen(ver) };
+        let s = unsafe { core::slice::from_raw_parts(ver, len) };
+        assert_eq!(s, b"2.38");
+    }
+
+    #[test]
+    fn test_libc_release_not_null() {
+        let rel = gnu_get_libc_release();
+        assert!(!rel.is_null());
+    }
+
+    #[test]
+    fn test_libc_release_is_stable() {
+        let rel = gnu_get_libc_release();
+        let len = unsafe { crate::string::strlen(rel) };
+        let s = unsafe { core::slice::from_raw_parts(rel, len) };
+        assert_eq!(s, b"stable");
+    }
+
+    // -- C++ guard functions --
+
+    #[test]
+    fn test_cxa_guard_acquire_uninitialized() {
+        let mut guard: u64 = 0; // Byte 0 = 0 → uninitialized.
+        let result = __cxa_guard_acquire(&raw mut guard);
+        assert_eq!(result, 1); // Should initialize.
+    }
+
+    #[test]
+    fn test_cxa_guard_acquire_already_initialized() {
+        let mut guard: u64 = 1; // Byte 0 = 1 → initialized.
+        let result = __cxa_guard_acquire(&raw mut guard);
+        assert_eq!(result, 0); // Already done.
+    }
+
+    #[test]
+    fn test_cxa_guard_release_sets_initialized() {
+        let mut guard: u64 = 0;
+        __cxa_guard_release(&raw mut guard);
+        // Byte 0 should be 1 now.
+        let byte0 = guard as u8;
+        assert_eq!(byte0, 1);
+    }
+
+    #[test]
+    fn test_cxa_guard_abort_resets() {
+        let mut guard: u64 = 0;
+        __cxa_guard_release(&raw mut guard); // Mark initialized.
+        __cxa_guard_abort(&raw mut guard); // Reset.
+        let byte0 = guard as u8;
+        assert_eq!(byte0, 0);
+        // Now acquire should say "initialize".
+        assert_eq!(__cxa_guard_acquire(&raw mut guard), 1);
+    }
+
+    #[test]
+    fn test_cxa_guard_full_lifecycle() {
+        let mut guard: u64 = 0;
+        // First acquire: should initialize.
+        assert_eq!(__cxa_guard_acquire(&raw mut guard), 1);
+        // Simulate successful initialization.
+        __cxa_guard_release(&raw mut guard);
+        // Second acquire: already done.
+        assert_eq!(__cxa_guard_acquire(&raw mut guard), 0);
+    }
+
+    #[test]
+    fn test_cxa_guard_acquire_null() {
+        // Null guard should not crash, return 0.
+        let result = __cxa_guard_acquire(core::ptr::null_mut());
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_cxa_guard_release_null() {
+        // Should not crash.
+        __cxa_guard_release(core::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_cxa_guard_abort_null() {
+        // Should not crash.
+        __cxa_guard_abort(core::ptr::null_mut());
+    }
+
+    // -- C++ exception stubs --
+
+    #[test]
+    fn test_cxa_allocate_exception_not_null() {
+        let ptr = __cxa_allocate_exception(64);
+        assert!(!ptr.is_null());
+    }
+
+    #[test]
+    fn test_cxa_begin_catch_returns_argument() {
+        let obj = 42u8;
+        let ptr = &obj as *const u8 as *mut u8;
+        let result = __cxa_begin_catch(ptr);
+        assert_eq!(result, ptr);
+    }
+
+    #[test]
+    fn test_cxa_begin_catch_null() {
+        let result = __cxa_begin_catch(core::ptr::null_mut());
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_cxa_end_catch_noop() {
+        // Should not crash.
+        __cxa_end_catch();
+    }
+
+    #[test]
+    fn test_cxa_finalize_noop() {
+        // Should not crash.
+        __cxa_finalize(core::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_gxx_personality_returns_fatal() {
+        // Should return _URC_FATAL_PHASE1_ERROR = 8.
+        assert_eq!(__gxx_personality_v0(), 8);
+    }
+
+    // -- atexit registration (without calling exit) --
+
+    // We can test atexit registration by checking the return value.
+    // We can't test exit() itself because it calls _exit which terminates.
+    // But we CAN test that atexit returns 0 for valid registrations.
+
+    extern "C" fn dummy_atexit_handler() {}
+
+    #[test]
+    fn test_atexit_returns_zero() {
+        // Reset state for this test.
+        unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
+        let result = atexit(dummy_atexit_handler);
+        assert_eq!(result, 0);
+        // Cleanup.
+        unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
+    }
+
+    #[test]
+    fn test_atexit_table_full() {
+        // Fill the table, then try one more.
+        unsafe { addr_of_mut!(ATEXIT_COUNT).write(MAX_ATEXIT); }
+        let result = atexit(dummy_atexit_handler);
+        assert_eq!(result, -1);
+        // Cleanup.
+        unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
+    }
+
+    #[test]
+    fn test_at_quick_exit_returns_zero() {
+        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+        let result = at_quick_exit(dummy_atexit_handler);
+        assert_eq!(result, 0);
+        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+    }
+
+    #[test]
+    fn test_at_quick_exit_table_full() {
+        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(MAX_ATEXIT); }
+        let result = at_quick_exit(dummy_atexit_handler);
+        assert_eq!(result, -1);
+        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+    }
+
+    // -- __cxa_thread_atexit_impl --
+
+    extern "C" fn dummy_dtor(_: *mut u8) {}
+
+    #[test]
+    fn test_cxa_thread_atexit_impl_accepts() {
+        let result = __cxa_thread_atexit_impl(
+            dummy_dtor,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        assert_eq!(result, 0);
+    }
+
+    // -- GCC CRT stubs --
+
+    #[test]
+    fn test_libc_csu_init_noop() {
+        __libc_csu_init(); // Should not crash.
+    }
+
+    #[test]
+    fn test_libc_csu_fini_noop() {
+        __libc_csu_fini(); // Should not crash.
+    }
+
+    // -- __libc_single_threaded --
+
+    #[test]
+    fn test_single_threaded_initial() {
+        // Should start as 1 (single-threaded).
+        let val = unsafe { core::ptr::addr_of!(__libc_single_threaded).read() };
+        // We can't guarantee no other test changed it, but it starts at 1.
+        let _ = val; // Just verify it's readable.
+    }
+
+    // -- posix_spawnattr via __register_atfork --
+
+    #[test]
+    fn test_register_atfork_returns_zero() {
+        let result = __register_atfork(None, None, None, core::ptr::null_mut());
+        assert_eq!(result, 0);
+    }
+}

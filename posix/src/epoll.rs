@@ -286,3 +286,222 @@ pub extern "C" fn inotify_rm_watch(_fd: i32, _wd: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- epoll constants (match Linux) --
+
+    #[test]
+    fn test_epoll_event_flags() {
+        assert_eq!(EPOLLIN, 0x001);
+        assert_eq!(EPOLLOUT, 0x004);
+        assert_eq!(EPOLLERR, 0x008);
+        assert_eq!(EPOLLHUP, 0x010);
+        assert_eq!(EPOLLET, 1 << 31);
+    }
+
+    #[test]
+    fn test_epoll_ctl_ops() {
+        assert_eq!(EPOLL_CTL_ADD, 1);
+        assert_eq!(EPOLL_CTL_DEL, 2);
+        assert_eq!(EPOLL_CTL_MOD, 3);
+    }
+
+    #[test]
+    fn test_epoll_event_flags_composable() {
+        let read_write = EPOLLIN | EPOLLOUT;
+        assert_eq!(read_write, 0x005);
+        let edge_read = EPOLLIN | EPOLLET;
+        assert_eq!(edge_read, 0x8000_0001);
+    }
+
+    // -- epoll stubs return -1 / ENOSYS --
+
+    #[test]
+    fn test_epoll_create_enosys() {
+        errno::set_errno(0);
+        assert_eq!(epoll_create(1), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_epoll_create1_enosys() {
+        errno::set_errno(0);
+        assert_eq!(epoll_create1(0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_epoll_ctl_enosys() {
+        errno::set_errno(0);
+        assert_eq!(epoll_ctl(3, EPOLL_CTL_ADD, 4, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_epoll_wait_enosys() {
+        errno::set_errno(0);
+        assert_eq!(epoll_wait(3, core::ptr::null_mut(), 10, -1), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_epoll_pwait_enosys() {
+        errno::set_errno(0);
+        assert_eq!(epoll_pwait(3, core::ptr::null_mut(), 10, -1, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- eventfd constants --
+
+    #[test]
+    fn test_efd_flags() {
+        assert_eq!(EFD_SEMAPHORE, 1);
+        // EFD_CLOEXEC and EFD_NONBLOCK should be distinct.
+        assert_ne!(EFD_CLOEXEC, EFD_NONBLOCK);
+        assert_ne!(EFD_CLOEXEC, 0);
+        assert_ne!(EFD_NONBLOCK, 0);
+    }
+
+    // -- eventfd stubs --
+
+    #[test]
+    fn test_eventfd_enosys() {
+        errno::set_errno(0);
+        assert_eq!(eventfd(0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_eventfd_read_enosys() {
+        errno::set_errno(0);
+        let mut val: u64 = 0;
+        assert_eq!(eventfd_read(3, &raw mut val), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_eventfd_write_enosys() {
+        errno::set_errno(0);
+        assert_eq!(eventfd_write(3, 1), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- timerfd constants --
+
+    #[test]
+    fn test_tfd_flags() {
+        assert_ne!(TFD_CLOEXEC, 0);
+        assert_ne!(TFD_NONBLOCK, 0);
+        assert_eq!(TFD_TIMER_ABSTIME, 1);
+    }
+
+    // -- timerfd stubs --
+
+    #[test]
+    fn test_timerfd_create_enosys() {
+        errno::set_errno(0);
+        assert_eq!(timerfd_create(0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_timerfd_settime_enosys() {
+        errno::set_errno(0);
+        assert_eq!(timerfd_settime(3, 0, core::ptr::null(), core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_enosys() {
+        errno::set_errno(0);
+        assert_eq!(timerfd_gettime(3, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- signalfd stub --
+
+    #[test]
+    fn test_signalfd_enosys() {
+        errno::set_errno(0);
+        assert_eq!(signalfd(-1, core::ptr::null(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- inotify constants (match Linux) --
+
+    #[test]
+    fn test_inotify_event_flags() {
+        assert_eq!(IN_ACCESS, 0x0000_0001);
+        assert_eq!(IN_MODIFY, 0x0000_0002);
+        assert_eq!(IN_ATTRIB, 0x0000_0004);
+        assert_eq!(IN_CLOSE_WRITE, 0x0000_0008);
+        assert_eq!(IN_CLOSE_NOWRITE, 0x0000_0010);
+        assert_eq!(IN_OPEN, 0x0000_0020);
+        assert_eq!(IN_MOVED_FROM, 0x0000_0040);
+        assert_eq!(IN_MOVED_TO, 0x0000_0080);
+        assert_eq!(IN_CREATE, 0x0000_0100);
+        assert_eq!(IN_DELETE, 0x0000_0200);
+        assert_eq!(IN_DELETE_SELF, 0x0000_0400);
+        assert_eq!(IN_MOVE_SELF, 0x0000_0800);
+    }
+
+    #[test]
+    fn test_inotify_composite_flags() {
+        assert_eq!(IN_CLOSE, IN_CLOSE_WRITE | IN_CLOSE_NOWRITE);
+        assert_eq!(IN_MOVE, IN_MOVED_FROM | IN_MOVED_TO);
+        assert_eq!(IN_ALL_EVENTS, 0x0000_0FFF);
+    }
+
+    #[test]
+    fn test_inotify_init_flags() {
+        assert_ne!(IN_CLOEXEC, 0);
+        assert_ne!(IN_NONBLOCK, 0);
+        assert_ne!(IN_CLOEXEC, IN_NONBLOCK);
+    }
+
+    // -- inotify stubs --
+
+    #[test]
+    fn test_inotify_init_enosys() {
+        errno::set_errno(0);
+        assert_eq!(inotify_init(), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_inotify_init1_enosys() {
+        errno::set_errno(0);
+        assert_eq!(inotify_init1(0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_enosys() {
+        errno::set_errno(0);
+        assert_eq!(inotify_add_watch(3, core::ptr::null(), IN_MODIFY), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_inotify_rm_watch_enosys() {
+        errno::set_errno(0);
+        assert_eq!(inotify_rm_watch(3, 1), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- EpollEvent struct layout --
+
+    #[test]
+    fn test_epoll_event_size() {
+        // EpollEvent should be 12 bytes (4 + 8) or 16 with padding.
+        let size = core::mem::size_of::<EpollEvent>();
+        assert!(size >= 12);
+    }
+}

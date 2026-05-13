@@ -186,6 +186,12 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
+    // POSIX: "If nbyte is 0, read() will return 0 and have no other
+    // results."  Short-circuit before touching the kernel so a 0-length
+    // read on a reset TCP connection doesn't spuriously return an error.
+    if count == 0 {
+        return 0;
+    }
 
     let Some(entry) = lookup_fd(fd) else { return -1; };
 
@@ -205,9 +211,6 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
         }
         HandleKind::Console => {
             // Console read: one character at a time via SYS_CONSOLE_READ_CHAR.
-            if count == 0 {
-                return 0;
-            }
             let ch = syscall0(SYS_CONSOLE_READ_CHAR);
             if ch < 0 {
                 return errno::translate(ch) as SsizeT;
@@ -278,6 +281,13 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
+    }
+    // POSIX: "If nbyte is zero and the file is a regular file, write()
+    // will return zero and have no other results."  For non-regular files
+    // (pipes, sockets) the spec says "unspecified", but Linux returns 0
+    // without error, and programs depend on this behavior.
+    if count == 0 {
+        return 0;
     }
 
     let Some(entry) = lookup_fd(fd) else { return -1; };

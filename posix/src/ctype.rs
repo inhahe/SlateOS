@@ -3,7 +3,7 @@
 //! Implements the `<ctype.h>` interface: `isalpha`, `isdigit`, `isalnum`,
 //! `isspace`, `isupper`, `islower`, `isprint`, `iscntrl`, `ispunct`,
 //! `isxdigit`, `isgraph`, `isblank`, `isascii`, `toascii`, `toupper`,
-//! `tolower`.
+//! `tolower`, plus POSIX.1-2008 `_l` locale variants of all the above.
 //!
 //! These operate on `int` values representing unsigned char values or EOF.
 //! Characters outside 0-127 are treated as non-matching (C locale).
@@ -133,6 +133,73 @@ pub extern "C" fn tolower(c: i32) -> i32 {
         c
     }
 }
+
+// ---------------------------------------------------------------------------
+// Locale-aware variants (_l suffix)
+// ---------------------------------------------------------------------------
+//
+// POSIX.1-2008 locale-aware ctype functions.  Since we only support
+// the C/POSIX locale, these all delegate to the non-locale versions.
+// The `locale_t` parameter is accepted but ignored.
+
+/// Locale type (opaque pointer).
+type LocaleT = usize;
+
+/// isalpha_l — locale-aware isalpha.
+#[unsafe(no_mangle)]
+pub extern "C" fn isalpha_l(c: i32, _locale: LocaleT) -> i32 { isalpha(c) }
+
+/// isdigit_l — locale-aware isdigit.
+#[unsafe(no_mangle)]
+pub extern "C" fn isdigit_l(c: i32, _locale: LocaleT) -> i32 { isdigit(c) }
+
+/// isalnum_l — locale-aware isalnum.
+#[unsafe(no_mangle)]
+pub extern "C" fn isalnum_l(c: i32, _locale: LocaleT) -> i32 { isalnum(c) }
+
+/// isspace_l — locale-aware isspace.
+#[unsafe(no_mangle)]
+pub extern "C" fn isspace_l(c: i32, _locale: LocaleT) -> i32 { isspace(c) }
+
+/// isupper_l — locale-aware isupper.
+#[unsafe(no_mangle)]
+pub extern "C" fn isupper_l(c: i32, _locale: LocaleT) -> i32 { isupper(c) }
+
+/// islower_l — locale-aware islower.
+#[unsafe(no_mangle)]
+pub extern "C" fn islower_l(c: i32, _locale: LocaleT) -> i32 { islower(c) }
+
+/// isprint_l — locale-aware isprint.
+#[unsafe(no_mangle)]
+pub extern "C" fn isprint_l(c: i32, _locale: LocaleT) -> i32 { isprint(c) }
+
+/// iscntrl_l — locale-aware iscntrl.
+#[unsafe(no_mangle)]
+pub extern "C" fn iscntrl_l(c: i32, _locale: LocaleT) -> i32 { iscntrl(c) }
+
+/// ispunct_l — locale-aware ispunct.
+#[unsafe(no_mangle)]
+pub extern "C" fn ispunct_l(c: i32, _locale: LocaleT) -> i32 { ispunct(c) }
+
+/// isxdigit_l — locale-aware isxdigit.
+#[unsafe(no_mangle)]
+pub extern "C" fn isxdigit_l(c: i32, _locale: LocaleT) -> i32 { isxdigit(c) }
+
+/// isgraph_l — locale-aware isgraph.
+#[unsafe(no_mangle)]
+pub extern "C" fn isgraph_l(c: i32, _locale: LocaleT) -> i32 { isgraph(c) }
+
+/// isblank_l — locale-aware isblank.
+#[unsafe(no_mangle)]
+pub extern "C" fn isblank_l(c: i32, _locale: LocaleT) -> i32 { isblank(c) }
+
+/// toupper_l — locale-aware toupper.
+#[unsafe(no_mangle)]
+pub extern "C" fn toupper_l(c: i32, _locale: LocaleT) -> i32 { toupper(c) }
+
+/// tolower_l — locale-aware tolower.
+#[unsafe(no_mangle)]
+pub extern "C" fn tolower_l(c: i32, _locale: LocaleT) -> i32 { tolower(c) }
 
 // ---------------------------------------------------------------------------
 // glibc-compatible ctype lookup tables

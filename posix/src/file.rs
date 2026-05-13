@@ -835,8 +835,7 @@ pub extern "C" fn close_range(first: u32, last: u32, _flags: u32) -> i32 {
 /// size limit.  Returns nothing (void in C).
 #[unsafe(no_mangle)]
 pub extern "C" fn closefrom(lowfd: i32) {
-    // Use a reasonable upper bound — our fd table max is typically 256.
-    let max_fd: i32 = 256;
+    let max_fd = fdtable::MAX_FDS as i32;
     let mut fd = lowfd.max(0);
     while fd < max_fd {
         let _ = close(fd);

@@ -641,6 +641,19 @@ pub extern "C" fn alarm(_seconds: u32) -> u32 {
     0
 }
 
+/// Set an alarm timer with microsecond granularity (deprecated BSD function).
+///
+/// Stub: returns 0 (no alarm support — signals not implemented).
+/// `usecs` is the initial alarm delay in microseconds.
+/// `interval` is the repeat interval in microseconds (0 = one-shot).
+///
+/// Returns the number of microseconds remaining from a previous alarm,
+/// or 0 if none was set.
+#[unsafe(no_mangle)]
+pub extern "C" fn ualarm(_usecs: u32, _interval: u32) -> u32 {
+    0
+}
+
 /// Suspend until a signal is delivered.
 ///
 /// Stub: sleeps for 1 second then returns -1/EINTR (no signals).

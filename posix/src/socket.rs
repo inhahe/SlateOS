@@ -1232,6 +1232,16 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 let _ = syscall2(
                     crate::syscall::SYS_TCP_SET_KEEPALIVE, handle, 1,
                 );
+                // Apply custom keepalive params if any differ from defaults.
+                if meta.keepidle != 75 || meta.keepintvl != 10 || meta.keepcnt != 9 {
+                    let _ = syscall4(
+                        crate::syscall::SYS_TCP_SET_KEEPALIVE_PARAMS,
+                        handle,
+                        meta.keepidle as u64,
+                        meta.keepintvl as u64,
+                        meta.keepcnt as u64,
+                    );
+                }
             }
             // TCP_CORK: tracked in metadata only (kernel doesn't have
             // explicit cork support yet).  No kernel call needed.

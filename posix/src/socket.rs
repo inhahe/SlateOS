@@ -1959,9 +1959,9 @@ pub unsafe extern "C" fn getsockopt(
 /// Get the name of the peer socket (remote address).
 ///
 /// Returns the remote IP and port that this socket is connected to.
-/// For TCP sockets connected via `connect()`, returns the server's
-/// address.  For accepted sockets, returns zeros (peer info is not
-/// yet returned by the kernel's accept syscall).
+/// First checks the cached metadata (set on connect/accept).  If the
+/// metadata has no peer address (e.g., dup'd fd), falls back to
+/// querying the kernel via `SYS_TCP_PEER_ADDR`.
 ///
 /// # Safety
 ///
@@ -1973,10 +1973,10 @@ pub unsafe extern "C" fn getpeername(
     addr: *mut Sockaddr,
     addrlen: *mut SocklenT,
 ) -> i32 {
-    if fdtable::get_fd(fd).is_none() {
+    let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
-    }
+    };
 
     if addr.is_null() || addrlen.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -1988,17 +1988,35 @@ pub unsafe extern "C" fn getpeername(
         return -1;
     };
 
-    // If no peer address recorded, the socket is not connected.
-    if meta.peer_addr == 0 && meta.peer_port == 0 {
+    let (peer_ip, peer_port) = if meta.peer_addr != 0 || meta.peer_port != 0 {
+        // Cached metadata available.
+        (meta.peer_addr, meta.peer_port)
+    } else if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
+        // Fall back to kernel query for TCP sockets.
+        let mut buf = [0u8; 6];
+        let ret = syscall2(
+            SYS_TCP_PEER_ADDR,
+            entry.handle,
+            buf.as_mut_ptr() as u64,
+        );
+        if ret == 0 {
+            let ip = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            let port = u16::from_be_bytes([buf[4], buf[5]]);
+            (ip, port.to_be())
+        } else {
+            errno::set_errno(errno::ENOTCONN);
+            return -1;
+        }
+    } else {
         errno::set_errno(errno::ENOTCONN);
         return -1;
-    }
+    };
 
     // Build a SockaddrIn with the peer address.
     let sin = SockaddrIn {
         sin_family: AF_INET as u16,
-        sin_port: meta.peer_port,
-        sin_addr: InAddr { s_addr: meta.peer_addr },
+        sin_port: peer_port,
+        sin_addr: InAddr { s_addr: peer_ip },
         sin_zero: [0u8; 8],
     };
 

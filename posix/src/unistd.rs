@@ -549,7 +549,10 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
     }
 
     // SAFETY: single-address-space, no concurrent writes during read.
-    let (hostname, hlen) = unsafe { (&HOSTNAME_BUF, HOSTNAME_LEN) };
+    // Use raw pointers to comply with Rust 2024 `static_mut_refs` rules.
+    let (hostname_ptr, hlen) = unsafe {
+        (&raw const HOSTNAME_BUF, *(&raw const HOSTNAME_LEN))
+    };
     let needed = hlen.wrapping_add(1); // +null
     if len < needed {
         errno::set_errno(errno::ENAMETOOLONG);
@@ -558,9 +561,11 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
 
     let mut idx: usize = 0;
     while idx < hlen {
-        if let Some(&byte) = hostname.get(idx) {
-            // SAFETY: idx < hlen < len, so name.add(idx) is within bounds.
-            unsafe { *name.add(idx) = byte; }
+        // SAFETY: idx < hlen <= HOST_NAME_MAX, HOSTNAME_BUF is HOST_NAME_MAX+1
+        // bytes, and name buffer has at least `needed` bytes.
+        unsafe {
+            let byte = *(hostname_ptr as *const u8).add(idx);
+            *name.add(idx) = byte;
         }
         idx = idx.wrapping_add(1);
     }
@@ -805,15 +810,17 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
     }
 
     // SAFETY: single-address-space, no concurrent access.
+    // Use raw pointers to comply with Rust 2024 `static_mut_refs` rules.
     unsafe {
+        let buf_ptr = &raw mut HOSTNAME_BUF as *mut u8;
         let mut idx = 0;
         while idx < len {
-            HOSTNAME_BUF[idx] = *name.add(idx);
+            *buf_ptr.add(idx) = *name.add(idx);
             idx = idx.wrapping_add(1);
         }
         // Null-terminate the stored hostname.
-        HOSTNAME_BUF[len] = 0;
-        HOSTNAME_LEN = len;
+        *buf_ptr.add(len) = 0;
+        *(&raw mut HOSTNAME_LEN) = len;
     }
     0
 }

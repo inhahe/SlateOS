@@ -242,44 +242,44 @@ pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i3
             let (readable, writable, hangup) = check_readiness(entry.kind, entry.handle);
 
             let mut revents: i16 = 0;
-        if readable && (pfd.events & POLLIN != 0) {
-            revents |= POLLIN;
+            if readable && (pfd.events & POLLIN != 0) {
+                revents |= POLLIN;
+            }
+            if writable && (pfd.events & POLLOUT != 0) {
+                revents |= POLLOUT;
+            }
+            if hangup {
+                revents |= POLLHUP;
+            }
+
+            pfd.revents = revents;
+            if revents != 0 {
+                ready_count = ready_count.wrapping_add(1);
+            }
+
+            i = i.wrapping_add(1);
         }
-        if writable && (pfd.events & POLLOUT != 0) {
-            revents |= POLLOUT;
-        }
-        if hangup {
-            revents |= POLLHUP;
-        }
 
-        pfd.revents = revents;
-        if revents != 0 {
-            ready_count = ready_count.wrapping_add(1);
+        // If any fds are ready, return immediately.
+        if ready_count > 0 {
+            return ready_count;
         }
 
-        i = i.wrapping_add(1);
-    }
-
-    // If any fds are ready, return immediately.
-    if ready_count > 0 {
-        return ready_count;
-    }
-
-    // Non-blocking (timeout == 0): return immediately.
-    if timeout == 0 {
-        return 0;
-    }
-
-    // Check deadline for positive timeouts.
-    if timeout > 0 {
-        let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
-        if now >= deadline_ns {
-            return 0; // Timeout expired.
+        // Non-blocking (timeout == 0): return immediately.
+        if timeout == 0 {
+            return 0;
         }
-    }
 
-    // Sleep briefly and retry.
-    let _ = syscall1(SYS_SLEEP, POLL_INTERVAL_NS);
+        // Check deadline for positive timeouts.
+        if timeout > 0 {
+            let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+            if now >= deadline_ns {
+                return 0; // Timeout expired.
+            }
+        }
+
+        // Sleep briefly and retry.
+        let _ = syscall1(SYS_SLEEP, POLL_INTERVAL_NS);
     } // end loop
 }
 

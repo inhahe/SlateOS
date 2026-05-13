@@ -435,7 +435,7 @@ pub fn init_environ() {
     rebuild_environ_ptrs();
 }
 
-/// Rebuild the ENVIRON_PTRS array from ENV_STORE.
+/// Rebuild the `ENVIRON_PTRS` array from `ENV_STORE`.
 fn rebuild_environ_ptrs() {
     // SAFETY: Single-threaded access.
     let store = unsafe { core::ptr::addr_of_mut!(ENV_STORE).as_ref() };
@@ -464,5 +464,339 @@ fn rebuild_environ_ptrs() {
         core::ptr::addr_of_mut!(environ).write(ptr_val);
         // Keep __environ (glibc alias) in sync.
         core::ptr::addr_of_mut!(crate::crt::__environ).write(ptr_val);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reset environment state before each test.  Tests run with
+    /// `--test-threads=1` so the global store is safe to mutate, but
+    /// residue from a prior test would cause false failures.
+    fn reset() {
+        clearenv();
+    }
+
+    /// Helper: read a C string pointer into a `&[u8]` slice (without
+    /// the terminating null).  Panics if `ptr` is null.
+    unsafe fn cstr_bytes(ptr: *const u8) -> &'static [u8] {
+        assert!(!ptr.is_null(), "unexpected null pointer");
+        let len = unsafe { string::strlen(ptr) } as usize;
+        unsafe { core::slice::from_raw_parts(ptr, len) }
+    }
+
+    // -----------------------------------------------------------------------
+    // getenv
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn getenv_returns_null_for_missing_var() {
+        reset();
+        let ptr = unsafe { getenv(b"NOSUCH\0".as_ptr()) };
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn getenv_returns_null_for_null_name() {
+        reset();
+        let ptr = unsafe { getenv(core::ptr::null()) };
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn getenv_returns_null_for_empty_name() {
+        reset();
+        // Empty string = just a null terminator.
+        let ptr = unsafe { getenv(b"\0".as_ptr()) };
+        assert!(ptr.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // setenv / getenv round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn setenv_then_getenv() {
+        reset();
+        let rc = unsafe { setenv(b"HOME\0".as_ptr(), b"/root\0".as_ptr(), 1) };
+        assert_eq!(rc, 0);
+
+        let val = unsafe { getenv(b"HOME\0".as_ptr()) };
+        assert!(!val.is_null());
+        assert_eq!(unsafe { cstr_bytes(val) }, b"/root");
+    }
+
+    #[test]
+    fn setenv_overwrite_replaces_value() {
+        reset();
+        unsafe { setenv(b"K\0".as_ptr(), b"old\0".as_ptr(), 1) };
+        unsafe { setenv(b"K\0".as_ptr(), b"new\0".as_ptr(), 1) };
+
+        let val = unsafe { getenv(b"K\0".as_ptr()) };
+        assert_eq!(unsafe { cstr_bytes(val) }, b"new");
+    }
+
+    #[test]
+    fn setenv_no_overwrite_keeps_original() {
+        reset();
+        unsafe { setenv(b"K\0".as_ptr(), b"first\0".as_ptr(), 1) };
+        let rc = unsafe { setenv(b"K\0".as_ptr(), b"second\0".as_ptr(), 0) };
+        assert_eq!(rc, 0); // success, but value unchanged
+
+        let val = unsafe { getenv(b"K\0".as_ptr()) };
+        assert_eq!(unsafe { cstr_bytes(val) }, b"first");
+    }
+
+    #[test]
+    fn setenv_empty_value() {
+        reset();
+        let rc = unsafe { setenv(b"EMPTY\0".as_ptr(), b"\0".as_ptr(), 1) };
+        assert_eq!(rc, 0);
+
+        let val = unsafe { getenv(b"EMPTY\0".as_ptr()) };
+        assert!(!val.is_null());
+        assert_eq!(unsafe { cstr_bytes(val) }, b"");
+    }
+
+    #[test]
+    fn setenv_rejects_null_name() {
+        reset();
+        let rc = unsafe { setenv(core::ptr::null(), b"v\0".as_ptr(), 1) };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn setenv_rejects_null_value() {
+        reset();
+        let rc = unsafe { setenv(b"K\0".as_ptr(), core::ptr::null(), 1) };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn setenv_rejects_empty_name() {
+        reset();
+        let rc = unsafe { setenv(b"\0".as_ptr(), b"v\0".as_ptr(), 1) };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn setenv_rejects_equals_in_name() {
+        reset();
+        let rc = unsafe { setenv(b"A=B\0".as_ptr(), b"v\0".as_ptr(), 1) };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn setenv_rejects_too_long_entry() {
+        reset();
+        // Build a value that, combined with a 1-char name + '=' + '\0',
+        // exceeds MAX_ENTRY_LEN (256).  Name "X" = 1, '=' = 1, '\0' = 1,
+        // so value must be > 253 bytes to overflow.
+        let mut long_val = [b'A'; 254];
+        long_val[253] = 0; // null terminate — 253 chars of content
+        // Total = 1 + 1 + 253 + 1 = 256 — exactly at the limit, should succeed.
+        let rc = unsafe { setenv(b"X\0".as_ptr(), long_val.as_ptr(), 1) };
+        assert_eq!(rc, 0);
+
+        // Now try one byte longer: 254 chars of content.
+        let mut too_long = [b'B'; 255];
+        too_long[254] = 0;
+        // Total = 1 + 1 + 254 + 1 = 257 — exceeds MAX_ENTRY_LEN.
+        let rc = unsafe { setenv(b"Y\0".as_ptr(), too_long.as_ptr(), 1) };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOMEM);
+    }
+
+    // -----------------------------------------------------------------------
+    // unsetenv
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn unsetenv_removes_variable() {
+        reset();
+        unsafe { setenv(b"DEL\0".as_ptr(), b"yes\0".as_ptr(), 1) };
+        let rc = unsafe { unsetenv(b"DEL\0".as_ptr()) };
+        assert_eq!(rc, 0);
+
+        let val = unsafe { getenv(b"DEL\0".as_ptr()) };
+        assert!(val.is_null());
+    }
+
+    #[test]
+    fn unsetenv_nonexistent_succeeds() {
+        reset();
+        let rc = unsafe { unsetenv(b"GHOST\0".as_ptr()) };
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn unsetenv_rejects_null_name() {
+        reset();
+        let rc = unsafe { unsetenv(core::ptr::null()) };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn unsetenv_rejects_empty_name() {
+        reset();
+        let rc = unsafe { unsetenv(b"\0".as_ptr()) };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn unsetenv_rejects_equals_in_name() {
+        reset();
+        let rc = unsafe { unsetenv(b"A=B\0".as_ptr()) };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // putenv
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn putenv_sets_variable() {
+        reset();
+        let mut s = *b"LANG=en_US\0";
+        let rc = unsafe { putenv(s.as_mut_ptr()) };
+        assert_eq!(rc, 0);
+
+        let val = unsafe { getenv(b"LANG\0".as_ptr()) };
+        assert_eq!(unsafe { cstr_bytes(val) }, b"en_US");
+    }
+
+    #[test]
+    fn putenv_overwrites_existing() {
+        reset();
+        let mut s1 = *b"Z=one\0";
+        unsafe { putenv(s1.as_mut_ptr()) };
+
+        let mut s2 = *b"Z=two\0";
+        unsafe { putenv(s2.as_mut_ptr()) };
+
+        let val = unsafe { getenv(b"Z\0".as_ptr()) };
+        assert_eq!(unsafe { cstr_bytes(val) }, b"two");
+    }
+
+    #[test]
+    fn putenv_no_equals_unsets() {
+        reset();
+        unsafe { setenv(b"REM\0".as_ptr(), b"v\0".as_ptr(), 1) };
+        let mut s = *b"REM\0";
+        let rc = unsafe { putenv(s.as_mut_ptr()) };
+        assert_eq!(rc, 0);
+
+        let val = unsafe { getenv(b"REM\0".as_ptr()) };
+        assert!(val.is_null());
+    }
+
+    #[test]
+    fn putenv_rejects_null() {
+        reset();
+        let rc = unsafe { putenv(core::ptr::null_mut()) };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn putenv_rejects_empty_name_with_equals() {
+        reset();
+        // "=value" has an empty name portion.
+        let mut s = *b"=value\0";
+        let rc = unsafe { putenv(s.as_mut_ptr()) };
+        assert_eq!(rc, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // clearenv
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn clearenv_removes_all() {
+        reset();
+        unsafe { setenv(b"A\0".as_ptr(), b"1\0".as_ptr(), 1) };
+        unsafe { setenv(b"B\0".as_ptr(), b"2\0".as_ptr(), 1) };
+        unsafe { setenv(b"C\0".as_ptr(), b"3\0".as_ptr(), 1) };
+
+        let rc = clearenv();
+        assert_eq!(rc, 0);
+
+        assert!(unsafe { getenv(b"A\0".as_ptr()) }.is_null());
+        assert!(unsafe { getenv(b"B\0".as_ptr()) }.is_null());
+        assert!(unsafe { getenv(b"C\0".as_ptr()) }.is_null());
+    }
+
+    #[test]
+    fn clearenv_on_empty_is_noop() {
+        reset();
+        let rc = clearenv();
+        assert_eq!(rc, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // secure_getenv
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn secure_getenv_matches_getenv() {
+        reset();
+        unsafe { setenv(b"SEC\0".as_ptr(), b"val\0".as_ptr(), 1) };
+
+        let a = unsafe { getenv(b"SEC\0".as_ptr()) };
+        let b = unsafe { secure_getenv(b"SEC\0".as_ptr()) };
+        assert_eq!(a, b);
+        assert_eq!(unsafe { cstr_bytes(b) }, b"val");
+    }
+
+    // -----------------------------------------------------------------------
+    // Interaction / multi-variable tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multiple_variables_independent() {
+        reset();
+        unsafe { setenv(b"X\0".as_ptr(), b"10\0".as_ptr(), 1) };
+        unsafe { setenv(b"Y\0".as_ptr(), b"20\0".as_ptr(), 1) };
+        unsafe { setenv(b"XX\0".as_ptr(), b"30\0".as_ptr(), 1) };
+
+        // "X" should not match "XX" or "Y".
+        assert_eq!(unsafe { cstr_bytes(getenv(b"X\0".as_ptr())) }, b"10");
+        assert_eq!(unsafe { cstr_bytes(getenv(b"Y\0".as_ptr())) }, b"20");
+        assert_eq!(unsafe { cstr_bytes(getenv(b"XX\0".as_ptr())) }, b"30");
+    }
+
+    #[test]
+    fn unsetenv_does_not_affect_others() {
+        reset();
+        unsafe { setenv(b"KEEP\0".as_ptr(), b"yes\0".as_ptr(), 1) };
+        unsafe { setenv(b"DROP\0".as_ptr(), b"no\0".as_ptr(), 1) };
+
+        unsafe { unsetenv(b"DROP\0".as_ptr()) };
+
+        assert_eq!(unsafe { cstr_bytes(getenv(b"KEEP\0".as_ptr())) }, b"yes");
+        assert!(unsafe { getenv(b"DROP\0".as_ptr()) }.is_null());
+    }
+
+    #[test]
+    fn setenv_after_unsetenv_reuses_slot() {
+        reset();
+        unsafe { setenv(b"REUSE\0".as_ptr(), b"a\0".as_ptr(), 1) };
+        unsafe { unsetenv(b"REUSE\0".as_ptr()) };
+        let rc = unsafe { setenv(b"REUSE\0".as_ptr(), b"b\0".as_ptr(), 1) };
+        assert_eq!(rc, 0);
+        assert_eq!(unsafe { cstr_bytes(getenv(b"REUSE\0".as_ptr())) }, b"b");
     }
 }

@@ -257,7 +257,10 @@ fn scan_word_end(input: &[u8], mut pos: usize, input_len: usize) -> usize {
                 pos = pos.wrapping_add(1);
             }
         } else if c == b'\\' {
-            pos = pos.wrapping_add(2);
+            // Skip backslash + the escaped character.  If the
+            // backslash is the last character, clamp to input_len
+            // so the returned end-position never exceeds the buffer.
+            pos = pos.wrapping_add(2).min(input_len);
         } else {
             pos = pos.wrapping_add(1);
         }
@@ -493,26 +496,19 @@ fn free_words(array_ptr: *mut *mut u8, count: usize) {
     unsafe { crate::malloc::free(array_ptr.cast()); }
 }
 
-/// Expand a `$VAR` or `${VAR}` reference from `input[pos..]`.
+/// Extract a variable name from `input[pos..]`, returning
+/// `(name_start, name_end, consumed)` where `consumed` is the number
+/// of input bytes used (including braces if present).
 ///
-/// Appends the variable's value to `expanded[*elen..]`.
-/// Returns the number of input bytes consumed, or `usize::MAX` if
-/// `WRDE_UNDEF` is set and the variable is undefined.
-fn expand_var(
-    input: &[u8],
-    pos: usize,
-    end: usize,
-    expanded: &mut [u8],
-    elen: &mut usize,
-    flags: i32,
-) -> usize {
+/// This is the pure parsing logic factored out of `expand_var` so it
+/// can be tested without calling `getenv`.
+fn parse_var_name(input: &[u8], pos: usize, end: usize) -> (usize, usize, usize) {
     let mut rp = pos;
     let braced = rp < end && input.get(rp).copied().unwrap_or(0) == b'{';
     if braced {
         rp = rp.wrapping_add(1);
     }
 
-    // Read variable name.
     let name_start = rp;
     while rp < end {
         let c = input.get(rp).copied().unwrap_or(0);
@@ -530,6 +526,24 @@ fn expand_var(
     if braced && rp < end {
         rp = rp.wrapping_add(1); // Skip closing '}'.
     }
+
+    (name_start, name_end, rp.wrapping_sub(pos))
+}
+
+/// Expand a `$VAR` or `${VAR}` reference from `input[pos..]`.
+///
+/// Appends the variable's value to `expanded[*elen..]`.
+/// Returns the number of input bytes consumed, or `usize::MAX` if
+/// `WRDE_UNDEF` is set and the variable is undefined.
+fn expand_var(
+    input: &[u8],
+    pos: usize,
+    end: usize,
+    expanded: &mut [u8],
+    elen: &mut usize,
+    flags: i32,
+) -> usize {
+    let (name_start, name_end, consumed) = parse_var_name(input, pos, end);
 
     let name_len = name_end.wrapping_sub(name_start);
     if name_len == 0 {
@@ -575,5 +589,544 @@ fn expand_var(
         }
     }
 
-    rp.wrapping_sub(pos)
+    consumed
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =======================================================================
+    // Constants — verify values match glibc/musl
+    // =======================================================================
+
+    #[test]
+    fn flag_constants_match_glibc() {
+        assert_eq!(WRDE_APPEND, 2);
+        assert_eq!(WRDE_NOCMD, 4);
+        assert_eq!(WRDE_REUSE, 8);
+        assert_eq!(WRDE_SHOWERR, 16);
+        assert_eq!(WRDE_UNDEF, 32);
+    }
+
+    #[test]
+    fn error_constants_match_glibc() {
+        assert_eq!(WRDE_NOSPACE, 1);
+        assert_eq!(WRDE_BADCHAR, 2);
+        assert_eq!(WRDE_BADVAL, 3);
+        assert_eq!(WRDE_CMDSUB, 4);
+        assert_eq!(WRDE_SYNTAX, 5);
+    }
+
+    #[test]
+    fn flags_are_distinct_powers_of_two() {
+        // Each flag should be a distinct bit so they can be OR'd.
+        let flags = [WRDE_APPEND, WRDE_NOCMD, WRDE_REUSE, WRDE_SHOWERR, WRDE_UNDEF];
+        for (i, &a) in flags.iter().enumerate() {
+            assert!(a.count_ones() == 1, "flag {a} is not a power of two");
+            for &b in &flags[i + 1..] {
+                assert_eq!(a & b, 0, "flags {a} and {b} overlap");
+            }
+        }
+    }
+
+    // =======================================================================
+    // WordexpT layout
+    // =======================================================================
+
+    #[test]
+    fn wordexp_t_size_and_alignment() {
+        // On 64-bit, WordexpT should be 3 pointers/usizes = 24 bytes.
+        assert_eq!(
+            core::mem::size_of::<WordexpT>(),
+            3 * core::mem::size_of::<usize>(),
+        );
+        assert_eq!(
+            core::mem::align_of::<WordexpT>(),
+            core::mem::align_of::<usize>(),
+        );
+    }
+
+    #[test]
+    fn wordexp_t_field_offsets() {
+        // Verify the repr(C) layout: wordc at 0, wordv at 1*ptr, offs at 2*ptr.
+        let ps = core::mem::size_of::<usize>();
+        assert_eq!(core::mem::offset_of!(WordexpT, we_wordc), 0);
+        assert_eq!(core::mem::offset_of!(WordexpT, we_wordv), ps);
+        assert_eq!(core::mem::offset_of!(WordexpT, we_offs), 2 * ps);
+    }
+
+    // =======================================================================
+    // Internal constants
+    // =======================================================================
+
+    #[test]
+    fn max_word_len_is_reasonable() {
+        assert!(MAX_WORD_LEN >= 1024, "MAX_WORD_LEN too small for practical use");
+        assert!(MAX_WORD_LEN <= 65536, "MAX_WORD_LEN wastefully large for stack");
+    }
+
+    #[test]
+    fn max_words_is_reasonable() {
+        assert!(MAX_WORDS >= 64, "MAX_WORDS too small");
+        assert!(MAX_WORDS <= 4096, "MAX_WORDS too large for stack arrays");
+    }
+
+    // =======================================================================
+    // emit_byte
+    // =======================================================================
+
+    #[test]
+    fn emit_byte_writes_and_advances() {
+        let mut exp = ExpandedWord {
+            buf: [0u8; MAX_WORD_LEN],
+            len: 0,
+        };
+        emit_byte(&mut exp, b'A');
+        assert_eq!(exp.len, 1);
+        assert_eq!(exp.buf[0], b'A');
+
+        emit_byte(&mut exp, b'B');
+        assert_eq!(exp.len, 2);
+        assert_eq!(exp.buf[1], b'B');
+    }
+
+    #[test]
+    fn emit_byte_advances_len_past_buffer_end() {
+        // When the buffer is full, emit_byte should still increment len
+        // (tracking the "would-have-been" length) but not write out of bounds.
+        let mut exp = ExpandedWord {
+            buf: [0u8; MAX_WORD_LEN],
+            len: MAX_WORD_LEN,
+        };
+        emit_byte(&mut exp, b'X');
+        assert_eq!(exp.len, MAX_WORD_LEN + 1);
+    }
+
+    // =======================================================================
+    // split_words — word splitting on whitespace
+    // =======================================================================
+
+    /// Helper: split a byte string and return a Vec of (start, end) pairs.
+    fn split(input: &[u8]) -> Vec<(usize, usize)> {
+        let mut buf = [0u8; MAX_WORD_LEN];
+        let len = input.len().min(MAX_WORD_LEN);
+        buf[..len].copy_from_slice(&input[..len]);
+        let (bounds, count) = split_words(&buf, len);
+        (0..count).map(|i| (bounds[i].start, bounds[i].end)).collect()
+    }
+
+    /// Helper: extract the word text from a split result.
+    fn split_texts(input: &[u8]) -> Vec<Vec<u8>> {
+        split(input)
+            .iter()
+            .map(|&(s, e)| input[s..e].to_vec())
+            .collect()
+    }
+
+    #[test]
+    fn split_empty_input() {
+        assert!(split(b"").is_empty());
+    }
+
+    #[test]
+    fn split_only_whitespace() {
+        assert!(split(b"   \t  \n  ").is_empty());
+    }
+
+    #[test]
+    fn split_single_word() {
+        let words = split_texts(b"hello");
+        assert_eq!(words, vec![b"hello".to_vec()]);
+    }
+
+    #[test]
+    fn split_multiple_words() {
+        let words = split_texts(b"hello world foo");
+        assert_eq!(
+            words,
+            vec![b"hello".to_vec(), b"world".to_vec(), b"foo".to_vec()],
+        );
+    }
+
+    #[test]
+    fn split_leading_trailing_whitespace() {
+        let words = split_texts(b"  hello  ");
+        assert_eq!(words, vec![b"hello".to_vec()]);
+    }
+
+    #[test]
+    fn split_tabs_and_newlines() {
+        let words = split_texts(b"a\tb\nc");
+        assert_eq!(
+            words,
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+        );
+    }
+
+    #[test]
+    fn split_preserves_quoted_spaces() {
+        // Single-quoted word containing a space should be one word.
+        let words = split_texts(b"'hello world'");
+        assert_eq!(words, vec![b"'hello world'".to_vec()]);
+    }
+
+    #[test]
+    fn split_preserves_double_quoted_spaces() {
+        let words = split_texts(b"\"hello world\"");
+        assert_eq!(words, vec![b"\"hello world\"".to_vec()]);
+    }
+
+    #[test]
+    fn split_backslash_escapes_space() {
+        let words = split_texts(b"hello\\ world");
+        assert_eq!(words, vec![b"hello\\ world".to_vec()]);
+    }
+
+    #[test]
+    fn split_mixed_quoted_and_unquoted() {
+        let words = split_texts(b"a 'b c' d");
+        assert_eq!(
+            words,
+            vec![b"a".to_vec(), b"'b c'".to_vec(), b"d".to_vec()],
+        );
+    }
+
+    #[test]
+    fn split_adjacent_quoted_regions() {
+        // "hello"'world' should be a single word.
+        let words = split_texts(b"\"hello\"'world'");
+        assert_eq!(words, vec![b"\"hello\"'world'".to_vec()]);
+    }
+
+    // =======================================================================
+    // scan_word_end — quote-aware word boundary scanning
+    // =======================================================================
+
+    #[test]
+    fn scan_plain_word() {
+        let input = b"hello world";
+        assert_eq!(scan_word_end(input, 0, input.len()), 5);
+    }
+
+    #[test]
+    fn scan_from_start_of_second_word() {
+        let input = b"hello world";
+        assert_eq!(scan_word_end(input, 6, input.len()), 11);
+    }
+
+    #[test]
+    fn scan_single_quoted_word() {
+        let input = b"'hello world' next";
+        assert_eq!(scan_word_end(input, 0, input.len()), 13);
+    }
+
+    #[test]
+    fn scan_double_quoted_word() {
+        let input = b"\"hello world\" next";
+        assert_eq!(scan_word_end(input, 0, input.len()), 13);
+    }
+
+    #[test]
+    fn scan_backslash_escape_in_word() {
+        let input = b"hello\\ world next";
+        assert_eq!(scan_word_end(input, 0, input.len()), 12);
+    }
+
+    #[test]
+    fn scan_double_quote_with_backslash_inside() {
+        // "he\"llo" should be one word (escaped quote inside double quotes).
+        let input = b"\"he\\\"llo\" next";
+        assert_eq!(scan_word_end(input, 0, input.len()), 9);
+    }
+
+    #[test]
+    fn scan_unclosed_single_quote() {
+        // Unclosed quote: scans to end of input.
+        let input = b"'hello";
+        assert_eq!(scan_word_end(input, 0, input.len()), 6);
+    }
+
+    #[test]
+    fn scan_unclosed_double_quote() {
+        let input = b"\"hello";
+        assert_eq!(scan_word_end(input, 0, input.len()), 6);
+    }
+
+    #[test]
+    fn scan_empty_quotes() {
+        let input = b"'' next";
+        assert_eq!(scan_word_end(input, 0, input.len()), 2);
+    }
+
+    // =======================================================================
+    // expand_single_quoted — single-quote removal
+    // =======================================================================
+
+    #[test]
+    fn single_quoted_basic() {
+        let input = b"'hello' rest";
+        let mut exp = ExpandedWord {
+            buf: [0u8; MAX_WORD_LEN],
+            len: 0,
+        };
+        let end_pos = expand_single_quoted(input, 0, 7, &mut exp);
+        assert_eq!(end_pos, 7); // past closing quote
+        assert_eq!(&exp.buf[..exp.len], b"hello");
+    }
+
+    #[test]
+    fn single_quoted_preserves_special_chars() {
+        // Single quotes preserve everything literally, including $ and \.
+        let input = b"'$HOME\\n'";
+        let mut exp = ExpandedWord {
+            buf: [0u8; MAX_WORD_LEN],
+            len: 0,
+        };
+        let end_pos = expand_single_quoted(input, 0, input.len(), &mut exp);
+        assert_eq!(end_pos, 9);
+        assert_eq!(&exp.buf[..exp.len], b"$HOME\\n");
+    }
+
+    #[test]
+    fn single_quoted_empty() {
+        let input = b"''";
+        let mut exp = ExpandedWord {
+            buf: [0u8; MAX_WORD_LEN],
+            len: 0,
+        };
+        let end_pos = expand_single_quoted(input, 0, 2, &mut exp);
+        assert_eq!(end_pos, 2);
+        assert_eq!(exp.len, 0);
+    }
+
+    #[test]
+    fn single_quoted_unclosed() {
+        // Unclosed single quote: copies to end of range.
+        let input = b"'hello";
+        let mut exp = ExpandedWord {
+            buf: [0u8; MAX_WORD_LEN],
+            len: 0,
+        };
+        let end_pos = expand_single_quoted(input, 0, input.len(), &mut exp);
+        assert_eq!(end_pos, 6); // scanned to end
+        assert_eq!(&exp.buf[..exp.len], b"hello");
+    }
+
+    #[test]
+    fn single_quoted_with_spaces() {
+        let input = b"'hello world'";
+        let mut exp = ExpandedWord {
+            buf: [0u8; MAX_WORD_LEN],
+            len: 0,
+        };
+        let end_pos = expand_single_quoted(input, 0, input.len(), &mut exp);
+        assert_eq!(end_pos, 13);
+        assert_eq!(&exp.buf[..exp.len], b"hello world");
+    }
+
+    // =======================================================================
+    // expand_backtick — backtick command substitution detection
+    // =======================================================================
+
+    #[test]
+    fn backtick_with_nocmd_returns_cmdsub() {
+        let input = b"`ls`";
+        let result = expand_backtick(input, 0, input.len(), WRDE_NOCMD);
+        assert_eq!(result, Err(WRDE_CMDSUB));
+    }
+
+    #[test]
+    fn backtick_without_nocmd_skips_content() {
+        let input = b"`ls -la` rest";
+        let result = expand_backtick(input, 0, 8, 0);
+        assert_eq!(result, Ok(8)); // past closing backtick
+    }
+
+    #[test]
+    fn backtick_unclosed_scans_to_end() {
+        let input = b"`ls -la";
+        let result = expand_backtick(input, 0, input.len(), 0);
+        assert_eq!(result, Ok(7));
+    }
+
+    // =======================================================================
+    // expand_dollar — command substitution branch ($(...))
+    // =======================================================================
+    //
+    // Only the $(...) branch is testable without getenv. The $VAR branch
+    // calls expand_var which calls getenv.
+
+    #[test]
+    fn dollar_paren_with_nocmd_returns_cmdsub() {
+        let input = b"$(echo hi)";
+        let mut exp = ExpandedWord {
+            buf: [0u8; MAX_WORD_LEN],
+            len: 0,
+        };
+        // expand_dollar starts after reading '$', so the '$' is at pos 0.
+        let result = expand_dollar(input, 0, input.len(), &mut exp, WRDE_NOCMD);
+        assert_eq!(result, Err(WRDE_CMDSUB));
+    }
+
+    #[test]
+    fn dollar_paren_without_nocmd_skips_balanced() {
+        let input = b"$(echo $(nested))rest";
+        let mut exp = ExpandedWord {
+            buf: [0u8; MAX_WORD_LEN],
+            len: 0,
+        };
+        // expand_dollar is called with pos pointing at '$', so the '(' is at pos+1.
+        let result = expand_dollar(input, 0, input.len(), &mut exp, 0);
+        // Should skip past the balanced $(echo $(nested)) which ends at index 17.
+        assert_eq!(result, Ok(17));
+    }
+
+    // =======================================================================
+    // parse_var_name — variable name extraction
+    // =======================================================================
+
+    #[test]
+    fn parse_var_name_simple() {
+        let input = b"HOME/bin";
+        let (start, end, consumed) = parse_var_name(input, 0, input.len());
+        assert_eq!(&input[start..end], b"HOME");
+        assert_eq!(consumed, 4);
+    }
+
+    #[test]
+    fn parse_var_name_with_underscore() {
+        let input = b"MY_VAR=rest";
+        let (start, end, consumed) = parse_var_name(input, 0, input.len());
+        assert_eq!(&input[start..end], b"MY_VAR");
+        assert_eq!(consumed, 6);
+    }
+
+    #[test]
+    fn parse_var_name_braced() {
+        let input = b"{HOME}/bin";
+        let (start, end, consumed) = parse_var_name(input, 0, input.len());
+        assert_eq!(&input[start..end], b"HOME");
+        // consumed includes the braces: { + HOME + } = 6
+        assert_eq!(consumed, 6);
+    }
+
+    #[test]
+    fn parse_var_name_braced_special_chars() {
+        // Braced names can contain characters that unbraced cannot.
+        let input = b"{FOO.BAR}rest";
+        let (start, end, consumed) = parse_var_name(input, 0, input.len());
+        assert_eq!(&input[start..end], b"FOO.BAR");
+        assert_eq!(consumed, 9);
+    }
+
+    #[test]
+    fn parse_var_name_empty() {
+        // Bare '$' with no valid name chars following.
+        let input = b" rest";
+        let (start, end, consumed) = parse_var_name(input, 0, input.len());
+        assert_eq!(start, end); // empty name
+        assert_eq!(consumed, 0);
+    }
+
+    #[test]
+    fn parse_var_name_digits_and_letters() {
+        let input = b"VAR123_x!";
+        let (start, end, consumed) = parse_var_name(input, 0, input.len());
+        assert_eq!(&input[start..end], b"VAR123_x");
+        assert_eq!(consumed, 8);
+    }
+
+    #[test]
+    fn parse_var_name_at_offset() {
+        // The variable name starts at a non-zero offset.
+        let input = b"xx HOME rest";
+        let (start, end, consumed) = parse_var_name(input, 3, input.len());
+        assert_eq!(&input[start..end], b"HOME");
+        assert_eq!(consumed, 4);
+    }
+
+    #[test]
+    fn parse_var_name_empty_braces() {
+        let input = b"{}rest";
+        let (start, end, consumed) = parse_var_name(input, 0, input.len());
+        assert_eq!(start, end); // empty name
+        assert_eq!(consumed, 2); // consumed both braces
+    }
+
+    #[test]
+    fn parse_var_name_unclosed_brace() {
+        // Unclosed brace: scans to end of range.
+        let input = b"{HOME";
+        let (start, end, consumed) = parse_var_name(input, 0, input.len());
+        assert_eq!(&input[start..end], b"HOME");
+        // No closing brace found, so consumed = end - pos = 5.
+        assert_eq!(consumed, 5);
+    }
+
+    // =======================================================================
+    // Interaction tests: split_words + scan_word_end consistency
+    // =======================================================================
+
+    #[test]
+    fn split_and_scan_agree_on_boundaries() {
+        let input = b"alpha 'beta gamma' delta";
+        let pairs = split(input);
+        // Should find 3 words: alpha, 'beta gamma', delta
+        assert_eq!(pairs.len(), 3);
+        assert_eq!(&input[pairs[0].0..pairs[0].1], b"alpha");
+        assert_eq!(&input[pairs[1].0..pairs[1].1], b"'beta gamma'");
+        assert_eq!(&input[pairs[2].0..pairs[2].1], b"delta");
+    }
+
+    #[test]
+    fn split_handles_many_words() {
+        // Build a string with exactly MAX_WORDS words.
+        let mut input = Vec::new();
+        for i in 0..MAX_WORDS {
+            if i > 0 {
+                input.push(b' ');
+            }
+            input.push(b'w');
+        }
+        let pairs = split(&input);
+        assert_eq!(pairs.len(), MAX_WORDS);
+    }
+
+    #[test]
+    fn split_caps_at_max_words() {
+        // Build a string with MAX_WORDS + 10 words.
+        let mut input = Vec::new();
+        for i in 0..MAX_WORDS + 10 {
+            if i > 0 {
+                input.push(b' ');
+            }
+            input.push(b'w');
+        }
+        let pairs = split(&input);
+        // Should be capped at MAX_WORDS.
+        assert_eq!(pairs.len(), MAX_WORDS);
+    }
+
+    #[test]
+    fn split_backslash_at_end_of_input() {
+        // Trailing backslash with no following character.
+        let input = b"hello\\";
+        let words = split_texts(input);
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0], b"hello\\");
+    }
+
+    #[test]
+    fn split_multiple_quote_styles_in_one_word() {
+        // A word that combines single and double quotes: he'l'"l"o
+        let input = b"he'l'\"l\"o next";
+        let words = split_texts(input);
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0], b"he'l'\"l\"o");
+    }
 }

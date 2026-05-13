@@ -379,6 +379,7 @@ const ROOT_FILES: &[&str] = &[
     "mdns",
     "telnet",
     "tftp",
+    "netsyslog",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7456,6 +7457,10 @@ fn gen_tftp() -> Vec<u8> {
     crate::net::tftp::procfs_content().into_bytes()
 }
 
+fn gen_netsyslog() -> Vec<u8> {
+    crate::net::syslog::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10142,6 +10147,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "mdns" => Ok(gen_mdns()),
         "telnet" => Ok(gen_telnet()),
         "tftp" => Ok(gen_tftp()),
+        "netsyslog" => Ok(gen_netsyslog()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

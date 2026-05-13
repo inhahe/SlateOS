@@ -3539,6 +3539,7 @@ const COMMANDS: &[&str] = &[
     "mdns", "dnssd",
     "telnetd", "telnet",
     "tftp", "tftpd",
+    "netsyslog", "rsyslog",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4732,6 +4733,7 @@ fn dispatch(line: &str) {
         "mdns" | "dnssd" => cmd_mdns(args),
         "telnetd" | "telnet" => cmd_telnetd(args),
         "tftp" | "tftpd" => cmd_tftp(args),
+        "netsyslog" | "rsyslog" => cmd_netsyslog(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -34973,6 +34975,144 @@ fn cmd_tftp(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'tftp help'.", sub);
+        }
+    }
+}
+
+/// `netsyslog` / `rsyslog` — network syslog client/receiver.
+fn cmd_netsyslog(args: &str) {
+    use crate::net::syslog;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", syslog::procfs_content());
+        }
+        "status" | "stats" => {
+            let s = syslog::stats();
+            shell_println!("Network Syslog");
+            shell_println!("  Receiver:    {}",
+                if s.receiver_enabled { "running" } else { "stopped" });
+            shell_println!("  Forwarder:   {}",
+                if s.forwarder_enabled {
+                    match s.remote_server {
+                        Some((ip, port)) => alloc::format!("→ {}:{}", ip, port),
+                        None => String::from("enabled (no server)"),
+                    }
+                } else { String::from("disabled") });
+            shell_println!("  Received:    {}", s.messages_received);
+            shell_println!("  Forwarded:   {}", s.messages_forwarded);
+            shell_println!("  Parse errs:  {}", s.parse_errors);
+            shell_println!("  Fwd errors:  {}", s.forward_errors);
+            shell_println!("  Buffer:      {}/{}", s.ring_count, 64);
+        }
+        "listen" | "start" => {
+            match syslog::start_receiver() {
+                Ok(()) => shell_println!("Syslog receiver started"),
+                Err(e) => shell_println!("Failed to start: {:?}", e),
+            }
+        }
+        "stop" => {
+            syslog::stop_receiver();
+            shell_println!("Syslog receiver stopped");
+        }
+        "forward" => {
+            // syslog forward <ip> [port]
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            if ip_str.is_empty() {
+                shell_println!("Usage: syslog forward <ip> [port]");
+                return;
+            }
+            if ip_str == "off" || ip_str == "disable" {
+                syslog::disable_forwarding();
+                shell_println!("Log forwarding disabled");
+                return;
+            }
+            let ip = match parse_ipv4(ip_str) {
+                Some(ip) => ip,
+                None => {
+                    shell_println!("Invalid IP: {}", ip_str);
+                    return;
+                }
+            };
+            let port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(514);
+            syslog::set_remote_server(ip, port);
+            shell_println!("Forwarding logs to {}:{}", ip, port);
+        }
+        "send" => {
+            // syslog send <message>
+            let message = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+            if message.is_empty() {
+                shell_println!("Usage: syslog send <message>");
+                return;
+            }
+            syslog::forward_kern(syslog::Severity::Info, &message);
+            shell_println!("Sent: {}", message);
+        }
+        "recent" | "messages" | "log" => {
+            let count: usize = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
+            let messages = syslog::recent_messages(count);
+            if messages.is_empty() {
+                shell_println!("No messages in buffer");
+            } else {
+                for msg in &messages {
+                    shell_println!("<{}.{}> {} [{}] {}: {}",
+                        msg.facility.label(), msg.severity.label(),
+                        msg.source_ip, msg.hostname, msg.app_name, msg.message);
+                }
+            }
+        }
+        "clear" => {
+            syslog::clear_messages();
+            shell_println!("Message buffer cleared");
+        }
+        "hostname" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                let s = syslog::stats();
+                shell_println!("Hostname: {}", s.hostname);
+            } else {
+                syslog::set_hostname(name);
+                shell_println!("Hostname set to {}", name);
+            }
+        }
+        "port" => {
+            let port_str = parts.get(1).copied().unwrap_or("");
+            if port_str.is_empty() {
+                shell_println!("Listen port: {}", syslog::stats().listen_port);
+            } else {
+                let port: u16 = port_str.parse().unwrap_or(0);
+                if port == 0 {
+                    shell_println!("Invalid port");
+                } else {
+                    syslog::set_port(port);
+                    shell_println!("Port set to {} (restart to apply)", port);
+                }
+            }
+        }
+        "test" => {
+            match syslog::self_test() {
+                Ok(()) => shell_println!("Syslog self-test: PASSED"),
+                Err(e) => shell_println!("Syslog self-test FAILED: {:?}", e),
+            }
+        }
+        "help" => {
+            shell_println!("syslog — network syslog client/receiver");
+            shell_println!("  show                Full status overview");
+            shell_println!("  status              Summary statistics");
+            shell_println!("  listen              Start syslog receiver");
+            shell_println!("  stop                Stop receiver");
+            shell_println!("  forward <ip> [port] Forward logs to server");
+            shell_println!("  forward off         Disable forwarding");
+            shell_println!("  send <message>      Send a test message");
+            shell_println!("  recent [N]          Show last N messages (default 20)");
+            shell_println!("  clear               Clear message buffer");
+            shell_println!("  hostname [name]     Get/set hostname");
+            shell_println!("  port [num]          Get/set listen port");
+            shell_println!("  test                Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'syslog help'.", sub);
         }
     }
 }
@@ -65431,7 +65571,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

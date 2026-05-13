@@ -571,6 +571,7 @@ pub fn tick_renewal() {
                     Ipv4Addr::UNSPECIFIED,
                 );
                 super::dns::flush_cache();
+                super::arp::flush_cache();
                 *DHCP_STATE.lock() = DhcpState::Idle;
                 *CURRENT_LEASE.lock() = DhcpLease::empty();
             }
@@ -774,6 +775,13 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
             // Flush DNS cache — the DNS server may have changed, and
             // cached results from the old server may be stale or wrong.
             super::dns::flush_cache();
+
+            // Flush ARP cache — the gateway or neighbors may have
+            // changed MAC addresses after a lease renewal.  The
+            // gratuitous ARP sent by configure() handles our own
+            // announcement, but stale entries for the gateway/peers
+            // could cause misrouted frames.
+            super::arp::flush_cache();
 
             *DHCP_STATE.lock() = DhcpState::Bound;
 

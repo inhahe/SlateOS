@@ -118,6 +118,7 @@ pub const SYS_TCP_SHUTDOWN: u64 = 848;
 pub const SYS_TCP_INFO: u64 = 849;
 pub const SYS_TCP_SET_NODELAY: u64 = 850;
 pub const SYS_TCP_SET_KEEPALIVE: u64 = 851;
+pub const SYS_TCP_SET_KEEPALIVE_PARAMS: u64 = 852;
 
 // ---------------------------------------------------------------------------
 // Inline syscall wrappers

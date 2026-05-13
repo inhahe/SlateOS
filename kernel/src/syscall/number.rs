@@ -2270,6 +2270,14 @@ pub const SYS_TCP_SET_NODELAY: u64 = 850;
 /// `arg1`: 0 = disable, 1 = enable.
 pub const SYS_TCP_SET_KEEPALIVE: u64 = 851;
 
+/// `SYS_TCP_SET_KEEPALIVE_PARAMS` — configure TCP keepalive timing.
+///
+/// `arg0`: socket handle.
+/// `arg1`: idle time in seconds (0 = use default).
+/// `arg2`: probe interval in seconds (0 = use default).
+/// `arg3`: max probe count (0 = use default).
+pub const SYS_TCP_SET_KEEPALIVE_PARAMS: u64 = 852;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

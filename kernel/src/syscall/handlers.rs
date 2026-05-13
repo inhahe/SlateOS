@@ -7269,3 +7269,40 @@ pub fn sys_tcp_set_keepalive(args: &SyscallArgs) -> SyscallResult {
         Err(e) => SyscallResult::err(e),
     }
 }
+
+/// `SYS_TCP_SET_KEEPALIVE_PARAMS` — configure TCP keepalive timing.
+///
+/// `arg0`: socket handle.
+/// `arg1`: idle time in seconds (0 = use default 75s).
+/// `arg2`: probe interval in seconds (0 = use default 10s).
+/// `arg3`: max probe count (0 = use default 9).
+///
+/// Returns 0 on success.
+pub fn sys_tcp_set_keepalive_params(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(
+        crate::cap::ResourceType::Socket,
+        crate::cap::Rights::WRITE,
+    ) {
+        return SyscallResult::err(e);
+    }
+
+    let handle = args.arg0 as usize;
+    // Convert seconds to nanoseconds (0 means "use default").
+    let idle_secs = args.arg1;
+    let interval_secs = args.arg2;
+    let max_probes = args.arg3 as u8;
+
+    // Default keepalive values (matching kernel constants).
+    const DEFAULT_IDLE_NS: u64 = 75_000_000_000;   // 75 seconds
+    const DEFAULT_INTERVAL_NS: u64 = 10_000_000_000; // 10 seconds
+    const DEFAULT_MAX_PROBES: u8 = 9;
+
+    let idle_ns = if idle_secs == 0 { DEFAULT_IDLE_NS } else { idle_secs.saturating_mul(1_000_000_000) };
+    let interval_ns = if interval_secs == 0 { DEFAULT_INTERVAL_NS } else { interval_secs.saturating_mul(1_000_000_000) };
+    let probes = if max_probes == 0 { DEFAULT_MAX_PROBES } else { max_probes };
+
+    match crate::net::tcp::set_keepalive_params(handle, idle_ns, interval_ns, probes) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}

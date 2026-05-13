@@ -279,6 +279,12 @@ struct SocketMeta {
     linger_onoff: bool,
     /// SO_LINGER: linger time in seconds (meaningful only when linger_onoff is true).
     linger_secs: i32,
+    /// TCP_KEEPIDLE: idle time before first keepalive probe (seconds).
+    keepidle: i32,
+    /// TCP_KEEPINTVL: interval between keepalive probes (seconds).
+    keepintvl: i32,
+    /// TCP_KEEPCNT: max keepalive probes before declaring connection dead.
+    keepcnt: i32,
 }
 
 /// Per-fd socket metadata table.
@@ -1027,6 +1033,9 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
         broadcast: false,
         linger_onoff: false,
         linger_secs: 0,
+        keepidle: 75,
+        keepintvl: 10,
+        keepcnt: 9,
     });
 
     fd
@@ -1135,6 +1144,9 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 broadcast: meta.broadcast,
                 linger_onoff: meta.linger_onoff,
                 linger_secs: meta.linger_secs,
+                keepidle: meta.keepidle,
+                keepintvl: meta.keepintvl,
+                keepcnt: meta.keepcnt,
             });
 
             if in_progress {
@@ -1392,6 +1404,9 @@ pub unsafe extern "C" fn accept(
         broadcast: false,
         linger_onoff: false,
         linger_secs: 0,
+        keepidle: 75,
+        keepintvl: 10,
+        keepcnt: 9,
     });
 
     // Fill in the peer address if requested.
@@ -2002,6 +2017,42 @@ pub extern "C" fn setsockopt(
                     );
                 }
             }
+            (SOL_TCP, TCP_KEEPIDLE) => {
+                meta.keepidle = val.max(1);
+                if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
+                    let _ = syscall4(
+                        SYS_TCP_SET_KEEPALIVE_PARAMS,
+                        entry.handle,
+                        meta.keepidle as u64,
+                        meta.keepintvl as u64,
+                        meta.keepcnt as u64,
+                    );
+                }
+            }
+            (SOL_TCP, TCP_KEEPINTVL) => {
+                meta.keepintvl = val.max(1);
+                if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
+                    let _ = syscall4(
+                        SYS_TCP_SET_KEEPALIVE_PARAMS,
+                        entry.handle,
+                        meta.keepidle as u64,
+                        meta.keepintvl as u64,
+                        meta.keepcnt as u64,
+                    );
+                }
+            }
+            (SOL_TCP, TCP_KEEPCNT) => {
+                meta.keepcnt = val.max(1);
+                if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
+                    let _ = syscall4(
+                        SYS_TCP_SET_KEEPALIVE_PARAMS,
+                        entry.handle,
+                        meta.keepidle as u64,
+                        meta.keepintvl as u64,
+                        meta.keepcnt as u64,
+                    );
+                }
+            }
             (SOL_IP | IPPROTO_IP, IP_MULTICAST_TTL | IP_MULTICAST_LOOP) => {
                 // Accept silently — no kernel support for these yet,
                 // but programs often set them alongside IP_ADD_MEMBERSHIP.
@@ -2160,9 +2211,9 @@ pub unsafe extern "C" fn getsockopt(
                 _ => 0,
             },
             (SOL_TCP, TCP_NODELAY) => meta.map_or(0, |m| i32::from(m.nodelay)),
-            (SOL_TCP, TCP_KEEPIDLE) => 75,   // Default 75s (matches kernel default).
-            (SOL_TCP, TCP_KEEPINTVL) => 10,  // Default 10s (matches kernel default).
-            (SOL_TCP, TCP_KEEPCNT) => 9,     // Default 9 probes (matches kernel default).
+            (SOL_TCP, TCP_KEEPIDLE) => meta.map_or(75, |m| m.keepidle),
+            (SOL_TCP, TCP_KEEPINTVL) => meta.map_or(10, |m| m.keepintvl),
+            (SOL_TCP, TCP_KEEPCNT) => meta.map_or(9, |m| m.keepcnt),
             (SOL_TCP, TCP_MAXSEG) => 1460,   // Default MSS (Ethernet MTU - headers).
             (SOL_TCP, TCP_CORK) => 0,        // Not corked.
             (SOL_TCP, TCP_USER_TIMEOUT) => 0, // No user timeout.

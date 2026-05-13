@@ -1153,11 +1153,40 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
     let local_port = alloc_port();
     let isn = generate_isn();
 
-    // Find a free slot.
+    // Find a free slot. If all slots are occupied, try to recycle the
+    // oldest TIME_WAIT connection (safest to evict since the connection
+    // is fully closed and only waiting to absorb stale duplicate segments).
     let handle = {
         let mut conns = CONNECTIONS.lock();
-        let slot = conns.iter().position(|c| !c.active)
-            .ok_or(KernelError::OutOfMemory)?;
+        let slot = match conns.iter().position(|c| !c.active) {
+            Some(idx) => idx,
+            None => {
+                // No free slots — try to reclaim a TIME_WAIT connection.
+                let mut best: Option<usize> = None;
+                let mut oldest_activity: u64 = u64::MAX;
+                for (i, c) in conns.iter().enumerate() {
+                    if c.active && c.state == TcpState::TimeWait {
+                        if c.last_activity_ns < oldest_activity {
+                            oldest_activity = c.last_activity_ns;
+                            best = Some(i);
+                        }
+                    }
+                }
+                let idx = best.ok_or(KernelError::OutOfMemory)?;
+                // Reclaim the TIME_WAIT slot.
+                crate::serial_println!(
+                    "[tcp] Recycling TIME_WAIT slot {} (port {}) for new connection",
+                    idx, conns[idx].local_port
+                );
+                conns[idx].active = false;
+                conns[idx].state = TcpState::Closed;
+                conns[idx].rx_buffer.clear();
+                conns[idx].tx_buffer.clear();
+                conns[idx].nagle_buf.clear();
+                conns[idx].ooo_buf.clear();
+                idx
+            }
+        };
 
         let conn = &mut conns[slot];
         conn.active = true;
@@ -2640,11 +2669,38 @@ fn handle_incoming_syn(
     let syn_opts = parse_tcp_options(option_bytes);
 
     // Allocate a connection slot for this incoming connection.
+    // If the table is full, recycle the oldest TIME_WAIT connection.
     let isn = generate_isn();
     let handle = {
         let mut conns = CONNECTIONS.lock();
-        let slot = conns.iter().position(|c| !c.active)
-            .ok_or(KernelError::OutOfMemory)?;
+        let slot = match conns.iter().position(|c| !c.active) {
+            Some(idx) => idx,
+            None => {
+                // No free slots — try to reclaim a TIME_WAIT connection.
+                let mut best: Option<usize> = None;
+                let mut oldest_activity: u64 = u64::MAX;
+                for (i, c) in conns.iter().enumerate() {
+                    if c.active && c.state == TcpState::TimeWait {
+                        if c.last_activity_ns < oldest_activity {
+                            oldest_activity = c.last_activity_ns;
+                            best = Some(i);
+                        }
+                    }
+                }
+                let idx = best.ok_or(KernelError::OutOfMemory)?;
+                crate::serial_println!(
+                    "[tcp] Recycling TIME_WAIT slot {} (port {}) for incoming SYN",
+                    idx, conns[idx].local_port
+                );
+                conns[idx].active = false;
+                conns[idx].state = TcpState::Closed;
+                conns[idx].rx_buffer.clear();
+                conns[idx].tx_buffer.clear();
+                conns[idx].nagle_buf.clear();
+                conns[idx].ooo_buf.clear();
+                idx
+            }
+        };
 
         let conn = &mut conns[slot];
         conn.active = true;

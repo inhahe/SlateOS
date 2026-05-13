@@ -488,6 +488,10 @@ const ROOT_FILES: &[&str] = &[
     "ratestat",
     "iomem",
     "vmzone",
+    "budstat",
+    "cgmem",
+    "vmfrag",
+    "pidfd",
     "columnview",
     "pathbar",
     "viewstate",
@@ -9430,6 +9434,75 @@ fn gen_vmzone() -> Vec<u8> {
     out.into_bytes()
 }
 
+fn gen_budstat() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (zones, splits, coalesces, ops) = super::budstat::stats();
+    out.push_str(&format!("=== Buddy Allocator Stats ===\n"));
+    out.push_str(&format!("Zones: {}  Splits: {}  Coalesces: {}  Ops: {}\n\n", zones, splits, coalesces, ops));
+    for z in super::budstat::per_zone() {
+        out.push_str(&format!("{}:\n  Free:  ", z.zone_name));
+        for (i, &c) in z.free_counts.iter().enumerate() { out.push_str(&format!(" O{}={}", i, c)); }
+        out.push_str("\n  Split: ");
+        for (i, &s) in z.splits.iter().enumerate() { out.push_str(&format!(" O{}={}", i, s)); }
+        out.push_str("\n  Coal:  ");
+        for (i, &c) in z.coalesces.iter().enumerate() { out.push_str(&format!(" O{}={}", i, c)); }
+        out.push('\n');
+    }
+    out.into_bytes()
+}
+
+fn gen_cgmem() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (cgroups, charges, uncharges, ooms, ops) = super::cgmem::stats();
+    out.push_str(&format!("=== Cgroup Memory Stats ===\n"));
+    out.push_str(&format!("Cgroups: {}  Charges: {}  Uncharges: {}  OOM kills: {}  Ops: {}\n\n",
+        cgroups, charges, uncharges, ooms, ops));
+    for c in super::cgmem::per_cgroup() {
+        let pct = if c.limit_pages < u64::MAX && c.limit_pages > 0 { c.usage_pages * 100 / c.limit_pages } else { 0 };
+        let limit = if c.limit_pages == u64::MAX { "unlimited".into() } else { format!("{}", c.limit_pages) };
+        out.push_str(&format!("  [{}] {:<10} usage={}/{}({}%)  rss={}  cache={}  swap={}  charges={}  oom={}\n",
+            c.cg_id, c.name, c.usage_pages, limit, pct, c.rss_pages, c.cache_pages,
+            c.swap_pages, c.charges, c.oom_kills));
+    }
+    out.into_bytes()
+}
+
+fn gen_vmfrag() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (zones, compactions, success, fail, ops) = super::vmfrag::stats();
+    let rate = if compactions > 0 { success * 100 / compactions } else { 0 };
+    out.push_str(&format!("=== VM Fragmentation Index ===\n"));
+    out.push_str(&format!("Zones: {}  Compactions: {}  Success: {}({}%)  Fail: {}  Ops: {}\n\n",
+        zones, compactions, success, rate, fail, ops));
+    for z in super::vmfrag::per_zone() {
+        let rate_z = if z.compactions > 0 { z.compact_success * 100 / z.compactions } else { 0 };
+        out.push_str(&format!("{}:  compact: {}/{}({}% ok)\n  Index:", z.zone_name, z.compact_success, z.compactions, rate_z));
+        for (i, &idx) in z.frag_index.iter().enumerate() {
+            out.push_str(&format!(" O{}={}.{}", i, idx / 10, idx % 10));
+        }
+        out.push('\n');
+    }
+    out.into_bytes()
+}
+
+fn gen_pidfd() -> Vec<u8> {
+    use alloc::format;
+    let mut out = String::new();
+    let (pids, creates, polls, signals, waits, closes, ops) = super::pidfd::stats();
+    out.push_str(&format!("=== Pidfd Stats ===\n"));
+    out.push_str(&format!("Tracked PIDs: {}  Creates: {}  Polls: {}  Signals: {}  Waits: {}  Closes: {}  Ops: {}\n\n",
+        pids, creates, polls, signals, waits, closes, ops));
+    out.push_str("Per-PID:\n");
+    for p in super::pidfd::per_pid() {
+        out.push_str(&format!("  PID {:>5}  creates={}  polls={}  signals={}  waits={}  closes={}\n",
+            p.pid, p.creates, p.polls, p.signals, p.waits, p.close_count));
+    }
+    out.into_bytes()
+}
+
 fn gen_columnview() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10083,6 +10156,10 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "ratestat" => Ok(gen_ratestat()),
         "iomem" => Ok(gen_iomem()),
         "vmzone" => Ok(gen_vmzone()),
+        "budstat" => Ok(gen_budstat()),
+        "cgmem" => Ok(gen_cgmem()),
+        "vmfrag" => Ok(gen_vmfrag()),
+        "pidfd" => Ok(gen_pidfd()),
         "columnview" => Ok(gen_columnview()),
         "pathbar" => Ok(gen_pathbar()),
         "viewstate" => Ok(gen_viewstate()),

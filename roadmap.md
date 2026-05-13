@@ -1014,6 +1014,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Rate Limiter (fs::ratestat): Kernel rate limiter monitoring with per-limiter allow/deny/burst tracking, token bucket state; `ratestat`/`rstat` kshell command; /proc/ratestat; 8 self-tests
   - [x] I/O Memory (fs::iomem): MMIO region mapping with per-region read/write counts, cacheability/prefetchability flags; `iomem`/`imem` kshell command; /proc/iomem; 8 self-tests
   - [x] VM Zones (fs::vmzone): Virtual memory zone monitoring with per-zone free/active/inactive pages, watermarks, alloc/reclaim; `vmzone`/`vzone` kshell command; /proc/vmzone; 8 self-tests
+  - [x] Buddy Info (fs::budstat): Buddy allocator fragmentation monitoring with per-zone per-order free counts, split/coalesce tracking; `buddyinfo`/`binfo` kshell command; /proc/budstat; 8 self-tests
+  - [x] Cgroup Memory (fs::cgmem): Per-cgroup memory accounting with RSS/cache/swap breakdown, charge/uncharge, OOM kill tracking; `cgmem`/`cgm` kshell command; /proc/cgmem; 8 self-tests
+  - [x] VM Fragmentation (fs::vmfrag): Memory fragmentation index per zone/order with compaction success tracking, timestamps; `vmfrag`/`vfrag` kshell command; /proc/vmfrag; 8 self-tests
+  - [x] Pidfd (fs::pidfd): Process file descriptor monitoring with create/poll/signal/wait/close tracking per PID; `pidfd`/`pfd` kshell command; /proc/pidfd; 8 self-tests
 - [ ] Later: NTFS read support, Btrfs/ZFS CoW support, F2FS
 
 ### 2.4 Networking stack (userspace)

@@ -143,13 +143,80 @@ pub fn send_frame(frame: &[u8]) -> KernelResult<()> {
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[net] Running network self-test...");
 
+    // Interface status.
     if interface::is_up() {
         let info = interface::info();
         crate::serial_println!("[net]   Interface: up");
         crate::serial_println!("[net]   MAC: {}", info.mac);
         crate::serial_println!("[net]   IP: {}", info.ip);
+        crate::serial_println!("[net]   Mask: {}", info.subnet_mask);
+        crate::serial_println!("[net]   Gateway: {}", info.gateway);
+        crate::serial_println!("[net]   DNS: {}", info.dns);
     } else {
         crate::serial_println!("[net]   No network interface (non-fatal)");
+    }
+
+    // Interface traffic statistics.
+    let stats = interface::stats();
+    crate::serial_println!(
+        "[net]   Traffic: TX {}/{} pkts, RX {}/{} pkts, {} TX errors, {} RX drops",
+        stats.tx_bytes, stats.tx_packets,
+        stats.rx_bytes, stats.rx_packets,
+        stats.tx_errors, stats.rx_drops,
+    );
+
+    // TCP state summary.
+    let tcp_stats = tcp::stats();
+    crate::serial_println!(
+        "[net]   TCP: {} active ({} ESTABLISHED, {} TIME_WAIT, {} CLOSE_WAIT), {} listeners",
+        tcp_stats.active_connections, tcp_stats.established,
+        tcp_stats.time_wait, tcp_stats.close_wait, tcp_stats.listeners,
+    );
+
+    // DNS cache statistics.
+    let dns_stats = dns::cache_stats();
+    crate::serial_println!(
+        "[net]   DNS cache: {}/{} entries, {} hits, {} misses, {} evictions",
+        dns_stats.entries, dns_stats.capacity,
+        dns_stats.hits, dns_stats.misses, dns_stats.evictions,
+    );
+
+    // ARP cache.
+    let (arp_entries, arp_count) = arp::cache_entries();
+    crate::serial_println!("[net]   ARP cache: {} entries", arp_count);
+    for i in 0..arp_count {
+        if let Some(entry) = arp_entries.get(i) {
+            crate::serial_println!(
+                "[net]     {} → {} (TTL {}s)",
+                entry.ip, entry.mac, entry.ttl_secs,
+            );
+        }
+    }
+
+    // UDP socket summary.
+    let (udp_socks, udp_count) = udp::all_sockets();
+    crate::serial_println!("[net]   UDP: {} active sockets", udp_count);
+    for i in 0..udp_count {
+        if let Some(sock) = udp_socks.get(i) {
+            crate::serial_println!(
+                "[net]     port {} (rx_queue={}, mcast_groups={})",
+                sock.local_port, sock.rx_queue_len, sock.mcast_groups,
+            );
+        }
+    }
+
+    // TCP listener summary.
+    let (tcp_listeners, listener_count) = tcp::all_listeners();
+    if listener_count > 0 {
+        crate::serial_println!("[net]   TCP listeners: {}", listener_count);
+        for i in 0..listener_count {
+            if let Some(listener) = tcp_listeners.get(i) {
+                crate::serial_println!(
+                    "[net]     port {} ({}/{} backlog)",
+                    listener.port, listener.backlog_used, listener.backlog_max,
+                );
+            }
+        }
     }
 
     crate::serial_println!("[net] Network self-test PASSED");

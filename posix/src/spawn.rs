@@ -52,6 +52,7 @@ const ACTION_PATH_MAX: usize = 256;
 
 /// A single file action to execute in the child (POSIX order).
 #[derive(Clone, Copy)]
+#[allow(dead_code)] // Used when posix_spawn actually applies actions in child.
 enum FileAction {
     /// Close a file descriptor.
     Close { fd: Fd },
@@ -112,6 +113,7 @@ impl FileActionSlot {
         }
     }
 
+    #[allow(dead_code)] // Used when posix_spawn actually applies actions in child.
     fn to_action(&self) -> Option<FileAction> {
         match self.tag {
             1 => Some(FileAction::Close { fd: self.fd }),

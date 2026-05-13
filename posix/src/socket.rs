@@ -2264,9 +2264,10 @@ pub extern "C" fn setsockopt(
                     );
                 }
             }
-            (SOL_IP | IPPROTO_IP, IP_MULTICAST_TTL | IP_MULTICAST_LOOP) => {
+            (SOL_IP, IP_MULTICAST_TTL | IP_MULTICAST_LOOP) => {
                 // Accept silently — no kernel support for these yet,
                 // but programs often set them alongside IP_ADD_MEMBERSHIP.
+                // Note: IPPROTO_IP == SOL_IP == 0, so this arm covers both.
             }
             _ => {
                 // Accept unknown options silently — many programs set
@@ -2283,7 +2284,7 @@ pub extern "C" fn setsockopt(
 ///
 /// Translates to `SYS_UDP_MCAST_JOIN` / `SYS_UDP_MCAST_LEAVE` syscalls.
 fn setsockopt_multicast(
-    fd: i32,
+    _fd: i32,
     entry: &fdtable::FdEntry,
     optname: i32,
     optval: *const u8,
@@ -2866,8 +2867,7 @@ static mut H_ERRNO: i32 = 0;
 /// Used by C code as `extern int h_errno;` via `*__h_errno_location()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn __h_errno_location() -> *mut i32 {
-    // SAFETY: single-threaded POSIX shim.
-    unsafe { core::ptr::addr_of_mut!(H_ERRNO) }
+    core::ptr::addr_of_mut!(H_ERRNO)
 }
 
 /// Return a string describing a resolver error code.
@@ -3881,24 +3881,28 @@ unsafe fn fill_servent(entry: &ServiceEntry) -> *const Servent {
     let aliases_ptr = core::ptr::addr_of_mut!(SERVENT_ALIASES);
     let result_ptr = core::ptr::addr_of_mut!(SERVENT_RESULT);
 
-    // Zero and copy name.
-    let nlen = entry.name.len().min(31);
-    core::ptr::write_bytes(name_ptr, 0, 32);
-    core::ptr::copy_nonoverlapping(entry.name.as_ptr(), name_ptr, nlen);
+    // SAFETY: All static buffers are valid for the lifetime of the program,
+    // and we only write within their bounds (name≤31, proto≤7).
+    unsafe {
+        // Zero and copy name.
+        let nlen = entry.name.len().min(31);
+        core::ptr::write_bytes(name_ptr, 0, 32);
+        core::ptr::copy_nonoverlapping(entry.name.as_ptr(), name_ptr, nlen);
 
-    // Zero and copy proto.
-    let plen = entry.proto.len().min(7);
-    core::ptr::write_bytes(proto_ptr, 0, 8);
-    core::ptr::copy_nonoverlapping(entry.proto.as_ptr(), proto_ptr, plen);
+        // Zero and copy proto.
+        let plen = entry.proto.len().min(7);
+        core::ptr::write_bytes(proto_ptr, 0, 8);
+        core::ptr::copy_nonoverlapping(entry.proto.as_ptr(), proto_ptr, plen);
 
-    // Empty alias list.
-    (*aliases_ptr)[0] = core::ptr::null();
+        // Empty alias list.
+        (*aliases_ptr)[0] = core::ptr::null();
 
-    // Assemble result.
-    (*result_ptr).s_name = name_ptr;
-    (*result_ptr).s_aliases = (*aliases_ptr).as_ptr();
-    (*result_ptr).s_port = entry.port.to_be() as i32;
-    (*result_ptr).s_proto = proto_ptr;
+        // Assemble result.
+        (*result_ptr).s_name = name_ptr;
+        (*result_ptr).s_aliases = (*aliases_ptr).as_ptr();
+        (*result_ptr).s_port = entry.port.to_be() as i32;
+        (*result_ptr).s_proto = proto_ptr;
+    }
 
     result_ptr
 }
@@ -4027,25 +4031,29 @@ unsafe fn fill_protoent(entry: &ProtoEntry) -> *const Protoent {
     let alias_buf_raw = core::ptr::addr_of_mut!(PROTOENT_ALIAS_BUF) as *mut u8;
     let result_ptr = core::ptr::addr_of_mut!(PROTOENT_RESULT);
 
-    // Zero and copy name.
-    let nlen = entry.name.len().min(15);
-    core::ptr::write_bytes(name_raw, 0, 16);
-    core::ptr::copy_nonoverlapping(entry.name.as_ptr(), name_raw, nlen);
+    // SAFETY: All static buffers are valid for the lifetime of the program,
+    // and we only write within their bounds (name≤15, alias≤15).
+    unsafe {
+        // Zero and copy name.
+        let nlen = entry.name.len().min(15);
+        core::ptr::write_bytes(name_raw, 0, 16);
+        core::ptr::copy_nonoverlapping(entry.name.as_ptr(), name_raw, nlen);
 
-    // Set up alias list (first alias if available, then NULL).
-    if let Some(&alias) = entry.aliases.first() {
-        let alen = alias.len().min(15);
-        core::ptr::write_bytes(alias_buf_raw, 0, 16);
-        core::ptr::copy_nonoverlapping(alias.as_ptr(), alias_buf_raw, alen);
-        (*aliases_ptr)[0] = alias_buf_raw;
-        (*aliases_ptr)[1] = core::ptr::null();
-    } else {
-        (*aliases_ptr)[0] = core::ptr::null();
+        // Set up alias list (first alias if available, then NULL).
+        if let Some(&alias) = entry.aliases.first() {
+            let alen = alias.len().min(15);
+            core::ptr::write_bytes(alias_buf_raw, 0, 16);
+            core::ptr::copy_nonoverlapping(alias.as_ptr(), alias_buf_raw, alen);
+            (*aliases_ptr)[0] = alias_buf_raw;
+            (*aliases_ptr)[1] = core::ptr::null();
+        } else {
+            (*aliases_ptr)[0] = core::ptr::null();
+        }
+
+        (*result_ptr).p_name = name_raw;
+        (*result_ptr).p_aliases = (*aliases_ptr).as_ptr();
+        (*result_ptr).p_proto = entry.number;
     }
-
-    (*result_ptr).p_name = name_raw;
-    (*result_ptr).p_aliases = (*aliases_ptr).as_ptr();
-    (*result_ptr).p_proto = entry.number;
 
     result_ptr
 }

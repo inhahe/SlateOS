@@ -213,15 +213,11 @@ const STDERR_SENTINEL: usize = 2;
 /// Sentinel values 0/1/2 map to the static stdin/stdout/stderr FILEs.
 /// All other values are interpreted as real `File` pointers from `fopen`.
 fn stream_to_file(stream: *mut u8) -> *mut File {
-    // SAFETY: Computing raw pointers to static mut variables without
-    // creating &mut references.  Single-threaded access.
-    unsafe {
-        match stream as usize {
-            STDIN_SENTINEL => core::ptr::addr_of_mut!(STDIN_FILE),
-            STDOUT_SENTINEL => core::ptr::addr_of_mut!(STDOUT_FILE),
-            STDERR_SENTINEL => core::ptr::addr_of_mut!(STDERR_FILE),
-            _ => stream.cast::<File>(),
-        }
+    match stream as usize {
+        STDIN_SENTINEL => core::ptr::addr_of_mut!(STDIN_FILE),
+        STDOUT_SENTINEL => core::ptr::addr_of_mut!(STDOUT_FILE),
+        STDERR_SENTINEL => core::ptr::addr_of_mut!(STDERR_FILE),
+        _ => stream.cast::<File>(),
     }
 }
 

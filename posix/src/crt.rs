@@ -364,3 +364,120 @@ pub extern "C" fn __libc_csu_init() {
 pub extern "C" fn __libc_csu_fini() {
     // No-op: destructors are handled by atexit/__cxa_finalize.
 }
+
+// ---------------------------------------------------------------------------
+// C++ thread-local destructor support
+// ---------------------------------------------------------------------------
+
+/// C++ ABI: Register a thread-local destructor.
+///
+/// Called by the C++ runtime for objects with `thread_local` storage
+/// duration that have non-trivial destructors.  Since we don't support
+/// thread-local storage cleanup yet, we ignore the registration.
+/// The destructor will leak (not be called at thread exit).
+#[unsafe(no_mangle)]
+pub extern "C" fn __cxa_thread_atexit_impl(
+    _dtor: extern "C" fn(*mut u8),
+    _obj: *mut u8,
+    _dso_handle: *mut u8,
+) -> i32 {
+    // Stub: accept registration but never call the destructor.
+    // When thread-local storage is fully supported, these destructors
+    // should run at thread exit in reverse registration order.
+    0
+}
+
+// ---------------------------------------------------------------------------
+// glibc atfork registration
+// ---------------------------------------------------------------------------
+
+/// glibc internal: Register fork handlers.
+///
+/// Some glibc-linked code calls this directly instead of
+/// `pthread_atfork`.  We delegate to our existing stub.
+#[unsafe(no_mangle)]
+pub extern "C" fn __register_atfork(
+    prepare: Option<extern "C" fn()>,
+    parent: Option<extern "C" fn()>,
+    child: Option<extern "C" fn()>,
+    _dso_handle: *mut u8,
+) -> i32 {
+    crate::pthread::pthread_atfork(prepare, parent, child)
+}
+
+// ---------------------------------------------------------------------------
+// glibc identification
+// ---------------------------------------------------------------------------
+
+/// Version string for our POSIX compatibility layer.
+///
+/// Programs compiled with glibc headers may call `gnu_get_libc_version()`
+/// to check the C library version.  We return a plausible version string.
+static LIBC_VERSION: [u8; 5] = *b"2.38\0";
+
+/// Release string.
+static LIBC_RELEASE: [u8; 8] = *b"stable\0\0";
+
+/// Return the "glibc version" string.
+///
+/// We're not actually glibc, but programs that check this at runtime
+/// (rather than link time) need a non-null result.
+#[unsafe(no_mangle)]
+pub extern "C" fn gnu_get_libc_version() -> *const u8 {
+    LIBC_VERSION.as_ptr()
+}
+
+/// Return the "glibc release" string.
+#[unsafe(no_mangle)]
+pub extern "C" fn gnu_get_libc_release() -> *const u8 {
+    LIBC_RELEASE.as_ptr()
+}
+
+// ---------------------------------------------------------------------------
+// glibc thread safety flag
+// ---------------------------------------------------------------------------
+
+/// glibc 2.32+: Flag indicating the process is single-threaded.
+///
+/// glibc uses this to optimize mutex operations (skip atomic ops when
+/// single-threaded).  Value: 1 = single-threaded, 0 = multi-threaded.
+/// We start as single-threaded; `pthread_create` should set this to 0.
+#[unsafe(no_mangle)]
+pub static mut __libc_single_threaded: u8 = 1;
+
+// ---------------------------------------------------------------------------
+// Auxiliary vector access
+// ---------------------------------------------------------------------------
+
+/// Query the auxiliary vector (glibc extension).
+///
+/// The auxiliary vector is a mechanism for the kernel to pass
+/// information to userspace at process startup (page size, UID, etc.).
+/// Since our kernel doesn't populate an auxv yet, we return sensible
+/// defaults for known types and 0 for everything else.
+#[unsafe(no_mangle)]
+pub extern "C" fn getauxval(typ: u64) -> u64 {
+    // Common AT_* values (from Linux headers).
+    const AT_PAGESZ: u64 = 6;
+    const AT_CLKTCK: u64 = 17;
+    const AT_SECURE: u64 = 23;
+    const AT_HWCAP: u64 = 16;
+    const AT_HWCAP2: u64 = 26;
+    const AT_UID: u64 = 11;
+    const AT_EUID: u64 = 12;
+    const AT_GID: u64 = 13;
+    const AT_EGID: u64 = 14;
+
+    match typ {
+        AT_PAGESZ => 16384, // Our 16 KiB page size.
+        AT_CLKTCK => 100,   // Jiffy rate (HZ).
+        AT_SECURE => 0,     // Not running in secure mode.
+        AT_HWCAP | AT_HWCAP2 => 0, // No hardware capability flags.
+        AT_UID | AT_EUID => 0, // Root.
+        AT_GID | AT_EGID => 0, // Root group.
+        _ => {
+            crate::errno::set_errno(crate::errno::ENOENT);
+            0
+        }
+    }
+}

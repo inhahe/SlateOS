@@ -353,3 +353,11 @@ pub extern "C" fn __ctype_toupper_loc() -> *const *const i32 {
         core::ptr::addr_of!(CACHED).cast()
     }
 }
+
+/// glibc: return maximum number of bytes in a multibyte character.
+///
+/// For UTF-8 (our encoding), this is always 4.
+#[unsafe(no_mangle)]
+pub extern "C" fn __ctype_get_mb_cur_max() -> usize {
+    4 // UTF-8: up to 4 bytes per character.
+}

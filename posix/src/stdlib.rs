@@ -1027,6 +1027,65 @@ pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
     -1
 }
 
+/// Generate a unique temporary filename (DEPRECATED — use `mkstemp`).
+///
+/// Replaces the last 6 'X' characters in `template` with random
+/// characters to create a unique filename.  Does NOT create the file,
+/// which is inherently racy (TOCTOU vulnerability).
+///
+/// Returns `template` on success, or sets errno and returns NULL on
+/// failure.
+///
+/// # Safety
+///
+/// `template` must be a writable null-terminated string with at least
+/// 6 trailing 'X' characters.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn mktemp(template: *mut u8) -> *mut u8 {
+    if template.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+
+    let len = unsafe { crate::string::strlen(template) };
+    if len < 6 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        // POSIX: mktemp sets template[0] = '\0' on error.
+        unsafe { *template = 0; }
+        return core::ptr::null_mut();
+    }
+
+    // Verify the last 6 characters are 'X'.
+    let suffix_start = len.wrapping_sub(6);
+    let mut i: usize = 0;
+    while i < 6 {
+        if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            unsafe { *template = 0; }
+            return core::ptr::null_mut();
+        }
+        i = i.wrapping_add(1);
+    }
+
+    // Generate random suffix.
+    let mut rand_bytes = [0u8; 6];
+    crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
+
+    let mut j: usize = 0;
+    while j < 6 {
+        let idx = rand_bytes[j] % 36;
+        let ch = if idx < 10 {
+            b'0'.wrapping_add(idx)
+        } else {
+            b'a'.wrapping_add(idx.wrapping_sub(10))
+        };
+        unsafe { *template.add(suffix_start.wrapping_add(j)) = ch; }
+        j = j.wrapping_add(1);
+    }
+
+    template
+}
+
 /// Create a temporary file.
 ///
 /// Returns a FILE* stream for a unique temporary file opened in "w+b"

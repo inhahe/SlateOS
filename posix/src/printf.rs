@@ -1039,7 +1039,15 @@ fn format_float_fixed(
 
     // Format into a temporary buffer.
     let mut buf = [0u8; 350]; // Enough for DBL_MAX (~308 digits) + decimal + precision
-    let len = fmt_fixed(abs_val, precision, &mut buf);
+    let mut len = fmt_fixed(abs_val, precision, &mut buf);
+
+    // C99 '#' flag: always include a decimal point, even when precision is 0.
+    if flags.alt_form && precision == 0 {
+        if let Some(slot) = buf.get_mut(len) {
+            *slot = b'.';
+        }
+        len = len.wrapping_add(1);
+    }
 
     emit_float_padded(dst, &buf, len, negative, flags, width);
 }
@@ -1069,7 +1077,34 @@ fn format_float_sci(
     let abs_val = if negative { -val } else { val };
 
     let mut buf = [0u8; 350];
-    let len = fmt_scientific(abs_val, precision, upper, &mut buf);
+    let mut len = fmt_scientific(abs_val, precision, upper, &mut buf);
+
+    // C99 '#' flag: always include a decimal point, even when precision is 0.
+    // Insert '.' before the 'e'/'E' exponent marker.
+    if flags.alt_form && precision == 0 {
+        // Find 'e'/'E' position.
+        let mut epos = 0;
+        while epos < len {
+            if let Some(&b) = buf.get(epos) {
+                if b == b'e' || b == b'E' { break; }
+            }
+            epos = epos.wrapping_add(1);
+        }
+        if epos < len {
+            // Shift exponent part right by 1 to make room for '.'.
+            let mut j = len;
+            while j > epos {
+                if let (Some(src), Some(dst_slot)) = (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j)) {
+                    *dst_slot = src;
+                }
+                j = j.wrapping_sub(1);
+            }
+            if let Some(slot) = buf.get_mut(epos) {
+                *slot = b'.';
+            }
+            len = len.wrapping_add(1);
+        }
+    }
 
     emit_float_padded(dst, &buf, len, negative, flags, width);
 }
@@ -1101,8 +1136,14 @@ fn format_float_general(
 
     let abs_val = if negative { -val } else { val };
 
-    // Determine exponent for the choice.
-    let exp = if abs_val == 0.0 { 0 } else { crate::math::ilogb(abs_val) };
+    // Determine decimal exponent X (what %e conversion would produce).
+    // C99: use floor(log10(|val|)).  ilogb gives the binary exponent
+    // which is wrong here — e.g. ilogb(9.5)=3 but the decimal exp is 0.
+    let exp = if abs_val == 0.0 {
+        0
+    } else {
+        crate::math::floor(crate::math::log10(abs_val)) as i32
+    };
     let p = precision as i32;
 
     let mut buf = [0u8; 350];
@@ -1121,6 +1162,46 @@ fn format_float_general(
     // Remove trailing zeros (unless # flag).
     if !flags.alt_form {
         len = trim_trailing_zeros(&mut buf, len);
+    }
+
+    // C99 '#' flag for %g: always include a decimal point.
+    // When precision is low enough that the computed sub-precision is 0,
+    // fmt_fixed / fmt_scientific won't emit a '.'.  Insert one if missing.
+    if flags.alt_form {
+        let has_dot = {
+            let mut found = false;
+            let mut k = 0;
+            while k < len {
+                if let Some(&b) = buf.get(k) {
+                    if b == b'.' { found = true; break; }
+                }
+                k = k.wrapping_add(1);
+            }
+            found
+        };
+        if !has_dot {
+            // Find 'e'/'E' (scientific) or end of buffer (fixed).
+            let mut insert_at = len;
+            let mut k = 0;
+            while k < len {
+                if let Some(&b) = buf.get(k) {
+                    if b == b'e' || b == b'E' { insert_at = k; break; }
+                }
+                k = k.wrapping_add(1);
+            }
+            // Shift [insert_at..len] right by 1.
+            let mut j = len;
+            while j > insert_at {
+                if let (Some(src), Some(dst_slot)) = (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j)) {
+                    *dst_slot = src;
+                }
+                j = j.wrapping_sub(1);
+            }
+            if let Some(slot) = buf.get_mut(insert_at) {
+                *slot = b'.';
+            }
+            len = len.wrapping_add(1);
+        }
     }
 
     emit_float_padded(dst, &buf, len, negative, flags, width);
@@ -1203,6 +1284,15 @@ fn emit_float_padded(
 /// Returns number of bytes written.
 #[allow(clippy::arithmetic_side_effects)]
 fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
+    // When precision is 0, round the value first so that e.g.
+    // printf("%.0f", 3.7) outputs "4" not "3".  The fractional-digit
+    // loop handles rounding for precision > 0 via carry propagation.
+    let val = if precision == 0 {
+        crate::math::round(val)
+    } else {
+        val
+    };
+
     // Separate integer and fractional parts.
     let int_part = val as u64;
     let frac = val - (int_part as f64);
@@ -1327,6 +1417,17 @@ fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> us
     // Normalize: 1 <= mantissa < 10.
     if mantissa >= 10.0 { mantissa /= 10.0; exp += 1; }
     if mantissa < 1.0 && mantissa > 0.0 { mantissa *= 10.0; exp -= 1; }
+
+    // Pre-round mantissa to the requested precision and re-normalize.
+    // Without this, rounding carry in fmt_fixed can push the integer part
+    // to 10 (e.g. mantissa 9.95 with precision 1 → "10.0"), producing
+    // invalid scientific notation like "10.0e+00" instead of "1.0e+01".
+    let scale = crate::math::pow(10.0, precision as f64);
+    mantissa = crate::math::round(mantissa * scale) / scale;
+    if mantissa >= 10.0 {
+        mantissa /= 10.0;
+        exp += 1;
+    }
 
     // Format mantissa as fixed point with `precision` decimal places.
     let mut pos = fmt_fixed(mantissa, precision, buf);

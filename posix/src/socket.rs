@@ -1221,6 +1221,21 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 cork: meta.cork,
             });
 
+            // Apply socket options that were set before connect.
+            // The kernel connection starts with defaults; we need to wire
+            // through any options the program set before calling connect().
+            let handle = ret as u64;
+            if meta.nodelay {
+                let _ = syscall2(SYS_TCP_SET_NODELAY, handle, 1);
+            }
+            if meta.keepalive {
+                let _ = syscall2(
+                    crate::syscall::SYS_TCP_SET_KEEPALIVE, handle, 1,
+                );
+            }
+            // TCP_CORK: tracked in metadata only (kernel doesn't have
+            // explicit cork support yet).  No kernel call needed.
+
             if in_progress {
                 // POSIX: non-blocking connect returns -1 / EINPROGRESS
                 // to signal the handshake is underway.  The caller uses
@@ -1309,7 +1324,7 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
         return -1;
     }
 
-    let Some(_entry) = fdtable::get_fd(fd) else {
+    let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
@@ -1332,6 +1347,16 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
 
     match meta.sock_type {
         SOCK_STREAM => {
+            // POSIX: bind on a connected socket is EINVAL.
+            if entry.handle != 0 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            // POSIX: bind on an already-bound socket is EINVAL.
+            if meta.bound_port != 0 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
             // For TCP, defer the kernel bind until listen().
             // Just record the port and local address.
             meta.bound_port = sin.sin_port; // store in network order
@@ -1340,6 +1365,11 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
             0
         }
         SOCK_DGRAM => {
+            // POSIX: bind on an already-bound socket is EINVAL.
+            if entry.handle != 0 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
             // For UDP, bind immediately.
             let ret = syscall1(SYS_UDP_BIND, u64::from(port));
             if ret < 0 {
@@ -1398,6 +1428,12 @@ pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
     // Don't re-listen on an already-listening socket.
     if entry.kind == HandleKind::TcpListener && entry.handle != 0 {
         return 0;
+    }
+
+    // POSIX: listen on a connected socket is EINVAL.
+    if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
     }
 
     // If not bound, implicitly bind to port 0 (ephemeral).
@@ -3645,8 +3681,8 @@ pub unsafe extern "C" fn getaddrinfo(
         0
     } else {
         let numeric = parse_port_string(service);
-        if numeric > 0 {
-            numeric
+        if numeric >= 0 {
+            numeric as u16
         } else {
             // Not a numeric port — AI_NUMERICSERV prohibits name lookup.
             if (want_flags & AI_NUMERICSERV) != 0 {
@@ -4376,12 +4412,18 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
 // ---------------------------------------------------------------------------
 
 /// Parse a numeric port string to u16.
-fn parse_port_string(s: *const u8) -> u16 {
+/// Parse a numeric port string to a port number.
+///
+/// Returns the port as `i32` (0..65535), or -1 if the string is not a
+/// valid numeric port (empty, non-digit characters, overflow > 65535).
+/// This allows distinguishing "0" (valid port 0) from "http" (not numeric).
+fn parse_port_string(s: *const u8) -> i32 {
     if s.is_null() {
-        return 0;
+        return -1;
     }
     let mut val: u32 = 0;
     let mut i: usize = 0;
+    let mut has_digit = false;
     loop {
         // SAFETY: s is a valid null-terminated string.
         let c = unsafe { *s.add(i) };
@@ -4389,18 +4431,22 @@ fn parse_port_string(s: *const u8) -> u16 {
             break;
         }
         if !c.is_ascii_digit() {
-            return 0; // Non-numeric service name — not supported.
+            return -1; // Non-numeric service name.
         }
+        has_digit = true;
         #[allow(clippy::arithmetic_side_effects)]
         {
             val = val.wrapping_mul(10).wrapping_add(u32::from(c - b'0'));
         }
         if val > 65535 {
-            return 0;
+            return -1;
         }
         i = i.wrapping_add(1);
     }
-    val as u16
+    if !has_digit {
+        return -1; // Empty string.
+    }
+    val as i32
 }
 
 // ---------------------------------------------------------------------------
@@ -5130,14 +5176,14 @@ mod tests {
 
     #[test]
     fn test_parse_port_invalid() {
-        // Non-numeric.
-        assert_eq!(parse_port_string(c"http".as_ptr().cast::<u8>()), 0);
+        // Non-numeric → -1 (distinguishes "not a number" from "port 0").
+        assert_eq!(parse_port_string(c"http".as_ptr().cast::<u8>()), -1);
         // Too large.
-        assert_eq!(parse_port_string(c"65536".as_ptr().cast::<u8>()), 0);
+        assert_eq!(parse_port_string(c"65536".as_ptr().cast::<u8>()), -1);
         // Null pointer.
-        assert_eq!(parse_port_string(core::ptr::null()), 0);
+        assert_eq!(parse_port_string(core::ptr::null()), -1);
         // Empty.
-        assert_eq!(parse_port_string(c"".as_ptr().cast::<u8>()), 0);
+        assert_eq!(parse_port_string(c"".as_ptr().cast::<u8>()), -1);
     }
 
     // -- translate_net_error tests --

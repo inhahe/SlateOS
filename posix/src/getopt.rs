@@ -1046,4 +1046,106 @@ mod tests {
         assert!(find_in_optstring(opts.as_ptr(), b'b') >= 0);
         assert_eq!(find_in_optstring(opts.as_ptr(), b'z'), -1);
     }
+
+    // -----------------------------------------------------------------------
+    // getopt_long_only — single-dash long options
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_long_only_single_dash() {
+        unsafe { reset_getopt_state(); }
+        // "-verbose" should match long option "verbose" with long_only.
+        let (argc, argv, _b) = make_argv(&["prog", "-verbose"]);
+        let opts = cstr("v");
+        let (longopts, _lb) = make_longopts(&[
+            (b"verbose", NO_ARGUMENT, i32::from(b'V')),
+        ]);
+        let mut longindex: i32 = -1;
+
+        let r = getopt_long_only(
+            argc, argv.as_ptr(), opts.as_ptr(),
+            longopts.as_ptr(), &mut longindex,
+        );
+        // Should match the long option, not the short 'v'.
+        assert_eq!(r, i32::from(b'V'));
+        assert_eq!(longindex, 0);
+    }
+
+    #[test]
+    fn test_long_only_with_arg() {
+        unsafe { reset_getopt_state(); }
+        // "-output=file.txt" should match long option with =arg.
+        let (argc, argv, _b) = make_argv(&["prog", "-output=file.txt"]);
+        let opts = cstr("");
+        let (longopts, _lb) = make_longopts(&[
+            (b"output", REQUIRED_ARGUMENT, i32::from(b'o')),
+        ]);
+        let mut longindex: i32 = -1;
+
+        let r = getopt_long_only(
+            argc, argv.as_ptr(), opts.as_ptr(),
+            longopts.as_ptr(), &mut longindex,
+        );
+        assert_eq!(r, i32::from(b'o'));
+        assert_eq!(longindex, 0);
+
+        // optarg should point to "file.txt".
+        let arg_ptr = unsafe { core::ptr::addr_of!(optarg).read() };
+        assert!(!arg_ptr.is_null());
+        assert_eq!(unsafe { *arg_ptr }, b'f');
+    }
+
+    #[test]
+    fn test_long_only_double_dash_still_works() {
+        unsafe { reset_getopt_state(); }
+        // "--verbose" should still work with getopt_long_only.
+        let (argc, argv, _b) = make_argv(&["prog", "--verbose"]);
+        let opts = cstr("");
+        let (longopts, _lb) = make_longopts(&[
+            (b"verbose", NO_ARGUMENT, i32::from(b'V')),
+        ]);
+        let mut longindex: i32 = -1;
+
+        let r = getopt_long_only(
+            argc, argv.as_ptr(), opts.as_ptr(),
+            longopts.as_ptr(), &mut longindex,
+        );
+        assert_eq!(r, i32::from(b'V'));
+        assert_eq!(longindex, 0);
+    }
+
+    #[test]
+    fn test_long_only_no_match_falls_to_short() {
+        unsafe { reset_getopt_state(); }
+        // "-a" should still work as short option when no long option matches.
+        let (argc, argv, _b) = make_argv(&["prog", "-a"]);
+        let opts = cstr("ab");
+        let (longopts, _lb) = make_longopts(&[
+            (b"verbose", NO_ARGUMENT, i32::from(b'V')),
+        ]);
+
+        let r = getopt_long_only(
+            argc, argv.as_ptr(), opts.as_ptr(),
+            longopts.as_ptr(), core::ptr::null_mut(),
+        );
+        assert_eq!(r, i32::from(b'a'));
+    }
+
+    #[test]
+    fn test_long_only_unknown_option() {
+        unsafe { reset_getopt_state(); }
+        // "-nonexistent" with no matching long option and not a valid short.
+        let (argc, argv, _b) = make_argv(&["prog", "-nonexistent"]);
+        let opts = cstr("ab");
+        let (longopts, _lb) = make_longopts(&[
+            (b"verbose", NO_ARGUMENT, i32::from(b'V')),
+        ]);
+
+        let r = getopt_long_only(
+            argc, argv.as_ptr(), opts.as_ptr(),
+            longopts.as_ptr(), core::ptr::null_mut(),
+        );
+        // Should return '?' for unrecognized option.
+        assert_eq!(r, i32::from(b'?'));
+    }
 }

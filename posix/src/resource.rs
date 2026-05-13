@@ -821,4 +821,43 @@ mod tests {
             "Rlimit alignment must match u64"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // prlimit64 — alias for prlimit
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prlimit64_get_and_set() {
+        reset_global_state();
+        // Set an initial value via setrlimit.
+        let init = Rlimit { rlim_cur: 100, rlim_max: 200 };
+        assert_eq!(setrlimit(RLIMIT_FSIZE, &init), 0);
+
+        // Use prlimit64 to get old and set new.
+        let new = Rlimit { rlim_cur: 300, rlim_max: 400 };
+        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let ret = prlimit64(0, RLIMIT_FSIZE, &new, &mut old);
+        assert_eq!(ret, 0);
+
+        // Old should match initial.
+        assert_eq!(old.rlim_cur, 100);
+        assert_eq!(old.rlim_max, 200);
+
+        // Verify prlimit64 set the new values.
+        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_FSIZE, &mut readback), 0);
+        assert_eq!(readback.rlim_cur, 300);
+        assert_eq!(readback.rlim_max, 400);
+    }
+
+    #[test]
+    fn prlimit64_get_only() {
+        reset_global_state();
+        // prlimit64 with null new_limit should just get current.
+        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let ret = prlimit64(0, RLIMIT_NOFILE, core::ptr::null(), &mut old);
+        assert_eq!(ret, 0);
+        assert_eq!(old.rlim_cur, 256);
+        assert_eq!(old.rlim_max, 256);
+    }
 }

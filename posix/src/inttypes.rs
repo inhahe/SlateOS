@@ -562,4 +562,116 @@ mod tests {
         assert_eq!(r.quot, i64::MIN);
         assert_eq!(r.rem, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // strtoimax / strtoumax — delegation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strtoimax_decimal() {
+        let s = b"12345\0";
+        let mut end: *const u8 = core::ptr::null();
+        let v = unsafe { strtoimax(s.as_ptr(), &mut end, 10) };
+        assert_eq!(v, 12345);
+        // endptr should point past the last digit.
+        assert_eq!(unsafe { *end }, 0);
+    }
+
+    #[test]
+    fn test_strtoimax_negative() {
+        let s = b"-9876\0";
+        let v = unsafe { strtoimax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, -9876);
+    }
+
+    #[test]
+    fn test_strtoimax_hex() {
+        let s = b"0xFF\0";
+        let v = unsafe { strtoimax(s.as_ptr(), core::ptr::null_mut(), 0) };
+        assert_eq!(v, 255);
+    }
+
+    #[test]
+    fn test_strtoimax_max() {
+        let s = b"9223372036854775807\0";
+        let v = unsafe { strtoimax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, i64::MAX);
+    }
+
+    #[test]
+    fn test_strtoumax_decimal() {
+        let s = b"42\0";
+        let mut end: *const u8 = core::ptr::null();
+        let v = unsafe { strtoumax(s.as_ptr(), &mut end, 10) };
+        assert_eq!(v, 42);
+        assert_eq!(unsafe { *end }, 0);
+    }
+
+    #[test]
+    fn test_strtoumax_hex() {
+        let s = b"0xDEAD\0";
+        let v = unsafe { strtoumax(s.as_ptr(), core::ptr::null_mut(), 0) };
+        assert_eq!(v, 0xDEAD);
+    }
+
+    #[test]
+    fn test_strtoumax_max() {
+        let s = b"18446744073709551615\0";
+        let v = unsafe { strtoumax(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, u64::MAX);
+    }
+
+    #[test]
+    fn test_strtoumax_octal() {
+        let s = b"0777\0";
+        let v = unsafe { strtoumax(s.as_ptr(), core::ptr::null_mut(), 0) };
+        assert_eq!(v, 0o777);
+    }
+
+    // -----------------------------------------------------------------------
+    // wcstoimax / wcstoumax — additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcstoimax_null_nptr() {
+        let mut end: *const i32 = 0x1234 as *const i32; // garbage initial
+        let v = unsafe { wcstoimax(core::ptr::null(), &mut end, 10) };
+        assert_eq!(v, 0);
+        assert!(end.is_null(), "endptr should be set to nptr (null)");
+    }
+
+    #[test]
+    fn test_wcstoumax_null_nptr() {
+        let mut end: *const i32 = 0x1234 as *const i32;
+        let v = unsafe { wcstoumax(core::ptr::null(), &mut end, 10) };
+        assert_eq!(v, 0);
+        assert!(end.is_null(), "endptr should be set to nptr (null)");
+    }
+
+    #[test]
+    fn test_wcstoimax_base_16_explicit() {
+        // "1A\0" with explicit base 16.
+        let s: [i32; 3] = [0x31, 0x41, 0x00]; // '1', 'A', NUL
+        let v = unsafe { wcstoimax(s.as_ptr(), core::ptr::null_mut(), 16) };
+        assert_eq!(v, 26);
+    }
+
+    #[test]
+    fn test_wcstoumax_base_2() {
+        // "1010\0" in base 2 = 10.
+        let s: [i32; 5] = [0x31, 0x30, 0x31, 0x30, 0x00];
+        let v = unsafe { wcstoumax(s.as_ptr(), core::ptr::null_mut(), 2) };
+        assert_eq!(v, 10);
+    }
+
+    #[test]
+    fn test_wcstoimax_leading_whitespace() {
+        // "  \t42\0" — whitespace then digits.
+        let s: [i32; 5] = [0x20, 0x20, 0x09, 0x34, 0x00]; // ' ', ' ', '\t', '4', NUL
+        // Hmm, wait — this is "  \t4" but we need more digits.
+        // Let's use "  42\0":
+        let s2: [i32; 5] = [0x20, 0x20, 0x34, 0x32, 0x00]; // ' ', ' ', '4', '2', NUL
+        let v = unsafe { wcstoimax(s2.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(v, 42);
+    }
 }

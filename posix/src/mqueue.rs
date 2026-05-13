@@ -232,4 +232,50 @@ mod tests {
         // 4 i64 fields + 4 i64 padding = 8 * 8 = 64 bytes
         assert_eq!(core::mem::size_of::<MqAttr>(), 64);
     }
+
+    // -- errno is set to ENOSYS for all stubs --
+
+    #[test]
+    fn test_mq_open_sets_errno() {
+        crate::errno::set_errno(0);
+        let _ = mq_open(b"/q\0".as_ptr(), 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mq_close_sets_errno() {
+        crate::errno::set_errno(0);
+        let _ = mq_close(0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mq_unlink_sets_errno() {
+        crate::errno::set_errno(0);
+        let _ = mq_unlink(b"/q\0".as_ptr());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mq_send_sets_errno() {
+        crate::errno::set_errno(0);
+        let _ = mq_send(0, b"x\0".as_ptr(), 1, 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mq_receive_sets_errno() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 8];
+        let mut prio: u32 = 0;
+        let _ = mq_receive(0, buf.as_mut_ptr(), 8, &raw mut prio);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mq_notify_sets_errno() {
+        crate::errno::set_errno(0);
+        let _ = mq_notify(0, core::ptr::null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
 }

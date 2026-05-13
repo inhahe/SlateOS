@@ -804,6 +804,79 @@ mod tests {
         assert!(e, "Unbound UDP with handle 0 should be in error state");
     }
 
+    // -- is_set_in word boundary tests --
+
+    #[test]
+    fn test_is_set_in_word_boundaries() {
+        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        fd_set_zero(&raw mut set);
+
+        // Test at 64-bit word boundaries.
+        fd_set_set(63, &raw mut set);
+        fd_set_set(64, &raw mut set);
+        fd_set_set(127, &raw mut set);
+        fd_set_set(128, &raw mut set);
+
+        assert!(is_set_in(63, &set), "fd 63 (end of word 0)");
+        assert!(is_set_in(64, &set), "fd 64 (start of word 1)");
+        assert!(is_set_in(127, &set), "fd 127 (end of word 1)");
+        assert!(is_set_in(128, &set), "fd 128 (start of word 2)");
+
+        // Neighbors should not be set.
+        assert!(!is_set_in(62, &set));
+        assert!(!is_set_in(65, &set));
+        assert!(!is_set_in(126, &set));
+        assert!(!is_set_in(129, &set));
+    }
+
+    #[test]
+    fn test_is_set_in_last_valid_fd() {
+        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        fd_set_zero(&raw mut set);
+
+        // FD_SETSIZE - 1 should be the last valid fd.
+        let last_fd = (FD_SETSIZE - 1) as i32;
+        fd_set_set(last_fd, &raw mut set);
+        assert!(is_set_in(last_fd, &set));
+        assert!(!is_set_in(last_fd + 1, &set)); // Out of range.
+    }
+
+    // -- Poll constant tests --
+
+    #[test]
+    fn test_poll_constants_match_linux() {
+        assert_eq!(POLLIN, 0x0001);
+        assert_eq!(POLLPRI, 0x0002);
+        assert_eq!(POLLOUT, 0x0004);
+        assert_eq!(POLLERR, 0x0008);
+        assert_eq!(POLLHUP, 0x0010);
+        assert_eq!(POLLNVAL, 0x0020);
+        assert_eq!(POLLRDNORM, 0x0040);
+        assert_eq!(POLLWRNORM, 0x0100);
+    }
+
+    #[test]
+    fn test_poll_flags_are_disjoint() {
+        let flags: [i16; 8] = [
+            POLLIN, POLLPRI, POLLOUT, POLLERR,
+            POLLHUP, POLLNVAL, POLLRDNORM, POLLWRNORM,
+        ];
+        for i in 0..flags.len() {
+            for j in (i + 1)..flags.len() {
+                assert_eq!(flags[i] & flags[j], 0,
+                    "poll flags {} and {} must be disjoint", flags[i], flags[j]);
+            }
+        }
+    }
+
+    // -- FdSet size/layout --
+
+    #[test]
+    fn test_fd_setsize() {
+        assert_eq!(FD_SETSIZE, 256);
+        assert_eq!(FD_SET_WORDS, 4);  // 256 / 64
+    }
+
     // -- Timeval tests --
 
     #[test]

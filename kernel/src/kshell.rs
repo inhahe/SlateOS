@@ -3545,6 +3545,7 @@ const COMMANDS: &[&str] = &[
     "traceroute", "tracert",
     "igmp",
     "lldp",
+    "netstat", "ss",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4744,6 +4745,7 @@ fn dispatch(line: &str) {
         "traceroute" | "tracert" => cmd_traceroute(args),
         "igmp" => cmd_igmp(args),
         "lldp" => cmd_lldp(args),
+        "netstat" | "ss" => cmd_netstat(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35561,6 +35563,94 @@ fn cmd_lldp(args: &str) {
     }
 }
 
+/// `netstat` / `ss` — Network status and diagnostics.
+fn cmd_netstat(args: &str) {
+    use crate::net::netstat;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let flag = parts.first().copied().unwrap_or("-a");
+    match flag {
+        "help" => {
+            shell_println!("netstat — unified network status");
+            shell_println!("  netstat              Show all connections and listeners");
+            shell_println!("  netstat -a           Show all (same as default)");
+            shell_println!("  netstat -t           TCP connections only");
+            shell_println!("  netstat -u           UDP sockets only");
+            shell_println!("  netstat -l           Listening sockets only");
+            shell_println!("  netstat -s           Protocol statistics");
+            shell_println!("  netstat -r           Routing table");
+            shell_println!("  netstat -i           Interface statistics");
+            shell_println!("  netstat test         Run self-tests");
+        }
+        "-t" | "--tcp" => {
+            let conns = netstat::collect_tcp_connections();
+            if conns.is_empty() {
+                shell_println!("No active TCP connections");
+            } else {
+                shell_print!("{}", netstat::format_tcp_connections(&conns));
+            }
+        }
+        "-u" | "--udp" => {
+            let udp = netstat::collect_udp_sockets();
+            if udp.is_empty() {
+                shell_println!("No active UDP sockets");
+            } else {
+                shell_print!("{}", netstat::format_udp_sockets(&udp));
+            }
+        }
+        "-l" | "--listen" => {
+            let listeners = netstat::collect_tcp_listeners();
+            let udp = netstat::collect_udp_sockets();
+            if listeners.is_empty() && udp.is_empty() {
+                shell_println!("No listening sockets");
+            } else {
+                if !listeners.is_empty() {
+                    shell_print!("{}", netstat::format_tcp_listeners(&listeners));
+                }
+                if !udp.is_empty() {
+                    shell_print!("{}", netstat::format_udp_sockets(&udp));
+                }
+            }
+        }
+        "-s" | "--stats" => {
+            shell_print!("{}", netstat::format_protocol_stats());
+        }
+        "-r" | "--route" => {
+            shell_print!("{}", netstat::format_routing());
+        }
+        "-i" | "--iface" | "--interface" => {
+            shell_print!("{}", netstat::format_interface_stats());
+        }
+        "test" => {
+            match netstat::self_test() {
+                Ok(()) => shell_println!("netstat self-test: PASSED"),
+                Err(e) => shell_println!("netstat self-test FAILED: {:?}", e),
+            }
+        }
+        "-a" | _ => {
+            // Default: show everything.
+            let conns = netstat::collect_tcp_connections();
+            let listeners = netstat::collect_tcp_listeners();
+            let udp = netstat::collect_udp_sockets();
+
+            if !conns.is_empty() {
+                shell_print!("{}", netstat::format_tcp_connections(&conns));
+                shell_println!("");
+            }
+            if !listeners.is_empty() {
+                shell_print!("{}", netstat::format_tcp_listeners(&listeners));
+                shell_println!("");
+            }
+            if !udp.is_empty() {
+                shell_print!("{}", netstat::format_udp_sockets(&udp));
+                shell_println!("");
+            }
+            if conns.is_empty() && listeners.is_empty() && udp.is_empty() {
+                shell_println!("No active connections or sockets");
+            }
+        }
+    }
+}
+
 /// `inputa11y` / `ia11y` — input accessibility features.
 fn cmd_inputa11y(args: &str) {
     use crate::fs::inputa11y;
@@ -66015,7 +66105,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

@@ -3547,6 +3547,7 @@ const COMMANDS: &[&str] = &[
     "lldp",
     "netstat", "ss",
     "ndisc", "arpscan",
+    "nc", "netcat",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4748,6 +4749,7 @@ fn dispatch(line: &str) {
         "lldp" => cmd_lldp(args),
         "netstat" | "ss" => cmd_netstat(args),
         "ndisc" | "arpscan" => cmd_ndisc(args),
+        "nc" | "netcat" => cmd_nc(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -35756,6 +35758,319 @@ fn cmd_ndisc(args: &str) {
     }
 }
 
+/// `nc` / `netcat` — TCP/UDP networking swiss army knife.
+fn cmd_nc(args: &str) {
+    use alloc::format;
+    use alloc::vec::Vec;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("help");
+
+    match sub {
+        "connect" | "c" => {
+            // nc connect <host> <port>
+            if parts.len() < 3 {
+                shell_println!("Usage: nc connect <host> <port>");
+                return;
+            }
+            let host_str = parts[1];
+            let port_str = parts[2];
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                // Try DNS resolution.
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("nc: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            let port: u16 = match port_str.parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("nc: invalid port '{}'", port_str);
+                    return;
+                }
+            };
+
+            shell_println!("Connecting to {}:{}...", ip, port);
+            match crate::net::netcat::tcp_connect(ip, port) {
+                Ok((handle, data)) => {
+                    let svc = crate::net::netcat::service_name(port);
+                    if svc.is_empty() {
+                        shell_println!("Connected to {}:{} (handle {})", ip, port, handle);
+                    } else {
+                        shell_println!("Connected to {}:{} ({}) (handle {})", ip, port, svc, handle);
+                    }
+                    if !data.is_empty() {
+                        shell_println!("Received {} bytes:", data.len());
+                        // Print as text if valid UTF-8, otherwise hex.
+                        if let Ok(text) = core::str::from_utf8(&data) {
+                            for line in text.lines() {
+                                shell_println!("  {}", line);
+                            }
+                        } else {
+                            let preview_len = data.len().min(64);
+                            let hex: Vec<u8> = data[..preview_len].iter()
+                                .flat_map(|b| {
+                                    let hi = b >> 4;
+                                    let lo = b & 0xf;
+                                    let to_hex = |n: u8| if n < 10 { b'0' + n } else { b'a' + n - 10 };
+                                    [to_hex(hi), to_hex(lo), b' ']
+                                })
+                                .collect();
+                            if let Ok(s) = core::str::from_utf8(&hex) {
+                                shell_println!("  {}", s.trim());
+                            }
+                        }
+                    }
+                    // Close the connection.
+                    crate::net::netcat::tcp_close(handle);
+                }
+                Err(e) => shell_println!("nc: connect failed: {:?}", e),
+            }
+        }
+
+        "listen" | "l" => {
+            // nc listen <port>
+            if parts.len() < 2 {
+                shell_println!("Usage: nc listen <port>");
+                return;
+            }
+            let port: u16 = match parts[1].parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("nc: invalid port '{}'", parts[1]);
+                    return;
+                }
+            };
+
+            shell_println!("Listening on port {}...", port);
+            match crate::net::netcat::tcp_listen(port) {
+                Ok((handle, peer_ip, peer_port)) => {
+                    shell_println!("Connection from {}:{} (handle {})", peer_ip, peer_port, handle);
+                    // Try to receive some data.
+                    match crate::net::netcat::tcp_recv(handle) {
+                        Ok(data) if !data.is_empty() => {
+                            shell_println!("Received {} bytes:", data.len());
+                            if let Ok(text) = core::str::from_utf8(&data) {
+                                for line in text.lines() {
+                                    shell_println!("  {}", line);
+                                }
+                            }
+                        }
+                        _ => shell_println!("(no data received)"),
+                    }
+                    crate::net::netcat::tcp_close(handle);
+                }
+                Err(e) => shell_println!("nc: listen failed: {:?}", e),
+            }
+        }
+
+        "send" | "s" => {
+            // nc send <host> <port> <data...>
+            if parts.len() < 4 {
+                shell_println!("Usage: nc send <host> <port> <data...>");
+                return;
+            }
+            let host_str = parts[1];
+            let port_str = parts[2];
+            let data_str: alloc::string::String = parts[3..].join(" ");
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("nc: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            let port: u16 = match port_str.parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("nc: invalid port '{}'", port_str);
+                    return;
+                }
+            };
+
+            // TCP send: connect, send, close.
+            shell_println!("Connecting to {}:{}...", ip, port);
+            match crate::net::netcat::tcp_connect(ip, port) {
+                Ok((handle, _)) => {
+                    match crate::net::netcat::tcp_send(handle, data_str.as_bytes()) {
+                        Ok(sent) => shell_println!("Sent {} bytes to {}:{}", sent, ip, port),
+                        Err(e) => shell_println!("nc: send failed: {:?}", e),
+                    }
+                    // Try to receive response.
+                    match crate::net::netcat::tcp_recv(handle) {
+                        Ok(data) if !data.is_empty() => {
+                            shell_println!("Response ({} bytes):", data.len());
+                            if let Ok(text) = core::str::from_utf8(&data) {
+                                for line in text.lines() {
+                                    shell_println!("  {}", line);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    crate::net::netcat::tcp_close(handle);
+                }
+                Err(e) => shell_println!("nc: connect failed: {:?}", e),
+            }
+        }
+
+        "udp" | "u" => {
+            // nc udp <host> <port> <data...>
+            if parts.len() < 4 {
+                shell_println!("Usage: nc udp <host> <port> <data...>");
+                return;
+            }
+            let host_str = parts[1];
+            let port_str = parts[2];
+            let data_str: alloc::string::String = parts[3..].join(" ");
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("nc: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            let port: u16 = match port_str.parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("nc: invalid port '{}'", port_str);
+                    return;
+                }
+            };
+
+            match crate::net::netcat::udp_send(ip, port, data_str.as_bytes()) {
+                Ok(()) => shell_println!("Sent {} bytes (UDP) to {}:{}", data_str.len(), ip, port),
+                Err(e) => shell_println!("nc: udp send failed: {:?}", e),
+            }
+        }
+
+        "scan" | "z" => {
+            // nc scan <host> <start-port> [end-port]
+            if parts.len() < 3 {
+                shell_println!("Usage: nc scan <host> <start-port> [end-port]");
+                return;
+            }
+            let host_str = parts[1];
+            let start_str = parts[2];
+            let end_str = parts.get(3).copied().unwrap_or(start_str);
+
+            let ip = if let Some(ip) = parse_ipv4(host_str) {
+                ip
+            } else {
+                match crate::net::dns::resolve(host_str) {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        shell_println!("nc: cannot resolve host '{}'", host_str);
+                        return;
+                    }
+                }
+            };
+
+            let start: u16 = match start_str.parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("nc: invalid port '{}'", start_str);
+                    return;
+                }
+            };
+            let end: u16 = match end_str.parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("nc: invalid port '{}'", end_str);
+                    return;
+                }
+            };
+
+            shell_println!("Scanning {}:{}-{}...", ip, start, end);
+            let results = crate::net::netcat::scan_ports(ip, start, end);
+            let mut open_count = 0u16;
+            for r in &results {
+                if r.open {
+                    let svc = crate::net::netcat::service_name(r.port);
+                    if svc.is_empty() {
+                        shell_println!("  port {}: OPEN", r.port);
+                    } else {
+                        shell_println!("  port {}: OPEN ({})", r.port, svc);
+                    }
+                    open_count = open_count.saturating_add(1);
+                }
+            }
+            shell_println!("Scan complete: {} ports scanned, {} open", results.len(), open_count);
+        }
+
+        "service" => {
+            // nc service <port>
+            if parts.len() < 2 {
+                shell_println!("Usage: nc service <port>");
+                return;
+            }
+            let port: u16 = match parts[1].parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("nc: invalid port '{}'", parts[1]);
+                    return;
+                }
+            };
+            let svc = crate::net::netcat::service_name(port);
+            if svc.is_empty() {
+                shell_println!("Port {}: (unknown service)", port);
+            } else {
+                shell_println!("Port {}: {}", port, svc);
+            }
+        }
+
+        "status" | "stats" => {
+            let s = crate::net::netcat::stats();
+            shell_println!("Netcat statistics:");
+            shell_println!("  TCP connects:   {}", s.tcp_connects);
+            shell_println!("  TCP listens:    {}", s.tcp_listens);
+            shell_println!("  UDP sends:      {}", s.udp_sends);
+            shell_println!("  Port scans:     {}", s.port_scans);
+            shell_println!("  Bytes sent:     {}", s.bytes_sent);
+            shell_println!("  Bytes received: {}", s.bytes_received);
+        }
+
+        "test" => {
+            match crate::net::netcat::self_test() {
+                Ok(()) => shell_println!("nc: all self-tests passed"),
+                Err(e) => shell_println!("nc: self-test failed: {:?}", e),
+            }
+        }
+
+        _ => {
+            shell_println!("nc — TCP/UDP networking swiss army knife");
+            shell_println!();
+            shell_println!("Usage:");
+            shell_println!("  nc connect <host> <port>              — TCP connect (banner grab)");
+            shell_println!("  nc listen <port>                      — TCP listen (accept one connection)");
+            shell_println!("  nc send <host> <port> <data...>       — TCP send data");
+            shell_println!("  nc udp <host> <port> <data...>        — UDP send datagram");
+            shell_println!("  nc scan <host> <start> [end]          — port scan");
+            shell_println!("  nc service <port>                     — look up well-known service");
+            shell_println!("  nc status                             — show statistics");
+            shell_println!("  nc test                               — run self-tests");
+        }
+    }
+}
+
 /// `inputa11y` / `ia11y` — input accessibility features.
 fn cmd_inputa11y(args: &str) {
     use crate::fs::inputa11y;
@@ -66210,7 +66525,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

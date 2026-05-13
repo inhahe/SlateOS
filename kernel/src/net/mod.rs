@@ -26,6 +26,7 @@ pub mod icmp;
 pub mod igmp;
 pub mod lldp;
 pub mod ndisc;
+pub mod netcat;
 pub mod netstat;
 pub mod mdns;
 pub mod ntp;

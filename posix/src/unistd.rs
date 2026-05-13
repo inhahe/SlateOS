@@ -588,6 +588,48 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
     0
 }
 
+/// Get the domain name of the host.
+///
+/// Stub: returns "(none)" (no NIS/YP domain configured).
+#[unsafe(no_mangle)]
+pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    let domain = b"(none)\0";
+    if len < domain.len() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let mut i: usize = 0;
+    while i < domain.len() {
+        unsafe { *name.add(i) = domain[i]; }
+        i = i.wrapping_add(1);
+    }
+    0
+}
+
+/// Set the domain name of the host.
+///
+/// Stub: always returns -1 with EPERM (requires root, not implemented).
+#[unsafe(no_mangle)]
+pub extern "C" fn setdomainname(_name: *const u8, _len: usize) -> i32 {
+    errno::set_errno(errno::EPERM);
+    -1
+}
+
+/// Get the maximum number of open file descriptors.
+///
+/// Returns the size of the per-process file descriptor table.
+/// This is a compatibility function; use `sysconf(_SC_OPEN_MAX)` in
+/// new code.
+#[unsafe(no_mangle)]
+pub extern "C" fn getdtablesize() -> i32 {
+    // Match our fd table size.
+    256
+}
+
 /// Set an alarm timer.
 ///
 /// Stub: returns 0 (no alarm support — signals not implemented).

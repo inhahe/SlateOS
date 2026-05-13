@@ -1345,3 +1345,196 @@ fn char_to_digit(c: u8, base: i32) -> i32 {
     };
     if val < base { val } else { -1 }
 }
+
+// ---------------------------------------------------------------------------
+// drand48 / lrand48 / mrand48 family — 48-bit LCG PRNG (POSIX)
+// ---------------------------------------------------------------------------
+//
+// Uses the standard POSIX 48-bit linear congruential generator:
+//   X_{n+1} = (a * X_n + c) mod 2^48
+// where a = 0x5DEECE66D, c = 0xB.
+
+/// 48-bit PRNG state.
+static mut RAND48_STATE: u64 = 0x330E_ABCD_1234_u64;
+
+/// LCG multiplier (POSIX standard value).
+const RAND48_A: u64 = 0x5DEE_CE66_D;
+/// LCG addend (POSIX standard value).
+const RAND48_C: u64 = 0xB;
+/// 48-bit mask.
+const RAND48_MASK: u64 = (1_u64 << 48) - 1;
+
+/// Advance the 48-bit LCG state.
+#[inline]
+fn rand48_step() -> u64 {
+    // SAFETY: Single-threaded access.
+    let state = unsafe { core::ptr::addr_of_mut!(RAND48_STATE).read() };
+    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
+    unsafe { core::ptr::addr_of_mut!(RAND48_STATE).write(next); }
+    next
+}
+
+/// Return a non-negative `f64` in [0.0, 1.0).
+///
+/// Uses the full 48-bit state scaled to a double.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn drand48() -> f64 {
+    let state = rand48_step();
+    // 2^48 = 281474976710656.0
+    state as f64 / 281_474_976_710_656.0
+}
+
+/// Return a non-negative `i64` in [0, 2^31).
+#[unsafe(no_mangle)]
+pub extern "C" fn lrand48() -> i64 {
+    let state = rand48_step();
+    (state >> 17) as i64 // Upper 31 bits.
+}
+
+/// Return a signed `i64` in [-2^31, 2^31).
+#[unsafe(no_mangle)]
+pub extern "C" fn mrand48() -> i64 {
+    let state = rand48_step();
+    // Interpret upper 32 bits as signed.
+    ((state >> 16) as i32) as i64
+}
+
+/// Seed the 48-bit PRNG with a 32-bit value.
+///
+/// Sets the upper 32 bits of state; lower 16 bits are set to 0x330E
+/// (POSIX default).
+#[unsafe(no_mangle)]
+pub extern "C" fn srand48(seedval: i64) {
+    let hi = (seedval as u64) << 16;
+    let state = (hi | 0x330E) & RAND48_MASK;
+    unsafe { core::ptr::addr_of_mut!(RAND48_STATE).write(state); }
+}
+
+/// Seed the 48-bit PRNG with a full 48-bit value.
+///
+/// `seed16v` points to an array of 3 `u16` values.
+/// Returns a pointer to the previous seed (static storage).
+///
+/// # Safety
+///
+/// `seed16v` must point to at least 3 `u16` values.
+#[unsafe(no_mangle)]
+pub extern "C" fn seed48(seed16v: *const u16) -> *const u16 {
+    static mut OLD_SEED: [u16; 3] = [0; 3];
+
+    // Use addr_of_mut to avoid creating shared references to mutable
+    // statics (Rust 2024).  addr_of_mut! is safe; only the dereference
+    // is unsafe.
+    let old_seed_ptr = core::ptr::addr_of_mut!(OLD_SEED);
+
+    if seed16v.is_null() {
+        return old_seed_ptr.cast::<u16>();
+    }
+
+    // Save old state.
+    let old = unsafe { core::ptr::addr_of_mut!(RAND48_STATE).read() };
+    unsafe {
+        (*old_seed_ptr)[0] = (old & 0xFFFF) as u16;
+        (*old_seed_ptr)[1] = ((old >> 16) & 0xFFFF) as u16;
+        (*old_seed_ptr)[2] = ((old >> 32) & 0xFFFF) as u16;
+    }
+
+    // Set new state from seed16v[0..3].
+    // SAFETY: seed16v verified non-null, caller guarantees 3 elements.
+    let s0 = unsafe { *seed16v } as u64;
+    let s1 = unsafe { *seed16v.add(1) } as u64;
+    let s2 = unsafe { *seed16v.add(2) } as u64;
+    let state = (s2 << 32) | (s1 << 16) | s0;
+    unsafe { core::ptr::addr_of_mut!(RAND48_STATE).write(state & RAND48_MASK); }
+
+    old_seed_ptr.cast::<u16>()
+}
+
+/// Same as `lrand48` but uses caller-provided state.
+///
+/// # Safety
+///
+/// `xsubi` must point to an array of 3 `u16` values that the
+/// function will read and update.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn nrand48(xsubi: *mut u16) -> i64 {
+    if xsubi.is_null() {
+        return 0;
+    }
+
+    // Read state from xsubi.
+    let s0 = unsafe { *xsubi } as u64;
+    let s1 = unsafe { *xsubi.add(1) } as u64;
+    let s2 = unsafe { *xsubi.add(2) } as u64;
+    let state = (s2 << 32) | (s1 << 16) | s0;
+
+    // Step.
+    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
+
+    // Write back.
+    unsafe {
+        *xsubi = (next & 0xFFFF) as u16;
+        *xsubi.add(1) = ((next >> 16) & 0xFFFF) as u16;
+        *xsubi.add(2) = ((next >> 32) & 0xFFFF) as u16;
+    }
+
+    (next >> 17) as i64
+}
+
+/// Same as `drand48` but uses caller-provided state.
+///
+/// # Safety
+///
+/// `xsubi` must point to an array of 3 `u16` values.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn erand48(xsubi: *mut u16) -> f64 {
+    if xsubi.is_null() {
+        return 0.0;
+    }
+
+    let s0 = unsafe { *xsubi } as u64;
+    let s1 = unsafe { *xsubi.add(1) } as u64;
+    let s2 = unsafe { *xsubi.add(2) } as u64;
+    let state = (s2 << 32) | (s1 << 16) | s0;
+
+    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
+
+    unsafe {
+        *xsubi = (next & 0xFFFF) as u16;
+        *xsubi.add(1) = ((next >> 16) & 0xFFFF) as u16;
+        *xsubi.add(2) = ((next >> 32) & 0xFFFF) as u16;
+    }
+
+    next as f64 / 281_474_976_710_656.0
+}
+
+/// Same as `mrand48` but uses caller-provided state.
+///
+/// # Safety
+///
+/// `xsubi` must point to an array of 3 `u16` values.
+#[unsafe(no_mangle)]
+#[allow(clippy::arithmetic_side_effects)]
+pub extern "C" fn jrand48(xsubi: *mut u16) -> i64 {
+    if xsubi.is_null() {
+        return 0;
+    }
+
+    let s0 = unsafe { *xsubi } as u64;
+    let s1 = unsafe { *xsubi.add(1) } as u64;
+    let s2 = unsafe { *xsubi.add(2) } as u64;
+    let state = (s2 << 32) | (s1 << 16) | s0;
+
+    let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
+
+    unsafe {
+        *xsubi = (next & 0xFFFF) as u16;
+        *xsubi.add(1) = ((next >> 16) & 0xFFFF) as u16;
+        *xsubi.add(2) = ((next >> 32) & 0xFFFF) as u16;
+    }
+
+    ((next >> 16) as i32) as i64
+}

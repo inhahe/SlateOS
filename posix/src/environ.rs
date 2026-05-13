@@ -110,6 +110,12 @@ pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i3
     let name_len = unsafe { string::strlen(name) };
     let value_len = unsafe { string::strlen(value) };
 
+    // POSIX: name must not be empty.
+    if name_len == 0 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+
     // Check for '=' in name (not allowed).
     let mut k: usize = 0;
     while k < name_len {

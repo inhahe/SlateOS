@@ -13,16 +13,16 @@
 //!
 //! ## Flags
 //!
-//! - `FNM_NOESCAPE` (1): treat `\` as ordinary character
-//! - `FNM_PATHNAME` (2): `*` and `?` don't match `/`
+//! - `FNM_PATHNAME` (1): `*` and `?` don't match `/`
+//! - `FNM_NOESCAPE` (2): treat `\` as ordinary character
 //! - `FNM_PERIOD` (4): leading `.` must be matched explicitly
 
 /// Returned when the pattern does not match.
 pub const FNM_NOMATCH: i32 = 1;
-/// Treat backslash as ordinary character.
-pub const FNM_NOESCAPE: i32 = 1;
-/// Wildcards don't match `/`.
-pub const FNM_PATHNAME: i32 = 2;
+/// Wildcards don't match `/` (glibc/musl value: 1).
+pub const FNM_PATHNAME: i32 = 1;
+/// Treat backslash as ordinary character (glibc/musl value: 2).
+pub const FNM_NOESCAPE: i32 = 2;
 /// Leading `.` must be matched explicitly.
 pub const FNM_PERIOD: i32 = 4;
 
@@ -192,14 +192,14 @@ fn match_star(
 /// Recursive pattern matching engine.
 ///
 /// `at_start` indicates whether `spos` is at the start of the string
-/// (or the start of a path component, for FNM_PATHNAME + FNM_PERIOD).
+/// (or the start of a path component, for `FNM_PATHNAME` + `FNM_PERIOD`).
 fn do_match(
     pat: *const u8,
     mut ppos: usize,
     str: *const u8,
     mut spos: usize,
     flags: i32,
-    at_start: bool,
+    mut at_start: bool,
 ) -> bool {
     loop {
         let pc = unsafe { *pat.add(ppos) };
@@ -217,6 +217,8 @@ fn do_match(
                 }
                 ppos = ppos.wrapping_add(1);
                 spos = spos.wrapping_add(1);
+                // Matched a non-'/' char; no longer at start of component.
+                at_start = false;
             }
 
             b'*' => {
@@ -242,6 +244,7 @@ fn do_match(
                 };
                 ppos = new_ppos;
                 spos = spos.wrapping_add(1);
+                at_start = false;
             }
 
             b'\\' if flags & FNM_NOESCAPE == 0 => {
@@ -252,6 +255,8 @@ fn do_match(
                 }
                 ppos = ppos.wrapping_add(1);
                 spos = spos.wrapping_add(1);
+                // After '\/' the next char is at component start.
+                at_start = sc == b'/';
             }
 
             _ => {
@@ -261,9 +266,8 @@ fn do_match(
                 ppos = ppos.wrapping_add(1);
                 spos = spos.wrapping_add(1);
                 // After passing a '/', next char is "at start" of component.
-                if pc == b'/' {
-                    return do_match(pat, ppos, str, spos, flags, true);
-                }
+                // Otherwise we're no longer at start.
+                at_start = pc == b'/';
             }
         }
     }

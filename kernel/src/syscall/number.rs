@@ -2070,6 +2070,14 @@ pub const SYS_UDP_MCAST_LEAVE: u64 = 815;
 /// Returns: 0 on success, negative error on failure.
 pub const SYS_UDP_CONNECT: u64 = 816;
 
+/// `SYS_UDP_LOCAL_PORT` — query the local port of a UDP socket.
+///
+/// `arg0`: socket handle.
+///
+/// Returns the local port number (positive u16 range) on success,
+/// or `InvalidArgument` if the handle is invalid or not active.
+pub const SYS_UDP_LOCAL_PORT: u64 = 817;
+
 /// Resolve a hostname to an IPv4 address via DNS.
 ///
 /// `arg0`: pointer to hostname string.

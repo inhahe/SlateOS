@@ -1686,10 +1686,30 @@ pub unsafe extern "C" fn send(
                 errno::set_errno(errno::EDESTADDRREQ);
                 return -1;
             }
+            // Implicit bind if not yet bound (POSIX: first send on
+            // unbound DGRAM socket binds to an ephemeral port).
+            let handle = if entry.handle == 0 {
+                let bind_ret = syscall1(SYS_UDP_BIND, 0);
+                if bind_ret < 0 {
+                    errno::set_errno(translate_net_error(bind_ret));
+                    return -1;
+                }
+                let new_handle = bind_ret as u64;
+                let _ = fdtable::install_fd(fd, HandleKind::UdpSocket, new_handle);
+                // Re-apply peer filter on the new handle.
+                let peer_port_host = u16::from_be(meta.peer_port);
+                let _ = syscall3(
+                    SYS_UDP_CONNECT, new_handle,
+                    u64::from(meta.peer_addr), u64::from(peer_port_host),
+                );
+                new_handle
+            } else {
+                entry.handle
+            };
             let port = u16::from_be(meta.peer_port);
             let ret = syscall5(
                 SYS_UDP_SEND,
-                entry.handle,
+                handle,
                 u64::from(meta.peer_addr),
                 u64::from(port),
                 buf as u64,
@@ -2185,11 +2205,27 @@ pub unsafe extern "C" fn sendto(
         port = u16::from_be(sin.sin_port);
     }
 
+    // Implicit bind: if the socket hasn't been bound yet (handle == 0),
+    // bind to ephemeral port 0 before sending.  POSIX requires this
+    // for unbound DGRAM sockets on the first sendto/send.
+    let handle = if entry.handle == 0 {
+        let bind_ret = syscall1(SYS_UDP_BIND, 0); // port 0 = ephemeral
+        if bind_ret < 0 {
+            errno::set_errno(translate_net_error(bind_ret));
+            return -1;
+        }
+        let new_handle = bind_ret as u64;
+        // Update fd table with the new kernel handle.
+        let _ = fdtable::install_fd(fd, HandleKind::UdpSocket, new_handle);
+        new_handle
+    } else {
+        entry.handle
+    };
+
     // SYS_UDP_SEND: arg0=handle, arg1=ip, arg2=port, arg3=buf, arg4=len.
-    // If handle is 0 (unbound), kernel creates an ephemeral port.
     let ret = syscall5(
         SYS_UDP_SEND,
-        entry.handle,
+        handle,
         u64::from(ip),
         u64::from(port),
         buf as u64,
@@ -3006,13 +3042,22 @@ pub unsafe extern "C" fn getsockname(
 
     // Determine the local port.  If the metadata has an explicit bound port
     // (from bind()), use it.  Otherwise query the kernel for the ephemeral
-    // port assigned during connect().
+    // port assigned during connect() or bind(port=0).
     let entry = fdtable::get_fd(fd).unwrap(); // Already validated above.
     let local_port = if meta.bound_port != 0 {
         meta.bound_port
     } else if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
         let port_raw = crate::syscall::syscall1(
             crate::syscall::SYS_TCP_LOCAL_PORT, entry.handle,
+        );
+        if port_raw > 0 {
+            (port_raw as u16).to_be()
+        } else {
+            0
+        }
+    } else if entry.kind == HandleKind::UdpSocket && entry.handle != 0 {
+        let port_raw = crate::syscall::syscall1(
+            crate::syscall::SYS_UDP_LOCAL_PORT, entry.handle,
         );
         if port_raw > 0 {
             (port_raw as u16).to_be()

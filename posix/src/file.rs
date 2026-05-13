@@ -283,7 +283,13 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             syscall3(SYS_FS_WRITE, entry.handle, buf as u64, count as u64)
         }
         HandleKind::Pipe => {
-            syscall3(SYS_PIPE_WRITE, entry.handle, buf as u64, count as u64)
+            let ret = syscall3(SYS_PIPE_WRITE, entry.handle, buf as u64, count as u64);
+            if ret == errno::native::CHANNEL_CLOSED {
+                // Reader has closed — POSIX mandates EPIPE (not ECONNRESET).
+                errno::set_errno(errno::EPIPE);
+                return -1;
+            }
+            ret
         }
         HandleKind::Console => {
             syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64)

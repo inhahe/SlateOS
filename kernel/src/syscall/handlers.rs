@@ -5620,14 +5620,13 @@ pub fn sys_udp_send(args: &SyscallArgs) -> SyscallResult {
         unsafe { core::slice::from_raw_parts(data_ptr, data_len) }
     };
 
-    // Use an ephemeral source port based on the handle, or a default.
-    // The UDP send function takes a source port directly.
-    let src_port: u16 = if _handle == 0 { 49152 } else {
-        // Look up the bound port from the socket handle.
-        // For simplicity, use 49152 + handle as ephemeral.
-        #[allow(clippy::cast_possible_truncation)]
-        let p = 49152u16.saturating_add(_handle as u16);
-        p
+    // Look up the actual bound port from the socket handle.
+    let src_port: u16 = match crate::net::udp::local_port(_handle) {
+        Some(port) => port,
+        None => {
+            // Invalid or inactive handle — cannot send.
+            return SyscallResult::err(KernelError::InvalidHandle);
+        }
     };
 
     match crate::net::udp::send(src_port, dst_ip, dst_port, data) {
@@ -5770,6 +5769,15 @@ pub fn sys_udp_connect(args: &SyscallArgs) -> SyscallResult {
     match crate::net::udp::connect(handle, peer_ip, port) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_UDP_LOCAL_PORT` — query the local port of a UDP socket.
+pub fn sys_udp_local_port(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    match crate::net::udp::local_port(handle) {
+        Some(port) => SyscallResult::ok(port as i64),
+        None => SyscallResult::err(KernelError::InvalidArgument),
     }
 }
 

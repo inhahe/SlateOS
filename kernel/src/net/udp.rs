@@ -486,6 +486,18 @@ pub fn peek(handle: usize) -> Option<Datagram> {
 
 /// Set the connected peer for a UDP socket (connected-mode filter).
 ///
+/// Return the local port bound to a UDP socket.
+///
+/// Returns `Some(port)` for valid active sockets, `None` for invalid handles.
+pub fn local_port(handle: usize) -> Option<u16> {
+    let sockets = SOCKETS.lock();
+    let sock = sockets.get(handle)?;
+    if !sock.active {
+        return None;
+    }
+    Some(sock.port)
+}
+
 /// After calling this, recv/peek will only return datagrams from
 /// the specified peer.  Pass `Ipv4Addr::UNSPECIFIED` and port 0 to
 /// disconnect (remove filter).

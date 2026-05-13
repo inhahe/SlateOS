@@ -103,6 +103,7 @@ pub const SYS_UDP_CLOSE: u64 = 813;
 pub const SYS_UDP_MCAST_JOIN: u64 = 814;
 pub const SYS_UDP_MCAST_LEAVE: u64 = 815;
 pub const SYS_UDP_CONNECT: u64 = 816;
+pub const SYS_UDP_LOCAL_PORT: u64 = 817;
 
 pub const SYS_DNS_RESOLVE: u64 = 820;
 pub const SYS_DNS_REVERSE_RESOLVE: u64 = 821;

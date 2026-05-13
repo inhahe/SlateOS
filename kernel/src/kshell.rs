@@ -3536,6 +3536,7 @@ const COMMANDS: &[&str] = &[
     "upnp", "portfwd",
     "httpc", "curl",
     "ntp", "ntpdate",
+    "mdns", "dnssd",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4726,6 +4727,7 @@ fn dispatch(line: &str) {
         "upnp" | "portfwd" => cmd_upnp(args),
         "httpc" | "curl" => cmd_httpc(args),
         "ntp" | "ntpdate" => cmd_ntp(args),
+        "mdns" | "dnssd" => cmd_mdns(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -34587,6 +34589,163 @@ fn cmd_ntp(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'ntp help'.", sub);
+        }
+    }
+}
+
+/// `mdns` / `dnssd` — mDNS / DNS-SD service discovery.
+fn cmd_mdns(args: &str) {
+    use crate::net::mdns;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "show" => {
+            shell_println!("{}", mdns::procfs_content());
+        }
+        "status" | "stats" => {
+            let s = mdns::stats();
+            shell_println!("mDNS / DNS-SD");
+            shell_println!("  Initialized:  {}", s.initialized);
+            shell_println!("  Hostname:     {}.local", s.hostname);
+            shell_println!("  Cache:        {}/{}", s.cache_entries, 32);
+            shell_println!("  Services:     {}/{}", s.services_registered, 8);
+            shell_println!("  Queries sent: {}", s.queries_sent);
+            shell_println!("  Responses:    {}", s.responses_sent);
+            shell_println!("  Records recv: {}", s.records_received);
+            shell_println!("  Cache hits:   {}  misses: {}", s.cache_hits, s.cache_misses);
+        }
+        "init" => {
+            mdns::init();
+            shell_println!("mDNS initialized");
+        }
+        "hostname" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                let s = mdns::stats();
+                shell_println!("{}.local", s.hostname);
+            } else {
+                mdns::set_hostname(name);
+                shell_println!("Hostname set to {}.local", name);
+            }
+        }
+        "resolve" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: mdns resolve <name.local>");
+                return;
+            }
+            // Append .local if not present.
+            let query = if name.ends_with(".local") {
+                String::from(name)
+            } else {
+                alloc::format!("{}.local", name)
+            };
+            shell_println!("Resolving {} ...", query);
+            match mdns::resolve_local(&query) {
+                Ok(ip) => shell_println!("{} -> {}", query, ip),
+                Err(e) => shell_println!("Failed: {:?}", e),
+            }
+        }
+        "browse" => {
+            let svc_type = parts.get(1).copied().unwrap_or("_http._tcp");
+            shell_println!("Browsing for {} services ...", svc_type);
+            match mdns::browse_services(svc_type) {
+                Ok(services) => {
+                    if services.is_empty() {
+                        shell_println!("No services found");
+                    } else {
+                        shell_println!("{:<20} {:<20} {:<20} {:<6} {}",
+                            "Instance", "Type", "Host", "Port", "IP");
+                        for svc in &services {
+                            let ip_str = match svc.ip {
+                                Some(ip) => alloc::format!("{}", ip),
+                                None => String::from("-"),
+                            };
+                            shell_println!("{:<20} {:<20} {:<20} {:<6} {}",
+                                svc.instance_name, svc.service_type,
+                                svc.hostname, svc.port, ip_str);
+                            if !svc.txt.is_empty() {
+                                for t in &svc.txt {
+                                    shell_println!("  TXT: {}", t);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => shell_println!("Browse failed: {:?}", e),
+            }
+        }
+        "register" => {
+            // mdns register <instance> <type> <port> [txt=val ...]
+            let instance = parts.get(1).copied().unwrap_or("");
+            let stype = parts.get(2).copied().unwrap_or("");
+            let port_str = parts.get(3).copied().unwrap_or("0");
+            if instance.is_empty() || stype.is_empty() {
+                shell_println!("Usage: mdns register <instance> <type> <port> [txt=val ...]");
+                return;
+            }
+            let port: u16 = port_str.parse().unwrap_or(0);
+            let txt: Vec<&str> = parts.get(4..).unwrap_or(&[]).to_vec();
+            match mdns::register_service(instance, stype, port, &txt) {
+                Ok(idx) => shell_println!("Registered service #{}: {}.{}.local port={}",
+                    idx, instance, stype, port),
+                Err(e) => shell_println!("Failed to register: {:?}", e),
+            }
+        }
+        "unregister" => {
+            let idx_str = parts.get(1).copied().unwrap_or("");
+            if idx_str.is_empty() {
+                shell_println!("Usage: mdns unregister <index>");
+                return;
+            }
+            let idx: usize = idx_str.parse().unwrap_or(usize::MAX);
+            if mdns::unregister_service(idx) {
+                shell_println!("Unregistered service #{}", idx);
+            } else {
+                shell_println!("Service #{} not found or inactive", idx);
+            }
+        }
+        "cache" => {
+            let records = mdns::cached_records();
+            if records.is_empty() {
+                shell_println!("Cache empty");
+            } else {
+                shell_println!("{:<30} {:<6} {:<30} {}", "Name", "Type", "Data", "TTL");
+                for r in &records {
+                    let data_str = match &r.data {
+                        crate::net::mdns::RecordData::Address(ip) => alloc::format!("{}", ip),
+                        crate::net::mdns::RecordData::Name(n) => n.clone(),
+                        crate::net::mdns::RecordData::Srv { port, target, .. } =>
+                            alloc::format!("{}:{}", target, port),
+                        crate::net::mdns::RecordData::Txt(entries) =>
+                            entries.join("; "),
+                    };
+                    shell_println!("{:<30} {:<6} {:<30} {}s",
+                        r.name, r.record_type.label(), data_str, r.ttl);
+                }
+            }
+        }
+        "test" => {
+            match mdns::self_test() {
+                Ok(()) => shell_println!("mDNS self-test: PASSED"),
+                Err(e) => shell_println!("mDNS self-test FAILED: {:?}", e),
+            }
+        }
+        "help" => {
+            shell_println!("mdns — mDNS / DNS-SD service discovery");
+            shell_println!("  show                Full status overview");
+            shell_println!("  status              Summary statistics");
+            shell_println!("  init                Initialize mDNS subsystem");
+            shell_println!("  hostname [name]     Get/set local hostname");
+            shell_println!("  resolve <name>      Resolve .local hostname");
+            shell_println!("  browse [type]       Browse services (default: _http._tcp)");
+            shell_println!("  register <inst> <type> <port> [txt=val ...]");
+            shell_println!("  unregister <idx>    Remove registered service");
+            shell_println!("  cache               Show cached records");
+            shell_println!("  test                Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'mdns help'.", sub);
         }
     }
 }
@@ -65045,7 +65204,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

@@ -376,6 +376,7 @@ const ROOT_FILES: &[&str] = &[
     "upnp",
     "http",
     "ntp",
+    "mdns",
     "systemimage",
     "raidmgr",
     "networkbridge",
@@ -7441,6 +7442,10 @@ fn gen_ntp() -> Vec<u8> {
     crate::net::ntp::procfs_content().into_bytes()
 }
 
+fn gen_mdns() -> Vec<u8> {
+    crate::net::mdns::procfs_content().into_bytes()
+}
+
 fn gen_systemimage() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
@@ -10124,6 +10129,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "upnp" => Ok(gen_upnp()),
         "http" => Ok(gen_http()),
         "ntp" => Ok(gen_ntp()),
+        "mdns" => Ok(gen_mdns()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),
         "networkbridge" => Ok(gen_networkbridge()),

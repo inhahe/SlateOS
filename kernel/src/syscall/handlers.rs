@@ -7157,6 +7157,17 @@ pub fn sys_tcp_poll_status(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(status as i64)
 }
 
+/// SYS_TCP_LAST_ERROR — query the last error code for a TCP connection.
+///
+/// arg0: connection handle
+///
+/// Returns: error code (0=none, 1=refused, 2=reset, 3=timedout).
+pub fn sys_tcp_last_error(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0 as usize;
+    let err = crate::net::tcp::last_error(handle);
+    SyscallResult::ok(err as i64)
+}
+
 /// SYS_TCP_LISTENER_READY — check if listener has pending connections.
 ///
 /// arg0: listener handle

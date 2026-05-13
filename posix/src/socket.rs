@@ -2551,23 +2551,20 @@ pub unsafe extern "C" fn getsockopt(
         let val: i32 = match (level, optname) {
             (SOL_SOCKET, SO_TYPE) => meta.map_or(0, |m| m.sock_type),
             (SOL_SOCKET, SO_ERROR) => {
-                // For TCP sockets, query kernel poll status to detect
-                // errors (e.g., failed non-blocking connect).
+                // Query the kernel for the connection's last error code.
+                // This distinguishes ECONNREFUSED (RST on SYN_SENT),
+                // ECONNRESET (RST on established), and ETIMEDOUT
+                // (retransmission exhaustion) — previously we could only
+                // infer the error from poll flags, which was imprecise.
                 if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
-                    let status = crate::syscall::syscall1(
-                        crate::syscall::SYS_TCP_POLL_STATUS, entry.handle,
-                    ) as u16;
-                    // POLL_ERROR (0x08) or POLL_HANGUP (0x10) on a socket
-                    // that was never established → connection refused.
-                    // Note: POLLHUP on an established connection is normal
-                    // EOF, not an error.
-                    if (status & 0x0008) != 0 {
-                        errno::ECONNREFUSED
-                    } else if (status & 0x0010) != 0 && (status & 0x0004) == 0 {
-                        // Hangup without writable → connection was lost.
-                        errno::ECONNRESET
-                    } else {
-                        0 // No pending error.
+                    let err = crate::syscall::syscall1(
+                        crate::syscall::SYS_TCP_LAST_ERROR, entry.handle,
+                    ) as u8;
+                    match err {
+                        1 => errno::ECONNREFUSED,
+                        2 => errno::ECONNRESET,
+                        3 => errno::ETIMEDOUT,
+                        _ => 0, // No pending error (normal close or active).
                     }
                 } else {
                     0

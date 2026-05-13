@@ -480,6 +480,16 @@ struct TcpConnection {
     keepalive_probes_sent: u8,
     /// Timestamp (ns, monotonic) of last data activity (send or receive).
     last_activity_ns: u64,
+
+    /// Last error that caused this connection to be deactivated.
+    ///
+    /// Set when the connection transitions to `active = false` due to an
+    /// error (RST, timeout, etc.).  Queried by `getsockopt(SO_ERROR)` to
+    /// distinguish between ECONNREFUSED (RST on SYN_SENT), ECONNRESET
+    /// (RST on established/closing), and ETIMEDOUT (retransmit exhaustion).
+    ///
+    /// Value 0 means no error (normal close).
+    last_error: u8,
 }
 
 impl TcpConnection {
@@ -539,6 +549,7 @@ impl TcpConnection {
             keepalive_probes_max: KEEPALIVE_PROBES_DEFAULT,
             keepalive_probes_sent: 0,
             last_activity_ns: 0,
+            last_error: 0,
         }
     }
 }
@@ -2835,6 +2846,7 @@ pub fn abort(handle: usize) -> KernelResult<()> {
     let rcv_nxt = conn.rcv_nxt;
 
     // Immediately reclaim the slot.
+    conn.last_error = TCP_ERR_RESET; // Aborted by local side.
     conn.active = false;
     conn.state = TcpState::Closed;
     conn.rx_buffer.clear();
@@ -2888,6 +2900,32 @@ pub fn is_remote_closed(handle: usize) -> bool {
     conns.get(handle)
         .map(|c| c.remote_closed || c.state == TcpState::CloseWait)
         .unwrap_or(true)
+}
+
+// ---------------------------------------------------------------------------
+// Connection error codes (for getsockopt SO_ERROR)
+// ---------------------------------------------------------------------------
+
+/// No error — connection closed normally.
+pub const TCP_ERR_NONE: u8 = 0;
+/// Connection refused — RST received while in SYN_SENT.
+pub const TCP_ERR_REFUSED: u8 = 1;
+/// Connection reset — RST received on established/closing connection.
+pub const TCP_ERR_RESET: u8 = 2;
+/// Connection timed out — retransmission limit exceeded.
+pub const TCP_ERR_TIMEDOUT: u8 = 3;
+
+/// Query the last error for a TCP connection.
+///
+/// Returns the error code that caused the connection to become inactive.
+/// Used by `getsockopt(SO_ERROR)` to report the correct POSIX error:
+/// - `TCP_ERR_NONE` (0) → no pending error
+/// - `TCP_ERR_REFUSED` (1) → `ECONNREFUSED`
+/// - `TCP_ERR_RESET` (2) → `ECONNRESET`
+/// - `TCP_ERR_TIMEDOUT` (3) → `ETIMEDOUT`
+pub fn last_error(handle: usize) -> u8 {
+    let conns = CONNECTIONS.lock();
+    conns.get(handle).map_or(TCP_ERR_RESET, |c| c.last_error)
 }
 
 // ---------------------------------------------------------------------------
@@ -3153,6 +3191,7 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
                         seq: conn.snd_nxt,
                         ack: conn.rcv_nxt,
                     });
+                    conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
@@ -3580,6 +3619,12 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     // Handle RST.
     if flags & TCP_RST != 0 {
         crate::serial_println!("[tcp] RST received — connection reset");
+        // RST on SYN_SENT = connection refused; on established+ = reset.
+        conn.last_error = if conn.state == TcpState::SynSent {
+            TCP_ERR_REFUSED
+        } else {
+            TCP_ERR_RESET
+        };
         conn.active = false;
         conn.state = TcpState::Closed;
         conn.rx_buffer.clear();
@@ -3675,6 +3720,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                     ip_packet.src, src_port, local_port
                 );
             } else if flags & TCP_RST != 0 {
+                conn.last_error = TCP_ERR_REFUSED;
                 conn.active = false;
                 conn.state = TcpState::Closed;
             } else if flags & TCP_SYN != 0 {
@@ -3986,6 +4032,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
 
         TcpState::LastAck => {
             if flags & TCP_ACK != 0 {
+                conn.last_error = TCP_ERR_NONE; // Normal close.
                 conn.active = false;
                 conn.state = TcpState::Closed;
             }
@@ -4190,6 +4237,7 @@ pub fn tick_keepalive() {
             let snd_nxt = conn.snd_nxt;
             let rcv_nxt = conn.rcv_nxt;
 
+            conn.last_error = TCP_ERR_NONE; // Normal close by local side.
             conn.active = false;
             conn.state = TcpState::Closed;
             conn.rx_buffer.clear();
@@ -4294,6 +4342,7 @@ pub fn tick_time_wait_cleanup() {
                         "[tcp] TIME_WAIT expired for port {} → {}:{} — reclaiming slot",
                         conn.local_port, conn.remote_ip, conn.remote_port
                     );
+                    conn.last_error = TCP_ERR_NONE; // Normal close.
                     conn.active = false;
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
@@ -4313,6 +4362,7 @@ pub fn tick_time_wait_cleanup() {
                         "[tcp] FIN_WAIT_1 timeout for port {} → {}:{} — reclaiming",
                         conn.local_port, conn.remote_ip, conn.remote_port
                     );
+                    conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
@@ -4333,6 +4383,7 @@ pub fn tick_time_wait_cleanup() {
                         "[tcp] FIN_WAIT_2 timeout for port {} → {}:{} — reclaiming",
                         conn.local_port, conn.remote_ip, conn.remote_port
                     );
+                    conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
@@ -4351,6 +4402,7 @@ pub fn tick_time_wait_cleanup() {
                         "[tcp] LAST_ACK timeout for port {} → {}:{} — reclaiming",
                         conn.local_port, conn.remote_ip, conn.remote_port
                     );
+                    conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
@@ -4369,6 +4421,7 @@ pub fn tick_time_wait_cleanup() {
                         "[tcp] SYN_RECEIVED timeout for port {} ← {}:{} — reclaiming",
                         conn.local_port, conn.remote_ip, conn.remote_port
                     );
+                    conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
@@ -4388,6 +4441,7 @@ pub fn tick_time_wait_cleanup() {
                         "[tcp] SYN_SENT timeout for port {} → {}:{} — reclaiming",
                         conn.local_port, conn.remote_ip, conn.remote_port
                     );
+                    conn.last_error = TCP_ERR_TIMEDOUT;
                     conn.active = false;
                     conn.state = TcpState::Closed;
                     conn.rx_buffer.clear();
@@ -4623,6 +4677,7 @@ pub fn icmp_error(
                     orig_src_ip, src_port,
                     orig_dst_ip, dst_port
                 );
+                conn.last_error = TCP_ERR_REFUSED; // ICMP unreachable on connect.
                 conn.active = false;
                 conn.state = TcpState::Closed;
                 conn.rx_buffer.clear();
@@ -4638,6 +4693,7 @@ pub fn icmp_error(
                     orig_src_ip, src_port,
                     orig_dst_ip, dst_port
                 );
+                conn.last_error = TCP_ERR_REFUSED; // ICMP unreachable on half-open.
                 conn.active = false;
                 conn.state = TcpState::Closed;
                 conn.rx_buffer.clear();

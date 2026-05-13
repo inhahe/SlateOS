@@ -2300,6 +2300,20 @@ pub const SYS_TCP_SET_KEEPALIVE: u64 = 851;
 /// `arg3`: max probe count (0 = use default).
 pub const SYS_TCP_SET_KEEPALIVE_PARAMS: u64 = 852;
 
+/// Query the last error code for a TCP connection.
+///
+/// Used by `getsockopt(SO_ERROR)` to report the correct POSIX error
+/// after a connection failure (refused, reset, timed out).
+///
+/// Returns:
+///   0 = no error (normal close)
+///   1 = connection refused (ECONNREFUSED)
+///   2 = connection reset (ECONNRESET)
+///   3 = connection timed out (ETIMEDOUT)
+///
+/// `arg0`: connection handle.
+pub const SYS_TCP_LAST_ERROR: u64 = 853;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

@@ -5334,13 +5334,19 @@ pub fn sys_tcp_recv(args: &SyscallArgs) -> SyscallResult {
     };
 
     if data.is_empty() {
-        // Check if we should return 0 (EOF/closed) or EAGAIN (non-blocking
-        // with nothing available).
-        if dontwait && !crate::net::tcp::is_remote_closed(handle) {
-            return SyscallResult::err(KernelError::WouldBlock);
+        // No data available.  Two cases:
+        // 1. Connection closed (remote FIN received): return 0 (EOF).
+        // 2. Connection still open but no data arrived (blocking timeout
+        //    expired, or non-blocking with nothing queued): return WouldBlock
+        //    so the POSIX layer can retry or propagate EAGAIN.
+        //
+        // The old code only returned WouldBlock for MSG_DONTWAIT, causing
+        // blocking reads to spuriously report EOF when the 5-second kernel
+        // poll expired on an active connection.
+        if crate::net::tcp::is_remote_closed(handle) {
+            return SyscallResult::ok(0);
         }
-        // Connection closed or timed out — return 0 (EOF).
-        return SyscallResult::ok(0);
+        return SyscallResult::err(KernelError::WouldBlock);
     }
 
     let copy_len = data.len().min(buf_cap);

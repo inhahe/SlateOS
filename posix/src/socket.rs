@@ -1669,17 +1669,13 @@ pub unsafe extern "C" fn recv(
             let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
             let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
 
-            // First attempt: if non-blocking or we have SO_RCVTIMEO, always
-            // use MSG_DONTWAIT so we control the timeout ourselves.
-            let first_flags = if is_nb || timeout_ms > 0 {
-                kern_flags | MSG_DONTWAIT as u32
-            } else {
-                kern_flags
-            };
+            // Always try non-blocking first so we can implement
+            // timeout/blocking semantics in userspace consistently.
+            let try_flags = kern_flags | MSG_DONTWAIT as u32;
 
             let ret = syscall4(
                 SYS_TCP_RECV, entry.handle,
-                buf as u64, len as u64, first_flags as u64,
+                buf as u64, len as u64, try_flags as u64,
             );
             if ret >= 0 {
                 return ret as isize;
@@ -1687,22 +1683,11 @@ pub unsafe extern "C" fn recv(
 
             let err = translate_net_error(ret);
             if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
-                // Blocking with SO_RCVTIMEO: poll-wait then retry.
-                if timeout_ms > 0 {
-                    return tcp_recv_wait(
-                        entry.handle, buf, len, kern_flags, timeout_ms,
-                    );
-                }
-                // No timeout set, use kernel's default blocking.
-                let retry = syscall4(
-                    SYS_TCP_RECV, entry.handle,
-                    buf as u64, len as u64, kern_flags as u64,
+                // Blocking socket — poll-wait with SO_RCVTIMEO.
+                // timeout_ms == 0 means wait indefinitely.
+                return tcp_recv_wait(
+                    entry.handle, buf, len, kern_flags, timeout_ms,
                 );
-                if retry < 0 {
-                    errno::set_errno(translate_net_error(retry));
-                    return -1;
-                }
-                return retry as isize;
             }
             errno::set_errno(err);
             -1
@@ -2083,35 +2068,25 @@ pub unsafe extern "C" fn recvfrom(
             let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
             let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
 
-            // Use MSG_DONTWAIT if we have SO_RCVTIMEO so we control timeout.
-            let first_flags = if !is_nb && timeout_ms > 0 {
-                kern_flags | MSG_DONTWAIT as u32
-            } else {
-                kern_flags
-            };
+            // Always try non-blocking first so we can implement timeout
+            // semantics in userspace.  If data is available, we return
+            // immediately without entering the poll loop.
+            let try_flags = kern_flags | MSG_DONTWAIT as u32;
 
             let ret = syscall4(
                 SYS_TCP_RECV, entry.handle,
-                buf as u64, len as u64, first_flags as u64,
+                buf as u64, len as u64, try_flags as u64,
             );
 
             let recv_result = if ret >= 0 {
                 ret as isize
             } else {
                 let err = translate_net_error(ret);
-                if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb && timeout_ms > 0 {
+                if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
+                    // Blocking socket — poll-wait with SO_RCVTIMEO.
+                    // timeout_ms == 0 means wait indefinitely (tcp_recv_wait
+                    // uses u64::MAX deadline in that case).
                     tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms)
-                } else if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb && timeout_ms == 0 {
-                    // No timeout: let kernel handle blocking.
-                    let retry = syscall4(
-                        SYS_TCP_RECV, entry.handle,
-                        buf as u64, len as u64, kern_flags as u64,
-                    );
-                    if retry < 0 {
-                        errno::set_errno(translate_net_error(retry));
-                        return -1;
-                    }
-                    retry as isize
                 } else {
                     errno::set_errno(err);
                     return -1;

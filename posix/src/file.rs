@@ -187,29 +187,22 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                 & crate::fcntl::O_NONBLOCK != 0;
             let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
 
-            // Use MSG_DONTWAIT if non-blocking or if we have SO_RCVTIMEO
-            // (so we control the timeout at the posix layer).
-            let flags: u64 = if is_nb || timeout_ms > 0 { 0x40 } else { 0 };
+            // Always try non-blocking first — we implement blocking
+            // and SO_RCVTIMEO in the POSIX layer via tcp_recv_wait.
             let ret = syscall4(
-                SYS_TCP_RECV, entry.handle, buf as u64, count as u64, flags,
+                SYS_TCP_RECV, entry.handle, buf as u64, count as u64,
+                0x40, // MSG_DONTWAIT
             );
             if ret >= 0 {
                 return ret as SsizeT;
             }
-            // Handle WouldBlock with SO_RCVTIMEO polling.
-            let err_code = ret;
-            let posix_err = crate::socket::translate_net_error(err_code);
+            let posix_err = crate::socket::translate_net_error(ret);
             if (posix_err == errno::EAGAIN || posix_err == errno::EWOULDBLOCK) && !is_nb {
-                if timeout_ms > 0 {
-                    return crate::socket::tcp_recv_wait(
-                        entry.handle, buf, count, 0, timeout_ms,
-                    );
-                }
-                // No timeout: fall back to kernel blocking.
-                let retry = syscall4(
-                    SYS_TCP_RECV, entry.handle, buf as u64, count as u64, 0,
+                // Blocking socket — poll-wait with SO_RCVTIMEO.
+                // timeout_ms == 0 means wait indefinitely.
+                return crate::socket::tcp_recv_wait(
+                    entry.handle, buf, count, 0, timeout_ms,
                 );
-                return errno::translate(retry) as SsizeT;
             }
             errno::set_errno(posix_err);
             return -1;

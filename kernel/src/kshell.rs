@@ -33455,7 +33455,12 @@ fn cmd_servicemgr(args: &str) {
             shell_println!("Services: {}, Running: {}", total, running);
             shell_println!("Starts: {}, Stops: {}, Failures: {}, Ops: {}", starts, stops, failures, ops);
         }
-        "test" => { servicemgr::self_test(); shell_println!("Service manager self-test complete."); }
+        "test" => {
+            match servicemgr::self_test() {
+                Ok(()) => shell_println!("Service manager self-test complete."),
+                Err(e) => shell_println!("Service manager self-test FAILED: {:?}", e),
+            }
+        }
         "init" => { servicemgr::init_defaults(); shell_println!("Service manager initialized."); }
         _ => {
             shell_println!("servicemgr (svcmgr) — system service management");

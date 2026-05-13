@@ -36,8 +36,10 @@
 //! - **Threads**: `pthread` stubs, working mutex ops
 //! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,
 //!   `posix_memalign`/`aligned_alloc`/`valloc`/`memalign`/`reallocarray`,
+//!   `malloc_usable_size`,
 //!   `setjmp`/`longjmp`/`sigsetjmp`/`siglongjmp`, `qsort`, `bsearch`,
-//!   `atoi`/`strtol`,
+//!   `atoi`/`atol`/`atoll`/`strtol`/`strtoul`,
+//!   `random`/`srandom`/`initstate`/`setstate`,
 //!   `puts`/`fputs`/`fwrite`/`fread`/`perror`, ctype classification,
 //!   `__ctype_b_loc`/`__ctype_tolower_loc`/`__ctype_toupper_loc`
 //! - **Formatted Output**: `printf`, `fprintf`, `dprintf`, `sprintf`,
@@ -66,13 +68,16 @@
 //!   `wcrtomb`, `mbrlen`, `wcwidth`, `wcswidth`, `iswalnum`..`iswxdigit`,
 //!   `towlower`, `towupper`, `wctype`, `iswctype`, `wctrans`, `towctrans`,
 //!   `wcscpy`, `wcsncpy`, `wcslen`, `wcscmp`, `wcsncmp`, `wcscat`,
-//!   `wcsncat`, `wcschr`, `wcsrchr`, `wcsstr`,
+//!   `wcsncat`, `wcschr`, `wcsrchr`, `wcsstr`, `wcsdup`,
+//!   `wcsspn`, `wcscspn`, `wcspbrk`, `wcstok`,
 //!   `wcstol`, `wcstoul`, `wcstoll`, `wcstoull`, `wcstod`, `wcstof`,
 //!   `wmemcpy`, `wmemset`, `wmemcmp`, `wmemchr`, `wmemmove`,
+//!   `mbsrtowcs`, `mbsnrtowcs`, `wcsrtombs`, `wcsnrtombs`,
 //!   `nl_langinfo`
 //! - **File Tree Walk**: `ftw`, `nftw` (recursive directory traversal)
 //! - **BSD Error Functions**: `err`, `errx`, `warn`, `warnx` (and `v*`
 //!   variants)
+//! - **Timezone**: `tzset`, `tzname`, `timezone`, `daylight`
 //! - **Misc**: `getcwd`, `chdir`, `realpath`, `errno`, `sysconf`,
 //!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`,
 //!   `basename`, `dirname`, `getopt`/`getopt_long`/`getopt_long_only`,

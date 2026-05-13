@@ -21,6 +21,7 @@ pub mod dns;
 pub mod ethernet;
 pub mod firewall;
 pub mod frag;
+pub mod http;
 pub mod icmp;
 pub mod interface;
 pub mod ipv4;

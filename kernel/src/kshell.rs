@@ -3534,6 +3534,7 @@ const COMMANDS: &[&str] = &[
     "vmguest", "vmtools",
     "pciids", "lspci",
     "upnp", "portfwd",
+    "httpc", "curl",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4722,6 +4723,7 @@ fn dispatch(line: &str) {
         "vmguest" | "vmtools" => cmd_vmguest(args),
         "pciids" | "lspci" => cmd_pciids(args),
         "upnp" | "portfwd" => cmd_upnp(args),
+        "httpc" | "curl" => cmd_httpc(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -34336,6 +34338,130 @@ fn cmd_upnp(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'upnp help'.", sub);
+        }
+    }
+}
+
+/// `httpc` / `curl` — HTTP client.
+fn cmd_httpc(args: &str) {
+    use crate::net::http;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("httpc — HTTP/1.1 client");
+            shell_println!("  get <url>              HTTP GET request");
+            shell_println!("  head <url>             HTTP HEAD request (headers only)");
+            shell_println!("  post <url> <body>      HTTP POST request");
+            shell_println!("  status                 HTTP client statistics");
+            shell_println!("  test                   Run self-tests");
+            shell_println!("");
+            shell_println!("Examples:");
+            shell_println!("  httpc get http://example.com/");
+            shell_println!("  httpc head http://example.com/");
+            shell_println!("  httpc post http://api.example.com/data key=value");
+        }
+        "get" => {
+            let url = parts.get(1).copied().unwrap_or("");
+            if url.is_empty() {
+                shell_println!("Usage: httpc get <url>");
+                return;
+            }
+            shell_println!("GET {}...", url);
+            match http::fetch(url) {
+                Ok(resp) => {
+                    shell_println!("HTTP {} {}", resp.status_code, resp.reason);
+                    for (name, value) in &resp.headers {
+                        shell_println!("  {}: {}", name, value);
+                    }
+                    shell_println!("");
+                    if resp.body.is_empty() {
+                        shell_println!("(empty body)");
+                    } else {
+                        let text = resp.body_text();
+                        // Truncate very long bodies for display.
+                        if text.len() > 4096 {
+                            if let Some(prefix) = text.get(..4096) {
+                                shell_println!("{}", prefix);
+                            }
+                            shell_println!("... ({} bytes total, truncated)", resp.body.len());
+                        } else {
+                            shell_println!("{}", text);
+                        }
+                    }
+                }
+                Err(e) => {
+                    shell_println!("Request failed: {:?}", e);
+                }
+            }
+        }
+        "head" => {
+            let url = parts.get(1).copied().unwrap_or("");
+            if url.is_empty() {
+                shell_println!("Usage: httpc head <url>");
+                return;
+            }
+            shell_println!("HEAD {}...", url);
+            match http::head(url) {
+                Ok(resp) => {
+                    shell_println!("HTTP {} {}", resp.status_code, resp.reason);
+                    for (name, value) in &resp.headers {
+                        shell_println!("  {}: {}", name, value);
+                    }
+                }
+                Err(e) => {
+                    shell_println!("Request failed: {:?}", e);
+                }
+            }
+        }
+        "post" => {
+            let url = parts.get(1).copied().unwrap_or("");
+            let body_str = parts.get(2..).map(|s| s.join(" ")).unwrap_or_default();
+            if url.is_empty() {
+                shell_println!("Usage: httpc post <url> [body]");
+                return;
+            }
+            shell_println!("POST {} ({} bytes)...", url, body_str.len());
+            match http::fetch_post(url, body_str.as_bytes(), Some("application/x-www-form-urlencoded")) {
+                Ok(resp) => {
+                    shell_println!("HTTP {} {}", resp.status_code, resp.reason);
+                    for (name, value) in &resp.headers {
+                        shell_println!("  {}: {}", name, value);
+                    }
+                    shell_println!("");
+                    let text = resp.body_text();
+                    if text.len() > 4096 {
+                        if let Some(prefix) = text.get(..4096) {
+                            shell_println!("{}", prefix);
+                        }
+                        shell_println!("... ({} bytes total, truncated)", resp.body.len());
+                    } else if !text.is_empty() {
+                        shell_println!("{}", text);
+                    }
+                }
+                Err(e) => {
+                    shell_println!("Request failed: {:?}", e);
+                }
+            }
+        }
+        "status" | "stats" => {
+            let s = http::stats();
+            shell_println!("HTTP Client Statistics");
+            shell_println!("  Total requests:      {}", s.total_requests);
+            shell_println!("  Successful (2xx):    {}", s.successful);
+            shell_println!("  Failed:              {}", s.failed);
+            shell_println!("  Redirects followed:  {}", s.redirects_followed);
+            shell_println!("  Bytes sent:          {}", s.bytes_sent);
+            shell_println!("  Bytes received:      {}", s.bytes_received);
+        }
+        "test" => {
+            match http::self_test() {
+                Ok(()) => shell_println!("HTTP self-test: PASSED"),
+                Err(e) => shell_println!("HTTP self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'httpc help'.", sub);
         }
     }
 }
@@ -64794,7 +64920,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
-        | "upnp" | "portfwd"
+        | "upnp" | "portfwd" | "httpc" | "curl"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

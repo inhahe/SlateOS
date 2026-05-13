@@ -568,6 +568,18 @@ fn frexp_internal(x: f64, exp: &mut i32) -> f64 {
 
     let bits = x.to_bits();
     let biased_exp = ((bits >> 52) & 0x7FF) as i32;
+
+    if biased_exp == 0 {
+        // Subnormal: value = (-1)^s × 0.mantissa × 2^(-1022).
+        // No implicit leading 1; we must normalize by scaling up.
+        // Multiply by 2^64 to move the value into normal range,
+        // then recurse and subtract 64 from the exponent.
+        let scaled = x * (1u64 << 54) as f64; // x * 2^54
+        let m = frexp_internal(scaled, exp);
+        *exp -= 54;
+        return m;
+    }
+
     *exp = biased_exp - 1022; // Adjust so that 0.5 <= |m| < 1.
 
     // Replace exponent with 1022 (which gives 0.5 * mantissa).
@@ -1509,19 +1521,16 @@ pub extern "C" fn remquo(x: f64, y: f64, quo: *mut i32) -> f64 {
     let rem = x - q_rounded * y;
 
     if !quo.is_null() {
-        // Store low bits of quotient with correct sign.
+        // Store low bits of the quotient magnitude with the correct sign.
+        // POSIX requires at least 3 bits of the quotient; we provide 31.
         let q_int = q_rounded as i64;
-        // POSIX requires at least 3 bits; we provide 31.
-        let q_low = (q_int & 0x7FFF_FFFF) as i32;
-        let sign = if (x < 0.0) == (y < 0.0) { 1_i32 } else { -1_i32 };
+        // Extract magnitude, then truncate to 31 bits.
+        let mag = q_int.unsigned_abs();
+        let q_low = (mag & 0x7FFF_FFFF) as i32;
+        // Apply the sign of x/y (positive when same sign, negative otherwise).
+        let signed_q = if (x < 0.0) != (y < 0.0) { -q_low } else { q_low };
         // SAFETY: quo verified non-null.
-        unsafe {
-            *quo = if q_int < 0 { -q_low } else { q_low };
-            // Ensure sign matches x/y.
-            if *quo != 0 && ((*quo < 0) != (sign < 0)) {
-                *quo = -*quo;
-            }
-        }
+        unsafe { *quo = signed_q; }
     }
 
     rem
@@ -3068,5 +3077,223 @@ mod tests {
         assert_eq!(ldexp(0.0, 100), 0.0, "ldexp(0, 100)");
         assert!(ldexp(f64::NAN, 5).is_nan(), "ldexp(NaN, 5)");
         assert_eq!(ldexp(f64::INFINITY, -5), f64::INFINITY, "ldexp(inf, -5)");
+    }
+
+    // -----------------------------------------------------------------------
+    // frexp subnormal handling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn frexp_subnormal_roundtrip() {
+        // Smallest positive subnormal: 5e-324 = 2^-1074.
+        let x = f64::from_bits(1);
+        let mut e: i32 = 0;
+        let m = frexp(x, &mut e);
+        // frexp(2^-1074) should give m=0.5, exp=-1073.
+        assert!(m >= 0.5 && m < 1.0,
+            "frexp subnormal: m={m} should be in [0.5, 1.0)");
+        let roundtrip = ldexp(m, e);
+        assert_eq!(roundtrip.to_bits(), x.to_bits(),
+            "frexp/ldexp roundtrip for smallest subnormal failed: got {roundtrip}, expected {x}");
+    }
+
+    #[test]
+    fn frexp_subnormal_mid() {
+        // A subnormal in the middle of the range.
+        // 2^-1024 = ldexp(1.0, -1024) — this is subnormal.
+        let x = ldexp(1.0, -1040);
+        let mut e: i32 = 0;
+        let m = frexp(x, &mut e);
+        assert!(m >= 0.5 && m < 1.0,
+            "frexp mid-subnormal: m={m} should be in [0.5, 1.0)");
+        assert_eq!(e, -1039,
+            "frexp(2^-1040) should have exp=-1039, got {e}");
+        let roundtrip = ldexp(m, e);
+        assert_eq!(roundtrip.to_bits(), x.to_bits(),
+            "frexp/ldexp roundtrip for mid-subnormal failed");
+    }
+
+    #[test]
+    fn frexp_negative_subnormal() {
+        let x = -f64::from_bits(1); // -5e-324
+        let mut e: i32 = 0;
+        let m = frexp(x, &mut e);
+        assert!(m <= -0.5 && m > -1.0,
+            "frexp negative subnormal: m={m} should be in (-1.0, -0.5]");
+        let roundtrip = ldexp(m, e);
+        assert_eq!(roundtrip.to_bits(), x.to_bits(),
+            "frexp/ldexp roundtrip for negative subnormal");
+    }
+
+    #[test]
+    fn frexp_largest_subnormal() {
+        // Largest subnormal: biased_exp=0, all mantissa bits set.
+        let x = f64::from_bits(0x000F_FFFF_FFFF_FFFF);
+        let mut e: i32 = 0;
+        let m = frexp(x, &mut e);
+        assert!(m >= 0.5 && m < 1.0,
+            "frexp largest subnormal: m={m} should be in [0.5, 1.0)");
+        let roundtrip = ldexp(m, e);
+        assert_eq!(roundtrip.to_bits(), x.to_bits(),
+            "frexp/ldexp roundtrip for largest subnormal");
+    }
+
+    // -----------------------------------------------------------------------
+    // sqrt accuracy with subnormals
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sqrt_small_value() {
+        // sqrt(1e-300) ≈ 1e-150.
+        let x = 1e-300;
+        let result = sqrt(x);
+        let expected = 1e-150;
+        assert_approx(result, expected, expected * 1e-10,
+            "sqrt(1e-300)");
+    }
+
+    // -----------------------------------------------------------------------
+    // nextafter edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nextafter_from_zero() {
+        let pos = nextafter(0.0, 1.0);
+        assert!(pos > 0.0, "nextafter(0, 1) should be positive");
+        assert_eq!(pos.to_bits(), 1, "nextafter(0, 1) should be smallest subnormal");
+
+        let neg = nextafter(0.0, -1.0);
+        assert!(neg < 0.0, "nextafter(0, -1) should be negative");
+    }
+
+    #[test]
+    fn nextafter_same() {
+        // nextafter(x, x) == x
+        #[allow(clippy::float_cmp)]
+        {
+            assert_eq!(nextafter(1.0, 1.0), 1.0);
+            assert_eq!(nextafter(0.0, 0.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn nextafter_direction() {
+        let up = nextafter(1.0, 2.0);
+        let down = nextafter(1.0, 0.0);
+        assert!(up > 1.0, "nextafter(1, 2) should be > 1");
+        assert!(down < 1.0, "nextafter(1, 0) should be < 1");
+    }
+
+    #[test]
+    fn nextafter_nan() {
+        assert!(nextafter(f64::NAN, 1.0).is_nan());
+        assert!(nextafter(1.0, f64::NAN).is_nan());
+    }
+
+    // -----------------------------------------------------------------------
+    // remainder / fmod edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remainder_basic() {
+        // remainder(5.0, 2.0) = 5.0 - rint(2.5)*2.0 = 5.0 - 2*2.0 = 1.0
+        assert_approx(remainder(5.0, 2.0), 1.0, EPS, "remainder(5,2)");
+    }
+
+    #[test]
+    fn remainder_negative() {
+        // remainder(7.0, 3.0): rint(7/3) = rint(2.333) = 2 → 7 - 2*3 = 1
+        assert_approx(remainder(7.0, 3.0), 1.0, EPS, "remainder(7,3)");
+    }
+
+    #[test]
+    fn remainder_ties_to_even() {
+        // remainder(2.5, 1.0): rint(2.5) = 2 (ties to even) → 2.5 - 2 = 0.5
+        assert_approx(remainder(2.5, 1.0), 0.5, EPS, "remainder(2.5,1) ties to even");
+    }
+
+    #[test]
+    fn fmod_basic() {
+        // fmod(5.0, 3.0) = 5.0 - trunc(5/3)*3 = 5 - 1*3 = 2
+        assert_approx(fmod(5.0, 3.0), 2.0, EPS, "fmod(5,3)");
+    }
+
+    #[test]
+    fn fmod_zero_divisor() {
+        assert!(fmod(1.0, 0.0).is_nan(), "fmod(1,0) should be NaN");
+    }
+
+    #[test]
+    fn remainder_special_cases() {
+        assert!(remainder(f64::INFINITY, 1.0).is_nan(), "remainder(inf, 1)");
+        assert!(remainder(1.0, 0.0).is_nan(), "remainder(1, 0)");
+        assert!(remainder(f64::NAN, 1.0).is_nan(), "remainder(NaN, 1)");
+    }
+
+    // -----------------------------------------------------------------------
+    // remquo edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remquo_basic() {
+        let mut q: i32 = 0;
+        let r = remquo(7.0, 3.0, &mut q);
+        assert_approx(r, 1.0, EPS, "remquo(7,3) remainder");
+        assert_eq!(q, 2, "remquo(7,3) quotient");
+    }
+
+    #[test]
+    fn remquo_negative() {
+        let mut q: i32 = 0;
+        let r = remquo(-7.0, 3.0, &mut q);
+        assert_approx(r, -1.0, EPS, "remquo(-7,3) remainder");
+        assert_eq!(q, -2, "remquo(-7,3) quotient");
+    }
+
+    #[test]
+    fn remquo_nan_inputs() {
+        let mut q: i32 = 42;
+        let _ = remquo(f64::NAN, 1.0, &mut q);
+        assert_eq!(q, 0, "remquo NaN input should zero quotient");
+    }
+
+    // -----------------------------------------------------------------------
+    // copysign
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn copysign_basic() {
+        assert_approx(copysign(3.0, -1.0), -3.0, EPS, "copysign(3, -1)");
+        assert_approx(copysign(-3.0, 1.0), 3.0, EPS, "copysign(-3, 1)");
+        assert_approx(copysign(5.0, 5.0), 5.0, EPS, "copysign(5, 5)");
+    }
+
+    // -----------------------------------------------------------------------
+    // fmin / fmax
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fmin_fmax_basic() {
+        assert_approx(fmin(1.0, 2.0), 1.0, EPS, "fmin(1,2)");
+        assert_approx(fmax(1.0, 2.0), 2.0, EPS, "fmax(1,2)");
+    }
+
+    #[test]
+    fn fmin_fmax_nan() {
+        // POSIX: if one arg is NaN, return the other.
+        assert_approx(fmin(f64::NAN, 1.0), 1.0, EPS, "fmin(NaN,1)");
+        assert_approx(fmax(f64::NAN, 1.0), 1.0, EPS, "fmax(NaN,1)");
+        assert_approx(fmin(1.0, f64::NAN), 1.0, EPS, "fmin(1,NaN)");
+        assert_approx(fmax(1.0, f64::NAN), 1.0, EPS, "fmax(1,NaN)");
+    }
+
+    // -----------------------------------------------------------------------
+    // fdim
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fdim_basic() {
+        assert_approx(fdim(5.0, 3.0), 2.0, EPS, "fdim(5,3)");
+        assert_approx(fdim(3.0, 5.0), 0.0, EPS, "fdim(3,5)");
     }
 }

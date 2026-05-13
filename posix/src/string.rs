@@ -2332,6 +2332,601 @@ mod tests {
         unsafe { swab(src.as_ptr(), dst.as_mut_ptr(), 0) };
         assert_eq!(dst, [0xFF, 0xFF], "zero length should not modify dst");
     }
+
+    // -----------------------------------------------------------------------
+    // strlcpy edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strlcpy_size_zero() {
+        // size=0: no bytes written, returns src length.
+        let mut dst = [0xFFu8; 4];
+        let src = b"hello\0";
+        let len = unsafe { strlcpy(dst.as_mut_ptr(), src.as_ptr(), 0) };
+        assert_eq!(len, 5);
+        assert_eq!(dst, [0xFF, 0xFF, 0xFF, 0xFF], "size=0 must not write");
+    }
+
+    #[test]
+    fn test_strlcpy_size_one() {
+        // size=1: only NUL byte written.
+        let mut dst = [0xFFu8; 4];
+        let src = b"hello\0";
+        let len = unsafe { strlcpy(dst.as_mut_ptr(), src.as_ptr(), 1) };
+        assert_eq!(len, 5);
+        assert_eq!(dst[0], 0, "size=1 must write only NUL");
+        assert_eq!(dst[1], 0xFF);
+    }
+
+    #[test]
+    fn test_strlcpy_exact_fit() {
+        // Buffer exactly big enough: src_len < size.
+        let mut dst = [0xFFu8; 6];
+        let src = b"hello\0";
+        let len = unsafe { strlcpy(dst.as_mut_ptr(), src.as_ptr(), 6) };
+        assert_eq!(len, 5);
+        assert_eq!(&dst[..6], b"hello\0");
+    }
+
+    #[test]
+    fn test_strlcpy_empty_src() {
+        let mut dst = [0xFFu8; 4];
+        let src = b"\0";
+        let len = unsafe { strlcpy(dst.as_mut_ptr(), src.as_ptr(), 4) };
+        assert_eq!(len, 0);
+        assert_eq!(dst[0], 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // strlcat edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strlcat_truncation() {
+        // dst="hello", src=" world", size=8 → truncated to "hello w\0".
+        let mut dst = [0u8; 8];
+        dst[..6].copy_from_slice(b"hello\0");
+        let src = b" world\0";
+        let len = unsafe { strlcat(dst.as_mut_ptr(), src.as_ptr(), 8) };
+        // Returns dst_len + src_len = 5 + 6 = 11 (truncation: 11 >= 8).
+        assert_eq!(len, 11);
+        assert_eq!(&dst[..8], b"hello w\0");
+    }
+
+    #[test]
+    fn test_strlcat_dst_fills_buffer() {
+        // dst already fills the buffer (no NUL within size).
+        let mut dst = [b'X'; 4]; // No NUL within first 4 bytes.
+        let src = b"abc\0";
+        let len = unsafe { strlcat(dst.as_mut_ptr(), src.as_ptr(), 4) };
+        // strnlen(dst, 4) = 4 >= size=4 → returns size + src_len = 4 + 3 = 7.
+        assert_eq!(len, 7);
+        // dst unchanged (no room to append).
+        assert_eq!(dst, [b'X', b'X', b'X', b'X']);
+    }
+
+    #[test]
+    fn test_strlcat_size_zero() {
+        let mut dst = [0u8; 4];
+        dst[..4].copy_from_slice(b"hi\0\0");
+        let src = b"there\0";
+        let len = unsafe { strlcat(dst.as_mut_ptr(), src.as_ptr(), 0) };
+        // size=0 → strnlen(dst,0) = 0 >= 0 → returns 0 + 5 = 5.
+        assert_eq!(len, 5);
+    }
+
+    #[test]
+    fn test_strlcat_empty_src() {
+        let mut dst = [0u8; 10];
+        dst[..4].copy_from_slice(b"abc\0");
+        let src = b"\0";
+        let len = unsafe { strlcat(dst.as_mut_ptr(), src.as_ptr(), 10) };
+        assert_eq!(len, 3); // 3 + 0
+        assert_eq!(&dst[..4], b"abc\0");
+    }
+
+    #[test]
+    fn test_strlcat_empty_dst() {
+        let mut dst = [0u8; 10];
+        let src = b"hello\0";
+        let len = unsafe { strlcat(dst.as_mut_ptr(), src.as_ptr(), 10) };
+        assert_eq!(len, 5); // 0 + 5
+        assert_eq!(&dst[..6], b"hello\0");
+    }
+
+    // -----------------------------------------------------------------------
+    // strsep edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strsep_basic() {
+        let mut data = *b"one,two,three\0";
+        let mut ptr: *mut u8 = data.as_mut_ptr();
+
+        let tok1 = unsafe { strsep(&raw mut ptr, b",\0".as_ptr()) };
+        assert!(!tok1.is_null());
+        assert_eq!(unsafe { strlen(tok1) }, 3);
+        assert_eq!(unsafe { *tok1 }, b'o');
+
+        let tok2 = unsafe { strsep(&raw mut ptr, b",\0".as_ptr()) };
+        assert!(!tok2.is_null());
+        assert_eq!(unsafe { strlen(tok2) }, 3);
+        assert_eq!(unsafe { *tok2 }, b't');
+
+        let tok3 = unsafe { strsep(&raw mut ptr, b",\0".as_ptr()) };
+        assert!(!tok3.is_null());
+        assert_eq!(unsafe { strlen(tok3) }, 5);
+        assert_eq!(unsafe { *tok3 }, b't');
+
+        // No more tokens.
+        let tok4 = unsafe { strsep(&raw mut ptr, b",\0".as_ptr()) };
+        assert!(tok4.is_null());
+    }
+
+    #[test]
+    fn test_strsep_empty_tokens() {
+        // ",,a" → empty, empty, "a"
+        let mut data = *b",,a\0";
+        let mut ptr: *mut u8 = data.as_mut_ptr();
+
+        let tok1 = unsafe { strsep(&raw mut ptr, b",\0".as_ptr()) };
+        assert!(!tok1.is_null());
+        assert_eq!(unsafe { strlen(tok1) }, 0); // empty token
+
+        let tok2 = unsafe { strsep(&raw mut ptr, b",\0".as_ptr()) };
+        assert!(!tok2.is_null());
+        assert_eq!(unsafe { strlen(tok2) }, 0); // empty token
+
+        let tok3 = unsafe { strsep(&raw mut ptr, b",\0".as_ptr()) };
+        assert!(!tok3.is_null());
+        assert_eq!(unsafe { strlen(tok3) }, 1); // "a"
+        assert_eq!(unsafe { *tok3 }, b'a');
+    }
+
+    #[test]
+    fn test_strsep_no_delimiter() {
+        let mut data = *b"hello\0";
+        let mut ptr: *mut u8 = data.as_mut_ptr();
+
+        let tok = unsafe { strsep(&raw mut ptr, b",\0".as_ptr()) };
+        assert!(!tok.is_null());
+        assert_eq!(unsafe { strlen(tok) }, 5);
+        assert!(ptr.is_null()); // no more tokens
+    }
+
+    #[test]
+    fn test_strsep_null_stringp() {
+        let result = unsafe { strsep(core::ptr::null_mut(), b",\0".as_ptr()) };
+        assert!(result.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // stpcpy / stpncpy return value tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stpcpy_returns_nul() {
+        let mut dst = [0u8; 10];
+        let src = b"test\0";
+        let end = unsafe { stpcpy(dst.as_mut_ptr(), src.as_ptr()) };
+        // end should point to the NUL terminator.
+        assert_eq!(end, unsafe { dst.as_mut_ptr().add(4) });
+        assert_eq!(unsafe { *end }, 0);
+        assert_eq!(&dst[..5], b"test\0");
+    }
+
+    #[test]
+    fn test_stpcpy_empty_src() {
+        let mut dst = [0xFFu8; 4];
+        let src = b"\0";
+        let end = unsafe { stpcpy(dst.as_mut_ptr(), src.as_ptr()) };
+        assert_eq!(end, dst.as_mut_ptr()); // Points to dst[0].
+        assert_eq!(unsafe { *end }, 0);
+    }
+
+    #[test]
+    fn test_stpncpy_returns_first_nul() {
+        let mut dst = [0xFFu8; 10];
+        let src = b"hi\0";
+        let end = unsafe { stpncpy(dst.as_mut_ptr(), src.as_ptr(), 10) };
+        // Should return pointer to first NUL (at dst+2).
+        assert_eq!(end, unsafe { dst.as_mut_ptr().add(2) });
+        assert_eq!(unsafe { *end }, 0);
+        // Remainder should be zero-filled.
+        for j in 2..10 {
+            assert_eq!(dst[j], 0);
+        }
+    }
+
+    #[test]
+    fn test_stpncpy_no_nul_in_n() {
+        // src longer than n: returns dst+n, no NUL written.
+        let mut dst = [0xFFu8; 3];
+        let src = b"abcdef\0";
+        let end = unsafe { stpncpy(dst.as_mut_ptr(), src.as_ptr(), 3) };
+        assert_eq!(end, unsafe { dst.as_mut_ptr().add(3) });
+        assert_eq!(dst, [b'a', b'b', b'c']);
+    }
+
+    // -----------------------------------------------------------------------
+    // strerror_r edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strerror_r_success() {
+        let mut buf = [0u8; 64];
+        let ret = unsafe { strerror_r(0, buf.as_mut_ptr(), 64) };
+        assert_eq!(ret, 0);
+        assert_eq!(unsafe { strlen(buf.as_ptr()) }, 7); // "Success"
+    }
+
+    #[test]
+    fn test_strerror_r_truncation() {
+        let mut buf = [0u8; 4];
+        let ret = unsafe { strerror_r(0, buf.as_mut_ptr(), 4) };
+        assert_eq!(ret, crate::errno::ERANGE);
+        assert_eq!(&buf[..4], b"Suc\0");
+    }
+
+    #[test]
+    fn test_strerror_r_exact_fit() {
+        // "Success" is 7 chars, buffer of 8 = exact fit with NUL.
+        let mut buf = [0xFFu8; 8];
+        let ret = unsafe { strerror_r(0, buf.as_mut_ptr(), 8) };
+        assert_eq!(ret, 0);
+        assert_eq!(&buf[..8], b"Success\0");
+    }
+
+    #[test]
+    fn test_strerror_r_null_buf() {
+        let ret = unsafe { strerror_r(0, core::ptr::null_mut(), 64) };
+        assert_eq!(ret, crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_strerror_r_zero_buflen() {
+        let mut buf = [0xFFu8; 4];
+        let ret = unsafe { strerror_r(0, buf.as_mut_ptr(), 0) };
+        assert_eq!(ret, crate::errno::ERANGE);
+        assert_eq!(buf[0], 0xFF, "buflen=0 must not write");
+    }
+
+    // -----------------------------------------------------------------------
+    // memccpy edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_memccpy_byte_found() {
+        let src = b"hello world";
+        let mut dst = [0u8; 11];
+        let ret = unsafe {
+            memccpy(dst.as_mut_ptr(), src.as_ptr(), b' ' as i32, 11)
+        };
+        // Should find ' ' at index 5, copy through it, return dst+6.
+        assert!(!ret.is_null());
+        assert_eq!(ret, unsafe { dst.as_mut_ptr().add(6) });
+        assert_eq!(&dst[..6], b"hello ");
+    }
+
+    #[test]
+    fn test_memccpy_byte_not_found() {
+        let src = b"hello";
+        let mut dst = [0u8; 5];
+        let ret = unsafe {
+            memccpy(dst.as_mut_ptr(), src.as_ptr(), b'x' as i32, 5)
+        };
+        assert!(ret.is_null());
+        assert_eq!(&dst[..5], b"hello");
+    }
+
+    #[test]
+    fn test_memccpy_first_byte() {
+        let src = b"abcd";
+        let mut dst = [0u8; 4];
+        let ret = unsafe {
+            memccpy(dst.as_mut_ptr(), src.as_ptr(), b'a' as i32, 4)
+        };
+        assert!(!ret.is_null());
+        assert_eq!(ret, unsafe { dst.as_mut_ptr().add(1) });
+        assert_eq!(dst[0], b'a');
+    }
+
+    // -----------------------------------------------------------------------
+    // explicit_bzero
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_explicit_bzero_zeroes_buffer() {
+        let mut buf = [0xABu8; 16];
+        unsafe { explicit_bzero(buf.as_mut_ptr(), 16) };
+        assert_eq!(buf, [0u8; 16]);
+    }
+
+    #[test]
+    fn test_explicit_bzero_partial() {
+        let mut buf = [0xFFu8; 8];
+        unsafe { explicit_bzero(buf.as_mut_ptr(), 4) };
+        assert_eq!(&buf[..4], &[0, 0, 0, 0]);
+        assert_eq!(&buf[4..], &[0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn test_explicit_bzero_zero_len() {
+        let mut buf = [0xFFu8; 4];
+        unsafe { explicit_bzero(buf.as_mut_ptr(), 0) };
+        assert_eq!(buf, [0xFF; 4], "zero length should not modify");
+    }
+
+    // -----------------------------------------------------------------------
+    // mempcpy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mempcpy_returns_past_end() {
+        let src = b"abc";
+        let mut dst = [0u8; 5];
+        let end = unsafe { mempcpy(dst.as_mut_ptr(), src.as_ptr(), 3) };
+        assert_eq!(end, unsafe { dst.as_mut_ptr().add(3) });
+        assert_eq!(&dst[..3], b"abc");
+    }
+
+    #[test]
+    fn test_mempcpy_zero_length() {
+        let src = b"abc";
+        let mut dst = [0xFFu8; 3];
+        let end = unsafe { mempcpy(dst.as_mut_ptr(), src.as_ptr(), 0) };
+        assert_eq!(end, dst.as_mut_ptr()); // Returns dest+0.
+        assert_eq!(dst, [0xFF; 3], "zero-length should not modify");
+    }
+
+    // -----------------------------------------------------------------------
+    // memmem edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_memmem_needle_at_end() {
+        let hay = b"abcdef";
+        let needle = b"def";
+        let ret = unsafe { memmem(hay.as_ptr(), 6, needle.as_ptr(), 3) };
+        assert!(!ret.is_null());
+        assert_eq!(ret, unsafe { hay.as_ptr().add(3) });
+    }
+
+    #[test]
+    fn test_memmem_needle_longer() {
+        let hay = b"abc";
+        let needle = b"abcdef";
+        let ret = unsafe { memmem(hay.as_ptr(), 3, needle.as_ptr(), 6) };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_memmem_single_byte_match() {
+        let hay = b"abcde";
+        let needle = b"c";
+        let ret = unsafe { memmem(hay.as_ptr(), 5, needle.as_ptr(), 1) };
+        assert!(!ret.is_null());
+        assert_eq!(ret, unsafe { hay.as_ptr().add(2) });
+    }
+
+    #[test]
+    fn test_memmem_no_match() {
+        let hay = b"abcde";
+        let needle = b"xyz";
+        let ret = unsafe { memmem(hay.as_ptr(), 5, needle.as_ptr(), 3) };
+        assert!(ret.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // strcasecmp / strncasecmp edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strcasecmp_case_insensitive() {
+        assert_eq!(unsafe { strcasecmp(b"Hello\0".as_ptr(), b"hello\0".as_ptr()) }, 0);
+        assert_eq!(unsafe { strcasecmp(b"ABC\0".as_ptr(), b"abc\0".as_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_strcasecmp_different() {
+        assert!(unsafe { strcasecmp(b"abc\0".as_ptr(), b"abd\0".as_ptr()) } < 0);
+        assert!(unsafe { strcasecmp(b"abd\0".as_ptr(), b"abc\0".as_ptr()) } > 0);
+    }
+
+    #[test]
+    fn test_strncasecmp_limited() {
+        // First 3 chars match case-insensitively, differ at char 4.
+        assert_eq!(
+            unsafe { strncasecmp(b"ABCx\0".as_ptr(), b"abcy\0".as_ptr(), 3) },
+            0
+        );
+        assert!(
+            unsafe { strncasecmp(b"ABCx\0".as_ptr(), b"abcy\0".as_ptr(), 4) } < 0
+        );
+    }
+
+    #[test]
+    fn test_strncasecmp_zero_n() {
+        // n=0: always returns 0.
+        assert_eq!(
+            unsafe { strncasecmp(b"abc\0".as_ptr(), b"xyz\0".as_ptr(), 0) },
+            0
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ffs / ffsl / ffsll edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ffs_powers_of_two() {
+        assert_eq!(ffs(1), 1);
+        assert_eq!(ffs(2), 2);
+        assert_eq!(ffs(4), 3);
+        assert_eq!(ffs(8), 4);
+        assert_eq!(ffs(16), 5);
+        assert_eq!(ffs(256), 9);
+        assert_eq!(ffs(1024), 11);
+    }
+
+    #[test]
+    fn test_ffs_i32_min() {
+        // i32::MIN = 0x80000000, LSB set at bit 31 → ffs returns 32.
+        assert_eq!(ffs(i32::MIN), 32);
+    }
+
+    #[test]
+    fn test_ffsl_basic() {
+        assert_eq!(ffsl(0), 0);
+        assert_eq!(ffsl(1), 1);
+        assert_eq!(ffsl(0x100), 9);
+    }
+
+    #[test]
+    fn test_ffsl_i64_min() {
+        // i64::MIN = 0x8000000000000000, bit 63 → ffs returns 64.
+        assert_eq!(ffsl(i64::MIN), 64);
+    }
+
+    #[test]
+    fn test_ffsll_matches_ffsl() {
+        assert_eq!(ffsll(0), ffsl(0));
+        assert_eq!(ffsll(42), ffsl(42));
+        assert_eq!(ffsll(i64::MIN), ffsl(i64::MIN));
+    }
+
+    // -----------------------------------------------------------------------
+    // memrchr edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_memrchr_last_occurrence() {
+        let buf = b"abcabc";
+        let ret = unsafe { memrchr(buf.as_ptr(), b'a' as i32, 6) };
+        assert!(!ret.is_null());
+        // Should find the LAST 'a', at index 3.
+        assert_eq!(ret, unsafe { buf.as_ptr().add(3) });
+    }
+
+    #[test]
+    fn test_memrchr_not_found() {
+        let buf = b"abcdef";
+        let ret = unsafe { memrchr(buf.as_ptr(), b'x' as i32, 6) };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_memrchr_zero_length() {
+        let buf = b"abc";
+        let ret = unsafe { memrchr(buf.as_ptr(), b'a' as i32, 0) };
+        assert!(ret.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // strcasestr edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strcasestr_not_found() {
+        let hay = b"Hello World\0";
+        let needle = b"xyz\0";
+        let ret = unsafe { strcasestr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_strcasestr_empty_needle() {
+        let hay = b"Hello\0";
+        let needle = b"\0";
+        let ret = unsafe { strcasestr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(!ret.is_null());
+        assert_eq!(ret, hay.as_ptr().cast_mut());
+    }
+
+    #[test]
+    fn test_strcasestr_mixed_case() {
+        let hay = b"The Quick Brown Fox\0";
+        let needle = b"BROWN\0";
+        let ret = unsafe { strcasestr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(!ret.is_null());
+        assert_eq!(unsafe { *ret }, b'B');
+    }
+
+    // -----------------------------------------------------------------------
+    // strtok_r additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strtok_r_all_delimiters() {
+        // String is all delimiters — should return NULL immediately.
+        let mut data = *b",,,,\0";
+        let mut save: *mut u8 = core::ptr::null_mut();
+        let tok = unsafe {
+            strtok_r(data.as_mut_ptr(), b",\0".as_ptr(), &raw mut save)
+        };
+        assert!(tok.is_null());
+    }
+
+    #[test]
+    fn test_strtok_r_single_token() {
+        let mut data = *b"hello\0";
+        let mut save: *mut u8 = core::ptr::null_mut();
+        let tok = unsafe {
+            strtok_r(data.as_mut_ptr(), b",\0".as_ptr(), &raw mut save)
+        };
+        assert!(!tok.is_null());
+        assert_eq!(unsafe { strlen(tok) }, 5);
+
+        let tok2 = unsafe {
+            strtok_r(core::ptr::null_mut(), b",\0".as_ptr(), &raw mut save)
+        };
+        assert!(tok2.is_null());
+    }
+
+    #[test]
+    fn test_strtok_r_multiple_delimiters() {
+        // Multiple delimiter characters.
+        let mut data = *b"one;two,three\0";
+        let mut save: *mut u8 = core::ptr::null_mut();
+        let tok1 = unsafe {
+            strtok_r(data.as_mut_ptr(), b",;\0".as_ptr(), &raw mut save)
+        };
+        assert!(!tok1.is_null());
+        assert_eq!(unsafe { strlen(tok1) }, 3);
+
+        let tok2 = unsafe {
+            strtok_r(core::ptr::null_mut(), b",;\0".as_ptr(), &raw mut save)
+        };
+        assert!(!tok2.is_null());
+        assert_eq!(unsafe { strlen(tok2) }, 3);
+
+        let tok3 = unsafe {
+            strtok_r(core::ptr::null_mut(), b",;\0".as_ptr(), &raw mut save)
+        };
+        assert!(!tok3.is_null());
+        assert_eq!(unsafe { strlen(tok3) }, 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // strverscmp additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strverscmp_empty_strings() {
+        assert_eq!(ver(b"\0", b"\0"), 0);
+    }
+
+    #[test]
+    fn test_strverscmp_one_empty() {
+        assert!(ver(b"\0", b"a\0") < 0);
+        assert!(ver(b"a\0", b"\0") > 0);
+    }
+
+    #[test]
+    fn test_strverscmp_just_digits() {
+        assert!(ver(b"9\0", b"10\0") < 0);
+        assert!(ver(b"100\0", b"99\0") > 0);
+    }
 }
 
 // ===========================================================================

@@ -3154,4 +3154,368 @@ mod tests {
         assert_ne!(iswprint(0xa0), 0);  // NBSP
         assert_ne!(iswprint(0xc0), 0);  // À
     }
+
+    // -----------------------------------------------------------------------
+    // wcstod
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcstod_basic() {
+        let s: &[WcharT] = &[b'3' as i32, b'.' as i32, b'1' as i32, b'4' as i32, 0];
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstod(s.as_ptr(), &raw mut end) };
+        assert!((val - 3.14).abs() < 1e-10);
+        assert_eq!(end, unsafe { s.as_ptr().add(4) });
+    }
+
+    #[test]
+    fn test_wcstod_negative() {
+        let s: &[WcharT] = &[b'-' as i32, b'2' as i32, b'.' as i32, b'5' as i32, 0];
+        let val = unsafe { wcstod(s.as_ptr(), core::ptr::null_mut()) };
+        assert!((val - (-2.5)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_wcstod_scientific() {
+        // "1e3" = 1000.0
+        let s: &[WcharT] = &[b'1' as i32, b'e' as i32, b'3' as i32, 0];
+        let val = unsafe { wcstod(s.as_ptr(), core::ptr::null_mut()) };
+        assert!((val - 1000.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_wcstod_leading_whitespace() {
+        // "  42" with leading wide spaces.
+        let s: &[WcharT] = &[b' ' as i32, b' ' as i32, b'4' as i32, b'2' as i32, 0];
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstod(s.as_ptr(), &raw mut end) };
+        assert!((val - 42.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_wcstod_no_digits() {
+        // "abc" — no valid float.
+        let s: &[WcharT] = &[b'a' as i32, b'b' as i32, b'c' as i32, 0];
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstod(s.as_ptr(), &raw mut end) };
+        assert_eq!(val, 0.0);
+        assert_eq!(end, s.as_ptr()); // endptr set to start.
+    }
+
+    #[test]
+    fn test_wcstod_infinity() {
+        let s: &[WcharT] = &[b'i' as i32, b'n' as i32, b'f' as i32, 0];
+        let val = unsafe { wcstod(s.as_ptr(), core::ptr::null_mut()) };
+        assert!(val.is_infinite() && val > 0.0);
+    }
+
+    #[test]
+    fn test_wcstod_nan() {
+        let s: &[WcharT] = &[b'n' as i32, b'a' as i32, b'n' as i32, 0];
+        let val = unsafe { wcstod(s.as_ptr(), core::ptr::null_mut()) };
+        assert!(val.is_nan());
+    }
+
+    #[test]
+    fn test_wcstod_trailing_text() {
+        // "12.5xyz" — parse "12.5", endptr at 'x'.
+        let s: &[WcharT] = &[
+            b'1' as i32, b'2' as i32, b'.' as i32, b'5' as i32,
+            b'x' as i32, b'y' as i32, b'z' as i32, 0,
+        ];
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstod(s.as_ptr(), &raw mut end) };
+        assert!((val - 12.5).abs() < 1e-10);
+        assert_eq!(end, unsafe { s.as_ptr().add(4) });
+    }
+
+    #[test]
+    fn test_wcstod_null() {
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstod(core::ptr::null(), &raw mut end) };
+        assert_eq!(val, 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // wcsstr
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcsstr_found() {
+        let hay: &[WcharT] = &[b'h' as i32, b'e' as i32, b'l' as i32, b'l' as i32, b'o' as i32, 0];
+        let needle: &[WcharT] = &[b'l' as i32, b'l' as i32, 0];
+        let ret = unsafe { wcsstr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(!ret.is_null());
+        assert_eq!(ret, unsafe { hay.as_ptr().add(2) });
+    }
+
+    #[test]
+    fn test_wcsstr_not_found() {
+        let hay: &[WcharT] = &[b'a' as i32, b'b' as i32, b'c' as i32, 0];
+        let needle: &[WcharT] = &[b'x' as i32, b'y' as i32, 0];
+        let ret = unsafe { wcsstr(hay.as_ptr(), needle.as_ptr()) };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_wcsstr_empty_needle() {
+        let hay: &[WcharT] = &[b'a' as i32, b'b' as i32, 0];
+        let needle: &[WcharT] = &[0];
+        let ret = unsafe { wcsstr(hay.as_ptr(), needle.as_ptr()) };
+        assert_eq!(ret, hay.as_ptr());
+    }
+
+    // -----------------------------------------------------------------------
+    // wcsspn / wcscspn / wcspbrk
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcsspn_basic() {
+        let s: &[WcharT] = &[b'a' as i32, b'b' as i32, b'c' as i32, b'x' as i32, 0];
+        let accept: &[WcharT] = &[b'a' as i32, b'b' as i32, b'c' as i32, 0];
+        let ret = unsafe { wcsspn(s.as_ptr(), accept.as_ptr()) };
+        assert_eq!(ret, 3);
+    }
+
+    #[test]
+    fn test_wcsspn_no_match() {
+        let s: &[WcharT] = &[b'x' as i32, b'y' as i32, 0];
+        let accept: &[WcharT] = &[b'a' as i32, b'b' as i32, 0];
+        assert_eq!(unsafe { wcsspn(s.as_ptr(), accept.as_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_wcscspn_basic() {
+        let s: &[WcharT] = &[b'a' as i32, b'b' as i32, b'c' as i32, b',' as i32, 0];
+        let reject: &[WcharT] = &[b',' as i32, b';' as i32, 0];
+        assert_eq!(unsafe { wcscspn(s.as_ptr(), reject.as_ptr()) }, 3);
+    }
+
+    #[test]
+    fn test_wcscspn_no_reject() {
+        let s: &[WcharT] = &[b'a' as i32, b'b' as i32, b'c' as i32, 0];
+        let reject: &[WcharT] = &[b'x' as i32, 0];
+        assert_eq!(unsafe { wcscspn(s.as_ptr(), reject.as_ptr()) }, 3);
+    }
+
+    #[test]
+    fn test_wcspbrk_found() {
+        let s: &[WcharT] = &[b'h' as i32, b'e' as i32, b'l' as i32, b'l' as i32, b'o' as i32, 0];
+        let accept: &[WcharT] = &[b'l' as i32, b'o' as i32, 0];
+        let ret = unsafe { wcspbrk(s.as_ptr(), accept.as_ptr()) };
+        assert!(!ret.is_null());
+        assert_eq!(ret, unsafe { s.as_ptr().add(2) }); // first 'l'
+    }
+
+    #[test]
+    fn test_wcspbrk_not_found() {
+        let s: &[WcharT] = &[b'a' as i32, b'b' as i32, 0];
+        let accept: &[WcharT] = &[b'x' as i32, 0];
+        let ret = unsafe { wcspbrk(s.as_ptr(), accept.as_ptr()) };
+        assert!(ret.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // wcstok
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcstok_basic() {
+        let mut data: [WcharT; 14] = [
+            b'o' as i32, b'n' as i32, b'e' as i32, b',' as i32,
+            b't' as i32, b'w' as i32, b'o' as i32, b',' as i32,
+            b't' as i32, b'h' as i32, b'r' as i32, b'e' as i32, b'e' as i32,
+            0,
+        ];
+        let delim: &[WcharT] = &[b',' as i32, 0];
+        let mut save: *mut WcharT = core::ptr::null_mut();
+
+        let tok1 = unsafe { wcstok(data.as_mut_ptr(), delim.as_ptr(), &raw mut save) };
+        assert!(!tok1.is_null());
+        assert_eq!(unsafe { wcslen(tok1) }, 3);
+
+        let tok2 = unsafe { wcstok(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(!tok2.is_null());
+        assert_eq!(unsafe { wcslen(tok2) }, 3);
+
+        let tok3 = unsafe { wcstok(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(!tok3.is_null());
+        assert_eq!(unsafe { wcslen(tok3) }, 5);
+
+        let tok4 = unsafe { wcstok(core::ptr::null_mut(), delim.as_ptr(), &raw mut save) };
+        assert!(tok4.is_null());
+    }
+
+    #[test]
+    fn test_wcstok_all_delimiters() {
+        let mut data: [WcharT; 4] = [b',' as i32, b',' as i32, b',' as i32, 0];
+        let delim: &[WcharT] = &[b',' as i32, 0];
+        let mut save: *mut WcharT = core::ptr::null_mut();
+
+        let tok = unsafe { wcstok(data.as_mut_ptr(), delim.as_ptr(), &raw mut save) };
+        assert!(tok.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // wcscasecmp / wcsncasecmp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcscasecmp_equal() {
+        let s1: &[WcharT] = &[b'H' as i32, b'E' as i32, b'L' as i32, b'L' as i32, b'O' as i32, 0];
+        let s2: &[WcharT] = &[b'h' as i32, b'e' as i32, b'l' as i32, b'l' as i32, b'o' as i32, 0];
+        assert_eq!(unsafe { wcscasecmp(s1.as_ptr(), s2.as_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_wcscasecmp_different() {
+        let s1: &[WcharT] = &[b'A' as i32, b'B' as i32, b'C' as i32, 0];
+        let s2: &[WcharT] = &[b'a' as i32, b'b' as i32, b'd' as i32, 0];
+        assert!(unsafe { wcscasecmp(s1.as_ptr(), s2.as_ptr()) } < 0);
+    }
+
+    #[test]
+    fn test_wcsncasecmp_limited() {
+        let s1: &[WcharT] = &[b'A' as i32, b'B' as i32, b'X' as i32, 0];
+        let s2: &[WcharT] = &[b'a' as i32, b'b' as i32, b'Y' as i32, 0];
+        // First 2 chars match case-insensitively.
+        assert_eq!(unsafe { wcsncasecmp(s1.as_ptr(), s2.as_ptr(), 2) }, 0);
+        // But all 3 chars differ at position 2.
+        assert!(unsafe { wcsncasecmp(s1.as_ptr(), s2.as_ptr(), 3) } < 0);
+    }
+
+    #[test]
+    fn test_wcsncasecmp_zero_n() {
+        let s1: &[WcharT] = &[b'A' as i32, 0];
+        let s2: &[WcharT] = &[b'Z' as i32, 0];
+        assert_eq!(unsafe { wcsncasecmp(s1.as_ptr(), s2.as_ptr(), 0) }, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // wcscpy / wcsncpy / wcslen / wcscmp / wcsncmp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcscpy_basic() {
+        let src: &[WcharT] = &[b'a' as i32, b'b' as i32, b'c' as i32, 0];
+        let mut dst: [WcharT; 4] = [0; 4];
+        let ret = unsafe { wcscpy(dst.as_mut_ptr(), src.as_ptr()) };
+        assert_eq!(ret, dst.as_mut_ptr());
+        assert_eq!(dst, [b'a' as i32, b'b' as i32, b'c' as i32, 0]);
+    }
+
+    #[test]
+    fn test_wcslen_basic() {
+        let s: &[WcharT] = &[b'h' as i32, b'i' as i32, 0];
+        assert_eq!(unsafe { wcslen(s.as_ptr()) }, 2);
+    }
+
+    #[test]
+    fn test_wcslen_empty() {
+        let s: &[WcharT] = &[0];
+        assert_eq!(unsafe { wcslen(s.as_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_wcscmp_equal() {
+        let s1: &[WcharT] = &[b'a' as i32, b'b' as i32, 0];
+        let s2: &[WcharT] = &[b'a' as i32, b'b' as i32, 0];
+        assert_eq!(unsafe { wcscmp(s1.as_ptr(), s2.as_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_wcscmp_less() {
+        let s1: &[WcharT] = &[b'a' as i32, 0];
+        let s2: &[WcharT] = &[b'b' as i32, 0];
+        assert!(unsafe { wcscmp(s1.as_ptr(), s2.as_ptr()) } < 0);
+    }
+
+    #[test]
+    fn test_wcscmp_greater() {
+        let s1: &[WcharT] = &[b'z' as i32, 0];
+        let s2: &[WcharT] = &[b'a' as i32, 0];
+        assert!(unsafe { wcscmp(s1.as_ptr(), s2.as_ptr()) } > 0);
+    }
+
+    #[test]
+    fn test_wcsncmp_limited() {
+        let s1: &[WcharT] = &[b'a' as i32, b'b' as i32, b'x' as i32, 0];
+        let s2: &[WcharT] = &[b'a' as i32, b'b' as i32, b'y' as i32, 0];
+        assert_eq!(unsafe { wcsncmp(s1.as_ptr(), s2.as_ptr(), 2) }, 0);
+        assert!(unsafe { wcsncmp(s1.as_ptr(), s2.as_ptr(), 3) } < 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // wcschr / wcsrchr
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcschr_found() {
+        let s: &[WcharT] = &[b'a' as i32, b'b' as i32, b'c' as i32, 0];
+        let ret = unsafe { wcschr(s.as_ptr(), b'b' as i32) };
+        assert!(!ret.is_null());
+        assert_eq!(ret, unsafe { s.as_ptr().add(1) });
+    }
+
+    #[test]
+    fn test_wcschr_not_found() {
+        let s: &[WcharT] = &[b'a' as i32, b'b' as i32, 0];
+        let ret = unsafe { wcschr(s.as_ptr(), b'x' as i32) };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_wcschr_null_terminator() {
+        // Searching for NUL should find the terminator.
+        let s: &[WcharT] = &[b'a' as i32, 0];
+        let ret = unsafe { wcschr(s.as_ptr(), 0) };
+        assert!(!ret.is_null());
+        assert_eq!(ret, unsafe { s.as_ptr().add(1) });
+    }
+
+    #[test]
+    fn test_wcsrchr_found() {
+        let s: &[WcharT] = &[b'a' as i32, b'b' as i32, b'a' as i32, 0];
+        let ret = unsafe { wcsrchr(s.as_ptr(), b'a' as i32) };
+        assert!(!ret.is_null());
+        // Should find the LAST 'a' at index 2.
+        assert_eq!(ret, unsafe { s.as_ptr().add(2) });
+    }
+
+    #[test]
+    fn test_wcsrchr_not_found() {
+        let s: &[WcharT] = &[b'a' as i32, b'b' as i32, 0];
+        let ret = unsafe { wcsrchr(s.as_ptr(), b'x' as i32) };
+        assert!(ret.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // wcsncat
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_wcsncat_basic() {
+        let mut dst: [WcharT; 10] = [0; 10];
+        dst[0] = b'A' as i32;
+        dst[1] = b'B' as i32;
+        dst[2] = 0;
+        let src: &[WcharT] = &[b'C' as i32, b'D' as i32, b'E' as i32, 0];
+        let ret = unsafe { wcsncat(dst.as_mut_ptr(), src.as_ptr(), 2) };
+        assert_eq!(ret, dst.as_mut_ptr());
+        // Should be "ABCD\0"
+        assert_eq!(dst[0], b'A' as i32);
+        assert_eq!(dst[1], b'B' as i32);
+        assert_eq!(dst[2], b'C' as i32);
+        assert_eq!(dst[3], b'D' as i32);
+        assert_eq!(dst[4], 0);
+    }
+
+    #[test]
+    fn test_wcsncat_zero_n() {
+        let mut dst: [WcharT; 4] = [b'x' as i32, 0, 0, 0];
+        let src: &[WcharT] = &[b'y' as i32, 0];
+        unsafe { wcsncat(dst.as_mut_ptr(), src.as_ptr(), 0) };
+        assert_eq!(dst[0], b'x' as i32);
+        assert_eq!(dst[1], 0); // Unchanged.
+    }
 }

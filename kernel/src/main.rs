@@ -155,6 +155,7 @@ mod sync;
 mod syscall;
 mod sysctl;
 mod syshealth;
+mod termsession;
 mod thermal;
 mod timekeeping;
 mod tlb;
@@ -1425,6 +1426,12 @@ extern "C" fn kmain() -> ! {
 
     // Console VT100/ANSI escape sequence self-test.
     console::self_test();
+
+    // Terminal session multiplexer init + self-test.
+    termsession::init();
+    if let Err(e) = termsession::self_test() {
+        serial_println!("[termsession] Self-test failed: {:?} (non-fatal)", e);
+    }
 
     // Unicode support self-test (UTF-8 decoding, box drawing, block elements).
     unicode::self_test();

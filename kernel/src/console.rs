@@ -351,17 +351,17 @@ const SCROLLBACK_LINE_MAX: usize = 256;
 
 /// A single cell in the scrollback buffer: character + colors.
 #[derive(Clone, Copy)]
-struct ScrollCell {
+pub(crate) struct ScrollCell {
     /// ASCII character (or 0 for empty).
-    ch: u8,
+    pub(crate) ch: u8,
     /// Foreground color.
-    fg: u32,
+    pub(crate) fg: u32,
     /// Background color.
-    bg: u32,
+    pub(crate) bg: u32,
 }
 
 impl ScrollCell {
-    const EMPTY: Self = Self {
+    pub(crate) const EMPTY: Self = Self {
         ch: b' ',
         fg: DEFAULT_FG,
         bg: DEFAULT_BG,
@@ -369,8 +369,8 @@ impl ScrollCell {
 }
 
 /// A single scrollback line (variable-width).
-struct ScrollLine {
-    cells: Vec<ScrollCell>,
+pub(crate) struct ScrollLine {
+    pub(crate) cells: Vec<ScrollCell>,
 }
 
 impl ScrollLine {
@@ -382,14 +382,14 @@ impl ScrollLine {
 }
 
 /// Ring buffer of scrollback lines.
-struct ScrollbackBuffer {
-    lines: Vec<ScrollLine>,
+pub(crate) struct ScrollbackBuffer {
+    pub(crate) lines: Vec<ScrollLine>,
     /// Index of the oldest line (ring start).
-    start: usize,
+    pub(crate) start: usize,
     /// Number of valid lines.
-    count: usize,
+    pub(crate) count: usize,
     /// Width (columns) of each line.
-    cols: usize,
+    pub(crate) cols: usize,
 }
 
 impl ScrollbackBuffer {
@@ -2326,6 +2326,186 @@ fn scroll_up_locked(con: &mut ConsoleInner) {
     // Place cursor at the start of the (now cleared) last row.
     con.cursor_row = rows.saturating_sub(1);
     con.cursor_col = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Terminal session snapshot / restore
+// ---------------------------------------------------------------------------
+
+/// A complete snapshot of console visual state.
+///
+/// Captures the screen text buffer (per-cell character + colors), cursor
+/// position, active colors and text attributes, scroll region, and
+/// palette.  Used by the terminal session multiplexer to save/restore
+/// console state when switching between sessions.
+pub struct ConsoleSnapshot {
+    /// Per-cell screen content (cols × rows cells, row-major).
+    pub screen: Vec<ScrollCell>,
+    /// Cursor column (0-based).
+    pub cursor_col: u32,
+    /// Cursor row (0-based).
+    pub cursor_row: u32,
+    /// Active foreground color.
+    pub fg_color: u32,
+    /// Active background color.
+    pub bg_color: u32,
+    /// Scheme default foreground.
+    pub default_fg: u32,
+    /// Scheme default background.
+    pub default_bg: u32,
+    /// ANSI 16-color palette.
+    pub palette: [u32; 16],
+    /// Text attributes.
+    pub bold: bool,
+    pub dim: bool,
+    pub underline: bool,
+    pub reverse: bool,
+    pub invisible: bool,
+    pub strikethrough: bool,
+    /// Scroll region (inclusive row indices, 0-based).
+    pub scroll_top: u32,
+    pub scroll_bottom: u32,
+    /// Screen dimensions at capture time (for validation on restore).
+    pub cols: u32,
+    pub rows: u32,
+}
+
+/// Capture the current console state as a snapshot.
+///
+/// Returns `None` if the console is not initialized or the screen buffer
+/// has not been allocated yet.
+pub fn snapshot_state() -> Option<ConsoleSnapshot> {
+    let con = CONSOLE.lock();
+    if !con.initialized || con.screen_buf.is_empty() {
+        return None;
+    }
+    Some(ConsoleSnapshot {
+        screen: con.screen_buf.clone(),
+        cursor_col: con.cursor_col,
+        cursor_row: con.cursor_row,
+        fg_color: con.fg_color,
+        bg_color: con.bg_color,
+        default_fg: con.default_fg,
+        default_bg: con.default_bg,
+        palette: con.palette,
+        bold: con.bold,
+        dim: con.dim,
+        underline: con.underline,
+        reverse: con.reverse,
+        invisible: con.invisible,
+        strikethrough: con.strikethrough,
+        scroll_top: con.scroll_top,
+        scroll_bottom: con.scroll_bottom,
+        cols: con.cols,
+        rows: con.rows,
+    })
+}
+
+/// Restore the console to a previously captured snapshot.
+///
+/// Overwrites the screen buffer, cursor, colors, attributes, and scroll
+/// region, then repaints the entire framebuffer from the snapshot data.
+///
+/// Does nothing if the console is not initialized or if the snapshot
+/// dimensions don't match the current console.
+pub fn restore_state(snap: &ConsoleSnapshot) {
+    let mut con = CONSOLE.lock();
+    if !con.initialized {
+        return;
+    }
+    // Dimension mismatch guard — the framebuffer size cannot change at
+    // runtime, but a stale snapshot from a different resolution must not
+    // be blindly applied.
+    if snap.cols != con.cols || snap.rows != con.rows {
+        return;
+    }
+
+    let expected_len = (con.cols as usize).saturating_mul(con.rows as usize);
+    if snap.screen.len() != expected_len {
+        return;
+    }
+
+    // Restore scalar state.
+    con.cursor_col = snap.cursor_col;
+    con.cursor_row = snap.cursor_row;
+    con.fg_color = snap.fg_color;
+    con.bg_color = snap.bg_color;
+    con.default_fg = snap.default_fg;
+    con.default_bg = snap.default_bg;
+    con.palette = snap.palette;
+    con.bold = snap.bold;
+    con.dim = snap.dim;
+    con.underline = snap.underline;
+    con.reverse = snap.reverse;
+    con.invisible = snap.invisible;
+    con.strikethrough = snap.strikethrough;
+    con.scroll_top = snap.scroll_top;
+    con.scroll_bottom = snap.scroll_bottom;
+
+    // Copy screen buffer.
+    con.screen_buf.clear();
+    con.screen_buf.extend_from_slice(&snap.screen);
+
+    // Repaint the entire framebuffer from the screen buffer.
+    let fb = con.fb_addr;
+    let pitch = con.fb_pitch;
+    let cols = con.cols;
+    let rows = con.rows;
+    for row in 0..rows {
+        for col in 0..cols {
+            let idx = (row as usize).wrapping_mul(cols as usize).wrapping_add(col as usize);
+            if let Some(cell) = con.screen_buf.get(idx) {
+                if cell.ch == b' ' && cell.fg == DEFAULT_FG && cell.bg == DEFAULT_BG {
+                    // Empty cell — erase is faster than drawing a space glyph.
+                    erase_cell(fb, pitch, col, row, cell.bg);
+                } else {
+                    draw_glyph_full(
+                        fb, pitch, col, row, cell.ch,
+                        cell.fg, cell.bg, false, false,
+                    );
+                }
+            }
+        }
+    }
+
+    // Reset ANSI parser to clean state so the restored session doesn't
+    // inherit a partial escape sequence from the previous session.
+    con.ansi_reset();
+}
+
+/// Take ownership of the global scrollback buffer, replacing it with
+/// an empty one.
+///
+/// Used by the terminal session multiplexer to save the current
+/// session's scrollback when switching away.
+pub(crate) fn take_scrollback() -> ScrollbackBuffer {
+    let mut lock = SCROLLBACK.lock();
+    let cols = lock.cols;
+    core::mem::replace(
+        &mut *lock,
+        ScrollbackBuffer {
+            lines: Vec::new(),
+            start: 0,
+            count: 0,
+            cols,
+        },
+    )
+}
+
+/// Replace the global scrollback buffer with the provided one.
+///
+/// Used by the terminal session multiplexer to restore a session's
+/// scrollback when switching to it.
+pub(crate) fn put_scrollback(buf: ScrollbackBuffer) {
+    *SCROLLBACK.lock() = buf;
+}
+
+/// Get the current console dimensions (cols, rows).
+///
+/// Returns `(0, 0)` if the console is not initialized.
+pub fn dimensions() -> (u32, u32) {
+    let con = CONSOLE.lock();
+    (con.cols, con.rows)
 }
 
 // ---------------------------------------------------------------------------

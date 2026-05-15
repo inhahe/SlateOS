@@ -3187,6 +3187,131 @@ fn read_line(buf: &mut String, history: &mut History) {
                 }
                 cursor = 0;
             }
+            0x02 => {
+                // Ctrl+B — terminal session prefix key (tmux-like).
+                // Wait for the next keypress: 0-9 → switch to that session,
+                // 'c' → create, 'n' → next, 'p' → previous, 'l' → list,
+                // 'd' → detach (back to session 0).
+                crate::console::write_str("^B");
+                let next = keyboard::read_char();
+                // Erase the ^B indicator.
+                crate::console::write_str("\x08\x08  \x08\x08");
+                match next {
+                    b'0'..=b'9' => {
+                        let target = (next - b'0') as u32;
+                        if target != crate::termsession::active_id() {
+                            keyboard::set_echo(true);
+                            crate::console::putchar(b'\n');
+                            do_session_switch(target);
+                            // Reprint prompt after switch.
+                            let prompt = alloc::format!("{}> ", get_cwd());
+                            crate::console::write_str(&prompt);
+                            buf.clear();
+                            cursor = 0;
+                            keyboard::set_echo(false);
+                        }
+                    }
+                    b'c' => {
+                        // Create new session and switch to it.
+                        keyboard::set_echo(true);
+                        crate::console::putchar(b'\n');
+                        if let Ok(id) = crate::termsession::create("") {
+                            do_session_switch(id);
+                        }
+                        let prompt = alloc::format!("{}> ", get_cwd());
+                        crate::console::write_str(&prompt);
+                        buf.clear();
+                        cursor = 0;
+                        keyboard::set_echo(false);
+                    }
+                    b'n' => {
+                        // Next session (wrap around).
+                        let sessions = crate::termsession::list();
+                        let current = crate::termsession::active_id();
+                        // Find current index, then go to the next.
+                        let mut next_id = current;
+                        for (i, s) in sessions.iter().enumerate() {
+                            if s.id == current {
+                                let next_idx = (i + 1) % sessions.len();
+                                next_id = sessions[next_idx].id;
+                                break;
+                            }
+                        }
+                        if next_id != current {
+                            keyboard::set_echo(true);
+                            crate::console::putchar(b'\n');
+                            do_session_switch(next_id);
+                            let prompt = alloc::format!("{}> ", get_cwd());
+                            crate::console::write_str(&prompt);
+                            buf.clear();
+                            cursor = 0;
+                            keyboard::set_echo(false);
+                        }
+                    }
+                    b'p' => {
+                        // Previous session (wrap around).
+                        let sessions = crate::termsession::list();
+                        let current = crate::termsession::active_id();
+                        let mut prev_id = current;
+                        for (i, s) in sessions.iter().enumerate() {
+                            if s.id == current {
+                                let prev_idx = if i == 0 {
+                                    sessions.len().saturating_sub(1)
+                                } else {
+                                    i - 1
+                                };
+                                prev_id = sessions[prev_idx].id;
+                                break;
+                            }
+                        }
+                        if prev_id != current {
+                            keyboard::set_echo(true);
+                            crate::console::putchar(b'\n');
+                            do_session_switch(prev_id);
+                            let prompt = alloc::format!("{}> ", get_cwd());
+                            crate::console::write_str(&prompt);
+                            buf.clear();
+                            cursor = 0;
+                            keyboard::set_echo(false);
+                        }
+                    }
+                    b'l' => {
+                        // List sessions inline.
+                        crate::console::putchar(b'\n');
+                        let sessions = crate::termsession::list();
+                        for s in &sessions {
+                            let marker = if s.active { "*" } else { " " };
+                            crate::console_println!(" {} {} {}", marker, s.id, s.name);
+                        }
+                        // Reprint prompt.
+                        let prompt = alloc::format!("{}> ", get_cwd());
+                        crate::console::write_str(&prompt);
+                        for &b in buf.as_bytes() {
+                            crate::console::putchar(b);
+                        }
+                        let tail_len = buf.len().saturating_sub(cursor);
+                        for _ in 0..tail_len {
+                            crate::console::putchar(b'\x08');
+                        }
+                    }
+                    b'd' => {
+                        // Detach — switch back to session 0.
+                        if crate::termsession::active_id() != 0 {
+                            keyboard::set_echo(true);
+                            crate::console::putchar(b'\n');
+                            do_session_switch(0);
+                            let prompt = alloc::format!("{}> ", get_cwd());
+                            crate::console::write_str(&prompt);
+                            buf.clear();
+                            cursor = 0;
+                            keyboard::set_echo(false);
+                        }
+                    }
+                    _ => {
+                        // Unknown — ignore.
+                    }
+                }
+            }
             0x03 => {
                 // Ctrl+C — cancel the current line (print ^C and start fresh).
                 keyboard::set_echo(true);
@@ -3556,6 +3681,8 @@ const COMMANDS: &[&str] = &[
     "qos",
     "socks", "socks5",
     "brctl", "bridge", "bond",
+    // Terminal session multiplexer
+    "tsession", "ts",
     // Scripting keywords and commands
     "break", "case", "command", "continue", "declare", "for", "function", "in",
     "local", "read", "return", "shift", "trap", "typeof", "unicode", "unicodetest", "until", "xargs", "yes",
@@ -4938,6 +5065,7 @@ fn dispatch(line: &str) {
         "parental" | "pctl" => cmd_parental(args),
         "audiodevice" | "adev" => cmd_audiodevice(args),
         "sessionmgr" | "session" => cmd_sessionmgr(args),
+        "tsession" | "ts" => cmd_tsession(args),
         "crashreport" | "crash" => cmd_crashreport(args),
         "netproxy" | "proxy" => cmd_netproxy(args),
         "fileversion" | "fver" => cmd_fileversion(args),
@@ -78725,4 +78853,208 @@ fn cmd_fairness() {
         shell_println!("  No active tasks with CPU time in this window.");
         shell_println!("  (Run again after some tasks have executed)");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Terminal session multiplexer
+// ---------------------------------------------------------------------------
+
+/// `tsession` / `ts` — terminal session management.
+///
+/// Provides tmux-like session multiplexing: multiple independent terminal
+/// sessions with their own screen, scrollback, history, CWD, and env.
+///
+/// Subcommands:
+///   new [name]        — create a new session
+///   list              — list all sessions
+///   switch <id>       — switch to session (alias: attach)
+///   kill <id>         — destroy a session
+///   rename <id> name  — rename a session
+///   (no args)         — show current session info
+fn cmd_tsession(args: &str) {
+    use crate::termsession;
+
+    if !termsession::is_initialized() {
+        shell_println!("Terminal session system not initialized");
+        return;
+    }
+
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let subcmd = parts.first().copied().unwrap_or("");
+
+    match subcmd {
+        "" | "info" | "status" => {
+            // Show current session info.
+            let active = termsession::active_id();
+            let name = termsession::session_name(active).unwrap_or_default();
+            let count = termsession::session_count();
+            shell_println!("Active session: {} (\"{}\")", active, name);
+            shell_println!("Total sessions: {}", count);
+            shell_println!("");
+            shell_println!("Usage: tsession <new|list|switch|kill|rename>");
+            shell_println!("  tsession new [name]        create a new session");
+            shell_println!("  tsession list              list all sessions");
+            shell_println!("  tsession switch <id>       switch to session");
+            shell_println!("  tsession kill <id>         destroy a session");
+            shell_println!("  tsession rename <id> name  rename a session");
+            shell_println!("");
+            shell_println!("Quick-switch: Ctrl+B then 0-9 switches to that session.");
+        }
+        "new" | "create" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            match termsession::create(name) {
+                Ok(id) => {
+                    let sname = termsession::session_name(id).unwrap_or_default();
+                    shell_println!("Created session {} (\"{}\")", id, sname);
+                }
+                Err(e) => {
+                    shell_println!("Failed to create session: {:?}", e);
+                }
+            }
+        }
+        "list" | "ls" => {
+            let sessions = termsession::list();
+            if sessions.is_empty() {
+                shell_println!("No sessions");
+                return;
+            }
+            shell_println!("{:>4}  {:>6}  {}", "ID", "STATUS", "NAME");
+            shell_println!("{}", "-".repeat(30));
+            for s in &sessions {
+                let marker = if s.active { " *" } else { "  " };
+                let status = if s.active { "active" } else { "detach" };
+                shell_println!("{:>4}  {:>6}  {}{}", s.id, status, s.name, marker);
+            }
+        }
+        "switch" | "attach" | "sw" => {
+            let id_str = match parts.get(1) {
+                Some(s) => s,
+                None => {
+                    shell_println!("Usage: tsession switch <id>");
+                    return;
+                }
+            };
+            let target_id: u32 = match id_str.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    shell_println!("Invalid session ID: {}", id_str);
+                    return;
+                }
+            };
+            do_session_switch(target_id);
+        }
+        "kill" | "destroy" | "rm" => {
+            let id_str = match parts.get(1) {
+                Some(s) => s,
+                None => {
+                    shell_println!("Usage: tsession kill <id>");
+                    return;
+                }
+            };
+            let target_id: u32 = match id_str.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    shell_println!("Invalid session ID: {}", id_str);
+                    return;
+                }
+            };
+            match termsession::destroy(target_id) {
+                Ok(()) => shell_println!("Session {} destroyed", target_id),
+                Err(crate::error::KernelError::InvalidArgument) => {
+                    shell_println!("Cannot destroy the active session (switch away first)");
+                }
+                Err(crate::error::KernelError::NotFound) => {
+                    shell_println!("Session {} not found", target_id);
+                }
+                Err(e) => shell_println!("Failed: {:?}", e),
+            }
+        }
+        "rename" | "name" => {
+            let id_str = match parts.get(1) {
+                Some(s) => s,
+                None => {
+                    shell_println!("Usage: tsession rename <id> <name>");
+                    return;
+                }
+            };
+            let new_name = match parts.get(2) {
+                Some(s) => s,
+                None => {
+                    shell_println!("Usage: tsession rename <id> <name>");
+                    return;
+                }
+            };
+            let target_id: u32 = match id_str.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    shell_println!("Invalid session ID: {}", id_str);
+                    return;
+                }
+            };
+            match termsession::rename(target_id, new_name) {
+                Ok(()) => shell_println!("Session {} renamed to \"{}\"", target_id, new_name),
+                Err(e) => shell_println!("Failed: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}", subcmd);
+            shell_println!("Usage: tsession <new|list|switch|kill|rename>");
+        }
+    }
+}
+
+/// Perform a session switch, saving and restoring shell context.
+///
+/// Saves the current shell state (CWD, environment variables) into the
+/// outgoing session, then switches the console, then restores the
+/// incoming session's shell state.
+fn do_session_switch(target_id: u32) {
+    use crate::termsession;
+
+    let current_id = termsession::active_id();
+    if target_id == current_id {
+        shell_println!("Already on session {}", target_id);
+        return;
+    }
+
+    // Save current shell context into the outgoing session.
+    let ctx = termsession::ShellContext {
+        cwd: get_cwd(),
+        env: ENV_VARS.lock().clone(),
+        history: SHELL_HISTORY.lock().clone(),
+    };
+    termsession::save_shell_context(current_id, ctx);
+
+    // Perform the console switch.
+    match termsession::switch(target_id) {
+        Ok(()) => {}
+        Err(crate::error::KernelError::NotFound) => {
+            shell_println!("Session {} not found", target_id);
+            return;
+        }
+        Err(e) => {
+            shell_println!("Switch failed: {:?}", e);
+            return;
+        }
+    }
+
+    // Restore the incoming session's shell context.
+    if let Some(ctx) = termsession::get_shell_context(target_id) {
+        {
+            let mut cwd = CWD.lock();
+            cwd.clear();
+            cwd.push_str(&ctx.cwd);
+        }
+        {
+            let mut env = ENV_VARS.lock();
+            *env = ctx.env;
+        }
+        {
+            let mut hist = SHELL_HISTORY.lock();
+            *hist = ctx.history;
+        }
+    }
+
+    let name = termsession::session_name(target_id).unwrap_or_default();
+    crate::console_println!("[Switched to session {} (\"{}\")] ", target_id, name);
 }

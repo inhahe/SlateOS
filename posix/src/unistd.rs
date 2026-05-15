@@ -74,6 +74,19 @@ pub const _SC_AVPHYS_PAGES: i32 = 86;
 /// Maximum number of iovec entries for readv/writev.
 pub const _SC_IOV_MAX: i32 = 60;
 
+/// Suggested size for getpwnam_r/getpwuid_r buffers.
+pub const _SC_GETPW_R_SIZE_MAX: i32 = 70;
+/// Suggested size for getgrnam_r/getgrgid_r buffers.
+pub const _SC_GETGR_R_SIZE_MAX: i32 = 69;
+/// Maximum symlink resolution depth.
+pub const _SC_SYMLOOP_MAX: i32 = 173;
+/// Maximum number of open streams per process.
+pub const _SC_STREAM_MAX: i32 = 5;
+/// TTY name max length.
+pub const _SC_TTY_NAME_MAX: i32 = 72;
+/// Maximum RE_DUP repetition count.
+pub const _SC_RE_DUP_MAX: i32 = 44;
+
 // ---------------------------------------------------------------------------
 // Current working directory tracking
 // ---------------------------------------------------------------------------
@@ -774,6 +787,12 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
         _SC_THREAD_STACK_MIN => 65536,  // 64 KiB minimum thread stack.
         _SC_PHYS_PAGES => 8192,         // ~128 MiB at 16 KiB pages (TODO: query kernel).
         _SC_AVPHYS_PAGES => 4096,       // ~64 MiB available (TODO: query kernel).
+        _SC_GETPW_R_SIZE_MAX => 1024,   // Suggested passwd buffer size (glibc default).
+        _SC_GETGR_R_SIZE_MAX => 1024,   // Suggested group buffer size.
+        _SC_SYMLOOP_MAX => 40,          // Max symlink resolution depth (Linux default).
+        _SC_STREAM_MAX => 16,           // Max stdio streams (our FILE_POOL size).
+        _SC_TTY_NAME_MAX => i64::from(crate::limits::TTY_NAME_MAX),
+        _SC_RE_DUP_MAX => 255,          // Max RE_DUP count (POSIX minimum 255).
         _ => {
             errno::set_errno(errno::EINVAL);
             -1
@@ -1558,6 +1577,44 @@ mod tests {
     }
 
     #[test]
+    fn test_sysconf_getpw_r_size_max() {
+        let val = sysconf(_SC_GETPW_R_SIZE_MAX);
+        assert!(val > 0, "GETPW_R_SIZE_MAX should be positive");
+    }
+
+    #[test]
+    fn test_sysconf_getgr_r_size_max() {
+        let val = sysconf(_SC_GETGR_R_SIZE_MAX);
+        assert!(val > 0, "GETGR_R_SIZE_MAX should be positive");
+    }
+
+    #[test]
+    fn test_sysconf_symloop_max() {
+        let val = sysconf(_SC_SYMLOOP_MAX);
+        assert!(val >= 8, "SYMLOOP_MAX should be at least 8");
+    }
+
+    #[test]
+    fn test_sysconf_stream_max() {
+        let val = sysconf(_SC_STREAM_MAX);
+        assert!(val > 0, "STREAM_MAX should be positive");
+    }
+
+    #[test]
+    fn test_sysconf_tty_name_max() {
+        assert_eq!(
+            sysconf(_SC_TTY_NAME_MAX),
+            i64::from(crate::limits::TTY_NAME_MAX),
+        );
+    }
+
+    #[test]
+    fn test_sysconf_re_dup_max() {
+        let val = sysconf(_SC_RE_DUP_MAX);
+        assert!(val >= 255, "RE_DUP_MAX should be at least POSIX minimum 255");
+    }
+
+    #[test]
     fn test_sysconf_unknown_returns_negative() {
         assert_eq!(sysconf(-999), -1);
     }
@@ -1831,6 +1888,12 @@ mod tests {
         assert_eq!(_SC_ARG_MAX, 0);
         assert_eq!(_SC_NPROCESSORS_CONF, 83);
         assert_eq!(_SC_NPROCESSORS_ONLN, 84);
+        assert_eq!(_SC_GETPW_R_SIZE_MAX, 70);
+        assert_eq!(_SC_GETGR_R_SIZE_MAX, 69);
+        assert_eq!(_SC_SYMLOOP_MAX, 173);
+        assert_eq!(_SC_STREAM_MAX, 5);
+        assert_eq!(_SC_TTY_NAME_MAX, 72);
+        assert_eq!(_SC_RE_DUP_MAX, 44);
     }
 
     // ------------------------------------------------------------------

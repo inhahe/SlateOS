@@ -430,72 +430,98 @@ impl Rtl8139Device {
         Ok(())
     }
 
+    /// Advance the RX read pointer past an entry of `raw_length` bytes and
+    /// update the hardware CAPR register.
+    ///
+    /// The RTL8139 ring layout is:  `[status:u16][length:u16][payload…]`
+    /// Each entry is 4-byte aligned.  Based on Linux `8139too.c` recovery logic.
+    fn rx_advance(&mut self, raw_length: u16) {
+        /// Wrap boundary: the actual ring is 8 KiB + 16 bytes = 8208 bytes.
+        /// The remaining 1500 bytes are a guard zone for hardware wrap-around.
+        const WRAP: usize = RX_BUF_SIZE - 1500;
+
+        // 4-byte header + payload, rounded up to 4-byte alignment.
+        let next = (self.rx_offset + 4 + raw_length as usize + 3) & !3;
+        self.rx_offset = next % WRAP;
+
+        // Update CAPR (Current Address of Packet Read).
+        // Hardware expects CAPR = offset − 0x10 (16-byte bias).
+        #[allow(clippy::cast_possible_truncation)]
+        let capr_val = (self.rx_offset as u16).wrapping_sub(0x10);
+        // SAFETY: Standard register write to update read pointer.
+        unsafe {
+            port::outw(self.io_base + REG_CAPR, capr_val);
+        }
+    }
+
     /// Try to receive a frame from the RX ring buffer.
     ///
     /// Returns `None` if no complete packet is available.
     pub fn recv(&mut self) -> Option<Vec<u8>> {
-        // Check if RX buffer is empty (CMD register bit 0 = buffer empty).
+        /// Wrap boundary: the actual ring is 8 KiB + 16 bytes = 8208 bytes.
+        const WRAP: usize = RX_BUF_SIZE - 1500;
+
+        // Check if RX buffer is empty (CMD register bit 0 = BUFE).
         // SAFETY: Reading command register.
         let cmd = unsafe { port::inb(self.io_base + REG_CMD) };
         if cmd & 0x01 != 0 {
-            // Buffer empty.
             return None;
         }
 
-        // Read the packet header at the current offset.
-        // Header format: [status: u16] [length: u16] [packet data...]
+        // Defensive: clamp rx_offset in case prior logic left it corrupt.
+        if self.rx_offset >= WRAP {
+            self.rx_offset = 0;
+        }
+
         let base = self.rx_buf_virt as *const u8;
 
-        // SAFETY: Reading within our allocated RX buffer.
-        let header = unsafe {
+        // Read the 4-byte packet header at the current offset.
+        // Header format: [status: u16le] [length: u16le] [packet data…]
+        //
+        // SAFETY: rx_offset < 8208 (clamped above), buffer is 9708 bytes, so
+        // rx_offset + 4 ≤ 8211 < 9708.  The 1500-byte guard zone at the end
+        // contains hardware-written wrap-around data, making unaligned header
+        // reads across the 8208-byte boundary safe.
+        let (status, length) = unsafe {
             let ptr = base.add(self.rx_offset);
-            // Read 4 bytes (status + length) as little-endian.
             let status = u16::from_le(core::ptr::read_unaligned(ptr as *const u16));
             let length = u16::from_le(core::ptr::read_unaligned(ptr.add(2) as *const u16));
             (status, length)
         };
 
-        let (status, length) = header;
-
         // Check if packet is valid (bit 0 of status = ROK).
         if status & 0x0001 == 0 {
-            // Bad packet — skip it.
+            // Bad packet — advance past it so we don't get stuck re-reading
+            // the same bad header forever.  If the length field looks plausible,
+            // use it; otherwise skip just the 4-byte header (minimum advance).
+            let skip = if length > 0 && length <= 1518 { length } else { 0 };
+            self.rx_advance(skip);
             return None;
         }
 
-        // Length includes the 4-byte CRC at the end.
+        // Length includes the 4-byte CRC appended by hardware.
         let pkt_len = (length as usize).saturating_sub(4);
         if pkt_len == 0 || pkt_len > 1514 {
-            // Invalid length — reset offset.
+            // Invalid length — advance past the entry to avoid getting stuck.
+            self.rx_advance(length);
             return None;
         }
 
-        // Copy packet data (starts 4 bytes after header).
+        // Copy packet data (starts 4 bytes past the header).
         let data_offset = self.rx_offset + 4;
         let mut packet = vec![0u8; pkt_len];
 
-        // Handle wrap-around: the buffer is circular.
+        // The buffer is circular; wrap indices at the 8208-byte boundary.
         for i in 0..pkt_len {
-            let buf_idx = (data_offset + i) % (RX_BUF_SIZE - 1500);
-            // SAFETY: Within allocated buffer bounds.
+            let buf_idx = (data_offset + i) % WRAP;
+            // SAFETY: buf_idx < 8208 < 9708 (total allocated buffer).
             unsafe {
                 packet[i] = *base.add(buf_idx);
             }
         }
 
-        // Advance the read pointer.
-        // Next packet starts at: current offset + 4 (header) + length, aligned to 4 bytes.
-        let next_offset = (self.rx_offset + 4 + length as usize + 3) & !3;
-        self.rx_offset = next_offset % (RX_BUF_SIZE - 1500);
-
-        // Update CAPR (Current Address of Packet Read).
-        // Hardware expects CAPR = offset - 0x10 (16-byte offset).
-        #[allow(clippy::cast_possible_truncation)]
-        let capr_val = (self.rx_offset as u16).wrapping_sub(0x10);
-        // SAFETY: Standard register write.
-        unsafe {
-            port::outw(self.io_base + REG_CAPR, capr_val);
-        }
+        // Advance past this packet and notify hardware.
+        self.rx_advance(length);
 
         Some(packet)
     }

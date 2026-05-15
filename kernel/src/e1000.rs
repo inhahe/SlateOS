@@ -37,7 +37,7 @@
 //! - Linux drivers/net/ethernet/intel/e1000/
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering, compiler_fence};
 use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
@@ -681,10 +681,18 @@ impl E1000Device {
         let buf_frame = self.tx_buf_frame.ok_or(KernelError::InternalError)?;
         let tail = self.tx_tail as usize;
 
+        // SAFETY: tx_descs is valid for TX_DESC_COUNT entries, tail < TX_DESC_COUNT,
+        // and we have exclusive access via the global mutex.  We use a raw
+        // pointer (not &mut) because hardware writes DD asynchronously via DMA.
+        let desc = unsafe { self.tx_descs.add(tail) };
+
         // Check that the descriptor is free (DD bit set by hardware on completion).
-        // SAFETY: tx_descs is valid for TX_DESC_COUNT entries and we have exclusive access.
-        let desc = unsafe { &mut *self.tx_descs.add(tail) };
-        if desc.status & TXD_STAT_DD == 0 {
+        // Volatile read because hardware writes this field asynchronously.
+        // SAFETY: desc points to valid DMA memory within the ring.
+        let status = unsafe {
+            core::ptr::read_volatile(core::ptr::addr_of!((*desc).status))
+        };
+        if status & TXD_STAT_DD == 0 {
             // Descriptor not yet completed by hardware — TX ring is full.
             return Err(KernelError::ResourceExhausted);
         }
@@ -696,12 +704,28 @@ impl E1000Device {
             core::ptr::copy_nonoverlapping(frame.as_ptr(), self.tx_buf, frame.len());
         }
 
-        // Set up the descriptor.
-        desc.addr = buf_phys;
-        #[allow(clippy::cast_possible_truncation)]
-        { desc.length = frame.len() as u16; }
-        desc.cmd = TXD_CMD_EOP | TXD_CMD_IFCS | TXD_CMD_RS;
-        desc.status = 0; // Clear DD — hardware will set it on completion.
+        // Set up the descriptor using volatile writes — hardware reads these
+        // fields via DMA after we update the tail pointer.
+        // SAFETY: desc points to valid, exclusively-owned DMA memory.
+        unsafe {
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*desc).addr), buf_phys);
+            #[allow(clippy::cast_possible_truncation)]
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!((*desc).length),
+                frame.len() as u16,
+            );
+            core::ptr::write_volatile(
+                core::ptr::addr_of_mut!((*desc).cmd),
+                TXD_CMD_EOP | TXD_CMD_IFCS | TXD_CMD_RS,
+            );
+            // Clear DD — hardware will set it on completion.
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*desc).status), 0);
+        }
+
+        // Ensure all descriptor writes are committed before notifying hardware
+        // via the tail-pointer MMIO write.  x86 has strong store ordering, but
+        // the compiler is free to reorder non-volatile stores past volatile ones.
+        compiler_fence(Ordering::Release);
 
         // Advance tail (notify hardware).
         #[allow(clippy::cast_possible_truncation)]
@@ -712,8 +736,11 @@ impl E1000Device {
 
         // Poll for completion (RS + DD).
         for _ in 0..100_000 {
-            let status = unsafe { core::ptr::read_volatile(&(*self.tx_descs.add(tail)).status) };
-            if status & TXD_STAT_DD != 0 {
+            // SAFETY: desc still points to the same valid descriptor.
+            let st = unsafe {
+                core::ptr::read_volatile(core::ptr::addr_of!((*desc).status))
+            };
+            if st & TXD_STAT_DD != 0 {
                 return Ok(());
             }
             core::hint::spin_loop();
@@ -728,20 +755,36 @@ impl E1000Device {
     pub fn recv(&mut self) -> Option<Vec<u8>> {
         let tail = self.rx_tail as usize;
 
+        // SAFETY: rx_descs is valid for RX_DESC_COUNT entries, tail < RX_DESC_COUNT,
+        // and we have exclusive access via the global mutex.  Raw pointer because
+        // hardware writes fields asynchronously via DMA.
+        let desc = unsafe { self.rx_descs.add(tail) };
+
         // Check if the current descriptor has data (DD bit set by hardware).
-        // SAFETY: rx_descs is valid for RX_DESC_COUNT entries, we have exclusive access.
-        let desc = unsafe { &mut *self.rx_descs.add(tail) };
-        if desc.status & RXD_STAT_DD == 0 {
+        // Volatile read because hardware writes status asynchronously.
+        // SAFETY: desc points to valid DMA memory within the ring.
+        let status = unsafe {
+            core::ptr::read_volatile(core::ptr::addr_of!((*desc).status))
+        };
+        if status & RXD_STAT_DD == 0 {
             return None; // No packet available.
         }
 
-        // Read the packet length.
-        let length = desc.length as usize;
+        // Read the packet length (hardware-written field, volatile read).
+        let length = unsafe {
+            core::ptr::read_volatile(core::ptr::addr_of!((*desc).length)) as usize
+        };
         if length == 0 || length > RX_BUF_SIZE {
             // Invalid length — reset descriptor and move on.
-            desc.status = 0;
+            // Volatile write: hardware must see the status reset via DMA.
+            // SAFETY: desc points to valid DMA memory.
+            unsafe {
+                core::ptr::write_volatile(core::ptr::addr_of_mut!((*desc).status), 0);
+            }
             #[allow(clippy::cast_possible_truncation)]
             { self.rx_tail = ((tail + 1) % RX_DESC_COUNT) as u16; }
+            // Ensure status reset is visible before updating tail pointer.
+            compiler_fence(Ordering::Release);
             self.write_reg(REG_RDT, tail as u32);
             return None;
         }
@@ -767,13 +810,20 @@ impl E1000Device {
             packet.extend_from_slice(slice);
         }
 
-        // Reset the descriptor for reuse.
-        desc.status = 0;
+        // Reset the descriptor for reuse — volatile write so hardware sees it
+        // when we return this buffer via the tail pointer.
+        // SAFETY: desc points to valid DMA memory.
+        unsafe {
+            core::ptr::write_volatile(core::ptr::addr_of_mut!((*desc).status), 0);
+        }
 
         // Advance tail — tell hardware this buffer is available again.
         let old_tail = tail;
         #[allow(clippy::cast_possible_truncation)]
         { self.rx_tail = ((tail + 1) % RX_DESC_COUNT) as u16; }
+        // Ensure the descriptor status reset commits before hardware sees
+        // the new tail pointer.
+        compiler_fence(Ordering::Release);
         self.write_reg(REG_RDT, old_tail as u32);
 
         Some(packet)

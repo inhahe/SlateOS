@@ -752,6 +752,79 @@ pub extern "C" fn clone3(_args: *const CloneArgs, _size: usize) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
+// process_vm_readv / process_vm_writev — cross-process I/O
+// ---------------------------------------------------------------------------
+
+/// `process_vm_readv` — read from another process's address space.
+///
+/// Linux 3.2+.  Stub: returns -1 with ENOSYS (cross-process memory
+/// access not supported).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn process_vm_readv(
+    _pid: i32,
+    _local_iov: *const crate::file::Iovec,
+    _liovcnt: u64,
+    _remote_iov: *const crate::file::Iovec,
+    _riovcnt: u64,
+    _flags: u64,
+) -> i64 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// `process_vm_writev` — write to another process's address space.
+///
+/// Linux 3.2+.  Stub: returns -1 with ENOSYS.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn process_vm_writev(
+    _pid: i32,
+    _local_iov: *const crate::file::Iovec,
+    _liovcnt: u64,
+    _remote_iov: *const crate::file::Iovec,
+    _riovcnt: u64,
+    _flags: u64,
+) -> i64 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
+// kcmp — compare two processes
+// ---------------------------------------------------------------------------
+
+/// `kcmp` type constants.
+pub const KCMP_FILE: i32 = 0;
+/// Compare virtual memory.
+pub const KCMP_VM: i32 = 1;
+/// Compare filesystem.
+pub const KCMP_FILES: i32 = 2;
+/// Compare filesystem root.
+pub const KCMP_FS: i32 = 3;
+/// Compare signal handling.
+pub const KCMP_SIGHAND: i32 = 4;
+/// Compare I/O context.
+pub const KCMP_IO: i32 = 5;
+/// Compare System V semaphore undo.
+pub const KCMP_SYSVSEM: i32 = 6;
+/// Compare epoll targets.
+pub const KCMP_EPOLL_TFD: i32 = 7;
+
+/// `kcmp` — compare kernel resources of two processes.
+///
+/// Linux 3.5+.  Stub: returns -1 with ENOSYS.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn kcmp(
+    _pid1: i32,
+    _pid2: i32,
+    _type_: i32,
+    _idx1: u64,
+    _idx2: u64,
+) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1558,5 +1631,73 @@ mod tests {
     fn test_clone_args_struct_layout() {
         // CloneArgs has 11 u64 fields = 88 bytes.
         assert_eq!(core::mem::size_of::<CloneArgs>(), 88);
+    }
+
+    // -----------------------------------------------------------------------
+    // process_vm_readv / process_vm_writev
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_process_vm_readv_enosys() {
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_process_vm_writev_enosys() {
+        crate::errno::set_errno(0);
+        let ret = process_vm_writev(
+            1,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -----------------------------------------------------------------------
+    // kcmp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_kcmp_enosys() {
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_FILE, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_kcmp_type_constants() {
+        assert_eq!(KCMP_FILE, 0);
+        assert_eq!(KCMP_VM, 1);
+        assert_eq!(KCMP_FILES, 2);
+        assert_eq!(KCMP_FS, 3);
+        assert_eq!(KCMP_SIGHAND, 4);
+        assert_eq!(KCMP_IO, 5);
+        assert_eq!(KCMP_SYSVSEM, 6);
+        assert_eq!(KCMP_EPOLL_TFD, 7);
+    }
+
+    #[test]
+    fn test_kcmp_all_types_enosys() {
+        for t in 0..=7 {
+            crate::errno::set_errno(0);
+            let ret = kcmp(1, 1, t, 0, 0);
+            assert_eq!(ret, -1, "kcmp type {t} should return -1");
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
     }
 }

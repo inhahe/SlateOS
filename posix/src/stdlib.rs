@@ -1210,6 +1210,98 @@ pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// mkstemps — create a temporary file with a suffix
+// ---------------------------------------------------------------------------
+
+/// Create a unique temporary file with a user-specified suffix.
+///
+/// Like `mkstemp`, but the last `suffixlen` characters of `template`
+/// are preserved as a suffix (e.g., `"/tmp/fileXXXXXX.txt"` with
+/// `suffixlen=4`).  The 6 'X' characters before the suffix are replaced
+/// with unique characters.
+///
+/// Returns an open fd on success, -1 on error.
+///
+/// # Safety
+///
+/// `template` must be a writable null-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn mkstemps(template: *mut u8, suffixlen: i32) -> i32 {
+    mkostemps(template, suffixlen, 0)
+}
+
+// ---------------------------------------------------------------------------
+// mkostemps — create a temporary file with suffix + flags
+// ---------------------------------------------------------------------------
+
+/// Create a unique temporary file with a suffix and open flags.
+///
+/// Combines `mkstemps` (suffix support) with `mkostemp` (additional
+/// open flags like `O_CLOEXEC`).
+///
+/// Returns an open fd on success, -1 on error.
+///
+/// # Safety
+///
+/// `template` must be a writable null-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn mkostemps(template: *mut u8, suffixlen: i32, flags: i32) -> i32 {
+    if template.is_null() || suffixlen < 0 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+
+    let slen = suffixlen as usize;
+    let len = unsafe { crate::string::strlen(template) };
+    // Need at least 6 'X' before the suffix.
+    if len < 6_usize.wrapping_add(slen) {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+
+    // Check that the 6 chars before the suffix are 'X'.
+    let x_start = len.wrapping_sub(slen).wrapping_sub(6);
+    let mut i: usize = 0;
+    while i < 6 {
+        if unsafe { *template.add(x_start.wrapping_add(i)) } != b'X' {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+        i = i.wrapping_add(1);
+    }
+
+    // Try up to 100 unique names.
+    let mut attempt: u32 = 0;
+    while attempt < 100 {
+        let mut rand_bytes = [0u8; 6];
+        crate::unistd::getrandom(rand_bytes.as_mut_ptr(), 6, 0);
+
+        let mut j: usize = 0;
+        while j < 6 {
+            let ch = rand_bytes[j] % 36;
+            let c = if ch < 10 { b'0'.wrapping_add(ch) } else { b'a'.wrapping_add(ch.wrapping_sub(10)) };
+            unsafe { *template.add(x_start.wrapping_add(j)) = c; }
+            j = j.wrapping_add(1);
+        }
+
+        let base_flags = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL;
+        let fd = crate::file::open(template, base_flags | flags, 0o600);
+        if fd >= 0 {
+            return fd;
+        }
+
+        if crate::errno::get_errno() != crate::errno::EEXIST {
+            return -1;
+        }
+
+        attempt = attempt.wrapping_add(1);
+    }
+
+    crate::errno::set_errno(crate::errno::EEXIST);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // mkdtemp — create a unique temporary directory
 // ---------------------------------------------------------------------------
 
@@ -4133,5 +4225,83 @@ mod tests {
         let ret = system(core::ptr::null());
         // Result is either 0 (no shell) or non-zero (shell available).
         let _ = ret;
+    }
+
+    // -----------------------------------------------------------------------
+    // mkstemps
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mkstemps_null_template() {
+        let ret = unsafe { mkstemps(core::ptr::null_mut(), 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mkstemps_negative_suffix() {
+        let mut tmpl = *b"/tmp/testXXXXXX.txt\0";
+        crate::errno::set_errno(0);
+        let ret = unsafe { mkstemps(tmpl.as_mut_ptr(), -1) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mkstemps_too_short() {
+        // Template with suffix but fewer than 6 X's.
+        let mut tmpl = *b"abXX.c\0";
+        crate::errno::set_errno(0);
+        let ret = unsafe { mkstemps(tmpl.as_mut_ptr(), 2) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mkstemps_missing_x_before_suffix() {
+        // 6 chars before suffix are not all X.
+        let mut tmpl = *b"/tmp/testABCDEF.txt\0";
+        crate::errno::set_errno(0);
+        let ret = unsafe { mkstemps(tmpl.as_mut_ptr(), 4) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // mkostemps
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mkostemps_null_template() {
+        let ret = unsafe { mkostemps(core::ptr::null_mut(), 0, 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mkostemps_negative_suffix() {
+        let mut tmpl = *b"/tmp/testXXXXXX.txt\0";
+        crate::errno::set_errno(0);
+        let ret = unsafe { mkostemps(tmpl.as_mut_ptr(), -1, 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mkostemps_too_short() {
+        let mut tmpl = *b"X.c\0";
+        crate::errno::set_errno(0);
+        let ret = unsafe { mkostemps(tmpl.as_mut_ptr(), 2, 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mkostemps_valid_suffix_validation() {
+        // Exactly 6 X's before a 4-char suffix — should pass validation
+        // (the actual file creation may fail on the test host, but that's ok).
+        let mut tmpl = *b"/tmp/testXXXXXX.txt\0";
+        let _ret = unsafe { mkostemps(tmpl.as_mut_ptr(), 4, 0) };
+        // Just verify no crash.
     }
 }

@@ -5501,6 +5501,25 @@ pub(crate) fn translate_net_error(code: i64) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// sockatmark — test whether socket is at out-of-band mark
+// ---------------------------------------------------------------------------
+
+/// `sockatmark` — test whether a socket is at the out-of-band mark.
+///
+/// Returns 1 if the socket is at the OOB mark, 0 if not, -1 on error.
+///
+/// Our kernel doesn't support OOB data, so we always return 0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sockatmark(fd: i32) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    // No OOB data support — never at mark.
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Tests — pure logic functions only (no syscalls needed)
 // ---------------------------------------------------------------------------
 
@@ -6904,5 +6923,31 @@ mod tests {
             len += 1;
         }
         unsafe { core::slice::from_raw_parts(ptr, len) }
+    }
+
+    // -----------------------------------------------------------------------
+    // sockatmark
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sockatmark_negative_fd() {
+        crate::errno::set_errno(0);
+        let ret = sockatmark(-1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_sockatmark_valid_fd() {
+        // On any valid fd, sockatmark returns 0 (no OOB support).
+        let ret = sockatmark(0);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_sockatmark_arbitrary_fd() {
+        // Any non-negative fd is accepted.
+        let ret = sockatmark(999);
+        assert_eq!(ret, 0);
     }
 }

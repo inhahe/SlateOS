@@ -41,7 +41,8 @@
 //! - **Pipes**: `pipe`, `pipe2`
 //! - **Signals**: Stub constants and handlers (partial), `sigwait`,
 //!   `sigtimedwait`, `sigqueue`, `sigaltstack`, `siginterrupt`
-//! - **Threads**: `pthread` stubs, working mutex ops
+//! - **Threads**: `pthread` stubs, working mutex ops,
+//!   `pthread_setaffinity_np`/`pthread_getaffinity_np` (CPU affinity)
 //! - **C Standard Library**: `malloc`/`free`/`calloc`/`realloc`,
 //!   `posix_memalign`/`aligned_alloc`/`valloc`/`memalign`/`reallocarray`,
 //!   `malloc_usable_size`,

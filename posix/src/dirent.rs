@@ -752,6 +752,44 @@ pub extern "C" fn getdents(_fd: i32, _dirp: *mut u8, _count: usize) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
+// scandirat — scan directory relative to a directory fd
+// ---------------------------------------------------------------------------
+
+/// `scandirat` — scan a directory relative to a directory fd.
+///
+/// Like `scandir`, but the directory is specified relative to `dirfd`.
+/// If `dirfd` is `AT_FDCWD` or `dirname` is absolute, this behaves
+/// identically to `scandir`.
+///
+/// Returns the number of matching entries on success, -1 on error.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn scandirat(
+    dirfd: i32,
+    dirname: *const u8,
+    namelist: *mut *mut *mut Dirent,
+    filter: Option<extern "C" fn(*const Dirent) -> i32>,
+    compar: Option<extern "C" fn(*const *const Dirent, *const *const Dirent) -> i32>,
+) -> i32 {
+    if dirname.is_null() || namelist.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Resolve relative to dirfd if needed.
+    if dirfd == crate::file::AT_FDCWD || crate::file::is_absolute_path(dirname) {
+        return scandir(dirname, namelist, filter, compar);
+    }
+
+    // Build full path from dirfd + relative dirname.
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = crate::file::resolve_dirfd_path(dirfd, dirname, &mut full);
+    if len == 0 {
+        return -1; // errno set by resolve_dirfd_path
+    }
+    scandir(full.as_ptr(), namelist, filter, compar)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1238,5 +1276,52 @@ mod tests {
     #[test]
     fn test_linux_dirent64_alignment() {
         assert!(core::mem::align_of::<LinuxDirent64>() >= 8);
+    }
+
+    // -----------------------------------------------------------------------
+    // scandirat
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_scandirat_null_dirname() {
+        crate::errno::set_errno(0);
+        let mut list: *mut *mut Dirent = core::ptr::null_mut();
+        let ret = scandirat(
+            crate::file::AT_FDCWD,
+            core::ptr::null(),
+            &raw mut list,
+            None,
+            None,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_scandirat_null_namelist() {
+        crate::errno::set_errno(0);
+        let ret = scandirat(
+            crate::file::AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            core::ptr::null_mut(),
+            None,
+            None,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_scandirat_with_at_fdcwd() {
+        // AT_FDCWD delegates to scandir — result depends on test host.
+        let mut list: *mut *mut Dirent = core::ptr::null_mut();
+        let _ret = scandirat(
+            crate::file::AT_FDCWD,
+            b"/nonexistent_scandirat\0".as_ptr(),
+            &raw mut list,
+            None,
+            None,
+        );
+        // Just verify no crash.
     }
 }

@@ -1614,7 +1614,7 @@ pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, _flags: i32)
 ///
 /// Returns `false` for null or empty paths.
 #[inline]
-fn is_absolute_path(path: *const u8) -> bool {
+pub(crate) fn is_absolute_path(path: *const u8) -> bool {
     // SAFETY: Callers guarantee `path` is either null or a valid C-string.
     // We only read the first byte (if non-null), which is always safe for
     // a valid C-string (it's either the first character or the null terminator).
@@ -1693,7 +1693,7 @@ fn build_at_path(
 ///
 /// Returns the total length (excluding null), or 0 on error with
 /// errno set (`EBADF`, `ENOTDIR`, or `ENAMETOOLONG`).
-fn resolve_dirfd_path(
+pub(crate) fn resolve_dirfd_path(
     dirfd: i32,
     path: *const u8,
     out: &mut [u8; crate::unistd::PATH_MAX],

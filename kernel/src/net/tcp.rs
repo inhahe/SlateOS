@@ -4637,9 +4637,12 @@ pub fn tick_retransmit() {
         return;
     }
 
-    // --- FIN retransmission for FinWait1/LastAck ---
-    // If the FIN segment was lost, the peer never saw it and won't
-    // transition.  Retransmit the FIN with exponential backoff.
+    // --- Data + FIN retransmission for FinWait1/LastAck ---
+    //
+    // If the connection has unacked data in tx_buffer, retransmit the
+    // data first.  If no data remains (all ACKed), retransmit the FIN.
+    // Per RFC 793, both data and FIN can be outstanding simultaneously
+    // in FinWait1 (data sent before close() + the FIN).
     for idx in 0..MAX_CONNECTIONS {
         let conn = &mut conns[idx];
         if !conn.active {
@@ -4648,12 +4651,44 @@ pub fn tick_retransmit() {
         if conn.state != TcpState::FinWait1 && conn.state != TcpState::LastAck {
             continue;
         }
-        let elapsed = now.saturating_sub(conn.last_activity_ns);
+        let elapsed = now.saturating_sub(
+            if !conn.tx_buffer.is_empty() && conn.tx_last_send_ns > 0 {
+                conn.tx_last_send_ns
+            } else {
+                conn.last_activity_ns
+            }
+        );
         if elapsed < conn.rto_ns {
             continue;
         }
 
-        // Retransmit FIN+ACK.
+        // If there's unacked data, retransmit it first (data before FIN
+        // in the byte stream).
+        if !conn.tx_buffer.is_empty() {
+            if let Some((lp, ri, rp, seq, ack, wnd, data, len, r_ts_ok, r_ts_recent)) =
+                retransmit_from_buffer(conn)
+            {
+                conn.rto_ns = conn.rto_ns.saturating_mul(2).min(RTO_MAX_NS);
+                conn.tx_last_send_ns = now;
+                on_loss_congestion(conn);
+                let rto_ecn = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
+
+                crate::serial_println!(
+                    "[tcp] RTO data retransmit ({:?}): {} bytes from seq {} (port {}, rto={}ms)",
+                    conn.state, len, seq, lp, conn.rto_ns / 1_000_000
+                );
+
+                drop(conns);
+                let _ = send_data_with_ts(
+                    lp, ri, rp, seq, ack, TCP_ACK | TCP_PSH, wnd,
+                    &data[..len], rto_ecn,
+                    r_ts_ok, r_ts_recent,
+                );
+                return;
+            }
+        }
+
+        // No data in tx_buffer — retransmit the FIN.
         let lp = conn.local_port;
         let ri = conn.remote_ip;
         let rp = conn.remote_port;

@@ -697,6 +697,15 @@ fn server_tick() {
                     let expected = xfer.current_block.wrapping_add(1);
                     if block == expected {
                         if let Some(payload) = dgram.data.get(4..) {
+                            // Enforce size limit to prevent heap exhaustion.
+                            if xfer.recv_data.len().saturating_add(payload.len()) > MAX_FILE_SIZE {
+                                let err = build_error(ERR_UNDEFINED, "File too large");
+                                let _ = super::udp::send(xfer.local_port, xfer.client_ip, xfer.client_port, &err);
+                                super::udp::close(xfer.socket_handle);
+                                xfer.active = false;
+                                SERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
                             xfer.recv_data.extend_from_slice(payload);
                             xfer.current_block = block;
 
@@ -709,7 +718,6 @@ fn server_tick() {
                             // Short block = EOF.
                             if payload.len() < BLOCK_SIZE {
                                 // Write received data to filesystem.
-                                let path = format!("{}/{}", xfer.filename, ""); // filename includes path
                                 let _ = write_received_file(&xfer.filename, &xfer.recv_data);
                                 super::udp::close(xfer.socket_handle);
                                 xfer.active = false;
@@ -719,7 +727,6 @@ fn server_tick() {
                                     xfer.filename, xfer.recv_data.len(),
                                     xfer.client_ip, xfer.client_port,
                                 );
-                                let _ = path; // suppress unused warning
                             }
                         }
                     }
@@ -775,6 +782,15 @@ fn handle_rrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16
     if !mode.eq_ignore_ascii_case("octet") {
         let err = build_error(ERR_UNDEFINED, "Only octet mode supported");
         let _ = super::udp::send(TFTP_PORT, client_ip, client_port, &err);
+        return;
+    }
+
+    // Sanitize filename: reject path traversal attempts.
+    // A remote client must not be able to read files outside the TFTP root.
+    if filename.contains("..") || filename.starts_with('/') || filename.starts_with('\\') {
+        let err = build_error(ERR_ACCESS_VIOLATION, "Invalid filename");
+        let _ = super::udp::send(TFTP_PORT, client_ip, client_port, &err);
+        SERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
         return;
     }
 
@@ -857,6 +873,14 @@ fn handle_wrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16
     if !mode.eq_ignore_ascii_case("octet") {
         let err = build_error(ERR_UNDEFINED, "Only octet mode supported");
         let _ = super::udp::send(TFTP_PORT, client_ip, client_port, &err);
+        return;
+    }
+
+    // Sanitize filename: reject path traversal attempts.
+    if filename.contains("..") || filename.starts_with('/') || filename.starts_with('\\') {
+        let err = build_error(ERR_ACCESS_VIOLATION, "Invalid filename");
+        let _ = super::udp::send(TFTP_PORT, client_ip, client_port, &err);
+        SERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
         return;
     }
 

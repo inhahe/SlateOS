@@ -380,9 +380,11 @@ fn parse_message(data: &[u8], source_ip: Ipv4Addr) -> Option<SyslogMessage> {
     let end_pri = text.find('>')?;
     let pri_str = text.get(1..end_pri)?;
     let pri: u8 = pri_str.parse().ok()?;
+    // RFC 5424: valid PRI is 0-191 (facility 0-23, severity 0-7).
+    // Reject out-of-range PRI rather than silently misclassifying.
     let (facility_opt, severity_opt) = decode_pri(pri);
-    let facility = facility_opt.unwrap_or(Facility::User);
-    let severity = severity_opt.unwrap_or(Severity::Info);
+    let facility = facility_opt?;
+    let severity = severity_opt?;
 
     // Rest of message after PRI.
     let rest = text.get(end_pri.saturating_add(1)..)?;

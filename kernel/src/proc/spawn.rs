@@ -832,7 +832,14 @@ fn setup_user_stack(pml4_phys: u64) -> KernelResult<u64> {
         // SAFETY: pml4_phys is valid (caller invariant), phys_frame is
         // freshly allocated and exclusively ours, virt is in user space.
         unsafe {
-            page_table::map_frame(pml4_phys, virt, phys_frame, flags)?;
+            if let Err(e) = page_table::map_frame(pml4_phys, virt, phys_frame, flags) {
+                // Free the frame that was never successfully mapped —
+                // otherwise it leaks permanently (address space teardown
+                // only finds mapped frames).
+                // SAFETY: phys_frame is exclusively ours and not mapped.
+                let _ = frame::free_frame(phys_frame);
+                return Err(e);
+            }
         }
     }
 

@@ -233,8 +233,22 @@ fn smtp_command(session: &SmtpSession, cmd: &str) -> KernelResult<SmtpReply> {
         super::poll();
     }
 
-    let reply_data = super::tcp::read_up_to(session.handle, MAX_REPLY_SIZE)?;
-    parse_reply(&reply_data).ok_or(KernelError::InvalidArgument)
+    let mut reply_data = super::tcp::read_up_to(session.handle, MAX_REPLY_SIZE)?;
+    let mut reply = parse_reply(&reply_data).ok_or(KernelError::InvalidArgument)?;
+
+    // Multi-line replies have '-' after the code on continuation lines.
+    // Keep reading until we get the final line (space after code).
+    let mut retries = 0u8;
+    while reply.continued && retries < 5 {
+        for _ in 0..REPLY_TIMEOUT_POLLS { super::poll(); }
+        let more = super::tcp::read_up_to(session.handle, MAX_REPLY_SIZE)?;
+        if more.is_empty() { break; }
+        reply_data.extend_from_slice(&more);
+        reply = parse_reply(&reply_data).ok_or(KernelError::InvalidArgument)?;
+        retries = retries.saturating_add(1);
+    }
+
+    Ok(reply)
 }
 
 /// Send raw data (for DATA phase).
@@ -247,8 +261,21 @@ fn smtp_send_data(session: &SmtpSession, data: &str) -> KernelResult<SmtpReply> 
         super::poll();
     }
 
-    let reply_data = super::tcp::read_up_to(session.handle, MAX_REPLY_SIZE)?;
-    parse_reply(&reply_data).ok_or(KernelError::InvalidArgument)
+    let mut reply_data = super::tcp::read_up_to(session.handle, MAX_REPLY_SIZE)?;
+    let mut reply = parse_reply(&reply_data).ok_or(KernelError::InvalidArgument)?;
+
+    // Handle multi-line reply continuation (same as smtp_command).
+    let mut retries = 0u8;
+    while reply.continued && retries < 5 {
+        for _ in 0..REPLY_TIMEOUT_POLLS { super::poll(); }
+        let more = super::tcp::read_up_to(session.handle, MAX_REPLY_SIZE)?;
+        if more.is_empty() { break; }
+        reply_data.extend_from_slice(&more);
+        reply = parse_reply(&reply_data).ok_or(KernelError::InvalidArgument)?;
+        retries = retries.saturating_add(1);
+    }
+
+    Ok(reply)
 }
 
 // ---------------------------------------------------------------------------

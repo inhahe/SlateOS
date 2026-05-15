@@ -70,6 +70,8 @@
 //! - **Formatted Messages**: `fmtmsg` (structured error/warning display)
 //! - **Message Catalogs**: `catopen`, `catgets`, `catclose` (stubs —
 //!   always falls back to default strings)
+//! - **Password Hashing**: `crypt`, `crypt_r` (stub — returns
+//!   `$0$<key>`), `encrypt`, `setkey` (DES stubs — ENOSYS)
 //! - **Search / Data Structures** (`<search.h>`): BST `tsearch`, `tfind`,
 //!   `tdelete`, `twalk`, `tdestroy`; hash table `hcreate`, `hdestroy`,
 //!   `hsearch`; linear search `lfind`, `lsearch`; linked list `insque`,
@@ -206,6 +208,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 pub mod aio;
 pub mod assert;
 pub mod crt;
+pub mod crypt;
 pub mod ctype;
 pub mod dlfcn;
 pub mod environ;

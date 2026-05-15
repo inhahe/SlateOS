@@ -1377,12 +1377,12 @@ _Port ext4 first. Don't write a custom filesystem._
 - [ ] Port ssh/sshd
 - [ ] Build custom grep (Rust, with unique features from Python grep)
 - [ ] Port find
-- [-] Terminal emulator (basic, serial/framebuffer):
+- [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)
   - [x] Unicode support (UTF-8 multi-byte accumulation, procedural box drawing/block element/geometric/arrow/symbol glyph generation, East Asian width detection, comprehensive self-tests)
   - [x] Configurable colors (6 built-in schemes: default/solarized-dark/monokai/dracula/gruvbox/light, custom FG/BG via hex RGB, runtime palette swap, SGR uses scheme defaults, `color` kshell command)
-  - [ ] tmux-like session detach/reattach
+  - [x] tmux-like session detach/reattach (termsession module: 10 sessions, per-session screen/scrollback/history/CWD/env, Ctrl+B quick-switch, tsession command)
   - [x] Find in backscroll (Ctrl+F interactive search with Ctrl+N/P navigation, 1000-line scrollback ring buffer, `scrollback` command with search/list/screen dump, per-cell screen text buffer for capture)
 
 ### 2.8 I/O scheduler

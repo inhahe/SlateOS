@@ -581,6 +581,23 @@ pub extern "C" fn sigqueue(_pid: crate::types::PidT, _sig: i32, _value: usize) -
 }
 
 // ---------------------------------------------------------------------------
+// siginfo si_code values for SIGCHLD (used with waitid)
+// ---------------------------------------------------------------------------
+
+/// Child has exited.
+pub const CLD_EXITED: i32 = 1;
+/// Child was killed by a signal.
+pub const CLD_KILLED: i32 = 2;
+/// Child was killed by a signal and dumped core.
+pub const CLD_DUMPED: i32 = 3;
+/// Child was trapped (ptrace).
+pub const CLD_TRAPPED: i32 = 4;
+/// Child was stopped.
+pub const CLD_STOPPED: i32 = 5;
+/// Stopped child was continued.
+pub const CLD_CONTINUED: i32 = 6;
+
+// ---------------------------------------------------------------------------
 // Realtime signal range
 // ---------------------------------------------------------------------------
 
@@ -1365,5 +1382,27 @@ mod tests {
         assert_ne!(SIG_BLOCK, SIG_UNBLOCK);
         assert_ne!(SIG_BLOCK, SIG_SETMASK);
         assert_ne!(SIG_UNBLOCK, SIG_SETMASK);
+    }
+
+    // -- CLD_* siginfo si_code constants --
+
+    #[test]
+    fn test_cld_constants_values() {
+        assert_eq!(CLD_EXITED, 1);
+        assert_eq!(CLD_KILLED, 2);
+        assert_eq!(CLD_DUMPED, 3);
+        assert_eq!(CLD_TRAPPED, 4);
+        assert_eq!(CLD_STOPPED, 5);
+        assert_eq!(CLD_CONTINUED, 6);
+    }
+
+    #[test]
+    fn test_cld_constants_sequential() {
+        // All CLD_* constants are sequential starting from 1.
+        assert_eq!(CLD_KILLED, CLD_EXITED + 1);
+        assert_eq!(CLD_DUMPED, CLD_KILLED + 1);
+        assert_eq!(CLD_TRAPPED, CLD_DUMPED + 1);
+        assert_eq!(CLD_STOPPED, CLD_TRAPPED + 1);
+        assert_eq!(CLD_CONTINUED, CLD_STOPPED + 1);
     }
 }

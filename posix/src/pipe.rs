@@ -106,3 +106,47 @@ pub extern "C" fn pipe2(pipefd: *mut Fd, flags: i32) -> i32 {
 
     0
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Null pointer checks (don't require kernel) --
+
+    #[test]
+    fn pipe_null_returns_efault() {
+        let ret = pipe(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn pipe2_null_returns_efault() {
+        let ret = pipe2(core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn pipe2_null_with_flags_returns_efault() {
+        let ret = pipe2(core::ptr::null_mut(), crate::fcntl::O_CLOEXEC);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn pipe_delegates_to_pipe2() {
+        // pipe(pipefd) == pipe2(pipefd, 0) — both should fail with
+        // null the same way, confirming pipe delegates.
+        let r1 = pipe(core::ptr::null_mut());
+        let e1 = errno::get_errno();
+        let r2 = pipe2(core::ptr::null_mut(), 0);
+        let e2 = errno::get_errno();
+        assert_eq!(r1, r2);
+        assert_eq!(e1, e2);
+    }
+}

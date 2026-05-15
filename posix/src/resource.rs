@@ -90,6 +90,8 @@ pub struct Rusage {
 /// Who to query for getrusage.
 pub const RUSAGE_SELF: i32 = 0;
 pub const RUSAGE_CHILDREN: i32 = -1;
+/// Linux extension: resource usage of the calling thread.
+pub const RUSAGE_THREAD: i32 = 1;
 
 // ---------------------------------------------------------------------------
 // Default limits
@@ -227,7 +229,7 @@ pub extern "C" fn getrusage(who: i32, usage: *mut Rusage) -> i32 {
         return -1;
     }
 
-    if who != RUSAGE_SELF && who != RUSAGE_CHILDREN {
+    if who != RUSAGE_SELF && who != RUSAGE_CHILDREN && who != RUSAGE_THREAD {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -441,6 +443,7 @@ mod tests {
     fn rusage_constants() {
         assert_eq!(RUSAGE_SELF, 0);
         assert_eq!(RUSAGE_CHILDREN, -1);
+        assert_eq!(RUSAGE_THREAD, 1);
     }
 
     // -----------------------------------------------------------------------
@@ -729,6 +732,15 @@ mod tests {
     fn getrusage_children_returns_zeroed() {
         let mut usage = unsafe { core::mem::MaybeUninit::<Rusage>::zeroed().assume_init() };
         let ret = getrusage(RUSAGE_CHILDREN, &mut usage);
+        assert_eq!(ret, 0);
+        assert_eq!(usage.ru_maxrss, 0);
+    }
+
+    #[test]
+    fn getrusage_thread_returns_zeroed() {
+        let mut usage = unsafe { core::mem::MaybeUninit::<Rusage>::zeroed().assume_init() };
+        usage.ru_maxrss = 123;
+        let ret = getrusage(RUSAGE_THREAD, &mut usage);
         assert_eq!(ret, 0);
         assert_eq!(usage.ru_maxrss, 0);
     }

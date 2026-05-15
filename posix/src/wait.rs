@@ -23,6 +23,14 @@ pub const WUNTRACED: i32 = 2;
 /// Also report continued children.
 pub const WCONTINUED: i32 = 8;
 
+// waitid-specific option flags (not used by waitpid).
+/// Wait for processes that have exited (waitid).
+pub const WEXITED: i32 = 4;
+/// Wait for stopped processes (waitid, equivalent to WUNTRACED for waitpid).
+pub const WSTOPPED: i32 = 2;
+/// Leave the child in a waitable state (don't consume the wait status).
+pub const WNOWAIT: i32 = 0x0100_0000;
+
 // ---------------------------------------------------------------------------
 // Wait status inspection functions (C-callable)
 // ---------------------------------------------------------------------------
@@ -106,6 +114,19 @@ mod tests {
         assert_eq!(WNOHANG, 1);
         assert_eq!(WUNTRACED, 2);
         assert_eq!(WCONTINUED, 8);
+    }
+
+    #[test]
+    fn waitid_constants_match_linux() {
+        assert_eq!(WEXITED, 4);
+        assert_eq!(WSTOPPED, 2);  // Same value as WUNTRACED
+        assert_eq!(WNOWAIT, 0x0100_0000);
+    }
+
+    #[test]
+    fn wstopped_equals_wuntraced() {
+        // POSIX: WSTOPPED is the waitid equivalent of waitpid's WUNTRACED.
+        assert_eq!(WSTOPPED, WUNTRACED);
     }
 
     // -----------------------------------------------------------------------

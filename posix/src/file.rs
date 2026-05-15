@@ -760,6 +760,79 @@ pub extern "C" fn pwritev(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) 
 }
 
 // ---------------------------------------------------------------------------
+// preadv2 / pwritev2 — Linux extended vectored I/O
+// ---------------------------------------------------------------------------
+
+/// Flags for `preadv2` / `pwritev2`.
+pub const RWF_HIPRI: i32 = 0x01;
+/// Append (only for pwritev2).
+pub const RWF_APPEND: i32 = 0x10;
+/// Per-I/O O_DSYNC semantics.
+pub const RWF_DSYNC: i32 = 0x02;
+/// Per-I/O O_SYNC semantics.
+pub const RWF_SYNC: i32 = 0x04;
+/// Do not wait for I/O completion.
+pub const RWF_NOWAIT: i32 = 0x08;
+
+/// Read data from a file at an offset into multiple buffers, with flags.
+///
+/// Like `preadv`, but with an additional `flags` parameter. `flags == 0`
+/// is identical to `preadv`.
+///
+/// If `offset == -1`, the current file position is used and updated
+/// (like `readv`).
+///
+/// Our implementation ignores flags and delegates to `preadv` (or `readv`
+/// if offset == -1).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn preadv2(
+    fd: Fd,
+    iov: *const Iovec,
+    iovcnt: i32,
+    offset: OffT,
+    _flags: i32,
+) -> SsizeT {
+    if offset == -1 {
+        // Use current file position (like readv).
+        return readv(fd, iov, iovcnt);
+    }
+    preadv(fd, iov, iovcnt, offset)
+}
+
+/// Write data to a file at an offset from multiple buffers, with flags.
+///
+/// Like `pwritev`, but with an additional `flags` parameter. `flags == 0`
+/// is identical to `pwritev`.
+///
+/// If `offset == -1`, the current file position is used and updated
+/// (like `writev`).
+///
+/// Our implementation ignores flags and delegates to `pwritev` (or `writev`
+/// if offset == -1).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pwritev2(
+    fd: Fd,
+    iov: *const Iovec,
+    iovcnt: i32,
+    offset: OffT,
+    _flags: i32,
+) -> SsizeT {
+    if offset == -1 {
+        return writev(fd, iov, iovcnt);
+    }
+    pwritev(fd, iov, iovcnt, offset)
+}
+
+/// `fadvise64` — LP64 alias for `posix_fadvise`.
+///
+/// Some glibc-compiled programs reference `fadvise64` instead of
+/// `posix_fadvise`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fadvise64(fd: Fd, offset: OffT, len: OffT, advice: i32) -> i32 {
+    posix_fadvise(fd, offset, len, advice)
+}
+
+// ---------------------------------------------------------------------------
 // dup / dup2
 // ---------------------------------------------------------------------------
 
@@ -4054,6 +4127,71 @@ mod tests {
     #[test]
     fn test_posix_fallocate64_invalid_len() {
         assert_eq!(posix_fallocate64(0, 0, 0), crate::errno::EINVAL);
+    }
+
+    // -- preadv2 / pwritev2 --
+
+    #[test]
+    fn test_preadv2_null_iov() {
+        crate::errno::set_errno(0);
+        assert_eq!(preadv2(0, core::ptr::null(), 1, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_preadv2_zero_iovcnt() {
+        crate::errno::set_errno(0);
+        assert_eq!(preadv2(0, core::ptr::null(), 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_preadv2_negative_offset_delegates_to_readv() {
+        // offset == -1 should use readv behavior (current file position).
+        // With null iov and iovcnt == 1, readv returns EINVAL.
+        crate::errno::set_errno(0);
+        assert_eq!(preadv2(0, core::ptr::null(), 1, -1, 0), -1);
+    }
+
+    #[test]
+    fn test_pwritev2_null_iov() {
+        crate::errno::set_errno(0);
+        assert_eq!(pwritev2(0, core::ptr::null(), 1, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pwritev2_negative_offset_delegates_to_writev() {
+        crate::errno::set_errno(0);
+        assert_eq!(pwritev2(0, core::ptr::null(), 1, -1, 0), -1);
+    }
+
+    // -- RWF_* constants --
+
+    #[test]
+    fn test_rwf_constants() {
+        assert_eq!(RWF_HIPRI, 0x01);
+        assert_eq!(RWF_DSYNC, 0x02);
+        assert_eq!(RWF_SYNC, 0x04);
+        assert_eq!(RWF_NOWAIT, 0x08);
+        assert_eq!(RWF_APPEND, 0x10);
+    }
+
+    #[test]
+    fn test_rwf_no_collisions() {
+        let all = [RWF_HIPRI, RWF_DSYNC, RWF_SYNC, RWF_NOWAIT, RWF_APPEND];
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_eq!(all[i] & all[j], 0);
+            }
+        }
+    }
+
+    // -- fadvise64 --
+
+    #[test]
+    fn test_fadvise64_succeeds() {
+        assert_eq!(fadvise64(0, 0, 0, 0), 0);
     }
 
     // -- splice stubs --

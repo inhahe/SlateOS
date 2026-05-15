@@ -619,6 +619,92 @@ pub extern "C" fn pidfd_getfd(_pidfd: i32, _targetfd: i32, _flags: u32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// arch_prctl — x86-64 specific thread state
+// ---------------------------------------------------------------------------
+
+/// Set the FS base address.
+pub const ARCH_SET_FS: i32 = 0x1002;
+/// Get the FS base address.
+pub const ARCH_GET_FS: i32 = 0x1003;
+/// Set the GS base address.
+pub const ARCH_SET_GS: i32 = 0x1001;
+/// Get the GS base address.
+pub const ARCH_GET_GS: i32 = 0x1004;
+
+/// Set architecture-specific thread state.
+///
+/// Stub: returns -1 with ENOSYS.  A real implementation would use
+/// `wrfsbase`/`wrgsbase` or the MSR to set segment base addresses.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn arch_prctl(_code: i32, _addr: u64) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
+// ioprio — I/O scheduling priority
+// ---------------------------------------------------------------------------
+
+/// I/O priority class: none (use default based on nice value).
+pub const IOPRIO_CLASS_NONE: i32 = 0;
+/// Real-time I/O class.
+pub const IOPRIO_CLASS_RT: i32 = 1;
+/// Best-effort I/O class.
+pub const IOPRIO_CLASS_BE: i32 = 2;
+/// Idle I/O class.
+pub const IOPRIO_CLASS_IDLE: i32 = 3;
+
+/// Who the ioprio applies to: process.
+pub const IOPRIO_WHO_PROCESS: i32 = 1;
+/// Who: process group.
+pub const IOPRIO_WHO_PGRP: i32 = 2;
+/// Who: user.
+pub const IOPRIO_WHO_USER: i32 = 3;
+
+/// Get the I/O scheduling class and priority of a process.
+///
+/// Stub: returns 0 (default priority = `IOPRIO_CLASS_NONE`).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ioprio_get(_which: i32, _who: i32) -> i32 {
+    // Return class=NONE, data=0 → value = (NONE << 13) | 0 = 0.
+    0
+}
+
+/// Set the I/O scheduling class and priority of a process.
+///
+/// Stub: returns 0 (succeed silently).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ioprio_set(_which: i32, _who: i32, _ioprio: i32) -> i32 {
+    0
+}
+
+// ---------------------------------------------------------------------------
+// membarrier — Linux process-wide memory barrier
+// ---------------------------------------------------------------------------
+
+/// Command: query supported operations.
+pub const MEMBARRIER_CMD_QUERY: i32 = 0;
+/// Issue a global barrier.
+pub const MEMBARRIER_CMD_GLOBAL: i32 = 1;
+/// Register intent to use private expedited barriers.
+pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: i32 = 1 << 4;
+/// Issue a private expedited barrier.
+pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED: i32 = 1 << 3;
+
+/// Perform a memory barrier operation across processes.
+///
+/// Stub: `MEMBARRIER_CMD_QUERY` returns 0 (no supported commands),
+/// other commands return -1 with ENOSYS.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn membarrier(cmd: i32, _flags: u32, _cpu_id: i32) -> i32 {
+    if cmd == MEMBARRIER_CMD_QUERY {
+        return 0; // No commands supported.
+    }
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1312,5 +1398,89 @@ mod tests {
     #[test]
     fn test_pidfd_nonblock_constant() {
         assert_ne!(PIDFD_NONBLOCK, 0);
+    }
+
+    // -- arch_prctl --
+
+    #[test]
+    fn test_arch_prctl_set_fs_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_SET_FS, 0x1000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_get_fs_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_GET_FS, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_constants() {
+        assert_eq!(ARCH_SET_GS, 0x1001);
+        assert_eq!(ARCH_SET_FS, 0x1002);
+        assert_eq!(ARCH_GET_FS, 0x1003);
+        assert_eq!(ARCH_GET_GS, 0x1004);
+    }
+
+    // -- ioprio --
+
+    #[test]
+    fn test_ioprio_get_returns_zero() {
+        assert_eq!(ioprio_get(IOPRIO_WHO_PROCESS, 0), 0);
+    }
+
+    #[test]
+    fn test_ioprio_set_succeeds() {
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_ioprio_class_constants() {
+        assert_eq!(IOPRIO_CLASS_NONE, 0);
+        assert_eq!(IOPRIO_CLASS_RT, 1);
+        assert_eq!(IOPRIO_CLASS_BE, 2);
+        assert_eq!(IOPRIO_CLASS_IDLE, 3);
+    }
+
+    #[test]
+    fn test_ioprio_who_constants() {
+        assert_eq!(IOPRIO_WHO_PROCESS, 1);
+        assert_eq!(IOPRIO_WHO_PGRP, 2);
+        assert_eq!(IOPRIO_WHO_USER, 3);
+    }
+
+    #[test]
+    fn test_ioprio_get_different_who() {
+        assert_eq!(ioprio_get(IOPRIO_WHO_PGRP, 0), 0);
+        assert_eq!(ioprio_get(IOPRIO_WHO_USER, 0), 0);
+    }
+
+    // -- membarrier --
+
+    #[test]
+    fn test_membarrier_query() {
+        assert_eq!(membarrier(MEMBARRIER_CMD_QUERY, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_membarrier_global_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(membarrier(MEMBARRIER_CMD_GLOBAL, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_membarrier_private_expedited_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_membarrier_constants() {
+        assert_eq!(MEMBARRIER_CMD_QUERY, 0);
+        assert_eq!(MEMBARRIER_CMD_GLOBAL, 1);
     }
 }

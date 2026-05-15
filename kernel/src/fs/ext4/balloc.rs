@@ -722,7 +722,306 @@ fn set_inode_bitmap_checksum(gd: &mut Ext4GroupDesc, desc_size: u32, csum: u32) 
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Self-test (runs in kernel)
+// ---------------------------------------------------------------------------
+
+/// ext4 block allocator unit tests — exercises bitmap operations and
+/// group descriptor field accessors.  The group descriptor tests are
+/// critical regression tests for the bit-shift bugs fixed in af1c277.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[ext4-balloc] Running self-test...");
+
+    test_bitmap_test_set_clear()?;
+    test_bitmap_find_free()?;
+    test_bitmap_find_free_run()?;
+    test_gd_free_blocks_32bit()?;
+    test_gd_free_blocks_64bit()?;
+    test_gd_free_inodes_64bit()?;
+    test_gd_increment_decrement()?;
+
+    crate::serial_println!("[ext4-balloc] Self-test PASSED (7 tests)");
+    Ok(())
+}
+
+/// Test bitmap_test, bitmap_set, bitmap_clear.
+fn test_bitmap_test_set_clear() -> KernelResult<()> {
+    let mut bitmap = vec![0u8; 16]; // 128 bits
+
+    // All bits should be free initially.
+    if bitmap_test(&bitmap, 0) || bitmap_test(&bitmap, 7) || bitmap_test(&bitmap, 127) {
+        crate::serial_println!("[ext4-balloc]   FAIL: zero bitmap has set bits");
+        return Err(KernelError::InternalError);
+    }
+
+    // Set bit 0.
+    bitmap_set(&mut bitmap, 0);
+    if !bitmap_test(&bitmap, 0) || bitmap_test(&bitmap, 1) {
+        crate::serial_println!("[ext4-balloc]   FAIL: bitmap_set(0) failed");
+        return Err(KernelError::InternalError);
+    }
+
+    // Set bit 7 (last bit of first byte).
+    bitmap_set(&mut bitmap, 7);
+    if !bitmap_test(&bitmap, 7) || bitmap[0] != 0b1000_0001 {
+        crate::serial_println!("[ext4-balloc]   FAIL: bitmap_set(7) wrong byte");
+        return Err(KernelError::InternalError);
+    }
+
+    // Set bit 8 (first bit of second byte).
+    bitmap_set(&mut bitmap, 8);
+    if !bitmap_test(&bitmap, 8) || bitmap[1] != 1 {
+        crate::serial_println!("[ext4-balloc]   FAIL: bitmap_set(8) wrong byte");
+        return Err(KernelError::InternalError);
+    }
+
+    // Clear bit 0.
+    bitmap_clear(&mut bitmap, 0);
+    if bitmap_test(&bitmap, 0) || bitmap[0] != 0b1000_0000 {
+        crate::serial_println!("[ext4-balloc]   FAIL: bitmap_clear(0) failed");
+        return Err(KernelError::InternalError);
+    }
+
+    // Out-of-bounds access should not panic (bitmap_test returns false).
+    if bitmap_test(&bitmap, 200) {
+        crate::serial_println!("[ext4-balloc]   FAIL: OOB bit reported as set");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-balloc]   bitmap test/set/clear: OK");
+    Ok(())
+}
+
+/// Test bitmap_find_free.
+fn test_bitmap_find_free() -> KernelResult<()> {
+    let mut bitmap = vec![0xFFu8; 4]; // 32 bits, all set
+    bitmap[2] = 0xFE; // Bit 16 is free (LSB of byte 2).
+
+    match bitmap_find_free(&bitmap, 0, 32) {
+        Some(16) => {}
+        other => {
+            crate::serial_println!("[ext4-balloc]   FAIL: find_free from 0 = {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Starting at 17 should wrap around and find bit 16.
+    match bitmap_find_free(&bitmap, 17, 32) {
+        Some(16) => {}
+        other => {
+            crate::serial_println!("[ext4-balloc]   FAIL: find_free wrap = {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // All full bitmap.
+    let full = vec![0xFFu8; 4];
+    if bitmap_find_free(&full, 0, 32).is_some() {
+        crate::serial_println!("[ext4-balloc]   FAIL: found free in full bitmap");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-balloc]   bitmap find_free: OK");
+    Ok(())
+}
+
+/// Test bitmap_find_free_run for contiguous allocation.
+fn test_bitmap_find_free_run() -> KernelResult<()> {
+    let mut bitmap = vec![0xFFu8; 4]; // 32 bits, all set
+
+    // Free bits 10, 11, 12 in byte 1 (which covers bits 8-15).
+    // bit 8 = LSB of byte 1
+    // bits 8,9 set, 10,11,12 clear, 13,14,15 set
+    // byte 1 = (1<<0)|(1<<1)|(0<<2)|(0<<3)|(0<<4)|(1<<5)|(1<<6)|(1<<7) = 0xE3
+    bitmap[1] = 0xE3;
+
+    match bitmap_find_free_run(&bitmap, 0, 32, 3) {
+        Some(10) => {}
+        other => {
+            crate::serial_println!("[ext4-balloc]   FAIL: find_free_run(3) = {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // 4 contiguous should fail (only 3 free).
+    if bitmap_find_free_run(&bitmap, 0, 32, 4).is_some() {
+        crate::serial_println!("[ext4-balloc]   FAIL: found 4-run in 3-free bitmap");
+        return Err(KernelError::InternalError);
+    }
+
+    // Run of 1 should find bit 10.
+    match bitmap_find_free_run(&bitmap, 0, 32, 1) {
+        Some(10) => {}
+        other => {
+            crate::serial_println!("[ext4-balloc]   FAIL: find_free_run(1) = {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[ext4-balloc]   bitmap find_free_run: OK");
+    Ok(())
+}
+
+/// Create a zeroed Ext4GroupDesc for testing.
+///
+/// # Safety
+/// Ext4GroupDesc is composed entirely of integer fields (u32, u16),
+/// for which all-zeros is a valid bit pattern.
+fn zeroed_gd() -> Ext4GroupDesc {
+    // SAFETY: All fields are u32/u16 — zero is a valid value for each.
+    unsafe { core::mem::zeroed() }
+}
+
+/// Test group_desc_free_blocks in 32-bit mode (lo field only).
+fn test_gd_free_blocks_32bit() -> KernelResult<()> {
+    let mut gd = zeroed_gd();
+    gd.bg_free_blocks_count_lo = 1234;
+
+    let count = group_desc_free_blocks(&gd, false);
+    if count != 1234 {
+        crate::serial_println!("[ext4-balloc]   FAIL: 32-bit free blocks = {}", count);
+        return Err(KernelError::InternalError);
+    }
+
+    // hi field should be ignored in 32-bit mode.
+    gd.bg_free_blocks_count_hi = 0xFFFF;
+    let count2 = group_desc_free_blocks(&gd, false);
+    if count2 != 1234 {
+        crate::serial_println!("[ext4-balloc]   FAIL: 32-bit mode used hi field");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-balloc]   gd free blocks 32-bit: OK");
+    Ok(())
+}
+
+/// Test group_desc_free_blocks in 64-bit mode (lo + hi << 16).
+///
+/// REGRESSION TEST: This caught the critical bit-shift bug where
+/// hi was shifted by 32 instead of 16 (fixed in commit af1c277).
+fn test_gd_free_blocks_64bit() -> KernelResult<()> {
+    let mut gd = zeroed_gd();
+
+    // Set lo=0x1234, hi=0x0005 → combined = 0x00051234.
+    gd.bg_free_blocks_count_lo = 0x1234;
+    gd.bg_free_blocks_count_hi = 0x0005;
+
+    let count = group_desc_free_blocks(&gd, true);
+    let expected: u64 = 0x00051234;
+    if count != expected {
+        crate::serial_println!(
+            "[ext4-balloc]   FAIL: 64-bit free blocks = {:#x}, expected {:#x}",
+            count, expected
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify max values: lo=0xFFFF, hi=0xFFFF → 0x0000_0000_FFFF_FFFF.
+    gd.bg_free_blocks_count_lo = 0xFFFF;
+    gd.bg_free_blocks_count_hi = 0xFFFF;
+
+    let max_count = group_desc_free_blocks(&gd, true);
+    let expected_max: u64 = 0xFFFFFFFF;
+    if max_count != expected_max {
+        crate::serial_println!(
+            "[ext4-balloc]   FAIL: max free blocks = {:#x}, expected {:#x}",
+            max_count, expected_max
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-balloc]   gd free blocks 64-bit: OK");
+    Ok(())
+}
+
+/// Test group_desc_free_inodes in 64-bit mode (same bit-shift pattern).
+fn test_gd_free_inodes_64bit() -> KernelResult<()> {
+    let mut gd = zeroed_gd();
+
+    gd.bg_free_inodes_count_lo = 0xABCD;
+    gd.bg_free_inodes_count_hi = 0x0012;
+
+    let count = group_desc_free_inodes(&gd, true);
+    let expected: u64 = 0x0012ABCD;
+    if count != expected {
+        crate::serial_println!(
+            "[ext4-balloc]   FAIL: 64-bit free inodes = {:#x}, expected {:#x}",
+            count, expected
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-balloc]   gd free inodes 64-bit: OK");
+    Ok(())
+}
+
+/// Test increment/decrement of free block/inode counts.
+///
+/// Verifies the write path: that decrement/increment correctly
+/// split the value back into lo(16) and hi(16) fields.
+fn test_gd_increment_decrement() -> KernelResult<()> {
+    let mut gd = zeroed_gd();
+
+    // Start at 0x10000 (hi=1, lo=0).
+    gd.bg_free_blocks_count_lo = 0;
+    gd.bg_free_blocks_count_hi = 1;
+
+    // Decrement: 0x10000 → 0xFFFF.
+    decrement_gd_free_blocks(&mut gd, true);
+    let after_dec = group_desc_free_blocks(&gd, true);
+    if after_dec != 0xFFFF {
+        crate::serial_println!(
+            "[ext4-balloc]   FAIL: 0x10000 - 1 = {:#x}, expected 0xFFFF",
+            after_dec
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Verify lo/hi fields: 0xFFFF → lo=0xFFFF, hi=0.
+    if gd.bg_free_blocks_count_lo != 0xFFFF || gd.bg_free_blocks_count_hi != 0 {
+        crate::serial_println!(
+            "[ext4-balloc]   FAIL: lo={:#x} hi={:#x} after dec",
+            gd.bg_free_blocks_count_lo, gd.bg_free_blocks_count_hi
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Increment: 0xFFFF → 0x10000.
+    increment_gd_free_blocks(&mut gd, true);
+    let after_inc = group_desc_free_blocks(&gd, true);
+    if after_inc != 0x10000 {
+        crate::serial_println!(
+            "[ext4-balloc]   FAIL: 0xFFFF + 1 = {:#x}, expected 0x10000",
+            after_inc
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Verify: lo=0, hi=1.
+    if gd.bg_free_blocks_count_lo != 0 || gd.bg_free_blocks_count_hi != 1 {
+        crate::serial_println!(
+            "[ext4-balloc]   FAIL: lo={:#x} hi={:#x} after inc",
+            gd.bg_free_blocks_count_lo, gd.bg_free_blocks_count_hi
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Same test for inodes.
+    gd.bg_free_inodes_count_lo = 0;
+    gd.bg_free_inodes_count_hi = 2; // 0x20000
+    decrement_gd_free_inodes(&mut gd, true);
+    let inodes_after = group_desc_free_inodes(&gd, true);
+    if inodes_after != 0x1FFFF {
+        crate::serial_println!(
+            "[ext4-balloc]   FAIL: inode 0x20000 - 1 = {:#x}",
+            inodes_after
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-balloc]   increment/decrement: OK");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests (std)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

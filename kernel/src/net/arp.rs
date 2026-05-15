@@ -426,3 +426,187 @@ pub fn flush_cache() {
     }
     crate::serial_println!("[arp] Cache flushed");
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// ARP unit tests — exercises packet parsing, cache insert/lookup, and
+/// rejection of invalid inputs.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[arp] Running ARP self-test...");
+
+    test_parse_valid_request()?;
+    test_parse_too_short()?;
+    test_parse_wrong_hw_type()?;
+    test_build_roundtrip()?;
+    test_cache_insert_lookup()?;
+    test_cache_reject_multicast()?;
+    test_cache_flush()?;
+
+    crate::serial_println!("[arp] ARP self-test PASSED");
+    Ok(())
+}
+
+/// Test parsing a well-formed ARP request.
+fn test_parse_valid_request() -> KernelResult<()> {
+    let our_mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    let our_ip = Ipv4Addr([192, 168, 1, 100]);
+    let target_mac = MacAddress([0x00; 6]);
+    let target_ip = Ipv4Addr([192, 168, 1, 1]);
+
+    let pkt = build_arp(ARP_REQUEST, &our_mac, our_ip, &target_mac, target_ip);
+    let (op, s_mac, s_ip, _t_mac, t_ip) = parse_arp(&pkt)?;
+
+    if op != ARP_REQUEST {
+        crate::serial_println!("[arp]   FAIL: expected REQUEST, got {}", op);
+        return Err(KernelError::InternalError);
+    }
+    if s_mac.0 != our_mac.0 || s_ip != our_ip || t_ip != target_ip {
+        crate::serial_println!("[arp]   FAIL: parsed fields don't match built packet");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[arp]   parse valid request: OK");
+    Ok(())
+}
+
+/// Test that a too-short packet is rejected.
+fn test_parse_too_short() -> KernelResult<()> {
+    let short = [0u8; 10];
+    if parse_arp(&short).is_ok() {
+        crate::serial_println!("[arp]   FAIL: accepted too-short packet");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[arp]   parse too-short: OK (rejected)");
+    Ok(())
+}
+
+/// Test that a non-Ethernet hardware type is rejected.
+fn test_parse_wrong_hw_type() -> KernelResult<()> {
+    let our_mac = MacAddress([0x11; 6]);
+    let our_ip = Ipv4Addr([10, 0, 0, 1]);
+    let target_mac = MacAddress([0x00; 6]);
+    let target_ip = Ipv4Addr([10, 0, 0, 2]);
+
+    let mut pkt = build_arp(ARP_REQUEST, &our_mac, our_ip, &target_mac, target_ip);
+    // Corrupt the hardware type field (bytes 0-1).
+    pkt[0] = 0xFF;
+    pkt[1] = 0xFF;
+
+    if parse_arp(&pkt).is_ok() {
+        crate::serial_println!("[arp]   FAIL: accepted non-Ethernet hw type");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[arp]   parse wrong hw type: OK (rejected)");
+    Ok(())
+}
+
+/// Test that build + parse round-trips correctly for ARP reply.
+fn test_build_roundtrip() -> KernelResult<()> {
+    let src_mac = MacAddress([0x02, 0x42, 0xAC, 0x11, 0x00, 0x02]);
+    let src_ip = Ipv4Addr([172, 17, 0, 2]);
+    let dst_mac = MacAddress([0x02, 0x42, 0xAC, 0x11, 0x00, 0x01]);
+    let dst_ip = Ipv4Addr([172, 17, 0, 1]);
+
+    let pkt = build_arp(ARP_REPLY, &src_mac, src_ip, &dst_mac, dst_ip);
+    let (op, s_mac, s_ip, t_mac, t_ip) = parse_arp(&pkt)?;
+
+    if op != ARP_REPLY || s_mac.0 != src_mac.0 || s_ip != src_ip
+        || t_mac.0 != dst_mac.0 || t_ip != dst_ip
+    {
+        crate::serial_println!("[arp]   FAIL: round-trip mismatch");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[arp]   build/parse round-trip: OK");
+    Ok(())
+}
+
+/// Test that cache_insert + lookup works for valid unicast IPs.
+fn test_cache_insert_lookup() -> KernelResult<()> {
+    let ip = Ipv4Addr([10, 99, 99, 99]);
+    let mac = MacAddress([0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01]);
+
+    // Should not be in cache initially.
+    flush_cache();
+    if lookup(ip).is_some() {
+        crate::serial_println!("[arp]   FAIL: found entry before insert");
+        return Err(KernelError::InternalError);
+    }
+
+    cache_insert(ip, mac);
+
+    match lookup(ip) {
+        Some(found) if found.0 == mac.0 => {}
+        Some(found) => {
+            crate::serial_println!("[arp]   FAIL: wrong MAC {:?}", found.0);
+            return Err(KernelError::InternalError);
+        }
+        None => {
+            crate::serial_println!("[arp]   FAIL: entry not found after insert");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    flush_cache();
+    crate::serial_println!("[arp]   cache insert/lookup: OK");
+    Ok(())
+}
+
+/// Test that multicast/broadcast IPs are rejected by cache_insert.
+fn test_cache_reject_multicast() -> KernelResult<()> {
+    flush_cache();
+
+    // 224.0.0.1 is multicast — should be rejected.
+    let mcast_ip = Ipv4Addr([224, 0, 0, 1]);
+    let mac = MacAddress([0x01, 0x00, 0x5E, 0x00, 0x00, 0x01]);
+    cache_insert(mcast_ip, mac);
+
+    if lookup(mcast_ip).is_some() {
+        crate::serial_println!("[arp]   FAIL: multicast IP was cached");
+        flush_cache();
+        return Err(KernelError::InternalError);
+    }
+
+    // 127.0.0.1 is loopback — should be rejected.
+    let lo_ip = Ipv4Addr([127, 0, 0, 1]);
+    cache_insert(lo_ip, mac);
+
+    if lookup(lo_ip).is_some() {
+        crate::serial_println!("[arp]   FAIL: loopback IP was cached");
+        flush_cache();
+        return Err(KernelError::InternalError);
+    }
+
+    flush_cache();
+    crate::serial_println!("[arp]   cache reject multicast/loopback: OK");
+    Ok(())
+}
+
+/// Test that flush_cache invalidates all entries.
+fn test_cache_flush() -> KernelResult<()> {
+    let ip1 = Ipv4Addr([10, 1, 1, 1]);
+    let ip2 = Ipv4Addr([10, 2, 2, 2]);
+    let mac1 = MacAddress([0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    let mac2 = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+
+    flush_cache();
+    cache_insert(ip1, mac1);
+    cache_insert(ip2, mac2);
+
+    // Both should be present.
+    if lookup(ip1).is_none() || lookup(ip2).is_none() {
+        crate::serial_println!("[arp]   FAIL: entries missing before flush");
+        flush_cache();
+        return Err(KernelError::InternalError);
+    }
+
+    flush_cache();
+
+    if lookup(ip1).is_some() || lookup(ip2).is_some() {
+        crate::serial_println!("[arp]   FAIL: entries survived flush");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[arp]   cache flush: OK");
+    Ok(())
+}

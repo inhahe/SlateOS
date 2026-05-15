@@ -639,4 +639,72 @@ mod tests {
     fn test_max_depth() {
         assert_eq!(MAX_DEPTH, 32);
     }
+
+    // -- build_child_path overflow --
+
+    #[test]
+    fn test_build_child_path_near_limit() {
+        // A parent near PATH_MAX-2 with a 1-byte name should work.
+        let mut parent = [b'a'; PATH_MAX];
+        parent[PATH_MAX - 3] = 0; // 4093 bytes of 'a', null at 4093
+        let name = b"x\0";
+        let mut buf = [0u8; PATH_MAX];
+        let len = build_child_path(parent.as_ptr(), name.as_ptr(), &mut buf);
+        // 4093 + "/" + "x" = 4095 bytes, which fits in PATH_MAX (4096).
+        assert!(len > 0, "should fit within PATH_MAX");
+    }
+
+    #[test]
+    fn test_build_child_path_at_limit() {
+        // Exactly at PATH_MAX: parent(4093) + "/" + name(1) + NUL = 4096
+        // But total must be < PATH_MAX, not <=, so this is at the edge.
+        let mut parent = [b'a'; PATH_MAX];
+        parent[PATH_MAX - 3] = 0; // length = 4093
+        // name = "xy" (2 bytes) → total = 4093+1+2 = 4096 → == PATH_MAX → returns 0
+        let name = b"xy\0";
+        let mut buf = [0u8; PATH_MAX];
+        let len = build_child_path(parent.as_ptr(), name.as_ptr(), &mut buf);
+        assert_eq!(len, 0, "should fail when result hits PATH_MAX");
+    }
+
+    // -- find_basename_offset more cases --
+
+    #[test]
+    fn test_basename_offset_only_slash() {
+        // "/" → basename offset is 1.
+        assert_eq!(find_basename_offset(b"/\0".as_ptr()), 1);
+    }
+
+    #[test]
+    fn test_basename_offset_double_slash() {
+        // "//" → last slash at position 1, offset = 2.
+        assert_eq!(find_basename_offset(b"//\0".as_ptr()), 2);
+    }
+
+    #[test]
+    fn test_basename_offset_relative() {
+        // "foo/bar" → last slash at 3, offset = 4.
+        assert_eq!(find_basename_offset(b"foo/bar\0".as_ptr()), 4);
+    }
+
+    // -- is_dot_or_dotdot empty string --
+
+    #[test]
+    fn test_is_dot_or_dotdot_empty() {
+        // Empty string ('\0') starts with '\0', not '.'.
+        assert!(!is_dot_or_dotdot(b"\0".as_ptr()));
+    }
+
+    // -- FTW type flags are distinct --
+
+    #[test]
+    fn test_ftw_type_flags_distinct() {
+        let types = [FTW_F, FTW_D, FTW_DNR, FTW_NS, FTW_SL, FTW_DP, FTW_SLN];
+        for i in 0..types.len() {
+            for j in (i + 1)..types.len() {
+                assert_ne!(types[i], types[j],
+                    "FTW types at indices {i} and {j} must be distinct");
+            }
+        }
+    }
 }

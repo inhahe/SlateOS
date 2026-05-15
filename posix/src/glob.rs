@@ -732,4 +732,127 @@ mod tests {
         assert_eq!(g.gl_pathc, 0);
         assert!(g.gl_pathv.is_null());
     }
+
+    // -- split_pattern edge cases --
+
+    #[test]
+    fn test_split_pattern_trailing_slash() {
+        // "/dir/" — last_slash at position 4
+        let parts = split_pattern(b"/dir/\0".as_ptr());
+        assert!(parts.has_slash);
+        assert_eq!(parts.last_slash, 4);
+        assert_eq!(parts.file_start, 5);
+        assert_eq!(parts.pat_len, 5);
+    }
+
+    #[test]
+    fn test_split_pattern_only_slash() {
+        let parts = split_pattern(b"/\0".as_ptr());
+        assert!(parts.has_slash);
+        assert_eq!(parts.last_slash, 0);
+        assert_eq!(parts.file_start, 1);
+        assert_eq!(parts.pat_len, 1);
+    }
+
+    #[test]
+    fn test_split_pattern_empty() {
+        let parts = split_pattern(b"\0".as_ptr());
+        assert!(!parts.has_slash);
+        assert_eq!(parts.file_start, 0);
+        assert_eq!(parts.pat_len, 0);
+        assert_eq!(parts.dir_buf[0], b'.');
+        assert_eq!(parts.dir_buf[1], 0);
+    }
+
+    #[test]
+    fn test_split_pattern_deep_nesting() {
+        // /a/b/c/d/e/f — positions: /=0 a=1 /=2 b=3 /=4 c=5 /=6 d=7 /=8 e=9 /=10 f=11
+        let parts = split_pattern(b"/a/b/c/d/e/f\0".as_ptr());
+        assert!(parts.has_slash);
+        assert_eq!(parts.last_slash, 10); // Last '/' at position 10
+        assert_eq!(parts.file_start, 11); // "f" at position 11
+    }
+
+    // -- sort_paths more edge cases --
+
+    #[test]
+    fn test_sort_paths_duplicates() {
+        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
+        let mut a1 = *b"same\0";
+        let mut a2 = *b"same\0";
+        let mut a3 = *b"same\0";
+        ptrs[0] = a1.as_mut_ptr();
+        ptrs[1] = a2.as_mut_ptr();
+        ptrs[2] = a3.as_mut_ptr();
+        // Sorting identical strings must not crash.
+        sort_paths(&mut ptrs, 3);
+    }
+
+    #[test]
+    fn test_sort_paths_two_elements() {
+        let mut ptrs = [core::ptr::null_mut::<u8>(); MAX_MATCHES];
+        let mut b_str = *b"beta\0";
+        let mut a_str = *b"alph\0";
+        ptrs[0] = b_str.as_mut_ptr();
+        ptrs[1] = a_str.as_mut_ptr();
+        sort_paths(&mut ptrs, 2);
+        assert_eq!(ptrs[0], a_str.as_mut_ptr());
+        assert_eq!(ptrs[1], b_str.as_mut_ptr());
+    }
+
+    // -- should_skip_dot more cases --
+
+    #[test]
+    fn test_dont_skip_dot_with_dotstar_pattern() {
+        // Pattern ".*" starts with '.', so we should NOT skip "." or "..".
+        assert!(!should_skip_dot(b".\0".as_ptr(), b".*\0".as_ptr()));
+        assert!(!should_skip_dot(b"..\0".as_ptr(), b".*\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_skip_dot_with_star_pattern() {
+        // Pattern "*" does NOT start with '.', so skip "." and "..".
+        assert!(should_skip_dot(b".\0".as_ptr(), b"*\0".as_ptr()));
+        assert!(should_skip_dot(b"..\0".as_ptr(), b"*\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_skip_dot_question_mark_pattern() {
+        // Pattern "?" does NOT start with '.'.
+        assert!(should_skip_dot(b".\0".as_ptr(), b"?\0".as_ptr()));
+    }
+
+    // -- GlobT struct size --
+
+    #[test]
+    fn test_glob_t_size() {
+        // On x86_64: usize(8) + ptr(8) + usize(8) = 24 bytes.
+        assert_eq!(core::mem::size_of::<GlobT>(), 24);
+    }
+
+    // -- Flag combinations --
+
+    #[test]
+    fn test_glob_flags_are_distinct_bits() {
+        // All flag values must be distinct (no overlap).
+        let flags = [GLOB_ERR, GLOB_MARK, GLOB_NOCHECK, GLOB_APPEND];
+        for i in 0..flags.len() {
+            for j in (i + 1)..flags.len() {
+                assert_ne!(flags[i], flags[j],
+                    "flags at indices {i} and {j} must be distinct");
+            }
+        }
+    }
+
+    // -- GLOB_NOCHECK and GLOB_APPEND should be combinable --
+
+    #[test]
+    fn test_glob_flags_combinable() {
+        // Combining GLOB_NOCHECK | GLOB_APPEND should produce a distinct value.
+        let combined = GLOB_NOCHECK | GLOB_APPEND;
+        assert_ne!(combined, GLOB_NOCHECK);
+        assert_ne!(combined, GLOB_APPEND);
+        assert_eq!(combined & GLOB_NOCHECK, GLOB_NOCHECK);
+        assert_eq!(combined & GLOB_APPEND, GLOB_APPEND);
+    }
 }

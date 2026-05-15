@@ -2726,4 +2726,453 @@ mod tests {
         assert_ne!(AT_SYMLINK_NOFOLLOW, AT_SYMLINK_FOLLOW);
         assert_eq!(AT_SYMLINK_NOFOLLOW & AT_SYMLINK_FOLLOW, 0);
     }
+
+    // -- Iovec struct layout --
+
+    #[test]
+    fn test_iovec_size() {
+        // On x86_64: pointer (8) + usize (8) = 16 bytes.
+        assert_eq!(core::mem::size_of::<Iovec>(), 16);
+    }
+
+    #[test]
+    fn test_iovec_fields() {
+        let mut buf = [0u8; 64];
+        let iov = Iovec {
+            iov_base: buf.as_mut_ptr(),
+            iov_len: 64,
+        };
+        assert_eq!(iov.iov_len, 64);
+        assert!(!iov.iov_base.is_null());
+    }
+
+    #[test]
+    fn test_iovec_null_base() {
+        let iov = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
+        assert!(iov.iov_base.is_null());
+        assert_eq!(iov.iov_len, 0);
+    }
+
+    // -- dup3 semantics --
+
+    #[test]
+    fn test_dup3_same_fd_returns_einval() {
+        // POSIX / Linux: dup3 returns EINVAL when oldfd == newfd.
+        let result = dup3(42, 42, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- closefrom --
+
+    #[test]
+    fn test_closefrom_negative() {
+        // closefrom with negative lowfd should clamp to 0 internally.
+        closefrom(-1); // Must not panic or loop.
+    }
+
+    // -- renameat2 with flags --
+
+    #[test]
+    fn test_renameat2_nonzero_flags() {
+        // Non-zero flags should return EINVAL (not supported).
+        let result = renameat2(AT_FDCWD, b"/a\0".as_ptr(), AT_FDCWD, b"/b\0".as_ptr(), 1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- lockf constants --
+
+    #[test]
+    fn test_lockf_constants() {
+        assert_eq!(F_ULOCK, 0);
+        assert_eq!(F_LOCK, 1);
+        assert_eq!(F_TLOCK, 2);
+        assert_eq!(F_TEST, 3);
+    }
+
+    #[test]
+    fn test_lockf_stub_succeeds() {
+        assert_eq!(lockf(0, F_LOCK, 0), 0);
+        assert_eq!(lockf(0, F_TLOCK, 0), 0);
+        assert_eq!(lockf(0, F_ULOCK, 0), 0);
+        assert_eq!(lockf(0, F_TEST, 0), 0);
+    }
+
+    // -- UTIME constants --
+
+    #[test]
+    fn test_utime_constants() {
+        assert_eq!(UTIME_NOW, (1 << 30) - 1);
+        assert_eq!(UTIME_OMIT, (1 << 30) - 2);
+        assert_ne!(UTIME_NOW, UTIME_OMIT);
+    }
+
+    // -- Timeval struct layout --
+
+    #[test]
+    fn test_timeval_size() {
+        // Two i64 fields = 16 bytes.
+        assert_eq!(core::mem::size_of::<Timeval>(), 16);
+    }
+
+    #[test]
+    fn test_timeval_fields() {
+        let tv = Timeval { tv_sec: 1234, tv_usec: 5678 };
+        assert_eq!(tv.tv_sec, 1234);
+        assert_eq!(tv.tv_usec, 5678);
+    }
+
+    // -- utimes / futimes stubs --
+
+    #[test]
+    fn test_utimes_stub_succeeds() {
+        assert_eq!(utimes(b"/tmp\0".as_ptr(), core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_futimes_stub_succeeds() {
+        assert_eq!(futimes(0, core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_utimensat_stub_succeeds() {
+        assert_eq!(utimensat(AT_FDCWD, b"/tmp\0".as_ptr(), core::ptr::null(), 0), 0);
+    }
+
+    #[test]
+    fn test_futimens_stub_succeeds() {
+        assert_eq!(futimens(0, core::ptr::null()), 0);
+    }
+
+    // -- creat is equivalent to open --
+
+    #[test]
+    fn test_creat_null_path() {
+        // creat(NULL, mode) should return -1/EFAULT like open().
+        let result = creat(core::ptr::null(), 0o644);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- LP64 aliases are provided --
+
+    #[test]
+    fn test_open64_null() {
+        // open64 is an alias for open — same EFAULT behavior.
+        let result = open64(core::ptr::null(), 0, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- translate_open_flags: O_RDONLY is zero --
+
+    #[test]
+    fn test_o_rdonly_is_zero() {
+        assert_eq!(fcntl::O_RDONLY, 0);
+    }
+
+    // -- close_range: first == last --
+
+    #[test]
+    fn test_close_range_single() {
+        // close_range(999, 999, 0) should close just fd 999 (no-op if not open).
+        let _ = close_range(999, 999, 0);
+    }
+
+    // -- pread / pwrite validation --
+
+    #[test]
+    fn test_pread_null_buf_nonzero_count() {
+        let result = pread(0, core::ptr::null_mut(), 10, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_pread_zero_count() {
+        // POSIX: "If nbyte is 0, read() will return 0."
+        let mut buf = [0u8; 1];
+        let result = pread(0, buf.as_mut_ptr(), 0, 0);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_pread_negative_offset() {
+        let mut buf = [0u8; 10];
+        let result = pread(0, buf.as_mut_ptr(), 10, -1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pwrite_null_buf_nonzero_count() {
+        let result = pwrite(0, core::ptr::null(), 10, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_pwrite_zero_count() {
+        let buf = [0u8; 1];
+        let result = pwrite(0, buf.as_ptr(), 0, 0);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_pwrite_negative_offset() {
+        let buf = [0u8; 10];
+        let result = pwrite(0, buf.as_ptr(), 10, -1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- readv / writev validation --
+
+    #[test]
+    fn test_readv_null_iov() {
+        let result = readv(0, core::ptr::null(), 1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_readv_zero_iovcnt() {
+        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let result = readv(0, &raw const iov, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_readv_negative_iovcnt() {
+        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let result = readv(0, &raw const iov, -1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_readv_too_many_iovcnt() {
+        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let result = readv(0, &raw const iov, 1025);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_writev_null_iov() {
+        let result = writev(0, core::ptr::null(), 1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_writev_zero_iovcnt() {
+        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let result = writev(0, &raw const iov, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- read / write zero-length --
+
+    #[test]
+    fn test_read_zero_count() {
+        // POSIX: "If nbyte is 0, read() will return 0."
+        let result = read(0, core::ptr::null_mut(), 0);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_write_zero_count() {
+        // POSIX: zero-length write returns 0.
+        let result = write(0, core::ptr::null(), 0);
+        assert_eq!(result, 0);
+    }
+
+    // -- read / write null buf with count > 0 --
+
+    #[test]
+    fn test_read_null_buf() {
+        let result = read(0, core::ptr::null_mut(), 10);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_write_null_buf() {
+        let result = write(0, core::ptr::null(), 10);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- lseek whence validation --
+
+    #[test]
+    fn test_lseek_invalid_whence() {
+        // whence must be SEEK_SET, SEEK_CUR, or SEEK_END.
+        let result = lseek(0, 0, 99);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- truncate negative length --
+
+    #[test]
+    fn test_truncate_negative_length() {
+        let result = truncate(b"/tmp/test\0".as_ptr(), -1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_truncate_null_path() {
+        let result = truncate(core::ptr::null(), 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_ftruncate_negative_length() {
+        let result = ftruncate(0, -1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- unlink / rename / link / symlink / readlink null checks --
+
+    #[test]
+    fn test_unlink_null() {
+        assert_eq!(unlink(core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_rename_null_old() {
+        assert_eq!(rename(core::ptr::null(), b"/b\0".as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_rename_null_new() {
+        assert_eq!(rename(b"/a\0".as_ptr(), core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_link_null_old() {
+        assert_eq!(link(core::ptr::null(), b"/b\0".as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_link_null_new() {
+        assert_eq!(link(b"/a\0".as_ptr(), core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_symlink_null_target() {
+        assert_eq!(symlink(core::ptr::null(), b"/link\0".as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_symlink_null_linkpath() {
+        assert_eq!(symlink(b"/target\0".as_ptr(), core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_readlink_null_path() {
+        let mut buf = [0u8; 64];
+        assert_eq!(readlink(core::ptr::null(), buf.as_mut_ptr(), 64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_readlink_null_buf() {
+        assert_eq!(readlink(b"/link\0".as_ptr(), core::ptr::null_mut(), 64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- mkdir / rmdir null checks --
+
+    #[test]
+    fn test_mkdir_null() {
+        assert_eq!(mkdir(core::ptr::null(), 0o755), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_rmdir_null() {
+        assert_eq!(rmdir(core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- stat / fstat null checks --
+
+    #[test]
+    fn test_stat_null_path() {
+        let mut buf = crate::stat::Stat::zeroed();
+        assert_eq!(stat(core::ptr::null(), &raw mut buf), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_stat_null_buf() {
+        assert_eq!(stat(b"/tmp\0".as_ptr(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_fstat_null_buf() {
+        assert_eq!(fstat(0, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_lstat_null_path() {
+        let mut buf = crate::stat::Stat::zeroed();
+        assert_eq!(lstat(core::ptr::null(), &raw mut buf), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_lstat_null_buf() {
+        assert_eq!(lstat(b"/tmp\0".as_ptr(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- access null check --
+
+    #[test]
+    fn test_access_null() {
+        assert_eq!(access(core::ptr::null(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- open null check --
+
+    #[test]
+    fn test_open_null() {
+        assert_eq!(open(core::ptr::null(), 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- c_strlen_pub --
+
+    #[test]
+    fn test_c_strlen_pub_empty() {
+        assert_eq!(unsafe { c_strlen_pub(b"\0".as_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_c_strlen_pub_hello() {
+        assert_eq!(unsafe { c_strlen_pub(b"hello\0".as_ptr()) }, 5);
+    }
 }

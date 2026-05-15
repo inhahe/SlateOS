@@ -439,4 +439,97 @@ mod tests {
         assert!((800..1000).contains(&SYS_UDP_BIND));
         assert!((800..1000).contains(&SYS_DNS_RESOLVE));
     }
+
+    // -- All pipe syscall numbers in IPC range --
+
+    #[test]
+    fn pipe_syscalls_in_ipc_range() {
+        let pipe_nrs = [
+            SYS_PIPE_CREATE, SYS_PIPE_WRITE, SYS_PIPE_READ,
+            SYS_PIPE_TRY_WRITE, SYS_PIPE_TRY_READ, SYS_PIPE_CLOSE,
+            SYS_PIPE_POLL, SYS_PIPE_READABLE_BYTES,
+        ];
+        for &nr in &pipe_nrs {
+            assert!((200..400).contains(&nr),
+                "pipe syscall {nr} must be in IPC range 200-399");
+        }
+    }
+
+    // -- All TCP syscall numbers in net range --
+
+    #[test]
+    fn tcp_syscalls_in_net_range() {
+        let tcp_nrs = [
+            SYS_TCP_CONNECT, SYS_TCP_SEND, SYS_TCP_RECV, SYS_TCP_CLOSE,
+            SYS_TCP_BIND, SYS_TCP_ACCEPT, SYS_TCP_CLOSE_LISTENER,
+            SYS_TCP_ABORT, SYS_TCP_PEER_ADDR,
+            SYS_TCP_POLL_STATUS, SYS_TCP_LISTENER_READY,
+            SYS_TCP_SHUTDOWN, SYS_TCP_INFO, SYS_TCP_SET_NODELAY,
+            SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS,
+            SYS_TCP_LAST_ERROR, SYS_TCP_LOCAL_PORT,
+            SYS_TCP_LIST, SYS_TCP_LISTENER_LIST,
+        ];
+        for &nr in &tcp_nrs {
+            assert!((800..1000).contains(&nr),
+                "TCP syscall {nr} must be in net range 800-999");
+        }
+    }
+
+    // -- All UDP syscall numbers in net range --
+
+    #[test]
+    fn udp_syscalls_in_net_range() {
+        let udp_nrs = [
+            SYS_UDP_BIND, SYS_UDP_SEND, SYS_UDP_RECV, SYS_UDP_CLOSE,
+            SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_CONNECT,
+            SYS_UDP_LOCAL_PORT, SYS_UDP_RX_READY, SYS_UDP_RX_FRONT_BYTES,
+        ];
+        for &nr in &udp_nrs {
+            assert!((800..1000).contains(&nr),
+                "UDP syscall {nr} must be in net range 800-999");
+        }
+    }
+
+    // -- DNS/ICMP/Net info syscalls in net range --
+
+    #[test]
+    fn dns_net_syscalls_in_net_range() {
+        let nrs = [
+            SYS_DNS_RESOLVE, SYS_DNS_REVERSE_RESOLVE,
+            SYS_NET_STAT, SYS_ICMP_PING, SYS_ICMP_PING_WAIT,
+            SYS_NET_IF_INFO, SYS_ARP_TABLE, SYS_DNS_CACHE_STATS,
+        ];
+        for &nr in &nrs {
+            assert!((800..1000).contains(&nr),
+                "net info syscall {nr} must be in net range 800-999");
+        }
+    }
+
+    // -- All FS syscall numbers in fs range --
+
+    #[test]
+    fn fs_syscalls_in_fs_range() {
+        let fs_nrs = [
+            SYS_FS_READ_FILE, SYS_FS_WRITE_FILE, SYS_FS_DELETE,
+            SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_RMDIR,
+            SYS_FS_STAT, SYS_FS_LINK, SYS_FS_STATVFS,
+            SYS_FS_OPEN, SYS_FS_CLOSE, SYS_FS_READ, SYS_FS_WRITE,
+            SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
+            SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
+            SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
+        ];
+        for &nr in &fs_nrs {
+            assert!((600..800).contains(&nr),
+                "FS syscall {nr} must be in fs range 600-799");
+        }
+    }
+
+    // -- Memory syscalls in kernel-core range --
+
+    #[test]
+    fn memory_syscalls_in_core_range() {
+        assert!(SYS_MMAP <= 199);
+        assert!(SYS_MUNMAP <= 199);
+        assert!(SYS_MPROTECT <= 199);
+    }
 }

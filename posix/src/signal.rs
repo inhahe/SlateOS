@@ -714,6 +714,54 @@ pub extern "C" fn __libc_current_sigrtmax() -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// siginfo_t — signal information structure
+// ---------------------------------------------------------------------------
+
+/// Signal information structure.
+///
+/// Matches the Linux x86_64 `siginfo_t` layout (128 bytes).
+/// Only the common header fields are defined; the union payload
+/// is represented as opaque padding.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SiginfoT {
+    /// Signal number.
+    pub si_signo: i32,
+    /// Error number (errno value).
+    pub si_errno: i32,
+    /// Signal code (SI_USER, SI_KERNEL, CLD_*, etc.).
+    pub si_code: i32,
+    /// Padding/union payload (rest of 128 bytes).
+    _pad: [u8; 116],
+}
+
+impl Default for SiginfoT {
+    fn default() -> Self {
+        // SAFETY: SiginfoT is a C struct, zero-init is valid.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// psiginfo — print signal info to stderr
+// ---------------------------------------------------------------------------
+
+/// `psiginfo` — print signal information to stderr.
+///
+/// Like `psignal`, but takes a `siginfo_t *` instead of a signal number.
+/// Prints: `"<msg>: <signal-name>\n"` to stderr.
+///
+/// # Safety
+///
+/// `info` must point to a valid `SiginfoT` struct (or be null, in which
+/// case "Unknown signal" is printed).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn psiginfo(info: *const SiginfoT, msg: *const u8) {
+    let signum = if info.is_null() { 0 } else { unsafe { (*info).si_signo } };
+    unsafe { psignal(signum, msg); }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1777,5 +1825,49 @@ mod tests {
     fn test_sigrt_range_is_nonempty() {
         let range = __libc_current_sigrtmax() - __libc_current_sigrtmin();
         assert!(range > 0, "realtime signal range must be nonempty");
+    }
+
+    // ------------------------------------------------------------------
+    // SiginfoT struct
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_siginfo_t_layout() {
+        // siginfo_t is 128 bytes on Linux x86_64.
+        assert_eq!(core::mem::size_of::<SiginfoT>(), 128);
+    }
+
+    #[test]
+    fn test_siginfo_t_default_zeroed() {
+        let si = SiginfoT::default();
+        assert_eq!(si.si_signo, 0);
+        assert_eq!(si.si_errno, 0);
+        assert_eq!(si.si_code, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // psiginfo
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_psiginfo_null_info() {
+        // psiginfo with null info → prints "Unknown signal 0".
+        // Just verify no crash.
+        unsafe { psiginfo(core::ptr::null(), b"test\0".as_ptr()); }
+    }
+
+    #[test]
+    fn test_psiginfo_with_signum() {
+        // psiginfo with a valid signum → prints the signal name.
+        let mut si = SiginfoT::default();
+        si.si_signo = SIGTERM;
+        unsafe { psiginfo(&si, b"test\0".as_ptr()); }
+    }
+
+    #[test]
+    fn test_psiginfo_null_msg() {
+        let mut si = SiginfoT::default();
+        si.si_signo = SIGINT;
+        unsafe { psiginfo(&si, core::ptr::null()); }
     }
 }

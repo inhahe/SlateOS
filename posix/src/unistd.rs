@@ -1790,6 +1790,89 @@ pub extern "C" fn klogctl(_cmd: i32, _buf: *mut u8, _len: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// glibc convenience: get_nprocs, get_nprocs_conf, etc.
+// ---------------------------------------------------------------------------
+
+/// `get_nprocs` — get number of available (online) processors.
+///
+/// glibc extension.  Equivalent to `sysconf(_SC_NPROCESSORS_ONLN)`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn get_nprocs() -> i32 {
+    sysconf(_SC_NPROCESSORS_ONLN) as i32
+}
+
+/// `get_nprocs_conf` — get number of configured processors.
+///
+/// glibc extension.  Equivalent to `sysconf(_SC_NPROCESSORS_CONF)`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn get_nprocs_conf() -> i32 {
+    sysconf(_SC_NPROCESSORS_CONF) as i32
+}
+
+/// `get_phys_pages` — get total number of physical pages.
+///
+/// glibc extension.  Equivalent to `sysconf(_SC_PHYS_PAGES)`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn get_phys_pages() -> i64 {
+    sysconf(_SC_PHYS_PAGES)
+}
+
+/// `get_avphys_pages` — get number of available physical pages.
+///
+/// glibc extension.  Equivalent to `sysconf(_SC_AVPHYS_PAGES)`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn get_avphys_pages() -> i64 {
+    sysconf(_SC_AVPHYS_PAGES)
+}
+
+// ---------------------------------------------------------------------------
+// futimesat — change file timestamps relative to directory fd
+// ---------------------------------------------------------------------------
+
+/// `futimesat` — change file timestamps relative to a directory fd.
+///
+/// Superseded by `utimensat`, but some programs still use it.
+/// If `dirfd` is `AT_FDCWD` or `path` is absolute, delegates to `utimes`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn futimesat(
+    dirfd: i32,
+    path: *const u8,
+    times: *const crate::file::Timeval,
+) -> i32 {
+    if dirfd == crate::file::AT_FDCWD || crate::file::is_absolute_path(path) {
+        return crate::file::utimes(path, times);
+    }
+    let mut full = [0u8; PATH_MAX];
+    let len = crate::file::resolve_dirfd_path(dirfd, path, &mut full);
+    if len == 0 { return -1; }
+    crate::file::utimes(full.as_ptr(), times)
+}
+
+// ---------------------------------------------------------------------------
+// tmpnam_r — thread-safe tmpnam
+// ---------------------------------------------------------------------------
+
+/// `tmpnam_r` — generate a unique temporary filename (thread-safe).
+///
+/// Like `tmpnam`, but returns null if `s` is null (never uses an
+/// internal static buffer).  Writes a unique name to `s` (which must
+/// be at least `L_tmpnam` bytes).
+///
+/// Returns `s` on success, null on error.
+///
+/// # Safety
+///
+/// `s` must point to a buffer of at least `L_tmpnam` (20) bytes.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn tmpnam_r(s: *mut u8) -> *mut u8 {
+    if s.is_null() {
+        return core::ptr::null_mut();
+    }
+    // Delegate to stdio::tmpnam which populates the buffer.
+    crate::stdio::tmpnam(s)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -3105,5 +3188,100 @@ mod tests {
         let a = issetugid();
         let b = issetugid();
         assert_eq!(a, b);
+    }
+
+    // ------------------------------------------------------------------
+    // get_nprocs / get_nprocs_conf
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_get_nprocs_positive() {
+        let n = get_nprocs();
+        assert!(n >= 1, "get_nprocs should return at least 1, got {n}");
+    }
+
+    #[test]
+    fn test_get_nprocs_conf_positive() {
+        let n = get_nprocs_conf();
+        assert!(n >= 1, "get_nprocs_conf should return at least 1, got {n}");
+    }
+
+    #[test]
+    fn test_get_nprocs_le_conf() {
+        // Online CPUs ≤ configured CPUs.
+        let onln = get_nprocs();
+        let conf = get_nprocs_conf();
+        assert!(onln <= conf,
+                "online ({onln}) should be ≤ configured ({conf})");
+    }
+
+    // ------------------------------------------------------------------
+    // get_phys_pages / get_avphys_pages
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_get_phys_pages_positive() {
+        let n = get_phys_pages();
+        assert!(n > 0, "get_phys_pages should return > 0, got {n}");
+    }
+
+    #[test]
+    fn test_get_avphys_pages_positive() {
+        let n = get_avphys_pages();
+        assert!(n > 0, "get_avphys_pages should return > 0, got {n}");
+    }
+
+    #[test]
+    fn test_get_avphys_pages_le_phys() {
+        // Available pages ≤ total physical pages.
+        let avail = get_avphys_pages();
+        let total = get_phys_pages();
+        assert!(avail <= total,
+                "available ({avail}) should be ≤ total ({total})");
+    }
+
+    // ------------------------------------------------------------------
+    // futimesat
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_futimesat_null_path() {
+        // null path → delegates to utimes which handles null.
+        let _ret = futimesat(
+            crate::file::AT_FDCWD,
+            core::ptr::null(),
+            core::ptr::null(),
+        );
+        // Just verify no crash.
+    }
+
+    #[test]
+    fn test_futimesat_at_fdcwd() {
+        // AT_FDCWD + relative path → delegates to utimes.
+        let _ret = futimesat(
+            crate::file::AT_FDCWD,
+            b"/nonexistent\0".as_ptr(),
+            core::ptr::null(),
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // tmpnam_r
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_tmpnam_r_null() {
+        let ret = unsafe { tmpnam_r(core::ptr::null_mut()) };
+        assert!(ret.is_null(), "tmpnam_r(null) should return null");
+    }
+
+    #[test]
+    fn test_tmpnam_r_with_buffer() {
+        // Provide a buffer — tmpnam_r should populate it.
+        let mut buf = [0u8; 64];
+        let ret = unsafe { tmpnam_r(buf.as_mut_ptr()) };
+        // On our OS, tmpnam generates /tmp/tmp_XXXXXX.
+        // On test host it may succeed or fail; just verify no crash.
+        let _ = ret;
     }
 }

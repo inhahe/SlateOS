@@ -103,6 +103,24 @@ pub extern "C" fn epoll_pwait(
     -1
 }
 
+/// Wait for events on an epoll fd with nanosecond timeout (Linux 5.11+).
+///
+/// Like `epoll_pwait`, but takes a `timespec` pointer instead of a
+/// millisecond integer, enabling sub-millisecond timeouts.
+///
+/// Stub: returns -1 with ENOSYS.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn epoll_pwait2(
+    _epfd: i32,
+    _events: *mut EpollEvent,
+    _maxevents: i32,
+    _timeout: *const crate::stat::Timespec,
+    _sigmask: *const u64,
+) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
 // ===========================================================================
 // eventfd — inter-thread / inter-process event notification
 // ===========================================================================
@@ -805,6 +823,27 @@ mod tests {
     fn test_signalfd4_with_flags() {
         crate::errno::set_errno(0);
         let ret = signalfd4(-1, core::ptr::null(), EFD_CLOEXEC as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -----------------------------------------------------------------------
+    // epoll_pwait2
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_epoll_pwait2_returns_enosys() {
+        crate::errno::set_errno(0);
+        let ret = epoll_pwait2(-1, core::ptr::null_mut(), 0, core::ptr::null(), core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_epoll_pwait2_with_timeout() {
+        crate::errno::set_errno(0);
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 100_000 };
+        let ret = epoll_pwait2(-1, core::ptr::null_mut(), 1, &ts, core::ptr::null());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }

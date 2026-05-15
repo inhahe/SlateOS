@@ -346,6 +346,10 @@ pub fn add_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
 /// If this was the last thread, the process enters Zombie state.
 /// Returns `(is_zombie, wait_task)` — if zombie, the optional task ID
 /// that should be woken (the parent waiting to reap this process).
+///
+/// When a process becomes a zombie, all its living children are
+/// reparented to PID 1 (init) and registered as orphans so init
+/// can reap them when they eventually exit.
 pub fn remove_thread(
     pid: ProcessId,
     task_id: TaskId,
@@ -363,6 +367,28 @@ pub fn remove_thread(
             proc.exit_code = Some(0); // Default exit code.
         }
         let wake = proc.wait_task.take();
+
+        // Reparent living children to init (PID 1).
+        //
+        // Any child whose parent just died becomes an orphan.  We
+        // change its parent field to INIT_PID so that init's
+        // try_reap() calls will satisfy the parent check.
+        let mut orphan_pids = Vec::new();
+        for child in table.values_mut() {
+            if child.parent == pid && child.pid != pid {
+                child.parent = crate::initproc::INIT_PID as ProcessId;
+                orphan_pids.push(child.pid);
+            }
+        }
+        // Drop the lock before calling initproc to avoid potential
+        // lock ordering issues (PROCESS_TABLE → initproc STATE).
+        drop(table);
+
+        for &orphan_pid in &orphan_pids {
+            #[allow(clippy::cast_possible_truncation)]
+            let _ = crate::initproc::register_orphan(orphan_pid as u32);
+        }
+
         return Ok((true, wake));
     }
 

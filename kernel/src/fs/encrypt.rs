@@ -503,6 +503,8 @@ fn generate_nonce() -> [u8; NONCE_SIZE] {
     let mut nonce = [0u8; NONCE_SIZE];
 
     // Mix TSC, realtime clock, and a counter for uniqueness.
+    // SAFETY: `_rdtsc` reads the timestamp counter and is always valid
+    // on x86_64 when RDTSC is supported (all CPUs since Pentium).
     let tsc = unsafe { core::arch::x86_64::_rdtsc() };
     let rt = crate::timekeeping::clock_realtime();
 

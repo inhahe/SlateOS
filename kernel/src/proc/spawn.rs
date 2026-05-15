@@ -698,11 +698,21 @@ pub fn exec_process(
     // Flush TLB for the user half.  Since we just freed all user
     // mappings, any stale TLB entries could cause use-after-free.
     // Reloading CR3 flushes all non-global TLB entries.
+    // SAFETY: `pml4_phys` is the current process's valid PML4 physical
+    // address (obtained from its PCB).  Writing it back to CR3 is a
+    // privileged but non-destructive operation that flushes the TLB
+    // without changing the active page table.  We are in kernel context
+    // with interrupts enabled, so the kernel mappings (upper half) are
+    // intact and remain valid throughout.
     unsafe {
         page_table::write_cr3(pml4_phys);
     }
 
     // Step 4: Load the new ELF segments into the clean address space.
+    // SAFETY: `pml4_phys` is the current process's valid PML4, which now
+    // has an empty user-half after clear_user_address_space + TLB flush.
+    // `elf_file` was validated by `elf::parse` above.  load_segments
+    // allocates frames and maps them into the process's address space.
     if let Err(e) = unsafe { elf::load_segments(&elf_file, pml4_phys) } {
         serial_println!("[exec] Failed to load new ELF segments: {:?}", e);
         // Process is in a broken state — caller should kill it.

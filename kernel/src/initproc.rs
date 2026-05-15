@@ -449,18 +449,56 @@ pub fn tick() {
     }
 
     // Reap orphans.
+    //
+    // For each orphan, attempt try_reap().  This is non-blocking:
+    // - Ok(Some(_)) → zombie reaped, process resources freed.
+    // - Ok(None)    → still running, keep in the list for next tick.
+    // - Err(_)      → process doesn't exist (already cleaned up),
+    //   treat as reaped.
     let orphan_count = state.orphans.len();
-    let mut reaped = 0u64;
-    for orphan in &mut state.orphans {
-        if !orphan.reaped {
-            // In a real implementation, this would call wait() on the PID.
-            // For now, mark as reaped.
-            orphan.reaped = true;
-            #[allow(clippy::arithmetic_side_effects)]
-            { reaped += 1; }
+    // Collect PIDs to attempt reaping — we must drop state lock first
+    // because try_reap acquires PROCESS_TABLE, and we need consistent
+    // lock ordering (initproc STATE is always acquired *before*
+    // PROCESS_TABLE, not after).
+    let pending: Vec<u32> = state
+        .orphans
+        .iter()
+        .filter(|o| !o.reaped)
+        .map(|o| o.pid)
+        .collect();
+
+    drop(state);
+
+    // Attempt reap outside the state lock.
+    let mut reaped_pids = Vec::new();
+    for &opid in &pending {
+        match crate::proc::pcb::try_reap(
+            INIT_PID as crate::proc::pcb::ProcessId,
+            opid as crate::proc::pcb::ProcessId,
+        ) {
+            Ok(Some(_exit_info)) => {
+                // Successfully reaped — zombie process resources freed.
+                reaped_pids.push(opid);
+            }
+            Ok(None) => {
+                // Still running — will retry on next tick.
+            }
+            Err(_) => {
+                // Process doesn't exist (already cleaned up or invalid).
+                // Remove from orphan list to avoid retrying forever.
+                reaped_pids.push(opid);
+            }
         }
     }
-    // Remove reaped entries.
+
+    // Re-acquire state to update orphan list and counters.
+    let mut state = STATE.lock();
+    for &rpid in &reaped_pids {
+        if let Some(orphan) = state.orphans.iter_mut().find(|o| o.pid == rpid) {
+            orphan.reaped = true;
+        }
+    }
+    let reaped = reaped_pids.len() as u64;
     state.orphans.retain(|o| !o.reaped);
     #[allow(clippy::arithmetic_side_effects)]
     { state.total_reaped += reaped; }
@@ -504,20 +542,39 @@ pub fn tick() {
 
 /// Register an orphaned process to be reaped by init.
 ///
-/// Called by the process manager when a parent process exits before its
-/// children. The orphans are reparented to PID 1.
+/// Called by the process manager (pcb::remove_thread) when a parent
+/// process exits before its children.  The child's `parent` field in
+/// the PCB has already been updated to `INIT_PID` by the caller.
+///
+/// This adds the orphan PID to init's tracking list.  The periodic
+/// `tick()` function will attempt `try_reap` on each orphan — if the
+/// child is still running, it stays in the list until it exits.
 pub fn register_orphan(pid: u32) -> KernelResult<()> {
     let now = crate::hpet::elapsed_ns();
     let mut state = STATE.lock();
 
+    // Avoid duplicates (same PID registered twice via race).
+    if state.orphans.iter().any(|o| o.pid == pid) {
+        return Ok(());
+    }
+
     if state.orphans.len() >= MAX_ORPHANS {
-        // Force-reap oldest orphans to make room.
+        // Force-reap oldest orphan to make room.  Drop the lock
+        // first so try_reap can acquire PROCESS_TABLE.
         if !state.orphans.is_empty() {
             let removed = state.orphans.remove(0);
             #[allow(clippy::arithmetic_side_effects)]
             { state.total_reaped += 1; }
+
+            // Best-effort: attempt actual reap of the evicted orphan.
+            drop(state);
+            let _ = crate::proc::pcb::try_reap(
+                INIT_PID as crate::proc::pcb::ProcessId,
+                removed.pid as crate::proc::pcb::ProcessId,
+            );
             crate::syslog!("init.reap", Warning,
                 "Force-reaped orphan pid {} (queue full)", removed.pid);
+            state = STATE.lock();
         }
     }
 

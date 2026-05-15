@@ -131,6 +131,99 @@ impl Ipv6Addr {
         addr[15] = mac.0[5];
         Self(addr)
     }
+
+    /// Parse an IPv6 address from a string in standard colon-hex notation.
+    ///
+    /// Supports the full RFC 5952 formats:
+    /// - Full form: `2001:0db8:0000:0000:0000:0000:0000:0001`
+    /// - Compressed: `2001:db8::1` (consecutive zero groups collapsed to `::`)
+    /// - Loopback: `::1`
+    /// - Unspecified: `::`
+    ///
+    /// Returns `None` if the string is not a valid IPv6 address.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            return None;
+        }
+
+        // Split on "::" to handle compressed notation.
+        let has_double_colon = s.contains("::");
+        let (left, right) = if let Some(pos) = s.find("::") {
+            (&s[..pos], &s[pos + 2..])
+        } else {
+            (s, "")
+        };
+
+        // Parse groups from left side.
+        let left_groups: Vec<u16> = if left.is_empty() {
+            Vec::new()
+        } else {
+            let mut v = Vec::new();
+            for part in left.split(':') {
+                let val = u16::from_str_radix(part, 16).ok()?;
+                v.push(val);
+            }
+            v
+        };
+
+        // Parse groups from right side (after "::").
+        let right_groups: Vec<u16> = if !has_double_colon || right.is_empty() {
+            Vec::new()
+        } else {
+            let mut v = Vec::new();
+            for part in right.split(':') {
+                let val = u16::from_str_radix(part, 16).ok()?;
+                v.push(val);
+            }
+            v
+        };
+
+        let total = left_groups.len() + right_groups.len();
+        if !has_double_colon && total != 8 {
+            return None; // Must have exactly 8 groups without "::".
+        }
+        if total > 8 {
+            return None; // Too many groups.
+        }
+
+        // Build 8 groups: left + zeros + right.
+        let zeros_needed = 8 - total;
+        let mut groups = [0u16; 8];
+        let mut idx = 0;
+        for &g in &left_groups {
+            if idx >= 8 { return None; }
+            groups[idx] = g;
+            idx += 1;
+        }
+        idx += zeros_needed;
+        for &g in &right_groups {
+            if idx >= 8 { return None; }
+            groups[idx] = g;
+            idx += 1;
+        }
+
+        // Convert to bytes.
+        let mut bytes = [0u8; 16];
+        for i in 0..8 {
+            let be = groups[i].to_be_bytes();
+            bytes[i * 2] = be[0];
+            bytes[i * 2 + 1] = be[1];
+        }
+
+        Some(Self(bytes))
+    }
+
+    /// Check if this is a global unicast address (not link-local, multicast,
+    /// loopback, or unspecified).
+    #[allow(dead_code)] // Public API.
+    pub fn is_global_unicast(self) -> bool {
+        !self.is_unspecified()
+            && !self.is_loopback()
+            && !self.is_multicast()
+            && !self.is_link_local()
+    }
 }
 
 impl fmt::Display for Ipv6Addr {
@@ -659,8 +752,9 @@ pub fn self_test() -> KernelResult<()> {
     test_extension_header_skip()?;
     test_multicast_mac_mapping()?;
     test_transport_checksum_roundtrip()?;
+    test_ipv6_addr_parse()?;
 
-    crate::serial_println!("[ipv6] IPv6 self-test PASSED (11 tests)");
+    crate::serial_println!("[ipv6] IPv6 self-test PASSED (12 tests)");
     Ok(())
 }
 
@@ -1016,5 +1110,94 @@ fn test_transport_checksum_roundtrip() -> KernelResult<()> {
     segment[4] = orig;
 
     crate::serial_println!("[ipv6]   transport checksum round-trip: OK");
+    Ok(())
+}
+
+/// Test IPv6 address parsing from string.
+fn test_ipv6_addr_parse() -> KernelResult<()> {
+    use alloc::format;
+
+    // Full form: 2001:0db8:0000:0000:0000:0000:0000:0001
+    let full = Ipv6Addr::parse("2001:0db8:0000:0000:0000:0000:0000:0001");
+    let expected = Ipv6Addr([0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    if full != Some(expected) {
+        crate::serial_println!("[ipv6]   FAIL: full-form parse mismatch");
+        return Err(KernelError::InternalError);
+    }
+
+    // Compressed: 2001:db8::1
+    let compressed = Ipv6Addr::parse("2001:db8::1");
+    if compressed != Some(expected) {
+        crate::serial_println!("[ipv6]   FAIL: compressed parse mismatch");
+        return Err(KernelError::InternalError);
+    }
+
+    // Loopback: ::1
+    let lo = Ipv6Addr::parse("::1");
+    if lo != Some(Ipv6Addr::LOOPBACK) {
+        crate::serial_println!("[ipv6]   FAIL: loopback parse");
+        return Err(KernelError::InternalError);
+    }
+
+    // Unspecified: ::
+    let unspec = Ipv6Addr::parse("::");
+    if unspec != Some(Ipv6Addr::UNSPECIFIED) {
+        crate::serial_println!("[ipv6]   FAIL: unspecified parse");
+        return Err(KernelError::InternalError);
+    }
+
+    // ff02::1 (all-nodes multicast)
+    let allnodes = Ipv6Addr::parse("ff02::1");
+    if allnodes != Some(Ipv6Addr::ALL_NODES_LINK_LOCAL) {
+        crate::serial_println!("[ipv6]   FAIL: ff02::1 parse");
+        return Err(KernelError::InternalError);
+    }
+
+    // Link-local: fe80::1
+    let ll = Ipv6Addr::parse("fe80::1");
+    let expected_ll = Ipv6Addr([0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    if ll != Some(expected_ll) {
+        crate::serial_println!("[ipv6]   FAIL: fe80::1 parse");
+        return Err(KernelError::InternalError);
+    }
+    // Verify link-local classification.
+    if !ll.unwrap_or(Ipv6Addr::UNSPECIFIED).is_link_local() {
+        crate::serial_println!("[ipv6]   FAIL: parsed fe80::1 not link-local");
+        return Err(KernelError::InternalError);
+    }
+
+    // Round-trip: parse → Display → parse.
+    let addr = Ipv6Addr::parse("2001:db8:85a3::8a2e:370:7334");
+    if let Some(a) = addr {
+        let s = format!("{}", a);
+        let reparsed = Ipv6Addr::parse(&s);
+        if reparsed != Some(a) {
+            crate::serial_println!(
+                "[ipv6]   FAIL: round-trip mismatch: '{}' → {:?}",
+                s, reparsed
+            );
+            return Err(KernelError::InternalError);
+        }
+    } else {
+        crate::serial_println!("[ipv6]   FAIL: failed to parse 2001:db8:85a3::8a2e:370:7334");
+        return Err(KernelError::InternalError);
+    }
+
+    // Invalid inputs.
+    if Ipv6Addr::parse("").is_some() {
+        crate::serial_println!("[ipv6]   FAIL: empty string accepted");
+        return Err(KernelError::InternalError);
+    }
+    if Ipv6Addr::parse("not:an:ipv6").is_some() {
+        // This has fewer than 8 groups and no ::, so should fail.
+        crate::serial_println!("[ipv6]   FAIL: 'not:an:ipv6' accepted");
+        return Err(KernelError::InternalError);
+    }
+    if Ipv6Addr::parse("gggg::1").is_some() {
+        crate::serial_println!("[ipv6]   FAIL: invalid hex 'gggg' accepted");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ipv6]   address parse: OK");
     Ok(())
 }

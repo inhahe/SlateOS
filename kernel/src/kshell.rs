@@ -63700,7 +63700,7 @@ fn cmd_ping6(args: &str) {
         return;
     }
 
-    let dst = match parse_ipv6(args) {
+    let dst = match crate::net::ipv6::Ipv6Addr::parse(args) {
         Some(addr) => addr,
         None => {
             crate::console_println!("Invalid IPv6 address: {}", args);
@@ -63757,84 +63757,6 @@ fn cmd_ping6(args: &str) {
         "--- {} ping6 statistics: {} sent, {} received ---",
         dst, sent, received
     );
-}
-
-/// Parse an IPv6 address from text.
-///
-/// Supports compressed notation (::), full notation, and mixed forms.
-/// Returns None if the string is not a valid IPv6 address.
-#[allow(clippy::arithmetic_side_effects)]
-fn parse_ipv6(s: &str) -> Option<crate::net::ipv6::Ipv6Addr> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-
-    // Split on "::" to handle compressed notation.
-    let (left, right) = if let Some(pos) = s.find("::") {
-        (&s[..pos], &s[pos + 2..])
-    } else {
-        (s, "")
-    };
-
-    // Parse groups from left side.
-    let left_groups: alloc::vec::Vec<u16> = if left.is_empty() {
-        alloc::vec::Vec::new()
-    } else {
-        let mut v = alloc::vec::Vec::new();
-        for part in left.split(':') {
-            let val = u16::from_str_radix(part, 16).ok()?;
-            v.push(val);
-        }
-        v
-    };
-
-    // Parse groups from right side (after "::").
-    let has_double_colon = s.contains("::");
-    let right_groups: alloc::vec::Vec<u16> = if !has_double_colon || right.is_empty() {
-        alloc::vec::Vec::new()
-    } else {
-        let mut v = alloc::vec::Vec::new();
-        for part in right.split(':') {
-            let val = u16::from_str_radix(part, 16).ok()?;
-            v.push(val);
-        }
-        v
-    };
-
-    let total = left_groups.len() + right_groups.len();
-    if !has_double_colon && total != 8 {
-        return None; // Must have exactly 8 groups without "::".
-    }
-    if total > 8 {
-        return None; // Too many groups.
-    }
-
-    // Build 8 groups: left + zeros + right.
-    let zeros_needed = 8 - total;
-    let mut groups = [0u16; 8];
-    let mut idx = 0;
-    for &g in &left_groups {
-        if idx >= 8 { return None; }
-        groups[idx] = g;
-        idx += 1;
-    }
-    idx += zeros_needed;
-    for &g in &right_groups {
-        if idx >= 8 { return None; }
-        groups[idx] = g;
-        idx += 1;
-    }
-
-    // Convert to bytes.
-    let mut bytes = [0u8; 16];
-    for i in 0..8 {
-        let be = groups[i].to_be_bytes();
-        bytes[i * 2] = be[0];
-        bytes[i * 2 + 1] = be[1];
-    }
-
-    Some(crate::net::ipv6::Ipv6Addr(bytes))
 }
 
 /// `firewall` — manage packet filtering rules.

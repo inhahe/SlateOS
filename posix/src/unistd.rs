@@ -553,8 +553,8 @@ pub extern "C" fn setgroups(_size: usize, _list: *const GidT) -> i32 {
 // Hostname storage
 // ---------------------------------------------------------------------------
 
-/// Maximum hostname length (POSIX HOST_NAME_MAX is typically 255).
-const HOST_NAME_MAX: usize = 255;
+/// Maximum hostname length (references limits::HOST_NAME_MAX).
+const HOST_NAME_MAX: usize = crate::limits::HOST_NAME_MAX as usize;
 
 /// Hostname buffer (including null terminator space).
 ///
@@ -853,9 +853,10 @@ pub extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
     // per-filesystem limits yet.
     match name {
         _PC_LINK_MAX => 127,                                      // Max hard links.
-        _PC_MAX_CANON | _PC_MAX_INPUT | _PC_NAME_MAX => 255,      // Terminal/filename limits.
+        _PC_MAX_CANON | _PC_MAX_INPUT => 255,                     // Terminal line limits.
+        _PC_NAME_MAX => i64::from(crate::limits::NAME_MAX),       // Max filename length.
         _PC_PATH_MAX => PATH_MAX as i64,
-        _PC_PIPE_BUF => 4096,                                     // Atomic pipe write size.
+        _PC_PIPE_BUF => i64::from(crate::limits::PIPE_BUF),      // Atomic pipe write size.
         _PC_CHOWN_RESTRICTED => 1,                                // chown restricted to root.
         _PC_NO_TRUNC => 1,                                        // Long names cause error.
         _PC_VDISABLE => 0,                                        // Characters can be disabled.
@@ -1596,12 +1597,18 @@ mod tests {
 
     #[test]
     fn test_pathconf_name_max() {
-        assert_eq!(pathconf(core::ptr::null(), _PC_NAME_MAX), 255);
+        assert_eq!(
+            pathconf(core::ptr::null(), _PC_NAME_MAX),
+            i64::from(crate::limits::NAME_MAX),
+        );
     }
 
     #[test]
     fn test_pathconf_pipe_buf() {
-        assert_eq!(pathconf(core::ptr::null(), _PC_PIPE_BUF), 4096);
+        assert_eq!(
+            pathconf(core::ptr::null(), _PC_PIPE_BUF),
+            i64::from(crate::limits::PIPE_BUF),
+        );
     }
 
     #[test]

@@ -134,7 +134,7 @@ pub static PIPE_BUF: i32 = 4096;
 
 /// Maximum number of open files per process.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub static OPEN_MAX: i32 = 256;
+pub static OPEN_MAX: i32 = crate::fdtable::MAX_FDS as i32;
 
 /// Maximum number of simultaneous processes per user.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn test_resource_limits() {
         assert_eq!(PIPE_BUF, 4096);
-        assert_eq!(OPEN_MAX, 256);
+        assert_eq!(OPEN_MAX, crate::fdtable::MAX_FDS as i32);
         assert_eq!(CHILD_MAX, 256);
         assert_eq!(IOV_MAX, 1024);
         assert_eq!(LINE_MAX, 2048);

@@ -35,8 +35,8 @@ const DEFAULT_INODE_TOTAL: u64 = 1_000_000;
 /// Default free inode count.
 const DEFAULT_INODE_FREE: u64 = 500_000;
 
-/// Maximum filename length (same as Linux ext4).
-const DEFAULT_NAMEMAX: u64 = 255;
+/// Maximum filename length (matches limits::NAME_MAX / Linux ext4).
+const DEFAULT_NAMEMAX: u64 = crate::limits::NAME_MAX as u64;
 
 // ---------------------------------------------------------------------------
 // Structures

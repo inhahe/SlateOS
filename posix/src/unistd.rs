@@ -86,6 +86,40 @@ pub const _SC_STREAM_MAX: i32 = 5;
 pub const _SC_TTY_NAME_MAX: i32 = 72;
 /// Maximum RE_DUP repetition count.
 pub const _SC_RE_DUP_MAX: i32 = 44;
+/// Maximum number of bytes for a timezone name.
+pub const _SC_TZNAME_MAX: i32 = 6;
+/// Maximum POSIX message queues per process.
+pub const _SC_MQ_OPEN_MAX: i32 = 27;
+/// Maximum message queue priority.
+pub const _SC_MQ_PRIO_MAX: i32 = 28;
+/// Maximum semaphore value.
+pub const _SC_SEM_VALUE_MAX: i32 = 33;
+/// Maximum timers per process.
+pub const _SC_TIMER_MAX: i32 = 35;
+/// Maximum `ibase`/`obase` for `bc`.
+pub const _SC_BC_BASE_MAX: i32 = 36;
+/// Maximum array elements for `bc`.
+pub const _SC_BC_DIM_MAX: i32 = 37;
+/// Maximum `scale` for `bc`.
+pub const _SC_BC_SCALE_MAX: i32 = 38;
+/// Maximum string length for `bc`.
+pub const _SC_BC_STRING_MAX: i32 = 39;
+/// Maximum collation weights per character.
+pub const _SC_COLL_WEIGHTS_MAX: i32 = 40;
+/// Maximum `expr` nesting depth.
+pub const _SC_EXPR_NEST_MAX: i32 = 42;
+/// POSIX.2 version.
+#[allow(non_upper_case_globals)]
+pub const _SC_2_VERSION: i32 = 46;
+/// POSIX.2 C language binding.
+#[allow(non_upper_case_globals)]
+pub const _SC_2_C_BIND: i32 = 47;
+/// Maximum number of thread destructor iterations.
+pub const _SC_THREAD_DESTRUCTOR_ITERATIONS: i32 = 73;
+/// Maximum concurrent threads per process.
+pub const _SC_THREAD_THREADS_MAX: i32 = 74;
+/// Maximum number of thread-specific data keys.
+pub const _SC_THREAD_KEYS_MAX: i32 = 76;
 
 // ---------------------------------------------------------------------------
 // Current working directory tracking
@@ -793,6 +827,21 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
         _SC_STREAM_MAX => 16,           // Max stdio streams (our FILE_POOL size).
         _SC_TTY_NAME_MAX => i64::from(crate::limits::TTY_NAME_MAX),
         _SC_RE_DUP_MAX => 255,          // Max RE_DUP count (POSIX minimum 255).
+        _SC_TZNAME_MAX => 6,            // Timezone name max (POSIX minimum 6).
+        _SC_MQ_OPEN_MAX => i64::from(crate::limits::MQ_OPEN_MAX),
+        _SC_MQ_PRIO_MAX => i64::from(crate::limits::MQ_PRIO_MAX),
+        _SC_SEM_VALUE_MAX => i64::from(crate::limits::SEM_VALUE_MAX),
+        _SC_TIMER_MAX => i64::from(crate::limits::TIMER_MAX),
+        _SC_BC_BASE_MAX => i64::from(crate::limits::BC_BASE_MAX),
+        _SC_BC_DIM_MAX => i64::from(crate::limits::BC_DIM_MAX),
+        _SC_BC_SCALE_MAX => i64::from(crate::limits::BC_SCALE_MAX),
+        _SC_BC_STRING_MAX => i64::from(crate::limits::BC_STRING_MAX),
+        _SC_COLL_WEIGHTS_MAX => i64::from(crate::limits::COLL_WEIGHTS_MAX),
+        _SC_EXPR_NEST_MAX => i64::from(crate::limits::EXPR_NEST_MAX),
+        _SC_2_VERSION | _SC_2_C_BIND => 200_809,  // POSIX.1-2008 conformance.
+        _SC_THREAD_DESTRUCTOR_ITERATIONS => i64::from(crate::limits::_POSIX_THREAD_DESTRUCTOR_ITERATIONS),
+        _SC_THREAD_THREADS_MAX => 1024,   // Max threads (no hard kernel limit yet).
+        _SC_THREAD_KEYS_MAX => i64::from(crate::limits::_POSIX_THREAD_KEYS_MAX),
         _ => {
             errno::set_errno(errno::EINVAL);
             -1
@@ -1617,6 +1666,71 @@ mod tests {
     #[test]
     fn test_sysconf_unknown_returns_negative() {
         assert_eq!(sysconf(-999), -1);
+    }
+
+    #[test]
+    fn test_sysconf_new_constants() {
+        // Verify all newly added _SC_* constants return positive values.
+        let new_names = [
+            _SC_TZNAME_MAX, _SC_MQ_OPEN_MAX, _SC_MQ_PRIO_MAX,
+            _SC_SEM_VALUE_MAX, _SC_TIMER_MAX,
+            _SC_BC_BASE_MAX, _SC_BC_DIM_MAX, _SC_BC_SCALE_MAX,
+            _SC_BC_STRING_MAX, _SC_COLL_WEIGHTS_MAX, _SC_EXPR_NEST_MAX,
+            _SC_2_VERSION, _SC_2_C_BIND,
+            _SC_THREAD_DESTRUCTOR_ITERATIONS, _SC_THREAD_THREADS_MAX,
+            _SC_THREAD_KEYS_MAX,
+        ];
+        for &name in &new_names {
+            let val = sysconf(name);
+            assert!(
+                val > 0,
+                "sysconf({name}) should return a positive value, got {val}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sysconf_mq_limits() {
+        assert_eq!(sysconf(_SC_MQ_OPEN_MAX), i64::from(crate::limits::MQ_OPEN_MAX));
+        assert_eq!(sysconf(_SC_MQ_PRIO_MAX), i64::from(crate::limits::MQ_PRIO_MAX));
+    }
+
+    #[test]
+    fn test_sysconf_bc_limits() {
+        assert_eq!(sysconf(_SC_BC_BASE_MAX), 99);
+        assert_eq!(sysconf(_SC_BC_DIM_MAX), 2048);
+        assert_eq!(sysconf(_SC_BC_SCALE_MAX), 99);
+        assert_eq!(sysconf(_SC_BC_STRING_MAX), 1000);
+    }
+
+    #[test]
+    fn test_sc_constants_unique() {
+        // All _SC_* constants must be distinct (except aliases).
+        let vals: &[i32] = &[
+            _SC_ARG_MAX, _SC_CHILD_MAX, _SC_CLK_TCK, _SC_NGROUPS_MAX,
+            _SC_OPEN_MAX, _SC_STREAM_MAX, _SC_TZNAME_MAX,
+            _SC_PAGESIZE, _SC_VERSION, _SC_THREADS,
+            _SC_HOST_NAME_MAX, _SC_LOGIN_NAME_MAX, _SC_LINE_MAX,
+            _SC_THREAD_STACK_MIN, _SC_PHYS_PAGES, _SC_AVPHYS_PAGES,
+            _SC_IOV_MAX, _SC_GETPW_R_SIZE_MAX, _SC_GETGR_R_SIZE_MAX,
+            _SC_SYMLOOP_MAX, _SC_TTY_NAME_MAX, _SC_RE_DUP_MAX,
+            _SC_NPROCESSORS_CONF, _SC_NPROCESSORS_ONLN,
+            _SC_MQ_OPEN_MAX, _SC_MQ_PRIO_MAX, _SC_SEM_VALUE_MAX,
+            _SC_TIMER_MAX, _SC_BC_BASE_MAX, _SC_BC_DIM_MAX,
+            _SC_BC_SCALE_MAX, _SC_BC_STRING_MAX, _SC_COLL_WEIGHTS_MAX,
+            _SC_EXPR_NEST_MAX, _SC_2_VERSION, _SC_2_C_BIND,
+            _SC_THREAD_DESTRUCTOR_ITERATIONS, _SC_THREAD_THREADS_MAX,
+            _SC_THREAD_KEYS_MAX,
+        ];
+        for i in 0..vals.len() {
+            for j in (i + 1)..vals.len() {
+                assert_ne!(
+                    vals[i], vals[j],
+                    "_SC constants at indices {i} and {j} must be distinct (both = {})",
+                    vals[i]
+                );
+            }
+        }
     }
 
     // ------------------------------------------------------------------

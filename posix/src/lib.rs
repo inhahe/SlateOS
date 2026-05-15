@@ -223,6 +223,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 pub mod aio;
 pub mod alloca;
+pub mod arpa_nameser;
 pub mod assert;
 pub mod crt;
 pub mod crypt;
@@ -306,6 +307,8 @@ pub mod endian;
 pub mod libintl;
 pub mod paths;
 pub mod sys_param;
+pub mod sys_prctl;
+pub mod sys_sendfile;
 pub mod sysexits;
 pub mod sys_random;
 pub mod tar;

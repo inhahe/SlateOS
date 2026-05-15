@@ -4490,4 +4490,63 @@ mod tests {
         let result = l64a(63);
         assert_eq!(unsafe { *result }, b'z');
     }
+
+    // ===================================================================
+    // Additional coverage — atoll, rand_r
+    // ===================================================================
+
+    #[test]
+    fn test_atoll_large_value() {
+        assert_eq!(unsafe { atoll(b"9876543210\0".as_ptr()) }, 9_876_543_210);
+    }
+
+    #[test]
+    fn test_atoll_negative_large() {
+        assert_eq!(unsafe { atoll(b"-9876543210\0".as_ptr()) }, -9_876_543_210);
+    }
+
+    #[test]
+    fn test_rand_r_deterministic_same_seed() {
+        let mut seed: u32 = 123;
+        let a = unsafe { rand_r(&mut seed) };
+        let mut seed2: u32 = 123;
+        let b = unsafe { rand_r(&mut seed2) };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_rand_r_advances_seed() {
+        let mut seed: u32 = 42;
+        let original = seed;
+        let _ = unsafe { rand_r(&mut seed) };
+        assert_ne!(seed, original, "rand_r should advance the seed");
+    }
+
+    #[test]
+    fn test_rand_r_non_negative() {
+        let mut seed: u32 = 7;
+        for _ in 0..20 {
+            let val = unsafe { rand_r(&mut seed) };
+            assert!(val >= 0, "rand_r should return non-negative values");
+        }
+    }
+
+    #[test]
+    fn test_atoi_plus_sign() {
+        assert_eq!(unsafe { atoi(b"+5\0".as_ptr()) }, 5);
+    }
+
+    #[test]
+    fn test_lldiv_large_values() {
+        let r = lldiv(1_000_000_007, 1000);
+        assert_eq!(r.quot, 1_000_000);
+        assert_eq!(r.rem, 7);
+    }
+
+    #[test]
+    fn test_lldiv_negative_dividend() {
+        let r = lldiv(-1_000_000_007, 1000);
+        assert_eq!(r.quot, -1_000_000);
+        assert_eq!(r.rem, -7);
+    }
 }

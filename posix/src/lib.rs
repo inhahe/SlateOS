@@ -68,6 +68,8 @@
 //! - **Character Encoding**: `iconv_open`, `iconv`, `iconv_close`
 //!   (UTF-8/ASCII conversions)
 //! - **Formatted Messages**: `fmtmsg` (structured error/warning display)
+//! - **Message Catalogs**: `catopen`, `catgets`, `catclose` (stubs —
+//!   always falls back to default strings)
 //! - **Search / Data Structures** (`<search.h>`): BST `tsearch`, `tfind`,
 //!   `tdelete`, `twalk`, `tdestroy`; hash table `hcreate`, `hdestroy`,
 //!   `hsearch`; linear search `lfind`, `lsearch`; linked list `insque`,
@@ -228,6 +230,7 @@ pub mod fdtable;
 pub mod file;
 pub mod locale;
 pub mod mman;
+pub mod nl_types;
 pub mod mqueue;
 pub mod pipe;
 pub mod poll;

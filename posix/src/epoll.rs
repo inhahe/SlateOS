@@ -504,4 +504,99 @@ mod tests {
         let size = core::mem::size_of::<EpollEvent>();
         assert!(size >= 12);
     }
+
+    #[test]
+    fn test_epoll_event_fields() {
+        let ev = EpollEvent { events: EPOLLIN | EPOLLOUT, data: 42 };
+        assert_eq!(ev.events, EPOLLIN | EPOLLOUT);
+        assert_eq!(ev.data, 42);
+    }
+
+    #[test]
+    fn test_epoll_event_data_holds_pointer() {
+        // data field is often used to hold a pointer cast to u64.
+        let val: u64 = 0x7FFE_0000_1234;
+        let ev = EpollEvent { events: EPOLLIN, data: val };
+        assert_eq!(ev.data, val);
+    }
+
+    // -- Itimerspec struct layout --
+
+    #[test]
+    fn test_itimerspec_size() {
+        // Two Timespec (each 16 bytes on LP64) = 32 bytes.
+        assert_eq!(core::mem::size_of::<Itimerspec>(), 32);
+    }
+
+    #[test]
+    fn test_itimerspec_fields() {
+        let its = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 1, tv_nsec: 500_000_000 },
+            it_value: crate::stat::Timespec { tv_sec: 5, tv_nsec: 0 },
+        };
+        assert_eq!(its.it_interval.tv_sec, 1);
+        assert_eq!(its.it_interval.tv_nsec, 500_000_000);
+        assert_eq!(its.it_value.tv_sec, 5);
+        assert_eq!(its.it_value.tv_nsec, 0);
+    }
+
+    // -- signalfd with different args --
+
+    #[test]
+    fn test_signalfd_negative_fd() {
+        errno::set_errno(0);
+        assert_eq!(signalfd(-1, core::ptr::null(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- epoll_pwait null events --
+
+    #[test]
+    fn test_epoll_pwait_null_events() {
+        errno::set_errno(0);
+        let ret = epoll_pwait(3, core::ptr::null_mut(), 10, 0, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- timerfd_gettime with fd 0 --
+
+    #[test]
+    fn test_timerfd_gettime_fd_zero() {
+        errno::set_errno(0);
+        assert_eq!(timerfd_gettime(0, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- timerfd_settime with abstime flag --
+
+    #[test]
+    fn test_timerfd_settime_abstime() {
+        errno::set_errno(0);
+        assert_eq!(
+            timerfd_settime(0, TFD_TIMER_ABSTIME, core::ptr::null(), core::ptr::null_mut()),
+            -1,
+        );
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- eventfd flag composability --
+
+    #[test]
+    fn test_efd_flags_composable() {
+        let flags = EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE;
+        // All three must be independently representable.
+        assert_ne!(flags & EFD_CLOEXEC, 0);
+        assert_ne!(flags & EFD_NONBLOCK, 0);
+        assert_ne!(flags & EFD_SEMAPHORE, 0);
+    }
+
+    // -- timerfd flag composability --
+
+    #[test]
+    fn test_tfd_flags_composable() {
+        let flags = TFD_CLOEXEC | TFD_NONBLOCK;
+        assert_ne!(flags & TFD_CLOEXEC, 0);
+        assert_ne!(flags & TFD_NONBLOCK, 0);
+    }
 }

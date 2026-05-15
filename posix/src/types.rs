@@ -194,4 +194,130 @@ mod tests {
         assert!(u > 0);
         assert!(g > 0);
     }
+
+    // -- Alignment tests --
+
+    #[test]
+    fn test_pid_t_alignment() {
+        assert_eq!(core::mem::align_of::<PidT>(), 4);
+    }
+
+    #[test]
+    fn test_off_t_alignment() {
+        assert_eq!(core::mem::align_of::<OffT>(), 8);
+    }
+
+    #[test]
+    fn test_dev_t_alignment() {
+        assert_eq!(core::mem::align_of::<DevT>(), 8);
+    }
+
+    #[test]
+    fn test_size_t_alignment() {
+        assert_eq!(core::mem::align_of::<SizeT>(), 8);
+        assert_eq!(core::mem::align_of::<SsizeT>(), 8);
+    }
+
+    #[test]
+    fn test_pointer_types_alignment() {
+        // Must match pointer alignment for FFI.
+        assert_eq!(core::mem::align_of::<IntptrT>(), core::mem::align_of::<*const u8>());
+        assert_eq!(core::mem::align_of::<UintptrT>(), core::mem::align_of::<*const u8>());
+    }
+
+    // -- Relationship tests --
+
+    #[test]
+    fn test_ssize_t_is_signed_size_t() {
+        // SsizeT should have the same width as SizeT but be signed.
+        assert_eq!(core::mem::size_of::<SsizeT>(), core::mem::size_of::<SizeT>());
+        let neg: SsizeT = -1;
+        assert!(neg < 0, "SsizeT must be signed");
+    }
+
+    #[test]
+    fn test_intptr_uintptr_same_size() {
+        assert_eq!(core::mem::size_of::<IntptrT>(), core::mem::size_of::<UintptrT>());
+    }
+
+    #[test]
+    fn test_intptr_holds_pointer() {
+        // IntptrT must be large enough to hold a pointer.
+        assert_eq!(core::mem::size_of::<IntptrT>(), core::mem::size_of::<*const u8>());
+    }
+
+    #[test]
+    fn test_ptrdiff_t_is_signed() {
+        let neg: PtrdiffT = -100;
+        assert!(neg < 0);
+    }
+
+    // -- Additional signedness checks --
+
+    #[test]
+    fn test_blksize_t_signed() {
+        let neg: BlksizeT = -1;
+        assert!(neg < 0);
+    }
+
+    #[test]
+    fn test_blkcnt_t_signed() {
+        let neg: BlkcntT = -1;
+        assert!(neg < 0);
+    }
+
+    #[test]
+    fn test_suseconds_t_signed() {
+        let neg: SusecondsT = -1;
+        assert!(neg < 0);
+    }
+
+    #[test]
+    fn test_key_t_signed() {
+        let neg: KeyT = -1;
+        assert!(neg < 0);
+    }
+
+    #[test]
+    fn test_clockid_t_signed() {
+        let neg: ClockidT = -1;
+        assert!(neg < 0);
+    }
+
+    #[test]
+    fn test_fd_signed() {
+        let neg: Fd = -1;
+        assert!(neg < 0, "fd -1 must be representable (common error sentinel)");
+    }
+
+    // -- Unsigned type max values --
+
+    #[test]
+    fn test_mode_t_unsigned() {
+        let max: ModeT = u32::MAX;
+        assert!(max > 0);
+    }
+
+    #[test]
+    fn test_usec_t_unsigned() {
+        let max: UsecT = u32::MAX;
+        assert!(max > 0);
+    }
+
+    #[test]
+    fn test_id_t_unsigned() {
+        let max: IdT = u32::MAX;
+        assert!(max > 0);
+    }
+
+    #[test]
+    fn test_nlink_t_unsigned() {
+        let max: NlinkT = u64::MAX;
+        assert!(max > 0);
+    }
+
+    #[test]
+    fn test_usec_t_size() {
+        assert_eq!(core::mem::size_of::<UsecT>(), 4);
+    }
 }

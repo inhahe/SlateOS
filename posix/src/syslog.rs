@@ -440,4 +440,119 @@ mod tests {
         assert!(stored.is_null());
         closelog();
     }
+
+    // -- Priority and facility encoding --
+
+    #[test]
+    fn test_priority_in_low_3_bits() {
+        for p in 0..=7 {
+            assert_eq!(log_pri(p), p);
+        }
+    }
+
+    #[test]
+    fn test_log_mask_each_priority() {
+        for p in 0..=7 {
+            let mask = log_mask(p);
+            // Only bit p should be set.
+            assert_eq!(mask, 1 << p);
+        }
+    }
+
+    #[test]
+    fn test_log_upto_emerg_only() {
+        let mask = log_upto(LOG_EMERG);
+        assert_ne!(mask & log_mask(LOG_EMERG), 0);
+        assert_eq!(mask & log_mask(LOG_ALERT), 0);
+    }
+
+    #[test]
+    fn test_log_upto_notice() {
+        let mask = log_upto(LOG_NOTICE);
+        for p in 0..=LOG_NOTICE {
+            assert_ne!(mask & log_mask(p), 0, "priority {p} should be in mask");
+        }
+        assert_eq!(mask & log_mask(LOG_INFO), 0);
+        assert_eq!(mask & log_mask(LOG_DEBUG), 0);
+    }
+
+    // -- write_u32 edge cases --
+
+    #[test]
+    fn test_write_u32_one() {
+        let mut buf = [0u8; 16];
+        let len = write_u32(1, &mut buf);
+        assert_eq!(len, 1);
+        assert_eq!(buf[15], b'1');
+    }
+
+    #[test]
+    fn test_write_u32_ten() {
+        let mut buf = [0u8; 16];
+        let len = write_u32(10, &mut buf);
+        assert_eq!(len, 2);
+        assert_eq!(&buf[14..16], b"10");
+    }
+
+    #[test]
+    fn test_write_u32_hundred() {
+        let mut buf = [0u8; 16];
+        let len = write_u32(100, &mut buf);
+        assert_eq!(len, 3);
+        assert_eq!(&buf[13..16], b"100");
+    }
+
+    // -- Facility values: all 8-byte aligned --
+
+    #[test]
+    fn test_facility_values_alignment() {
+        // All facility values should be multiples of 8 (shifted by 3).
+        let facilities = [
+            LOG_KERN, LOG_USER, LOG_MAIL, LOG_DAEMON, LOG_AUTH,
+            LOG_LOCAL0, LOG_LOCAL7,
+        ];
+        for f in facilities {
+            assert_eq!(f & 0x07, 0, "facility {f} should have low 3 bits zero");
+        }
+    }
+
+    // -- syslog writes to stderr (no crash tests) --
+
+    #[test]
+    fn test_syslog_no_crash() {
+        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        syslog(LOG_INFO, b"test syslog message\0".as_ptr());
+    }
+
+    #[test]
+    fn test_syslog_filtered_by_mask() {
+        // Set mask to only allow ERR and below.
+        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(log_upto(LOG_ERR) as i32); }
+        // This should be filtered out (LOG_INFO > LOG_ERR).
+        syslog(LOG_INFO, b"this should be filtered\0".as_ptr());
+        // This should get through.
+        syslog(LOG_ERR, b"this should print\0".as_ptr());
+        // Restore.
+        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+    }
+
+    #[test]
+    fn test_syslog_null_message_no_crash() {
+        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        syslog(LOG_ERR, core::ptr::null());
+    }
+
+    // -- setlogmask with specific masks --
+
+    #[test]
+    fn test_setlogmask_specific_mask() {
+        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        // Set to only LOG_ERR.
+        let old = setlogmask(log_mask(LOG_ERR) as i32);
+        assert_eq!(old, 0xFF);
+        let current = setlogmask(0); // Query.
+        assert_eq!(current, log_mask(LOG_ERR) as i32);
+        // Restore.
+        setlogmask(0xFF);
+    }
 }

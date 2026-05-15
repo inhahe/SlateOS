@@ -277,4 +277,72 @@ mod tests {
     fn test_lc_global_locale_sentinel() {
         assert_eq!(LC_GLOBAL_LOCALE, usize::MAX);
     }
+
+    // -- localeconv field completeness --
+
+    #[test]
+    fn test_localeconv_thousands_sep_empty() {
+        let lc = localeconv();
+        let ts = unsafe { (*lc).thousands_sep };
+        assert!(!ts.is_null());
+        // C locale: thousands_sep is empty string.
+        assert_eq!(unsafe { *ts }, 0);
+    }
+
+    #[test]
+    fn test_localeconv_monetary_fields_not_available() {
+        let lc = localeconv();
+        let lconv = unsafe { &*lc };
+        // All monetary precision/position fields should be 127 (CHAR_MAX).
+        assert_eq!(lconv.p_cs_precedes, 127);
+        assert_eq!(lconv.p_sep_by_space, 127);
+        assert_eq!(lconv.n_cs_precedes, 127);
+        assert_eq!(lconv.n_sep_by_space, 127);
+        assert_eq!(lconv.p_sign_posn, 127);
+        assert_eq!(lconv.n_sign_posn, 127);
+    }
+
+    #[test]
+    fn test_localeconv_currency_symbol_empty() {
+        let lc = localeconv();
+        let cs = unsafe { (*lc).currency_symbol };
+        assert!(!cs.is_null());
+        assert_eq!(unsafe { *cs }, 0);
+    }
+
+    #[test]
+    fn test_localeconv_int_curr_symbol_empty() {
+        let lc = localeconv();
+        let ics = unsafe { (*lc).int_curr_symbol };
+        assert!(!ics.is_null());
+        assert_eq!(unsafe { *ics }, 0);
+    }
+
+    // -- Extended locale round-trip --
+
+    #[test]
+    fn test_newlocale_ignores_base() {
+        // newlocale with any base returns C locale.
+        let loc1 = newlocale(LC_ALL_MASK, b"C\0".as_ptr(), 0);
+        let loc2 = newlocale(LC_ALL_MASK, b"en_US\0".as_ptr(), loc1);
+        assert_eq!(loc1, C_LOCALE_TAG);
+        assert_eq!(loc2, C_LOCALE_TAG);
+    }
+
+    #[test]
+    fn test_uselocale_returns_previous() {
+        // uselocale should return the previous locale.
+        let prev = uselocale(C_LOCALE_TAG);
+        assert_eq!(prev, C_LOCALE_TAG);
+        // Setting LC_GLOBAL_LOCALE should also return C locale.
+        let prev2 = uselocale(LC_GLOBAL_LOCALE);
+        assert_eq!(prev2, C_LOCALE_TAG);
+    }
+
+    #[test]
+    fn test_lconv_size() {
+        // Lconv: 10 pointers (80 bytes) + 8 u8 fields (8 bytes) = 88 bytes.
+        let size = core::mem::size_of::<Lconv>();
+        assert!(size >= 88, "Lconv must be at least 88 bytes, got {size}");
+    }
 }

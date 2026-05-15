@@ -2975,4 +2975,442 @@ mod tests {
         let ret = stdio_rename(b"/tmp/old\0".as_ptr(), core::ptr::null());
         assert_eq!(ret, -1);
     }
+
+    // -----------------------------------------------------------------------
+    // setbuf — null sets unbuffered, non-null sets fully buffered
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_setbuf_null_makes_unbuffered() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_mode = unsafe { (*file).buf_mode };
+        setbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut());
+        assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_NONE);
+        unsafe { (*file).buf_mode = old_mode; }
+    }
+
+    #[test]
+    fn test_setbuf_nonnull_makes_fully_buffered() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_mode = unsafe { (*file).buf_mode };
+        let mut dummy = [0u8; 1];
+        setbuf(STDERR_SENTINEL as *mut u8, dummy.as_mut_ptr());
+        assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_FULL);
+        unsafe { (*file).buf_mode = old_mode; }
+    }
+
+    // -----------------------------------------------------------------------
+    // setlinebuf — sets line-buffered mode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_setlinebuf_makes_line_buffered() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_mode = unsafe { (*file).buf_mode };
+        setlinebuf(STDERR_SENTINEL as *mut u8);
+        assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_LINE);
+        unsafe { (*file).buf_mode = old_mode; }
+    }
+
+    // -----------------------------------------------------------------------
+    // setbuffer — null sets unbuffered, non-null sets fully buffered
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_setbuffer_null_makes_unbuffered() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_mode = unsafe { (*file).buf_mode };
+        setbuffer(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 0);
+        assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_NONE);
+        unsafe { (*file).buf_mode = old_mode; }
+    }
+
+    #[test]
+    fn test_setbuffer_nonnull_makes_fully_buffered() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_mode = unsafe { (*file).buf_mode };
+        let mut dummy = [0u8; 1];
+        setbuffer(STDERR_SENTINEL as *mut u8, dummy.as_mut_ptr(), 4096);
+        assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_FULL);
+        unsafe { (*file).buf_mode = old_mode; }
+    }
+
+    // -----------------------------------------------------------------------
+    // setvbuf — mode transitions and buffer state
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_setvbuf_full_to_line() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_mode = unsafe { (*file).buf_mode };
+
+        // Set to fully buffered first.
+        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 0, 0);
+        assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_FULL);
+
+        // Switch to line-buffered.
+        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 1, 0);
+        assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_LINE);
+
+        unsafe { (*file).buf_mode = old_mode; }
+    }
+
+    #[test]
+    fn test_setvbuf_line_to_none() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_mode = unsafe { (*file).buf_mode };
+
+        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 1, 0);
+        assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_LINE);
+
+        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 2, 0);
+        assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_NONE);
+
+        unsafe { (*file).buf_mode = old_mode; }
+    }
+
+    #[test]
+    fn test_setvbuf_clears_read_buffer_on_mode_change() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_dir = unsafe { (*file).buf_dir };
+        let old_pos = unsafe { (*file).buf_pos };
+        let old_len = unsafe { (*file).buf_len };
+        let old_mode = unsafe { (*file).buf_mode };
+
+        // Simulate buffered read state.
+        unsafe {
+            (*file).buf_dir = BUF_DIR_READ;
+            (*file).buf_pos = 10;
+            (*file).buf_len = 50;
+        }
+
+        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 2, 0);
+
+        // Buffer state should be cleared.
+        assert_eq!(unsafe { (*file).buf_pos }, 0);
+        assert_eq!(unsafe { (*file).buf_len }, 0);
+        assert_eq!(unsafe { (*file).buf_dir }, BUF_DIR_IDLE);
+
+        // Restore.
+        unsafe {
+            (*file).buf_dir = old_dir;
+            (*file).buf_pos = old_pos;
+            (*file).buf_len = old_len;
+            (*file).buf_mode = old_mode;
+        }
+    }
+
+    #[test]
+    fn test_setvbuf_returns_zero_on_success() {
+        for mode in [0, 1, 2] {
+            let ret = setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), mode, 0);
+            assert_eq!(ret, 0, "setvbuf(mode={mode}) should return 0");
+        }
+        // Restore stderr to unbuffered.
+        setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 2, 0);
+    }
+
+    #[test]
+    fn test_setvbuf_returns_neg1_on_invalid() {
+        let ret = setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 3, 0);
+        assert_eq!(ret, -1);
+
+        let ret = setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), -1, 0);
+        assert_eq!(ret, -1);
+    }
+
+    // -----------------------------------------------------------------------
+    // putc — alias for fputc
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_putc_is_fputc_alias() {
+        // Both should process the same byte value.
+        // We can't test actual I/O, but verify the function exists and
+        // is callable without crash for a valid sentinel.
+        // putc writes to the stream buffer; in test mode the underlying
+        // write syscall returns 0 (writes go to a non-existent fd).
+        let ret = putc(b'X' as i32, STDERR_SENTINEL as *mut u8);
+        // stderr is unbuffered so it calls write immediately.
+        // In test mode write returns 0 (no actual kernel).
+        // fputc returns EOF on write error or the byte value on success.
+        // Either result is acceptable — we're testing it doesn't crash.
+        let _ = ret;
+    }
+
+    // -----------------------------------------------------------------------
+    // fopen — invalid mode string
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fopen_invalid_mode() {
+        let ret = unsafe { fopen(b"/tmp/x\0".as_ptr(), b"x\0".as_ptr()) };
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // freopen — null mode
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_freopen_null_mode() {
+        let ret = unsafe {
+            freopen(b"/tmp/x\0".as_ptr(), core::ptr::null(), STDOUT_SENTINEL as *mut u8)
+        };
+        assert!(ret.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // fflush(NULL) — flush all streams (idle buffers succeed)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fflush_null_flushes_all_idle() {
+        // Ensure all streams are idle (no pending writes).
+        // fflush(NULL) should return 0 when all buffers are idle.
+        // Reset FILE_POOL so no in-use files interfere.
+        unsafe {
+            let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
+            let mut i: usize = 0;
+            while i < MAX_OPEN_FILES {
+                (*pool.add(i)).in_use = false;
+                i += 1;
+            }
+        }
+
+        // Reset stdout and stderr write buffers to idle.
+        let f_out = stream_to_file(STDOUT_SENTINEL as *mut u8);
+        let f_err = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_out_dir = unsafe { (*f_out).buf_dir };
+        let old_out_pos = unsafe { (*f_out).buf_pos };
+        let old_err_dir = unsafe { (*f_err).buf_dir };
+        let old_err_pos = unsafe { (*f_err).buf_pos };
+
+        unsafe {
+            (*f_out).buf_dir = BUF_DIR_IDLE;
+            (*f_out).buf_pos = 0;
+            (*f_err).buf_dir = BUF_DIR_IDLE;
+            (*f_err).buf_pos = 0;
+        }
+
+        let ret = fflush(core::ptr::null_mut());
+        assert_eq!(ret, 0, "fflush(NULL) should succeed on idle buffers");
+
+        // Restore.
+        unsafe {
+            (*f_out).buf_dir = old_out_dir;
+            (*f_out).buf_pos = old_out_pos;
+            (*f_err).buf_dir = old_err_dir;
+            (*f_err).buf_pos = old_err_pos;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // fflush on a specific stream with idle buffer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fflush_idle_stream_returns_zero() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_dir = unsafe { (*file).buf_dir };
+        let old_pos = unsafe { (*file).buf_pos };
+
+        unsafe {
+            (*file).buf_dir = BUF_DIR_IDLE;
+            (*file).buf_pos = 0;
+        }
+
+        let ret = fflush(STDERR_SENTINEL as *mut u8);
+        assert_eq!(ret, 0);
+
+        unsafe {
+            (*file).buf_dir = old_dir;
+            (*file).buf_pos = old_pos;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // rewind — clears error flag
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rewind_clears_error() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_flags = unsafe { (*file).flags };
+
+        // Set error flag.
+        unsafe { (*file).flags |= FLAG_ERR; }
+
+        rewind(STDERR_SENTINEL as *mut u8);
+        assert_eq!(unsafe { (*file).flags } & FLAG_ERR, 0, "rewind must clear error");
+
+        unsafe { (*file).flags = old_flags; }
+    }
+
+    // -----------------------------------------------------------------------
+    // fseeko / ftello / fseeko64 / ftello64 — alias correctness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fseeko_is_fseek_alias() {
+        // Both should produce the same result for the same arguments.
+        // On LP64, fseeko == fseek — verify the function exists.
+        let _ret = fseeko(STDERR_SENTINEL as *mut u8, 0, SEEK_SET);
+        // Can't verify exact result (depends on lseek syscall in test mode)
+        // but it should not crash.
+    }
+
+    #[test]
+    fn test_ftello_is_ftell_alias() {
+        let _ret = ftello(STDERR_SENTINEL as *mut u8);
+    }
+
+    #[test]
+    fn test_fseeko64_is_fseek_alias() {
+        let _ret = fseeko64(STDERR_SENTINEL as *mut u8, 0, SEEK_SET);
+    }
+
+    #[test]
+    fn test_ftello64_is_ftell_alias() {
+        let _ret = ftello64(STDERR_SENTINEL as *mut u8);
+    }
+
+    // -----------------------------------------------------------------------
+    // fgetpos64 / fsetpos64 — LP64 aliases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fgetpos64_null_pos() {
+        let ret = fgetpos64(STDOUT_SENTINEL as *mut u8, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fsetpos64_null_pos() {
+        let ret = fsetpos64(STDOUT_SENTINEL as *mut u8, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // fopen64 — LP64 alias for fopen
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fopen64_null_path() {
+        let ret = unsafe { fopen64(core::ptr::null(), b"r\0".as_ptr()) };
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fopen64_null_mode() {
+        let ret = unsafe { fopen64(b"/tmp/x\0".as_ptr(), core::ptr::null()) };
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // Unlocked variants — aliases for locked versions
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_getc_unlocked_exists() {
+        // getc_unlocked(stream) is an alias for fgetc(stream).
+        // Verify it's callable without crashing.  The return value
+        // depends on stdin state (may have a pushed-back byte from
+        // a prior test), so we only assert it doesn't panic.
+        let _ret = getc_unlocked(STDIN_SENTINEL as *mut u8);
+    }
+
+    #[test]
+    fn test_getchar_unlocked_exists() {
+        // Alias for fgetc(stdin).  Just verify it doesn't crash.
+        let _ret = getchar_unlocked();
+    }
+
+    #[test]
+    fn test_putc_unlocked_exists() {
+        let _ret = putc_unlocked(b'X' as i32, STDERR_SENTINEL as *mut u8);
+    }
+
+    #[test]
+    fn test_putchar_unlocked_exists() {
+        let _ret = putchar_unlocked(b'X' as i32);
+    }
+
+    // -----------------------------------------------------------------------
+    // File pool — free non-pool pointer is a no-op
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_free_file_nonpool_is_noop() {
+        // Freeing a pointer not in the pool should do nothing (no crash).
+        let mut fake = File::new(99, BUF_MODE_FULL);
+        free_file(&raw mut fake);
+        // If we get here, it didn't crash — success.
+    }
+
+    // -----------------------------------------------------------------------
+    // mode_to_flags — additional edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mode_to_flags_empty_mode() {
+        // A NUL byte at position 0 means the mode char is 0, which
+        // is not r/w/a → invalid.
+        assert_eq!(mode_to_flags(b"\0".as_ptr()), -1);
+    }
+
+    // -----------------------------------------------------------------------
+    // ungetc — double pushback
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ungetc_overwrites_previous() {
+        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        let old_byte = unsafe { (*file).ungetc_byte };
+        let old_flags = unsafe { (*file).flags };
+
+        ungetc(b'A' as i32, STDIN_SENTINEL as *mut u8);
+        assert_eq!(unsafe { (*file).ungetc_byte }, b'A' as i16);
+
+        // Second pushback overwrites the first.
+        ungetc(b'B' as i32, STDIN_SENTINEL as *mut u8);
+        assert_eq!(unsafe { (*file).ungetc_byte }, b'B' as i16);
+
+        unsafe {
+            (*file).ungetc_byte = old_byte;
+            (*file).flags = old_flags;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // fdopen — pool allocation (non-standard fds)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fdopen_allocates_from_pool() {
+        // Reset pool.
+        unsafe {
+            let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
+            let mut i: usize = 0;
+            while i < MAX_OPEN_FILES {
+                (*pool.add(i)).in_use = false;
+                i += 1;
+            }
+        }
+
+        let stream = fdopen(42, b"r\0".as_ptr());
+        assert!(!stream.is_null(), "fdopen(42) should allocate from pool");
+
+        // Check it's a valid File pointer.
+        let file = stream_to_file(stream);
+        assert_eq!(unsafe { (*file).fd }, 42);
+
+        // Clean up — return the slot.
+        free_file(file);
+    }
 }

@@ -906,4 +906,173 @@ mod tests {
         // Timeval should be 16 bytes (two i64s).
         assert_eq!(core::mem::size_of::<Timeval>(), 16);
     }
+
+    #[test]
+    fn test_timeval_fields() {
+        let tv = Timeval { tv_sec: 5, tv_usec: 500_000 };
+        assert_eq!(tv.tv_sec, 5);
+        assert_eq!(tv.tv_usec, 500_000);
+    }
+
+    #[test]
+    fn test_timeval_zero() {
+        let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        assert_eq!(tv.tv_sec, 0);
+        assert_eq!(tv.tv_usec, 0);
+    }
+
+    // -- FdSet exhaustive word tests --
+
+    #[test]
+    fn test_fd_set_all_bits_in_first_word() {
+        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        // Set every bit in word 0 (fds 0..63).
+        for fd in 0..64 {
+            fd_set_set(fd, &raw mut set);
+        }
+        assert_eq!(set.fds_bits[0], u64::MAX);
+        // Other words should be zero.
+        assert_eq!(set.fds_bits[1], 0);
+        assert_eq!(set.fds_bits[2], 0);
+        assert_eq!(set.fds_bits[3], 0);
+    }
+
+    #[test]
+    fn test_fd_set_clr_preserves_others() {
+        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        fd_set_set(10, &raw mut set);
+        fd_set_set(11, &raw mut set);
+        fd_set_set(12, &raw mut set);
+        fd_set_clr(11, &raw mut set);
+        assert_ne!(fd_set_isset(10, &raw const set), 0);
+        assert_eq!(fd_set_isset(11, &raw const set), 0);
+        assert_ne!(fd_set_isset(12, &raw const set), 0);
+    }
+
+    #[test]
+    fn test_fd_set_double_set() {
+        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        fd_set_set(50, &raw mut set);
+        fd_set_set(50, &raw mut set); // Idempotent.
+        assert_ne!(fd_set_isset(50, &raw const set), 0);
+    }
+
+    #[test]
+    fn test_fd_set_clr_unset_is_noop() {
+        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        fd_set_clr(50, &raw mut set); // Nothing to clear — no crash.
+        assert_eq!(fd_set_isset(50, &raw const set), 0);
+    }
+
+    #[test]
+    fn test_fd_set_zero_then_isset() {
+        let mut set = FdSet { fds_bits: [0xFFFF_FFFF_FFFF_FFFF; FD_SET_WORDS] };
+        fd_set_zero(&raw mut set);
+        // Every fd should be unset.
+        for fd in [0, 1, 63, 64, 127, 128, 200, 255] {
+            assert_eq!(fd_set_isset(fd, &raw const set), 0, "fd {fd} should be clear");
+        }
+    }
+
+    // -- FdSet boundary edge cases --
+
+    #[test]
+    fn test_fd_set_set_negative_is_noop() {
+        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        fd_set_set(-100, &raw mut set); // Should not crash.
+        // All bits should still be 0.
+        for word in &set.fds_bits {
+            assert_eq!(*word, 0);
+        }
+    }
+
+    #[test]
+    fn test_fd_set_clr_out_of_range() {
+        let mut set = FdSet { fds_bits: [0xFFFF_FFFF_FFFF_FFFF; FD_SET_WORDS] };
+        fd_set_clr(300, &raw mut set); // Out of range — no crash.
+        // All bits should still be set.
+        for word in &set.fds_bits {
+            assert_eq!(*word, u64::MAX);
+        }
+    }
+
+    // -- Pollfd init and layout --
+
+    #[test]
+    fn test_pollfd_fields() {
+        let pfd = Pollfd { fd: 5, events: POLLIN | POLLOUT, revents: 0 };
+        assert_eq!(pfd.fd, 5);
+        assert_eq!(pfd.events, POLLIN | POLLOUT);
+        assert_eq!(pfd.revents, 0);
+    }
+
+    #[test]
+    fn test_pollfd_copy() {
+        let pfd1 = Pollfd { fd: 3, events: POLLIN, revents: POLLHUP };
+        let pfd2 = pfd1;
+        assert_eq!(pfd2.fd, pfd1.fd);
+        assert_eq!(pfd2.events, pfd1.events);
+        assert_eq!(pfd2.revents, pfd1.revents);
+    }
+
+    // -- FdSet size --
+
+    #[test]
+    fn test_fdset_size() {
+        // 4 words × 8 bytes = 32 bytes.
+        assert_eq!(core::mem::size_of::<FdSet>(), 32);
+    }
+
+    #[test]
+    fn test_fdset_copy() {
+        let mut set1 = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        fd_set_set(10, &raw mut set1);
+        fd_set_set(200, &raw mut set1);
+        let set2 = set1;
+        assert_ne!(fd_set_isset(10, &raw const set2), 0);
+        assert_ne!(fd_set_isset(200, &raw const set2), 0);
+        assert_eq!(fd_set_isset(11, &raw const set2), 0);
+    }
+
+    // -- NfdsT --
+
+    #[test]
+    fn test_nfds_t_size() {
+        assert_eq!(core::mem::size_of::<NfdsT>(), 8); // u64
+    }
+
+    // -- check_readiness for additional handle kinds --
+
+    #[test]
+    fn test_check_readiness_unknown_kind() {
+        // An unknown/unrecognized kind should default to not-ready
+        // or ready depending on implementation. Just verify no crash.
+        let (r, w, h, e) = check_readiness(fdtable::HandleKind::Console, 1);
+        assert!(r);
+        assert!(w);
+        assert!(!h);
+        assert!(!e);
+    }
+
+    // -- is_set_in comprehensive --
+
+    #[test]
+    fn test_is_set_in_all_words() {
+        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        // Set one bit in each word.
+        fd_set_set(0, &raw mut set);    // word 0
+        fd_set_set(64, &raw mut set);   // word 1
+        fd_set_set(128, &raw mut set);  // word 2
+        fd_set_set(192, &raw mut set);  // word 3
+
+        assert!(is_set_in(0, &set));
+        assert!(is_set_in(64, &set));
+        assert!(is_set_in(128, &set));
+        assert!(is_set_in(192, &set));
+
+        assert!(!is_set_in(1, &set));
+        assert!(!is_set_in(65, &set));
+        assert!(!is_set_in(129, &set));
+        assert!(!is_set_in(193, &set));
+    }
 }

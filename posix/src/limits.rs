@@ -490,4 +490,142 @@ mod tests {
         assert_eq!(_POSIX_THREAD_KEYS_MAX, 128);
         assert_eq!(_POSIX_THREAD_DESTRUCTOR_ITERATIONS, 4);
     }
+
+    // -- Min/max relationships --
+
+    #[test]
+    fn test_schar_range_relationship() {
+        // SCHAR_MAX must be positive, SCHAR_MIN must be negative,
+        // and MAX = -MIN - 1 for two's complement.
+        assert!(SCHAR_MAX > 0);
+        assert!(SCHAR_MIN < 0);
+        assert_eq!(SCHAR_MAX, -SCHAR_MIN - 1);
+    }
+
+    #[test]
+    fn test_shrt_range_relationship() {
+        assert!(SHRT_MAX > 0);
+        assert!(SHRT_MIN < 0);
+        // Two's complement: MAX = -(MIN + 1).  Avoid negating MIN directly
+        // (i16::MIN overflows on negate).
+        assert_eq!(SHRT_MAX, -(SHRT_MIN + 1));
+    }
+
+    #[test]
+    fn test_int_range_relationship() {
+        assert!(INT_MAX > 0);
+        assert!(INT_MIN < 0);
+        // For 32-bit two's complement: MAX = -MIN - 1.
+        assert_eq!(INT_MAX as i64, -(INT_MIN as i64) - 1);
+    }
+
+    #[test]
+    fn test_long_range_relationship() {
+        assert!(LONG_MAX > 0);
+        assert!(LONG_MIN < 0);
+    }
+
+    // -- Unsigned max >= signed max --
+
+    #[test]
+    fn test_uchar_max_ge_schar_max() {
+        assert!(UCHAR_MAX > SCHAR_MAX);
+    }
+
+    #[test]
+    fn test_ushrt_max_ge_shrt_max() {
+        assert!(USHRT_MAX as i32 > SHRT_MAX as i32);
+    }
+
+    #[test]
+    fn test_uint_max_ge_int_max() {
+        assert!(UINT_MAX as i64 > INT_MAX as i64);
+    }
+
+    // -- Positive resource limits --
+
+    #[test]
+    fn test_all_resource_limits_positive() {
+        assert!(PIPE_BUF > 0);
+        assert!(OPEN_MAX > 0);
+        assert!(CHILD_MAX > 0);
+        assert!(IOV_MAX > 0);
+        assert!(LINE_MAX > 0);
+        assert!(ARG_MAX > 0);
+        assert!(NGROUPS_MAX > 0);
+        assert!(LINK_MAX > 0);
+        assert!(TIMER_MAX > 0);
+        assert!(MQ_OPEN_MAX > 0);
+        assert!(MQ_PRIO_MAX > 0);
+    }
+
+    // -- Name/path limits are at least 1 --
+
+    #[test]
+    fn test_name_limits_positive() {
+        assert!(HOST_NAME_MAX > 0);
+        assert!(LOGIN_NAME_MAX > 0);
+        assert!(TTY_NAME_MAX > 0);
+        assert!(NAME_MAX > 0);
+        assert!(PATH_MAX > 0);
+        assert!(SYMLINK_MAX > 0);
+    }
+
+    // -- POSIX minimums are consistent --
+
+    #[test]
+    fn test_posix_minimums_positive() {
+        assert!(_POSIX_PATH_MAX > 0);
+        assert!(_POSIX_NAME_MAX > 0);
+        assert!(_POSIX_OPEN_MAX > 0);
+        assert!(_POSIX_CHILD_MAX > 0);
+        assert!(_POSIX_ARG_MAX > 0);
+        assert!(_POSIX_SEM_VALUE_MAX > 0);
+        assert!(_POSIX_TIMER_MAX > 0);
+        assert!(_POSIX_THREAD_KEYS_MAX > 0);
+        assert!(_POSIX_THREAD_DESTRUCTOR_ITERATIONS > 0);
+        assert!(_POSIX_SYMLOOP_MAX > 0);
+        assert!(_POSIX_SYMLINK_MAX > 0);
+        assert!(_POSIX_LINK_MAX > 0);
+    }
+
+    // -- Fixed-width integer min values --
+
+    #[test]
+    fn test_fixed_width_min_values() {
+        assert_eq!(INT8_MAX, 0x7F);
+        assert_eq!(INT16_MAX, 0x7FFF);
+        assert_eq!(INT32_MAX, 0x7FFF_FFFF);
+        assert_eq!(INT64_MAX, 0x7FFF_FFFF_FFFF_FFFF);
+    }
+
+    // -- Additional POSIX minimum constraint checks --
+
+    #[test]
+    fn test_symloop_exceeds_posix() {
+        assert!(SYMLOOP_MAX >= _POSIX_SYMLOOP_MAX,
+            "SYMLOOP_MAX ({SYMLOOP_MAX}) must be >= _POSIX_SYMLOOP_MAX ({_POSIX_SYMLOOP_MAX})");
+    }
+
+    #[test]
+    fn test_sem_value_exceeds_posix() {
+        assert!(SEM_VALUE_MAX >= _POSIX_SEM_VALUE_MAX,
+            "SEM_VALUE_MAX must be >= _POSIX_SEM_VALUE_MAX");
+    }
+
+    #[test]
+    fn test_timer_exceeds_posix() {
+        assert!(TIMER_MAX >= _POSIX_TIMER_MAX,
+            "TIMER_MAX must be >= _POSIX_TIMER_MAX");
+    }
+
+    // -- LONG and LLONG identical on LP64 --
+
+    #[test]
+    fn test_long_llong_identical_lp64() {
+        // On our LP64 target, long and long long are both 64-bit.
+        assert_eq!(LONG_MIN, LLONG_MIN);
+        assert_eq!(LONG_MAX, LLONG_MAX);
+        assert_eq!(ULONG_MAX, ULLONG_MAX);
+    }
 }

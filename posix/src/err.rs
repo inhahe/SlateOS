@@ -214,4 +214,79 @@ mod tests {
     fn write_cstr_empty_string_no_crash() {
         write_cstr(b"\0".as_ptr());
     }
+
+    // -- warn with various errno values --
+
+    #[test]
+    fn warn_with_eperm_no_crash() {
+        crate::errno::set_errno(crate::errno::EPERM);
+        warn(b"permission check\0".as_ptr());
+    }
+
+    #[test]
+    fn warn_with_zero_errno_no_crash() {
+        crate::errno::set_errno(0);
+        warn(b"no error\0".as_ptr());
+    }
+
+    // -- warnx with various messages --
+
+    #[test]
+    fn warnx_empty_message_no_crash() {
+        warnx(b"\0".as_ptr());
+    }
+
+    #[test]
+    fn warnx_long_message_no_crash() {
+        warnx(b"this is a somewhat longer warning message for testing purposes\0".as_ptr());
+    }
+
+    // -- vwarn / vwarnx with various messages --
+
+    #[test]
+    fn vwarn_empty_message_no_crash() {
+        crate::errno::set_errno(crate::errno::ENOSYS);
+        vwarn(b"\0".as_ptr());
+    }
+
+    #[test]
+    fn vwarnx_empty_message_no_crash() {
+        vwarnx(b"\0".as_ptr());
+    }
+
+    // -- write_stderr helper --
+
+    #[test]
+    fn write_stderr_empty_no_crash() {
+        write_stderr(b"");
+    }
+
+    #[test]
+    fn write_stderr_with_content_no_crash() {
+        write_stderr(b"test stderr output\n");
+    }
+
+    // -- emit_warn / emit_warnx internals --
+
+    #[test]
+    fn emit_warn_null_fmt_no_crash() {
+        crate::errno::set_errno(crate::errno::ENOENT);
+        emit_warn(core::ptr::null());
+    }
+
+    #[test]
+    fn emit_warnx_null_fmt_no_crash() {
+        emit_warnx(core::ptr::null());
+    }
+
+    #[test]
+    fn emit_warn_with_message_no_crash() {
+        crate::errno::set_errno(crate::errno::EIO);
+        emit_warn(b"disk error\0".as_ptr());
+    }
+
+    #[test]
+    fn emit_warnx_with_message_no_crash() {
+        emit_warnx(b"invalid argument\0".as_ptr());
+    }
 }

@@ -278,4 +278,55 @@ mod tests {
         let _ = mq_notify(0, core::ptr::null());
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
+
+    // -- MqAttr field access --
+
+    #[test]
+    fn test_mq_attr_fields() {
+        let attr = MqAttr {
+            mq_flags: 1,
+            mq_maxmsg: 10,
+            mq_msgsize: 256,
+            mq_curmsgs: 5,
+            _pad: [0; 4],
+        };
+        assert_eq!(attr.mq_flags, 1);
+        assert_eq!(attr.mq_maxmsg, 10);
+        assert_eq!(attr.mq_msgsize, 256);
+        assert_eq!(attr.mq_curmsgs, 5);
+    }
+
+    #[test]
+    fn test_mqd_t_is_i32() {
+        assert_eq!(core::mem::size_of::<MqdT>(), 4);
+        let neg: MqdT = -1;
+        assert!(neg < 0, "MqdT must be signed (error values are -1)");
+    }
+
+    // -- All stubs return -1 regardless of inputs --
+
+    #[test]
+    fn test_mq_open_null_name() {
+        assert_eq!(mq_open(core::ptr::null(), 0), -1);
+    }
+
+    #[test]
+    fn test_mq_unlink_null_name() {
+        assert_eq!(mq_unlink(core::ptr::null()), -1);
+    }
+
+    #[test]
+    fn test_mq_send_null_msg() {
+        assert_eq!(mq_send(0, core::ptr::null(), 0, 0), -1);
+    }
+
+    #[test]
+    fn test_mq_receive_null_buf() {
+        assert_eq!(mq_receive(0, core::ptr::null_mut(), 0, core::ptr::null_mut()), -1);
+    }
+
+    #[test]
+    fn test_mq_getattr_null_attr() {
+        assert_eq!(mq_getattr(0, core::ptr::null_mut()), -1);
+    }
 }

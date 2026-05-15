@@ -151,10 +151,22 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_getservbyname_returns_null() {
+    fn test_getservbyname_known() {
         let result = unsafe {
             crate::socket::getservbyname(
                 b"http\0".as_ptr(),
+                b"tcp\0".as_ptr(),
+            )
+        };
+        // "http" / "tcp" is in the built-in service table.
+        assert!(!result.is_null());
+    }
+
+    #[test]
+    fn test_getservbyname_unknown() {
+        let result = unsafe {
+            crate::socket::getservbyname(
+                b"nonexistent_svc_xyz\0".as_ptr(),
                 b"tcp\0".as_ptr(),
             )
         };
@@ -162,8 +174,14 @@ mod tests {
     }
 
     #[test]
-    fn test_getprotobynumber_returns_null() {
+    fn test_getprotobynumber_known() {
         let result = crate::socket::getprotobynumber(6); // TCP
+        assert!(!result.is_null());
+    }
+
+    #[test]
+    fn test_getprotobynumber_unknown() {
+        let result = crate::socket::getprotobynumber(254); // unassigned
         assert!(result.is_null());
     }
 

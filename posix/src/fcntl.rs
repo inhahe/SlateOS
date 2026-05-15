@@ -55,6 +55,10 @@ pub const SEEK_SET: i32 = 0;
 pub const SEEK_CUR: i32 = 1;
 /// Seek relative to end of file.
 pub const SEEK_END: i32 = 2;
+/// Seek to next data (Linux 3.1+, `lseek` extension).
+pub const SEEK_DATA: i32 = 3;
+/// Seek to next hole (Linux 3.1+, `lseek` extension).
+pub const SEEK_HOLE: i32 = 4;
 
 // ---------------------------------------------------------------------------
 // access() mode flags
@@ -195,6 +199,18 @@ mod tests {
         assert_eq!(SEEK_SET, 0);
         assert_eq!(SEEK_CUR, 1);
         assert_eq!(SEEK_END, 2);
+        assert_eq!(SEEK_DATA, 3);
+        assert_eq!(SEEK_HOLE, 4);
+    }
+
+    #[test]
+    fn test_seek_constants_distinct() {
+        let vals = [SEEK_SET, SEEK_CUR, SEEK_END, SEEK_DATA, SEEK_HOLE];
+        for i in 0..vals.len() {
+            for j in (i + 1)..vals.len() {
+                assert_ne!(vals[i], vals[j], "seek constants must be distinct");
+            }
+        }
     }
 
     // -- access() mode flags --

@@ -41,6 +41,16 @@ pub const RLIMIT_RSS: i32 = 5;
 pub const RLIMIT_MSGQUEUE: i32 = 12;
 /// Maximum number of bytes that can be locked in memory.
 pub const RLIMIT_MEMLOCK: i32 = 8;
+/// Maximum number of file locks.
+pub const RLIMIT_LOCKS: i32 = 10;
+/// Maximum number of pending signals.
+pub const RLIMIT_SIGPENDING: i32 = 11;
+/// Ceiling for the process nice value (since Linux 2.6.12).
+pub const RLIMIT_NICE: i32 = 13;
+/// Ceiling on real-time scheduling priority (since Linux 2.6.12).
+pub const RLIMIT_RTPRIO: i32 = 14;
+/// Limit on CPU time for real-time processes (microseconds, since Linux 2.6.25).
+pub const RLIMIT_RTTIME: i32 = 15;
 /// Number of resource limit types.
 const RLIMIT_NLIMITS: usize = 16;
 
@@ -412,7 +422,27 @@ mod tests {
         assert_eq!(RLIMIT_NOFILE, 7);
         assert_eq!(RLIMIT_MEMLOCK, 8);
         assert_eq!(RLIMIT_AS, 9);
+        assert_eq!(RLIMIT_LOCKS, 10);
+        assert_eq!(RLIMIT_SIGPENDING, 11);
         assert_eq!(RLIMIT_MSGQUEUE, 12);
+        assert_eq!(RLIMIT_NICE, 13);
+        assert_eq!(RLIMIT_RTPRIO, 14);
+        assert_eq!(RLIMIT_RTTIME, 15);
+    }
+
+    #[test]
+    fn rlimit_constants_all_distinct() {
+        let vals = [
+            RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_STACK,
+            RLIMIT_CORE, RLIMIT_RSS, RLIMIT_NPROC, RLIMIT_NOFILE,
+            RLIMIT_MEMLOCK, RLIMIT_AS, RLIMIT_LOCKS, RLIMIT_SIGPENDING,
+            RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME,
+        ];
+        for i in 0..vals.len() {
+            for j in (i + 1)..vals.len() {
+                assert_ne!(vals[i], vals[j], "RLIMIT constants must be distinct");
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -518,7 +548,9 @@ mod tests {
         // Resources that default to RLIM_INFINITY for both soft and hard.
         let inf_resources = [
             RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_RSS,
-            RLIMIT_NPROC, RLIMIT_MEMLOCK, RLIMIT_AS, RLIMIT_MSGQUEUE,
+            RLIMIT_NPROC, RLIMIT_MEMLOCK, RLIMIT_AS, RLIMIT_LOCKS,
+            RLIMIT_SIGPENDING, RLIMIT_MSGQUEUE, RLIMIT_NICE,
+            RLIMIT_RTPRIO, RLIMIT_RTTIME,
         ];
         for &res in &inf_resources {
             let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
@@ -871,6 +903,40 @@ mod tests {
         assert_eq!(ret, 0);
         assert_eq!(old.rlim_cur, crate::fdtable::MAX_FDS as u64);
         assert_eq!(old.rlim_max, crate::fdtable::MAX_FDS as u64);
+    }
+
+    // -----------------------------------------------------------------------
+    // New RLIMIT_* constants: getrlimit/setrlimit round trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn new_rlimit_constants_getrlimit_works() {
+        reset_global_state();
+        // Verify all new constants are accessible via getrlimit.
+        let new_resources = [
+            RLIMIT_LOCKS, RLIMIT_SIGPENDING, RLIMIT_NICE,
+            RLIMIT_RTPRIO, RLIMIT_RTTIME,
+        ];
+        for &res in &new_resources {
+            let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            let ret = getrlimit(res, &mut rl);
+            assert_eq!(ret, 0, "getrlimit failed for resource {res}");
+            // All default to RLIM_INFINITY.
+            assert_eq!(rl.rlim_cur, RLIM_INFINITY);
+            assert_eq!(rl.rlim_max, RLIM_INFINITY);
+        }
+    }
+
+    #[test]
+    fn new_rlimit_constants_setrlimit_round_trip() {
+        reset_global_state();
+        let new = Rlimit { rlim_cur: 128, rlim_max: 256 };
+        assert_eq!(setrlimit(RLIMIT_SIGPENDING, &new), 0);
+
+        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_SIGPENDING, &mut readback), 0);
+        assert_eq!(readback.rlim_cur, 128);
+        assert_eq!(readback.rlim_max, 256);
     }
 
     // -----------------------------------------------------------------------

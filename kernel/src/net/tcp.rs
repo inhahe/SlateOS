@@ -4506,6 +4506,17 @@ const TIME_WAIT_DURATION_NS: u64 = 60_000_000_000;
 /// This timeout reclaims the slot after 60 seconds of inactivity.
 const FIN_WAIT2_TIMEOUT_NS: u64 = 60_000_000_000;
 
+/// CLOSE_WAIT timeout: 5 minutes (300 seconds).
+///
+/// A connection enters CLOSE_WAIT when the peer sends FIN but the local
+/// application hasn't called close() yet.  In a microkernel, the driver
+/// or application process may crash without closing connections.  Without
+/// a timeout, these slots would leak forever.  5 minutes is generous
+/// enough for any well-behaved app, but prevents permanent slot exhaustion.
+/// Linux has no equivalent (relies on the app closing), but our kernel must
+/// be self-healing since userspace drivers can crash.
+const CLOSE_WAIT_TIMEOUT_NS: u64 = 300_000_000_000;
+
 /// SYN_RECEIVED timeout: 30 seconds.
 ///
 /// A server-side connection enters SYN_RECEIVED after receiving a SYN
@@ -4641,6 +4652,27 @@ pub fn tick_time_wait_cleanup() {
                 if elapsed >= SYN_RECEIVED_TIMEOUT_NS {
                     crate::serial_println!(
                         "[tcp] SYN_SENT timeout for port {} → {}:{} — reclaiming",
+                        conn.local_port, conn.remote_ip, conn.remote_port
+                    );
+                    conn.last_error = TCP_ERR_TIMEDOUT;
+                    conn.active = false;
+                    conn.state = TcpState::Closed;
+                    conn.rx_buffer.clear();
+                    conn.tx_buffer.clear();
+                    conn.nagle_buf.clear();
+                    conn.ooo_buf.clear();
+                }
+            }
+            TcpState::CloseWait => {
+                // Peer sent FIN, but the local app hasn't closed yet.
+                // If the app crashed or leaked the connection, this slot
+                // would be stuck forever.  In a microkernel where driver
+                // processes can crash without cleaning up, we need a
+                // safety timeout.  5 minutes is generous for any real app.
+                let elapsed = now.saturating_sub(conn.last_activity_ns);
+                if elapsed >= CLOSE_WAIT_TIMEOUT_NS && conn.tx_buffer.is_empty() {
+                    crate::serial_println!(
+                        "[tcp] CLOSE_WAIT timeout for port {} → {}:{} — reclaiming (app likely crashed)",
                         conn.local_port, conn.remote_ip, conn.remote_port
                     );
                     conn.last_error = TCP_ERR_TIMEDOUT;

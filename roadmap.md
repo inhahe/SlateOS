@@ -1145,7 +1145,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Traceroute6 (ICMPv6 echo with increasing hop-limit, Time Exceeded correlation, SLAAC-aware source selection, DNS AAAA fallback)
   - [x] IGMP multicast group management (IGMPv2 RFC 2236, membership reports, query responses, report suppression)
   - [x] LLDP neighbor discovery (IEEE 802.1AB, TLV parsing, neighbor table, periodic advertisements)
-  - [x] Netstat unified network status (TCP/UDP/listeners, interface stats, routing, protocol summary)
+  - [x] Netstat unified network status (TCP/UDP/listeners, interface stats, routing, protocol summary, IPv6 addresses/NDP/SLAAC/routing via `-6` flag)
   - [x] ARP-based network discovery (subnet scanning, host enumeration, reverse DNS)
   - [x] Netcat (nc) TCP/UDP swiss army knife (connect, listen, send, port scan, service lookup)
   - [x] iperf network bandwidth measurement (TCP/UDP throughput, jitter, packet loss)

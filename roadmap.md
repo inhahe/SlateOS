@@ -1658,6 +1658,7 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
       - [x] ARP/firewall doc notes (global/shared, per-namespace ARP is future)
       - [ ] Per-namespace ARP cache (requires veth pairs)
       - [x] Per-namespace firewall rules (16 rules, 32 conntrack entries per namespace; ns_init/ns_enable/ns_add_rule/ns_check_outbound_ns/ns_check_inbound_ns API; 3 self-tests for isolation, conntrack, lifecycle)
+      - [x] IPv6 firewall (Rule6/ConntrackEntry6 with independent enable/policy; check_inbound_v6/check_outbound_v6 wired into IPv6 processing; ip6_matches u128 prefix comparison; Protocol::Icmp maps to ICMPv6 for v6 rules; fw on6/off6/policy6/allow6/deny6/remove6/clear6 commands; 5 self-tests)
       - [ ] Wire process→container→net_ns into socket layer callers
   - [x] Mount namespace: separate mount point trees (implemented as fs::mount_ns)
   - [x] User namespace: UID/GID remapping for rootless containers

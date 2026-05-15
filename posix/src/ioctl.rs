@@ -1052,18 +1052,31 @@ mod tests {
 
     // -- isatty tests (use pre-initialized Console fds 0/1/2) --
 
+    /// Ensure fds 0/1/2 are Console handles.
+    ///
+    /// Other tests may close or overwrite these fds; this restores
+    /// the expected state before tests that depend on console fds.
+    fn ensure_std_fds() {
+        fdtable::install_fd(0, HandleKind::Console, 0);
+        fdtable::install_fd(1, HandleKind::Console, 1);
+        fdtable::install_fd(2, HandleKind::Console, 2);
+    }
+
     #[test]
     fn test_isatty_stdin() {
+        ensure_std_fds();
         assert_eq!(isatty(0), 1, "fd 0 (stdin) is Console → isatty");
     }
 
     #[test]
     fn test_isatty_stdout() {
+        ensure_std_fds();
         assert_eq!(isatty(1), 1, "fd 1 (stdout) is Console → isatty");
     }
 
     #[test]
     fn test_isatty_stderr() {
+        ensure_std_fds();
         assert_eq!(isatty(2), 1, "fd 2 (stderr) is Console → isatty");
     }
 
@@ -1084,6 +1097,7 @@ mod tests {
 
     #[test]
     fn test_ttyname_console() {
+        ensure_std_fds();
         let ptr = ttyname(0);
         assert!(!ptr.is_null());
         let slice = unsafe {
@@ -1201,6 +1215,7 @@ mod tests {
 
     #[test]
     fn test_validate_terminal_fd_console() {
+        ensure_std_fds();
         assert!(validate_terminal_fd(0).is_ok());
         assert!(validate_terminal_fd(1).is_ok());
         assert!(validate_terminal_fd(2).is_ok());

@@ -1875,8 +1875,20 @@ mod tests {
 
     // -- build_fd_map --
 
+    /// Ensure fds 0/1/2 are Console handles.
+    ///
+    /// Other tests may close or overwrite them; this restores the
+    /// expected state before each build_fd_map test.
+    fn ensure_std_fds() {
+        use crate::fdtable::{install_fd, HandleKind};
+        install_fd(0, HandleKind::Console, 0);
+        install_fd(1, HandleKind::Console, 1);
+        install_fd(2, HandleKind::Console, 2);
+    }
+
     #[test]
     fn test_build_fd_map_no_actions() {
+        ensure_std_fds();
         // With no file_actions (null), the fd_map should contain
         // the parent's inheritable fds.  In the test environment,
         // fds 0/1/2 are pre-initialized as Console handles.
@@ -1898,6 +1910,7 @@ mod tests {
 
     #[test]
     fn test_build_fd_map_with_close() {
+        ensure_std_fds();
         // Create file_actions that close fd 1 (stdout).
         let mut acts = PosixSpawnFileActionsT {
             count: 0,
@@ -1923,6 +1936,7 @@ mod tests {
 
     #[test]
     fn test_build_fd_map_with_dup2() {
+        ensure_std_fds();
         // Create file_actions that dup2(2, 1) — redirect stdout to stderr.
         let mut acts = PosixSpawnFileActionsT {
             count: 0,
@@ -1950,6 +1964,7 @@ mod tests {
 
     #[test]
     fn test_build_fd_map_close_then_dup2() {
+        ensure_std_fds();
         // Close fd 1, then dup2(2, 1) — common shell pattern for
         // redirecting stdout to a pipe.
         let mut acts = PosixSpawnFileActionsT {

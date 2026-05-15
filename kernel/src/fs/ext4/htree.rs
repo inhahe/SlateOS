@@ -646,7 +646,7 @@ pub fn htree_add_entry(
             name,
             file_type_byte,
             block_size,
-        );
+        )?;
 
         // Re-stamp the directory block checksum.
         super::driver::stamp_dirent_checksum_pub(
@@ -763,7 +763,7 @@ fn insert_leaf_entry(
     name: &[u8],
     file_type_byte: u8,
     block_size: usize,
-) {
+) -> KernelResult<()> {
     let entry_hdr = 8usize; // sizeof(Ext4DirEntry2)
 
     // Find and shrink the previous entry.
@@ -798,10 +798,13 @@ fn insert_leaf_entry(
     let remaining = block_size.saturating_sub(offset % block_size);
 
     // Write the new entry.
-    write_leaf_dirent(data, offset, child_ino, name, file_type_byte, remaining);
+    write_leaf_dirent(data, offset, child_ino, name, file_type_byte, remaining)
 }
 
 /// Write a raw directory entry at a specific offset in a leaf block.
+///
+/// Returns `InvalidArgument` if `name` exceeds 255 bytes or `rec_len`
+/// exceeds 65535 (the on-disk field widths).
 fn write_leaf_dirent(
     buf: &mut [u8],
     offset: usize,
@@ -809,7 +812,15 @@ fn write_leaf_dirent(
     name: &[u8],
     file_type_byte: u8,
     rec_len: usize,
-) {
+) -> KernelResult<()> {
+    // Defend against silent truncation of on-disk fields.
+    if name.len() > 255 {
+        return Err(KernelError::InvalidArgument);
+    }
+    if rec_len > u16::MAX as usize {
+        return Err(KernelError::InvalidArgument);
+    }
+
     if let Some(dest) = buf.get_mut(offset..offset.saturating_add(4)) {
         dest.copy_from_slice(&inode.to_le_bytes());
     }
@@ -831,6 +842,8 @@ fn write_leaf_dirent(
             dest.copy_from_slice(name);
         }
     }
+
+    Ok(())
 }
 
 /// Split a full leaf block and insert the new entry.
@@ -916,8 +929,8 @@ fn split_leaf_and_insert(
     let mut left_buf = vec![0u8; block_size];
     let mut right_buf = vec![0u8; block_size];
 
-    write_leaf_entries(&mut left_buf, left_entries, block_size, has_csum);
-    write_leaf_entries(&mut right_buf, right_entries, block_size, has_csum);
+    write_leaf_entries(&mut left_buf, left_entries, block_size, has_csum)?;
+    write_leaf_entries(&mut right_buf, right_entries, block_size, has_csum)?;
 
     // Stamp checksums.
     super::driver::stamp_dirent_checksum_pub(
@@ -1034,7 +1047,7 @@ fn write_leaf_entries(
     entries: &[LeafEntry],
     block_size: usize,
     has_csum: bool,
-) {
+) -> KernelResult<()> {
     let entry_hdr = 8usize;
     let tail_size = if has_csum { 12 } else { 0 };
     let usable = block_size.saturating_sub(tail_size);
@@ -1051,7 +1064,7 @@ fn write_leaf_entries(
             actual_size
         };
 
-        write_leaf_dirent(buf, offset, e.inode, &e.name, e.file_type, rec_len);
+        write_leaf_dirent(buf, offset, e.inode, &e.name, e.file_type, rec_len)?;
         offset += rec_len;
     }
 
@@ -1077,6 +1090,8 @@ fn write_leaf_entries(
             d.copy_from_slice(&0u32.to_le_bytes());
         }
     }
+
+    Ok(())
 }
 
 /// Add a new dx_entry to the hash tree root (or intermediate node).

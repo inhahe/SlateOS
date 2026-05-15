@@ -2615,7 +2615,7 @@ impl Ext4Driver {
                         name_bytes,
                         file_type_byte,
                         block_size.saturating_sub(space % block_size),
-                    );
+                    )?;
 
                     // Stamp directory block checksums before writing.
                     stamp_dir_data_checksums(
@@ -2664,7 +2664,7 @@ impl Ext4Driver {
             name_bytes,
             file_type_byte,
             entry_rec_len,
-        );
+        )?;
 
         // Initialize and stamp the dirent tail if checksums are enabled.
         if self.sb.has_metadata_csum {
@@ -5223,7 +5223,7 @@ fn insert_dir_entry(
     name: &[u8],
     file_type_byte: u8,
     remaining_in_block: usize,
-) {
+) -> KernelResult<()> {
     // First, shrink the previous entry's rec_len.
     // The previous entry ends at `offset`, so find it and update its rec_len.
     let entry_header_size = core::mem::size_of::<Ext4DirEntry2>();
@@ -5281,10 +5281,15 @@ fn insert_dir_entry(
         name,
         file_type_byte,
         remaining_in_block,
-    );
+    )
 }
 
 /// Write a raw directory entry at the given offset.
+///
+/// Returns `InvalidArgument` if `name` exceeds 255 bytes or `rec_len`
+/// exceeds 65535, since those are the on-disk field widths (u8 and u16
+/// respectively).  Callers are expected to validate before reaching
+/// this point, but this function defends against silent truncation.
 fn write_dir_entry_raw(
     buf: &mut [u8],
     offset: usize,
@@ -5292,7 +5297,15 @@ fn write_dir_entry_raw(
     name: &[u8],
     file_type_byte: u8,
     rec_len: usize,
-) {
+) -> KernelResult<()> {
+    // Defend against silent truncation of on-disk fields.
+    if name.len() > 255 {
+        return Err(KernelError::InvalidArgument);
+    }
+    if rec_len > u16::MAX as usize {
+        return Err(KernelError::InvalidArgument);
+    }
+
     // inode (4 bytes, LE)
     if let Some(dest) = buf.get_mut(offset..offset.saturating_add(4)) {
         dest.copy_from_slice(&inode.to_le_bytes());
@@ -5319,6 +5332,8 @@ fn write_dir_entry_raw(
             dest.copy_from_slice(name);
         }
     }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -5679,11 +5694,11 @@ fn test_parse_dir_entries() -> KernelResult<()> {
     let mut block = [0u8; 128];
 
     // Entry 1: inode=2, rec_len=12, name_len=1, type=DIR, name="."
-    write_dir_entry_raw(&mut block, 0, 2, b".", 2, 12);
+    write_dir_entry_raw(&mut block, 0, 2, b".", 2, 12)?;
     // Entry 2: inode=2, rec_len=16, name_len=2, type=DIR, name=".."
-    write_dir_entry_raw(&mut block, 12, 2, b"..", 2, 16);
+    write_dir_entry_raw(&mut block, 12, 2, b"..", 2, 16)?;
     // Entry 3: inode=100, rec_len=100, name_len=9, type=REG, name="hello.txt"
-    write_dir_entry_raw(&mut block, 28, 100, b"hello.txt", 1, 100);
+    write_dir_entry_raw(&mut block, 28, 100, b"hello.txt", 1, 100)?;
 
     let entries = parse_dir_entries(&block)?;
 
@@ -5724,8 +5739,8 @@ fn test_parse_dir_entries() -> KernelResult<()> {
 
     // Deleted entry (inode=0) should be skipped.
     let mut block2 = [0u8; 64];
-    write_dir_entry_raw(&mut block2, 0, 0, b"deleted", 1, 32);
-    write_dir_entry_raw(&mut block2, 32, 50, b"alive", 1, 32);
+    write_dir_entry_raw(&mut block2, 0, 0, b"deleted", 1, 32)?;
+    write_dir_entry_raw(&mut block2, 32, 50, b"alive", 1, 32)?;
     let entries = parse_dir_entries(&block2)?;
     if entries.len() != 1 || entries[0].0 != 50 {
         crate::serial_println!(
@@ -5743,7 +5758,7 @@ fn test_parse_dir_entries() -> KernelResult<()> {
 fn test_write_dir_entry_raw() -> KernelResult<()> {
     let mut buf = [0u8; 32];
 
-    write_dir_entry_raw(&mut buf, 0, 12345, b"test", 1, 16);
+    write_dir_entry_raw(&mut buf, 0, 12345, b"test", 1, 16)?;
 
     // inode at offset 0: 12345 LE.
     let ino = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);

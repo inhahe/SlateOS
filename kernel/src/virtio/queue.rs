@@ -159,6 +159,10 @@ impl Virtqueue {
         // Initialize the free descriptor list (each descriptor's `next`
         // points to the following one).
         for i in 0..queue_size {
+            // SAFETY: virt_ptr is the start of a zeroed, owned frame.
+            // i < queue_size, and queue_size * 16 < FRAME_SIZE (checked
+            // indirectly via total < FRAME_SIZE above), so the pointer
+            // arithmetic stays within the allocated frame.
             let desc = unsafe { &mut *(virt_ptr.add(i as usize * 16) as *mut VirtqDesc) };
             desc.next = if i + 1 < queue_size { i + 1 } else { 0xFFFF };
         }
@@ -227,6 +231,8 @@ impl Virtqueue {
 
     /// Get a mutable reference to descriptor `idx`.
     fn desc_mut(&mut self, idx: u16) -> &mut VirtqDesc {
+        // SAFETY: same as desc() — idx is within 0..queue_size
+        // (ensured by alloc_desc), and we have exclusive access (&mut self).
         unsafe { &mut *(self.virt_base.add(idx as usize * 16) as *mut VirtqDesc) }
     }
 
@@ -277,15 +283,20 @@ impl Virtqueue {
         fence(Ordering::SeqCst);
 
         // Add the head to the available ring.
+        // SAFETY for the avail_ring pointer arithmetic below:
+        // avail_offset = desc_table_size = queue_size * 16, which is within
+        // the allocated frame.  The available ring is: 2-byte flags, 2-byte
+        // idx, then queue_size × 2-byte entries.  ring_slot < queue_size,
+        // so 4 + ring_slot * 2 stays within the avail region.  The frame is
+        // exclusively owned and the HHDM maps it as writable kernel memory.
         let avail_ring_base = unsafe { self.virt_base.add(self.avail_offset) };
-        let avail_idx_ptr = unsafe { &*(avail_ring_base.add(2) as *const u16) };
-        let _ = avail_idx_ptr; // Read not needed; we track our own avail_idx.
 
         // Ring entry offset: 4 (header) + (avail_idx % queue_size) * 2.
         let ring_slot = (self.avail_idx % self.queue_size) as usize;
         let entry_ptr = unsafe {
             avail_ring_base.add(4 + ring_slot * 2) as *mut u16
         };
+        // SAFETY: entry_ptr is within the available ring (see above).
         unsafe { core::ptr::write_volatile(entry_ptr, indices[0]); }
 
         // Memory fence before updating avail idx.
@@ -293,6 +304,8 @@ impl Virtqueue {
 
         // Increment the available ring index.
         self.avail_idx = self.avail_idx.wrapping_add(1);
+        // SAFETY: avail_ring_base + 2 = the idx field of the available ring
+        // header, within the same allocated frame.
         let avail_idx_field = unsafe {
             avail_ring_base.add(2) as *mut u16
         };
@@ -312,7 +325,13 @@ impl Virtqueue {
     // Index arithmetic wraps; used ring accesses use small offsets.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     pub fn poll_used(&mut self) -> Option<(u16, u32)> {
-        // Read the device's used ring index.
+        // SAFETY for the used_ring pointer arithmetic below:
+        // used_offset is page-aligned within the allocated frame (computed
+        // in new()).  The used ring is: 2-byte flags, 2-byte idx, then
+        // queue_size × 8-byte VirtqUsedElem entries.  ring_slot < queue_size,
+        // so 4 + ring_slot * 8 stays within the used region.  The frame is
+        // exclusively owned.  Volatile reads are necessary because the
+        // device writes the used ring asynchronously.
         let used_ring_base = unsafe { self.virt_base.add(self.used_offset) };
         let device_used_idx = unsafe {
             core::ptr::read_volatile(used_ring_base.add(2) as *const u16)

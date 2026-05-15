@@ -59,6 +59,34 @@ const ICMP_PARAM_PROBLEM: u8 = 12;
 /// ICMP header size (type + code + checksum + id/seq or unused).
 const ICMP_HEADER_SIZE: usize = 8;
 
+// ---------------------------------------------------------------------------
+// ICMP error rate limiter (RFC 1812 §4.3.2.7)
+// ---------------------------------------------------------------------------
+
+/// Minimum interval between ICMP error messages (nanoseconds).
+/// 10 ms = 100 errors/second maximum.  This prevents DoS amplification
+/// when an attacker floods packets to non-existent ports.
+const ICMP_ERROR_INTERVAL_NS: u64 = 10_000_000;
+
+/// Timestamp (ns) of the last ICMP error message sent.
+static LAST_ICMP_ERROR_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Check whether we're allowed to send an ICMP error right now.
+/// Returns `true` if enough time has passed since the last error.
+/// Updates the timestamp atomically to claim the slot.
+fn icmp_error_rate_ok() -> bool {
+    let now = crate::hrtimer::now_ns();
+    let prev = LAST_ICMP_ERROR_NS.load(Ordering::Relaxed);
+    if now.saturating_sub(prev) < ICMP_ERROR_INTERVAL_NS {
+        return false;
+    }
+    // Try to claim the slot.  If another CPU beats us, that's fine —
+    // we just skip this error (over-suppression is acceptable).
+    LAST_ICMP_ERROR_NS
+        .compare_exchange(prev, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+}
+
 /// Ping identifier (fixed for our kernel).
 const PING_ID: u16 = 0x1234;
 
@@ -766,6 +794,13 @@ pub fn send_port_unreachable(
     orig_ip_hdr: &[u8],
     orig_transport_8: &[u8],
 ) -> KernelResult<()> {
+    // Rate-limit ICMP error generation (RFC 1812 §4.3.2.7).
+    // Under a port-scan or UDP flood, the kernel could otherwise generate
+    // one Destination Unreachable per inbound packet, amplifying the attack.
+    if !icmp_error_rate_ok() {
+        return Ok(());
+    }
+
     // Need the original IP header (≥20 bytes) and 8 bytes of transport.
     if orig_ip_hdr.len() < 20 || orig_transport_8.len() < 8 {
         return Ok(());

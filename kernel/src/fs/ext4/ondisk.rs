@@ -954,3 +954,452 @@ pub const EXT4_FIRST_INO: u32 = 11;
 /// Lost+found directory inode (inode 11, typically).
 #[allow(dead_code)]
 pub const EXT4_LOST_FOUND_INO: u32 = 11;
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// On-disk structure layout tests — verifies `#[repr(C)]` struct field
+/// offsets match the ext4 specification.  If any offset is wrong, we
+/// silently read/write the wrong bytes on real filesystems.
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    crate::serial_println!("[ext4-ondisk] Running self-test...");
+
+    test_superblock_size_and_magic()?;
+    test_superblock_field_offsets()?;
+    test_group_desc_field_offsets()?;
+    test_inode_field_offsets()?;
+    test_extent_structures()?;
+    test_dir_entry_layout()?;
+    test_feature_flag_constants()?;
+    test_xattr_structures()?;
+
+    crate::serial_println!("[ext4-ondisk] Self-test PASSED (8 tests)");
+    Ok(())
+}
+
+/// Helper: byte offset of a field within a struct, using pointer arithmetic.
+///
+/// # Safety
+/// Uses a zeroed struct instance (all integer fields, so zeroed is valid).
+/// Computes field offset via pointer subtraction — no actual memory
+/// access to invalid data.
+macro_rules! field_offset {
+    ($struct_ty:ty, $field:ident) => {{
+        // SAFETY: All on-disk structs are composed entirely of integer
+        // and byte-array fields; all-zeros is a valid bit pattern.
+        let base: $struct_ty = unsafe { core::mem::zeroed() };
+        let base_ptr = &base as *const $struct_ty as usize;
+        let field_ptr = &base.$field as *const _ as usize;
+        field_ptr - base_ptr
+    }};
+}
+
+/// Verify superblock is 1024 bytes and magic field is at the right offset.
+fn test_superblock_size_and_magic() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    // Size already checked at compile time, but verify at runtime too.
+    let size = core::mem::size_of::<Ext4Superblock>();
+    if size != 1024 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: Ext4Superblock size = {}", size);
+        return Err(KernelError::InternalError);
+    }
+
+    // Construct a byte buffer, set magic at offset 0x38, parse as superblock.
+    let mut buf = [0u8; 1024];
+    // Magic 0xEF53 in little-endian: [0x53, 0xEF].
+    buf[0x38] = 0x53;
+    buf[0x39] = 0xEF;
+
+    // SAFETY: buf is 1024 bytes = sizeof(Ext4Superblock), properly aligned
+    // on stack for u8 (and we only read integer fields from the result).
+    let sb = unsafe { &*(buf.as_ptr() as *const Ext4Superblock) };
+    if sb.s_magic != EXT4_MAGIC {
+        crate::serial_println!(
+            "[ext4-ondisk]   FAIL: magic = {:#x}, expected {:#x}",
+            sb.s_magic, EXT4_MAGIC
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-ondisk]   superblock size and magic: OK");
+    Ok(())
+}
+
+/// Verify critical superblock field offsets match the ext4 spec.
+fn test_superblock_field_offsets() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let checks: &[(&str, usize, usize)] = &[
+        ("s_inodes_count",       field_offset!(Ext4Superblock, s_inodes_count),       0x00),
+        ("s_blocks_count_lo",    field_offset!(Ext4Superblock, s_blocks_count_lo),    0x04),
+        ("s_free_blocks_count_lo", field_offset!(Ext4Superblock, s_free_blocks_count_lo), 0x0C),
+        ("s_free_inodes_count",  field_offset!(Ext4Superblock, s_free_inodes_count),  0x10),
+        ("s_log_block_size",     field_offset!(Ext4Superblock, s_log_block_size),     0x18),
+        ("s_blocks_per_group",   field_offset!(Ext4Superblock, s_blocks_per_group),   0x20),
+        ("s_inodes_per_group",   field_offset!(Ext4Superblock, s_inodes_per_group),   0x28),
+        ("s_magic",              field_offset!(Ext4Superblock, s_magic),              0x38),
+        ("s_inode_size",         field_offset!(Ext4Superblock, s_inode_size),         0x58),
+        ("s_feature_compat",     field_offset!(Ext4Superblock, s_feature_compat),     0x5C),
+        ("s_feature_incompat",   field_offset!(Ext4Superblock, s_feature_incompat),   0x60),
+        ("s_feature_ro_compat",  field_offset!(Ext4Superblock, s_feature_ro_compat),  0x64),
+        ("s_uuid",               field_offset!(Ext4Superblock, s_uuid),              0x68),
+        ("s_journal_inum",       field_offset!(Ext4Superblock, s_journal_inum),       0xE0),
+        ("s_desc_size",          field_offset!(Ext4Superblock, s_desc_size),          0xFE),
+        ("s_blocks_count_hi",    field_offset!(Ext4Superblock, s_blocks_count_hi),    0x150),
+        ("s_free_blocks_count_hi", field_offset!(Ext4Superblock, s_free_blocks_count_hi), 0x158),
+        ("s_checksum",           field_offset!(Ext4Superblock, s_checksum),           0x3FC),
+    ];
+
+    for &(name, actual, expected) in checks {
+        if actual != expected {
+            crate::serial_println!(
+                "[ext4-ondisk]   FAIL: {}.offset = {:#x}, expected {:#x}",
+                name, actual, expected
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[ext4-ondisk]   superblock field offsets: OK");
+    Ok(())
+}
+
+/// Verify group descriptor field offsets.
+fn test_group_desc_field_offsets() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let size = core::mem::size_of::<Ext4GroupDesc>();
+    if size != 64 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: Ext4GroupDesc size = {}", size);
+        return Err(KernelError::InternalError);
+    }
+
+    let checks: &[(&str, usize, usize)] = &[
+        ("bg_block_bitmap_lo",       field_offset!(Ext4GroupDesc, bg_block_bitmap_lo),       0x00),
+        ("bg_inode_bitmap_lo",       field_offset!(Ext4GroupDesc, bg_inode_bitmap_lo),       0x04),
+        ("bg_inode_table_lo",        field_offset!(Ext4GroupDesc, bg_inode_table_lo),        0x08),
+        ("bg_free_blocks_count_lo",  field_offset!(Ext4GroupDesc, bg_free_blocks_count_lo),  0x0C),
+        ("bg_free_inodes_count_lo",  field_offset!(Ext4GroupDesc, bg_free_inodes_count_lo),  0x0E),
+        ("bg_used_dirs_count_lo",    field_offset!(Ext4GroupDesc, bg_used_dirs_count_lo),    0x10),
+        ("bg_flags",                 field_offset!(Ext4GroupDesc, bg_flags),                 0x12),
+        ("bg_checksum",              field_offset!(Ext4GroupDesc, bg_checksum),              0x1E),
+        ("bg_block_bitmap_hi",       field_offset!(Ext4GroupDesc, bg_block_bitmap_hi),       0x20),
+        ("bg_free_blocks_count_hi",  field_offset!(Ext4GroupDesc, bg_free_blocks_count_hi),  0x2C),
+        ("bg_free_inodes_count_hi",  field_offset!(Ext4GroupDesc, bg_free_inodes_count_hi),  0x2E),
+    ];
+
+    for &(name, actual, expected) in checks {
+        if actual != expected {
+            crate::serial_println!(
+                "[ext4-ondisk]   FAIL: {}.offset = {:#x}, expected {:#x}",
+                name, actual, expected
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[ext4-ondisk]   group descriptor field offsets: OK");
+    Ok(())
+}
+
+/// Verify inode field offsets match ext4 specification.
+fn test_inode_field_offsets() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let size = core::mem::size_of::<Ext4Inode>();
+    if size != 128 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: Ext4Inode size = {}", size);
+        return Err(KernelError::InternalError);
+    }
+
+    let checks: &[(&str, usize, usize)] = &[
+        ("i_mode",        field_offset!(Ext4Inode, i_mode),        0x00),
+        ("i_uid",         field_offset!(Ext4Inode, i_uid),         0x02),
+        ("i_size_lo",     field_offset!(Ext4Inode, i_size_lo),     0x04),
+        ("i_atime",       field_offset!(Ext4Inode, i_atime),       0x08),
+        ("i_ctime",       field_offset!(Ext4Inode, i_ctime),       0x0C),
+        ("i_mtime",       field_offset!(Ext4Inode, i_mtime),       0x10),
+        ("i_dtime",       field_offset!(Ext4Inode, i_dtime),       0x14),
+        ("i_gid",         field_offset!(Ext4Inode, i_gid),         0x18),
+        ("i_links_count", field_offset!(Ext4Inode, i_links_count), 0x1A),
+        ("i_blocks_lo",   field_offset!(Ext4Inode, i_blocks_lo),   0x1C),
+        ("i_flags",       field_offset!(Ext4Inode, i_flags),       0x20),
+        ("i_block",       field_offset!(Ext4Inode, i_block),       0x28),
+        ("i_generation",  field_offset!(Ext4Inode, i_generation),  0x64),
+        ("i_file_acl_lo", field_offset!(Ext4Inode, i_file_acl_lo), 0x68),
+        ("i_size_high",   field_offset!(Ext4Inode, i_size_high),   0x6C),
+    ];
+
+    for &(name, actual, expected) in checks {
+        if actual != expected {
+            crate::serial_println!(
+                "[ext4-ondisk]   FAIL: {}.offset = {:#x}, expected {:#x}",
+                name, actual, expected
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Also check extra inode fields.
+    let extra_size = core::mem::size_of::<Ext4InodeExtra>();
+    if extra_size != 32 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: Ext4InodeExtra size = {}", extra_size);
+        return Err(KernelError::InternalError);
+    }
+
+    let extra_checks: &[(&str, usize, usize)] = &[
+        ("i_extra_isize",  field_offset!(Ext4InodeExtra, i_extra_isize),  0x00),
+        ("i_checksum_hi",  field_offset!(Ext4InodeExtra, i_checksum_hi),  0x02),
+        ("i_ctime_extra",  field_offset!(Ext4InodeExtra, i_ctime_extra),  0x04),
+        ("i_crtime",       field_offset!(Ext4InodeExtra, i_crtime),       0x10),
+        ("i_crtime_extra", field_offset!(Ext4InodeExtra, i_crtime_extra), 0x14),
+    ];
+
+    for &(name, actual, expected) in extra_checks {
+        if actual != expected {
+            crate::serial_println!(
+                "[ext4-ondisk]   FAIL: extra {}.offset = {:#x}, expected {:#x}",
+                name, actual, expected
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[ext4-ondisk]   inode field offsets: OK");
+    Ok(())
+}
+
+/// Verify extent tree structures: header, leaf, index, tail.
+fn test_extent_structures() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    // Size checks.
+    if core::mem::size_of::<Ext4ExtentHeader>() != 12 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: ExtentHeader size");
+        return Err(KernelError::InternalError);
+    }
+    if core::mem::size_of::<Ext4Extent>() != 12 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: Extent size");
+        return Err(KernelError::InternalError);
+    }
+    if core::mem::size_of::<Ext4ExtentIdx>() != 12 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: ExtentIdx size");
+        return Err(KernelError::InternalError);
+    }
+    if core::mem::size_of::<Ext4ExtentTail>() != 4 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: ExtentTail size");
+        return Err(KernelError::InternalError);
+    }
+
+    // Parse an extent header from bytes.
+    let bytes: [u8; 12] = [
+        0x0A, 0xF3, // eh_magic = 0xF30A (LE)
+        0x03, 0x00, // eh_entries = 3
+        0x04, 0x00, // eh_max = 4
+        0x00, 0x00, // eh_depth = 0 (leaf)
+        0x00, 0x00, 0x00, 0x00, // eh_generation = 0
+    ];
+
+    // SAFETY: bytes is exactly sizeof(Ext4ExtentHeader), all integer fields.
+    let hdr = unsafe { &*(bytes.as_ptr() as *const Ext4ExtentHeader) };
+    if hdr.eh_magic != EXT4_EXTENT_MAGIC {
+        crate::serial_println!(
+            "[ext4-ondisk]   FAIL: extent magic = {:#x}",
+            hdr.eh_magic
+        );
+        return Err(KernelError::InternalError);
+    }
+    if hdr.eh_entries != 3 || hdr.eh_max != 4 || hdr.eh_depth != 0 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: extent header fields");
+        return Err(KernelError::InternalError);
+    }
+
+    // Parse a leaf extent.
+    let ext_bytes: [u8; 12] = [
+        0x00, 0x00, 0x00, 0x00, // ee_block = 0
+        0x10, 0x00,             // ee_len = 16
+        0x00, 0x00,             // ee_start_hi = 0
+        0x80, 0x00, 0x00, 0x00, // ee_start_lo = 128
+    ];
+
+    let ext = unsafe { &*(ext_bytes.as_ptr() as *const Ext4Extent) };
+    if ext.ee_block != 0 || ext.ee_len != 16 || ext.ee_start_hi != 0 || ext.ee_start_lo != 128 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: extent leaf fields");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-ondisk]   extent structures: OK");
+    Ok(())
+}
+
+/// Verify directory entry layout and field parsing.
+fn test_dir_entry_layout() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    if core::mem::size_of::<Ext4DirEntry2>() != 8 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: DirEntry2 size");
+        return Err(KernelError::InternalError);
+    }
+    if core::mem::size_of::<Ext4DirEntryTail>() != 12 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: DirEntryTail size");
+        return Err(KernelError::InternalError);
+    }
+
+    // Parse a directory entry from bytes: inode=2, rec_len=12, name_len=1,
+    // file_type=DIR(2), name="."
+    let bytes: [u8; 8] = [
+        0x02, 0x00, 0x00, 0x00, // inode = 2 (root)
+        0x0C, 0x00,             // rec_len = 12
+        0x01,                   // name_len = 1
+        0x02,                   // file_type = DIR
+    ];
+
+    let entry = unsafe { &*(bytes.as_ptr() as *const Ext4DirEntry2) };
+    if entry.inode != EXT4_ROOT_INO {
+        crate::serial_println!("[ext4-ondisk]   FAIL: dir entry inode = {}", entry.inode);
+        return Err(KernelError::InternalError);
+    }
+    if entry.rec_len != 12 || entry.name_len != 1 || entry.file_type != dir_type::DIR {
+        crate::serial_println!("[ext4-ondisk]   FAIL: dir entry fields");
+        return Err(KernelError::InternalError);
+    }
+
+    // Parse a dir entry tail (checksum record).
+    let tail_bytes: [u8; 12] = [
+        0x00, 0x00, 0x00, 0x00, // det_reserved_zero1 = 0
+        0x0C, 0x00,             // det_rec_len = 12
+        0x00,                   // det_reserved_zero2 = 0
+        0xDE,                   // det_reserved_ft = 0xDE (marker)
+        0xAA, 0xBB, 0xCC, 0xDD, // det_checksum = 0xDDCCBBAA
+    ];
+
+    let tail = unsafe { &*(tail_bytes.as_ptr() as *const Ext4DirEntryTail) };
+    if tail.det_reserved_ft != EXT4_DIRENT_TAIL_MARKER {
+        crate::serial_println!(
+            "[ext4-ondisk]   FAIL: tail marker = {:#x}",
+            tail.det_reserved_ft
+        );
+        return Err(KernelError::InternalError);
+    }
+    if tail.det_rec_len != 12 || tail.det_checksum != 0xDDCC_BBAA {
+        crate::serial_println!("[ext4-ondisk]   FAIL: tail fields");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-ondisk]   directory entry layout: OK");
+    Ok(())
+}
+
+/// Verify feature flag constants match the ext4 specification.
+fn test_feature_flag_constants() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    // Incompatible feature flags from the spec.
+    if incompat::FILETYPE != 0x0002 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: FILETYPE");
+        return Err(KernelError::InternalError);
+    }
+    if incompat::EXTENTS != 0x0040 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: EXTENTS");
+        return Err(KernelError::InternalError);
+    }
+    if incompat::BIT64 != 0x0080 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: BIT64");
+        return Err(KernelError::InternalError);
+    }
+    if incompat::FLEX_BG != 0x0200 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: FLEX_BG");
+        return Err(KernelError::InternalError);
+    }
+
+    // RO-compat flags.
+    if ro_compat::METADATA_CSUM != 0x0400 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: METADATA_CSUM");
+        return Err(KernelError::InternalError);
+    }
+    if ro_compat::HUGE_FILE != 0x0008 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: HUGE_FILE");
+        return Err(KernelError::InternalError);
+    }
+
+    // Inode flags.
+    if inode_flags::EXTENTS != 0x0008_0000 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: inode EXTENTS flag");
+        return Err(KernelError::InternalError);
+    }
+    if inode_flags::INLINE_DATA != 0x1000_0000 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: inode INLINE_DATA flag");
+        return Err(KernelError::InternalError);
+    }
+
+    // EXT4_MAGIC.
+    if EXT4_MAGIC != 0xEF53 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: EXT4_MAGIC = {:#x}", EXT4_MAGIC);
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify SUPPORTED_INCOMPAT includes the required features.
+    if SUPPORTED_INCOMPAT & incompat::EXTENTS == 0 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: SUPPORTED_INCOMPAT missing EXTENTS");
+        return Err(KernelError::InternalError);
+    }
+    if SUPPORTED_INCOMPAT & incompat::BIT64 == 0 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: SUPPORTED_INCOMPAT missing BIT64");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-ondisk]   feature flag constants: OK");
+    Ok(())
+}
+
+/// Verify xattr structures: header and entry.
+fn test_xattr_structures() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    if core::mem::size_of::<Ext4XattrHeader>() != 32 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: XattrHeader size");
+        return Err(KernelError::InternalError);
+    }
+    if core::mem::size_of::<Ext4XattrEntry>() != 16 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: XattrEntry size");
+        return Err(KernelError::InternalError);
+    }
+
+    // Parse xattr header from bytes.
+    let mut hdr_bytes = [0u8; 32];
+    // h_magic at offset 0: 0xEA020000 in LE = [0x00, 0x00, 0x02, 0xEA].
+    hdr_bytes[0] = 0x00;
+    hdr_bytes[1] = 0x00;
+    hdr_bytes[2] = 0x02;
+    hdr_bytes[3] = 0xEA;
+    // h_refcount at offset 4: 1 in LE.
+    hdr_bytes[4] = 0x01;
+    // h_blocks at offset 8: 1 in LE.
+    hdr_bytes[8] = 0x01;
+
+    let hdr = unsafe { &*(hdr_bytes.as_ptr() as *const Ext4XattrHeader) };
+    if hdr.h_magic != EXT4_XATTR_MAGIC {
+        crate::serial_println!(
+            "[ext4-ondisk]   FAIL: xattr magic = {:#x}, expected {:#x}",
+            hdr.h_magic, EXT4_XATTR_MAGIC
+        );
+        return Err(KernelError::InternalError);
+    }
+    if hdr.h_refcount != 1 || hdr.h_blocks != 1 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: xattr header fields");
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify xattr_index constants.
+    if xattr_index::USER != 1 || xattr_index::SECURITY != 6 || xattr_index::TRUSTED != 4 {
+        crate::serial_println!("[ext4-ondisk]   FAIL: xattr index constants");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-ondisk]   xattr structures: OK");
+    Ok(())
+}

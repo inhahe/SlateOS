@@ -1045,4 +1045,144 @@ mod tests {
         // Clean up.
         close_fd(11);
     }
+
+    // -- install_fd_with_flags --
+
+    #[test]
+    fn test_install_fd_with_flags() {
+        let old = install_fd_with_flags(15, HandleKind::File, 500, 0o2);
+        // Slot 15 was likely empty, so old should be None.
+        // (Other tests may have left something — just check the new entry.)
+        let e = get_fd(15).unwrap();
+        assert_eq!(e.kind, HandleKind::File);
+        assert_eq!(e.handle, 500);
+        // Verify status flags were stored.
+        let sf = get_status_flags(15).unwrap();
+        assert_eq!(sf & 0o2, 0o2, "Status flags should include O_RDWR");
+        // Clean up.
+        close_fd(15);
+        let _ = old;
+    }
+
+    #[test]
+    fn test_install_fd_with_flags_replaces_existing() {
+        install_fd(16, HandleKind::Pipe, 600);
+        let old = install_fd_with_flags(16, HandleKind::File, 601, 0o1);
+        assert!(old.is_some(), "Should return old entry");
+        let old_entry = old.unwrap();
+        assert_eq!(old_entry.kind, HandleKind::Pipe);
+        assert_eq!(old_entry.handle, 600);
+        // New entry check.
+        let e = get_fd(16).unwrap();
+        assert_eq!(e.kind, HandleKind::File);
+        assert_eq!(e.handle, 601);
+        // Clean up.
+        close_fd(16);
+    }
+
+    #[test]
+    fn test_install_fd_with_flags_out_of_range() {
+        let result = install_fd_with_flags(MAX_FDS as i32, HandleKind::File, 1, 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_install_fd_with_flags_negative_fd() {
+        let result = install_fd_with_flags(-1, HandleKind::File, 1, 0);
+        assert!(result.is_none());
+    }
+
+    // -- alloc_fd_from_with_flags --
+
+    #[test]
+    fn test_alloc_fd_from_with_flags() {
+        let fd = alloc_fd_from_with_flags(20, HandleKind::Pipe, 700, 0o4000);
+        assert!(fd.is_some());
+        let fd = fd.unwrap();
+        assert!(fd >= 20, "Should allocate at or above min_fd=20");
+        let e = get_fd(fd).unwrap();
+        assert_eq!(e.kind, HandleKind::Pipe);
+        assert_eq!(e.handle, 700);
+        // Verify status flags.
+        let sf = get_status_flags(fd).unwrap();
+        assert_ne!(sf & 0o4000, 0, "O_NONBLOCK should be set");
+        // Clean up.
+        close_fd(fd);
+    }
+
+    #[test]
+    fn test_alloc_fd_from_with_flags_negative_min() {
+        let result = alloc_fd_from_with_flags(-1, HandleKind::File, 1, 0);
+        assert!(result.is_none());
+    }
+
+    // -- alloc_fd_with_flags --
+
+    #[test]
+    fn test_alloc_fd_with_flags_basic() {
+        let fd = alloc_fd_with_flags(HandleKind::File, 800, 0o1);
+        assert!(fd.is_some());
+        let fd = fd.unwrap();
+        let e = get_fd(fd).unwrap();
+        assert_eq!(e.kind, HandleKind::File);
+        assert_eq!(e.handle, 800);
+        let sf = get_status_flags(fd).unwrap();
+        assert_eq!(sf & 0o3, 0o1, "O_WRONLY should be set");
+        close_fd(fd);
+    }
+
+    // -- HandleKind variant coverage --
+
+    #[test]
+    fn test_alloc_fd_all_handle_kinds() {
+        let kinds = [
+            HandleKind::Console,
+            HandleKind::File,
+            HandleKind::Pipe,
+            HandleKind::TcpStream,
+            HandleKind::TcpListener,
+            HandleKind::UdpSocket,
+        ];
+        for kind in kinds {
+            let fd = alloc_fd(kind, 999).unwrap();
+            let e = get_fd(fd).unwrap();
+            assert_eq!(e.kind, kind);
+            close_fd(fd);
+        }
+    }
+
+    // -- is_handle_referenced edge case --
+
+    #[test]
+    fn test_is_handle_referenced_different_handle() {
+        let fd1 = alloc_fd(HandleKind::Pipe, 1001).unwrap();
+        let fd2 = alloc_fd(HandleKind::Pipe, 1002).unwrap();
+        // fd1 and fd2 have different handles — closing one should not
+        // affect is_handle_referenced for the other.
+        close_fd(fd1);
+        assert!(is_handle_referenced(HandleKind::Pipe, 1002));
+        close_fd(fd2);
+        assert!(!is_handle_referenced(HandleKind::Pipe, 1002));
+    }
+
+    // -- get_fd_flags default is zero --
+
+    #[test]
+    fn test_get_fd_flags_default_zero() {
+        let fd = alloc_fd(HandleKind::File, 1003).unwrap();
+        assert_eq!(get_fd_flags(fd), Some(0));
+        close_fd(fd);
+    }
+
+    // -- store_fd_path empty string --
+
+    #[test]
+    fn test_store_fd_path_empty() {
+        let fd = alloc_fd(HandleKind::File, 1004).unwrap();
+        store_fd_path(fd, b"\0".as_ptr(), 0);
+        let mut out = [0u8; 64];
+        let len = get_fd_path(fd, &mut out);
+        assert_eq!(len, 0, "Empty path should have length 0");
+        close_fd(fd);
+    }
 }

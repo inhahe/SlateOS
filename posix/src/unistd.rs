@@ -2337,4 +2337,333 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::ENOENT);
     }
 
+    // ------------------------------------------------------------------
+    // seteuid / setegid / setreuid / setregid — stub success tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_seteuid_succeeds() {
+        assert_eq!(seteuid(0), 0);
+        assert_eq!(seteuid(1000), 0);
+        assert_eq!(seteuid(u32::MAX), 0);
+    }
+
+    #[test]
+    fn test_setegid_succeeds() {
+        assert_eq!(setegid(0), 0);
+        assert_eq!(setegid(1000), 0);
+        assert_eq!(setegid(u32::MAX), 0);
+    }
+
+    #[test]
+    fn test_setreuid_succeeds() {
+        assert_eq!(setreuid(0, 0), 0);
+        assert_eq!(setreuid(1000, 2000), 0);
+        assert_eq!(setreuid(u32::MAX, u32::MAX), 0);
+    }
+
+    #[test]
+    fn test_setregid_succeeds() {
+        assert_eq!(setregid(0, 0), 0);
+        assert_eq!(setregid(1000, 2000), 0);
+        assert_eq!(setregid(u32::MAX, u32::MAX), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // setgroups — stub success
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_setgroups_empty() {
+        assert_eq!(setgroups(0, core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_setgroups_non_empty() {
+        let groups: [GidT; 3] = [100, 200, 300];
+        assert_eq!(setgroups(3, groups.as_ptr()), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // ualarm — stub returns 0
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_ualarm_returns_zero() {
+        assert_eq!(ualarm(100_000, 0), 0);
+    }
+
+    #[test]
+    fn test_ualarm_with_interval() {
+        assert_eq!(ualarm(100_000, 50_000), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // chroot — stub returns ENOSYS
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_chroot_enosys() {
+        errno::set_errno(0);
+        assert_eq!(chroot(b"/\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_chroot_null_path() {
+        // chroot with null should fail (the stub returns ENOSYS
+        // regardless of arguments, so we just verify it returns -1).
+        assert_eq!(chroot(core::ptr::null()), -1);
+    }
+
+    // ------------------------------------------------------------------
+    // sync — void function, just verify no crash
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_sync_no_crash() {
+        sync();
+        // sync is void — if we got here, it succeeded.
+    }
+
+    // ------------------------------------------------------------------
+    // getloadavg — fills 0.0 values
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_getloadavg_one() {
+        let mut avg = [99.0f64; 1];
+        let ret = getloadavg(avg.as_mut_ptr(), 1);
+        assert_eq!(ret, 1);
+        assert_eq!(avg[0], 0.0);
+    }
+
+    #[test]
+    fn test_getloadavg_three() {
+        let mut avg = [99.0f64; 3];
+        let ret = getloadavg(avg.as_mut_ptr(), 3);
+        assert_eq!(ret, 3);
+        assert_eq!(avg[0], 0.0);
+        assert_eq!(avg[1], 0.0);
+        assert_eq!(avg[2], 0.0);
+    }
+
+    #[test]
+    fn test_getloadavg_clamped_to_three() {
+        let mut avg = [99.0f64; 5];
+        let ret = getloadavg(avg.as_mut_ptr(), 5);
+        assert_eq!(ret, 3, "Should clamp to 3 (POSIX max)");
+        // Only first 3 should be filled.
+        assert_eq!(avg[0], 0.0);
+        assert_eq!(avg[1], 0.0);
+        assert_eq!(avg[2], 0.0);
+        assert_eq!(avg[3], 99.0, "Element 3 should be untouched");
+    }
+
+    #[test]
+    fn test_getloadavg_null() {
+        assert_eq!(getloadavg(core::ptr::null_mut(), 1), -1);
+    }
+
+    #[test]
+    fn test_getloadavg_zero_nelem() {
+        let mut avg = [0.0f64; 1];
+        assert_eq!(getloadavg(avg.as_mut_ptr(), 0), -1);
+    }
+
+    #[test]
+    fn test_getloadavg_negative_nelem() {
+        let mut avg = [0.0f64; 1];
+        assert_eq!(getloadavg(avg.as_mut_ptr(), -1), -1);
+    }
+
+    // ------------------------------------------------------------------
+    // getrandom
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_getrandom_null() {
+        errno::set_errno(0);
+        assert_eq!(getrandom(core::ptr::null_mut(), 10, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_getrandom_zero_len() {
+        let mut buf = [0u8; 1];
+        let ret = getrandom(buf.as_mut_ptr(), 0, 0);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_getrandom_fills_buffer() {
+        let mut buf = [0u8; 32];
+        let ret = getrandom(buf.as_mut_ptr(), 32, 0);
+        assert_eq!(ret, 32);
+        // It's theoretically possible all bytes are 0, but extremely
+        // unlikely for 32 bytes of random data.
+        // Just verify the call succeeded and returned the right count.
+    }
+
+    #[test]
+    fn test_getrandom_overflow_len() {
+        let mut buf = [0u8; 1];
+        errno::set_errno(0);
+        let ret = getrandom(buf.as_mut_ptr(), usize::MAX, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getrandom_with_flags() {
+        let mut buf = [0u8; 8];
+        let ret = getrandom(buf.as_mut_ptr(), 8, GRND_NONBLOCK);
+        assert_eq!(ret, 8);
+        let ret2 = getrandom(buf.as_mut_ptr(), 8, GRND_RANDOM);
+        assert_eq!(ret2, 8);
+    }
+
+    // ------------------------------------------------------------------
+    // getentropy
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_getentropy_null() {
+        errno::set_errno(0);
+        assert_eq!(getentropy(core::ptr::null_mut(), 10), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_getentropy_too_large() {
+        let mut buf = [0u8; 257];
+        errno::set_errno(0);
+        assert_eq!(getentropy(buf.as_mut_ptr(), 257), -1);
+        assert_eq!(errno::get_errno(), errno::EIO);
+    }
+
+    #[test]
+    fn test_getentropy_max_256() {
+        let mut buf = [0u8; 256];
+        assert_eq!(getentropy(buf.as_mut_ptr(), 256), 0);
+    }
+
+    #[test]
+    fn test_getentropy_zero() {
+        let mut buf = [0u8; 1];
+        assert_eq!(getentropy(buf.as_mut_ptr(), 0), 0);
+    }
+
+    #[test]
+    fn test_getentropy_small() {
+        let mut buf = [0u8; 16];
+        assert_eq!(getentropy(buf.as_mut_ptr(), 16), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // GRND flag constants
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_grnd_constants() {
+        assert_eq!(GRND_NONBLOCK, 1);
+        assert_eq!(GRND_RANDOM, 2);
+        assert_ne!(GRND_NONBLOCK, GRND_RANDOM);
+    }
+
+    // ------------------------------------------------------------------
+    // getcwd
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_getcwd_null_buf() {
+        errno::set_errno(0);
+        let ret = getcwd(core::ptr::null_mut(), 100);
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getcwd_zero_size() {
+        let mut buf = [0u8; 100];
+        errno::set_errno(0);
+        let ret = getcwd(buf.as_mut_ptr(), 0);
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getcwd_buffer_too_small() {
+        let mut buf = [0u8; 1];
+        // CWD is at least "/" (1 byte + null = 2), so size=1 should fail.
+        errno::set_errno(0);
+        let ret = getcwd(buf.as_mut_ptr(), 1);
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::ERANGE);
+    }
+
+    #[test]
+    fn test_getcwd_succeeds() {
+        let mut buf = [0u8; PATH_MAX];
+        let ret = getcwd(buf.as_mut_ptr(), PATH_MAX);
+        assert!(!ret.is_null(), "getcwd should succeed with PATH_MAX buffer");
+        assert_eq!(ret, buf.as_mut_ptr());
+        // Result should be null-terminated.
+        let nul_pos = buf.iter().position(|&b| b == 0);
+        assert!(nul_pos.is_some(), "getcwd result should be null-terminated");
+        // Should start with '/'.
+        assert_eq!(buf[0], b'/', "CWD should start with '/'");
+    }
+
+    // ------------------------------------------------------------------
+    // chdir — error paths (actual dir changes need kernel)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_chdir_null_path() {
+        errno::set_errno(0);
+        assert_eq!(chdir(core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_chdir_empty_path() {
+        errno::set_errno(0);
+        assert_eq!(chdir(b"\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    // ------------------------------------------------------------------
+    // fchdir — error paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_fchdir_invalid_fd() {
+        errno::set_errno(0);
+        assert_eq!(fchdir(-1), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // ------------------------------------------------------------------
+    // Standard file descriptor constants
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_stdio_fileno_constants() {
+        assert_eq!(STDIN_FILENO, 0);
+        assert_eq!(STDOUT_FILENO, 1);
+        assert_eq!(STDERR_FILENO, 2);
+    }
+
+    // ------------------------------------------------------------------
+    // getgroups with non-zero size
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_getgroups_with_buffer() {
+        let mut groups: [GidT; 5] = [99; 5];
+        let ret = getgroups(5, groups.as_mut_ptr());
+        assert_eq!(ret, 0, "getgroups should return 0 (no supplementary groups)");
+    }
+
 }

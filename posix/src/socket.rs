@@ -4919,6 +4919,62 @@ pub unsafe extern "C" fn if_indextoname(ifindex: u32, ifname: *mut u8) -> *mut u
 pub const IF_NAMESIZE: usize = 16;
 
 // ---------------------------------------------------------------------------
+// if_nameindex / if_freenameindex — interface enumeration
+// ---------------------------------------------------------------------------
+
+/// Entry returned by `if_nameindex`.
+#[repr(C)]
+pub struct IfNameindex {
+    /// Interface index (1-based, 0 = end of list).
+    pub if_index: u32,
+    /// Interface name (null-terminated, points into the same allocation).
+    pub if_name: *mut u8,
+}
+
+/// Static storage for the interface name returned by `if_nameindex`.
+///
+/// Our OS has a single network interface "eth0" (index 1).  We use
+/// static storage to avoid heap allocation (the crate is `no_std`).
+static mut IF_NAMEINDEX_NAMES: [u8; 5] = *b"eth0\0";
+
+/// Static array of `IfNameindex` entries: one real entry + sentinel.
+static mut IF_NAMEINDEX_TABLE: [IfNameindex; 2] = [
+    IfNameindex { if_index: 1, if_name: core::ptr::null_mut() },
+    IfNameindex { if_index: 0, if_name: core::ptr::null_mut() },
+];
+
+/// Return an array of all network interface names and indices.
+///
+/// Returns a pointer to a zero-terminated array of `IfNameindex`
+/// structures.  The caller must free the result with
+/// `if_freenameindex()`.
+///
+/// Our OS has a single interface "eth0" (index 1).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn if_nameindex() -> *mut IfNameindex {
+    // SAFETY: Single-threaded.  We patch the if_name pointer to
+    // point into the static name buffer on each call.
+    unsafe {
+        let name_ptr = core::ptr::addr_of_mut!(IF_NAMEINDEX_NAMES).cast::<u8>();
+        let table = core::ptr::addr_of_mut!(IF_NAMEINDEX_TABLE);
+        // First entry: "eth0", index 1.
+        if let Some(entry) = (*table).get_mut(0) {
+            entry.if_name = name_ptr;
+        }
+        // Second entry: sentinel (index 0, name null) — already initialized.
+        (*table).as_mut_ptr()
+    }
+}
+
+/// Free the array returned by `if_nameindex`.
+///
+/// Since our implementation uses static storage, this is a no-op.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn if_freenameindex(_ptr: *mut IfNameindex) {
+    // No-op: we use static storage, not heap allocation.
+}
+
+// ---------------------------------------------------------------------------
 // getifaddrs / freeifaddrs — interface address enumeration
 // ---------------------------------------------------------------------------
 
@@ -6786,6 +6842,54 @@ mod tests {
         let mut buf = [0u8; 16];
         let ret = unsafe { if_indextoname(999, buf.as_mut_ptr()) };
         assert!(ret.is_null());
+    }
+
+    // -- if_nameindex / if_freenameindex --
+
+    #[test]
+    fn test_if_nameindex_returns_non_null() {
+        let table = if_nameindex();
+        assert!(!table.is_null());
+    }
+
+    #[test]
+    fn test_if_nameindex_first_entry() {
+        let table = if_nameindex();
+        assert!(!table.is_null());
+        // SAFETY: if_nameindex returns a valid static array.
+        let first = unsafe { &*table };
+        assert_eq!(first.if_index, 1, "First interface should be index 1");
+        assert!(!first.if_name.is_null(), "if_name should not be null");
+        let name = unsafe { c_str_to_slice(first.if_name.cast_const()) };
+        assert_eq!(name, b"eth0", "First interface should be eth0");
+    }
+
+    #[test]
+    fn test_if_nameindex_sentinel() {
+        let table = if_nameindex();
+        assert!(!table.is_null());
+        // Second entry should be the sentinel (index = 0).
+        let sentinel = unsafe { &*table.add(1) };
+        assert_eq!(sentinel.if_index, 0, "Sentinel should have index 0");
+    }
+
+    #[test]
+    fn test_if_freenameindex_no_crash() {
+        let table = if_nameindex();
+        if_freenameindex(table);
+        // Should not crash (it's a no-op).
+    }
+
+    #[test]
+    fn test_if_freenameindex_null() {
+        if_freenameindex(core::ptr::null_mut());
+        // Should not crash.
+    }
+
+    #[test]
+    fn test_if_nameindex_size() {
+        assert!(core::mem::size_of::<IfNameindex>() >= 8,
+            "IfNameindex should be at least 8 bytes (u32 + pointer)");
     }
 
     // -- Helper --

@@ -625,6 +625,141 @@ pub extern "C" fn writev(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
 }
 
 // ---------------------------------------------------------------------------
+// preadv / pwritev — vectored I/O at offset
+// ---------------------------------------------------------------------------
+
+/// Read data into multiple buffers at a given offset (scatter read).
+///
+/// Like `readv`, but reads from file position `offset` without
+/// changing the file's current offset (same semantics as `pread`).
+///
+/// Returns the total number of bytes read, or -1 on error.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn preadv(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
+    if iov.is_null() || iovcnt <= 0 || iovcnt > 1024 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if offset < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let Some(entry) = lookup_fd(fd) else { return -1; };
+
+    if entry.kind != HandleKind::File {
+        errno::set_errno(errno::ESPIPE);
+        return -1;
+    }
+
+    // Save current position.
+    let saved = syscall3(SYS_FS_SEEK, entry.handle, 0, crate::fcntl::SEEK_CUR as u64);
+    if saved < 0 {
+        return errno::translate(saved) as SsizeT;
+    }
+
+    // Seek to the requested offset.
+    let sr = syscall3(SYS_FS_SEEK, entry.handle, offset as u64, crate::fcntl::SEEK_SET as u64);
+    if sr < 0 {
+        return errno::translate(sr) as SsizeT;
+    }
+
+    // Read into each iov buffer.
+    let mut total: SsizeT = 0;
+    let mut i: i32 = 0;
+    while i < iovcnt {
+        // SAFETY: Caller guarantees iov is valid for iovcnt entries.
+        let vec = unsafe { &*iov.add(i as usize) };
+        if vec.iov_len > 0 {
+            let n = read(fd, vec.iov_base, vec.iov_len);
+            if n < 0 {
+                // Restore position before returning error.
+                let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+                if total > 0 {
+                    return total;
+                }
+                return n;
+            }
+            total = total.wrapping_add(n);
+            if (n as SizeT) < vec.iov_len {
+                break;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+
+    // Restore original position.
+    let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+
+    total
+}
+
+/// Write data from multiple buffers at a given offset (gather write).
+///
+/// Like `writev`, but writes to file position `offset` without
+/// changing the file's current offset (same semantics as `pwrite`).
+///
+/// Returns the total number of bytes written, or -1 on error.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pwritev(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -> SsizeT {
+    if iov.is_null() || iovcnt <= 0 || iovcnt > 1024 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if offset < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let Some(entry) = lookup_fd(fd) else { return -1; };
+
+    if entry.kind != HandleKind::File {
+        errno::set_errno(errno::ESPIPE);
+        return -1;
+    }
+
+    // Save current position.
+    let saved = syscall3(SYS_FS_SEEK, entry.handle, 0, crate::fcntl::SEEK_CUR as u64);
+    if saved < 0 {
+        return errno::translate(saved) as SsizeT;
+    }
+
+    // Seek to the requested offset.
+    let sr = syscall3(SYS_FS_SEEK, entry.handle, offset as u64, crate::fcntl::SEEK_SET as u64);
+    if sr < 0 {
+        return errno::translate(sr) as SsizeT;
+    }
+
+    // Write from each iov buffer.
+    let mut total: SsizeT = 0;
+    let mut i: i32 = 0;
+    while i < iovcnt {
+        // SAFETY: Caller guarantees iov is valid for iovcnt entries.
+        let vec = unsafe { &*iov.add(i as usize) };
+        if vec.iov_len > 0 {
+            let n = write(fd, vec.iov_base.cast_const(), vec.iov_len);
+            if n < 0 {
+                let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+                if total > 0 {
+                    return total;
+                }
+                return n;
+            }
+            total = total.wrapping_add(n);
+            if (n as SizeT) < vec.iov_len {
+                break;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+
+    // Restore original position.
+    let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+
+    total
+}
+
+// ---------------------------------------------------------------------------
 // dup / dup2
 // ---------------------------------------------------------------------------
 
@@ -3657,5 +3792,106 @@ mod tests {
         let result = renameat(AT_FDCWD, core::ptr::null(), AT_FDCWD, core::ptr::null());
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- __getcwd_chk --
+
+    #[test]
+    fn test_getcwd_chk_null() {
+        crate::errno::set_errno(0);
+        let ret = __getcwd_chk(core::ptr::null_mut(), 100, 100);
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getcwd_chk_zero_size() {
+        let mut buf = [0u8; 100];
+        crate::errno::set_errno(0);
+        let ret = __getcwd_chk(buf.as_mut_ptr(), 0, 100);
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getcwd_chk_succeeds() {
+        let mut buf = [0u8; 4096];
+        let ret = __getcwd_chk(buf.as_mut_ptr(), 4096, 4096);
+        assert!(!ret.is_null(), "__getcwd_chk should succeed");
+        assert_eq!(buf[0], b'/', "CWD should start with '/'");
+    }
+
+    // -- preadv / pwritev --
+
+    #[test]
+    fn test_preadv_null_iov() {
+        crate::errno::set_errno(0);
+        let ret = preadv(0, core::ptr::null(), 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_preadv_zero_iovcnt() {
+        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        crate::errno::set_errno(0);
+        let ret = preadv(0, &iov, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_preadv_negative_iovcnt() {
+        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        crate::errno::set_errno(0);
+        let ret = preadv(0, &iov, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_preadv_over_max_iovcnt() {
+        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        crate::errno::set_errno(0);
+        let ret = preadv(0, &iov, 1025, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_preadv_negative_offset() {
+        let mut buf = [0u8; 16];
+        let iov = Iovec { iov_base: buf.as_mut_ptr(), iov_len: 16 };
+        crate::errno::set_errno(0);
+        let ret = preadv(0, &iov, 1, -1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pwritev_null_iov() {
+        crate::errno::set_errno(0);
+        let ret = pwritev(0, core::ptr::null(), 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pwritev_zero_iovcnt() {
+        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        crate::errno::set_errno(0);
+        let ret = pwritev(0, &iov, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pwritev_negative_offset() {
+        let buf = [0u8; 16];
+        let iov = Iovec { iov_base: buf.as_ptr().cast_mut(), iov_len: 16 };
+        crate::errno::set_errno(0);
+        let ret = pwritev(0, &iov, 1, -1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 }

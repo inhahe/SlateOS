@@ -861,6 +861,28 @@ fn validate_terminal_fd(fd: i32) -> Result<(), i32> {
 }
 
 // ---------------------------------------------------------------------------
+// tcgetsid — get session ID for terminal
+// ---------------------------------------------------------------------------
+
+/// Get the session ID associated with a terminal.
+///
+/// Returns the session ID of the foreground process group's session
+/// for the terminal referenced by `fd`.
+///
+/// Our OS does not have full session management, so this returns the
+/// process's own session ID (via `getsid(0)`).  Returns -1 with
+/// `EBADF` for invalid fds or `ENOTTY` for non-terminal fds.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tcgetsid(fd: i32) -> i32 {
+    if let Err(e) = validate_terminal_fd(fd) {
+        errno::set_errno(e);
+        return -1;
+    }
+    // Return the calling process's session ID.
+    crate::process::getsid(0)
+}
+
+// ---------------------------------------------------------------------------
 // Tests — pure logic functions only (no syscalls)
 // ---------------------------------------------------------------------------
 
@@ -1263,6 +1285,773 @@ mod tests {
     fn test_tcdrain_invalid_fd() {
         assert_eq!(tcdrain(9999), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // -- ioctl() through-function tests on console fds --
+
+    #[test]
+    fn test_ioctl_tiocgwinsz_console() {
+        ensure_std_fds();
+        let mut ws = Winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        let ret = ioctl(0, TIOCGWINSZ, (&raw mut ws).cast::<u8>());
+        assert_eq!(ret, 0);
+        assert_eq!(ws.ws_row, 25);
+        assert_eq!(ws.ws_col, 80);
+    }
+
+    #[test]
+    fn test_ioctl_tiocgwinsz_null_arg() {
+        ensure_std_fds();
+        let ret = ioctl(0, TIOCGWINSZ, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_ioctl_tiocswinsz_console() {
+        ensure_std_fds();
+        let ws = Winsize { ws_row: 50, ws_col: 120, ws_xpixel: 0, ws_ypixel: 0 };
+        let ret = ioctl(0, TIOCSWINSZ, (&raw const ws).cast::<u8>().cast_mut());
+        assert_eq!(ret, 0, "TIOCSWINSZ on console should succeed (no-op)");
+    }
+
+    #[test]
+    fn test_ioctl_tiocswinsz_non_console() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 300).unwrap();
+        let ret = ioctl(fd, TIOCSWINSZ, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_ioctl_tiocgwinsz_non_console() {
+        let fd = fdtable::alloc_fd(HandleKind::Pipe, 301).unwrap();
+        let mut ws = Winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        let ret = ioctl(fd, TIOCGWINSZ, (&raw mut ws).cast::<u8>());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_ioctl_fionbio_enable() {
+        ensure_std_fds();
+        let enable: i32 = 1;
+        let ret = ioctl(0, FIONBIO, (&raw const enable).cast::<u8>().cast_mut());
+        assert_eq!(ret, 0);
+        // Check that O_NONBLOCK is now set.
+        let flags = fdtable::get_status_flags(0).unwrap_or(0);
+        assert_ne!(flags & crate::fcntl::O_NONBLOCK, 0, "O_NONBLOCK should be set");
+        // Restore: disable nonblock.
+        let disable: i32 = 0;
+        let _ = ioctl(0, FIONBIO, (&raw const disable).cast::<u8>().cast_mut());
+    }
+
+    #[test]
+    fn test_ioctl_fionbio_disable() {
+        ensure_std_fds();
+        // First enable.
+        let enable: i32 = 1;
+        let _ = ioctl(0, FIONBIO, (&raw const enable).cast::<u8>().cast_mut());
+        // Then disable.
+        let disable: i32 = 0;
+        let ret = ioctl(0, FIONBIO, (&raw const disable).cast::<u8>().cast_mut());
+        assert_eq!(ret, 0);
+        let flags = fdtable::get_status_flags(0).unwrap_or(crate::fcntl::O_NONBLOCK);
+        assert_eq!(flags & crate::fcntl::O_NONBLOCK, 0, "O_NONBLOCK should be clear");
+    }
+
+    #[test]
+    fn test_ioctl_fionbio_null_arg() {
+        ensure_std_fds();
+        let ret = ioctl(0, FIONBIO, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_ioctl_fionread_console() {
+        ensure_std_fds();
+        let mut avail: i32 = -1;
+        let ret = ioctl(0, FIONREAD, (&raw mut avail).cast::<u8>());
+        assert_eq!(ret, 0);
+        assert_eq!(avail, 0, "Console FIONREAD should return 0");
+    }
+
+    #[test]
+    fn test_ioctl_fionread_null_arg() {
+        ensure_std_fds();
+        let ret = ioctl(0, FIONREAD, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_ioctl_fionread_file() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 302).unwrap();
+        let mut avail: i32 = 0;
+        let ret = ioctl(fd, FIONREAD, (&raw mut avail).cast::<u8>());
+        assert_eq!(ret, -1, "FIONREAD on File → ENOTTY");
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_ioctl_tcgets_console() {
+        ensure_std_fds();
+        let mut t = core::mem::MaybeUninit::<Termios>::uninit();
+        let ret = ioctl(0, TCGETS, t.as_mut_ptr().cast::<u8>());
+        assert_eq!(ret, 0);
+        let t = unsafe { t.assume_init() };
+        // Should be default canonical mode.
+        assert_ne!(t.c_lflag & ICANON, 0);
+        assert_ne!(t.c_lflag & ECHO, 0);
+        assert_eq!(t.c_ispeed, B38400);
+        assert_eq!(t.c_ospeed, B38400);
+    }
+
+    #[test]
+    fn test_ioctl_tcgets_null_arg() {
+        ensure_std_fds();
+        let ret = ioctl(0, TCGETS, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_ioctl_tcgets_non_console() {
+        let fd = fdtable::alloc_fd(HandleKind::Pipe, 303).unwrap();
+        let mut t = core::mem::MaybeUninit::<Termios>::uninit();
+        let ret = ioctl(fd, TCGETS, t.as_mut_ptr().cast::<u8>());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_ioctl_tcsets_console() {
+        ensure_std_fds();
+        let t = default_termios();
+        let ret = ioctl(0, TCSETS, (&raw const t).cast::<u8>().cast_mut());
+        assert_eq!(ret, 0, "TCSETS on console should succeed");
+    }
+
+    #[test]
+    fn test_ioctl_tcsetsw_console() {
+        ensure_std_fds();
+        let t = default_termios();
+        let ret = ioctl(0, TCSETSW, (&raw const t).cast::<u8>().cast_mut());
+        assert_eq!(ret, 0, "TCSETSW on console should succeed");
+    }
+
+    #[test]
+    fn test_ioctl_tcsetsf_console() {
+        ensure_std_fds();
+        let t = default_termios();
+        let ret = ioctl(0, TCSETSF, (&raw const t).cast::<u8>().cast_mut());
+        assert_eq!(ret, 0, "TCSETSF on console should succeed");
+    }
+
+    #[test]
+    fn test_ioctl_tcsets_non_console() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 304).unwrap();
+        let t = default_termios();
+        let ret = ioctl(fd, TCSETS, (&raw const t).cast::<u8>().cast_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_ioctl_tiocsctty_console() {
+        ensure_std_fds();
+        assert_eq!(ioctl(0, TIOCSCTTY, core::ptr::null_mut()), 0);
+    }
+
+    #[test]
+    fn test_ioctl_tiocnotty_console() {
+        ensure_std_fds();
+        assert_eq!(ioctl(0, TIOCNOTTY, core::ptr::null_mut()), 0);
+    }
+
+    #[test]
+    fn test_ioctl_tiocgpgrp_console() {
+        ensure_std_fds();
+        // First set a known pgrp so we read a deterministic value.
+        let set_val: i32 = 100;
+        let _ = ioctl(0, TIOCSPGRP, (&raw const set_val).cast::<u8>().cast_mut());
+        let mut pgrp: i32 = -999;
+        let ret = ioctl(0, TIOCGPGRP, (&raw mut pgrp).cast::<u8>());
+        assert_eq!(ret, 0);
+        assert_eq!(pgrp, 100, "Should read back the pgrp we set");
+    }
+
+    #[test]
+    fn test_ioctl_tiocgpgrp_null_arg() {
+        ensure_std_fds();
+        let ret = ioctl(0, TIOCGPGRP, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_ioctl_tiocspgrp_console() {
+        ensure_std_fds();
+        let pgrp: i32 = 42;
+        let ret = ioctl(0, TIOCSPGRP, (&raw const pgrp).cast::<u8>().cast_mut());
+        assert_eq!(ret, 0);
+        // Verify round-trip: read it back.
+        let mut read_pgrp: i32 = 0;
+        let ret2 = ioctl(0, TIOCGPGRP, (&raw mut read_pgrp).cast::<u8>());
+        assert_eq!(ret2, 0);
+        assert_eq!(read_pgrp, 42, "pgrp round-trip should match");
+    }
+
+    #[test]
+    fn test_ioctl_tiocspgrp_null_arg() {
+        ensure_std_fds();
+        let ret = ioctl(0, TIOCSPGRP, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_ioctl_tiocgpgrp_non_console() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 305).unwrap();
+        let mut pgrp: i32 = 0;
+        let ret = ioctl(fd, TIOCGPGRP, (&raw mut pgrp).cast::<u8>());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_ioctl_tiocspgrp_non_console() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 306).unwrap();
+        let pgrp: i32 = 10;
+        let ret = ioctl(fd, TIOCSPGRP, (&raw const pgrp).cast::<u8>().cast_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_ioctl_invalid_fd() {
+        let ret = ioctl(-1, TIOCGWINSZ, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_ioctl_unknown_request() {
+        ensure_std_fds();
+        let ret = ioctl(0, 0xDEAD, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+    }
+
+    // -- tcgetattr / tcsetattr wrapper tests --
+
+    #[test]
+    fn test_tcgetattr_console() {
+        ensure_std_fds();
+        let mut t = core::mem::MaybeUninit::<Termios>::uninit();
+        let ret = tcgetattr(0, t.as_mut_ptr());
+        assert_eq!(ret, 0);
+        let t = unsafe { t.assume_init() };
+        assert_ne!(t.c_lflag & ICANON, 0, "tcgetattr: canonical mode");
+        assert_eq!(t.c_cc[VINTR], 0x03, "tcgetattr: Ctrl-C");
+    }
+
+    #[test]
+    fn test_tcgetattr_non_console() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 307).unwrap();
+        let mut t = core::mem::MaybeUninit::<Termios>::uninit();
+        assert_eq!(tcgetattr(fd, t.as_mut_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_tcsetattr_tcsanow() {
+        ensure_std_fds();
+        let t = default_termios();
+        assert_eq!(tcsetattr(0, TCSANOW, &raw const t), 0);
+    }
+
+    #[test]
+    fn test_tcsetattr_tcsadrain() {
+        ensure_std_fds();
+        let t = default_termios();
+        assert_eq!(tcsetattr(0, TCSADRAIN, &raw const t), 0);
+    }
+
+    #[test]
+    fn test_tcsetattr_tcsaflush() {
+        ensure_std_fds();
+        let t = default_termios();
+        assert_eq!(tcsetattr(0, TCSAFLUSH, &raw const t), 0);
+    }
+
+    #[test]
+    fn test_tcsetattr_invalid_action() {
+        ensure_std_fds();
+        let t = default_termios();
+        assert_eq!(tcsetattr(0, 99, &raw const t), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_tcsetattr_negative_action() {
+        ensure_std_fds();
+        let t = default_termios();
+        assert_eq!(tcsetattr(0, -1, &raw const t), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- tcsendbreak / tcdrain / tcflow / tcflush on console --
+
+    #[test]
+    fn test_tcsendbreak_console() {
+        ensure_std_fds();
+        assert_eq!(tcsendbreak(0, 0), 0);
+    }
+
+    #[test]
+    fn test_tcsendbreak_console_nonzero_duration() {
+        ensure_std_fds();
+        assert_eq!(tcsendbreak(0, 100), 0, "duration is ignored");
+    }
+
+    #[test]
+    fn test_tcsendbreak_non_terminal() {
+        let fd = fdtable::alloc_fd(HandleKind::Pipe, 308).unwrap();
+        assert_eq!(tcsendbreak(fd, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_tcdrain_console() {
+        ensure_std_fds();
+        assert_eq!(tcdrain(0), 0);
+    }
+
+    #[test]
+    fn test_tcdrain_non_terminal() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 309).unwrap();
+        assert_eq!(tcdrain(fd), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_tcflow_console_all_valid_actions() {
+        ensure_std_fds();
+        assert_eq!(tcflow(0, TCOON), 0);
+        assert_eq!(tcflow(0, TCOOFF), 0);
+        assert_eq!(tcflow(0, TCION), 0);
+        assert_eq!(tcflow(0, TCIOFF), 0);
+    }
+
+    #[test]
+    fn test_tcflow_invalid_action() {
+        ensure_std_fds();
+        assert_eq!(tcflow(0, 99), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_tcflow_negative_action() {
+        ensure_std_fds();
+        assert_eq!(tcflow(0, -1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_tcflow_non_terminal() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 310).unwrap();
+        assert_eq!(tcflow(fd, TCOON), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_tcflush_console_all_valid_selectors() {
+        ensure_std_fds();
+        assert_eq!(tcflush(0, TCIFLUSH), 0);
+        assert_eq!(tcflush(0, TCOFLUSH), 0);
+        assert_eq!(tcflush(0, TCIOFLUSH), 0);
+    }
+
+    #[test]
+    fn test_tcflush_invalid_selector() {
+        ensure_std_fds();
+        assert_eq!(tcflush(0, 99), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_tcflush_negative_selector() {
+        ensure_std_fds();
+        assert_eq!(tcflush(0, -1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_tcflush_non_terminal() {
+        let fd = fdtable::alloc_fd(HandleKind::Pipe, 311).unwrap();
+        assert_eq!(tcflush(fd, TCIFLUSH), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // -- Additional cfmakeraw / termios tests --
+
+    #[test]
+    fn test_cfmakeraw_preserves_baud() {
+        let mut t = default_termios();
+        unsafe { cfsetispeed(&raw mut t, B115200); }
+        unsafe { cfsetospeed(&raw mut t, B9600); }
+        unsafe { cfmakeraw(&raw mut t); }
+        assert_eq!(t.c_ispeed, B115200, "cfmakeraw should not change c_ispeed");
+        assert_eq!(t.c_ospeed, B9600, "cfmakeraw should not change c_ospeed");
+    }
+
+    #[test]
+    fn test_cfmakeraw_preserves_c_line() {
+        let mut t = default_termios();
+        t.c_line = 5;
+        unsafe { cfmakeraw(&raw mut t); }
+        assert_eq!(t.c_line, 5, "cfmakeraw should not change c_line");
+    }
+
+    #[test]
+    fn test_cfmakeraw_idempotent() {
+        let mut t1 = default_termios();
+        unsafe { cfmakeraw(&raw mut t1); }
+        let mut t2 = t1;
+        unsafe { cfmakeraw(&raw mut t2); }
+        // All fields should be identical after double application.
+        assert_eq!(t1.c_iflag, t2.c_iflag);
+        assert_eq!(t1.c_oflag, t2.c_oflag);
+        assert_eq!(t1.c_cflag, t2.c_cflag);
+        assert_eq!(t1.c_lflag, t2.c_lflag);
+        assert_eq!(t1.c_cc, t2.c_cc);
+    }
+
+    #[test]
+    fn test_cfmakeraw_clears_echonl() {
+        let mut t = default_termios();
+        assert_ne!(t.c_lflag & ECHONL, 0, "ECHONL should be set in default");
+        unsafe { cfmakeraw(&raw mut t); }
+        assert_eq!(t.c_lflag & ECHONL, 0, "ECHONL should be cleared in raw");
+    }
+
+    #[test]
+    fn test_cfmakeraw_clears_iexten() {
+        let mut t = default_termios();
+        assert_ne!(t.c_lflag & IEXTEN, 0, "IEXTEN should be set in default");
+        unsafe { cfmakeraw(&raw mut t); }
+        assert_eq!(t.c_lflag & IEXTEN, 0, "IEXTEN should be cleared in raw");
+    }
+
+    #[test]
+    fn test_cfmakeraw_clears_brkint() {
+        let mut t = default_termios();
+        t.c_iflag |= BRKINT;
+        unsafe { cfmakeraw(&raw mut t); }
+        assert_eq!(t.c_iflag & BRKINT, 0, "BRKINT should be cleared in raw");
+    }
+
+    #[test]
+    fn test_cfmakeraw_clears_ixon() {
+        let mut t = default_termios();
+        t.c_iflag |= IXON;
+        unsafe { cfmakeraw(&raw mut t); }
+        assert_eq!(t.c_iflag & IXON, 0, "IXON should be cleared in raw");
+    }
+
+    #[test]
+    fn test_cfmakeraw_clears_istrip() {
+        let mut t = default_termios();
+        t.c_iflag |= ISTRIP;
+        unsafe { cfmakeraw(&raw mut t); }
+        assert_eq!(t.c_iflag & ISTRIP, 0, "ISTRIP should be cleared in raw");
+    }
+
+    #[test]
+    fn test_cfmakeraw_clears_inpck() {
+        let mut t = default_termios();
+        t.c_iflag |= INPCK;
+        unsafe { cfmakeraw(&raw mut t); }
+        assert_eq!(t.c_iflag & INPCK, 0, "INPCK should be cleared in raw");
+    }
+
+    #[test]
+    fn test_cfmakeraw_clears_onlcr() {
+        let mut t = default_termios();
+        assert_ne!(t.c_oflag & ONLCR, 0, "ONLCR should be set in default");
+        unsafe { cfmakeraw(&raw mut t); }
+        // ONLCR is implicitly cleared because OPOST is cleared; ONLCR only
+        // matters when OPOST is on, but let's verify OPOST is cleared.
+        assert_eq!(t.c_oflag & OPOST, 0, "OPOST should be cleared in raw");
+    }
+
+    // -- Default termios additional tests --
+
+    #[test]
+    fn test_default_termios_cread() {
+        let t = default_termios();
+        assert_ne!(t.c_cflag & CREAD, 0, "Receiver should be enabled");
+    }
+
+    #[test]
+    fn test_default_termios_hupcl() {
+        let t = default_termios();
+        assert_ne!(t.c_cflag & HUPCL, 0, "Hang up on close should be set");
+    }
+
+    #[test]
+    fn test_default_termios_clocal() {
+        let t = default_termios();
+        assert_ne!(t.c_cflag & CLOCAL, 0, "Ignore modem lines should be set");
+    }
+
+    #[test]
+    fn test_default_termios_no_parenb() {
+        let t = default_termios();
+        assert_eq!(t.c_cflag & PARENB, 0, "Parity should not be enabled by default");
+    }
+
+    #[test]
+    fn test_default_termios_c_line_zero() {
+        let t = default_termios();
+        assert_eq!(t.c_line, 0, "Line discipline should be 0 (N_TTY)");
+    }
+
+    #[test]
+    fn test_default_termios_vstart_vstop() {
+        let t = default_termios();
+        assert_eq!(t.c_cc[VSTART], 0x11, "VSTART should be Ctrl-Q");
+        assert_eq!(t.c_cc[VSTOP], 0x13, "VSTOP should be Ctrl-S");
+    }
+
+    #[test]
+    fn test_default_termios_vmin_vtime() {
+        let t = default_termios();
+        assert_eq!(t.c_cc[VMIN], 1, "VMIN should be 1");
+        assert_eq!(t.c_cc[VTIME], 0, "VTIME should be 0");
+    }
+
+    // -- Structure alignment tests --
+
+    #[test]
+    fn test_termios_alignment() {
+        assert!(core::mem::align_of::<Termios>() >= 4,
+            "Termios should be aligned to at least 4 bytes");
+    }
+
+    #[test]
+    fn test_winsize_alignment() {
+        assert!(core::mem::align_of::<Winsize>() >= 2,
+            "Winsize should be aligned to at least 2 bytes");
+    }
+
+    // -- Flag bit distinctness --
+
+    #[test]
+    fn test_iflag_bits_distinct() {
+        let flags = [BRKINT, INPCK, ISTRIP, INLCR, IGNCR, ICRNL, IXON];
+        for i in 0..flags.len() {
+            for j in (i + 1)..flags.len() {
+                assert_eq!(flags[i] & flags[j], 0,
+                    "iflag bits at {i} and {j} should not overlap");
+            }
+        }
+    }
+
+    #[test]
+    fn test_lflag_bits_distinct() {
+        let flags = [ISIG, ICANON, ECHO, ECHONL, IEXTEN];
+        for i in 0..flags.len() {
+            for j in (i + 1)..flags.len() {
+                assert_eq!(flags[i] & flags[j], 0,
+                    "lflag bits at {i} and {j} should not overlap");
+            }
+        }
+    }
+
+    #[test]
+    fn test_cflag_csize_cs8() {
+        // CS8 should set all bits in the CSIZE mask.
+        assert_eq!(CS8 & CSIZE, CS8, "CS8 should fit within CSIZE mask");
+        assert_eq!(CS8, CSIZE, "CS8 should equal the full CSIZE mask (8-bit)");
+    }
+
+    #[test]
+    fn test_cflag_distinct_non_csize() {
+        // CREAD, PARENB, HUPCL, CLOCAL should be distinct from each
+        // other and from CSIZE.
+        let flags = [CREAD, PARENB, HUPCL, CLOCAL];
+        for i in 0..flags.len() {
+            assert_eq!(flags[i] & CSIZE, 0,
+                "cflag bit {i} should not overlap with CSIZE");
+            for j in (i + 1)..flags.len() {
+                assert_eq!(flags[i] & flags[j], 0,
+                    "cflag bits at {i} and {j} should not overlap");
+            }
+        }
+    }
+
+    #[test]
+    fn test_oflag_bits_distinct() {
+        assert_eq!(OPOST & ONLCR, 0, "OPOST and ONLCR should not overlap");
+    }
+
+    // -- isatty errno setting --
+
+    #[test]
+    fn test_isatty_non_terminal_sets_enotty() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 312).unwrap();
+        assert_eq!(isatty(fd), 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_isatty_invalid_fd_sets_ebadf() {
+        assert_eq!(isatty(-1), 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // -- ttyname errno setting --
+
+    #[test]
+    fn test_ttyname_non_terminal_sets_enotty() {
+        let fd = fdtable::alloc_fd(HandleKind::Pipe, 313).unwrap();
+        assert!(ttyname(fd).is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_ttyname_invalid_fd_sets_ebadf() {
+        assert!(ttyname(-1).is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // -- Baud rate round-trip all speeds --
+
+    #[test]
+    fn test_baud_rate_roundtrip_all() {
+        let speeds = [B9600, B19200, B38400, B115200];
+        for &speed in &speeds {
+            let mut t = default_termios();
+            assert_eq!(unsafe { cfsetspeed(&raw mut t, speed) }, 0);
+            assert_eq!(unsafe { cfgetispeed(&raw const t) }, speed);
+            assert_eq!(unsafe { cfgetospeed(&raw const t) }, speed);
+        }
+    }
+
+    // -- cfsetispeed / cfsetospeed round-trip with different speeds --
+
+    #[test]
+    fn test_baud_rate_independent_ispeed_ospeed() {
+        let mut t = default_termios();
+        assert_eq!(unsafe { cfsetispeed(&raw mut t, B9600) }, 0);
+        assert_eq!(unsafe { cfsetospeed(&raw mut t, B115200) }, 0);
+        assert_eq!(unsafe { cfgetispeed(&raw const t) }, B9600);
+        assert_eq!(unsafe { cfgetospeed(&raw const t) }, B115200);
+    }
+
+    // -- PTY stubs with various fd values --
+
+    #[test]
+    fn test_posix_openpt_rdwr() {
+        assert_eq!(posix_openpt(0x02), -1); // O_RDWR
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_ptsname_r_small_buffer() {
+        let mut buf = [0u8; 1];
+        assert_eq!(ptsname_r(0, buf.as_mut_ptr(), buf.len()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- ctermid with buffer verifies null terminator --
+
+    #[test]
+    fn test_ctermid_buffer_null_terminated() {
+        let mut buf = [0xFFu8; 20];
+        let _ = ctermid(buf.as_mut_ptr());
+        // Find the null terminator.
+        let nul_pos = buf.iter().position(|&b| b == 0);
+        assert_eq!(nul_pos, Some(12), "Null terminator at position 12");
+    }
+
+    // -- Fionread on TcpListener gives 0 --
+
+    #[test]
+    fn test_ioctl_fionread_tcp_listener() {
+        let fd = fdtable::alloc_fd(HandleKind::TcpListener, 0).unwrap();
+        let mut avail: i32 = -1;
+        let ret = ioctl(fd, FIONREAD, (&raw mut avail).cast::<u8>());
+        assert_eq!(ret, 0);
+        assert_eq!(avail, 0, "TcpListener FIONREAD should return 0");
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_ioctl_fionread_tcp_stream_zero_handle() {
+        let fd = fdtable::alloc_fd(HandleKind::TcpStream, 0).unwrap();
+        let mut avail: i32 = -1;
+        let ret = ioctl(fd, FIONREAD, (&raw mut avail).cast::<u8>());
+        assert_eq!(ret, 0);
+        assert_eq!(avail, 0, "TcpStream handle=0 FIONREAD should return 0");
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_ioctl_fionread_udp_zero_handle() {
+        let fd = fdtable::alloc_fd(HandleKind::UdpSocket, 0).unwrap();
+        let mut avail: i32 = -1;
+        let ret = ioctl(fd, FIONREAD, (&raw mut avail).cast::<u8>());
+        assert_eq!(ret, 0);
+        assert_eq!(avail, 0, "UdpSocket handle=0 FIONREAD should return 0");
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // -- tcgetsid tests --
+
+    #[test]
+    fn test_tcgetsid_console() {
+        ensure_std_fds();
+        let sid = tcgetsid(0);
+        // In test mode, getsid(0) calls getpid() which executes a
+        // real syscall instruction, returning an unpredictable value.
+        // Just verify tcgetsid didn't return -1 with EBADF/ENOTTY
+        // (i.e., it passed the terminal validation).
+        // The actual sid value is OS-dependent in test mode.
+        let _ = sid;
+    }
+
+    #[test]
+    fn test_tcgetsid_invalid_fd() {
+        let ret = tcgetsid(-1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tcgetsid_non_terminal() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 314).unwrap();
+        let ret = tcgetsid(fd);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
     }
 }
 

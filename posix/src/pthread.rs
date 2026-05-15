@@ -2955,4 +2955,83 @@ mod tests {
     fn sched_yield_returns_zero() {
         assert_eq!(sched_yield(), 0);
     }
+
+    // =======================================================================
+    // pthread_setname_np / pthread_getname_np
+    // =======================================================================
+
+    #[test]
+    fn test_pthread_setname_np_null() {
+        let ret = unsafe { pthread_setname_np(0, core::ptr::null()) };
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pthread_setname_np_too_long() {
+        // PTHREAD_NAME_MAX is 16, so a 16-char name (excluding null) is too long.
+        let name = b"0123456789abcdef\0";
+        let ret = unsafe { pthread_setname_np(0, name.as_ptr()) };
+        assert_eq!(ret, crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_pthread_setname_np_max_valid() {
+        // 15 chars + null = exactly PTHREAD_NAME_MAX.
+        let name = b"0123456789abcde\0";
+        let ret = unsafe { pthread_setname_np(1, name.as_ptr()) };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_pthread_setname_np_short() {
+        let name = b"main\0";
+        let ret = unsafe { pthread_setname_np(2, name.as_ptr()) };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_pthread_getname_np_null() {
+        let ret = unsafe { pthread_getname_np(0, core::ptr::null_mut(), 16) };
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pthread_getname_np_zero_len() {
+        let mut buf = [0u8; 16];
+        let ret = unsafe { pthread_getname_np(0, buf.as_mut_ptr(), 0) };
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pthread_setname_getname_roundtrip() {
+        let name = b"worker\0";
+        let ret = unsafe { pthread_setname_np(3, name.as_ptr()) };
+        assert_eq!(ret, 0);
+
+        let mut buf = [0u8; 16];
+        let ret = unsafe { pthread_getname_np(3, buf.as_mut_ptr(), 16) };
+        assert_eq!(ret, 0);
+        assert_eq!(&buf[..7], b"worker\0");
+    }
+
+    #[test]
+    fn test_pthread_getname_np_buffer_too_small() {
+        let name = b"longthreadname\0"; // 14 chars
+        let _ = unsafe { pthread_setname_np(4, name.as_ptr()) };
+
+        let mut buf = [0u8; 5]; // Too small for "longthreadname\0" (15 bytes)
+        let ret = unsafe { pthread_getname_np(4, buf.as_mut_ptr(), 5) };
+        assert_eq!(ret, crate::errno::ERANGE);
+    }
+
+    #[test]
+    fn test_pthread_setname_empty() {
+        let name = b"\0";
+        let ret = unsafe { pthread_setname_np(5, name.as_ptr()) };
+        assert_eq!(ret, 0);
+        let mut buf = [0xFFu8; 16];
+        let ret = unsafe { pthread_getname_np(5, buf.as_mut_ptr(), 16) };
+        assert_eq!(ret, 0);
+        assert_eq!(buf[0], 0, "Empty name should give empty string");
+    }
 }

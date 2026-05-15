@@ -790,3 +790,284 @@ impl Journal {
         self.reader.flush()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Journal unit tests — exercises big-endian helpers, constant validation,
+/// and block header encoding.  These are the building blocks used by
+/// journal read/write; encoding bugs here cause data corruption.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[ext4-journal] Running journal self-test...");
+
+    test_read_write_be32()?;
+    test_read_be64()?;
+    test_read_be32_short_buffer()?;
+    test_write_be32_short_buffer()?;
+    test_block_header_encoding()?;
+    test_descriptor_tag_encoding()?;
+    test_constants()?;
+
+    crate::serial_println!("[ext4-journal] Journal self-test PASSED (7 tests)");
+    Ok(())
+}
+
+/// Test read_be32 / write_be32 round-trip with known values.
+fn test_read_write_be32() -> KernelResult<()> {
+    let mut buf = [0u8; 16];
+
+    // Write known values.
+    write_be32(&mut buf, 0, 0x12345678);
+    write_be32(&mut buf, 4, 0xDEADBEEF);
+    write_be32(&mut buf, 8, 0x00000001);
+    write_be32(&mut buf, 12, 0x00000000);
+
+    // Verify big-endian byte order.
+    if buf[0] != 0x12 || buf[1] != 0x34 || buf[2] != 0x56 || buf[3] != 0x78 {
+        crate::serial_println!("[ext4-journal]   FAIL: write_be32 byte order wrong");
+        return Err(KernelError::InternalError);
+    }
+
+    // Read back.
+    if read_be32(&buf, 0) != 0x12345678 {
+        crate::serial_println!("[ext4-journal]   FAIL: read_be32 @ 0");
+        return Err(KernelError::InternalError);
+    }
+    if read_be32(&buf, 4) != 0xDEADBEEF {
+        crate::serial_println!("[ext4-journal]   FAIL: read_be32 @ 4");
+        return Err(KernelError::InternalError);
+    }
+    if read_be32(&buf, 8) != 1 {
+        crate::serial_println!("[ext4-journal]   FAIL: read_be32 @ 8");
+        return Err(KernelError::InternalError);
+    }
+    if read_be32(&buf, 12) != 0 {
+        crate::serial_println!("[ext4-journal]   FAIL: read_be32 @ 12");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-journal]   read/write be32: OK");
+    Ok(())
+}
+
+/// Test read_be64 with known values.
+fn test_read_be64() -> KernelResult<()> {
+    let mut buf = [0u8; 16];
+
+    // Write a known 64-bit value in big-endian.
+    let val: u64 = 0x0102030405060708;
+    buf[0..8].copy_from_slice(&val.to_be_bytes());
+
+    let result = read_be64(&buf, 0);
+    if result != val {
+        crate::serial_println!(
+            "[ext4-journal]   FAIL: read_be64 = {:#018x}, expected {:#018x}",
+            result, val
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Test at non-zero offset.
+    let val2: u64 = 0xAAAABBBBCCCCDDDD;
+    buf[8..16].copy_from_slice(&val2.to_be_bytes());
+
+    if read_be64(&buf, 8) != val2 {
+        crate::serial_println!("[ext4-journal]   FAIL: read_be64 @ 8");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-journal]   read_be64: OK");
+    Ok(())
+}
+
+/// Test that read_be32 returns 0 on short/out-of-bounds buffer.
+fn test_read_be32_short_buffer() -> KernelResult<()> {
+    let buf = [0xFFu8; 3]; // Only 3 bytes — too short for u32.
+
+    if read_be32(&buf, 0) != 0 {
+        crate::serial_println!("[ext4-journal]   FAIL: short buffer didn't return 0");
+        return Err(KernelError::InternalError);
+    }
+
+    // Out-of-bounds offset.
+    let buf2 = [0xFFu8; 8];
+    if read_be32(&buf2, 6) != 0 {
+        crate::serial_println!("[ext4-journal]   FAIL: OOB offset didn't return 0");
+        return Err(KernelError::InternalError);
+    }
+
+    // Empty buffer.
+    let empty: &[u8] = &[];
+    if read_be32(empty, 0) != 0 {
+        crate::serial_println!("[ext4-journal]   FAIL: empty buffer didn't return 0");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-journal]   read_be32 short buffer: OK (returns 0)");
+    Ok(())
+}
+
+/// Test that write_be32 on short buffer doesn't panic (silently no-op).
+fn test_write_be32_short_buffer() -> KernelResult<()> {
+    let mut buf = [0xFFu8; 3];
+    write_be32(&mut buf, 0, 0x12345678); // Should silently skip.
+
+    // Buffer should be unchanged.
+    if buf != [0xFF, 0xFF, 0xFF] {
+        crate::serial_println!("[ext4-journal]   FAIL: write_be32 modified short buffer");
+        return Err(KernelError::InternalError);
+    }
+
+    // Out-of-bounds offset.
+    let mut buf2 = [0xAAu8; 8];
+    write_be32(&mut buf2, 6, 0xDEADBEEF); // Only 2 bytes available, needs 4.
+
+    // Bytes at [6..8] should be unchanged.
+    if buf2[6] != 0xAA || buf2[7] != 0xAA {
+        crate::serial_println!("[ext4-journal]   FAIL: OOB write modified data");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-journal]   write_be32 short buffer: OK (no-op)");
+    Ok(())
+}
+
+/// Test block header encoding (magic + type + sequence).
+fn test_block_header_encoding() -> KernelResult<()> {
+    // We can't call write_block_header without a Journal instance,
+    // but we can verify the encoding by manually writing a header
+    // using the same write_be32 calls and checking the output.
+    let mut buf = [0u8; 12];
+
+    // Simulate write_block_header for DESCRIPTOR at sequence 42.
+    write_be32(&mut buf, 0, JBD2_MAGIC);
+    write_be32(&mut buf, 4, block_type::DESCRIPTOR);
+    write_be32(&mut buf, 8, 42);
+
+    // Verify magic.
+    if read_be32(&buf, 0) != JBD2_MAGIC {
+        crate::serial_println!("[ext4-journal]   FAIL: header magic wrong");
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify block type.
+    if read_be32(&buf, 4) != block_type::DESCRIPTOR {
+        crate::serial_println!("[ext4-journal]   FAIL: header type wrong");
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify sequence.
+    if read_be32(&buf, 8) != 42 {
+        crate::serial_println!("[ext4-journal]   FAIL: header seq wrong");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-journal]   block header encoding: OK");
+    Ok(())
+}
+
+/// Test descriptor tag encoding (block number + flags).
+fn test_descriptor_tag_encoding() -> KernelResult<()> {
+    let mut tag_buf = [0u8; 8];
+
+    // Simulate writing a descriptor tag for block 12345 with LAST_TAG.
+    let block_nr: u32 = 12345;
+    let flags: u32 = tag_flags::SAME_UUID | tag_flags::LAST_TAG;
+
+    write_be32(&mut tag_buf, 0, block_nr);
+    write_be32(&mut tag_buf, 4, flags);
+
+    // Read back.
+    let read_block = read_be32(&tag_buf, 0);
+    let read_flags = read_be32(&tag_buf, 4);
+
+    if read_block != 12345 {
+        crate::serial_println!("[ext4-journal]   FAIL: tag block_nr = {}", read_block);
+        return Err(KernelError::InternalError);
+    }
+    if read_flags != flags {
+        crate::serial_println!("[ext4-journal]   FAIL: tag flags = {:#x}", read_flags);
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify individual flag bits.
+    if read_flags & tag_flags::LAST_TAG == 0 {
+        crate::serial_println!("[ext4-journal]   FAIL: LAST_TAG not set");
+        return Err(KernelError::InternalError);
+    }
+    if read_flags & tag_flags::SAME_UUID == 0 {
+        crate::serial_println!("[ext4-journal]   FAIL: SAME_UUID not set");
+        return Err(KernelError::InternalError);
+    }
+    if read_flags & tag_flags::ESCAPE != 0 {
+        crate::serial_println!("[ext4-journal]   FAIL: ESCAPE unexpectedly set");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-journal]   descriptor tag encoding: OK");
+    Ok(())
+}
+
+/// Verify journal constant values match the jbd2 specification.
+fn test_constants() -> KernelResult<()> {
+    // JBD2 magic number (same across all jbd/jbd2 implementations).
+    if JBD2_MAGIC != 0xC03B_3998 {
+        crate::serial_println!("[ext4-journal]   FAIL: JBD2_MAGIC = {:#x}", JBD2_MAGIC);
+        return Err(KernelError::InternalError);
+    }
+
+    // Block types per jbd2 spec.
+    if block_type::DESCRIPTOR != 1 {
+        crate::serial_println!("[ext4-journal]   FAIL: DESCRIPTOR != 1");
+        return Err(KernelError::InternalError);
+    }
+    if block_type::COMMIT != 2 {
+        crate::serial_println!("[ext4-journal]   FAIL: COMMIT != 2");
+        return Err(KernelError::InternalError);
+    }
+    if block_type::SUPERBLOCK_V1 != 3 {
+        crate::serial_println!("[ext4-journal]   FAIL: SUPERBLOCK_V1 != 3");
+        return Err(KernelError::InternalError);
+    }
+    if block_type::SUPERBLOCK_V2 != 4 {
+        crate::serial_println!("[ext4-journal]   FAIL: SUPERBLOCK_V2 != 4");
+        return Err(KernelError::InternalError);
+    }
+    if block_type::REVOKE != 5 {
+        crate::serial_println!("[ext4-journal]   FAIL: REVOKE != 5");
+        return Err(KernelError::InternalError);
+    }
+
+    // Tag flags.
+    if tag_flags::ESCAPE != 1 {
+        crate::serial_println!("[ext4-journal]   FAIL: ESCAPE != 1");
+        return Err(KernelError::InternalError);
+    }
+    if tag_flags::SAME_UUID != 2 {
+        crate::serial_println!("[ext4-journal]   FAIL: SAME_UUID != 2");
+        return Err(KernelError::InternalError);
+    }
+    if tag_flags::LAST_TAG != 8 {
+        crate::serial_println!("[ext4-journal]   FAIL: LAST_TAG != 8");
+        return Err(KernelError::InternalError);
+    }
+
+    // 64-bit feature flag per jbd2 spec.
+    if JBD2_FEATURE_INCOMPAT_64BIT != 0x0000_0002 {
+        crate::serial_println!("[ext4-journal]   FAIL: 64BIT flag wrong");
+        return Err(KernelError::InternalError);
+    }
+
+    // JournalSuperblock size check (must be exactly 1024 bytes).
+    if core::mem::size_of::<JournalSuperblock>() != 1024 {
+        crate::serial_println!(
+            "[ext4-journal]   FAIL: JournalSuperblock size = {}",
+            core::mem::size_of::<JournalSuperblock>()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-journal]   constants: OK");
+    Ok(())
+}

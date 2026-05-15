@@ -2858,6 +2858,285 @@ pub extern "C" fn open_by_handle_at(
 }
 
 // ---------------------------------------------------------------------------
+// fstatat64 — LP64 alias for fstatat
+// ---------------------------------------------------------------------------
+
+/// `fstatat64` — alias for `fstatat` on LP64 systems.
+///
+/// On our 64-bit target, `off_t` is always 64-bit, so this is identical
+/// to `fstatat`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fstatat64(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i32) -> i32 {
+    fstatat(dirfd, path, buf, flags)
+}
+
+// ---------------------------------------------------------------------------
+// faccessat2 — faccessat with flags
+// ---------------------------------------------------------------------------
+
+/// `faccessat2` — check file accessibility relative to a directory fd.
+///
+/// Extends `faccessat` with an explicit `flags` argument that supports
+/// `AT_SYMLINK_NOFOLLOW` and `AT_EACCESS`.  On our single-user OS,
+/// `AT_EACCESS` is a no-op (effective == real IDs).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn faccessat2(dirfd: i32, path: *const u8, mode: i32, flags: i32) -> i32 {
+    faccessat(dirfd, path, mode, flags)
+}
+
+// ---------------------------------------------------------------------------
+// openat2 — extended openat (Linux 5.6+)
+// ---------------------------------------------------------------------------
+
+/// Resolve flags for `openat2`.
+pub const RESOLVE_NO_XDEV: u64 = 0x01;
+/// Resolve flags for `openat2`.
+pub const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+/// Resolve flags for `openat2`.
+pub const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+/// Resolve flags for `openat2`.
+pub const RESOLVE_BENEATH: u64 = 0x08;
+/// Resolve flags for `openat2`.
+pub const RESOLVE_IN_ROOT: u64 = 0x10;
+/// Resolve flags for `openat2`.
+pub const RESOLVE_CACHED: u64 = 0x20;
+
+/// `open_how` structure for `openat2`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct OpenHow {
+    /// O_* flags.
+    pub flags: u64,
+    /// File creation mode (only used with O_CREAT/O_TMPFILE).
+    pub mode: u64,
+    /// RESOLVE_* flags.
+    pub resolve: u64,
+}
+
+/// `openat2` — open a file relative to a directory fd with extended
+/// resolution control.
+///
+/// Linux 5.6+ syscall.  Our implementation delegates to regular `openat`
+/// for now — the `resolve` flags are accepted but not enforced (our VFS
+/// doesn't support the RESOLVE_* restrictions yet).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn openat2(dirfd: i32, path: *const u8, how: *const OpenHow, size: usize) -> Fd {
+    if how.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if size < core::mem::size_of::<OpenHow>() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: caller guarantees `how` points to a valid OpenHow struct.
+    let h = unsafe { &*how };
+    openat(dirfd, path, h.flags as i32, h.mode as ModeT)
+}
+
+// ---------------------------------------------------------------------------
+// statx — extended stat (Linux 4.11+)
+// ---------------------------------------------------------------------------
+
+/// `statx` mask flags.
+pub const STATX_TYPE: u32 = 0x0001;
+/// `statx` mask flags.
+pub const STATX_MODE: u32 = 0x0002;
+/// `statx` mask flags.
+pub const STATX_NLINK: u32 = 0x0004;
+/// `statx` mask flags.
+pub const STATX_UID: u32 = 0x0008;
+/// `statx` mask flags.
+pub const STATX_GID: u32 = 0x0010;
+/// `statx` mask flags.
+pub const STATX_ATIME: u32 = 0x0020;
+/// `statx` mask flags.
+pub const STATX_MTIME: u32 = 0x0040;
+/// `statx` mask flags.
+pub const STATX_CTIME: u32 = 0x0080;
+/// `statx` mask flags.
+pub const STATX_INO: u32 = 0x0100;
+/// `statx` mask flags.
+pub const STATX_SIZE: u32 = 0x0200;
+/// `statx` mask flags.
+pub const STATX_BLOCKS: u32 = 0x0400;
+/// `statx` mask flags — all basic fields.
+pub const STATX_BASIC_STATS: u32 = 0x07FF;
+/// `statx` mask flags — all fields.
+pub const STATX_ALL: u32 = 0x0FFF;
+/// `statx` mask flags — block size.
+pub const STATX_BTIME: u32 = 0x0800;
+
+/// Timestamp for `statx`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StatxTimestamp {
+    /// Seconds since epoch.
+    pub tv_sec: i64,
+    /// Nanoseconds (0..999_999_999).
+    pub tv_nsec: u32,
+    /// Reserved.
+    pub __reserved: i32,
+}
+
+/// Extended stat structure (Linux 4.11+).
+///
+/// Returned by `statx()`.  Provides more fields than `struct stat`,
+/// including birth time and per-field validity masks.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Statx {
+    /// Mask of bits indicating filled fields.
+    pub stx_mask: u32,
+    /// Block size for filesystem I/O.
+    pub stx_blksize: u32,
+    /// Extra file attribute indicators.
+    pub stx_attributes: u64,
+    /// Number of hard links.
+    pub stx_nlink: u32,
+    /// User ID of owner.
+    pub stx_uid: u32,
+    /// Group ID of owner.
+    pub stx_gid: u32,
+    /// File type and mode.
+    pub stx_mode: u16,
+    /// Padding.
+    _pad1: u16,
+    /// Inode number.
+    pub stx_ino: u64,
+    /// Total size in bytes.
+    pub stx_size: u64,
+    /// Number of 512-byte blocks allocated.
+    pub stx_blocks: u64,
+    /// Mask of supported attributes.
+    pub stx_attributes_mask: u64,
+    /// Last access time.
+    pub stx_atime: StatxTimestamp,
+    /// Birth (creation) time.
+    pub stx_btime: StatxTimestamp,
+    /// Last status change time.
+    pub stx_ctime: StatxTimestamp,
+    /// Last modification time.
+    pub stx_mtime: StatxTimestamp,
+    /// Major device ID (if special file).
+    pub stx_rdev_major: u32,
+    /// Minor device ID (if special file).
+    pub stx_rdev_minor: u32,
+    /// Major device ID of filesystem.
+    pub stx_dev_major: u32,
+    /// Minor device ID of filesystem.
+    pub stx_dev_minor: u32,
+    /// Mount ID.
+    pub stx_mnt_id: u64,
+    /// Reserved.
+    _pad2: u64,
+    /// Reserved.
+    _spare: [u64; 12],
+}
+
+impl Default for Statx {
+    fn default() -> Self {
+        // SAFETY: Statx is a C-compatible struct, zero-init is valid.
+        unsafe { core::mem::zeroed() }
+    }
+}
+
+/// Convert a `Timespec` to a `StatxTimestamp`.
+fn timespec_to_statx_ts(ts: &crate::stat::Timespec) -> StatxTimestamp {
+    StatxTimestamp {
+        tv_sec: ts.tv_sec,
+        tv_nsec: ts.tv_nsec as u32,
+        __reserved: 0,
+    }
+}
+
+/// `statx` — extended file status (Linux 4.11+).
+///
+/// Gets extended file status relative to a directory fd.  Falls back
+/// to `fstatat` internally and converts the result into a `Statx`.
+/// The `mask` argument selects which fields to populate.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn statx(
+    dirfd: i32,
+    path: *const u8,
+    flags: i32,
+    mask: u32,
+    buf: *mut Statx,
+) -> i32 {
+    if buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // Get the underlying stat info via fstatat.
+    let mut st = Stat::default();
+    let ret = fstatat(dirfd, path, &raw mut st, flags);
+    if ret != 0 {
+        return ret;
+    }
+
+    // SAFETY: caller guarantees `buf` points to valid memory.
+    let sx = unsafe { &mut *buf };
+    *sx = Statx::default();
+
+    // Populate requested fields.
+    let mut filled: u32 = 0;
+
+    if mask & STATX_TYPE != 0 || mask & STATX_MODE != 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        { sx.stx_mode = st.st_mode as u16; }
+        filled |= STATX_TYPE | STATX_MODE;
+    }
+    if mask & STATX_NLINK != 0 {
+        #[allow(clippy::cast_possible_truncation)]
+        { sx.stx_nlink = st.st_nlink as u32; }
+        filled |= STATX_NLINK;
+    }
+    if mask & STATX_UID != 0 {
+        sx.stx_uid = st.st_uid;
+        filled |= STATX_UID;
+    }
+    if mask & STATX_GID != 0 {
+        sx.stx_gid = st.st_gid;
+        filled |= STATX_GID;
+    }
+    if mask & STATX_INO != 0 {
+        sx.stx_ino = st.st_ino;
+        filled |= STATX_INO;
+    }
+    if mask & STATX_SIZE != 0 {
+        sx.stx_size = st.st_size as u64;
+        filled |= STATX_SIZE;
+    }
+    if mask & STATX_BLOCKS != 0 {
+        sx.stx_blocks = st.st_blocks as u64;
+        filled |= STATX_BLOCKS;
+    }
+    if mask & STATX_ATIME != 0 {
+        sx.stx_atime = timespec_to_statx_ts(&st.st_atim);
+        filled |= STATX_ATIME;
+    }
+    if mask & STATX_MTIME != 0 {
+        sx.stx_mtime = timespec_to_statx_ts(&st.st_mtim);
+        filled |= STATX_MTIME;
+    }
+    if mask & STATX_CTIME != 0 {
+        sx.stx_ctime = timespec_to_statx_ts(&st.st_ctim);
+        filled |= STATX_CTIME;
+    }
+
+    sx.stx_blksize = st.st_blksize as u32;
+    // Device numbers: split st_dev/st_rdev into major/minor.
+    sx.stx_dev_major = (st.st_dev >> 8) as u32;
+    sx.stx_dev_minor = (st.st_dev & 0xFF) as u32;
+    sx.stx_rdev_major = (st.st_rdev >> 8) as u32;
+    sx.stx_rdev_minor = (st.st_rdev & 0xFF) as u32;
+
+    sx.stx_mask = filled;
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -4561,5 +4840,211 @@ mod tests {
         // FileHandle header: handle_bytes (u32) + handle_type (i32) = 8 bytes.
         assert_eq!(core::mem::size_of::<FileHandle>(), 8);
         assert!(core::mem::align_of::<FileHandle>() >= 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // fstatat64 — LP64 alias for fstatat
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fstatat64_null_path() {
+        crate::errno::set_errno(0);
+        let mut st = Stat::default();
+        let ret = fstatat64(AT_FDCWD, core::ptr::null(), &raw mut st, 0);
+        // null path → stat returns error
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_fstatat64_with_at_fdcwd() {
+        // AT_FDCWD → delegates to stat/lstat.
+        // On the test host the syscall result is unpredictable,
+        // so we just verify it doesn't crash.
+        let mut st = Stat::default();
+        let _ret = fstatat64(AT_FDCWD, b"/nonexistent\0".as_ptr(), &raw mut st, 0);
+    }
+
+    #[test]
+    fn test_fstatat64_nofollow_flag() {
+        // Verify the AT_SYMLINK_NOFOLLOW flag path compiles and runs.
+        let mut st = Stat::default();
+        let _ret = fstatat64(
+            AT_FDCWD,
+            b"/nonexistent_link\0".as_ptr(),
+            &raw mut st,
+            AT_SYMLINK_NOFOLLOW,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // faccessat2
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_faccessat2_null_path() {
+        crate::errno::set_errno(0);
+        let ret = faccessat2(AT_FDCWD, core::ptr::null(), 0, 0);
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_faccessat2_nonexistent() {
+        // Syscall result is unpredictable on test host — just verify no crash.
+        let _ret = faccessat2(AT_FDCWD, b"/nonexistent_file_xyz\0".as_ptr(), crate::fcntl::F_OK, 0);
+    }
+
+    #[test]
+    fn test_faccessat2_with_nofollow() {
+        // Verify the nofollow flag path doesn't crash.
+        let _ret = faccessat2(
+            AT_FDCWD,
+            b"/nonexistent\0".as_ptr(),
+            crate::fcntl::F_OK,
+            AT_SYMLINK_NOFOLLOW,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // openat2
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_openat2_null_how() {
+        crate::errno::set_errno(0);
+        let ret = openat2(AT_FDCWD, b"/tmp\0".as_ptr(), core::ptr::null(), 24);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_openat2_short_size() {
+        crate::errno::set_errno(0);
+        let how = OpenHow { flags: 0, mode: 0, resolve: 0 };
+        let ret = openat2(AT_FDCWD, b"/tmp\0".as_ptr(), &how, 1); // too small
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_openat2_struct_layout() {
+        assert_eq!(core::mem::size_of::<OpenHow>(), 24);
+    }
+
+    #[test]
+    fn test_openat2_resolve_flags_distinct() {
+        // Each RESOLVE_* flag is a distinct power of two.
+        let flags = [
+            RESOLVE_NO_XDEV,
+            RESOLVE_NO_MAGICLINKS,
+            RESOLVE_NO_SYMLINKS,
+            RESOLVE_BENEATH,
+            RESOLVE_IN_ROOT,
+            RESOLVE_CACHED,
+        ];
+        for i in 0..flags.len() {
+            assert!(flags[i].is_power_of_two(), "flag at {i} not power of 2");
+            for j in (i + 1)..flags.len() {
+                assert_ne!(flags[i], flags[j], "duplicate flags at {i} and {j}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_openat2_valid_how() {
+        // Valid OpenHow — delegates to openat.  Syscall result is
+        // unpredictable on the test host; just verify no crash.
+        let how = OpenHow { flags: crate::fcntl::O_RDONLY as u64, mode: 0, resolve: 0 };
+        let _ret = openat2(
+            AT_FDCWD,
+            b"/nonexistent_openat2_test\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // statx
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_statx_null_buf() {
+        crate::errno::set_errno(0);
+        let ret = statx(AT_FDCWD, b"/tmp\0".as_ptr(), 0, STATX_ALL, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_statx_struct_layout() {
+        // statx is 256 bytes on Linux x86_64.
+        assert_eq!(core::mem::size_of::<Statx>(), 256);
+    }
+
+    #[test]
+    fn test_statx_timestamp_layout() {
+        // StatxTimestamp: i64 + u32 + i32 = 16 bytes.
+        assert_eq!(core::mem::size_of::<StatxTimestamp>(), 16);
+    }
+
+    #[test]
+    fn test_statx_mask_constants() {
+        assert_eq!(STATX_TYPE, 0x0001);
+        assert_eq!(STATX_MODE, 0x0002);
+        assert_eq!(STATX_NLINK, 0x0004);
+        assert_eq!(STATX_UID, 0x0008);
+        assert_eq!(STATX_GID, 0x0010);
+        assert_eq!(STATX_ATIME, 0x0020);
+        assert_eq!(STATX_MTIME, 0x0040);
+        assert_eq!(STATX_CTIME, 0x0080);
+        assert_eq!(STATX_INO, 0x0100);
+        assert_eq!(STATX_SIZE, 0x0200);
+        assert_eq!(STATX_BLOCKS, 0x0400);
+        assert_eq!(STATX_BASIC_STATS, 0x07FF);
+        assert_eq!(STATX_BTIME, 0x0800);
+    }
+
+    #[test]
+    fn test_statx_nonexistent_path() {
+        // Syscall result is unpredictable on test host.
+        // If the underlying fstatat returns 0, statx fills the struct;
+        // if it returns -1, statx propagates the error.  Both are valid.
+        let mut sx = Statx::default();
+        let ret = statx(
+            AT_FDCWD,
+            b"/nonexistent_statx_test\0".as_ptr(),
+            0,
+            STATX_ALL,
+            &raw mut sx,
+        );
+        if ret == 0 {
+            // statx filled the struct — stx_mask should have bits set.
+            assert_ne!(sx.stx_mask, 0);
+        }
+        // Either way, no crash.
+    }
+
+    #[test]
+    fn test_statx_basic_stats_mask() {
+        // STATX_BASIC_STATS should be all basic bits ORed.
+        let expected = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_UID
+            | STATX_GID | STATX_ATIME | STATX_MTIME | STATX_CTIME
+            | STATX_INO | STATX_SIZE | STATX_BLOCKS;
+        assert_eq!(STATX_BASIC_STATS, expected);
+    }
+
+    #[test]
+    fn test_statx_default_zeroed() {
+        let sx = Statx::default();
+        assert_eq!(sx.stx_mask, 0);
+        assert_eq!(sx.stx_size, 0);
+        assert_eq!(sx.stx_uid, 0);
+        assert_eq!(sx.stx_gid, 0);
+        assert_eq!(sx.stx_ino, 0);
+    }
+
+    #[test]
+    fn test_statx_all_includes_btime() {
+        assert_eq!(STATX_ALL, 0x0FFF);
+        assert_ne!(STATX_ALL & STATX_BTIME, 0);
     }
 }

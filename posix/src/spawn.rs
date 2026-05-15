@@ -1323,6 +1323,43 @@ fn file_exists(path: *const u8, path_len: usize) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// execvpe — exec with PATH search + custom environment
+// ---------------------------------------------------------------------------
+
+/// Replace the current process image with a new program, searching PATH.
+///
+/// Like `execvp` but accepts an explicit environment (`envp`).
+/// If `file` contains `/`, it is used directly.
+/// Otherwise, searches each directory in `PATH`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn execvpe(
+    file: *const u8,
+    argv: *const *const u8,
+    envp: *const *const u8,
+) -> i32 {
+    if file.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    let file_len = unsafe { crate::file::c_strlen_pub(file) };
+
+    // If `file` contains a '/', use it directly.
+    if contains_slash(file, file_len) {
+        return execve(file, argv, envp);
+    }
+
+    // Search PATH for the executable.
+    let mut found = [0u8; crate::unistd::PATH_MAX];
+    if !search_path(file, file_len, &mut found) {
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    }
+
+    execve(found.as_ptr(), argv, envp)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2180,5 +2217,46 @@ mod tests {
             b"/tmp\0".as_ptr(),
         );
         assert_eq!(ret, crate::errno::ENOMEM, "full actions should return ENOMEM");
+    }
+
+    // -----------------------------------------------------------------------
+    // execvpe — exec with PATH search + custom environment
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_execvpe_null_file() {
+        crate::errno::set_errno(0);
+        let ret = execvpe(core::ptr::null(), core::ptr::null(), core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_execvpe_nonexistent_path_search() {
+        // A filename without '/' that doesn't exist in PATH.
+        // On our OS this returns ENOENT; on the test host, search_path
+        // may produce unpredictable results via SYS_FS_STAT.
+        crate::errno::set_errno(0);
+        let ret = execvpe(
+            b"nonexistent_binary_xyz_12345\0".as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+        );
+        // Either ENOENT (not found in PATH) or the exec itself fails.
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_execvpe_with_slash_delegates_to_execve() {
+        // A filename with '/' is used directly, not searched in PATH.
+        // Syscall result is unpredictable on test host.
+        let ret = execvpe(
+            b"/nonexistent/binary\0".as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+        );
+        // Should return -1 (exec replaces process on success, so any
+        // return means failure).
+        assert_eq!(ret, -1);
     }
 }

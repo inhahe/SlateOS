@@ -5,7 +5,7 @@
 //!   `epoll_wait`, `epoll_pwait`
 //! - **eventfd**: `eventfd`, `eventfd_read`, `eventfd_write`
 //! - **timerfd**: `timerfd_create`, `timerfd_settime`, `timerfd_gettime`
-//! - **signalfd**: `signalfd`
+//! - **signalfd**: `signalfd`, `signalfd4`
 //! - **inotify**: `inotify_init`, `inotify_init1`, `inotify_add_watch`,
 //!   `inotify_rm_watch`
 //!
@@ -205,6 +205,17 @@ pub extern "C" fn timerfd_gettime(_fd: i32, _curr_value: *mut Itimerspec) -> i32
 pub extern "C" fn signalfd(_fd: i32, _mask: *const u64, _flags: i32) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
+}
+
+/// `signalfd4` — Linux alias for `signalfd` with explicit flags.
+///
+/// On Linux, `signalfd(2)` is the library wrapper; the raw syscall is
+/// `signalfd4` which takes an explicit `flags` argument (SFD_CLOEXEC,
+/// SFD_NONBLOCK).  Our `signalfd` already accepts flags, so this is a
+/// direct alias.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn signalfd4(fd: i32, mask: *const u64, flags: i32) -> i32 {
+    signalfd(fd, mask, flags)
 }
 
 // ===========================================================================
@@ -775,5 +786,26 @@ mod tests {
     fn test_nonblock_flags_consistent() {
         assert_eq!(EFD_NONBLOCK, TFD_NONBLOCK);
         assert_eq!(EFD_NONBLOCK, IN_NONBLOCK);
+    }
+
+    // -----------------------------------------------------------------------
+    // signalfd4 — Linux alias for signalfd
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_signalfd4_returns_enosys() {
+        // signalfd4 delegates to signalfd which is an ENOSYS stub.
+        crate::errno::set_errno(0);
+        let ret = signalfd4(-1, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_signalfd4_with_flags() {
+        crate::errno::set_errno(0);
+        let ret = signalfd4(-1, core::ptr::null(), EFD_CLOEXEC as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 }

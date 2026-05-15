@@ -705,6 +705,53 @@ pub extern "C" fn membarrier(cmd: i32, _flags: u32, _cpu_id: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// clone3 — extended clone (Linux 5.3+)
+// ---------------------------------------------------------------------------
+
+/// `clone_args` structure for `clone3`.
+///
+/// Matches the Linux `struct clone_args` layout.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct CloneArgs {
+    /// Clone flags (CLONE_*).
+    pub flags: u64,
+    /// PID file descriptor (for `CLONE_PIDFD`).
+    pub pidfd: u64,
+    /// Signal to deliver to parent on child termination.
+    pub child_tid: u64,
+    /// Pointer to child TID in child memory.
+    pub parent_tid: u64,
+    /// Exit signal number.
+    pub exit_signal: u64,
+    /// Lowest address of stack.
+    pub stack: u64,
+    /// Size of stack.
+    pub stack_size: u64,
+    /// TLS value.
+    pub tls: u64,
+    /// Pointer to `pid_t` array for `CLONE_NEWPID` set_tid.
+    pub set_tid: u64,
+    /// Number of entries in set_tid array.
+    pub set_tid_size: u64,
+    /// cgroup file descriptor.
+    pub cgroup: u64,
+}
+
+/// `clone3` — create a child process (Linux 5.3+).
+///
+/// Extended version of `clone` that takes a `clone_args` structure
+/// instead of positional arguments.
+///
+/// Stub: returns -1 with ENOSYS (process creation uses our kernel's
+/// native `SYS_PROCESS_SPAWN_EX`).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn clone3(_args: *const CloneArgs, _size: usize) -> i64 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1482,5 +1529,34 @@ mod tests {
     fn test_membarrier_constants() {
         assert_eq!(MEMBARRIER_CMD_QUERY, 0);
         assert_eq!(MEMBARRIER_CMD_GLOBAL, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // clone3
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_clone3_returns_enosys() {
+        // clone3 is not supported — returns -1 with ENOSYS.
+        crate::errno::set_errno(0);
+        // SAFETY: zero-init is valid for CloneArgs (all-zeros = no flags).
+        let args: CloneArgs = unsafe { core::mem::zeroed() };
+        let ret = clone3(&args, core::mem::size_of::<CloneArgs>());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_null_args() {
+        crate::errno::set_errno(0);
+        let ret = clone3(core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone_args_struct_layout() {
+        // CloneArgs has 11 u64 fields = 88 bytes.
+        assert_eq!(core::mem::size_of::<CloneArgs>(), 88);
     }
 }

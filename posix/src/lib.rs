@@ -16,24 +16,25 @@
 //!   `chown`, `fchown`, `lchown`, `umask`, `truncate`, `ftruncate`,
 //!   `fsync`, `fdatasync`, `link`, `symlink`, `readlink`, `utimes`,
 //!   `futimes`, `utimensat`, `futimens`, `sendfile`, `sendfile64`,
-//!   `fallocate`, `splice`, `tee`, `vmsplice`, `mknod`, `mkfifo`
+//!   `fallocate`, `splice`, `tee`, `vmsplice`, `mknod`, `mkfifo`,
+//!   `openat2`, `faccessat2`, `statx`
 //! - **Sockets**: `socket`, `connect`, `bind`, `listen`, `accept`,
 //!   `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`,
 //!   `getsockopt`, `getpeername`, `getsockname`, `getaddrinfo`,
 //!   `freeaddrinfo`, `getnameinfo`, `gethostbyname`, `gethostbyname2`,
 //!   `htons`, `htonl`, `inet_addr`, `inet_ntoa`, `inet_aton`,
 //!   `inet_pton`, `inet_ntop`
-//! - **I/O Multiplexing**: `poll`, `select`, `pselect`
+//! - **I/O Multiplexing**: `poll`, `select`, `pselect`, `signalfd4`
 //! - **Terminal**: `ioctl` (TIOCGWINSZ, TCGETS, FIONBIO, etc.),
 //!   `isatty`, `ttyname`, `tcgetattr`, `tcsetattr`, `cfmakeraw`,
 //!   `cfsetspeed`, `tcsendbreak`, `tcdrain`, `tcflow`, `tcflush`,
 //!   termios flags, `posix_openpt`, `grantpt`, `unlockpt`, `ptsname`,
 //!   `ptsname_r`
 //! - **Process**: `_exit`, `getpid`, `getppid`, `posix_spawn`,
-//!   `posix_spawnp`, `execve`, `execvp`, `execv`, `fexecve`, `vfork`,
-//!   `waitpid`, `sleep`, `nanosleep`, `getpgrp`, `setpgid`, `setsid`,
-//!   `getsid`, `pidfd_open`, `pidfd_send_signal`, `pidfd_getfd`,
-//!   `issetugid`, `posix_spawn_file_actions_addchdir_np`
+//!   `posix_spawnp`, `execve`, `execvp`, `execv`, `execvpe`, `fexecve`,
+//!   `vfork`, `waitpid`, `sleep`, `nanosleep`, `getpgrp`, `setpgid`,
+//!   `setsid`, `getsid`, `pidfd_open`, `pidfd_send_signal`, `pidfd_getfd`,
+//!   `issetugid`, `posix_spawn_file_actions_addchdir_np`, `clone3`
 //! - **Memory**: `mmap`, `munmap`, `mprotect`, `mmap64`, `mremap`,
 //!   `mlock`/`mlock2`/`munlock`/`mlockall`/`munlockall`, `msync`, `madvise`,
 //!   `posix_madvise`, `shm_open`/`shm_unlink`, `memfd_create`
@@ -126,7 +127,7 @@
 //!   `S_ISBLK`, `S_ISFIFO`, `S_ISSOCK`, `mknod`/`mknodat`,
 //!   `mkfifo`/`mkfifoat`
 //! - **LP64 Aliases**: `open64`, `lseek64`, `stat64`, `fstat64`, `lstat64`,
-//!   `fopen64`, `freopen64`, `mmap64`, `prlimit64`
+//!   `fstatat64`, `fopen64`, `freopen64`, `mmap64`, `prlimit64`
 //! - **glibc Compat**: `__xstat`/`__fxstat`/`__lxstat` (and `*64` variants),
 //!   `__libc_malloc`/`__libc_free`/`__libc_realloc`/`__libc_calloc`/`__libc_memalign`,
 //!   `__isoc99_sscanf`/`__isoc99_scanf`/`__isoc99_fscanf`,

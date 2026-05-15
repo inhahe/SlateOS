@@ -34,6 +34,54 @@ pub const STDOUT_FILENO: Fd = 1;
 pub const STDERR_FILENO: Fd = 2;
 
 // ---------------------------------------------------------------------------
+// POSIX feature-test macros (exported as constants for C programs)
+// ---------------------------------------------------------------------------
+
+/// POSIX version this implementation conforms to (POSIX.1-2008).
+#[allow(non_upper_case_globals)]
+pub const _POSIX_VERSION: i64 = 200_809;
+
+/// XSI (X/Open System Interfaces) extension version.
+#[allow(non_upper_case_globals)]
+pub const _XOPEN_VERSION: i32 = 700;
+
+/// Threads are supported (value = POSIX version).
+#[allow(non_upper_case_globals)]
+pub const _POSIX_THREADS: i64 = 200_809;
+
+/// Memory-mapped files are supported.
+#[allow(non_upper_case_globals)]
+pub const _POSIX_MAPPED_FILES: i64 = 200_809;
+
+/// Memory protection is supported.
+#[allow(non_upper_case_globals)]
+pub const _POSIX_MEMORY_PROTECTION: i64 = 200_809;
+
+/// fsync is supported.
+#[allow(non_upper_case_globals)]
+pub const _POSIX_FSYNC: i64 = 200_809;
+
+/// Timers are supported (value = POSIX version).
+#[allow(non_upper_case_globals)]
+pub const _POSIX_TIMERS: i64 = 200_809;
+
+/// Monotonic clock is available.
+#[allow(non_upper_case_globals)]
+pub const _POSIX_MONOTONIC_CLOCK: i64 = 200_809;
+
+/// Clock selection is available.
+#[allow(non_upper_case_globals)]
+pub const _POSIX_CLOCK_SELECTION: i64 = 200_809;
+
+/// Saved set-user-ID and set-group-ID are supported.
+#[allow(non_upper_case_globals)]
+pub const _POSIX_SAVED_IDS: i32 = 1;
+
+/// Job control is supported.
+#[allow(non_upper_case_globals)]
+pub const _POSIX_JOB_CONTROL: i32 = 1;
+
+// ---------------------------------------------------------------------------
 // sysconf names
 // ---------------------------------------------------------------------------
 
@@ -2152,5 +2200,37 @@ mod tests {
 
         let mut buf = [0u8; 5];
         assert_eq!(getdomainname(buf.as_mut_ptr(), buf.len()), -1);
+    }
+
+    // ------------------------------------------------------------------
+    // POSIX feature-test constants
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_posix_version_constant() {
+        assert_eq!(_POSIX_VERSION, 200_809);
+    }
+
+    #[test]
+    fn test_xopen_version_constant() {
+        assert_eq!(_XOPEN_VERSION, 700);
+    }
+
+    #[test]
+    fn test_posix_feature_macros_are_posix_2008() {
+        // All feature macros that indicate version should be 200809.
+        assert_eq!(_POSIX_THREADS, 200_809);
+        assert_eq!(_POSIX_MAPPED_FILES, 200_809);
+        assert_eq!(_POSIX_MEMORY_PROTECTION, 200_809);
+        assert_eq!(_POSIX_FSYNC, 200_809);
+        assert_eq!(_POSIX_TIMERS, 200_809);
+        assert_eq!(_POSIX_MONOTONIC_CLOCK, 200_809);
+        assert_eq!(_POSIX_CLOCK_SELECTION, 200_809);
+    }
+
+    #[test]
+    fn test_posix_boolean_features() {
+        assert_eq!(_POSIX_SAVED_IDS, 1);
+        assert_eq!(_POSIX_JOB_CONTROL, 1);
     }
 }

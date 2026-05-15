@@ -387,8 +387,6 @@ pub fn tick_expire() {
 /// IPv4 reassembly unit tests — exercises FragEntry methods directly
 /// without touching global state or the timer.
 pub fn self_test() -> crate::error::KernelResult<()> {
-    use crate::error::KernelError;
-
     crate::serial_println!("[frag] Running self-test...");
 
     test_single_fragment()?;

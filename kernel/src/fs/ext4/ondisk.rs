@@ -963,8 +963,6 @@ pub const EXT4_LOST_FOUND_INO: u32 = 11;
 /// offsets match the ext4 specification.  If any offset is wrong, we
 /// silently read/write the wrong bytes on real filesystems.
 pub fn self_test() -> crate::error::KernelResult<()> {
-    use crate::error::KernelError;
-
     crate::serial_println!("[ext4-ondisk] Running self-test...");
 
     test_superblock_size_and_magic()?;

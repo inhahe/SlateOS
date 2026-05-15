@@ -172,8 +172,10 @@ pub fn send_frame(frame: &[u8]) -> KernelResult<()> {
     Err(KernelError::NoSuchDevice)
 }
 
-/// Self-test: verify network interface is configured.
-#[allow(dead_code)] // Public API.
+/// Self-test: verify network interface status and run per-module tests.
+///
+/// Called from main.rs during boot.  Exercises protocol parsing/building
+/// for all core network modules without requiring network hardware.
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[net] Running network self-test...");
 
@@ -252,6 +254,21 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
     }
+
+    // --- Per-module unit tests ---
+    //
+    // These exercise protocol parsing and data structure correctness
+    // without requiring network hardware.
+
+    ethernet::self_test()?;
+    ipv4::self_test()?;
+    icmp::self_test()?;
+    arp::self_test()?;
+    udp::self_test()?;
+    dns::self_test()?;
+    dhcp::self_test()?;
+    frag::self_test()?;
+    interface::self_test()?;
 
     crate::serial_println!("[net] Network self-test PASSED");
     Ok(())

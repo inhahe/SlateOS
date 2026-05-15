@@ -5511,7 +5511,7 @@ fn test_extent_cache() -> KernelResult<()> {
     }
 
     // Stats.
-    let (hits, misses, valid) = cache.stats();
+    let (hits, _misses, valid) = cache.stats();
     if hits != 2 || valid != 0 {
         crate::serial_println!(
             "[ext4-driver]   FAIL: extent stats hits={}, valid={}", hits, valid

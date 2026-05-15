@@ -544,8 +544,6 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
 /// Tests for fsck helper functions: bitmap counting, inode classification,
 /// group descriptor field accessors, and report construction.
 pub fn self_test() -> KernelResult<()> {
-    use crate::error::KernelError;
-
     crate::serial_println!("[ext4-fsck] Running self-test...");
 
     test_count_used_bits()?;

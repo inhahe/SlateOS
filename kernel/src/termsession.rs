@@ -280,7 +280,7 @@ pub fn destroy(id: u32) -> KernelResult<()> {
 /// using [`save_shell_context`] and [`take_shell_context`] before and
 /// after calling this function.
 pub fn switch(target_id: u32) -> KernelResult<()> {
-    let mut table = TABLE.lock();
+    let table = TABLE.lock();
     if !table.initialized {
         return Err(KernelError::NotSupported);
     }

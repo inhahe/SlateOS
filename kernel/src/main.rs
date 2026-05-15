@@ -1260,6 +1260,13 @@ extern "C" fn kmain() -> ! {
         serial_println!("[WARN] Firewall self-test failed: {:?}", e);
     }
 
+    // Step 22e⅞++++n4: Network stack per-module self-tests.
+    // Exercises protocol parsing/building for ethernet, IPv4, ICMP, ARP,
+    // UDP, DNS, DHCP, fragmentation, and interface modules.
+    if let Err(e) = net::self_test() {
+        serial_println!("[WARN] Network self-test failed: {:?}", e);
+    }
+
     // Step 22e⅞++++o: Kernel object tracking self-test.
     // Lifecycle counters for all kernel object types.
     kobject::self_test();

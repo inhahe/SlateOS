@@ -377,8 +377,6 @@ pub fn stats() -> InterfaceStats {
 /// Network interface unit tests — exercises Ipv4Addr methods and
 /// InterfaceInfo defaults.
 pub fn self_test() -> crate::error::KernelResult<()> {
-    use crate::error::KernelError;
-
     crate::serial_println!("[interface] Running self-test...");
 
     test_ipv4_addr_constructors()?;

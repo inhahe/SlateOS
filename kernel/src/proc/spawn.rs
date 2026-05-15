@@ -85,6 +85,27 @@ pub const USER_STACK_GUARD: u64 = USER_STACK_TOP - MAX_STACK_SIZE;
 // Public types
 // ---------------------------------------------------------------------------
 
+/// Handle types for file descriptor mapping entries.
+///
+/// Indicates what kind of kernel object an inherited fd refers to.
+/// The child's POSIX layer uses this to set up the correct fd type
+/// (File, Pipe, Socket, etc.) in its fd table.
+pub mod fd_handle_type {
+    /// Regular file handle (from `fs::handle`).  The kernel dups it
+    /// via `fs::handle::dup()`.
+    pub const FILE: u8 = 0;
+    /// Pipe handle (from `ipc::pipe`).  The raw handle value is
+    /// passed through — the kernel-ipc zone must provide ref-counting
+    /// for pipe handles before this type is fully functional.
+    pub const PIPE: u8 = 1;
+    /// TCP socket handle.
+    pub const TCP_SOCKET: u8 = 2;
+    /// UDP socket handle.
+    pub const UDP_SOCKET: u8 = 3;
+    /// Console I/O (stdin/stdout/stderr virtual handle).
+    pub const CONSOLE: u8 = 4;
+}
+
 /// A file descriptor mapping entry passed from userspace.
 ///
 /// Used by `SYS_PROCESS_SPAWN_EX` to specify which kernel handles the
@@ -97,9 +118,14 @@ pub const USER_STACK_GUARD: u64 = USER_STACK_TOP - MAX_STACK_SIZE;
 pub struct FdMapEntry {
     /// Target POSIX fd number in the child (e.g. 0 = stdin, 1 = stdout).
     pub fd: i32,
-    /// Padding for natural alignment of `handle`.
-    pub _pad: i32,
-    /// Kernel file handle ID.
+    /// Handle type (see [`fd_handle_type`] constants).
+    ///
+    /// Determines how the kernel duplicates the handle and how the
+    /// child's POSIX layer interprets it.
+    pub handle_type: u8,
+    /// Reserved padding (set to 0).
+    pub _pad: [u8; 3],
+    /// Kernel handle ID.
     ///
     /// For `SYS_PROCESS_SPAWN_EX`: this is the *parent's* handle to dup.
     /// For `SYS_PROCESS_GET_INITIAL_FDS`: this is the *child's* own handle.
@@ -187,7 +213,10 @@ pub struct SpawnOptions<'a> {
     /// `SYS_PROCESS_GET_INITIAL_FDS` during startup.
     ///
     /// An empty slice means no fd inheritance (the default).
-    pub fd_map: &'a [(i32, u64)],
+    ///
+    /// Each tuple is `(posix_fd, handle_type, parent_handle)`.
+    /// `handle_type` uses [`fd_handle_type`] constants.
+    pub fd_map: &'a [(i32, u8, u64)],
     /// Command-line arguments for the child process.
     ///
     /// Each element is one argument as a byte slice (no null terminator
@@ -238,11 +267,11 @@ impl<'a> SpawnOptions<'a> {
 
     /// Set the initial fd map for the child.
     ///
-    /// Each entry is `(posix_fd_number, parent_kernel_handle)`.  The
-    /// parent's handles are duplicated — the child gets independent
+    /// Each entry is `(posix_fd_number, handle_type, parent_handle)`.
+    /// The parent's handles are duplicated — the child gets independent
     /// handles that it owns.
     #[must_use]
-    pub fn fd_map(mut self, map: &'a [(i32, u64)]) -> Self {
+    pub fn fd_map(mut self, map: &'a [(i32, u8, u64)]) -> Self {
         self.fd_map = map;
         self
     }
@@ -438,23 +467,55 @@ pub fn spawn_process(
     // SYS_PROCESS_GET_INITIAL_FDS.
     if !options.fd_map.is_empty() {
         let mut initial_fds = alloc::vec::Vec::with_capacity(options.fd_map.len());
-        for &(fd_num, parent_handle) in options.fd_map {
-            match crate::fs::handle::dup(parent_handle) {
+        for &(fd_num, handle_type, parent_handle) in options.fd_map {
+            let dup_result = match handle_type {
+                fd_handle_type::FILE => {
+                    // Duplicate the file handle — child gets an independent copy.
+                    crate::fs::handle::dup(parent_handle)
+                }
+                fd_handle_type::PIPE => {
+                    // For pipe handles, pass through the raw value.
+                    //
+                    // TODO(kernel-ipc): Once pipe::dup() exists with proper
+                    // ref-counting, use it here instead of raw pass-through.
+                    // Without ref-counting, closing the handle from either
+                    // parent or child closes it for both.
+                    Ok(parent_handle)
+                }
+                fd_handle_type::CONSOLE => {
+                    // Console is a virtual handle — just pass the value.
+                    Ok(parent_handle)
+                }
+                _ => {
+                    // Unknown handle type.
+                    serial_println!(
+                        "[spawn] Unknown handle type {} for fd {}",
+                        handle_type, fd_num,
+                    );
+                    Err(KernelError::InvalidArgument)
+                }
+            };
+
+            match dup_result {
                 Ok(child_handle) => {
                     serial_println!(
-                        "[spawn] fd {} → handle {} (duped from {})",
-                        fd_num, child_handle, parent_handle,
+                        "[spawn] fd {} → handle {} (type={}, duped from {})",
+                        fd_num, child_handle, handle_type, parent_handle,
                     );
                     initial_fds.push((fd_num, child_handle));
                 }
                 Err(e) => {
-                    // Close any handles we already duped — don't leak.
+                    // Close any FILE handles we already duped — don't leak.
+                    // (Pipe/console handles are pass-through, not duped.)
                     for &(_fd, h) in &initial_fds {
+                        // Only close if it looks like a file handle (not
+                        // a pipe or console).  For now we close everything
+                        // since only FILE type goes through dup.
                         let _ = crate::fs::handle::close(h);
                     }
                     serial_println!(
-                        "[spawn] Failed to dup handle {} for fd {}: {:?}",
-                        parent_handle, fd_num, e,
+                        "[spawn] Failed to dup handle {} (type={}) for fd {}: {:?}",
+                        parent_handle, handle_type, fd_num, e,
                     );
                     pcb::destroy(pid);
                     return Err(e);
@@ -1359,7 +1420,7 @@ fn test_fd_map_entry_layout() -> KernelResult<()> {
     }
 
     // Verify field offsets are correct.
-    let entry = FdMapEntry { fd: 1, _pad: 0, handle: 42 };
+    let entry = FdMapEntry { fd: 1, handle_type: fd_handle_type::FILE, _pad: [0; 3], handle: 42 };
     if entry.fd != 1 || entry.handle != 42 {
         serial_println!("[spawn]   FAIL: FdMapEntry field values wrong");
         return Err(KernelError::InternalError);
@@ -1381,7 +1442,7 @@ fn test_spawn_with_fd_map() -> KernelResult<()> {
 
     // Spawn with fd_map: fd 1 → parent_handle.
     let elf_data = elf::build_test_elf_public();
-    let fd_map = [(1_i32, parent_handle)];
+    let fd_map = [(1_i32, fd_handle_type::FILE, parent_handle)];
     let options = SpawnOptions::new("spawn-test-fdmap").fd_map(&fd_map);
 
     let result = spawn_process(&elf_data, &options)?;
@@ -1483,7 +1544,7 @@ fn test_spawn_fd_map_invalid_handle() -> KernelResult<()> {
     let elf_data = elf::build_test_elf_public();
 
     // Handle 999999 doesn't exist — dup should fail.
-    let fd_map = [(0_i32, 999_999_u64)];
+    let fd_map = [(0_i32, fd_handle_type::FILE, 999_999_u64)];
     let options = SpawnOptions::new("spawn-test-bad-fd").fd_map(&fd_map);
 
     match spawn_process(&elf_data, &options) {
@@ -1525,7 +1586,7 @@ fn test_take_initial_fds_one_shot() -> KernelResult<()> {
     )?;
 
     let elf_data = elf::build_test_elf_public();
-    let fd_map = [(0_i32, parent_handle)];
+    let fd_map = [(0_i32, fd_handle_type::FILE, parent_handle)];
     let options = SpawnOptions::new("spawn-test-oneshot").fd_map(&fd_map);
 
     let result = spawn_process(&elf_data, &options)?;

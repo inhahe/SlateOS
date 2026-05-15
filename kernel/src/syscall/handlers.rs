@@ -2342,11 +2342,11 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
     };
 
     // Read the fd map entries.
-    let fd_pairs: alloc::vec::Vec<(i32, u64)> = if fd_map_count > 0 && fd_map_ptr != 0 {
+    let fd_pairs: alloc::vec::Vec<(i32, u8, u64)> = if fd_map_count > 0 && fd_map_ptr != 0 {
         let entries = unsafe {
             core::slice::from_raw_parts(fd_map_ptr as *const FdMapEntry, fd_map_count)
         };
-        entries.iter().map(|e| (e.fd, e.handle)).collect()
+        entries.iter().map(|e| (e.fd, e.handle_type, e.handle)).collect()
     } else {
         alloc::vec::Vec::new()
     };
@@ -2460,7 +2460,8 @@ pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
             if let Some(entry) = out_slice.get_mut(i) {
                 *entry = FdMapEntry {
                     fd,
-                    _pad: 0,
+                    handle_type: crate::proc::spawn::fd_handle_type::FILE,
+                    _pad: [0; 3],
                     handle,
                 };
             }

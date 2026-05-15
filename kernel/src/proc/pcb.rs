@@ -974,6 +974,7 @@ pub fn set_wait_task(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
 ///
 /// Called when a process becomes a zombie to retrieve the task that
 /// should be woken.
+#[allow(dead_code)] // Public API — called when wait/exit is fully wired.
 pub fn take_wait_task(pid: ProcessId) -> Option<TaskId> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid)?;
@@ -1255,6 +1256,7 @@ pub fn get_credentials(pid: ProcessId) -> Option<ProcessCredentials> {
 /// Only processes running as root (uid=0) or the kernel (PID 0
 /// caller) should call this.  The authorization check is the
 /// caller's responsibility.
+#[allow(dead_code)] // Public API — called when login/user management lands.
 pub fn set_credentials(
     pid: ProcessId,
     credentials: ProcessCredentials,

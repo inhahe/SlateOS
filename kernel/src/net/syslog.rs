@@ -222,6 +222,7 @@ pub struct SyslogMessage {
     /// Source IP (for received messages).
     pub source_ip: Ipv4Addr,
     /// Timestamp (kernel ns) when received.
+    #[allow(dead_code)] // Public API field.
     pub received_at_ns: u64,
 }
 
@@ -633,6 +634,7 @@ pub struct SyslogStats {
     pub remote_server: Option<(Ipv4Addr, u16)>,
     pub messages_received: u64,
     pub messages_forwarded: u64,
+    #[allow(dead_code)] // Stats field — exposed for procfs.
     pub messages_dropped: u64,
     pub parse_errors: u64,
     pub forward_errors: u64,

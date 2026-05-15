@@ -1865,12 +1865,47 @@ pub extern "C" fn posix_fadvise(_fd: Fd, _offset: OffT, _len: OffT, _advice: i32
     0 // Succeed silently — advice is purely advisory.
 }
 
-/// Preallocate file space.
+/// Ensure that disk space is allocated for the file region
+/// `[offset, offset+len)`.
 ///
-/// Stub: returns 0 without actually preallocating.  The filesystem
-/// layer doesn't support preallocation yet.
+/// POSIX: on success, returns 0.  On error, returns an error number
+/// (NOT -1; unlike most POSIX functions, `posix_fallocate` returns
+/// the error directly).
+///
+/// Our implementation uses `fstat` + `ftruncate` to extend the file
+/// if `offset + len` exceeds the current size.  This doesn't truly
+/// preallocate contiguous blocks (the filesystem may still allocate
+/// lazily), but it guarantees the file is at least as large as
+/// `offset + len` — sufficient for programs that use `posix_fallocate`
+/// to avoid `ENOSPC` on later writes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn posix_fallocate(_fd: Fd, _offset: OffT, _len: OffT) -> i32 {
+pub extern "C" fn posix_fallocate(fd: Fd, offset: OffT, len: OffT) -> i32 {
+    // POSIX: EINVAL if offset < 0 or len <= 0.
+    if offset < 0 || len <= 0 {
+        return errno::EINVAL;
+    }
+
+    // Check that offset + len doesn't overflow.
+    let Some(target_size) = offset.checked_add(len) else {
+        return errno::EFBIG;
+    };
+
+    // Get the current file size.
+    let mut stat_buf = Stat::zeroed();
+    if fstat(fd, &raw mut stat_buf) < 0 {
+        return errno::get_errno();
+    }
+
+    // If the file is already large enough, nothing to do.
+    if stat_buf.st_size >= target_size {
+        return 0;
+    }
+
+    // Extend the file to the required size.
+    if ftruncate(fd, target_size) < 0 {
+        return errno::get_errno();
+    }
+
     0
 }
 
@@ -2514,8 +2549,30 @@ mod tests {
     }
 
     #[test]
-    fn test_posix_fallocate_succeeds() {
-        assert_eq!(posix_fallocate(0, 0, 4096), 0);
+    fn test_posix_fallocate_invalid_offset() {
+        // Negative offset → EINVAL (returned directly, not via errno).
+        assert_eq!(posix_fallocate(0, -1, 4096), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_posix_fallocate_invalid_len_zero() {
+        // len == 0 → EINVAL.
+        assert_eq!(posix_fallocate(0, 0, 0), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_posix_fallocate_invalid_len_negative() {
+        // len < 0 → EINVAL.
+        assert_eq!(posix_fallocate(0, 0, -1), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_posix_fallocate_overflow() {
+        // offset + len overflows i64 → EFBIG.
+        assert_eq!(
+            posix_fallocate(0, i64::MAX, 1),
+            crate::errno::EFBIG,
+        );
     }
 
     #[test]

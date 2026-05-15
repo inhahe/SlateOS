@@ -1405,4 +1405,45 @@ mod tests {
         assert_eq!(CLD_STOPPED, CLD_TRAPPED + 1);
         assert_eq!(CLD_CONTINUED, CLD_STOPPED + 1);
     }
+
+    // -- raise (non-SIGABRT) --
+
+    #[test]
+    fn test_raise_non_sigabrt_returns_enosys() {
+        // raise(anything except SIGABRT) should return -1 with ENOSYS.
+        errno::set_errno(0);
+        assert_eq!(raise(SIGTERM), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_raise_sigint_returns_enosys() {
+        errno::set_errno(0);
+        assert_eq!(raise(SIGINT), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_raise_sighup_returns_enosys() {
+        errno::set_errno(0);
+        assert_eq!(raise(SIGHUP), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_raise_sigkill_returns_enosys() {
+        // SIGKILL without kernel support → ENOSYS.
+        errno::set_errno(0);
+        assert_eq!(raise(SIGKILL), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_raise_zero_returns_enosys() {
+        // Signal 0 is not SIGABRT → ENOSYS.
+        errno::set_errno(0);
+        assert_eq!(raise(0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
 }

@@ -767,4 +767,153 @@ mod tests {
         assert!(!wifsignaled(status));
         // WIFSTOPPED: low byte = 0xFF != 0x7F, so not stopped.
     }
+
+    // -- Process group / session state machine --
+    //
+    // These tests pre-set OUR_PGID/OUR_SID/FG_PGRP to non-zero values
+    // to skip the getpid() call in ensure_pg_init().  This lets us test
+    // the pure-logic state machine on the host without triggering actual
+    // kernel syscalls.
+
+    /// Reset the process group/session state to known values.
+    ///
+    /// Must be called before each process group test to avoid
+    /// inter-test interference.  Uses `pid=42` as a deterministic
+    /// "fake PID" so ensure_pg_init() skips the getpid() syscall.
+    fn reset_pg() {
+        unsafe {
+            core::ptr::addr_of_mut!(OUR_PGID).write(42);
+            core::ptr::addr_of_mut!(OUR_SID).write(42);
+            core::ptr::addr_of_mut!(FG_PGRP).write(42);
+        }
+    }
+
+    #[test]
+    fn test_getpgrp_returns_initialized_value() {
+        reset_pg();
+        assert_eq!(getpgrp(), 42);
+    }
+
+    #[test]
+    fn test_getpgrp_consistent() {
+        reset_pg();
+        let a = getpgrp();
+        let b = getpgrp();
+        assert_eq!(a, b, "consecutive getpgrp calls must return same value");
+    }
+
+    #[test]
+    fn test_getpgid_other_pid_returns_that_pid() {
+        // For PIDs that aren't ours, getpgid returns the pid itself
+        // (each process assumed to be its own group leader).
+        reset_pg();
+        // Use a PID that definitely isn't "ours" (42).
+        assert_eq!(getpgid(9999), 9999);
+        assert_eq!(getpgid(1), 1);
+    }
+
+    #[test]
+    fn test_getsid_other_pid_returns_that_pid() {
+        // Same behavior for session ID queries on foreign PIDs.
+        reset_pg();
+        assert_eq!(getsid(9999), 9999);
+        assert_eq!(getsid(1), 1);
+    }
+
+    // -- tcgetpgrp / tcsetpgrp (pure state, no getpid call) --
+
+    #[test]
+    fn test_tcgetpgrp_returns_fg_pgrp() {
+        reset_pg();
+        assert_eq!(tcgetpgrp(0), 42);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_round_trip() {
+        reset_pg();
+        assert_eq!(tcsetpgrp(0, 77), 0);
+        assert_eq!(tcgetpgrp(0), 77);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_different_values() {
+        reset_pg();
+        assert_eq!(tcsetpgrp(1, 100), 0);
+        assert_eq!(tcgetpgrp(1), 100);
+        assert_eq!(tcsetpgrp(2, 200), 0);
+        assert_eq!(tcgetpgrp(2), 200);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_rejects_zero() {
+        reset_pg();
+        assert_eq!(tcsetpgrp(0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Original value should be unchanged.
+        assert_eq!(tcgetpgrp(0), 42);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_rejects_negative() {
+        reset_pg();
+        assert_eq!(tcsetpgrp(0, -1), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(tcgetpgrp(0), 42);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_rejects_negative_large() {
+        reset_pg();
+        assert_eq!(tcsetpgrp(0, i32::MIN), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_accepts_one() {
+        reset_pg();
+        assert_eq!(tcsetpgrp(0, 1), 0);
+        assert_eq!(tcgetpgrp(0), 1);
+    }
+
+    // -- setpgid for other PIDs (silent success, no state change) --
+
+    #[test]
+    fn test_setpgid_other_pid_succeeds_silently() {
+        reset_pg();
+        // setpgid for a PID that isn't ours succeeds but is a no-op.
+        assert_eq!(setpgid(9999, 100), 0);
+        // Our PGID should be unchanged.
+        assert_eq!(getpgrp(), 42);
+    }
+
+    // -- waitid constants and branches --
+
+    #[test]
+    fn test_waitid_invalid_idtype() {
+        errno::set_errno(0);
+        assert_eq!(waitid(99, 0, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_waitid_pgid_returns_enosys() {
+        errno::set_errno(0);
+        assert_eq!(waitid(P_PGID, 0, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- setpgrp delegates to setpgid(0,0) --
+
+    #[test]
+    fn test_setpgrp_return_value() {
+        // setpgrp() returns 0 (same as setpgid(0,0)).
+        // Note: this calls getpid() but we pre-set state so
+        // ensure_pg_init() won't call getpid().  The setpgid
+        // body still calls getpid() to get `us`.  On the test
+        // target this will return some value; as long as it
+        // doesn't crash, the return value of setpgrp (0) is
+        // deterministic.
+        reset_pg();
+        assert_eq!(setpgrp(), 0);
+    }
 }

@@ -67,6 +67,8 @@
 //!   (pathname expansion), `wordexp`/`wordfree` (word expansion)
 //! - **Character Encoding**: `iconv_open`, `iconv`, `iconv_close`
 //!   (UTF-8/ASCII conversions)
+//! - **Binary Search Tree**: `tsearch`, `tfind`, `tdelete`, `twalk`,
+//!   `tdestroy` (POSIX `<search.h>` BST operations)
 //! - **Resource Limits**: `getrlimit`, `setrlimit`, `getrusage`,
 //!   `prlimit`/`prlimit64`
 //! - **Timers**: `timer_create`, `timer_settime`, `timer_gettime`,
@@ -230,6 +232,7 @@ pub mod pthread;
 pub mod regex;
 pub mod scanf;
 pub mod sched;
+pub mod search;
 pub mod semaphore;
 pub mod process;
 pub mod pwd;

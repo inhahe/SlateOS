@@ -381,7 +381,8 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 8: Stats accessible ---
     {
         let s = stats();
-        assert!(s.total_scans >= 0 || s.total_scans == 0, "stats valid");
+        // Verify counter is accessible and u64-typed.
+        let _ = s.total_scans;
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[ndisc]   test 8 (stats) PASSED");

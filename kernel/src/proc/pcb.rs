@@ -713,7 +713,6 @@ pub fn is_ready(pid: ProcessId) -> KernelResult<bool> {
 /// - [`KernelError::BadAlignment`] if start/end are not frame-aligned.
 /// - [`KernelError::AlreadyExists`] if the range overlaps an existing VMA.
 pub fn add_vma(pid: ProcessId, vma: Vma) -> KernelResult<()> {
-    use crate::mm::frame::FRAME_SIZE;
     use crate::mm::page_table::VirtAddr;
 
     let mut table = PROCESS_TABLE.lock();

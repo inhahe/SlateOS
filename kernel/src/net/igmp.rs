@@ -43,7 +43,7 @@ use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
-use crate::error::{KernelError, KernelResult};
+use crate::error::KernelResult;
 use super::interface::Ipv4Addr;
 use super::ipv4;
 
@@ -615,8 +615,8 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 6: Stats accessible ---
     {
         let s = stats();
-        assert!(s.reports_sent >= 0 || s.reports_sent == 0, "reports_sent valid");
-        assert!(s.leaves_sent >= 0 || s.leaves_sent == 0, "leaves_sent valid");
+        let _ = s.reports_sent; // Verify counter is accessible and u64-typed.
+        let _ = s.leaves_sent;
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[igmp]   test 6 (stats accessible) PASSED");

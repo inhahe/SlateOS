@@ -213,12 +213,12 @@ pub fn tcp_server_test(port: u16, max_polls: u32) -> KernelResult<ThroughputResu
     let handle = match conn_handle {
         Some(h) => h,
         None => {
-            super::tcp::close_listener(listener);
+            let _ = super::tcp::close_listener(listener);
             return Err(KernelError::TimedOut);
         }
     };
 
-    super::tcp::close_listener(listener);
+    let _ = super::tcp::close_listener(listener);
 
     // Receive data and measure.
     let start_ns = crate::hrtimer::now_ns();

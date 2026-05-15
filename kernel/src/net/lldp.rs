@@ -41,7 +41,7 @@ use alloc::format;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
-use crate::error::{KernelError, KernelResult};
+use crate::error::KernelResult;
 use super::interface::Ipv4Addr;
 use super::ethernet;
 use crate::virtio::net::MacAddress;

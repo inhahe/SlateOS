@@ -1379,7 +1379,7 @@ fn bench_ipc_futex() {
     let result2 = run("futex_wait_mismatch", 2000, || {
         // Value is 42 but expected=0 → immediate return (Ok(false)).
         let r = futex::futex_wait(futex_addr, 0);
-        core::hint::black_box(r);
+        let _ = core::hint::black_box(r);
     });
 
     // Target: < 500 ns.  Compare + return, no blocking.
@@ -1494,7 +1494,7 @@ fn bench_ipc_completion_port() {
 
     let result = run("cp_try_wait_empty", 2000, || {
         let events = completion::try_wait(cp);
-        core::hint::black_box(events);
+        let _ = core::hint::black_box(events);
     });
 
     // Target: < 500 ns.  Lock acquire, check empty queue, return.

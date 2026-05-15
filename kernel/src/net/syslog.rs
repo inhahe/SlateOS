@@ -47,7 +47,7 @@ use alloc::format;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU16, Ordering};
 use spin::Mutex;
 
-use crate::error::{KernelError, KernelResult};
+use crate::error::KernelResult;
 use super::interface::Ipv4Addr;
 
 // ---------------------------------------------------------------------------

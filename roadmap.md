@@ -372,7 +372,7 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] Kshell `usb` command (status/ports/devices/rescan)
   - [x] Graceful fallback when no controller present
   - [x] Verified with QEMU qemu-xhci + usb-kbd + usb-mouse (2 devices enumerated)
-- [-] Network (Intel e1000/e1000e for VMs, basic realtek for real hardware)
+- [x] Network (Intel e1000/e1000e for VMs, basic realtek for real hardware)
   - [x] Intel e1000 driver: PCI detection (82540EM/82574L/I217/I211), BAR0 MMIO with explicit page table mapping, MAC from RAL0/RAH0 + EEPROM fallback, TX/RX descriptor rings (16 RX / 32 TX), link auto-negotiation, polling send/recv
   - [x] Unified network driver abstraction: send_frame()/recv_frame() try virtio-net then e1000 then rtl8139
   - [x] DHCP works end-to-end over e1000 (verified: QEMU 10.0.2.15)
@@ -1337,7 +1337,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [ ] POSIX signals → translate to native IPC messages
 
 ### 2.6 Init / service manager
-- [-] PID 1 init process
+- [x] PID 1 init process
   - [x] Minimal userspace init binary (ring 3, SYSCALL-based I/O, embedded in kernel ELF)
   - [x] Interactive shell: console read/write, echo command, help, exit
   - [x] Filesystem shell commands: ls, cat, write, stat, mkdir, rmdir, rm

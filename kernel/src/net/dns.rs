@@ -50,6 +50,14 @@
 //! the associated hostname.  PTR results are not cached (reverse
 //! lookups are comparatively rare).
 //!
+//! ## Transport
+//!
+//! DNS queries are sent over IPv4 UDP by default (using the DHCP-provided
+//! DNS server).  When no IPv4 DNS server is configured, the resolver falls
+//! back to IPv6 UDP transport using the DNS server address from Router
+//! Advertisement RDNSS options (RFC 8106).  This enables name resolution
+//! in IPv6-only networks.
+//!
 //! ## Limitations
 //!
 //! - CNAME chasing limited to 8 hops.
@@ -1070,59 +1078,70 @@ const MAX_DNS_ATTEMPTS: usize = 3;
 /// so these correspond to roughly 1s, 2s, 4s timeouts.
 const DNS_ATTEMPT_POLLS: [usize; MAX_DNS_ATTEMPTS] = [1000, 2000, 4000];
 
-/// Resolve a single name (with retry on timeout).
+// ---------------------------------------------------------------------------
+// Transport-agnostic DNS query helper
+// ---------------------------------------------------------------------------
+
+/// DNS server address — either IPv4 (from DHCP) or IPv6 (from SLAAC RDNSS).
 ///
-/// Sends a DNS A record query and waits for a response.  On timeout,
-/// retransmits the query with an increasing wait window (1s → 2s → 4s).
-/// Returns `Ok(ip)` on success, `Err(NotFound)` if no A record was
-/// found (check `cname_out` for CNAME follow-up), or another error.
+/// Allows DNS queries to be sent over either IPv4 or IPv6 transport
+/// depending on the available network configuration.
+#[derive(Debug, Clone, Copy)]
+enum DnsServer {
+    /// IPv4 DNS server (typically from DHCP).
+    V4(Ipv4Addr),
+    /// IPv6 DNS server (typically from Router Advertisement RDNSS option).
+    V6(Ipv6Addr),
+}
+
+impl core::fmt::Display for DnsServer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DnsServer::V4(ip) => write!(f, "{}", ip),
+            DnsServer::V6(ip) => write!(f, "{}", ip),
+        }
+    }
+}
+
+/// Pick the best available DNS server.
+///
+/// Prefers IPv4 (from DHCP) since it's more widely deployed.  Falls back
+/// to IPv6 (from SLAAC RDNSS) when no IPv4 DNS server is configured.
+fn pick_dns_server() -> KernelResult<DnsServer> {
+    let v4 = interface::info().dns;
+    if !v4.is_unspecified() {
+        return Ok(DnsServer::V4(v4));
+    }
+    if let Some(v6) = super::icmpv6::slaac_rdnss() {
+        return Ok(DnsServer::V6(v6));
+    }
+    Err(KernelError::NotSupported)
+}
+
+/// Send a DNS query and wait for a response with retry/backoff.
+///
+/// Abstracts the transport (IPv4 or IPv6 UDP) based on the DNS server
+/// address family.  The DNS query format is identical regardless of
+/// transport — only the UDP send/receive changes.
+///
+/// Returns the raw DNS response payload on success, or `TimedOut` after
+/// exhausting all retry attempts.
 #[allow(clippy::arithmetic_side_effects)]
-fn resolve_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<Ipv4Addr> {
-    let now_ns = crate::hrtimer::now_ns();
-
-    // Check cache first (positive and negative entries).
-    match DNS_CACHE.lock().lookup(name, now_ns) {
-        Some(Some(ip)) => {
-            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-            crate::serial_println!("[dns] Cache hit: '{}' → {}", name, ip);
-            return Ok(ip);
-        }
-        Some(None) => {
-            // Negative cache hit — name was recently queried and not found.
-            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
-            crate::serial_println!("[dns] Negative cache hit: '{}'", name);
-            return Err(KernelError::NotFound);
-        }
-        None => {
-            CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    let dns_server = interface::info().dns;
-    if dns_server.is_unspecified() {
-        crate::serial_println!("[dns] No DNS server configured");
-        return Err(KernelError::NotSupported);
-    }
-
-    crate::serial_println!("[dns] Resolving '{}' via {}...", name, dns_server);
-
-    // Clear any previous CNAME target.
-    *cname_out = None;
-
-    // Use a unique transaction ID and ephemeral port per query.
-    let query_id = next_query_id();
-    let local_port = next_dns_port();
-
-    // Build the query once — retransmits send the same bytes.
-    let query = build_query(name, query_id);
-
-    // Bind a UDP socket to receive the reply.
+fn dns_query_raw(
+    server: &DnsServer,
+    local_port: u16,
+    query: &[u8],
+    name: &str,
+) -> KernelResult<Vec<u8>> {
     let sock = super::udp::bind(local_port)?;
 
-    // Retry loop with increasing timeouts.
     for attempt in 0..MAX_DNS_ATTEMPTS {
-        // Send (or re-send) the query.
-        if let Err(e) = super::udp::send(local_port, dns_server, DNS_PORT, &query) {
+        // Send (or re-send) the query via the appropriate transport.
+        let send_result = match server {
+            DnsServer::V4(ip) => super::udp::send(local_port, *ip, DNS_PORT, query),
+            DnsServer::V6(ip) => super::udp::send_v6(local_port, *ip, DNS_PORT, query),
+        };
+        if let Err(e) = send_result {
             super::udp::close(sock);
             return Err(e);
         }
@@ -1137,45 +1156,34 @@ fn resolve_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<Ip
 
         let polls = DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000);
 
-        // Poll for response.
         for _ in 0..polls {
             super::poll();
 
-            if let Some(dgram) = super::udp::recv(sock) {
-                // Validate source: must be from our DNS server on port 53.
-                if dgram.src_ip != dns_server || dgram.src_port != DNS_PORT {
-                    continue;
-                }
-                super::udp::close(sock);
-                match parse_response(&dgram.data, query_id, cname_out) {
-                    Ok(result) => {
-                        crate::serial_println!(
-                            "[dns] Resolved '{}' → {} (TTL {}s)",
-                            name, result.ip, result.ttl_secs
-                        );
-                        let cache_now = crate::hrtimer::now_ns();
-                        DNS_CACHE.lock().insert(name, result.ip, result.ttl_secs, cache_now);
-                        return Ok(result.ip);
-                    }
-                    Err(KernelError::NotFound) => {
-                        // CNAME-only or NXDOMAIN — don't retry, it's a
-                        // definitive answer from the server.
-                        if cname_out.is_none() {
-                            let cache_now = crate::hrtimer::now_ns();
-                            DNS_CACHE.lock().insert(
-                                name,
-                                Ipv4Addr::UNSPECIFIED,
-                                NEGATIVE_CACHE_TTL,
-                                cache_now,
-                            );
+            // Check the appropriate receive queue based on server type.
+            let response = match server {
+                DnsServer::V4(ip) => {
+                    super::udp::recv(sock).and_then(|dgram| {
+                        if dgram.src_ip == *ip && dgram.src_port == DNS_PORT {
+                            Some(dgram.data)
+                        } else {
+                            None
                         }
-                        return Err(KernelError::NotFound);
-                    }
-                    Err(e) => {
-                        crate::serial_println!("[dns] Parse error: {:?}", e);
-                        return Err(e);
-                    }
+                    })
                 }
+                DnsServer::V6(ip) => {
+                    super::udp::recv_v6(sock).and_then(|dgram| {
+                        if dgram.src_ip == *ip && dgram.src_port == DNS_PORT {
+                            Some(dgram.data)
+                        } else {
+                            None
+                        }
+                    })
+                }
+            };
+
+            if let Some(data) = response {
+                super::udp::close(sock);
+                return Ok(data);
             }
 
             // Brief spin delay (~1ms per iteration).
@@ -1183,16 +1191,82 @@ fn resolve_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<Ip
                 core::hint::spin_loop();
             }
         }
-
-        // This attempt timed out — retry (unless last attempt).
     }
 
     super::udp::close(sock);
     crate::serial_println!(
-        "[dns] Resolution timed out for '{}' after {} attempts",
-        name, MAX_DNS_ATTEMPTS
+        "[dns] Query timed out for '{}' after {} attempts via {}",
+        name, MAX_DNS_ATTEMPTS, server
     );
     Err(KernelError::TimedOut)
+}
+
+/// Resolve a single name (with retry on timeout).
+///
+/// Sends a DNS A record query and waits for a response.  On timeout,
+/// retransmits the query with an increasing wait window (1s → 2s → 4s).
+/// Uses [`pick_dns_server`] to select IPv4 or IPv6 DNS transport.
+/// Returns `Ok(ip)` on success, `Err(NotFound)` if no A record was
+/// found (check `cname_out` for CNAME follow-up), or another error.
+#[allow(clippy::arithmetic_side_effects)]
+fn resolve_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<Ipv4Addr> {
+    let now_ns = crate::hrtimer::now_ns();
+
+    // Check cache first (positive and negative entries).
+    match DNS_CACHE.lock().lookup(name, now_ns) {
+        Some(Some(ip)) => {
+            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            crate::serial_println!("[dns] Cache hit: '{}' → {}", name, ip);
+            return Ok(ip);
+        }
+        Some(None) => {
+            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            crate::serial_println!("[dns] Negative cache hit: '{}'", name);
+            return Err(KernelError::NotFound);
+        }
+        None => {
+            CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let server = pick_dns_server()?;
+    crate::serial_println!("[dns] Resolving '{}' via {}...", name, server);
+
+    *cname_out = None;
+
+    let query_id = next_query_id();
+    let local_port = next_dns_port();
+    let query = build_query(name, query_id);
+
+    let response_data = dns_query_raw(&server, local_port, &query, name)?;
+
+    match parse_response(&response_data, query_id, cname_out) {
+        Ok(result) => {
+            crate::serial_println!(
+                "[dns] Resolved '{}' → {} (TTL {}s)",
+                name, result.ip, result.ttl_secs
+            );
+            let cache_now = crate::hrtimer::now_ns();
+            DNS_CACHE.lock().insert(name, result.ip, result.ttl_secs, cache_now);
+            Ok(result.ip)
+        }
+        Err(KernelError::NotFound) => {
+            if cname_out.is_none() {
+                let cache_now = crate::hrtimer::now_ns();
+                DNS_CACHE.lock().insert(
+                    name,
+                    Ipv4Addr::UNSPECIFIED,
+                    NEGATIVE_CACHE_TTL,
+                    cache_now,
+                );
+            }
+            Err(KernelError::NotFound)
+        }
+        Err(e) => {
+            crate::serial_println!("[dns] Parse error: {:?}", e);
+            Err(e)
+        }
+    }
 }
 
 /// Flush the entire DNS cache (both A and AAAA).
@@ -1228,85 +1302,34 @@ pub fn resolve_str(name: &str) -> KernelResult<String> {
 ///
 /// Results are not cached (PTR records change less frequently and
 /// reverse lookups are comparatively rare).
+///
+/// Uses [`pick_dns_server`] for transport selection (IPv4 or IPv6).
 #[allow(clippy::arithmetic_side_effects)]
 pub fn reverse_resolve(ip: Ipv4Addr) -> KernelResult<String> {
-    let dns_server = interface::info().dns;
-    if dns_server.is_unspecified() {
-        crate::serial_println!("[dns] No DNS server configured");
-        return Err(KernelError::NotSupported);
-    }
-
-    crate::serial_println!("[dns] Reverse resolving {}...", ip);
+    let server = pick_dns_server()?;
+    crate::serial_println!("[dns] Reverse resolving {} via {}...", ip, server);
 
     let query_id = next_query_id();
     let local_port = next_dns_port();
     let query = build_ptr_query(ip, query_id);
+    let arpa_name = alloc::format!("{}", ip); // For timeout logging.
 
-    // Bind a UDP socket to receive the reply.
-    let sock = super::udp::bind(local_port)?;
+    let response_data = dns_query_raw(&server, local_port, &query, &arpa_name)?;
 
-    // Retry loop with increasing timeouts (same as forward resolution).
-    for attempt in 0..MAX_DNS_ATTEMPTS {
-        if let Err(e) = super::udp::send(local_port, dns_server, DNS_PORT, &query) {
-            super::udp::close(sock);
-            return Err(e);
+    match parse_ptr_response(&response_data, query_id) {
+        Ok(name) => {
+            crate::serial_println!("[dns] Reverse resolved {} → '{}'", ip, name);
+            Ok(name)
         }
-
-        if attempt > 0 {
-            crate::serial_println!(
-                "[dns] PTR retry {} for {} (timeout {}ms)",
-                attempt, ip,
-                DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000)
-            );
+        Err(KernelError::NotFound) => {
+            crate::serial_println!("[dns] No PTR record for {}", ip);
+            Err(KernelError::NotFound)
         }
-
-        let polls = DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000);
-
-        for _ in 0..polls {
-            super::poll();
-
-            if let Some(dgram) = super::udp::recv(sock) {
-                // Validate source: must be from our DNS server on port 53.
-                if dgram.src_ip != dns_server || dgram.src_port != DNS_PORT {
-                    continue;
-                }
-                super::udp::close(sock);
-                match parse_ptr_response(&dgram.data, query_id) {
-                    Ok(name) => {
-                        crate::serial_println!(
-                            "[dns] Reverse resolved {} → '{}'",
-                            ip, name
-                        );
-                        return Ok(name);
-                    }
-                    Err(KernelError::NotFound) => {
-                        // Definitive answer — no PTR record.
-                        crate::serial_println!(
-                            "[dns] No PTR record for {}",
-                            ip
-                        );
-                        return Err(KernelError::NotFound);
-                    }
-                    Err(e) => {
-                        crate::serial_println!("[dns] PTR parse error: {:?}", e);
-                        return Err(e);
-                    }
-                }
-            }
-
-            // Brief spin delay (~1ms per iteration).
-            for _ in 0..10_000 {
-                core::hint::spin_loop();
-            }
+        Err(e) => {
+            crate::serial_println!("[dns] PTR parse error: {:?}", e);
+            Err(e)
         }
     }
-
-    super::udp::close(sock);
-    crate::serial_println!(
-        "[dns] PTR resolution timed out for {} after {} attempts",
-        ip, MAX_DNS_ATTEMPTS
-    );
-    Err(KernelError::TimedOut)
 }
 
 // ---------------------------------------------------------------------------
@@ -1497,6 +1520,8 @@ pub fn resolve6(name: &str) -> KernelResult<Ipv6Addr> {
 }
 
 /// Resolve a single AAAA name (with retry on timeout).
+///
+/// Uses [`pick_dns_server`] for transport selection (IPv4 or IPv6).
 #[allow(clippy::arithmetic_side_effects)]
 fn resolve6_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<Ipv6Addr> {
     let now_ns = crate::hrtimer::now_ns();
@@ -1518,12 +1543,8 @@ fn resolve6_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<I
         }
     }
 
-    let dns_server = interface::info().dns;
-    if dns_server.is_unspecified() {
-        return Err(KernelError::NotSupported);
-    }
-
-    crate::serial_println!("[dns] AAAA resolving '{}' via {}...", name, dns_server);
+    let server = pick_dns_server()?;
+    crate::serial_println!("[dns] AAAA resolving '{}' via {}...", name, server);
 
     *cname_out = None;
 
@@ -1531,73 +1552,35 @@ fn resolve6_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<I
     let local_port = next_dns_port();
     let query = build_aaaa_query(name, query_id);
 
-    let sock = super::udp::bind(local_port)?;
+    let response_data = dns_query_raw(&server, local_port, &query, name)?;
 
-    for attempt in 0..MAX_DNS_ATTEMPTS {
-        if let Err(e) = super::udp::send(local_port, dns_server, DNS_PORT, &query) {
-            super::udp::close(sock);
-            return Err(e);
-        }
-
-        if attempt > 0 {
+    match parse_aaaa_response(&response_data, query_id, cname_out) {
+        Ok(result) => {
             crate::serial_println!(
-                "[dns] AAAA retry {} for '{}' (timeout {}ms)",
-                attempt, name,
-                DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000)
+                "[dns] AAAA resolved '{}' → {} (TTL {}s)",
+                name, result.ip, result.ttl_secs
             );
+            let cache_now = crate::hrtimer::now_ns();
+            AAAA_CACHE.lock().insert(name, result.ip, result.ttl_secs, cache_now);
+            Ok(result.ip)
         }
-
-        let polls = DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000);
-
-        for _ in 0..polls {
-            super::poll();
-
-            if let Some(dgram) = super::udp::recv(sock) {
-                if dgram.src_ip != dns_server || dgram.src_port != DNS_PORT {
-                    continue;
-                }
-                super::udp::close(sock);
-                match parse_aaaa_response(&dgram.data, query_id, cname_out) {
-                    Ok(result) => {
-                        crate::serial_println!(
-                            "[dns] AAAA resolved '{}' → {} (TTL {}s)",
-                            name, result.ip, result.ttl_secs
-                        );
-                        let cache_now = crate::hrtimer::now_ns();
-                        AAAA_CACHE.lock().insert(name, result.ip, result.ttl_secs, cache_now);
-                        return Ok(result.ip);
-                    }
-                    Err(KernelError::NotFound) => {
-                        if cname_out.is_none() {
-                            let cache_now = crate::hrtimer::now_ns();
-                            AAAA_CACHE.lock().insert(
-                                name,
-                                Ipv6Addr::UNSPECIFIED,
-                                NEGATIVE_CACHE_TTL,
-                                cache_now,
-                            );
-                        }
-                        return Err(KernelError::NotFound);
-                    }
-                    Err(e) => {
-                        crate::serial_println!("[dns] AAAA parse error: {:?}", e);
-                        return Err(e);
-                    }
-                }
+        Err(KernelError::NotFound) => {
+            if cname_out.is_none() {
+                let cache_now = crate::hrtimer::now_ns();
+                AAAA_CACHE.lock().insert(
+                    name,
+                    Ipv6Addr::UNSPECIFIED,
+                    NEGATIVE_CACHE_TTL,
+                    cache_now,
+                );
             }
-
-            for _ in 0..10_000 {
-                core::hint::spin_loop();
-            }
+            Err(KernelError::NotFound)
+        }
+        Err(e) => {
+            crate::serial_println!("[dns] AAAA parse error: {:?}", e);
+            Err(e)
         }
     }
-
-    super::udp::close(sock);
-    crate::serial_println!(
-        "[dns] AAAA resolution timed out for '{}' after {} attempts",
-        name, MAX_DNS_ATTEMPTS
-    );
-    Err(KernelError::TimedOut)
 }
 
 /// Resolve a domain name to an IPv6 address and return it as a string.
@@ -1614,79 +1597,35 @@ pub fn resolve6_str(name: &str) -> KernelResult<String> {
 /// `1.0.0.0.…0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa`.
 ///
 /// Results are not cached (reverse lookups are rare).
+///
+/// Uses [`pick_dns_server`] for transport selection (IPv4 or IPv6).
 #[allow(dead_code)] // Public API.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn reverse_resolve6(ip: &Ipv6Addr) -> KernelResult<String> {
-    let dns_server = interface::info().dns;
-    if dns_server.is_unspecified() {
-        return Err(KernelError::NotSupported);
-    }
-
-    crate::serial_println!("[dns] Reverse resolving {} (AAAA)...", ip);
+    let server = pick_dns_server()?;
+    crate::serial_println!("[dns] Reverse resolving {} via {}...", ip, server);
 
     let query_id = next_query_id();
     let local_port = next_dns_port();
     let query = build_ptr6_query(ip, query_id);
+    let name_for_log = alloc::format!("{}", ip);
 
-    let sock = super::udp::bind(local_port)?;
+    let response_data = dns_query_raw(&server, local_port, &query, &name_for_log)?;
 
-    for attempt in 0..MAX_DNS_ATTEMPTS {
-        if let Err(e) = super::udp::send(local_port, dns_server, DNS_PORT, &query) {
-            super::udp::close(sock);
-            return Err(e);
+    match parse_ptr_response(&response_data, query_id) {
+        Ok(name) => {
+            crate::serial_println!("[dns] PTR6 resolved {} → '{}'", ip, name);
+            Ok(name)
         }
-
-        if attempt > 0 {
-            crate::serial_println!(
-                "[dns] PTR6 retry {} for {} (timeout {}ms)",
-                attempt, ip,
-                DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000)
-            );
+        Err(KernelError::NotFound) => {
+            crate::serial_println!("[dns] No PTR record for {}", ip);
+            Err(KernelError::NotFound)
         }
-
-        let polls = DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000);
-
-        for _ in 0..polls {
-            super::poll();
-
-            if let Some(dgram) = super::udp::recv(sock) {
-                if dgram.src_ip != dns_server || dgram.src_port != DNS_PORT {
-                    continue;
-                }
-                super::udp::close(sock);
-                match parse_ptr_response(&dgram.data, query_id) {
-                    Ok(name) => {
-                        crate::serial_println!(
-                            "[dns] PTR6 resolved {} → '{}'",
-                            ip, name
-                        );
-                        return Ok(name);
-                    }
-                    Err(KernelError::NotFound) => {
-                        crate::serial_println!(
-                            "[dns] No PTR record for {}", ip
-                        );
-                        return Err(KernelError::NotFound);
-                    }
-                    Err(e) => {
-                        crate::serial_println!("[dns] PTR6 parse error: {:?}", e);
-                        return Err(e);
-                    }
-                }
-            }
-
-            for _ in 0..10_000 {
-                core::hint::spin_loop();
-            }
+        Err(e) => {
+            crate::serial_println!("[dns] PTR6 parse error: {:?}", e);
+            Err(e)
         }
     }
-
-    super::udp::close(sock);
-    crate::serial_println!(
-        "[dns] PTR6 resolution timed out for {} after {} attempts",
-        ip, MAX_DNS_ATTEMPTS
-    );
-    Err(KernelError::TimedOut)
 }
 
 /// Return the number of entries in the AAAA cache.

@@ -1116,9 +1116,12 @@ pub fn set_initial_args(
     argv: Vec<Vec<u8>>,
     envp: Vec<Vec<u8>>,
 ) -> KernelResult<()> {
-    // Check total size.
-    let total: usize = argv.iter().map(|a| a.len()).sum::<usize>()
-        + envp.iter().map(|e| e.len()).sum::<usize>();
+    // Check total size including null terminators.  When the child
+    // retrieves these via SYS_PROCESS_GET_ARGS, each string gets a
+    // null terminator appended (len + 1 per entry).  We must account
+    // for that here so the size check is consistent.
+    let total: usize = argv.iter().map(|a| a.len().saturating_add(1)).sum::<usize>()
+        + envp.iter().map(|e| e.len().saturating_add(1)).sum::<usize>();
     if total > MAX_ARGS_BYTES {
         return Err(KernelError::InvalidArgument);
     }

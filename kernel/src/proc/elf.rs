@@ -376,18 +376,17 @@ impl<'a> ElfFile<'a> {
                 return Err(KernelError::InvalidExecutable);
             }
 
-            // For static executables, vaddr must be in user space.
-            // PIE executables (ET_DYN) may have vaddr=0 (relocated at load
-            // time), so we skip this check for them.
-            if self.header.e_type == ET_EXEC {
-                let seg_end = phdr
-                    .p_vaddr
-                    .checked_add(phdr.p_memsz)
-                    .ok_or(KernelError::InvalidExecutable)?;
+            // Validate that vaddr + memsz doesn't overflow and fits
+            // in user address space.  This applies to both ET_EXEC and
+            // ET_DYN — a PIE binary may have vaddr=0, but the segment
+            // still must not wrap around or exceed the user space limit.
+            let seg_end = phdr
+                .p_vaddr
+                .checked_add(phdr.p_memsz)
+                .ok_or(KernelError::InvalidExecutable)?;
 
-                if seg_end > USER_SPACE_END {
-                    return Err(KernelError::InvalidExecutable);
-                }
+            if seg_end > USER_SPACE_END {
+                return Err(KernelError::InvalidExecutable);
             }
         }
 
@@ -620,11 +619,11 @@ fn copy_segment_data_to_frame(
     frame_hhdm_virt: u64,
 ) {
     let frame_size = FRAME_SIZE as u64;
-    let frame_end = frame_vaddr + frame_size;
+    let frame_end = frame_vaddr.saturating_add(frame_size);
 
     // The file-backed region of the segment.
     let file_start = seg.vaddr;
-    let file_end = seg.vaddr + seg.file_size;
+    let file_end = seg.vaddr.saturating_add(seg.file_size);
 
     // Overlap between this frame and the file-backed region.
     let overlap_start = file_start.max(frame_vaddr);
@@ -644,10 +643,10 @@ fn copy_segment_data_to_frame(
 
     // Get source data from the ELF file.
     let src_start = file_offset as usize;
-    let src_end = src_start + byte_count;
+    let src_end = src_start.saturating_add(byte_count);
 
     // Bounds check on source data.
-    if src_end > elf.data.len() || frame_offset + byte_count > FRAME_SIZE {
+    if src_end > elf.data.len() || frame_offset.saturating_add(byte_count) > FRAME_SIZE {
         return; // Silently skip — validation already caught bad segments.
     }
 

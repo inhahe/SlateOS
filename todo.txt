@@ -229,6 +229,15 @@ Remaining net improvements (diminishing returns):
 
 ## Cross-Zone Bug Reports
 
+- Boot hangs after mm::integ_test test 9 ("Cgroup per-frame tracking: OK").
+  The next test (test 10: cgroup charge/uncharge, frame.rs ~line 2740)
+  calls cgroup::create() + set_mem_limit() which sets CGROUP_MEM_ACTIVE=true.
+  QEMU TCG accumulates CPU time but no serial output appears after test 9.
+  Possible causes: (a) deadlock involving cgroup TABLE spin::Mutex held across
+  timer interrupt, (b) QEMU serial file output buffering, (c) extremely slow
+  cgroup operations under TCG.  Zone: kernel-core.  Boot gets to 2444 lines
+  of serial output (~968 OK marks) before hanging.
+
 - (FIXED) rip_sample.rs:373 assertion failure (`left: 6, right: 5`) — panics
   during rip_sample self-test on SMP.  APs contribute timer samples between
   baseline and final check.  Fixed: changed exact assert_eq to >= checks.

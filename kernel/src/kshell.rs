@@ -3575,7 +3575,7 @@ const COMMANDS: &[&str] = &[
     "id", "ifconfig", "installer", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "logpersist", "lpersist", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
-    "move", "net", "nl", "notifcenter", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "printenv",
+    "move", "net", "nl", "notifcenter", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "ping6", "printenv",
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "usbpolicy", "usbpol", "applaunch", "alaunch", "sysprofiler", "sprof", "clipsync", "clsync",
@@ -5421,6 +5421,7 @@ fn dispatch(line: &str) {
         "desktop" | "startx" => cmd_desktop(),
         "dhcp" => cmd_dhcp(),
         "ping" => cmd_ping(args),
+        "ping6" => cmd_ping6(args),
         "nslookup" => cmd_dns(args),
         "wget" | "http" => cmd_wget(args),
         "fw" => cmd_firewall(args),
@@ -63631,6 +63632,152 @@ fn cmd_ping(args: &str) {
     );
 }
 
+/// `ping6` — send ICMPv6 Echo Requests to an IPv6 address.
+fn cmd_ping6(args: &str) {
+    if args.is_empty() {
+        crate::console_println!("Usage: ping6 <ipv6-address>");
+        crate::console_println!("  e.g., ping6 fe80::1");
+        crate::console_println!("  e.g., ping6 ff02::1  (all nodes link-local)");
+        return;
+    }
+
+    let dst = match parse_ipv6(args) {
+        Some(addr) => addr,
+        None => {
+            crate::console_println!("Invalid IPv6 address: {}", args);
+            return;
+        }
+    };
+
+    crate::console_println!("PING6 {} ...", dst);
+
+    let mut sent = 0u32;
+    let mut received = 0u32;
+    for i in 0..4u32 {
+        match crate::net::icmpv6::ping6(dst) {
+            Ok(seq) => {
+                sent = sent.saturating_add(1);
+                match crate::net::icmpv6::wait_reply_rtt(seq, 2000) {
+                    Some(rtt_ns) => {
+                        received = received.saturating_add(1);
+                        #[allow(clippy::arithmetic_side_effects)]
+                        let rtt_us = rtt_ns / 1000;
+                        if rtt_us >= 1000 {
+                            #[allow(clippy::arithmetic_side_effects)]
+                            let rtt_ms = rtt_us / 1000;
+                            crate::console_println!(
+                                "Reply from {}: seq={} rtt={} ms",
+                                dst, seq, rtt_ms
+                            );
+                        } else {
+                            crate::console_println!(
+                                "Reply from {}: seq={} rtt={} us",
+                                dst, seq, rtt_us
+                            );
+                        }
+                    }
+                    None => {
+                        crate::console_println!("Request timed out: seq={}", seq);
+                    }
+                }
+            }
+            Err(e) => {
+                crate::console_println!("ping6: send failed: {:?}", e);
+            }
+        }
+
+        // Brief delay between pings (if not the last one).
+        if i < 3 {
+            for _ in 0..500_000 {
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    crate::console_println!(
+        "--- {} ping6 statistics: {} sent, {} received ---",
+        dst, sent, received
+    );
+}
+
+/// Parse an IPv6 address from text.
+///
+/// Supports compressed notation (::), full notation, and mixed forms.
+/// Returns None if the string is not a valid IPv6 address.
+#[allow(clippy::arithmetic_side_effects)]
+fn parse_ipv6(s: &str) -> Option<crate::net::ipv6::Ipv6Addr> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Split on "::" to handle compressed notation.
+    let (left, right) = if let Some(pos) = s.find("::") {
+        (&s[..pos], &s[pos + 2..])
+    } else {
+        (s, "")
+    };
+
+    // Parse groups from left side.
+    let left_groups: alloc::vec::Vec<u16> = if left.is_empty() {
+        alloc::vec::Vec::new()
+    } else {
+        let mut v = alloc::vec::Vec::new();
+        for part in left.split(':') {
+            let val = u16::from_str_radix(part, 16).ok()?;
+            v.push(val);
+        }
+        v
+    };
+
+    // Parse groups from right side (after "::").
+    let has_double_colon = s.contains("::");
+    let right_groups: alloc::vec::Vec<u16> = if !has_double_colon || right.is_empty() {
+        alloc::vec::Vec::new()
+    } else {
+        let mut v = alloc::vec::Vec::new();
+        for part in right.split(':') {
+            let val = u16::from_str_radix(part, 16).ok()?;
+            v.push(val);
+        }
+        v
+    };
+
+    let total = left_groups.len() + right_groups.len();
+    if !has_double_colon && total != 8 {
+        return None; // Must have exactly 8 groups without "::".
+    }
+    if total > 8 {
+        return None; // Too many groups.
+    }
+
+    // Build 8 groups: left + zeros + right.
+    let zeros_needed = 8 - total;
+    let mut groups = [0u16; 8];
+    let mut idx = 0;
+    for &g in &left_groups {
+        if idx >= 8 { return None; }
+        groups[idx] = g;
+        idx += 1;
+    }
+    idx += zeros_needed;
+    for &g in &right_groups {
+        if idx >= 8 { return None; }
+        groups[idx] = g;
+        idx += 1;
+    }
+
+    // Convert to bytes.
+    let mut bytes = [0u8; 16];
+    for i in 0..8 {
+        let be = groups[i].to_be_bytes();
+        bytes[i * 2] = be[0];
+        bytes[i * 2 + 1] = be[1];
+    }
+
+    Some(crate::net::ipv6::Ipv6Addr(bytes))
+}
+
 /// `firewall` — manage packet filtering rules.
 ///
 /// Usage:
@@ -67828,7 +67975,7 @@ fn is_builtin(name: &str) -> bool {
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
-        | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "nslookup"
+        | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "ping6" | "nslookup"
         | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"

@@ -43,6 +43,9 @@ pub const SYS_PROCESS_TRY_WAIT: u64 = 507;
 pub const SYS_THREAD_CREATE: u64 = 510;
 pub const SYS_THREAD_EXIT: u64 = 511;
 pub const SYS_THREAD_JOIN: u64 = 512;
+pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
+pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
+pub const SYS_PROCESS_GET_ARGS: u64 = 519;
 
 // Filesystem
 pub const SYS_FS_READ_FILE: u64 = 600;
@@ -305,6 +308,8 @@ mod tests {
             SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT, SYS_PROCESS_EXEC,
             SYS_PROCESS_TRY_WAIT,
             SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
+            SYS_PROCESS_SPAWN_EX, SYS_PROCESS_GET_INITIAL_FDS,
+            SYS_PROCESS_GET_ARGS,
             SYS_FS_READ_FILE, SYS_FS_WRITE_FILE, SYS_FS_DELETE,
             SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_RMDIR,
             SYS_FS_STAT, SYS_FS_LINK, SYS_FS_STATVFS,
@@ -349,6 +354,8 @@ mod tests {
             SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT, SYS_PROCESS_EXEC,
             SYS_PROCESS_TRY_WAIT,
             SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
+            SYS_PROCESS_SPAWN_EX, SYS_PROCESS_GET_INITIAL_FDS,
+            SYS_PROCESS_GET_ARGS,
             SYS_FS_READ_FILE, SYS_FS_WRITE_FILE, SYS_FS_DELETE,
             SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_RMDIR,
             SYS_FS_STAT, SYS_FS_LINK, SYS_FS_STATVFS,
@@ -416,6 +423,9 @@ mod tests {
         assert!((500..600).contains(&SYS_THREAD_CREATE));
         assert!((500..600).contains(&SYS_THREAD_EXIT));
         assert!((500..600).contains(&SYS_THREAD_JOIN));
+        assert!((500..600).contains(&SYS_PROCESS_SPAWN_EX));
+        assert!((500..600).contains(&SYS_PROCESS_GET_INITIAL_FDS));
+        assert!((500..600).contains(&SYS_PROCESS_GET_ARGS));
 
         // fs: 600-799
         assert!((600..800).contains(&SYS_FS_READ_FILE));

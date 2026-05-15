@@ -151,13 +151,191 @@ pub extern "C" fn quick_exit(status: i32) -> ! {
     crate::process::_Exit(status);
 }
 
+// ---------------------------------------------------------------------------
+// Kernel argument retrieval (SYS_PROCESS_GET_ARGS)
+// ---------------------------------------------------------------------------
+
+/// Maximum buffer size for argv+envp data retrieved from the kernel.
+///
+/// 64 KiB covers virtually all real-world cases.  The kernel supports
+/// up to 256 KiB each for argv and envp, but programs needing that
+/// much are extremely rare.  If the data exceeds this buffer, the
+/// child starts with argc=0 (no arguments).
+const INIT_ARGS_BUF_SIZE: usize = 64 * 1024;
+
+/// Maximum number of individual argument or environment string pointers.
+const MAX_INIT_PTRS: usize = 512;
+
+/// Static buffer for args data from `SYS_PROCESS_GET_ARGS`.
+///
+/// Layout: `SpawnArgsHeader` (16 bytes) + packed argv strings + packed
+/// envp strings.  Lives in .bss (zeroed at load, no binary size cost).
+static mut INIT_ARGS_BUF: [u8; INIT_ARGS_BUF_SIZE] = [0u8; INIT_ARGS_BUF_SIZE];
+
+/// Static argv pointer array (null-terminated).
+///
+/// Each entry points into `INIT_ARGS_BUF` at the start of an argv string.
+/// The last entry is NULL (C convention).
+static mut INIT_ARGV: [*const u8; MAX_INIT_PTRS + 1] = [core::ptr::null(); MAX_INIT_PTRS + 1];
+
+/// Static envp pointer array (null-terminated).
+static mut INIT_ENVP: [*const u8; MAX_INIT_PTRS + 1] = [core::ptr::null(); MAX_INIT_PTRS + 1];
+
+/// Retrieve initial arguments from the kernel via `SYS_PROCESS_GET_ARGS`.
+///
+/// The kernel stores argv/envp data passed by the parent via
+/// `SYS_PROCESS_SPAWN_EX`.  This function retrieves them and builds
+/// the argc/argv/envp pointers that main() expects.
+///
+/// Returns `(argc, argv, envp)`.  If no args are available (e.g., the
+/// process was spawned with the old `SYS_PROCESS_SPAWN`), returns
+/// `(0, null, null)`.
+///
+/// # Safety
+///
+/// Must be called exactly once, before main().  The returned pointers
+/// are valid for the entire process lifetime (they point into statics).
+unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
+    use crate::spawn::SpawnArgsHeader;
+    use crate::syscall::{syscall2, SYS_PROCESS_GET_ARGS};
+
+    let buf_ptr = addr_of_mut!(INIT_ARGS_BUF);
+    let buf = unsafe { (*buf_ptr).as_mut_ptr() };
+
+    // Call SYS_PROCESS_GET_ARGS.  Returns total bytes written, or
+    // the needed size if our buffer is too small (data is preserved
+    // in the kernel for retry), or 0 if no args were set.
+    let ret = syscall2(
+        SYS_PROCESS_GET_ARGS,
+        buf as u64,
+        INIT_ARGS_BUF_SIZE as u64,
+    );
+
+    if ret <= 0 {
+        return (0, core::ptr::null(), core::ptr::null());
+    }
+
+    let total = ret as usize;
+    let header_size = core::mem::size_of::<SpawnArgsHeader>();
+
+    // If the kernel returned more than our buffer can hold, the data
+    // is still in the PCB (not consumed).  We can't use it without a
+    // larger buffer.  Fall back to no args.
+    if total > INIT_ARGS_BUF_SIZE || total < header_size {
+        return (0, core::ptr::null(), core::ptr::null());
+    }
+
+    // Parse the header.
+    // SAFETY: buf points to INIT_ARGS_BUF which has `total` valid bytes.
+    let header = unsafe { &*(buf as *const SpawnArgsHeader) };
+    let argc = header.argc as usize;
+    let envc = header.envc as usize;
+    let argv_data_len = header.argv_data_len as usize;
+    let envp_data_len = header.envp_data_len as usize;
+
+    if argc == 0 && envc == 0 {
+        return (0, core::ptr::null(), core::ptr::null());
+    }
+
+    // Validate that the data fits within what we received.
+    let expected = header_size
+        .saturating_add(argv_data_len)
+        .saturating_add(envp_data_len);
+    if expected > total {
+        return (0, core::ptr::null(), core::ptr::null());
+    }
+
+    // Build argv pointer array.
+    // SAFETY: data_start is within our buffer bounds (validated above).
+    let data_start = unsafe { buf.add(header_size) };
+    let argv_ptrs = addr_of_mut!(INIT_ARGV);
+
+    let mut pos = 0usize;
+    let mut arg_idx = 0usize;
+    while arg_idx < argc && arg_idx < MAX_INIT_PTRS && pos < argv_data_len {
+        // SAFETY: pos < argv_data_len, which is within buffer bounds.
+        unsafe {
+            if let Some(slot) = (*argv_ptrs).get_mut(arg_idx) {
+                *slot = data_start.add(pos);
+            }
+        }
+
+        // Advance past this string's null terminator.
+        while pos < argv_data_len {
+            // SAFETY: pos < argv_data_len guarantees we're in bounds.
+            if unsafe { *data_start.add(pos) } == 0 {
+                break;
+            }
+            pos = pos.wrapping_add(1);
+        }
+        pos = pos.wrapping_add(1); // Skip the null.
+        arg_idx = arg_idx.wrapping_add(1);
+    }
+
+    // Null-terminate the argv array.
+    unsafe {
+        if let Some(slot) = (*argv_ptrs).get_mut(arg_idx) {
+            *slot = core::ptr::null();
+        }
+    }
+
+    // Build envp pointer array.
+    // SAFETY: envp_start is at data_start + argv_data_len, within bounds.
+    let envp_start = unsafe { data_start.add(argv_data_len) };
+    let envp_ptrs = addr_of_mut!(INIT_ENVP);
+
+    let mut pos = 0usize;
+    let mut env_idx = 0usize;
+    while env_idx < envc && env_idx < MAX_INIT_PTRS && pos < envp_data_len {
+        unsafe {
+            if let Some(slot) = (*envp_ptrs).get_mut(env_idx) {
+                *slot = envp_start.add(pos);
+            }
+        }
+
+        while pos < envp_data_len {
+            if unsafe { *envp_start.add(pos) } == 0 {
+                break;
+            }
+            pos = pos.wrapping_add(1);
+        }
+        pos = pos.wrapping_add(1);
+        env_idx = env_idx.wrapping_add(1);
+    }
+
+    // Null-terminate the envp array.
+    unsafe {
+        if let Some(slot) = (*envp_ptrs).get_mut(env_idx) {
+            *slot = core::ptr::null();
+        }
+    }
+
+    // Load environment variables into the environ store so that
+    // getenv()/setenv() work.  This must happen before init_environ().
+    if envc > 0 && envp_data_len > 0 {
+        unsafe {
+            crate::environ::load_packed_envp(envp_start, envp_data_len, envc);
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let final_argc = arg_idx as i32;
+    let final_argv = unsafe { (*argv_ptrs).as_ptr() };
+
+    (final_argc, final_argv, core::ptr::null())
+}
+
 /// C runtime entry point (glibc convention).
 ///
 /// Called by `_start` (crt0) with:
 /// - `main`: pointer to the program's main function
-/// - `argc`: argument count
-/// - `argv`: argument vector
+/// - `argc`: argument count (0 from `_start` before kernel arg passing)
+/// - `argv`: argument vector (NULL from `_start`)
 /// - `envp`: environment pointer vector
+///
+/// On startup, attempts to retrieve arguments from the kernel via
+/// `SYS_PROCESS_GET_ARGS`.  If the kernel has args (because the parent
+/// used `SYS_PROCESS_SPAWN_EX`), those override the values from `_start`.
 ///
 /// Initializes the environment, calls `main`, then `exit`.
 ///
@@ -178,11 +356,21 @@ pub unsafe extern "C" fn __libc_start_main(
     // The fd table is statically initialized, so this is a no-op,
     // but explicit initialization would go here.
 
+    // Try to retrieve args from the kernel.  The parent may have
+    // passed argv/envp via SYS_PROCESS_SPAWN_EX, which are stored
+    // in the PCB until we fetch them.
+    let (kernel_argc, kernel_argv, _kernel_envp) = unsafe { retrieve_initial_args() };
+
+    // Use kernel-provided args if available, otherwise fall back to
+    // what _start passed (currently argc=0, argv=NULL).
+    let actual_argc = if kernel_argc > 0 { kernel_argc } else { arg_count };
+    let actual_argv = if kernel_argc > 0 { kernel_argv } else { arg_vec };
+
     // Set program name from argv[0] if available.
     // err/warn/errx/warnx use __progname for the "prog: msg" prefix.
-    if arg_count > 0 && !arg_vec.is_null() {
-        // SAFETY: arg_count > 0 guarantees argv[0] exists.
-        let argv0 = unsafe { *arg_vec };
+    if actual_argc > 0 && !actual_argv.is_null() {
+        // SAFETY: actual_argc > 0 guarantees argv[0] exists.
+        let argv0 = unsafe { *actual_argv };
         if !argv0.is_null() {
             unsafe {
                 addr_of_mut!(program_invocation_name).write(argv0);
@@ -214,10 +402,15 @@ pub unsafe extern "C" fn __libc_start_main(
     // Ensure `environ` points at a valid (empty) null-terminated array.
     // POSIX requires environ to be non-NULL so programs can safely
     // iterate it without checking for NULL first.
+    //
+    // Note: if the kernel provided envp, load_packed_envp() was already
+    // called by retrieve_initial_args() to populate ENV_STORE.  This
+    // call to init_environ() rebuilds the pointer array, which will
+    // include those entries.
     crate::environ::init_environ();
 
     // Call main.
-    let ret = main(arg_count, arg_vec, unsafe { crate::environ::environ.cast() });
+    let ret = main(actual_argc, actual_argv, unsafe { crate::environ::environ.cast() });
 
     // Exit with main's return value.
     exit(ret);
@@ -1018,5 +1211,33 @@ mod tests {
     fn test_register_atfork_returns_zero() {
         let result = __register_atfork(None, None, None, core::ptr::null_mut());
         assert_eq!(result, 0);
+    }
+
+    // -- Arg retrieval constants --
+
+    #[test]
+    fn test_init_args_buf_size() {
+        // Buffer should be large enough for typical programs.
+        assert!(INIT_ARGS_BUF_SIZE >= 64 * 1024);
+    }
+
+    #[test]
+    fn test_max_init_ptrs() {
+        // Should support a reasonable number of arguments.
+        assert!(MAX_INIT_PTRS >= 512);
+    }
+
+    #[test]
+    fn test_init_argv_has_null_terminator_space() {
+        // The array must have room for MAX_INIT_PTRS entries + null.
+        // SAFETY: just reading the length of the static.
+        let len = unsafe { (*addr_of_mut!(INIT_ARGV)).len() };
+        assert_eq!(len, MAX_INIT_PTRS + 1);
+    }
+
+    #[test]
+    fn test_init_envp_has_null_terminator_space() {
+        let len = unsafe { (*addr_of_mut!(INIT_ENVP)).len() };
+        assert_eq!(len, MAX_INIT_PTRS + 1);
     }
 }

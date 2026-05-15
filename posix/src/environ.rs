@@ -467,6 +467,81 @@ fn rebuild_environ_ptrs() {
     }
 }
 
+/// Load environment variables from packed null-terminated strings.
+///
+/// Each entry is a `KEY=VALUE\0` string, concatenated end-to-end.
+/// Used during process startup to populate the environment from
+/// data received via `SYS_PROCESS_GET_ARGS`.
+///
+/// Entries that exceed `MAX_ENTRY_LEN` or that don't contain `=`
+/// are silently skipped.  If `ENV_STORE` runs out of slots, remaining
+/// entries are dropped.
+///
+/// After loading, `rebuild_environ_ptrs()` is called to update
+/// the `environ` pointer.
+///
+/// # Safety
+///
+/// `data` must point to readable memory of at least `data_len` bytes.
+pub unsafe fn load_packed_envp(data: *const u8, data_len: usize, count: usize) {
+    if data.is_null() || data_len == 0 || count == 0 {
+        return;
+    }
+
+    let store = unsafe { core::ptr::addr_of_mut!(ENV_STORE).as_mut() };
+    let Some(store) = store else { return };
+
+    let mut pos = 0usize;
+    let mut loaded = 0usize;
+
+    while loaded < count && pos < data_len {
+        let start = pos;
+
+        // Find the null terminator for this entry.
+        while pos < data_len {
+            // SAFETY: pos < data_len guarantees readable.
+            if unsafe { *data.add(pos) } == 0 {
+                break;
+            }
+            pos = pos.wrapping_add(1);
+        }
+
+        let entry_len = pos.wrapping_sub(start);
+
+        if entry_len > 0 && entry_len.wrapping_add(1) <= MAX_ENTRY_LEN {
+            // Find an empty slot in ENV_STORE.
+            let mut installed = false;
+            for slot in store.iter_mut() {
+                if slot[0] == 0 {
+                    // Copy the "KEY=VALUE" string + null terminator.
+                    // SAFETY: start..start+entry_len is within data_len.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            data.add(start),
+                            slot.as_mut_ptr(),
+                            entry_len,
+                        );
+                    }
+                    if let Some(term) = slot.get_mut(entry_len) {
+                        *term = 0;
+                    }
+                    installed = true;
+                    break;
+                }
+            }
+            if !installed {
+                break; // No more free slots.
+            }
+        }
+
+        // Skip past the null terminator.
+        pos = pos.wrapping_add(1);
+        loaded = loaded.wrapping_add(1);
+    }
+
+    rebuild_environ_ptrs();
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -798,5 +873,77 @@ mod tests {
         let rc = unsafe { setenv(b"REUSE\0".as_ptr(), b"b\0".as_ptr(), 1) };
         assert_eq!(rc, 0);
         assert_eq!(unsafe { cstr_bytes(getenv(b"REUSE\0".as_ptr())) }, b"b");
+    }
+
+    // -----------------------------------------------------------------------
+    // load_packed_envp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_packed_envp_basic() {
+        reset();
+        // Two entries: "HOME=/root\0" + "USER=test\0"
+        let data = b"HOME=/root\0USER=test\0";
+        unsafe { load_packed_envp(data.as_ptr(), data.len(), 2) };
+
+        let home = unsafe { getenv(b"HOME\0".as_ptr()) };
+        assert!(!home.is_null());
+        assert_eq!(unsafe { cstr_bytes(home) }, b"/root");
+
+        let user = unsafe { getenv(b"USER\0".as_ptr()) };
+        assert!(!user.is_null());
+        assert_eq!(unsafe { cstr_bytes(user) }, b"test");
+    }
+
+    #[test]
+    fn load_packed_envp_single() {
+        reset();
+        let data = b"LANG=C\0";
+        unsafe { load_packed_envp(data.as_ptr(), data.len(), 1) };
+
+        let val = unsafe { getenv(b"LANG\0".as_ptr()) };
+        assert!(!val.is_null());
+        assert_eq!(unsafe { cstr_bytes(val) }, b"C");
+    }
+
+    #[test]
+    fn load_packed_envp_null() {
+        reset();
+        // Null data should be a no-op.
+        unsafe { load_packed_envp(core::ptr::null(), 0, 0) };
+        // No crash, no vars set.
+    }
+
+    #[test]
+    fn load_packed_envp_zero_count() {
+        reset();
+        let data = b"FOO=bar\0";
+        unsafe { load_packed_envp(data.as_ptr(), data.len(), 0) };
+        // Count 0 — nothing loaded.
+        assert!(unsafe { getenv(b"FOO\0".as_ptr()) }.is_null());
+    }
+
+    #[test]
+    fn load_packed_envp_zero_len() {
+        reset();
+        let data = b"FOO=bar\0";
+        unsafe { load_packed_envp(data.as_ptr(), 0, 1) };
+        // Zero length — nothing loaded.
+        assert!(unsafe { getenv(b"FOO\0".as_ptr()) }.is_null());
+    }
+
+    #[test]
+    fn load_packed_envp_preserves_existing() {
+        reset();
+        // Set an existing var first.
+        unsafe { setenv(b"EXISTING\0".as_ptr(), b"yes\0".as_ptr(), 1) };
+
+        // Load a new var from packed data.
+        let data = b"NEW=added\0";
+        unsafe { load_packed_envp(data.as_ptr(), data.len(), 1) };
+
+        // Both should exist.
+        assert_eq!(unsafe { cstr_bytes(getenv(b"EXISTING\0".as_ptr())) }, b"yes");
+        assert_eq!(unsafe { cstr_bytes(getenv(b"NEW\0".as_ptr())) }, b"added");
     }
 }

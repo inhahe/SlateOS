@@ -5,13 +5,14 @@
 //!
 //! ## How It Works
 //!
-//! Our kernel's `SYS_PROCESS_SPAWN` and `SYS_PROCESS_EXEC` take raw
+//! Our kernel's `SYS_PROCESS_SPAWN_EX` and `SYS_PROCESS_EXEC` take raw
 //! ELF data in memory, not file paths.  This module bridges the gap:
 //!
 //! 1. Stat the file to determine its size
 //! 2. Allocate a buffer via mmap
 //! 3. Read the ELF binary from the filesystem via `SYS_FS_READ_FILE`
-//! 4. Pass the raw bytes to `SYS_PROCESS_SPAWN` or `SYS_PROCESS_EXEC`
+//! 4. Pass the raw bytes to `SYS_PROCESS_SPAWN_EX` (with argv/envp)
+//!    or `SYS_PROCESS_EXEC`
 //! 5. Free the buffer via munmap
 //!
 //! ## PATH Search
@@ -22,14 +23,23 @@
 //! `/bin:/usr/bin`) is tried with the filename appended.  The first
 //! path that exists (per `SYS_FS_STAT`) is used.
 //!
+//! ## Argument and Environment Passing
+//!
+//! `posix_spawn` packs `argv` and `envp` C string arrays into contiguous
+//! null-terminated buffers and passes them to the kernel via the
+//! `SpawnExArgs` struct.  The child retrieves them during startup via
+//! `SYS_PROCESS_GET_ARGS` (handled in `crt.rs`).
+//!
+//! `execve` passes argv/envp via `SYS_PROCESS_EXEC` args 2–5.
+//!
 //! ## Limitations
 //!
-//! - `posix_spawn` file_actions are recorded but cannot be fully applied
-//!   in the child because the kernel's `SYS_PROCESS_SPAWN` does not yet
-//!   support fd inheritance.  Actions are stored correctly and will be
-//!   effective once the kernel-process zone adds fd passing to spawn.
-//! - `posix_spawn` `argv`/`envp` are passed via `SYS_PROCESS_SPAWN_EX`.
-//!   `execve` `argv`/`envp` are passed via `SYS_PROCESS_EXEC` args 2–5.
+//! - `posix_spawn` file_actions are recorded but not yet applied via
+//!   the fd_map mechanism.  The kernel supports fd inheritance via
+//!   `SYS_PROCESS_SPAWN_EX` fd_map, but the child-side fd retrieval
+//!   (`SYS_PROCESS_GET_INITIAL_FDS`) is not wired into child startup
+//!   yet.  File_actions will be effective once the child's `_start`
+//!   calls `SYS_PROCESS_GET_INITIAL_FDS` and reinitializes its fd table.
 //! - `posix_spawnattr` flags are stored but only `POSIX_SPAWN_SETPGROUP`
 //!   is meaningfully supported (spawn attributes are recorded for
 //!   forward compatibility).
@@ -38,6 +48,61 @@ use crate::errno;
 use crate::mman;
 use crate::syscall::*;
 use crate::types::*;
+
+// ---------------------------------------------------------------------------
+// ABI types (must match kernel's proc/spawn.rs layout)
+// ---------------------------------------------------------------------------
+
+/// Extended spawn arguments struct passed to `SYS_PROCESS_SPAWN_EX`.
+///
+/// A single pointer to this struct is passed in arg0.  All pointer
+/// fields must point to valid memory for the duration of the syscall.
+/// Layout must match kernel's `SpawnExArgs` exactly (C ABI, all u64).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SpawnExArgs {
+    /// Pointer to ELF data in memory.
+    pub elf_ptr: u64,
+    /// Length of ELF data in bytes.
+    pub elf_len: u64,
+    /// Pointer to process name string (UTF-8).
+    pub name_ptr: u64,
+    /// Length of name string in bytes.
+    pub name_len: u64,
+    /// Pointer to `FdMapEntry` array (0 = no fd inheritance).
+    pub fd_map_ptr: u64,
+    /// Number of `FdMapEntry` entries.
+    pub fd_map_count: u64,
+    /// Pointer to packed null-terminated argv string data.
+    pub argv_ptr: u64,
+    /// Total byte length of the packed argv data.
+    pub argv_len: u64,
+    /// Number of arguments.
+    pub argc: u64,
+    /// Pointer to packed null-terminated envp string data.
+    pub envp_ptr: u64,
+    /// Total byte length of the packed envp data.
+    pub envp_len: u64,
+    /// Number of environment variables.
+    pub envc: u64,
+}
+
+/// Header returned by `SYS_PROCESS_GET_ARGS`.
+///
+/// Prefixed to the output buffer, followed by packed argv strings
+/// then packed envp strings.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SpawnArgsHeader {
+    /// Number of argv entries.
+    pub argc: u32,
+    /// Number of envp entries.
+    pub envc: u32,
+    /// Total bytes of packed argv data (including null terminators).
+    pub argv_data_len: u32,
+    /// Total bytes of packed envp data (including null terminators).
+    pub envp_data_len: u32,
+}
 
 // ---------------------------------------------------------------------------
 // posix_spawn_file_actions
@@ -378,20 +443,25 @@ pub extern "C" fn posix_spawnattr_getpgroup(
 
 /// Spawn a new process from a file path.
 ///
-/// Reads the ELF binary at `path` and creates a new process.
-/// On success, stores the child PID in `*pid` (if non-null).
+/// Reads the ELF binary at `path` and creates a new process via
+/// `SYS_PROCESS_SPAWN_EX`.  On success, stores the child PID in
+/// `*pid` (if non-null).
 ///
 /// # Parameters
 ///
 /// - `pid`: Output parameter for child PID (may be null).
 /// - `path`: Path to the ELF binary (null-terminated C string).
 /// - `file_actions`: File actions to apply in the child (close, dup2, open).
-///   Currently recorded but not applied — the kernel's `SYS_PROCESS_SPAWN`
-///   does not yet support fd inheritance.
+///   Currently recorded but not yet applied via the kernel's fd_map
+///   mechanism — requires child-side `SYS_PROCESS_GET_INITIAL_FDS`
+///   retrieval to be wired into the child's startup code.
 /// - `attrp`: Spawn attributes (flags, process group).  Recorded but most
 ///   flags have no effect yet.
-/// - `argv`: Ignored (not yet passed to child).
-/// - `envp`: Ignored (not yet passed to child).
+/// - `argv`: Null-terminated array of argument strings for the child.
+///   Packed and passed to the kernel; the child retrieves them via
+///   `SYS_PROCESS_GET_ARGS` during startup.  May be null.
+/// - `envp`: Null-terminated array of environment strings for the child.
+///   Packed and passed to the kernel.  May be null.
 ///
 /// Returns 0 on success, or an error number (NOT -1) on failure.
 /// This matches the POSIX spec: `posix_spawn` returns the error
@@ -402,13 +472,14 @@ pub extern "C" fn posix_spawn(
     path: *const u8,
     file_actions: *const PosixSpawnFileActionsT,
     _attrp: *const PosixSpawnattrT,
-    _argv: *const *const u8,
-    _envp: *const *const u8,
+    argv: *const *const u8,
+    envp: *const *const u8,
 ) -> i32 {
     // Note: file_actions are properly stored but cannot be applied to
-    // the child process yet because SYS_PROCESS_SPAWN doesn't support
-    // fd inheritance.  When the kernel-process zone adds fd passing,
-    // we'll iterate file_actions here and pass them to the kernel.
+    // the child yet because the child's startup doesn't call
+    // SYS_PROCESS_GET_INITIAL_FDS to retrieve inherited fds.  When
+    // the child's _start is updated to do this, we'll build an fd_map
+    // from file_actions and the parent's fd table.
     let _action_count = if file_actions.is_null() {
         0
     } else {
@@ -433,13 +504,38 @@ pub extern "C" fn posix_spawn(
         Err(err) => return err,
     };
 
-    // Spawn the process with the ELF data.
-    let ret = syscall4(
-        SYS_PROCESS_SPAWN,
-        buf_ptr as u64,
-        data_size as u64,
-        resolved.as_ptr() as u64,  // Use resolved path as the process name.
-        resolved_len as u64,
+    // Pack argv into a contiguous null-terminated buffer.
+    let mut argv_buf = [0u8; EXEC_PACKED_MAX];
+    let argv_packed_len = pack_cstring_array(argv, &mut argv_buf);
+    let argc = count_cstring_array(argv);
+
+    // Pack envp into a contiguous null-terminated buffer.
+    let mut envp_buf = [0u8; EXEC_PACKED_MAX];
+    let envp_packed_len = pack_cstring_array(envp, &mut envp_buf);
+    let envc = count_cstring_array(envp);
+
+    // Build the SpawnExArgs struct for SYS_PROCESS_SPAWN_EX.
+    let spawn_args = SpawnExArgs {
+        elf_ptr: buf_ptr as u64,
+        elf_len: data_size as u64,
+        name_ptr: resolved.as_ptr() as u64,
+        name_len: resolved_len as u64,
+        // fd_map not passed yet — requires child-side
+        // SYS_PROCESS_GET_INITIAL_FDS retrieval in child startup.
+        fd_map_ptr: 0,
+        fd_map_count: 0,
+        argv_ptr: if argv_packed_len > 0 { argv_buf.as_ptr() as u64 } else { 0 },
+        argv_len: argv_packed_len as u64,
+        argc: argc as u64,
+        envp_ptr: if envp_packed_len > 0 { envp_buf.as_ptr() as u64 } else { 0 },
+        envp_len: envp_packed_len as u64,
+        envc: envc as u64,
+    };
+
+    // Spawn the process with the extended args struct.
+    let ret = syscall1(
+        SYS_PROCESS_SPAWN_EX,
+        (&spawn_args as *const SpawnExArgs) as u64,
     );
 
     // Free the ELF buffer (must use alloc_size, not data_size, to
@@ -602,6 +698,26 @@ fn pack_cstring_array(array: *const *const u8, buf: &mut [u8]) -> usize {
         i += 1;
     }
     pos
+}
+
+/// Count the number of strings in a null-terminated C string array.
+///
+/// Used to determine `argc`/`envc` for `SpawnExArgs`.
+/// Returns 0 if `array` is null.
+fn count_cstring_array(array: *const *const u8) -> usize {
+    if array.is_null() {
+        return 0;
+    }
+    let mut count = 0usize;
+    loop {
+        // SAFETY: Caller guarantees array is null-terminated.
+        let ptr = unsafe { *array.add(count) };
+        if ptr.is_null() {
+            break;
+        }
+        count = count.wrapping_add(1);
+    }
+    count
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,5 +1408,130 @@ mod tests {
                  | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
         // Each flag should be a distinct bit.
         assert_eq!(all, 0x0F);
+    }
+
+    // -- SpawnExArgs struct layout --
+
+    #[test]
+    fn test_spawn_ex_args_size() {
+        // SpawnExArgs has 12 u64 fields = 96 bytes.
+        assert_eq!(core::mem::size_of::<SpawnExArgs>(), 96);
+    }
+
+    #[test]
+    fn test_spawn_ex_args_alignment() {
+        // Must be u64-aligned for proper ABI.
+        assert_eq!(core::mem::align_of::<SpawnExArgs>(), 8);
+    }
+
+    #[test]
+    fn test_spawn_ex_args_field_layout() {
+        // Verify fields are at the expected offsets (all u64, sequential).
+        let args = SpawnExArgs {
+            elf_ptr: 0x1111_1111_1111_1111,
+            elf_len: 0x2222_2222_2222_2222,
+            name_ptr: 0x3333_3333_3333_3333,
+            name_len: 0x4444_4444_4444_4444,
+            fd_map_ptr: 0x5555_5555_5555_5555,
+            fd_map_count: 6,
+            argv_ptr: 0x7777_7777_7777_7777,
+            argv_len: 128,
+            argc: 3,
+            envp_ptr: 0xAAAA_AAAA_AAAA_AAAA,
+            envp_len: 64,
+            envc: 2,
+        };
+        assert_eq!(args.elf_ptr, 0x1111_1111_1111_1111);
+        assert_eq!(args.elf_len, 0x2222_2222_2222_2222);
+        assert_eq!(args.name_ptr, 0x3333_3333_3333_3333);
+        assert_eq!(args.name_len, 0x4444_4444_4444_4444);
+        assert_eq!(args.fd_map_ptr, 0x5555_5555_5555_5555);
+        assert_eq!(args.fd_map_count, 6);
+        assert_eq!(args.argv_ptr, 0x7777_7777_7777_7777);
+        assert_eq!(args.argv_len, 128);
+        assert_eq!(args.argc, 3);
+        assert_eq!(args.envp_ptr, 0xAAAA_AAAA_AAAA_AAAA);
+        assert_eq!(args.envp_len, 64);
+        assert_eq!(args.envc, 2);
+    }
+
+    // -- SpawnArgsHeader struct layout --
+
+    #[test]
+    fn test_spawn_args_header_size() {
+        // SpawnArgsHeader has 4 u32 fields = 16 bytes.
+        assert_eq!(core::mem::size_of::<SpawnArgsHeader>(), 16);
+    }
+
+    #[test]
+    fn test_spawn_args_header_alignment() {
+        assert_eq!(core::mem::align_of::<SpawnArgsHeader>(), 4);
+    }
+
+    #[test]
+    fn test_spawn_args_header_field_values() {
+        let header = SpawnArgsHeader {
+            argc: 5,
+            envc: 3,
+            argv_data_len: 100,
+            envp_data_len: 50,
+        };
+        assert_eq!(header.argc, 5);
+        assert_eq!(header.envc, 3);
+        assert_eq!(header.argv_data_len, 100);
+        assert_eq!(header.envp_data_len, 50);
+    }
+
+    // -- count_cstring_array --
+
+    #[test]
+    fn test_count_cstring_array_null() {
+        assert_eq!(count_cstring_array(core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_count_cstring_array_empty() {
+        // A null-terminated array with just the NULL terminator.
+        let ptrs: [*const u8; 1] = [core::ptr::null()];
+        assert_eq!(count_cstring_array(ptrs.as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_count_cstring_array_one() {
+        let s = b"hello\0";
+        let ptrs: [*const u8; 2] = [s.as_ptr(), core::ptr::null()];
+        assert_eq!(count_cstring_array(ptrs.as_ptr()), 1);
+    }
+
+    #[test]
+    fn test_count_cstring_array_three() {
+        let s1 = b"one\0";
+        let s2 = b"two\0";
+        let s3 = b"three\0";
+        let ptrs: [*const u8; 4] = [
+            s1.as_ptr(), s2.as_ptr(), s3.as_ptr(), core::ptr::null(),
+        ];
+        assert_eq!(count_cstring_array(ptrs.as_ptr()), 3);
+    }
+
+    // -- pack_cstring_array (existing, but add a round-trip test with count) --
+
+    #[test]
+    fn test_pack_and_count_consistency() {
+        let s1 = b"alpha\0";
+        let s2 = b"beta\0";
+        let ptrs: [*const u8; 3] = [s1.as_ptr(), s2.as_ptr(), core::ptr::null()];
+
+        // Count should match.
+        assert_eq!(count_cstring_array(ptrs.as_ptr()), 2);
+
+        // Pack and verify format.
+        let mut buf = [0u8; 256];
+        let packed_len = pack_cstring_array(ptrs.as_ptr(), &mut buf);
+
+        // "alpha\0beta\0" = 6 + 5 = 11 bytes.
+        assert_eq!(packed_len, 11);
+        assert_eq!(&buf[..6], b"alpha\0");
+        assert_eq!(&buf[6..11], b"beta\0");
     }
 }

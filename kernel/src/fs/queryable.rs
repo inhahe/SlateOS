@@ -682,9 +682,13 @@ pub fn query(
     let mut results = Vec::new();
 
     for file in &store.files {
-        // Skip files not under root_path.
+        // Skip files not under root_path.  Use path-boundary check
+        // to avoid /tmp matching /tmpfile.
         if let Some(root) = root_path {
-            if !file.path.starts_with(root) {
+            if file.path != root
+                && !(file.path.starts_with(root)
+                     && file.path.as_bytes().get(root.len()) == Some(&b'/'))
+            {
                 continue;
             }
         }

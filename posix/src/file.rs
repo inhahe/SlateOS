@@ -2233,7 +2233,7 @@ pub extern "C" fn futimens(_fd: Fd, _times: *const crate::stat::Timespec) -> i32
 // ---------------------------------------------------------------------------
 
 /// Translate POSIX open flags to our native flag word.
-fn translate_open_flags(posix_flags: i32) -> u64 {
+pub(crate) fn translate_open_flags(posix_flags: i32) -> u64 {
     let mut native: u64 = 0;
 
     // Access mode.

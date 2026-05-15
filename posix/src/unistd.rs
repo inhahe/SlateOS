@@ -1350,17 +1350,10 @@ fn fill_random(buf: *mut u8, len: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// fdatasync / syncfs
+// syncfs
 // ---------------------------------------------------------------------------
 
-/// Flush data (not metadata) for an open file descriptor.
-///
-/// Stub: delegates to `fsync` (we don't distinguish data-only sync).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fdatasync(fd: Fd) -> i32 {
-    // Our fsync already just returns 0 (filesystem writes are sync).
-    crate::file::fsync(fd)
-}
+// NOTE: fdatasync() is in file.rs (delegates to fsync).
 
 /// Synchronize all data for the filesystem containing `fd`.
 ///

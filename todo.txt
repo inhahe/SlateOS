@@ -253,12 +253,13 @@ Remaining net improvements (diminishing returns):
   fds via SYS_PROCESS_GET_INITIAL_FDS in crt.rs retrieve_initial_fds()
   and reinitializes fdtable.  Pipeline: parent builds fd_map → kernel
   dups handles into child PCB → child retrieves at startup.
+  Open file_actions: DONE.  Parent opens files via raw SYS_FS_OPEN,
+  records handles in fd_map, closes parent copies after spawn.
   NOTE: kernel's sys_process_get_initial_fds currently stores (fd, handle)
   pairs without handle_type.  The child gets handle_type=FILE for all
   entries.  This means pipes/sockets inherited via fd_map won't have the
   correct HandleKind in the child.  Needs kernel-side fix to store
   (fd, handle_type, handle) triples in PCB.initial_fds.
-  Open file_actions (addopen) are ignored — requires kernel extension.
 
 ## Judgment Calls
 

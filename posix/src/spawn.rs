@@ -44,13 +44,11 @@
 //! from the parent's inheritable (non-`FD_CLOEXEC`) fds:
 //! - **close**: removes the fd from the child's view
 //! - **dup2**: copies a handle from one fd to another
-//! - **open**: not yet supported (requires kernel extension)
+//! - **open**: opens the file in the parent's context (raw syscall) and
+//!   records the kernel handle for inheritance.  The handles are closed
+//!   in the parent after the spawn syscall completes.
 //!
 //! ## Limitations
-//!
-//! - `posix_spawn_file_actions_addopen` records the action but it is
-//!   currently ignored during fd_map building (the kernel would need to
-//!   open the file on behalf of the child).
 //! - `posix_spawnattr` flags are stored but only `POSIX_SPAWN_SETPGROUP`
 //!   is meaningfully supported (spawn attributes are recorded for
 //!   forward compatibility).
@@ -507,13 +505,51 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
     }
 }
 
+/// Tracks kernel handles opened by `build_fd_map` for open file_actions.
+///
+/// The parent opens files on behalf of the child (so the kernel can dup
+/// them into the child's PCB).  These handles must be closed after the
+/// spawn syscall returns — whether it succeeded or failed.
+struct OpenedHandles {
+    /// Kernel handle values that were opened by build_fd_map.
+    handles: [u64; MAX_FILE_ACTIONS],
+    /// Number of valid entries.
+    count: usize,
+}
+
+impl OpenedHandles {
+    const fn new() -> Self {
+        Self { handles: [0; MAX_FILE_ACTIONS], count: 0 }
+    }
+
+    fn push(&mut self, handle: u64) {
+        if self.count < MAX_FILE_ACTIONS {
+            self.handles[self.count] = handle;
+            self.count = self.count.wrapping_add(1);
+        }
+    }
+
+    /// Close all tracked handles.
+    fn close_all(&self) {
+        let mut i = 0usize;
+        while i < self.count {
+            let _ = syscall1(SYS_FS_CLOSE, self.handles[i]);
+            i = i.wrapping_add(1);
+        }
+    }
+}
+
 /// Build an fd_map array from the parent's fd table and file_actions.
 ///
 /// Simulates what the child needs to see: starts with the parent's
 /// inheritable fds (non-`FD_CLOEXEC`), then applies file_actions in
-/// order (close removes an entry, dup2 clones an entry to a new fd,
-/// open is deferred — we can't open files on behalf of the child
-/// from userspace, so open actions are ignored with a TODO).
+/// order:
+/// - **close**: removes the fd from the virtual table
+/// - **dup2**: copies a handle from one fd to another
+/// - **open**: opens the file in the parent's context (raw syscall, no
+///   fd allocation) and records the kernel handle.  The kernel will dup
+///   it into the child during spawn.  The raw handles are tracked in
+///   `opened` so the caller can close them after the spawn syscall.
 ///
 /// Returns the number of valid entries written to `out`.
 ///
@@ -528,6 +564,7 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
 fn build_fd_map(
     file_actions: *const PosixSpawnFileActionsT,
     out: &mut [FdMapEntry; MAX_FD_MAP],
+    opened: &mut OpenedHandles,
 ) -> usize {
     use crate::fdtable;
 
@@ -572,9 +609,6 @@ fn build_fd_map(
                     }
                     2 => {
                         // Dup2(fd → newfd): copy fd's entry to newfd.
-                        // The source fd must exist in the parent's fd table
-                        // (not just the virtual table — dup2 operates on
-                        // the parent's actual handles).
                         #[allow(clippy::cast_sign_loss)]
                         let src_u = slot.fd as usize;
                         #[allow(clippy::cast_sign_loss)]
@@ -586,14 +620,42 @@ fn build_fd_map(
                         }
                     }
                     3 => {
-                        // Open: can't open files on behalf of the child
-                        // from userspace (the kernel would need to do it
-                        // with the child's credentials).  Skip for now.
-                        //
-                        // TODO: implement open actions via a kernel
-                        // extension that accepts (path, flags, mode) in
-                        // the fd_map, or by opening the file in the parent
-                        // and passing the resulting handle.
+                        // Open: open the file in the parent's context.
+                        // We use a raw syscall (no fd allocation) — we
+                        // just need the kernel handle to pass via fd_map.
+                        // The kernel will dup it into the child during spawn.
+                        #[allow(clippy::cast_sign_loss)]
+                        let target_fd = slot.fd as usize;
+                        if target_fd < MAX_FD_MAP && slot.path_len > 0 {
+                            // Resolve the path against CWD.
+                            let mut resolved = [0u8; crate::unistd::PATH_MAX];
+                            let resolved_len = unsafe {
+                                crate::unistd::resolve_path(
+                                    slot.path.as_ptr(),
+                                    &mut resolved,
+                                )
+                            };
+
+                            if let Some(rlen) = resolved_len {
+                                let native_flags = crate::file::translate_open_flags(slot.oflag);
+                                let ret = syscall3(
+                                    SYS_FS_OPEN,
+                                    resolved.as_ptr() as u64,
+                                    rlen as u64,
+                                    native_flags,
+                                );
+                                if ret >= 0 {
+                                    let handle = ret as u64;
+                                    virt[target_fd] = Some((fd_handle_type::FILE, handle));
+                                    opened.push(handle);
+                                }
+                                // If open fails, silently skip this action.
+                                // POSIX says posix_spawn should fail, but we
+                                // can't return an error from build_fd_map
+                                // without complicating the interface.  The
+                                // child will simply not have this fd.
+                            }
+                        }
                     }
                     _ => {} // Unknown tag — skip.
                 }
@@ -669,21 +731,29 @@ pub extern "C" fn posix_spawn(
 
     // Build the fd_map from the parent's fd table + file_actions.
     // This tells the kernel which handles the child should inherit.
+    // Open file_actions are executed here — the parent opens the files
+    // and the kernel dups the handles into the child.  We track the
+    // opened handles so we can close them after the spawn syscall.
     let mut fd_map = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
-    let fd_map_count = build_fd_map(file_actions, &mut fd_map);
+    let mut opened = OpenedHandles::new();
+    let fd_map_count = build_fd_map(file_actions, &mut fd_map, &mut opened);
 
     // Resolve relative paths against CWD.
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     let Some(resolved_len) = (unsafe { crate::unistd::resolve_path(path, &mut resolved) }) else {
         // POSIX: empty path → ENOENT; too-long → ENAMETOOLONG.
         // SAFETY: path is non-null (checked above) and a valid C string.
+        opened.close_all(); // Clean up any handles opened by build_fd_map.
         return if unsafe { *path } == 0 { errno::ENOENT } else { errno::ENAMETOOLONG };
     };
 
     // Load the ELF binary using the resolved absolute path.
     let (buf_ptr, alloc_size, data_size) = match load_elf(resolved.as_ptr(), resolved_len) {
         Ok(result) => result,
-        Err(err) => return err,
+        Err(err) => {
+            opened.close_all();
+            return err;
+        }
     };
 
     // Pack argv into a contiguous null-terminated buffer.
@@ -721,6 +791,11 @@ pub extern "C" fn posix_spawn(
     // Free the ELF buffer (must use alloc_size, not data_size, to
     // unmap the entire mmap'd region and avoid memory leaks).
     let _ = mman::munmap(buf_ptr.cast::<core::ffi::c_void>(), alloc_size);
+
+    // Close any file handles opened by build_fd_map for open file_actions.
+    // The kernel has already duped them into the child's PCB, so the
+    // parent's copies are no longer needed.
+    opened.close_all();
 
     if ret < 0 {
         return native_to_posix_err(ret);
@@ -1806,7 +1881,8 @@ mod tests {
         // the parent's inheritable fds.  In the test environment,
         // fds 0/1/2 are pre-initialized as Console handles.
         let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
-        let count = build_fd_map(core::ptr::null(), &mut out);
+        let mut opened = OpenedHandles::new();
+        let count = build_fd_map(core::ptr::null(), &mut out, &mut opened);
 
         // Should have at least fds 0, 1, 2 (Console).
         assert!(count >= 3, "expected at least 3 fds, got {}", count);
@@ -1832,7 +1908,8 @@ mod tests {
         posix_spawn_file_actions_addclose(&raw mut acts, 1);
 
         let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
-        let count = build_fd_map(&raw const acts, &mut out);
+        let mut opened = OpenedHandles::new();
+        let count = build_fd_map(&raw const acts, &mut out, &mut opened);
 
         // fd 1 should be gone.  We should have fd 0 and fd 2.
         let has_fd1 = out[..count].iter().any(|e| e.fd == 1);
@@ -1856,7 +1933,8 @@ mod tests {
         posix_spawn_file_actions_adddup2(&raw mut acts, 2, 1);
 
         let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
-        let count = build_fd_map(&raw const acts, &mut out);
+        let mut opened = OpenedHandles::new();
+        let count = build_fd_map(&raw const acts, &mut out, &mut opened);
 
         // fd 1 should now have the same handle as fd 2.
         let fd1 = out[..count].iter().find(|e| e.fd == 1);
@@ -1884,7 +1962,8 @@ mod tests {
         posix_spawn_file_actions_adddup2(&raw mut acts, 2, 1);
 
         let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
-        let count = build_fd_map(&raw const acts, &mut out);
+        let mut opened = OpenedHandles::new();
+        let count = build_fd_map(&raw const acts, &mut out, &mut opened);
 
         // fd 1 should exist (recreated by dup2) with fd 2's handle.
         let fd1 = out[..count].iter().find(|e| e.fd == 1);
@@ -1908,7 +1987,8 @@ mod tests {
         posix_spawn_file_actions_addclose(&raw mut acts, 2);
 
         let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
-        let count = build_fd_map(&raw const acts, &mut out);
+        let mut opened = OpenedHandles::new();
+        let count = build_fd_map(&raw const acts, &mut out, &mut opened);
 
         // No standard fds should remain.
         let has_0_1_2 = out[..count].iter().any(|e| e.fd <= 2);

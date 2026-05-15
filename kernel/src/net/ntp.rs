@@ -502,8 +502,9 @@ fn validate_response(resp: &NtpResponse, our_origin: &NtpTimestamp) -> KernelRes
         return Err(KernelError::InvalidArgument);
     }
 
-    // Transmit timestamp must not be zero.
-    if resp.transmit_ts.is_zero() {
+    // Transmit and receive timestamps must not be zero — a valid server
+    // always populates both T2 (receive) and T3 (transmit).
+    if resp.transmit_ts.is_zero() || resp.receive_ts.is_zero() {
         RESPONSES_BAD.fetch_add(1, Ordering::Relaxed);
         return Err(KernelError::InvalidArgument);
     }

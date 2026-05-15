@@ -1076,3 +1076,255 @@ pub fn domain_name() -> ([u8; 64], usize) {
     let lease = CURRENT_LEASE.lock();
     (lease.domain_name, lease.domain_name_len)
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// DHCP unit tests — exercises packet building, magic cookie placement,
+/// IP header checksum, renewal retry intervals, and state string lookup.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[dhcp] Running DHCP self-test...");
+
+    test_build_dhcp_message_structure()?;
+    test_build_dhcp_ip_udp_header()?;
+    test_renewal_retry_interval()?;
+    test_state_str()?;
+    test_build_renew_message()?;
+
+    crate::serial_println!("[dhcp] DHCP self-test PASSED (5 tests)");
+    Ok(())
+}
+
+/// Test that build_dhcp_message produces correct structure.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_build_dhcp_message_structure() -> KernelResult<()> {
+    let mac = MacAddress([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+
+    // Set a known XID for reproducible tests.
+    CURRENT_XID.store(0x12345678, core::sync::atomic::Ordering::Relaxed);
+
+    let msg = build_dhcp_message(DHCP_DISCOVER, &mac, &[]);
+
+    // Minimum 300 bytes.
+    if msg.len() < 300 {
+        crate::serial_println!("[dhcp]   FAIL: message too short ({})", msg.len());
+        return Err(KernelError::InternalError);
+    }
+
+    // op = BOOTREQUEST (1).
+    if msg[0] != 1 {
+        crate::serial_println!("[dhcp]   FAIL: op = {}", msg[0]);
+        return Err(KernelError::InternalError);
+    }
+
+    // htype = Ethernet (1).
+    if msg[1] != 1 {
+        crate::serial_println!("[dhcp]   FAIL: htype = {}", msg[1]);
+        return Err(KernelError::InternalError);
+    }
+
+    // hlen = 6.
+    if msg[2] != 6 {
+        crate::serial_println!("[dhcp]   FAIL: hlen = {}", msg[2]);
+        return Err(KernelError::InternalError);
+    }
+
+    // XID = 0x12345678.
+    let xid = u32::from_be_bytes([msg[4], msg[5], msg[6], msg[7]]);
+    if xid != 0x12345678 {
+        crate::serial_println!("[dhcp]   FAIL: xid = {:#010x}", xid);
+        return Err(KernelError::InternalError);
+    }
+
+    // chaddr: first 6 bytes should be our MAC.
+    if msg[28..34] != mac.0 {
+        crate::serial_println!("[dhcp]   FAIL: chaddr doesn't match MAC");
+        return Err(KernelError::InternalError);
+    }
+
+    // Magic cookie at offset 236.
+    if msg[236..240] != MAGIC_COOKIE {
+        crate::serial_println!("[dhcp]   FAIL: magic cookie wrong");
+        return Err(KernelError::InternalError);
+    }
+
+    // First option should be MSG_TYPE = DISCOVER (1).
+    if msg[240] != OPT_MSG_TYPE || msg[241] != 1 || msg[242] != DHCP_DISCOVER {
+        crate::serial_println!("[dhcp]   FAIL: msg_type option wrong");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dhcp]   build message structure: OK");
+    Ok(())
+}
+
+/// Test that build_dhcp_ip_udp produces a valid IP/UDP header.
+fn test_build_dhcp_ip_udp_header() -> KernelResult<()> {
+    let mac = MacAddress([0x11; 6]);
+    CURRENT_XID.store(0xDEADBEEF, core::sync::atomic::Ordering::Relaxed);
+
+    let dhcp_msg = build_dhcp_message(DHCP_DISCOVER, &mac, &[]);
+    let pkt = build_dhcp_ip_udp(&dhcp_msg);
+
+    // Must start with IPv4 (version 4, IHL 5).
+    if pkt[0] != 0x45 {
+        crate::serial_println!("[dhcp]   FAIL: IP version/IHL = {:#04x}", pkt[0]);
+        return Err(KernelError::InternalError);
+    }
+
+    // Protocol = UDP (17).
+    if pkt[9] != 17 {
+        crate::serial_println!("[dhcp]   FAIL: IP protocol = {}", pkt[9]);
+        return Err(KernelError::InternalError);
+    }
+
+    // Source IP = 0.0.0.0.
+    if pkt[12..16] != [0, 0, 0, 0] {
+        crate::serial_println!("[dhcp]   FAIL: src IP not 0.0.0.0");
+        return Err(KernelError::InternalError);
+    }
+
+    // Dest IP = 255.255.255.255.
+    if pkt[16..20] != [255, 255, 255, 255] {
+        crate::serial_println!("[dhcp]   FAIL: dst IP not broadcast");
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify IP header checksum.
+    let cksum = super::ipv4::ip_checksum(&pkt[..20]);
+    if cksum != 0 {
+        crate::serial_println!("[dhcp]   FAIL: IP checksum = {:#06x}", cksum);
+        return Err(KernelError::InternalError);
+    }
+
+    // UDP source port = 68 (DHCP client).
+    let src_port = u16::from_be_bytes([pkt[20], pkt[21]]);
+    if src_port != DHCP_CLIENT_PORT {
+        crate::serial_println!("[dhcp]   FAIL: UDP src port = {}", src_port);
+        return Err(KernelError::InternalError);
+    }
+
+    // UDP dest port = 67 (DHCP server).
+    let dst_port = u16::from_be_bytes([pkt[22], pkt[23]]);
+    if dst_port != DHCP_SERVER_PORT {
+        crate::serial_println!("[dhcp]   FAIL: UDP dst port = {}", dst_port);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dhcp]   build IP/UDP header: OK");
+    Ok(())
+}
+
+/// Test RenewalRetry interval exponential backoff.
+fn test_renewal_retry_interval() -> KernelResult<()> {
+    let mut retry = RenewalRetry::new();
+
+    // Initial interval: 4 seconds.
+    let expected_ns = 4_000_000_000u64;
+    if retry.interval_ns() != expected_ns {
+        crate::serial_println!("[dhcp]   FAIL: initial interval = {}", retry.interval_ns());
+        return Err(KernelError::InternalError);
+    }
+
+    // After 1 retry: 8 seconds.
+    retry.retries = 1;
+    if retry.interval_ns() != 8_000_000_000 {
+        crate::serial_println!("[dhcp]   FAIL: retry 1 interval = {}", retry.interval_ns());
+        return Err(KernelError::InternalError);
+    }
+
+    // After 2 retries: 16 seconds.
+    retry.retries = 2;
+    if retry.interval_ns() != 16_000_000_000 {
+        crate::serial_println!("[dhcp]   FAIL: retry 2 interval = {}", retry.interval_ns());
+        return Err(KernelError::InternalError);
+    }
+
+    // Capped at 64 seconds.
+    retry.retries = 10; // 4 * 1024 = 4096 > 64, so should cap.
+    if retry.interval_ns() != 64_000_000_000 {
+        crate::serial_println!("[dhcp]   FAIL: capped interval = {}", retry.interval_ns());
+        return Err(KernelError::InternalError);
+    }
+
+    // Reset brings retries back to 0.
+    retry.reset();
+    if retry.retries != 0 || retry.last_attempt_ns != 0 {
+        crate::serial_println!("[dhcp]   FAIL: reset didn't clear state");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dhcp]   renewal retry interval: OK");
+    Ok(())
+}
+
+/// Test state_str returns correct strings.
+fn test_state_str() -> KernelResult<()> {
+    // Save and restore original state.
+    let original = *DHCP_STATE.lock();
+
+    *DHCP_STATE.lock() = DhcpState::Idle;
+    if state_str() != "idle" {
+        crate::serial_println!("[dhcp]   FAIL: Idle → '{}'", state_str());
+        *DHCP_STATE.lock() = original;
+        return Err(KernelError::InternalError);
+    }
+
+    *DHCP_STATE.lock() = DhcpState::Bound;
+    if state_str() != "bound" {
+        crate::serial_println!("[dhcp]   FAIL: Bound → '{}'", state_str());
+        *DHCP_STATE.lock() = original;
+        return Err(KernelError::InternalError);
+    }
+
+    *DHCP_STATE.lock() = DhcpState::Renewing;
+    if state_str() != "renewing" {
+        crate::serial_println!("[dhcp]   FAIL: Renewing → '{}'", state_str());
+        *DHCP_STATE.lock() = original;
+        return Err(KernelError::InternalError);
+    }
+
+    // Restore.
+    *DHCP_STATE.lock() = original;
+
+    crate::serial_println!("[dhcp]   state_str: OK");
+    Ok(())
+}
+
+/// Test that build_dhcp_renew_message sets ciaddr correctly.
+fn test_build_renew_message() -> KernelResult<()> {
+    let mac = MacAddress([0x22; 6]);
+    let our_ip = Ipv4Addr([192, 168, 1, 50]);
+    CURRENT_XID.store(0xCAFEBABE, core::sync::atomic::Ordering::Relaxed);
+
+    let msg = build_dhcp_renew_message(&mac, our_ip);
+
+    if msg.len() < 300 {
+        crate::serial_println!("[dhcp]   FAIL: renew message too short");
+        return Err(KernelError::InternalError);
+    }
+
+    // ciaddr (offset 12-15) should be our_ip.
+    if msg[12..16] != our_ip.0 {
+        crate::serial_println!("[dhcp]   FAIL: ciaddr not set to our IP");
+        return Err(KernelError::InternalError);
+    }
+
+    // flags should be 0 (unicast OK for renewal).
+    let flags = u16::from_be_bytes([msg[10], msg[11]]);
+    if flags != 0 {
+        crate::serial_println!("[dhcp]   FAIL: renew flags = {:#06x}, expected 0", flags);
+        return Err(KernelError::InternalError);
+    }
+
+    // msg_type option should be REQUEST (3).
+    // After magic cookie at 240: opt_code, opt_len, opt_value.
+    if msg[240] != OPT_MSG_TYPE || msg[241] != 1 || msg[242] != DHCP_REQUEST {
+        crate::serial_println!("[dhcp]   FAIL: renew msg_type not REQUEST");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dhcp]   build renew message: OK");
+    Ok(())
+}

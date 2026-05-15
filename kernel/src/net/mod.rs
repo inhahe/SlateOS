@@ -218,9 +218,10 @@ pub fn self_test() -> KernelResult<()> {
 
     // DNS cache statistics.
     let dns_stats = dns::cache_stats();
+    let aaaa_count = dns::aaaa_cache_count();
     crate::serial_println!(
-        "[net]   DNS cache: {}/{} entries, {} hits, {} misses, {} evictions",
-        dns_stats.entries, dns_stats.capacity,
+        "[net]   DNS cache: {}/{} A entries, {} AAAA entries, {} hits, {} misses, {} evictions",
+        dns_stats.entries, dns_stats.capacity, aaaa_count,
         dns_stats.hits, dns_stats.misses, dns_stats.evictions,
     );
 

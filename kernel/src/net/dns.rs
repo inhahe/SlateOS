@@ -52,9 +52,16 @@
 //!
 //! ## Limitations
 //!
-//! - Forward resolution only supports A records (IPv4 addresses).
 //! - CNAME chasing limited to 8 hops.
 //! - No EDNS0 or DNSSEC.
+//!
+//! ## IPv6 support (AAAA records)
+//!
+//! The [`resolve6`] function queries AAAA records (RFC 3596) to resolve
+//! domain names to IPv6 addresses.  AAAA results are cached in a
+//! separate 16-entry cache with the same TTL/eviction behaviour as the
+//! A record cache.  [`reverse_resolve6`] queries PTR records in the
+//! `ip6.arpa` domain for IPv6 reverse DNS.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -64,6 +71,7 @@ use spin::Mutex;
 use crate::error::{KernelError, KernelResult};
 
 use super::interface::{self, Ipv4Addr};
+use super::ipv6::Ipv6Addr;
 
 // ---------------------------------------------------------------------------
 // DNS cache statistics (lock-free atomic counters)
@@ -116,6 +124,8 @@ const TYPE_A: u16 = 1;
 const TYPE_CNAME: u16 = 5;
 /// DNS record type: PTR (pointer / reverse DNS).
 const TYPE_PTR: u16 = 12;
+/// DNS record type: AAAA (IPv6 address, RFC 3596).
+const TYPE_AAAA: u16 = 28;
 /// DNS record class: IN (Internet).
 const CLASS_IN: u16 = 1;
 
@@ -349,21 +359,154 @@ impl DnsCache {
     }
 }
 
-/// Global DNS cache.
+/// Global DNS cache (A records).
 static DNS_CACHE: Mutex<DnsCache> = Mutex::new(DnsCache::new());
+
+// ---------------------------------------------------------------------------
+// AAAA (IPv6) DNS cache
+// ---------------------------------------------------------------------------
+
+/// Maximum number of cached AAAA entries.
+///
+/// Smaller than the A cache because IPv6 is less commonly used.
+const AAAA_CACHE_SIZE: usize = 16;
+
+/// A cached DNS AAAA resolution result.
+#[derive(Clone)]
+struct AaaaCacheEntry {
+    /// Domain name (lowercased).
+    name: [u8; MAX_NAME_LEN],
+    /// Length of the name.
+    name_len: usize,
+    /// Resolved IPv6 address.
+    ip: Ipv6Addr,
+    /// Absolute expiration time in nanoseconds (monotonic clock).
+    expires_ns: u64,
+}
+
+impl AaaaCacheEntry {
+    const fn empty() -> Self {
+        Self {
+            name: [0u8; MAX_NAME_LEN],
+            name_len: 0,
+            ip: Ipv6Addr::UNSPECIFIED,
+            expires_ns: 0,
+        }
+    }
+
+    fn is_valid(&self, now_ns: u64) -> bool {
+        self.name_len > 0 && now_ns < self.expires_ns
+    }
+}
+
+/// DNS AAAA resolution cache.
+///
+/// Same eviction strategy as the A record cache.
+struct DnsAaaaCache {
+    entries: [AaaaCacheEntry; AAAA_CACHE_SIZE],
+    count: usize,
+}
+
+impl DnsAaaaCache {
+    const fn new() -> Self {
+        Self {
+            entries: [const { AaaaCacheEntry::empty() }; AAAA_CACHE_SIZE],
+            count: 0,
+        }
+    }
+
+    /// Look up a name.  Returns `Some(Some(ip))` for positive hit,
+    /// `Some(None)` for negative hit, `None` for cache miss.
+    fn lookup(&self, name: &str, now_ns: u64) -> Option<Option<Ipv6Addr>> {
+        let name_bytes = name.as_bytes();
+        for entry in &self.entries {
+            if entry.name_len == name_bytes.len()
+                && entry.is_valid(now_ns)
+                && DnsCache::names_match(&entry.name, entry.name_len, name_bytes)
+            {
+                if entry.ip.is_unspecified() {
+                    return Some(None); // Negative cache entry.
+                }
+                return Some(Some(entry.ip));
+            }
+        }
+        None
+    }
+
+    /// Insert or update an entry.
+    fn insert(&mut self, name: &str, ip: Ipv6Addr, ttl_secs: u32, now_ns: u64) {
+        let name_bytes = name.as_bytes();
+        if name_bytes.len() > MAX_NAME_LEN {
+            return;
+        }
+
+        let ttl_clamped = ttl_secs.clamp(60, 3600);
+        let ttl_ns = u64::from(ttl_clamped).wrapping_mul(1_000_000_000);
+        let expires = now_ns.wrapping_add(ttl_ns);
+
+        // Update in place if already cached.
+        for entry in &mut self.entries {
+            if entry.name_len == name_bytes.len()
+                && DnsCache::names_match(&entry.name, entry.name_len, name_bytes)
+            {
+                entry.ip = ip;
+                entry.expires_ns = expires;
+                return;
+            }
+        }
+
+        // Find a slot: prefer empty/expired, then evict oldest.
+        let mut best_idx: usize = 0;
+        let mut best_expires: u64 = u64::MAX;
+
+        for (i, entry) in self.entries.iter().enumerate() {
+            if entry.name_len == 0 {
+                best_idx = i;
+                break;
+            }
+            if !entry.is_valid(now_ns) {
+                best_idx = i;
+                break;
+            }
+            if entry.expires_ns < best_expires {
+                best_expires = entry.expires_ns;
+                best_idx = i;
+            }
+        }
+
+        if let Some(slot) = self.entries.get_mut(best_idx) {
+            if slot.name_len > 0 && slot.is_valid(now_ns) {
+                CACHE_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            slot.name = [0u8; MAX_NAME_LEN];
+            let copy_len = name_bytes.len().min(MAX_NAME_LEN);
+            slot.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+            slot.name_len = name_bytes.len();
+            slot.ip = ip;
+            slot.expires_ns = expires;
+            if self.count < AAAA_CACHE_SIZE {
+                self.count = self.count.wrapping_add(1);
+            }
+        }
+    }
+}
+
+/// Global AAAA (IPv6) DNS cache.
+static AAAA_CACHE: Mutex<DnsAaaaCache> = Mutex::new(DnsAaaaCache::new());
 
 // ---------------------------------------------------------------------------
 // DNS packet building
 // ---------------------------------------------------------------------------
 
-/// Build a DNS query packet for an A record.
+/// Build a DNS query packet for any record type.
 ///
 /// `query_id` is the transaction ID for this query — used to match
 /// the response and prevent spoofed replies.
+/// `qtype` is the DNS record type (TYPE_A, TYPE_AAAA, TYPE_PTR, etc.).
 ///
 /// Returns the raw UDP payload.
 #[allow(clippy::arithmetic_side_effects)]
-fn build_query(name: &str, query_id: u16) -> Vec<u8> {
+fn build_query_typed(name: &str, query_id: u16, qtype: u16) -> Vec<u8> {
     let mut pkt = Vec::with_capacity(64);
 
     // Header (12 bytes).
@@ -377,45 +520,73 @@ fn build_query(name: &str, query_id: u16) -> Vec<u8> {
     // Question section: encode domain name as labels.
     encode_name(&mut pkt, name);
 
-    // Type: A.
-    pkt.extend_from_slice(&TYPE_A.to_be_bytes());
-    // Class: IN.
+    // Type + Class.
+    pkt.extend_from_slice(&qtype.to_be_bytes());
     pkt.extend_from_slice(&CLASS_IN.to_be_bytes());
 
     pkt
 }
 
-/// Build a DNS query packet for a PTR record (reverse DNS).
+/// Build a DNS query packet for an A record.
+fn build_query(name: &str, query_id: u16) -> Vec<u8> {
+    build_query_typed(name, query_id, TYPE_A)
+}
+
+/// Build a DNS query packet for an AAAA record (IPv6, RFC 3596).
+fn build_aaaa_query(name: &str, query_id: u16) -> Vec<u8> {
+    build_query_typed(name, query_id, TYPE_AAAA)
+}
+
+/// Build a DNS query packet for a PTR record (reverse DNS, IPv4).
 ///
 /// Converts the IP address to the `in-addr.arpa` domain format
 /// (e.g., `192.168.1.1` → `1.1.168.192.in-addr.arpa`) and queries
 /// for a PTR record.
-#[allow(clippy::arithmetic_side_effects)]
 fn build_ptr_query(ip: Ipv4Addr, query_id: u16) -> Vec<u8> {
-    let mut pkt = Vec::with_capacity(64);
-
-    // Header (12 bytes).
-    pkt.extend_from_slice(&query_id.to_be_bytes());
-    pkt.extend_from_slice(&FLAGS_QUERY_RD.to_be_bytes());
-    pkt.extend_from_slice(&1u16.to_be_bytes());           // QDCOUNT = 1.
-    pkt.extend_from_slice(&0u16.to_be_bytes());           // ANCOUNT = 0.
-    pkt.extend_from_slice(&0u16.to_be_bytes());           // NSCOUNT = 0.
-    pkt.extend_from_slice(&0u16.to_be_bytes());           // ARCOUNT = 0.
-
-    // Build reverse name: octets in reverse order + "in-addr.arpa".
-    // E.g., 192.168.1.1 → "1.1.168.192.in-addr.arpa"
     let arpa_name = alloc::format!(
         "{}.{}.{}.{}.in-addr.arpa",
         ip.0[3], ip.0[2], ip.0[1], ip.0[0]
     );
-    encode_name(&mut pkt, &arpa_name);
+    build_query_typed(&arpa_name, query_id, TYPE_PTR)
+}
 
-    // Type: PTR.
-    pkt.extend_from_slice(&TYPE_PTR.to_be_bytes());
-    // Class: IN.
-    pkt.extend_from_slice(&CLASS_IN.to_be_bytes());
+/// Build a DNS query packet for a PTR record (reverse DNS, IPv6).
+///
+/// Converts the IPv6 address to the `ip6.arpa` domain format:
+/// each nibble of the 128-bit address is reversed and separated by dots.
+///
+/// E.g., `2001:db8::1` → `1.0.0.0.…0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa`
+fn build_ptr6_query(ip: &Ipv6Addr, query_id: u16) -> Vec<u8> {
+    let arpa_name = ipv6_to_ip6_arpa(ip);
+    build_query_typed(&arpa_name, query_id, TYPE_PTR)
+}
 
-    pkt
+/// Convert an IPv6 address to the ip6.arpa reverse DNS format.
+///
+/// Each nibble (4 bits) of the address is represented as a hex digit,
+/// reversed, and separated by dots.  For example:
+///
+/// `2001:0db8:0000:0000:0000:0000:0000:0001` →
+/// `1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa`
+fn ipv6_to_ip6_arpa(ip: &Ipv6Addr) -> String {
+    // 32 nibbles * 2 chars each (nibble + '.') + "ip6.arpa" = ~74 bytes.
+    let mut name = String::with_capacity(80);
+
+    // Process each byte from the end, low nibble first.
+    for i in (0..16).rev() {
+        let byte = ip.0[i];
+        let lo = byte & 0x0F;
+        let hi = (byte >> 4) & 0x0F;
+
+        // Low nibble first (reversed order).
+        let hex_chars = b"0123456789abcdef";
+        name.push(hex_chars[lo as usize] as char);
+        name.push('.');
+        name.push(hex_chars[hi as usize] as char);
+        name.push('.');
+    }
+    name.push_str("ip6.arpa");
+    name
 }
 
 /// Encode a domain name as DNS wire-format labels.
@@ -1024,14 +1195,20 @@ fn resolve_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<Ip
     Err(KernelError::TimedOut)
 }
 
-/// Flush the entire DNS cache.
+/// Flush the entire DNS cache (both A and AAAA).
 ///
 /// Called when the network configuration changes (e.g., DHCP renewal
 /// with a new DNS server) to avoid stale cached results.
 pub fn flush_cache() {
-    let mut cache = DNS_CACHE.lock();
-    *cache = DnsCache::new();
-    crate::serial_println!("[dns] Cache flushed");
+    {
+        let mut cache = DNS_CACHE.lock();
+        *cache = DnsCache::new();
+    }
+    {
+        let mut cache = AAAA_CACHE.lock();
+        *cache = DnsAaaaCache::new();
+    }
+    crate::serial_println!("[dns] Cache flushed (A + AAAA)");
 }
 
 /// Resolve a domain name and return it as a formatted string.
@@ -1133,6 +1310,391 @@ pub fn reverse_resolve(ip: Ipv4Addr) -> KernelResult<String> {
 }
 
 // ---------------------------------------------------------------------------
+// AAAA (IPv6) resolution — RFC 3596
+// ---------------------------------------------------------------------------
+
+/// Parsed DNS AAAA record result: IPv6 address and TTL in seconds.
+struct DnsResult6 {
+    ip: Ipv6Addr,
+    ttl_secs: u32,
+}
+
+/// Parse a DNS response and extract the first AAAA record.
+///
+/// Follows CNAME chains within the response, same as the A record parser.
+/// Returns `Err(NotFound)` with the CNAME target in `cname_out` if only
+/// CNAMEs are present (caller should re-query).
+#[allow(clippy::arithmetic_side_effects)]
+fn parse_aaaa_response(
+    data: &[u8],
+    expected_id: u16,
+    cname_out: &mut Option<String>,
+) -> KernelResult<DnsResult6> {
+    if data.len() < 12 {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let id = u16::from_be_bytes([data[0], data[1]]);
+    if id != expected_id {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let flags = u16::from_be_bytes([data[2], data[3]]);
+    if flags & 0x8000 == 0 {
+        return Err(KernelError::InvalidArgument); // Not a response.
+    }
+    let rcode = flags & 0x000F;
+    if rcode != 0 {
+        return Err(KernelError::NotFound); // Server error (NXDOMAIN, etc.).
+    }
+
+    let qdcount = u16::from_be_bytes([data[4], data[5]]);
+    let ancount = u16::from_be_bytes([data[6], data[7]]);
+
+    if ancount == 0 {
+        return Err(KernelError::NotFound);
+    }
+
+    // Skip the question section.
+    let mut offset = 12;
+    for _ in 0..qdcount {
+        offset = skip_name(data, offset)?;
+        if offset.checked_add(4).map_or(true, |end| end > data.len()) {
+            return Err(KernelError::InvalidArgument);
+        }
+        offset += 4; // QTYPE + QCLASS.
+    }
+
+    // Collect CNAME mappings and AAAA records.
+    let mut cname_target: Option<String> = None;
+    let mut aaaa_results: Vec<(String, Ipv6Addr, u32)> = Vec::new();
+
+    for _ in 0..ancount {
+        if offset >= data.len() {
+            break;
+        }
+
+        let (rr_name, new_offset) = decode_name(data, offset)?;
+        offset = new_offset;
+
+        if offset + 10 > data.len() {
+            break;
+        }
+
+        let rtype = u16::from_be_bytes([data[offset], data[offset + 1]]);
+        let rclass = u16::from_be_bytes([data[offset + 2], data[offset + 3]]);
+        let ttl = u32::from_be_bytes([
+            data[offset + 4], data[offset + 5],
+            data[offset + 6], data[offset + 7],
+        ]);
+        let rdlength = u16::from_be_bytes([data[offset + 8], data[offset + 9]]);
+        offset += 10;
+
+        let rd_end = offset + rdlength as usize;
+        if rd_end > data.len() {
+            break;
+        }
+
+        if rclass == CLASS_IN {
+            if rtype == TYPE_AAAA && rdlength == 16 {
+                let mut addr = [0u8; 16];
+                addr.copy_from_slice(&data[offset..offset + 16]);
+                aaaa_results.push((rr_name, Ipv6Addr(addr), ttl));
+            } else if rtype == TYPE_CNAME {
+                let (cname, _) = decode_name(data, offset)?;
+                crate::serial_println!(
+                    "[dns] CNAME (AAAA): {} → {}", rr_name, cname
+                );
+                cname_target = Some(cname);
+            }
+        }
+
+        offset = rd_end;
+    }
+
+    // If we have a CNAME, check if any AAAA record resolves the target.
+    if let Some(ref cname) = cname_target {
+        for (name, ip, ttl) in &aaaa_results {
+            if names_eq_case_insensitive(name, cname) {
+                return Ok(DnsResult6 { ip: *ip, ttl_secs: *ttl });
+            }
+        }
+    }
+
+    // Return the first AAAA record found.
+    if let Some((_, ip, ttl)) = aaaa_results.first() {
+        return Ok(DnsResult6 { ip: *ip, ttl_secs: *ttl });
+    }
+
+    // No AAAA record — propagate CNAME for follow-up.
+    if cname_target.is_some() {
+        *cname_out = cname_target;
+        return Err(KernelError::NotFound);
+    }
+
+    Err(KernelError::NotFound)
+}
+
+/// Resolve a domain name to an IPv6 address (AAAA record, RFC 3596).
+///
+/// Checks the AAAA cache first.  On a cache miss, sends a DNS AAAA
+/// query and waits for a response.  Follows CNAME chains.
+///
+/// Successful results are cached with the TTL from the DNS response.
+#[allow(dead_code)] // Public API, not yet called from other modules.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn resolve6(name: &str) -> KernelResult<Ipv6Addr> {
+    let mut current_name = String::from(name);
+    let mut cname_out = None;
+
+    for hop in 0..MAX_CNAME_HOPS {
+        match resolve6_single(&current_name, &mut cname_out) {
+            Ok(ip) => {
+                // Cache under the original name too, if we followed CNAMEs.
+                if hop > 0 {
+                    let cache_now = crate::hrtimer::now_ns();
+                    AAAA_CACHE.lock().insert(name, ip, 60, cache_now);
+                }
+                return Ok(ip);
+            }
+            Err(KernelError::NotFound) => {
+                if let Some(target) = cname_out.take() {
+                    crate::serial_println!(
+                        "[dns] Following CNAME (AAAA): {} → {} (hop {})",
+                        current_name, target, hop + 1
+                    );
+                    // Check AAAA cache for the CNAME target.
+                    let now_ns = crate::hrtimer::now_ns();
+                    match AAAA_CACHE.lock().lookup(&target, now_ns) {
+                        Some(Some(ip)) => {
+                            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+                            let cache_now = crate::hrtimer::now_ns();
+                            AAAA_CACHE.lock().insert(name, ip, 60, cache_now);
+                            return Ok(ip);
+                        }
+                        Some(None) => {
+                            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+                            return Err(KernelError::NotFound);
+                        }
+                        None => {
+                            CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    current_name = target;
+                    continue;
+                }
+                return Err(KernelError::NotFound);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    crate::serial_println!(
+        "[dns] AAAA CNAME loop for '{}' (>{} hops)",
+        name, MAX_CNAME_HOPS
+    );
+    Err(KernelError::InvalidArgument)
+}
+
+/// Resolve a single AAAA name (with retry on timeout).
+#[allow(clippy::arithmetic_side_effects)]
+fn resolve6_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<Ipv6Addr> {
+    let now_ns = crate::hrtimer::now_ns();
+
+    // Check AAAA cache first.
+    match AAAA_CACHE.lock().lookup(name, now_ns) {
+        Some(Some(ip)) => {
+            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            crate::serial_println!("[dns] AAAA cache hit: '{}' → {}", name, ip);
+            return Ok(ip);
+        }
+        Some(None) => {
+            CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+            crate::serial_println!("[dns] AAAA negative cache hit: '{}'", name);
+            return Err(KernelError::NotFound);
+        }
+        None => {
+            CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let dns_server = interface::info().dns;
+    if dns_server.is_unspecified() {
+        return Err(KernelError::NotSupported);
+    }
+
+    crate::serial_println!("[dns] AAAA resolving '{}' via {}...", name, dns_server);
+
+    *cname_out = None;
+
+    let query_id = next_query_id();
+    let local_port = next_dns_port();
+    let query = build_aaaa_query(name, query_id);
+
+    let sock = super::udp::bind(local_port)?;
+
+    for attempt in 0..MAX_DNS_ATTEMPTS {
+        if let Err(e) = super::udp::send(local_port, dns_server, DNS_PORT, &query) {
+            super::udp::close(sock);
+            return Err(e);
+        }
+
+        if attempt > 0 {
+            crate::serial_println!(
+                "[dns] AAAA retry {} for '{}' (timeout {}ms)",
+                attempt, name,
+                DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000)
+            );
+        }
+
+        let polls = DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000);
+
+        for _ in 0..polls {
+            super::poll();
+
+            if let Some(dgram) = super::udp::recv(sock) {
+                if dgram.src_ip != dns_server || dgram.src_port != DNS_PORT {
+                    continue;
+                }
+                super::udp::close(sock);
+                match parse_aaaa_response(&dgram.data, query_id, cname_out) {
+                    Ok(result) => {
+                        crate::serial_println!(
+                            "[dns] AAAA resolved '{}' → {} (TTL {}s)",
+                            name, result.ip, result.ttl_secs
+                        );
+                        let cache_now = crate::hrtimer::now_ns();
+                        AAAA_CACHE.lock().insert(name, result.ip, result.ttl_secs, cache_now);
+                        return Ok(result.ip);
+                    }
+                    Err(KernelError::NotFound) => {
+                        if cname_out.is_none() {
+                            let cache_now = crate::hrtimer::now_ns();
+                            AAAA_CACHE.lock().insert(
+                                name,
+                                Ipv6Addr::UNSPECIFIED,
+                                NEGATIVE_CACHE_TTL,
+                                cache_now,
+                            );
+                        }
+                        return Err(KernelError::NotFound);
+                    }
+                    Err(e) => {
+                        crate::serial_println!("[dns] AAAA parse error: {:?}", e);
+                        return Err(e);
+                    }
+                }
+            }
+
+            for _ in 0..10_000 {
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    super::udp::close(sock);
+    crate::serial_println!(
+        "[dns] AAAA resolution timed out for '{}' after {} attempts",
+        name, MAX_DNS_ATTEMPTS
+    );
+    Err(KernelError::TimedOut)
+}
+
+/// Resolve a domain name to an IPv6 address and return it as a string.
+#[allow(dead_code)] // Public API.
+pub fn resolve6_str(name: &str) -> KernelResult<String> {
+    let ip = resolve6(name)?;
+    Ok(alloc::format!("{}", ip))
+}
+
+/// Reverse-resolve an IPv6 address to a hostname (PTR record via ip6.arpa).
+///
+/// Converts the address to the nibble-reversed ip6.arpa domain and sends
+/// a PTR query.  For example, `2001:db8::1` queries for
+/// `1.0.0.0.…0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa`.
+///
+/// Results are not cached (reverse lookups are rare).
+#[allow(dead_code)] // Public API.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn reverse_resolve6(ip: &Ipv6Addr) -> KernelResult<String> {
+    let dns_server = interface::info().dns;
+    if dns_server.is_unspecified() {
+        return Err(KernelError::NotSupported);
+    }
+
+    crate::serial_println!("[dns] Reverse resolving {} (AAAA)...", ip);
+
+    let query_id = next_query_id();
+    let local_port = next_dns_port();
+    let query = build_ptr6_query(ip, query_id);
+
+    let sock = super::udp::bind(local_port)?;
+
+    for attempt in 0..MAX_DNS_ATTEMPTS {
+        if let Err(e) = super::udp::send(local_port, dns_server, DNS_PORT, &query) {
+            super::udp::close(sock);
+            return Err(e);
+        }
+
+        if attempt > 0 {
+            crate::serial_println!(
+                "[dns] PTR6 retry {} for {} (timeout {}ms)",
+                attempt, ip,
+                DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000)
+            );
+        }
+
+        let polls = DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000);
+
+        for _ in 0..polls {
+            super::poll();
+
+            if let Some(dgram) = super::udp::recv(sock) {
+                if dgram.src_ip != dns_server || dgram.src_port != DNS_PORT {
+                    continue;
+                }
+                super::udp::close(sock);
+                match parse_ptr_response(&dgram.data, query_id) {
+                    Ok(name) => {
+                        crate::serial_println!(
+                            "[dns] PTR6 resolved {} → '{}'",
+                            ip, name
+                        );
+                        return Ok(name);
+                    }
+                    Err(KernelError::NotFound) => {
+                        crate::serial_println!(
+                            "[dns] No PTR record for {}", ip
+                        );
+                        return Err(KernelError::NotFound);
+                    }
+                    Err(e) => {
+                        crate::serial_println!("[dns] PTR6 parse error: {:?}", e);
+                        return Err(e);
+                    }
+                }
+            }
+
+            for _ in 0..10_000 {
+                core::hint::spin_loop();
+            }
+        }
+    }
+
+    super::udp::close(sock);
+    crate::serial_println!(
+        "[dns] PTR6 resolution timed out for {} after {} attempts",
+        ip, MAX_DNS_ATTEMPTS
+    );
+    Err(KernelError::TimedOut)
+}
+
+/// Return the number of entries in the AAAA cache.
+pub fn aaaa_cache_count() -> usize {
+    AAAA_CACHE.lock().count
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1149,8 +1711,12 @@ pub fn self_test() -> KernelResult<()> {
     test_parse_response_a_record()?;
     test_cache_insert_lookup()?;
     test_cache_negative_entry()?;
+    test_build_aaaa_query_structure()?;
+    test_parse_aaaa_response()?;
+    test_aaaa_cache()?;
+    test_ipv6_reverse_name()?;
 
-    crate::serial_println!("[dns] DNS self-test PASSED (8 tests)");
+    crate::serial_println!("[dns] DNS self-test PASSED (12 tests)");
     Ok(())
 }
 
@@ -1477,5 +2043,222 @@ fn test_cache_negative_entry() -> KernelResult<()> {
     }
 
     crate::serial_println!("[dns]   cache negative entry: OK");
+    Ok(())
+}
+
+/// Test AAAA query building produces correct structure.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_build_aaaa_query_structure() -> KernelResult<()> {
+    let query = build_aaaa_query("test.dev", 0x5678);
+
+    // Minimum: 12 header + name + 4 (qtype+qclass).
+    if query.len() < 12 + 4 {
+        crate::serial_println!("[dns]   FAIL: AAAA query too short ({})", query.len());
+        return Err(KernelError::InternalError);
+    }
+
+    // Transaction ID.
+    let id = u16::from_be_bytes([query[0], query[1]]);
+    if id != 0x5678 {
+        crate::serial_println!("[dns]   FAIL: AAAA query ID = {:#06x}", id);
+        return Err(KernelError::InternalError);
+    }
+
+    // QTYPE at end-4 should be AAAA (28).
+    let qtype = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
+    if qtype != TYPE_AAAA {
+        crate::serial_println!("[dns]   FAIL: QTYPE = {} (expected {})", qtype, TYPE_AAAA);
+        return Err(KernelError::InternalError);
+    }
+
+    // QCLASS at end-2 should be IN (1).
+    let qclass = u16::from_be_bytes([query[query.len() - 2], query[query.len() - 1]]);
+    if qclass != CLASS_IN {
+        crate::serial_println!("[dns]   FAIL: QCLASS = {}", qclass);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dns]   build AAAA query: OK");
+    Ok(())
+}
+
+/// Test AAAA response parsing with a hand-crafted response.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_parse_aaaa_response() -> KernelResult<()> {
+    // Build a synthetic DNS response for "test.dev" → 2001:db8::1.
+    let query_id: u16 = 0xBEEF;
+    let mut resp = Vec::new();
+
+    // Header.
+    resp.extend_from_slice(&query_id.to_be_bytes());       // ID.
+    resp.extend_from_slice(&0x8180u16.to_be_bytes());      // Flags: QR=1, RD=1, RA=1.
+    resp.extend_from_slice(&1u16.to_be_bytes());            // QDCOUNT = 1.
+    resp.extend_from_slice(&1u16.to_be_bytes());            // ANCOUNT = 1.
+    resp.extend_from_slice(&0u16.to_be_bytes());            // NSCOUNT = 0.
+    resp.extend_from_slice(&0u16.to_be_bytes());            // ARCOUNT = 0.
+
+    // Question section: "test.dev" IN AAAA.
+    encode_name(&mut resp, "test.dev");
+    resp.extend_from_slice(&TYPE_AAAA.to_be_bytes());
+    resp.extend_from_slice(&CLASS_IN.to_be_bytes());
+
+    // Answer section: test.dev AAAA 600 2001:db8::1.
+    encode_name(&mut resp, "test.dev");
+    resp.extend_from_slice(&TYPE_AAAA.to_be_bytes());      // TYPE.
+    resp.extend_from_slice(&CLASS_IN.to_be_bytes());        // CLASS.
+    resp.extend_from_slice(&600u32.to_be_bytes());          // TTL = 600s.
+    resp.extend_from_slice(&16u16.to_be_bytes());           // RDLENGTH = 16.
+    // 2001:0db8::1 = 2001:0db8:0000:0000:0000:0000:0000:0001
+    resp.extend_from_slice(&[
+        0x20, 0x01, 0x0d, 0xb8,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
+    ]);
+
+    let expected_ip = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
+    ]);
+
+    let mut cname_out = None;
+    let result = parse_aaaa_response(&resp, query_id, &mut cname_out)?;
+
+    if result.ip != expected_ip {
+        crate::serial_println!("[dns]   FAIL: parsed AAAA IP = {}", result.ip);
+        return Err(KernelError::InternalError);
+    }
+    if result.ttl_secs != 600 {
+        crate::serial_println!("[dns]   FAIL: parsed AAAA TTL = {}", result.ttl_secs);
+        return Err(KernelError::InternalError);
+    }
+
+    // Wrong query ID should be rejected.
+    let mut cname_out2 = None;
+    if parse_aaaa_response(&resp, 0x1111, &mut cname_out2).is_ok() {
+        crate::serial_println!("[dns]   FAIL: AAAA accepted wrong query ID");
+        return Err(KernelError::InternalError);
+    }
+
+    // Too-short response should be rejected.
+    let mut cname_out3 = None;
+    if parse_aaaa_response(&resp[..8], query_id, &mut cname_out3).is_ok() {
+        crate::serial_println!("[dns]   FAIL: AAAA accepted too-short response");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dns]   parse AAAA response: OK");
+    Ok(())
+}
+
+/// Test AAAA cache insert/lookup/negative.
+fn test_aaaa_cache() -> KernelResult<()> {
+    let mut cache = DnsAaaaCache::new();
+    let now = crate::hrtimer::now_ns();
+    let ip = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
+    ]);
+
+    // Insert and lookup.
+    cache.insert("v6.example", ip, 120, now);
+
+    match cache.lookup("v6.example", now) {
+        Some(Some(found)) if found == ip => {} // OK.
+        Some(Some(found)) => {
+            crate::serial_println!("[dns]   FAIL: AAAA cache lookup = {}", found);
+            return Err(KernelError::InternalError);
+        }
+        Some(None) => {
+            crate::serial_println!("[dns]   FAIL: AAAA cache returned negative for positive");
+            return Err(KernelError::InternalError);
+        }
+        None => {
+            crate::serial_println!("[dns]   FAIL: AAAA cache miss after insert");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Case-insensitive lookup.
+    match cache.lookup("V6.EXAMPLE", now) {
+        Some(Some(found)) if found == ip => {} // OK.
+        _ => {
+            crate::serial_println!("[dns]   FAIL: AAAA case-insensitive lookup");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Negative entry.
+    cache.insert("nx.v6.test", Ipv6Addr::UNSPECIFIED, 60, now);
+    match cache.lookup("nx.v6.test", now) {
+        Some(None) => {} // Correct — negative hit.
+        _ => {
+            crate::serial_println!("[dns]   FAIL: AAAA negative entry");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Miss for unknown name.
+    if cache.lookup("unknown.v6", now).is_some() {
+        crate::serial_println!("[dns]   FAIL: AAAA found nonexistent entry");
+        return Err(KernelError::InternalError);
+    }
+
+    // Expired entry.
+    let far_future = now.wrapping_add(1_000_000_000_000);
+    if cache.lookup("v6.example", far_future).is_some() {
+        crate::serial_println!("[dns]   FAIL: AAAA expired entry still returned");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dns]   AAAA cache: OK");
+    Ok(())
+}
+
+/// Test IPv6 → ip6.arpa reverse name generation.
+fn test_ipv6_reverse_name() -> KernelResult<()> {
+    // 2001:0db8::1 = 2001:0db8:0000:0000:0000:0000:0000:0001
+    let ip = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
+    ]);
+    let arpa = ipv6_to_ip6_arpa(&ip);
+
+    // Expected: 1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa
+    let expected = "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa";
+    if arpa != expected {
+        crate::serial_println!("[dns]   FAIL: ip6.arpa = '{}'", arpa);
+        crate::serial_println!("[dns]   expected:         '{}'", expected);
+        return Err(KernelError::InternalError);
+    }
+
+    // Loopback (::1) should produce all zeros except the last nibble.
+    let lo = Ipv6Addr::LOOPBACK;
+    let lo_arpa = ipv6_to_ip6_arpa(&lo);
+    if !lo_arpa.ends_with("ip6.arpa") {
+        crate::serial_println!("[dns]   FAIL: loopback ip6.arpa missing suffix");
+        return Err(KernelError::InternalError);
+    }
+    if !lo_arpa.starts_with("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0") {
+        crate::serial_println!("[dns]   FAIL: loopback ip6.arpa prefix wrong");
+        return Err(KernelError::InternalError);
+    }
+
+    // Unspecified (::) should be all zeros.
+    let zero = Ipv6Addr::UNSPECIFIED;
+    let zero_arpa = ipv6_to_ip6_arpa(&zero);
+    let expected_zero = "0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa";
+    if zero_arpa != expected_zero {
+        crate::serial_println!("[dns]   FAIL: :: ip6.arpa = '{}'", zero_arpa);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dns]   IPv6 reverse name: OK");
     Ok(())
 }

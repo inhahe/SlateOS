@@ -64455,17 +64455,45 @@ fn cmd_wget(args: &str) {
 fn cmd_dns(args: &str) {
     if args.is_empty() {
         crate::console_println!("Usage: dns <domain-name>");
+        crate::console_println!("       dns -6 <domain-name>   (AAAA / IPv6)");
         crate::console_println!("  e.g., dns example.com");
         return;
     }
 
-    crate::console_println!("Resolving {}...", args);
-    match crate::net::dns::resolve(args) {
-        Ok(ip) => {
-            crate::console_println!("{} -> {}", args, ip);
+    // Check for -6 flag for AAAA query.
+    let (query_ipv6, name) = if args.starts_with("-6 ") || args.starts_with("-6\t") {
+        (true, args[3..].trim())
+    } else if args == "-6" {
+        crate::console_println!("Usage: dns -6 <domain-name>");
+        return;
+    } else {
+        (false, args.trim())
+    };
+
+    if name.is_empty() {
+        crate::console_println!("Usage: dns <domain-name>");
+        return;
+    }
+
+    if query_ipv6 {
+        crate::console_println!("Resolving {} (AAAA)...", name);
+        match crate::net::dns::resolve6(name) {
+            Ok(ip) => {
+                crate::console_println!("{} -> {}", name, ip);
+            }
+            Err(e) => {
+                crate::console_println!("AAAA resolution failed: {:?}", e);
+            }
         }
-        Err(e) => {
-            crate::console_println!("DNS resolution failed: {:?}", e);
+    } else {
+        crate::console_println!("Resolving {}...", name);
+        match crate::net::dns::resolve(name) {
+            Ok(ip) => {
+                crate::console_println!("{} -> {}", name, ip);
+            }
+            Err(e) => {
+                crate::console_println!("DNS resolution failed: {:?}", e);
+            }
         }
     }
 }

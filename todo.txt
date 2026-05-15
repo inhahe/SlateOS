@@ -126,12 +126,14 @@ Remaining net improvements (diminishing returns):
 
 ## Known Limitations (fs zone)
 
-- ext4 parse_dir_entries and volume name parsing use from_utf8_lossy(),
-  which violates CLAUDE.md ("silent data corruption").  Paths should be
-  treated as opaque bytes, not forced to UTF-8.  Fixing requires changing
-  the VFS DirEntry name type from String to Vec<u8> or OsStr, then
-  propagating through all VFS consumers.  Deferred until the VFS can be
-  refactored — affects driver.rs:3049 and superblock.rs:286.
+- (FIXED) Eliminated all from_utf8_lossy() calls in fs zone (6 sites in
+  ext4 driver/superblock and iso9660).  ext4 dir entries now use strict
+  from_utf8 and skip non-UTF-8 entries with a warning.  Superblock and
+  ISO 9660 volume names use hex-escaping for non-UTF-8 bytes.  Rock Ridge
+  NM/SL names use strict parsing and skip non-UTF-8 entries.
+  The full VFS String→Vec<u8> refactor (149 DirEntry references in 14
+  files) remains deferred — but data corruption on non-UTF-8 filenames
+  is now prevented (error/skip instead of lossy replacement).
 
 - (FIXED) ext4 journal byte order: converted all jbd2 field reads/writes
   from little-endian to big-endian (network byte order) per jbd2 spec.

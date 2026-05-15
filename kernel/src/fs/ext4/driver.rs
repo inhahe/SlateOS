@@ -4926,8 +4926,20 @@ fn parse_dir_entries(data: &[u8]) -> KernelResult<Vec<(u32, u8, String)>> {
             let name_end = name_start.saturating_add(hdr.name_len as usize);
             if name_end <= data.len() {
                 if let Some(name_bytes) = data.get(name_start..name_end) {
-                    let name = String::from_utf8_lossy(name_bytes).into_owned();
-                    entries.push((hdr.inode, hdr.file_type, name));
+                    // Reject non-UTF-8 filenames rather than silently
+                    // corrupting them with lossy replacement characters.
+                    // The proper fix is byte-string DirEntry names (see todo.txt).
+                    match core::str::from_utf8(name_bytes) {
+                        Ok(s) => entries.push((hdr.inode, hdr.file_type, String::from(s))),
+                        Err(_) => {
+                            // Skip this entry — non-UTF-8 filename.
+                            // Log once per directory to avoid spam.
+                            crate::serial_println!(
+                                "[ext4] WARNING: skipping non-UTF-8 directory entry (inode {})",
+                                hdr.inode
+                            );
+                        }
+                    }
                 }
             }
         }

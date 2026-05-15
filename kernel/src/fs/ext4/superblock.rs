@@ -307,10 +307,29 @@ fn read_superblock(data: &[u8]) -> KernelResult<Ext4Superblock> {
 }
 
 /// Extract a null-terminated name from a fixed-size byte array.
+///
+/// Returns valid UTF-8 or falls back to a hex-escaped representation
+/// for non-UTF-8 volume names (which are informational, not path data).
 fn extract_name(buf: &[u8]) -> String {
     let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     let name_bytes = buf.get(..len).unwrap_or(&[]);
-    String::from_utf8_lossy(name_bytes).into_owned()
+    match core::str::from_utf8(name_bytes) {
+        Ok(s) => String::from(s),
+        Err(_) => {
+            // Volume name is informational — hex-escape non-UTF-8 bytes
+            // rather than silently corrupting with replacement characters.
+            let mut out = String::with_capacity(name_bytes.len() * 4);
+            for &b in name_bytes {
+                if b.is_ascii_graphic() || b == b' ' {
+                    out.push(b as char);
+                } else {
+                    use core::fmt::Write;
+                    let _ = write!(out, "\\x{:02x}", b);
+                }
+            }
+            out
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -691,9 +691,12 @@ fn parse_pvd(data: &[u8]) -> KernelResult<PrimaryVolumeDescriptor> {
     }
 
     // Volume identifier: bytes 40-71 (32 bytes, space-padded).
+    // ISO 9660 specifies d-characters (A-Z, 0-9, _) so this should
+    // always be valid ASCII/UTF-8.  Use strict parsing.
     let volume_id = data
         .get(40..72)
-        .map(|b| String::from_utf8_lossy(b).trim_end().into())
+        .and_then(|b| core::str::from_utf8(b).ok())
+        .map(|s| String::from(s.trim_end()))
         .unwrap_or_default();
 
     // Logical block size: bytes 128-129 (LE).
@@ -972,7 +975,11 @@ fn parse_rock_ridge(sua: &[u8]) -> RockRidgeMeta {
                 if nm_flags & 0x01 == 0 {
                     // Concatenate all NM fragments.
                     let full: Vec<u8> = nm_parts.iter().flat_map(|p| p.iter().copied()).collect();
-                    meta.alt_name = Some(String::from_utf8_lossy(&full).into());
+                    // Rock Ridge NM names are POSIX filenames — should be
+                    // valid UTF-8 in practice.  Skip non-UTF-8 entries.
+                    if let Ok(s) = core::str::from_utf8(&full) {
+                        meta.alt_name = Some(String::from(s));
+                    }
                     nm_parts.clear();
                 }
             }
@@ -993,11 +1000,15 @@ fn parse_rock_ridge(sua: &[u8]) -> RockRidgeMeta {
                     0x08 => sl_parts.push(String::from("/")),  // ROOT
                     _ => {
                         // Normal component name.
-                        if let Some(s) = entry.get(
+                        if let Some(bytes) = entry.get(
                             comp_off.saturating_add(2)
                                 ..comp_off.saturating_add(2).saturating_add(c_len),
                         ) {
-                            sl_parts.push(String::from_utf8_lossy(s).into());
+                            // Symlink components should be valid UTF-8 in
+                            // Rock Ridge POSIX environments.
+                            if let Ok(s) = core::str::from_utf8(bytes) {
+                                sl_parts.push(String::from(s));
+                            }
                         }
                     }
                 }
@@ -1060,7 +1071,25 @@ fn records_to_dir_entries(
 ///
 /// Strips the version number and trailing dot.
 fn parse_iso_filename(file_id: &[u8]) -> String {
-    let raw = String::from_utf8_lossy(file_id);
+    // ISO 9660 d-characters are always ASCII, so strict UTF-8
+    // parsing should always succeed.  Fall back to hex-escaped
+    // representation instead of silently corrupting.
+    let raw = match core::str::from_utf8(file_id) {
+        Ok(s) => String::from(s),
+        Err(_) => {
+            // Non-UTF-8 file identifier — hex-escape for display.
+            let mut out = String::with_capacity(file_id.len() * 4);
+            for &b in file_id {
+                if b.is_ascii_graphic() || b == b' ' {
+                    out.push(b as char);
+                } else {
+                    use core::fmt::Write;
+                    let _ = write!(out, "\\x{:02x}", b);
+                }
+            }
+            out
+        }
+    };
 
     // Strip the version number (";1" suffix).
     let name = raw.split(';').next().unwrap_or(&raw);

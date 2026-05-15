@@ -80,12 +80,14 @@ const REG_VMAJ: usize = 0x03;
 /// Global Control (32-bit).
 const REG_GCTL: usize = 0x08;
 /// Wake Enable (16-bit).
+#[allow(dead_code)]
 const REG_WAKEEN: usize = 0x0C;
 /// State Change Status (16-bit) — codec detection.
 const REG_STATESTS: usize = 0x0E;
 /// Interrupt Control (32-bit).
 const REG_INTCTL: usize = 0x20;
 /// Interrupt Status (32-bit).
+#[allow(dead_code)]
 const REG_INTSTS: usize = 0x24;
 
 // CORB registers
@@ -94,6 +96,7 @@ const REG_CORBUBASE: usize = 0x44;
 const REG_CORBWP: usize = 0x48;
 const REG_CORBRP: usize = 0x4A;
 const REG_CORBCTL: usize = 0x4C;
+#[allow(dead_code)]
 const REG_CORBSTS: usize = 0x4D;
 const REG_CORBSIZE: usize = 0x4E;
 
@@ -112,7 +115,9 @@ const STREAM_SIZE: usize = 0x20;
 
 // Stream descriptor register offsets (relative to stream base)
 const SD_CTL: usize = 0x00;   // 24-bit control (read as u32, bits 23:0)
+#[allow(dead_code)]
 const SD_STS: usize = 0x03;   // 8-bit status
+#[allow(dead_code)]
 const SD_LPIB: usize = 0x04;  // 32-bit link position in buffer
 const SD_CBL: usize = 0x08;   // 32-bit cyclic buffer length
 const SD_LVI: usize = 0x0C;   // 16-bit last valid BDL index
@@ -155,6 +160,7 @@ const CORB_ENTRIES: usize = 256;
 const RIRB_ENTRIES: usize = 256;
 
 // Maximum number of BDL entries per stream.
+#[allow(dead_code)]
 const MAX_BDL_ENTRIES: usize = 256;
 
 // Timeouts (in microseconds)
@@ -189,13 +195,17 @@ const fn verb4(cad: u8, nid: u8, verb: u8, payload: u16) -> u32 {
 
 // Common 12-bit verbs
 const VERB_GET_PARAM: u16 = 0xF00;
+#[allow(dead_code)]
 const VERB_SET_STREAM_FORMAT: u16 = 0x200; // 4-bit: verb=2, payload=format
 const VERB_SET_CONV_STREAM_CHAN: u16 = 0x706;
+#[allow(dead_code)]
 const VERB_GET_CONV_STREAM_CHAN: u16 = 0xF06;
 const VERB_SET_PIN_WIDGET_CTL: u16 = 0x707;
+#[allow(dead_code)]
 const VERB_GET_PIN_WIDGET_CTL: u16 = 0xF07;
 const VERB_SET_EAPD_BTLENABLE: u16 = 0x70C;
 const VERB_SET_POWER_STATE: u16 = 0x705;
+#[allow(dead_code)]
 const VERB_GET_CONN_LIST: u16 = 0xF02;
 
 // 4-bit verb for amp gain
@@ -207,13 +217,17 @@ const PARAM_REVISION_ID: u8 = 0x02;
 const PARAM_SUBORD_NODE_COUNT: u8 = 0x04;
 const PARAM_FUNC_GROUP_TYPE: u8 = 0x05;
 const PARAM_AUDIO_WIDGET_CAP: u8 = 0x09;
+#[allow(dead_code)]
 const PARAM_PCM_SIZE_RATE: u8 = 0x0A;
 const PARAM_PIN_CAP: u8 = 0x0C;
+#[allow(dead_code)]
 const PARAM_CONN_LIST_LEN: u8 = 0x0E;
+#[allow(dead_code)]
 const PARAM_AMP_OUT_CAP: u8 = 0x12;
 
 // Audio widget types (bits 23:20 of AUDIO_WIDGET_CAP)
 const WIDGET_TYPE_AUDIO_OUTPUT: u8 = 0x0; // DAC
+#[allow(dead_code)]
 const WIDGET_TYPE_AUDIO_INPUT: u8 = 0x1;  // ADC
 const WIDGET_TYPE_AUDIO_MIXER: u8 = 0x2;
 const WIDGET_TYPE_AUDIO_SELECTOR: u8 = 0x3;
@@ -225,9 +239,11 @@ const PIN_CTL_HP_EN: u8 = 0x80;   // Headphone amplifier enable
 
 // Amp gain/mute bits (for SET_AMP_GAIN payload)
 const AMP_OUT: u16 = 1 << 15;     // Output amp
+#[allow(dead_code)]
 const AMP_IN: u16 = 1 << 14;      // Input amp
 const AMP_LEFT: u16 = 1 << 13;    // Left channel
 const AMP_RIGHT: u16 = 1 << 12;   // Right channel
+#[allow(dead_code)]
 const AMP_MUTE: u16 = 1 << 7;     // Mute
 
 // ---------------------------------------------------------------------------
@@ -284,16 +300,16 @@ struct HdaDevice {
     oss: u8,
     /// Number of bidirectional streams.
     bss: u8,
-    /// Codec addresses that are present (bitmask, bits 0–14).
-    codec_mask: u16,
+    /// Codec addresses that are present (bitmask, bits 0-14).
+    _codec_mask: u16,
     /// CORB DMA buffer physical address.
-    corb_phys: u64,
+    _corb_phys: u64,
     /// CORB DMA buffer virtual address.
     corb_virt: u64,
     /// Current CORB write pointer.
     corb_wp: u16,
     /// RIRB DMA buffer physical address.
-    rirb_phys: u64,
+    _rirb_phys: u64,
     /// RIRB DMA buffer virtual address.
     rirb_virt: u64,
     /// Current RIRB read pointer (software-maintained).
@@ -571,8 +587,6 @@ pub fn init(hhdm_offset: u64) {
 
     // Allocate PCM output buffer (4 frames = 64 KiB for ~340ms of 48kHz/16-bit/stereo).
     let pcm_frames_needed = 4;
-    let mut pcm_phys = 0u64;
-    let mut pcm_virt = 0u64;
     let pcm_size: u32 = pcm_frames_needed * 16384; // 4 × 16 KiB = 64 KiB
 
     // Allocate contiguous frames for PCM buffer.
@@ -586,8 +600,8 @@ pub fn init(hhdm_offset: u64) {
             return;
         }
     };
-    pcm_phys = first_pcm_frame.addr();
-    pcm_virt = pcm_phys + hhdm_offset;
+    let pcm_phys = first_pcm_frame.addr();
+    let pcm_virt = pcm_phys + hhdm_offset;
     frames.push(first_pcm_frame);
 
     for _ in 1..pcm_frames_needed {
@@ -612,11 +626,11 @@ pub fn init(hhdm_offset: u64) {
         iss,
         oss,
         bss,
-        codec_mask,
-        corb_phys,
+        _codec_mask: codec_mask,
+        _corb_phys: corb_phys,
         corb_virt,
         corb_wp: 0,
-        rirb_phys,
+        _rirb_phys: rirb_phys,
         rirb_virt,
         rirb_rp: 0,
         bdl_phys,
@@ -770,7 +784,7 @@ fn send_verb(dev: &mut HdaDevice, verb: u32) -> KernelResult<u32> {
 
     // Write verb to next CORB slot.
     dev.corb_wp = (dev.corb_wp + 1) % (CORB_ENTRIES as u16);
-    let slot_offset = (dev.corb_wp as usize) * 4;
+    let _slot_offset = (dev.corb_wp as usize) * 4;
 
     // SAFETY: corb_virt points to our allocated DMA buffer.
     unsafe {
@@ -1181,6 +1195,7 @@ pub fn stream_counts() -> Option<(u8, u8, u8)> {
 /// Handle an HDA controller interrupt.
 ///
 /// Called from the IOAPIC IRQ handler when the HDA interrupt fires.
+#[allow(dead_code)]
 pub fn handle_irq() {
     let guard = DEVICE.lock();
     let Some(dev) = guard.as_ref() else { return };

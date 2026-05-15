@@ -189,6 +189,7 @@ pub fn record_io(is_write: bool) {
 /// A reasonable threshold is 200–300 ticks at 100 Hz timer = 2–3 seconds
 /// of disk silence.
 #[must_use]
+#[allow(dead_code)]
 pub fn is_idle_for(ticks: u64) -> bool {
     let last = LAST_IO_TICK.load(Ordering::Acquire);
     if last == 0 {
@@ -201,6 +202,7 @@ pub fn is_idle_for(ticks: u64) -> bool {
 
 /// Get the tick count of the most recent I/O operation.
 #[must_use]
+#[allow(dead_code)]
 pub fn last_io_tick() -> u64 {
     LAST_IO_TICK.load(Ordering::Relaxed)
 }
@@ -319,6 +321,7 @@ pub fn list_devices_full() -> Vec<BlockDeviceInfo> {
 ///
 /// Moves any already-initialized drivers into the registry.
 /// Called from `kmain()` after all device drivers are probed.
+#[allow(dead_code)]
 pub fn init() {
     // Move the global virtio-blk device (if present) into the registry.
     // This handles the single-device path used by virtio::blk::init().

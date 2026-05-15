@@ -134,12 +134,14 @@ pub struct VirtioBlkDevice {
     /// Disk capacity in 512-byte sectors.
     capacity: u64,
     /// HHDM offset for physical ↔ virtual translation.
+    #[allow(dead_code)]
     hhdm_offset: u64,
     /// The DMA request frame.
     dma_frame: PhysFrame,
     /// Virtual address of the DMA request frame.
     dma_virt: *mut u8,
     /// PCI IRQ line (0xFF if unknown/not assigned).
+    #[allow(dead_code)]
     irq_line: u8,
 }
 
@@ -235,6 +237,7 @@ impl VirtioBlkDevice {
     ///
     /// Prefer [`enable_interrupts()`] (module-level) when the device
     /// has already been moved into the block device registry.
+    #[allow(dead_code)]
     pub fn enable_irq(&mut self, irq_line: u8) {
         self.irq_line = irq_line;
         // SAFETY: The IRQ line is valid (from PCI config space) and the
@@ -473,6 +476,7 @@ impl Drop for VirtioBlkDevice {
 /// Find and initialize a virtio-blk device on the PCI bus.
 ///
 /// Returns `None` if no virtio-blk device is present.
+#[allow(dead_code)]
 pub fn probe(hhdm_offset: u64) -> Option<VirtioBlkDevice> {
     let pci_dev = pci::find_device(VIRTIO_VENDOR, VIRTIO_BLK_DEVICE)?;
     crate::serial_println!(
@@ -559,12 +563,14 @@ pub fn probe_all(hhdm_offset: u64) -> alloc::vec::Vec<VirtioBlkDevice> {
 // ---------------------------------------------------------------------------
 
 /// The global virtio-blk device (if present).
+#[allow(dead_code)]
 static DEVICE: Mutex<Option<VirtioBlkDevice>> = Mutex::new(None);
 
 /// Initialize the virtio-blk subsystem.
 ///
 /// Probes for a virtio-blk device on the PCI bus.  If found,
 /// initializes it, runs a self-test, and stores it globally.
+#[allow(dead_code)]
 pub fn init(hhdm_offset: u64) {
     if let Some(mut dev) = probe(hhdm_offset) {
         match self_test(&mut dev) {
@@ -586,6 +592,7 @@ pub fn init(hhdm_offset: u64) {
 /// Execute a closure with the global block device, if present.
 ///
 /// Returns `None` if no device has been initialized.
+#[allow(dead_code)]
 pub fn with_device<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut VirtioBlkDevice) -> R,
@@ -599,11 +606,13 @@ where
 /// ownership of driver instances.
 ///
 /// Returns `None` if no device was stored (or already taken).
+#[allow(dead_code)]
 pub fn take_device() -> Option<VirtioBlkDevice> {
     DEVICE.lock().take()
 }
 
 /// Self-test: read sector 0 and verify no error.
+#[allow(dead_code)]
 pub fn self_test(dev: &mut VirtioBlkDevice) -> KernelResult<()> {
     crate::serial_println!("[virtio-blk] Running self-test...");
     crate::serial_println!("[virtio-blk]   Capacity: {} sectors", dev.capacity());

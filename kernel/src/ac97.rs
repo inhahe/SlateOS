@@ -94,6 +94,7 @@ const NAM_VENDOR_ID2: u16 = 0x7E;
 /// PCM Out Buffer Descriptor List base address (32-bit physical).
 const NABM_PCMO_BDBAR: u16 = 0x10;
 /// PCM Out Current Index (which BDL entry the controller is on).
+#[allow(dead_code)]
 const NABM_PCMO_CIV: u16 = 0x14;
 /// PCM Out Last Valid Index (last entry the controller should process).
 const NABM_PCMO_LVI: u16 = 0x15;

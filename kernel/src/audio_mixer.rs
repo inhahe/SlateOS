@@ -55,6 +55,7 @@ use crate::serial_println;
 const MAX_STREAMS: usize = 8;
 
 /// Internal sample rate (Hz).
+#[allow(dead_code)]
 pub const SAMPLE_RATE: u32 = 48000;
 
 /// Internal format: stereo, 16-bit signed, little-endian.
@@ -253,6 +254,7 @@ pub fn write_pcm(id: StreamId, data: &[u8]) -> KernelResult<usize> {
 }
 
 /// Get the amount of buffered data for a stream (in bytes).
+#[allow(dead_code)]
 pub fn buffered(id: StreamId) -> usize {
     let idx = id as usize;
     if idx >= MAX_STREAMS {
@@ -281,6 +283,7 @@ pub fn set_master_mute(muted: bool) {
 }
 
 /// Is master muted?
+#[allow(dead_code)]
 pub fn is_master_muted() -> bool {
     MASTER_MUTED.load(Ordering::Relaxed)
 }
@@ -304,6 +307,7 @@ pub fn get_volume(id: StreamId) -> u8 {
 }
 
 /// Set per-stream mute.
+#[allow(dead_code)]
 pub fn set_muted(id: StreamId, muted: bool) {
     let idx = id as usize;
     if idx < MAX_STREAMS {
@@ -312,6 +316,7 @@ pub fn set_muted(id: StreamId, muted: bool) {
 }
 
 /// Is a stream muted?
+#[allow(dead_code)]
 pub fn is_muted(id: StreamId) -> bool {
     let idx = id as usize;
     if idx < MAX_STREAMS {
@@ -447,6 +452,7 @@ pub fn status() -> (u8, u32, u32, u8, bool) {
 /// Get info about a specific stream: (volume, muted, buffered_bytes).
 ///
 /// Returns `None` if the stream is not active.
+#[allow(dead_code)]
 pub fn stream_info(id: StreamId) -> Option<(u8, bool, usize)> {
     let idx = id as usize;
     if idx >= MAX_STREAMS {
@@ -465,6 +471,7 @@ pub fn stream_info(id: StreamId) -> Option<(u8, bool, usize)> {
 }
 
 /// Copy a stream's name into the provided buffer. Returns bytes written.
+#[allow(dead_code)]
 pub fn stream_name(id: StreamId, dst: &mut [u8]) -> usize {
     let idx = id as usize;
     if idx >= MAX_STREAMS {

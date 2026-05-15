@@ -52,6 +52,7 @@ pub struct VirtqDesc {
 /// offset 4: ring[0..queue_size] (u16 each) — descriptor head indices
 /// ```
 #[repr(C)]
+#[allow(dead_code)]
 pub struct VirtqAvailHeader {
     pub flags: u16,
     pub idx: u16,
@@ -73,6 +74,7 @@ pub struct VirtqUsedElem {
 
 /// Used ring header (4 bytes) + entries.
 #[repr(C)]
+#[allow(dead_code)]
 pub struct VirtqUsedHeader {
     pub flags: u16,
     pub idx: u16,

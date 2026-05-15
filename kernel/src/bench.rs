@@ -292,6 +292,7 @@ pub fn run<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
 /// or compute-bound.
 ///
 /// Falls back to plain `run()` if PMU is unavailable.
+#[allow(dead_code)]
 pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) -> BenchResult {
     use crate::pmc;
 

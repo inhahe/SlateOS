@@ -167,6 +167,7 @@ pub struct VirtioNetDevice {
     /// Device MAC address.
     mac: MacAddress,
     /// HHDM offset for physical ↔ virtual translation.
+    #[allow(dead_code)]
     hhdm_offset: u64,
     /// Physical frame for DMA buffers (TX header/data).
     dma_frame: PhysFrame,
@@ -578,6 +579,7 @@ pub fn init(hhdm_offset: u64) {
 }
 
 /// Self-test: verify device is initialized and can be queried.
+#[allow(dead_code)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[virtio-net] Running self-test...");
 

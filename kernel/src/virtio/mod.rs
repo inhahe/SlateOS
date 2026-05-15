@@ -157,6 +157,7 @@ impl VirtioLegacyPci {
     }
 
     /// Read and clear the ISR status register.
+    #[allow(dead_code)]
     pub fn read_isr(&self) -> u8 {
         self.read8(REG_ISR_STATUS)
     }

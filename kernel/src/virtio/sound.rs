@@ -52,6 +52,7 @@ const VIRTIO_SND_DEVICE_MODERN: u16 = 0x1059;
 
 // Virtio sound control request types (virtio 1.2 §5.14.6)
 /// Query jack information.
+#[allow(dead_code)]
 const VIRTIO_SND_R_JACK_INFO: u32 = 1;
 /// Query PCM stream information.
 const VIRTIO_SND_R_PCM_INFO: u32 = 0x0100;
@@ -165,6 +166,7 @@ struct VirtioSndPcmXfer {
 /// TX/RX status response (device writes this after consuming the buffer).
 #[repr(C)]
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 struct VirtioSndPcmStatus {
     status: u32,
     latency_bytes: u32,

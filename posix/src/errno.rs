@@ -29,6 +29,7 @@ pub const EAGAIN: i32 = 11;        // Resource temporarily unavailable
 pub const ENOMEM: i32 = 12;        // Cannot allocate memory
 pub const EACCES: i32 = 13;        // Permission denied
 pub const EFAULT: i32 = 14;        // Bad address
+pub const ENOTBLK: i32 = 15;      // Block device required
 pub const EBUSY: i32 = 16;         // Device or resource busy
 pub const EEXIST: i32 = 17;        // File exists
 pub const EXDEV: i32 = 18;         // Invalid cross-device link
@@ -55,15 +56,40 @@ pub const ENOTEMPTY: i32 = 39;      // Directory not empty
 pub const ELOOP: i32 = 40;         // Too many levels of symbolic links
 pub const EWOULDBLOCK: i32 = EAGAIN;
 pub const ENOMSG: i32 = 42;        // No message of desired type
+pub const ECHRNG: i32 = 44;        // Channel number out of range
+pub const EL2NSYNC: i32 = 45;     // Level 2 not synchronized
+pub const EL3HLT: i32 = 46;       // Level 3 halted
+pub const EL3RST: i32 = 47;       // Level 3 reset
+pub const ELNRNG: i32 = 48;       // Link number out of range
+pub const EUNATCH: i32 = 49;      // Protocol driver not attached
+pub const ENOCSI: i32 = 50;       // No CSI structure available
+pub const EL2HLT: i32 = 51;       // Level 2 halted
+pub const EBADE: i32 = 52;        // Invalid exchange
+pub const EBADR: i32 = 53;        // Invalid request descriptor
+pub const EXFULL: i32 = 54;       // Exchange full
+pub const ENOANO: i32 = 55;       // No anode
+pub const EBADRQC: i32 = 56;      // Invalid request code
+pub const EBADSLT: i32 = 57;      // Invalid slot
+pub const EBFONT: i32 = 59;       // Bad font file format
 pub const ENODATA: i32 = 61;       // No data available
 pub const ETIME: i32 = 62;         // Timer expired
 pub const EOVERFLOW: i32 = 75;     // Value too large for data type
+pub const ENOTUNIQ: i32 = 76;     // Name not unique on network
+pub const EBADFD: i32 = 77;       // File descriptor in bad state
+pub const EREMCHG: i32 = 78;      // Remote address changed
+pub const ELIBACC: i32 = 79;      // Cannot access a shared library
+pub const ELIBBAD: i32 = 80;      // Accessing a corrupt shared library
+pub const ELIBSCN: i32 = 81;      // .lib section in a.out corrupted
+pub const ELIBMAX: i32 = 82;      // Too many shared libraries
+pub const ELIBEXEC: i32 = 83;     // Cannot exec a shared library directly
 pub const ENOTSOCK: i32 = 88;      // Socket operation on non-socket
 pub const EDESTADDRREQ: i32 = 89;  // Destination address required
 pub const ENOPROTOOPT: i32 = 92;   // Protocol not available
 pub const EPROTONOSUPPORT: i32 = 93; // Protocol not supported
+pub const ESOCKTNOSUPPORT: i32 = 94; // Socket type not supported
 pub const ENOTSUP: i32 = 95;       // Operation not supported
 pub const EOPNOTSUPP: i32 = 95;    // Operation not supported on socket (same as ENOTSUP on Linux)
+pub const EPFNOSUPPORT: i32 = 96;  // Protocol family not supported
 pub const EAFNOSUPPORT: i32 = 97;  // Address family not supported
 pub const EADDRINUSE: i32 = 98;    // Address already in use
 pub const EADDRNOTAVAIL: i32 = 99; // Cannot assign requested address
@@ -71,6 +97,7 @@ pub const ENETUNREACH: i32 = 101;  // Network is unreachable
 pub const ECONNRESET: i32 = 104;   // Connection reset by peer
 pub const EISCONN: i32 = 106;      // Transport endpoint is already connected
 pub const ENOTCONN: i32 = 107;     // Transport endpoint is not connected
+pub const ETOOMANYREFS: i32 = 109; // Too many references: cannot splice
 pub const ETIMEDOUT: i32 = 110;    // Connection timed out
 pub const ESHUTDOWN: i32 = 108;    // Cannot send after transport shutdown
 pub const ECONNREFUSED: i32 = 111; // Connection refused
@@ -79,18 +106,39 @@ pub const EHOSTUNREACH: i32 = 113; // No route to host
 pub const EALREADY: i32 = 114;     // Operation already in progress
 pub const EINPROGRESS: i32 = 115;  // Operation now in progress
 pub const ECANCELED: i32 = 125;    // Operation canceled
+pub const EKEYEXPIRED: i32 = 126;  // Key has expired
+pub const EKEYREVOKED: i32 = 127;  // Key has been revoked
+pub const EKEYREJECTED: i32 = 128; // Key was rejected by service
+pub const EDEADLOCK: i32 = EDEADLK; // Alias for EDEADLK
 pub const ENOMEDIUM: i32 = 123;    // No medium found
+pub const EMEDIUMTYPE: i32 = 124;  // Wrong medium type
 pub const EILSEQ: i32 = 84;        // Invalid or incomplete multibyte/wide character
+pub const ERESTART: i32 = 85;     // Interrupted system call should be restarted
+pub const ESTRPIPE: i32 = 86;     // Streams pipe error
+pub const EUSERS: i32 = 87;       // Too many users
 pub const EOWNERDEAD: i32 = 130;   // Owner died
 pub const ENOTRECOVERABLE: i32 = 131; // State not recoverable
+pub const ENONET: i32 = 64;        // Machine is not on the network
+pub const ENOPKG: i32 = 65;        // Package not installed
+pub const EREMOTE: i32 = 66;       // Object is remote
 pub const ENOLINK: i32 = 67;       // Link has been severed
+pub const EADV: i32 = 68;          // Advertise error
+pub const ESRMNT: i32 = 69;        // Srmount error
+pub const ECOMM: i32 = 70;         // Communication error on send
 pub const EPROTO: i32 = 71;        // Protocol error
 pub const EMULTIHOP: i32 = 72;     // Multihop attempted
+pub const EDOTDOT: i32 = 73;       // RFS specific error
 pub const EBADMSG: i32 = 74;       // Bad message
 pub const EIDRM: i32 = 43;         // Identifier removed
 pub const ENOSR: i32 = 63;         // Out of streams resources
 pub const ENOSTR: i32 = 60;        // Device not a stream
 pub const ESTALE: i32 = 116;       // Stale file handle
+pub const EUCLEAN: i32 = 117;     // Structure needs cleaning
+pub const ENOTNAM: i32 = 118;     // Not a XENIX named type file
+pub const ENAVAIL: i32 = 119;     // No XENIX semaphores available
+pub const EISNAM: i32 = 120;      // Is a named type file
+pub const EREMOTEIO: i32 = 121;   // Remote I/O error
+pub const EDQUOT: i32 = 122;      // Disk quota exceeded
 pub const EMSGSIZE: i32 = 90;      // Message too long
 pub const EPROTOTYPE: i32 = 91;    // Protocol wrong type for socket
 pub const ENETDOWN: i32 = 100;     // Network is down
@@ -356,6 +404,106 @@ mod tests {
     #[test]
     fn test_eopnotsupp_equals_enotsup() {
         assert_eq!(EOPNOTSUPP, ENOTSUP);
+    }
+
+    #[test]
+    fn test_edeadlock_equals_edeadlk() {
+        assert_eq!(EDEADLOCK, EDEADLK);
+    }
+
+    #[test]
+    fn test_errno_extended_constants_match_linux() {
+        // Linux-specific errno constants (44-57, 59)
+        assert_eq!(ENOTBLK, 15);
+        assert_eq!(ECHRNG, 44);
+        assert_eq!(EL2NSYNC, 45);
+        assert_eq!(EL3HLT, 46);
+        assert_eq!(EL3RST, 47);
+        assert_eq!(ELNRNG, 48);
+        assert_eq!(EUNATCH, 49);
+        assert_eq!(ENOCSI, 50);
+        assert_eq!(EL2HLT, 51);
+        assert_eq!(EBADE, 52);
+        assert_eq!(EBADR, 53);
+        assert_eq!(EXFULL, 54);
+        assert_eq!(ENOANO, 55);
+        assert_eq!(EBADRQC, 56);
+        assert_eq!(EBADSLT, 57);
+        assert_eq!(EBFONT, 59);
+        // Network/remote (64-70, 73)
+        assert_eq!(ENONET, 64);
+        assert_eq!(ENOPKG, 65);
+        assert_eq!(EREMOTE, 66);
+        assert_eq!(EADV, 68);
+        assert_eq!(ESRMNT, 69);
+        assert_eq!(ECOMM, 70);
+        assert_eq!(EDOTDOT, 73);
+        // Shared library (76-83)
+        assert_eq!(ENOTUNIQ, 76);
+        assert_eq!(EBADFD, 77);
+        assert_eq!(EREMCHG, 78);
+        assert_eq!(ELIBACC, 79);
+        assert_eq!(ELIBBAD, 80);
+        assert_eq!(ELIBSCN, 81);
+        assert_eq!(ELIBMAX, 82);
+        assert_eq!(ELIBEXEC, 83);
+        // System (85-87)
+        assert_eq!(ERESTART, 85);
+        assert_eq!(ESTRPIPE, 86);
+        assert_eq!(EUSERS, 87);
+        // Socket (94, 96)
+        assert_eq!(ESOCKTNOSUPPORT, 94);
+        assert_eq!(EPFNOSUPPORT, 96);
+        // References/quota (109, 117-122, 124, 126-128)
+        assert_eq!(ETOOMANYREFS, 109);
+        assert_eq!(EUCLEAN, 117);
+        assert_eq!(ENOTNAM, 118);
+        assert_eq!(ENAVAIL, 119);
+        assert_eq!(EISNAM, 120);
+        assert_eq!(EREMOTEIO, 121);
+        assert_eq!(EDQUOT, 122);
+        assert_eq!(EMEDIUMTYPE, 124);
+        assert_eq!(EKEYEXPIRED, 126);
+        assert_eq!(EKEYREVOKED, 127);
+        assert_eq!(EKEYREJECTED, 128);
+    }
+
+    #[test]
+    fn test_errno_values_no_duplicates() {
+        // All distinct errno values (excluding aliases) must be unique.
+        let vals: &[i32] = &[
+            EPERM, ENOENT, ESRCH, EINTR, EIO, ENXIO, E2BIG, ENOEXEC,
+            EBADF, ECHILD, EAGAIN, ENOMEM, EACCES, EFAULT, ENOTBLK,
+            EBUSY, EEXIST, EXDEV, ENODEV, ENOTDIR, EISDIR, EINVAL,
+            ENFILE, EMFILE, ENOTTY, ETXTBSY, EFBIG, ENOSPC, ESPIPE,
+            EROFS, EMLINK, EPIPE, EDOM, ERANGE, EDEADLK, ENAMETOOLONG,
+            ENOLCK, ENOSYS, ENOTEMPTY, ELOOP, ENOMSG, EIDRM,
+            ECHRNG, EL2NSYNC, EL3HLT, EL3RST, ELNRNG, EUNATCH,
+            ENOCSI, EL2HLT, EBADE, EBADR, EXFULL, ENOANO, EBADRQC,
+            EBADSLT, EBFONT, ENOSTR, ENODATA, ETIME, ENOSR,
+            ENONET, ENOPKG, EREMOTE, ENOLINK, EADV, ESRMNT, ECOMM,
+            EPROTO, EMULTIHOP, EDOTDOT, EBADMSG, EOVERFLOW,
+            ENOTUNIQ, EBADFD, EREMCHG, ELIBACC, ELIBBAD, ELIBSCN,
+            ELIBMAX, ELIBEXEC, EILSEQ, ERESTART, ESTRPIPE, EUSERS,
+            ENOTSOCK, EDESTADDRREQ, EMSGSIZE, EPROTOTYPE,
+            ENOPROTOOPT, EPROTONOSUPPORT, ESOCKTNOSUPPORT,
+            ENOTSUP, EPFNOSUPPORT, EAFNOSUPPORT, EADDRINUSE,
+            EADDRNOTAVAIL, ENETDOWN, ENETUNREACH, ENETRESET,
+            ECONNABORTED, ECONNRESET, ENOBUFS, EISCONN, ENOTCONN,
+            ESHUTDOWN, ETOOMANYREFS, ETIMEDOUT, ECONNREFUSED,
+            EHOSTDOWN, EHOSTUNREACH, EALREADY, EINPROGRESS, ESTALE,
+            EUCLEAN, ENOTNAM, ENAVAIL, EISNAM, EREMOTEIO, EDQUOT,
+            ENOMEDIUM, EMEDIUMTYPE, ECANCELED, EKEYEXPIRED,
+            EKEYREVOKED, EKEYREJECTED, EOWNERDEAD, ENOTRECOVERABLE,
+        ];
+        for i in 0..vals.len() {
+            for j in (i + 1)..vals.len() {
+                assert_ne!(
+                    vals[i], vals[j],
+                    "errno values at indices {i} and {j} must be distinct"
+                );
+            }
+        }
     }
 
     #[test]

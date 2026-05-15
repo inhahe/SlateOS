@@ -1477,8 +1477,10 @@ pub extern "C" fn tmpnam(s: *mut u8) -> *mut u8 {
     // duplicate names — caller should use mkstemp anyway).
     // SAFETY: Static mutable access.  Best-effort uniqueness.
     let count = unsafe {
-        COUNTER = COUNTER.wrapping_add(1);
-        COUNTER
+        let ptr = core::ptr::addr_of_mut!(COUNTER);
+        let c = ptr.read().wrapping_add(1);
+        ptr.write(c);
+        c
     };
 
     // Build name: "/tmp/tmp_NNNNNN\0"

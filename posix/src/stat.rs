@@ -437,4 +437,198 @@ mod tests {
         assert_eq!(S_ISDIR(st.st_mode) != 0, st.is_dir());
         assert_eq!(S_ISLNK(st.st_mode) != 0, st.is_link());
     }
+
+    // -- S_IS* with mode=0 (no type set) --
+
+    #[test]
+    fn test_s_is_functions_mode_zero() {
+        assert_eq!(S_ISREG(0), 0);
+        assert_eq!(S_ISDIR(0), 0);
+        assert_eq!(S_ISLNK(0), 0);
+        assert_eq!(S_ISCHR(0), 0);
+        assert_eq!(S_ISBLK(0), 0);
+        assert_eq!(S_ISFIFO(0), 0);
+        assert_eq!(S_ISSOCK(0), 0);
+    }
+
+    // -- S_IS* with only permission bits (no type) --
+
+    #[test]
+    fn test_s_isreg_only_perms() {
+        assert_eq!(S_ISREG(0o777), 0);
+    }
+
+    // -- Stat::is_* all false for mode=0 --
+
+    #[test]
+    fn test_stat_is_methods_mode_zero() {
+        let st = Stat::zeroed();
+        assert!(!st.is_file());
+        assert!(!st.is_dir());
+        assert!(!st.is_link());
+        assert!(!st.is_chr());
+        assert!(!st.is_blk());
+        assert!(!st.is_fifo());
+        assert!(!st.is_sock());
+    }
+
+    // -- Each type is exclusively one type --
+
+    #[test]
+    fn test_s_is_exclusive_reg() {
+        let mode = S_IFREG | 0o644;
+        assert_eq!(S_ISREG(mode), 1);
+        assert_eq!(S_ISDIR(mode), 0);
+        assert_eq!(S_ISLNK(mode), 0);
+        assert_eq!(S_ISCHR(mode), 0);
+        assert_eq!(S_ISBLK(mode), 0);
+        assert_eq!(S_ISFIFO(mode), 0);
+        assert_eq!(S_ISSOCK(mode), 0);
+    }
+
+    #[test]
+    fn test_s_is_exclusive_dir() {
+        let mode = S_IFDIR | 0o755;
+        assert_eq!(S_ISDIR(mode), 1);
+        assert_eq!(S_ISREG(mode), 0);
+        assert_eq!(S_ISLNK(mode), 0);
+        assert_eq!(S_ISCHR(mode), 0);
+    }
+
+    #[test]
+    fn test_s_is_exclusive_lnk() {
+        let mode = S_IFLNK | 0o777;
+        assert_eq!(S_ISLNK(mode), 1);
+        assert_eq!(S_ISREG(mode), 0);
+        assert_eq!(S_ISDIR(mode), 0);
+    }
+
+    #[test]
+    fn test_s_is_exclusive_chr() {
+        let mode = S_IFCHR | 0o666;
+        assert_eq!(S_ISCHR(mode), 1);
+        assert_eq!(S_ISREG(mode), 0);
+        assert_eq!(S_ISBLK(mode), 0);
+    }
+
+    #[test]
+    fn test_s_is_exclusive_sock() {
+        let mode = S_IFSOCK | 0o755;
+        assert_eq!(S_ISSOCK(mode), 1);
+        assert_eq!(S_ISREG(mode), 0);
+        assert_eq!(S_ISFIFO(mode), 0);
+    }
+
+    // -- S_IFMT mask extracts type correctly --
+
+    #[test]
+    fn test_s_ifmt_extraction() {
+        let mode = S_IFREG | S_ISUID | S_ISGID | S_ISVTX | 0o777;
+        assert_eq!(mode & S_IFMT, S_IFREG);
+    }
+
+    #[test]
+    fn test_s_ifmt_strips_permissions() {
+        let mode = S_IFDIR | 0o777;
+        assert_eq!(mode & S_IFMT, S_IFDIR);
+        assert_eq!(mode & !S_IFMT, 0o777);
+    }
+
+    // -- Timespec --
+
+    #[test]
+    fn test_timespec_alignment() {
+        assert_eq!(core::mem::align_of::<Timespec>(), 8);
+    }
+
+    #[test]
+    fn test_timespec_field_values() {
+        let ts = Timespec { tv_sec: 1000, tv_nsec: 500_000_000 };
+        assert_eq!(ts.tv_sec, 1000);
+        assert_eq!(ts.tv_nsec, 500_000_000);
+    }
+
+    // -- Stat struct alignment and field offsets --
+
+    #[test]
+    fn test_stat_alignment() {
+        assert_eq!(core::mem::align_of::<Stat>(), 8);
+    }
+
+    #[test]
+    fn test_stat_field_values() {
+        let mut st = Stat::zeroed();
+        st.st_ino = 12345;
+        st.st_mode = S_IFREG | 0o644;
+        st.st_nlink = 1;
+        st.st_uid = 1000;
+        st.st_gid = 1000;
+        st.st_size = 4096;
+        assert_eq!(st.st_ino, 12345);
+        assert_eq!(st.st_nlink, 1);
+        assert_eq!(st.st_uid, 1000);
+        assert_eq!(st.st_gid, 1000);
+        assert_eq!(st.st_size, 4096);
+    }
+
+    // -- Permission bit combining --
+
+    #[test]
+    fn test_permission_bits_compose() {
+        // Owner rwx = 0o700
+        assert_eq!(S_IRUSR | S_IWUSR | S_IXUSR, 0o700);
+        // Group rwx = 0o070
+        assert_eq!(S_IRGRP | S_IWGRP | S_IXGRP, 0o070);
+        // Other rwx = 0o007
+        assert_eq!(S_IROTH | S_IWOTH | S_IXOTH, 0o007);
+        // All rwx = 0o777
+        assert_eq!(
+            S_IRUSR | S_IWUSR | S_IXUSR |
+            S_IRGRP | S_IWGRP | S_IXGRP |
+            S_IROTH | S_IWOTH | S_IXOTH,
+            0o777,
+        );
+    }
+
+    // -- mknod/mkfifo set errno --
+
+    #[test]
+    fn test_mknod_sets_enosys() {
+        crate::errno::set_errno(0);
+        mknod(b"/tmp/n\0".as_ptr(), 0, 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mkfifo_sets_enosys() {
+        crate::errno::set_errno(0);
+        mkfifo(b"/tmp/f\0".as_ptr(), 0o644);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mknodat_sets_enosys() {
+        crate::errno::set_errno(0);
+        mknodat(0, b"n\0".as_ptr(), 0, 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mkfifoat_sets_enosys() {
+        crate::errno::set_errno(0);
+        mkfifoat(0, b"f\0".as_ptr(), 0o644);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- Null pointer args don't crash --
+
+    #[test]
+    fn test_mknod_null_path() {
+        assert_eq!(mknod(core::ptr::null(), 0, 0), -1);
+    }
+
+    #[test]
+    fn test_mkfifo_null_path() {
+        assert_eq!(mkfifo(core::ptr::null(), 0), -1);
+    }
 }

@@ -784,4 +784,217 @@ mod tests {
         cpu_set(0, &raw mut a);
         assert_eq!(cpu_equal(&raw const a, &raw const b), 0);
     }
+
+    // -- CPU set word boundary tests --
+
+    #[test]
+    fn test_cpu_set_word_boundary_63() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        cpu_set(63, &raw mut set);
+        assert_eq!(cpu_isset(63, &raw const set), 1);
+        assert_eq!(set.bits[0], 1u64 << 63);
+        assert_eq!(set.bits[1], 0);
+    }
+
+    #[test]
+    fn test_cpu_set_word_boundary_64() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        cpu_set(64, &raw mut set);
+        assert_eq!(cpu_isset(64, &raw const set), 1);
+        assert_eq!(set.bits[0], 0);
+        assert_eq!(set.bits[1], 1);
+    }
+
+    #[test]
+    fn test_cpu_set_word_boundary_127() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        cpu_set(127, &raw mut set);
+        assert_eq!(cpu_isset(127, &raw const set), 1);
+        assert_eq!(set.bits[1], 1u64 << 63);
+        assert_eq!(set.bits[2], 0);
+    }
+
+    #[test]
+    fn test_cpu_set_word_boundary_128() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        cpu_set(128, &raw mut set);
+        assert_eq!(cpu_isset(128, &raw const set), 1);
+        assert_eq!(set.bits[1], 0);
+        assert_eq!(set.bits[2], 1);
+    }
+
+    #[test]
+    fn test_cpu_set_last_valid_1023() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        cpu_set(1023, &raw mut set);
+        assert_eq!(cpu_isset(1023, &raw const set), 1);
+        // 1023 = word 15, bit 63
+        assert_eq!(set.bits[15], 1u64 << 63);
+    }
+
+    #[test]
+    fn test_cpu_clr_word_boundary() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        cpu_set(63, &raw mut set);
+        cpu_set(64, &raw mut set);
+        assert_eq!(cpu_count(&raw const set), 2);
+        cpu_clr(63, &raw mut set);
+        assert_eq!(cpu_isset(63, &raw const set), 0);
+        assert_eq!(cpu_isset(64, &raw const set), 1);
+        assert_eq!(cpu_count(&raw const set), 1);
+    }
+
+    // -- CPU set all bits in a word --
+
+    #[test]
+    fn test_cpu_set_fill_first_word() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        for i in 0..64 {
+            cpu_set(i, &raw mut set);
+        }
+        assert_eq!(set.bits[0], u64::MAX);
+        assert_eq!(set.bits[1], 0);
+        assert_eq!(cpu_count(&raw const set), 64);
+    }
+
+    #[test]
+    fn test_cpu_set_fill_second_word() {
+        let mut set = CpuSetT { bits: [0; 16] };
+        for i in 64..128 {
+            cpu_set(i, &raw mut set);
+        }
+        assert_eq!(set.bits[0], 0);
+        assert_eq!(set.bits[1], u64::MAX);
+        assert_eq!(cpu_count(&raw const set), 64);
+    }
+
+    #[test]
+    fn test_cpu_count_all_bits_set() {
+        let set = CpuSetT { bits: [u64::MAX; 16] };
+        assert_eq!(cpu_count(&raw const set), 1024);
+    }
+
+    // -- CPU set operations across words --
+
+    #[test]
+    fn test_cpu_and_cross_word() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut b = CpuSetT { bits: [0; 16] };
+        let mut dest = CpuSetT { bits: [0; 16] };
+
+        // Set bits in different words
+        cpu_set(63, &raw mut a);  // word 0
+        cpu_set(64, &raw mut a);  // word 1
+        cpu_set(64, &raw mut b);  // word 1
+        cpu_set(128, &raw mut b); // word 2
+
+        cpu_and(&raw mut dest, &raw const a, &raw const b);
+        // Only 64 is in both
+        assert_eq!(cpu_isset(63, &raw const dest), 0);
+        assert_eq!(cpu_isset(64, &raw const dest), 1);
+        assert_eq!(cpu_isset(128, &raw const dest), 0);
+        assert_eq!(cpu_count(&raw const dest), 1);
+    }
+
+    #[test]
+    fn test_cpu_or_cross_word() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut b = CpuSetT { bits: [0; 16] };
+        let mut dest = CpuSetT { bits: [0; 16] };
+
+        cpu_set(63, &raw mut a);   // word 0
+        cpu_set(128, &raw mut b);  // word 2
+        cpu_set(511, &raw mut b);  // word 7
+
+        cpu_or(&raw mut dest, &raw const a, &raw const b);
+        assert_eq!(cpu_isset(63, &raw const dest), 1);
+        assert_eq!(cpu_isset(128, &raw const dest), 1);
+        assert_eq!(cpu_isset(511, &raw const dest), 1);
+        assert_eq!(cpu_count(&raw const dest), 3);
+    }
+
+    #[test]
+    fn test_cpu_xor_cross_word() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut b = CpuSetT { bits: [0; 16] };
+        let mut dest = CpuSetT { bits: [0; 16] };
+
+        cpu_set(0, &raw mut a);
+        cpu_set(0, &raw mut b);    // same — cancels
+        cpu_set(64, &raw mut a);   // only in a
+        cpu_set(128, &raw mut b);  // only in b
+
+        cpu_xor(&raw mut dest, &raw const a, &raw const b);
+        assert_eq!(cpu_isset(0, &raw const dest), 0);   // cancelled
+        assert_eq!(cpu_isset(64, &raw const dest), 1);
+        assert_eq!(cpu_isset(128, &raw const dest), 1);
+        assert_eq!(cpu_count(&raw const dest), 2);
+    }
+
+    // -- CpuSetT layout --
+
+    #[test]
+    fn test_cpu_set_size() {
+        // 16 × 8 bytes = 128 bytes
+        assert_eq!(core::mem::size_of::<CpuSetT>(), 128);
+    }
+
+    #[test]
+    fn test_cpu_set_alignment() {
+        assert_eq!(core::mem::align_of::<CpuSetT>(), 8);
+    }
+
+    // -- sched_setscheduler errno --
+
+    #[test]
+    fn test_sched_setscheduler_any_policy_accepted() {
+        // Our stub accepts any policy and returns 0 if param is non-null.
+        let param = SchedParam { sched_priority: 0 };
+        assert_eq!(sched_setscheduler(0, 99, &raw const param), 0);
+        assert_eq!(sched_setscheduler(0, SCHED_OTHER, &raw const param), 0);
+    }
+
+    // -- SchedParam layout --
+
+    #[test]
+    fn test_sched_param_alignment() {
+        assert_eq!(core::mem::align_of::<SchedParam>(), 4);
+    }
+
+    #[test]
+    fn test_sched_param_field_access() {
+        let p = SchedParam { sched_priority: 42 };
+        assert_eq!(p.sched_priority, 42);
+    }
+
+    // -- sched_getparam returns zero priority --
+
+    #[test]
+    fn test_sched_getparam_pid_zero() {
+        let mut param = SchedParam { sched_priority: 99 };
+        let ret = sched_getparam(0, &raw mut param);
+        assert_eq!(ret, 0);
+        assert_eq!(param.sched_priority, 0);
+    }
+
+    // -- sched_get_priority range --
+
+    #[test]
+    fn test_sched_priority_min_leq_max() {
+        let min = sched_get_priority_min(SCHED_OTHER);
+        let max = sched_get_priority_max(SCHED_OTHER);
+        assert!(min <= max, "min ({min}) should be <= max ({max})");
+    }
+
+    // -- cpu_isset with clr'd bit --
+
+    #[test]
+    fn test_cpu_isset_after_clr_out_of_range() {
+        let mut set = CpuSetT { bits: [u64::MAX; 16] };
+        // Clear out of range should be no-op
+        cpu_clr(-1, &raw mut set);
+        cpu_clr(1024, &raw mut set);
+        // All bits should still be set
+        assert_eq!(cpu_count(&raw const set), 1024);
+    }
 }

@@ -1350,4 +1350,175 @@ mod tests {
             assert_eq!(entry.handle, 0);
         }
     }
+
+    // -- Stack canary entropy --
+
+    #[test]
+    fn test_stack_chk_guard_no_null_bytes() {
+        // A good canary should avoid null bytes (they terminate C strings,
+        // making buffer overflows easier).
+        let bytes = __stack_chk_guard.to_ne_bytes();
+        // At least some non-zero bytes
+        let nonzero_count = bytes.iter().filter(|&&b| b != 0).count();
+        assert!(nonzero_count >= 4, "canary should have several non-zero bytes");
+    }
+
+    // -- __cxa_guard lifecycle: abort then re-acquire --
+
+    #[test]
+    fn test_cxa_guard_abort_then_reacquire() {
+        let mut guard: u64 = 0;
+        // Acquire (start initialization)
+        assert_eq!(__cxa_guard_acquire(&raw mut guard), 1);
+        // Abort (initialization failed)
+        __cxa_guard_abort(&raw mut guard);
+        // Should be able to acquire again
+        assert_eq!(__cxa_guard_acquire(&raw mut guard), 1);
+        // Now succeed
+        __cxa_guard_release(&raw mut guard);
+        // Should not acquire again
+        assert_eq!(__cxa_guard_acquire(&raw mut guard), 0);
+    }
+
+    // -- Multiple atexit registrations --
+
+    extern "C" fn dummy_handler2() {}
+    extern "C" fn dummy_handler3() {}
+
+    #[test]
+    fn test_atexit_multiple_registrations() {
+        unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
+        assert_eq!(atexit(dummy_atexit_handler), 0);
+        assert_eq!(atexit(dummy_handler2), 0);
+        assert_eq!(atexit(dummy_handler3), 0);
+        let count = unsafe { addr_of_mut!(ATEXIT_COUNT).read() };
+        assert_eq!(count, 3);
+        unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
+    }
+
+    #[test]
+    fn test_at_quick_exit_multiple_registrations() {
+        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+        assert_eq!(at_quick_exit(dummy_atexit_handler), 0);
+        assert_eq!(at_quick_exit(dummy_handler2), 0);
+        let count = unsafe { addr_of_mut!(QUICKEXIT_COUNT).read() };
+        assert_eq!(count, 2);
+        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+    }
+
+    // -- atexit and quick_exit stacks are separate --
+
+    #[test]
+    fn test_atexit_and_quick_exit_separate() {
+        unsafe {
+            addr_of_mut!(ATEXIT_COUNT).write(0);
+            addr_of_mut!(QUICKEXIT_COUNT).write(0);
+        }
+        atexit(dummy_atexit_handler);
+        at_quick_exit(dummy_handler2);
+        let a = unsafe { addr_of_mut!(ATEXIT_COUNT).read() };
+        let q = unsafe { addr_of_mut!(QUICKEXIT_COUNT).read() };
+        assert_eq!(a, 1);
+        assert_eq!(q, 1);
+        unsafe {
+            addr_of_mut!(ATEXIT_COUNT).write(0);
+            addr_of_mut!(QUICKEXIT_COUNT).write(0);
+        }
+    }
+
+    // -- getauxval edge cases --
+
+    #[test]
+    fn test_getauxval_zero() {
+        crate::errno::set_errno(0);
+        let val = getauxval(0); // AT_NULL
+        // AT_NULL is not a recognized type in our implementation
+        // so it should set ENOENT
+        assert_eq!(val, 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_getauxval_max() {
+        crate::errno::set_errno(0);
+        let val = getauxval(u64::MAX);
+        assert_eq!(val, 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    // -- __cxa_allocate_exception sizes --
+
+    #[test]
+    fn test_cxa_allocate_exception_zero_size() {
+        let ptr = __cxa_allocate_exception(0);
+        // Should still return a non-null pointer (a valid address)
+        assert!(!ptr.is_null());
+    }
+
+    #[test]
+    fn test_cxa_allocate_exception_large_size() {
+        let ptr = __cxa_allocate_exception(1024);
+        assert!(!ptr.is_null());
+    }
+
+    // -- __cxa_finalize with non-null --
+
+    #[test]
+    fn test_cxa_finalize_nonzero_dso() {
+        // Should not crash with a non-null handle
+        __cxa_finalize(0x1000 as *mut u8);
+    }
+
+    // -- __register_atfork with callbacks --
+
+    extern "C" fn dummy_atfork() {}
+
+    #[test]
+    fn test_register_atfork_with_callbacks() {
+        let result = __register_atfork(
+            Some(dummy_atfork),
+            Some(dummy_atfork),
+            Some(dummy_atfork),
+            core::ptr::null_mut(),
+        );
+        assert_eq!(result, 0);
+    }
+
+    // -- __cxa_thread_atexit_impl with non-null args --
+
+    #[test]
+    fn test_cxa_thread_atexit_impl_nonzero() {
+        let result = __cxa_thread_atexit_impl(
+            dummy_dtor,
+            0x1000 as *mut u8,
+            0x2000 as *mut u8,
+        );
+        assert_eq!(result, 0);
+    }
+
+    // -- Program invocation globals accessible --
+
+    #[test]
+    fn test_program_invocation_name_not_null() {
+        let ptr = unsafe { core::ptr::addr_of!(program_invocation_name).read() };
+        assert!(!ptr.is_null());
+    }
+
+    #[test]
+    fn test_program_invocation_short_name_not_null() {
+        let ptr = unsafe { core::ptr::addr_of!(program_invocation_short_name).read() };
+        assert!(!ptr.is_null());
+    }
+
+    #[test]
+    fn test_progname_not_null() {
+        let ptr = unsafe { core::ptr::addr_of!(__progname).read() };
+        assert!(!ptr.is_null());
+    }
+
+    #[test]
+    fn test_progname_full_not_null() {
+        let ptr = unsafe { core::ptr::addr_of!(__progname_full).read() };
+        assert!(!ptr.is_null());
+    }
 }

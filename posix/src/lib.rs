@@ -374,3 +374,7 @@ pub mod linux_magic;
 pub mod linux_ioprio;
 pub mod linux_membarrier;
 pub mod sys_wait_ext;
+pub mod sys_sched;
+pub mod sys_syslog;
+pub mod sys_fcntl;
+pub mod sys_syscall;

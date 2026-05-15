@@ -141,3 +141,77 @@ pub extern "C" fn vwarn(msg: *const u8) {
 pub extern "C" fn vwarnx(msg: *const u8) {
     emit_warnx(msg);
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- warn / warnx / vwarn / vwarnx don't crash with null fmt --
+    //
+    // These functions write to stderr. We can't easily capture the
+    // output in unit tests, but we can verify they don't panic or
+    // crash when called with null pointers and various inputs.
+
+    #[test]
+    fn warn_null_fmt_no_crash() {
+        // Set a known errno so the output is deterministic.
+        crate::errno::set_errno(crate::errno::EINVAL);
+        warn(core::ptr::null());
+        // Survived — no crash.
+    }
+
+    #[test]
+    fn warn_with_message_no_crash() {
+        crate::errno::set_errno(crate::errno::ENOENT);
+        warn(b"test warning\0".as_ptr());
+    }
+
+    #[test]
+    fn warnx_null_fmt_no_crash() {
+        warnx(core::ptr::null());
+    }
+
+    #[test]
+    fn warnx_with_message_no_crash() {
+        warnx(b"test warnx\0".as_ptr());
+    }
+
+    #[test]
+    fn vwarn_null_msg_no_crash() {
+        crate::errno::set_errno(crate::errno::EIO);
+        vwarn(core::ptr::null());
+    }
+
+    #[test]
+    fn vwarn_with_message_no_crash() {
+        crate::errno::set_errno(crate::errno::EPERM);
+        vwarn(b"formatted message\0".as_ptr());
+    }
+
+    #[test]
+    fn vwarnx_null_msg_no_crash() {
+        vwarnx(core::ptr::null());
+    }
+
+    #[test]
+    fn vwarnx_with_message_no_crash() {
+        vwarnx(b"formatted warnx\0".as_ptr());
+    }
+
+    // -- Helper function behavior --
+
+    #[test]
+    fn write_cstr_null_no_crash() {
+        // write_cstr with null should be a no-op.
+        write_cstr(core::ptr::null());
+    }
+
+    #[test]
+    fn write_cstr_empty_string_no_crash() {
+        write_cstr(b"\0".as_ptr());
+    }
+}

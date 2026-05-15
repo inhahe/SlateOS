@@ -109,7 +109,7 @@
 //!   `dladdr`, `dl_iterate_phdr`, `__tls_get_addr`
 //! - **Directories**: `opendir`, `closedir`, `readdir`, `rewinddir`,
 //!   `seekdir`, `telldir`, `scandir`, `alphasort`, `versionsort`,
-//!   `readdir_r`, `fdopendir`, `dirfd`
+//!   `readdir_r`, `fdopendir` (via path tracking), `dirfd`
 //! - **File Mode Testing**: `S_ISREG`, `S_ISDIR`, `S_ISLNK`, `S_ISCHR`,
 //!   `S_ISBLK`, `S_ISFIFO`, `S_ISSOCK`, `mknod`/`mknodat`,
 //!   `mkfifo`/`mkfifoat`

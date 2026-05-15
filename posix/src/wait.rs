@@ -77,6 +77,15 @@ pub extern "C" fn WSTOPSIG(status: i32) -> i32 {
     (status >> 8) & 0xFF
 }
 
+/// True if child was resumed by `SIGCONT`.
+///
+/// Linux encoding: continued status is `0xFFFF`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[allow(non_snake_case)]
+pub extern "C" fn WIFCONTINUED(status: i32) -> i32 {
+    i32::from(crate::process::wifcontinued(status))
+}
+
 /// True if child produced a core dump (non-POSIX but widely available).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(non_snake_case)]
@@ -297,6 +306,34 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // WIFCONTINUED — status == 0xFFFF
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn wifcontinued_continued_status() {
+        let status = 0xFFFF;
+        assert_eq!(WIFCONTINUED(status), 1);
+    }
+
+    #[test]
+    fn wifcontinued_normal_exit() {
+        let status = 42 << 8;
+        assert_eq!(WIFCONTINUED(status), 0);
+    }
+
+    #[test]
+    fn wifcontinued_signal_death() {
+        let status = 0x09;
+        assert_eq!(WIFCONTINUED(status), 0);
+    }
+
+    #[test]
+    fn wifcontinued_stopped() {
+        let status = (20 << 8) | 0x7F;
+        assert_eq!(WIFCONTINUED(status), 0);
+    }
+
+    // -----------------------------------------------------------------------
     // WCOREDUMP — bit 7
     // -----------------------------------------------------------------------
 
@@ -333,6 +370,7 @@ mod tests {
         assert_eq!(WEXITSTATUS(status), 7);
         assert_eq!(WIFSIGNALED(status), 0);
         assert_eq!(WIFSTOPPED(status), 0);
+        assert_eq!(WIFCONTINUED(status), 0);
         assert_eq!(WCOREDUMP(status), 0);
     }
 
@@ -366,6 +404,17 @@ mod tests {
         assert_eq!(WIFSIGNALED(status), 0);
         assert_eq!(WIFSTOPPED(status), 1);
         assert_eq!(WSTOPSIG(status), 20);
+        assert_eq!(WIFCONTINUED(status), 0);
+    }
+
+    #[test]
+    fn encoding_continued_all_macros() {
+        // Resumed by SIGCONT.
+        let status = 0xFFFF;
+        assert_eq!(WIFEXITED(status), 0);
+        assert_eq!(WIFSIGNALED(status), 0);
+        assert_eq!(WIFSTOPPED(status), 0);
+        assert_eq!(WIFCONTINUED(status), 1);
     }
 
     // -----------------------------------------------------------------------

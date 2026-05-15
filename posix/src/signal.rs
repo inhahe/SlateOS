@@ -80,6 +80,17 @@ pub const SIG_IGN: SighandlerT = 1;
 pub const SIG_ERR: SighandlerT = usize::MAX;
 
 // ---------------------------------------------------------------------------
+// sigprocmask `how` argument constants
+// ---------------------------------------------------------------------------
+
+/// Add signals to the blocked set.
+pub const SIG_BLOCK: i32 = 0;
+/// Remove signals from the blocked set.
+pub const SIG_UNBLOCK: i32 = 1;
+/// Replace the blocked set entirely.
+pub const SIG_SETMASK: i32 = 2;
+
+// ---------------------------------------------------------------------------
 // Signal functions (stubs)
 // ---------------------------------------------------------------------------
 
@@ -572,6 +583,16 @@ pub extern "C" fn sigqueue(_pid: crate::types::PidT, _sig: i32, _value: usize) -
 // ---------------------------------------------------------------------------
 // Realtime signal range
 // ---------------------------------------------------------------------------
+
+/// First realtime signal number (Linux x86_64).
+///
+/// Programs may reference `SIGRTMIN` as a constant.  On glibc this is
+/// actually a function call (`__libc_current_sigrtmin()`) because glibc
+/// reserves the first few RT signals for NPTL.  We expose both the
+/// constant and the function.
+pub const SIGRTMIN: i32 = 32;
+/// Last realtime signal number (Linux x86_64).
+pub const SIGRTMAX: i32 = 64;
 
 /// glibc: return the lowest realtime signal number.
 ///
@@ -1304,5 +1325,45 @@ mod tests {
         assert_eq!(__libc_current_sigrtmax(), 64);
         // rtmax > rtmin
         assert!(__libc_current_sigrtmax() > __libc_current_sigrtmin());
+    }
+
+    // -- SIGRTMIN / SIGRTMAX constants --
+
+    #[test]
+    fn test_sigrtmin_sigrtmax_constants() {
+        assert_eq!(SIGRTMIN, 32);
+        assert_eq!(SIGRTMAX, 64);
+        // Constants must agree with the functions.
+        assert_eq!(SIGRTMIN, __libc_current_sigrtmin());
+        assert_eq!(SIGRTMAX, __libc_current_sigrtmax());
+    }
+
+    #[test]
+    fn test_sigrtmin_above_standard_signals() {
+        // All standard signals (1-31) must be below SIGRTMIN.
+        assert!(SIGSYS < SIGRTMIN);
+    }
+
+    #[test]
+    fn test_sigrtmax_within_nsig() {
+        // SIGRTMAX must be < NSIG (so sigset_t can hold all signals).
+        assert!(SIGRTMAX < NSIG);
+    }
+
+    // -- SIG_BLOCK / SIG_UNBLOCK / SIG_SETMASK constants --
+
+    #[test]
+    fn test_sig_block_constants() {
+        // Values match Linux x86_64.
+        assert_eq!(SIG_BLOCK, 0);
+        assert_eq!(SIG_UNBLOCK, 1);
+        assert_eq!(SIG_SETMASK, 2);
+    }
+
+    #[test]
+    fn test_sig_block_constants_distinct() {
+        assert_ne!(SIG_BLOCK, SIG_UNBLOCK);
+        assert_ne!(SIG_BLOCK, SIG_SETMASK);
+        assert_ne!(SIG_UNBLOCK, SIG_SETMASK);
     }
 }

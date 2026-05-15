@@ -34,7 +34,7 @@ static mut LAST_CHILD_PID: PidT = 0;
 /// Called from `posix_spawn` / `posix_spawnp` after a successful spawn.
 pub(crate) fn record_child_pid(pid: PidT) {
     // SAFETY: Single-threaded access.
-    unsafe { LAST_CHILD_PID = pid; }
+    unsafe { core::ptr::addr_of_mut!(LAST_CHILD_PID).write(pid); }
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +77,15 @@ pub const fn wifsignaled(status: i32) -> bool {
 #[must_use]
 pub const fn wtermsig(status: i32) -> i32 {
     status & 0x7f
+}
+
+/// True if the child was resumed by `SIGCONT`.
+///
+/// Linux encoding: continued status is `0xFFFF`.
+#[inline]
+#[must_use]
+pub const fn wifcontinued(status: i32) -> bool {
+    status == 0xFFFF
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +183,7 @@ pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
     if pid > 0 {
         pid
     } else {
-        let child = unsafe { LAST_CHILD_PID };
+        let child = unsafe { core::ptr::addr_of!(LAST_CHILD_PID).read() };
         if child > 0 { child } else { 1 }
     }
 }
@@ -339,14 +348,14 @@ static mut FG_PGRP: PidT = 0;
 fn ensure_pg_init() {
     // SAFETY: single-address-space process, no concurrency.
     unsafe {
-        if OUR_PGID == 0 {
-            OUR_PGID = getpid();
+        if core::ptr::addr_of!(OUR_PGID).read() == 0 {
+            core::ptr::addr_of_mut!(OUR_PGID).write(getpid());
         }
-        if OUR_SID == 0 {
-            OUR_SID = getpid();
+        if core::ptr::addr_of!(OUR_SID).read() == 0 {
+            core::ptr::addr_of_mut!(OUR_SID).write(getpid());
         }
-        if FG_PGRP == 0 {
-            FG_PGRP = getpid();
+        if core::ptr::addr_of!(FG_PGRP).read() == 0 {
+            core::ptr::addr_of_mut!(FG_PGRP).write(getpid());
         }
     }
 }
@@ -359,7 +368,7 @@ fn ensure_pg_init() {
 pub extern "C" fn getpgrp() -> PidT {
     ensure_pg_init();
     // SAFETY: initialized above.
-    unsafe { OUR_PGID }
+    unsafe { core::ptr::addr_of!(OUR_PGID).read() }
 }
 
 /// Get the process group ID of a specific process.
@@ -373,7 +382,7 @@ pub extern "C" fn getpgid(pid: PidT) -> PidT {
     let us = getpid();
     if pid == 0 || pid == us {
         // SAFETY: initialized.
-        return unsafe { OUR_PGID };
+        return unsafe { core::ptr::addr_of!(OUR_PGID).read() };
     }
     // Without kernel support, each other process is assumed to be its
     // own group leader.
@@ -400,7 +409,7 @@ pub extern "C" fn setpgid(pid: PidT, pgid: PidT) -> i32 {
     }
     let new_pgid = if pgid == 0 { us } else { pgid };
     // SAFETY: single process.
-    unsafe { OUR_PGID = new_pgid; }
+    unsafe { core::ptr::addr_of_mut!(OUR_PGID).write(new_pgid); }
     0
 }
 
@@ -422,7 +431,7 @@ pub extern "C" fn getsid(pid: PidT) -> PidT {
     let us = getpid();
     if pid == 0 || pid == us {
         // SAFETY: initialized.
-        return unsafe { OUR_SID };
+        return unsafe { core::ptr::addr_of!(OUR_SID).read() };
     }
     pid
 }
@@ -440,9 +449,9 @@ pub extern "C" fn setsid() -> PidT {
     let us = getpid();
     // SAFETY: single process.
     unsafe {
-        OUR_SID = us;
-        OUR_PGID = us;
-        FG_PGRP = us;
+        core::ptr::addr_of_mut!(OUR_SID).write(us);
+        core::ptr::addr_of_mut!(OUR_PGID).write(us);
+        core::ptr::addr_of_mut!(FG_PGRP).write(us);
     }
     us
 }
@@ -455,7 +464,7 @@ pub extern "C" fn setsid() -> PidT {
 pub extern "C" fn tcgetpgrp(_fd: crate::types::Fd) -> PidT {
     ensure_pg_init();
     // SAFETY: initialized.
-    unsafe { FG_PGRP }
+    unsafe { core::ptr::addr_of!(FG_PGRP).read() }
 }
 
 /// Set the foreground process group ID of a terminal.
@@ -469,7 +478,7 @@ pub extern "C" fn tcsetpgrp(_fd: crate::types::Fd, pgrp: PidT) -> i32 {
         return -1;
     }
     // SAFETY: single process.
-    unsafe { FG_PGRP = pgrp; }
+    unsafe { core::ptr::addr_of_mut!(FG_PGRP).write(pgrp); }
     0
 }
 
@@ -722,5 +731,40 @@ mod tests {
     #[test]
     fn test_umount2_returns_enosys() {
         assert_eq!(umount2(core::ptr::null(), 0), -1);
+    }
+
+    // -- wifcontinued: continued status is 0xFFFF --
+
+    #[test]
+    fn test_wifcontinued_true() {
+        // Linux continued status encoding.
+        assert!(wifcontinued(0xFFFF));
+    }
+
+    #[test]
+    fn test_wifcontinued_false_for_normal_exit() {
+        assert!(!wifcontinued(42 << 8));
+        assert!(!wifcontinued(0));
+    }
+
+    #[test]
+    fn test_wifcontinued_false_for_signal() {
+        assert!(!wifcontinued(9));
+        assert!(!wifcontinued(11));
+    }
+
+    #[test]
+    fn test_wifcontinued_false_for_stopped() {
+        assert!(!wifcontinued((19 << 8) | 0x7F));
+    }
+
+    #[test]
+    fn test_wifcontinued_mutually_exclusive() {
+        // Continued status must not be recognized as exited/signaled/stopped.
+        let status = 0xFFFF;
+        assert!(wifcontinued(status));
+        assert!(!wifexited(status));
+        assert!(!wifsignaled(status));
+        // WIFSTOPPED: low byte = 0xFF != 0x7F, so not stopped.
     }
 }

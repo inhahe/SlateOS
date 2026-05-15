@@ -15,7 +15,8 @@
 //!   `rename`, `dup`, `dup2`, `dup3`, `access`, `chmod`, `fchmod`,
 //!   `chown`, `fchown`, `lchown`, `umask`, `truncate`, `ftruncate`,
 //!   `fsync`, `fdatasync`, `link`, `symlink`, `readlink`, `utimes`,
-//!   `futimes`, `utimensat`, `futimens`, `sendfile`, `mknod`, `mkfifo`
+//!   `futimes`, `utimensat`, `futimens`, `sendfile`, `sendfile64`,
+//!   `fallocate`, `mknod`, `mkfifo`
 //! - **Sockets**: `socket`, `connect`, `bind`, `listen`, `accept`,
 //!   `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`,
 //!   `getsockopt`, `getpeername`, `getsockname`, `getaddrinfo`,
@@ -32,7 +33,7 @@
 //!   `posix_spawnp`, `execve`, `execvp`, `execv`, `vfork`, `waitpid`,
 //!   `sleep`, `nanosleep`, `getpgrp`, `setpgid`, `setsid`, `getsid`
 //! - **Memory**: `mmap`, `munmap`, `mprotect`, `mmap64`, `mremap`,
-//!   `mlock`/`munlock`/`mlockall`/`munlockall`, `msync`, `madvise`,
+//!   `mlock`/`mlock2`/`munlock`/`mlockall`/`munlockall`, `msync`, `madvise`,
 //!   `posix_madvise`, `shm_open`/`shm_unlink`, `memfd_create`
 //! - **Pipes**: `pipe`, `pipe2`
 //! - **Signals**: Stub constants and handlers (partial), `sigwait`,
@@ -92,6 +93,9 @@
 //! - **File Tree Walk**: `ftw`, `nftw` (recursive directory traversal)
 //! - **BSD Error Functions**: `err`, `errx`, `warn`, `warnx` (and `v*`
 //!   variants)
+//! - **User Accounting** (stubs): `setutxent`, `getutxent`, `getutxid`,
+//!   `getutxline`, `pututxline`, `endutxent`, `utmpxname`
+//!   (and glibc aliases `setutent`, `getutent`, etc.)
 //! - **Timezone**: `tzset`, `tzname`, `timezone`, `daylight`
 //! - **Extended Attributes** (stubs): `getxattr`, `lgetxattr`, `fgetxattr`,
 //!   `setxattr`, `lsetxattr`, `fsetxattr`, `listxattr`, `llistxattr`,
@@ -230,6 +234,7 @@ pub mod time;
 pub mod types;
 pub mod resource;
 pub mod unistd;
+pub mod utmpx;
 pub mod utsname;
 pub mod wait;
 pub mod wchar;

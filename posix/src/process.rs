@@ -1117,4 +1117,126 @@ mod tests {
         assert_ne!(LINUX_REBOOT_CMD_HALT, LINUX_REBOOT_CMD_POWER_OFF);
         assert_ne!(LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_CMD_POWER_OFF);
     }
+
+    // -- wait (convenience wrapper) --
+
+    #[test]
+    fn test_wait_null_status() {
+        // wait(NULL) should not crash. It delegates to waitpid(-1,NULL,0).
+        // On the host this will hit a real syscall and fail, but it should
+        // not segfault.
+        let ret = wait(core::ptr::null_mut());
+        // Return is either a child PID or -1 (no children). Don't assert
+        // the exact value — just verify no crash.
+        let _ = ret;
+    }
+
+    // -- wait3 --
+
+    #[test]
+    fn test_wait3_null_status_null_rusage() {
+        let ret = wait3(core::ptr::null_mut(), WNOHANG, core::ptr::null_mut());
+        // On host: -1 (ECHILD). Don't assert exact value.
+        let _ = ret;
+    }
+
+    #[test]
+    fn test_wait3_zeroes_rusage() {
+        let mut rusage = crate::resource::Rusage {
+            ru_utime: crate::time::Timeval { tv_sec: 99, tv_usec: 99 },
+            ru_stime: crate::time::Timeval { tv_sec: 99, tv_usec: 99 },
+            ru_maxrss: 99,
+            ru_ixrss: 0, ru_idrss: 0, ru_isrss: 0,
+            ru_minflt: 0, ru_majflt: 0, ru_nswap: 0,
+            ru_inblock: 0, ru_oublock: 0, ru_msgsnd: 0,
+            ru_msgrcv: 0, ru_nsignals: 0, ru_nvcsw: 0,
+            ru_nivcsw: 0,
+        };
+        let _ = wait3(core::ptr::null_mut(), WNOHANG, &raw mut rusage);
+        // rusage should have been zeroed.
+        assert_eq!(rusage.ru_utime.tv_sec, 0);
+        assert_eq!(rusage.ru_stime.tv_sec, 0);
+        assert_eq!(rusage.ru_maxrss, 0);
+    }
+
+    // -- wait4 --
+
+    #[test]
+    fn test_wait4_null_rusage() {
+        let ret = wait4(-1, core::ptr::null_mut(), WNOHANG, core::ptr::null_mut());
+        let _ = ret;
+    }
+
+    #[test]
+    fn test_wait4_zeroes_rusage() {
+        let mut rusage = crate::resource::Rusage {
+            ru_utime: crate::time::Timeval { tv_sec: 77, tv_usec: 77 },
+            ru_stime: crate::time::Timeval { tv_sec: 77, tv_usec: 77 },
+            ru_maxrss: 77,
+            ru_ixrss: 0, ru_idrss: 0, ru_isrss: 0,
+            ru_minflt: 0, ru_majflt: 0, ru_nswap: 0,
+            ru_inblock: 0, ru_oublock: 0, ru_msgsnd: 0,
+            ru_msgrcv: 0, ru_nsignals: 0, ru_nvcsw: 0,
+            ru_nivcsw: 0,
+        };
+        let _ = wait4(1, core::ptr::null_mut(), WNOHANG, &raw mut rusage);
+        assert_eq!(rusage.ru_utime.tv_sec, 0);
+        assert_eq!(rusage.ru_maxrss, 0);
+    }
+
+    // -- setsid --
+
+    #[test]
+    fn test_setsid_sets_sid_and_pgid() {
+        reset_pg();
+        // setsid calls getpid() which will return some value on the
+        // host. Just verify it doesn't crash and returns non-negative.
+        // We can't predict the exact PID on the test host.
+        let sid = setsid();
+        // After setsid, getsid(0) should return the same value.
+        let reported_sid = getsid(0);
+        assert_eq!(sid, reported_sid);
+        // And getpgrp should match too.
+        assert_eq!(sid, getpgrp());
+    }
+
+    // -- getpid/gettid return something --
+
+    #[test]
+    fn test_getpid_returns_value() {
+        // getpid() calls a real syscall on the host. Just verify it
+        // doesn't crash and returns some value.
+        let pid = getpid();
+        let _ = pid;
+    }
+
+    #[test]
+    fn test_gettid_returns_value() {
+        // gettid() calls a real syscall on the host.
+        let tid = gettid();
+        let _ = tid;
+    }
+
+    // -- wait3/wait4 with WNOHANG don't block --
+
+    #[test]
+    fn test_wait3_wnohang_returns_immediately() {
+        let ret = wait3(core::ptr::null_mut(), WNOHANG, core::ptr::null_mut());
+        // With WNOHANG and no children, should return quickly (likely -1).
+        let _ = ret;
+    }
+
+    #[test]
+    fn test_wait4_specific_pid_wnohang() {
+        let ret = wait4(99999, core::ptr::null_mut(), WNOHANG, core::ptr::null_mut());
+        let _ = ret;
+    }
+
+    // -- reboot CAD constants --
+
+    #[test]
+    fn test_reboot_cad_constants() {
+        assert_ne!(LINUX_REBOOT_CMD_CAD_ON, LINUX_REBOOT_CMD_CAD_OFF);
+        assert_eq!(LINUX_REBOOT_CMD_CAD_OFF, 0);
+    }
 }

@@ -2045,6 +2045,67 @@ pub extern "C" fn posix_fallocate(fd: Fd, offset: OffT, len: OffT) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// fallocate — Linux file allocation (non-POSIX)
+// ---------------------------------------------------------------------------
+
+/// Default mode: allocate space in the file.
+pub const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+/// Deallocate (punch a hole) in the file.
+pub const FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
+/// Remove a range of a file without leaving a hole (collapse range).
+pub const FALLOC_FL_COLLAPSE_RANGE: i32 = 0x08;
+/// Zero a range of the file.
+pub const FALLOC_FL_ZERO_RANGE: i32 = 0x10;
+/// Insert space within the file (shift data up).
+pub const FALLOC_FL_INSERT_RANGE: i32 = 0x20;
+/// Unshare shared extents (copy-on-write breakage).
+pub const FALLOC_FL_UNSHARE_RANGE: i32 = 0x40;
+
+/// Manipulate file space.
+///
+/// Linux-specific `fallocate(2)`.  Unlike `posix_fallocate`, this
+/// supports modes such as hole-punching, range collapsing, and
+/// zero-filling via the `mode` parameter.
+///
+/// With `mode == 0`, this is equivalent to `posix_fallocate` (but
+/// returns -1/errno instead of the error code directly).
+///
+/// With `FALLOC_FL_KEEP_SIZE`, space is allocated but the file size
+/// is not changed.
+///
+/// Our implementation delegates to `posix_fallocate` for the basic
+/// allocation case and stubs the advanced modes with EOPNOTSUPP.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fallocate(fd: Fd, mode: i32, offset: OffT, len: OffT) -> i32 {
+    if offset < 0 || len <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Basic allocation (mode 0): delegate to posix_fallocate.
+    if mode == 0 {
+        let err = posix_fallocate(fd, offset, len);
+        if err != 0 {
+            errno::set_errno(err);
+            return -1;
+        }
+        return 0;
+    }
+
+    // KEEP_SIZE alone: allocate but don't extend visible size.
+    // We treat this as a no-op success (the filesystem can allocate
+    // lazily — the space will be available when written).
+    if mode == FALLOC_FL_KEEP_SIZE {
+        return 0;
+    }
+
+    // Advanced modes (punch hole, collapse range, zero range, etc.)
+    // are not yet supported by our filesystem.
+    errno::set_errno(errno::EOPNOTSUPP);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // flock — advisory file locking
 // ---------------------------------------------------------------------------
 
@@ -2208,6 +2269,20 @@ pub extern "C" fn sendfile(
     }
 
     total as isize
+}
+
+/// `sendfile64` — LP64 alias for `sendfile`.
+///
+/// On 64-bit systems (LP64), `off_t` is already 64-bit, so `sendfile64`
+/// is identical to `sendfile`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sendfile64(
+    out_fd: Fd,
+    in_fd: Fd,
+    offset: *mut i64,
+    count: usize,
+) -> isize {
+    sendfile(out_fd, in_fd, offset, count)
 }
 
 // ---------------------------------------------------------------------------
@@ -2708,6 +2783,107 @@ mod tests {
             posix_fallocate(0, i64::MAX, 1),
             crate::errno::EFBIG,
         );
+    }
+
+    // -- fallocate (Linux) --
+
+    #[test]
+    fn test_fallocate_negative_offset() {
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(0, 0, -1, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fallocate_zero_len() {
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(0, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fallocate_negative_len() {
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(0, 0, 0, -1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fallocate_keep_size_succeeds() {
+        // KEEP_SIZE mode is a no-op stub — should succeed.
+        assert_eq!(fallocate(0, FALLOC_FL_KEEP_SIZE, 0, 4096), 0);
+    }
+
+    #[test]
+    fn test_fallocate_keep_size_negative_offset() {
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(0, FALLOC_FL_KEEP_SIZE, -1, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fallocate_punch_hole_eopnotsupp() {
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(0, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+    }
+
+    #[test]
+    fn test_fallocate_collapse_range_eopnotsupp() {
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(0, FALLOC_FL_COLLAPSE_RANGE, 0, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+    }
+
+    #[test]
+    fn test_fallocate_zero_range_eopnotsupp() {
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(0, FALLOC_FL_ZERO_RANGE, 0, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+    }
+
+    #[test]
+    fn test_fallocate_insert_range_eopnotsupp() {
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(0, FALLOC_FL_INSERT_RANGE, 0, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+    }
+
+    #[test]
+    fn test_fallocate_unshare_range_eopnotsupp() {
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(0, FALLOC_FL_UNSHARE_RANGE, 0, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+    }
+
+    // -- FALLOC_FL_* constants --
+
+    #[test]
+    fn test_falloc_fl_constants() {
+        assert_eq!(FALLOC_FL_KEEP_SIZE, 0x01);
+        assert_eq!(FALLOC_FL_PUNCH_HOLE, 0x02);
+        assert_eq!(FALLOC_FL_COLLAPSE_RANGE, 0x08);
+        assert_eq!(FALLOC_FL_ZERO_RANGE, 0x10);
+        assert_eq!(FALLOC_FL_INSERT_RANGE, 0x20);
+        assert_eq!(FALLOC_FL_UNSHARE_RANGE, 0x40);
+    }
+
+    #[test]
+    fn test_falloc_fl_no_collisions() {
+        let all = [
+            FALLOC_FL_KEEP_SIZE,
+            FALLOC_FL_PUNCH_HOLE,
+            FALLOC_FL_COLLAPSE_RANGE,
+            FALLOC_FL_ZERO_RANGE,
+            FALLOC_FL_INSERT_RANGE,
+            FALLOC_FL_UNSHARE_RANGE,
+        ];
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_eq!(all[i] & all[j], 0,
+                    "FALLOC_FL flags {i} and {j} collide");
+            }
+        }
     }
 
     #[test]
@@ -3782,6 +3958,22 @@ mod tests {
         assert_eq!(result, 0);
         // Offset should not change for zero-length transfer.
         assert_eq!(off, 100);
+    }
+
+    // -- sendfile64 (LP64 alias) --
+
+    #[test]
+    fn test_sendfile64_zero_count() {
+        let result = sendfile64(1, 0, core::ptr::null_mut(), 0);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_sendfile64_with_offset_zero_count() {
+        let mut off: i64 = 200;
+        let result = sendfile64(1, 0, &raw mut off, 0);
+        assert_eq!(result, 0);
+        assert_eq!(off, 200);
     }
 
     // -- renameat with AT_FDCWD both sides --

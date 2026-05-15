@@ -547,6 +547,34 @@ mod tests {
         assert_eq!(mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT), 0);
     }
 
+    // -- mlock2 --
+
+    #[test]
+    fn test_mlock2_no_flags() {
+        // flags == 0 is equivalent to mlock
+        assert_eq!(mlock2(core::ptr::null(), 4096, 0), 0);
+    }
+
+    #[test]
+    fn test_mlock2_onfault() {
+        assert_eq!(mlock2(core::ptr::null(), 4096, MLOCK_ONFAULT), 0);
+    }
+
+    #[test]
+    fn test_mlock2_with_addr() {
+        assert_eq!(mlock2(0x1000 as *const core::ffi::c_void, 16384, 0), 0);
+    }
+
+    #[test]
+    fn test_mlock2_with_addr_onfault() {
+        assert_eq!(mlock2(0x1000 as *const core::ffi::c_void, 16384, MLOCK_ONFAULT), 0);
+    }
+
+    #[test]
+    fn test_mlock_onfault_constant() {
+        assert_eq!(MLOCK_ONFAULT, 1);
+    }
+
     #[test]
     fn test_msync_ms_async() {
         assert_eq!(msync(core::ptr::null_mut(), 4096, MS_ASYNC), 0);
@@ -720,6 +748,32 @@ pub extern "C" fn mremap(
 ) -> *mut core::ffi::c_void {
     errno::set_errno(errno::ENOSYS);
     MAP_FAILED
+}
+
+// ---------------------------------------------------------------------------
+// mlock2 — Linux memory locking extension
+// ---------------------------------------------------------------------------
+
+/// `MLOCK_ONFAULT` — only lock pages when they are faulted in.
+/// Linux 4.4+ extension.  Without this flag, `mlock2` behaves
+/// identically to `mlock`.
+pub const MLOCK_ONFAULT: i32 = 1;
+
+/// Lock pages in memory, with flags.
+///
+/// Linux extension.  `flags == 0` is equivalent to `mlock`.
+/// `flags == MLOCK_ONFAULT` locks pages only as they are faulted in,
+/// rather than faulting them all in immediately.
+///
+/// Stub: succeeds silently (same as `mlock`).  No kernel page-pinning
+/// support yet.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn mlock2(
+    _addr: *const core::ffi::c_void,
+    _len: SizeT,
+    _flags: i32,
+) -> i32 {
+    0
 }
 
 // ---------------------------------------------------------------------------

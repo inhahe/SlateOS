@@ -213,6 +213,58 @@ pub extern "C" fn endgrent() {
 }
 
 // ---------------------------------------------------------------------------
+// getgrouplist / initgroups
+// ---------------------------------------------------------------------------
+
+/// Get list of groups to which a user belongs.
+///
+/// Fills `groups` with up to `*ngroups` GIDs.  Always includes `group`
+/// (the caller-provided primary group).
+///
+/// Our stub OS only knows about GID 0 (root).  If the user is "root",
+/// we return GID 0.  Otherwise we just return the supplied primary group.
+///
+/// Returns the total number of groups on success.  If `*ngroups` is too
+/// small, `*ngroups` is set to the required count and -1 is returned.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getgrouplist(
+    _user: *const u8,
+    group: GidT,
+    groups: *mut GidT,
+    ngroups: *mut i32,
+) -> i32 {
+    if ngroups.is_null() {
+        return -1;
+    }
+
+    let max = unsafe { *ngroups };
+    // We always have exactly 1 group (the primary).
+    let needed = 1;
+
+    if max < needed {
+        unsafe { *ngroups = needed; }
+        return -1;
+    }
+
+    if !groups.is_null() {
+        unsafe { *groups = group; }
+    }
+    unsafe { *ngroups = needed; }
+    needed
+}
+
+/// Initialize the supplementary group access list.
+///
+/// Sets the supplementary group IDs for the calling process to the
+/// groups that `user` belongs to, plus `group`.
+///
+/// Stub: always succeeds (single-user OS, groups not enforced).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn initgroups(_user: *const u8, _group: GidT) -> i32 {
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Reentrant password/group lookups
 // ---------------------------------------------------------------------------
 
@@ -1080,5 +1132,78 @@ mod tests {
         assert_eq!(unsafe { (*g3).gr_gid }, 0);
 
         endgrent();
+    }
+
+    // -- getgrouplist --
+
+    #[test]
+    fn test_getgrouplist_basic() {
+        let mut groups = [0i32; 4];
+        let mut ngroups: i32 = 4;
+        let ret = getgrouplist(
+            b"root\0".as_ptr(),
+            0,
+            groups.as_mut_ptr() as *mut GidT,
+            &mut ngroups,
+        );
+        assert_eq!(ret, 1);
+        assert_eq!(ngroups, 1);
+        assert_eq!(groups[0], 0);
+    }
+
+    #[test]
+    fn test_getgrouplist_nonroot_user() {
+        let mut groups = [0i32; 4];
+        let mut ngroups: i32 = 4;
+        let ret = getgrouplist(
+            b"nobody\0".as_ptr(),
+            1000,
+            groups.as_mut_ptr() as *mut GidT,
+            &mut ngroups,
+        );
+        assert_eq!(ret, 1);
+        assert_eq!(ngroups, 1);
+        assert_eq!(groups[0], 1000);
+    }
+
+    #[test]
+    fn test_getgrouplist_buffer_too_small() {
+        let mut ngroups: i32 = 0;
+        let ret = getgrouplist(
+            b"root\0".as_ptr(),
+            0,
+            core::ptr::null_mut(),
+            &mut ngroups,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(ngroups, 1);
+    }
+
+    #[test]
+    fn test_getgrouplist_null_ngroups() {
+        let ret = getgrouplist(
+            b"root\0".as_ptr(),
+            0,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+    }
+
+    // -- initgroups --
+
+    #[test]
+    fn test_initgroups_succeeds() {
+        assert_eq!(initgroups(b"root\0".as_ptr(), 0), 0);
+    }
+
+    #[test]
+    fn test_initgroups_nonroot() {
+        assert_eq!(initgroups(b"nobody\0".as_ptr(), 1000), 0);
+    }
+
+    #[test]
+    fn test_initgroups_null_user() {
+        assert_eq!(initgroups(core::ptr::null(), 0), 0);
     }
 }

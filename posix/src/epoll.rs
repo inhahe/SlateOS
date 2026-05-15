@@ -599,4 +599,181 @@ mod tests {
         assert_ne!(flags & TFD_CLOEXEC, 0);
         assert_ne!(flags & TFD_NONBLOCK, 0);
     }
+
+    // -- epoll_create with different sizes --
+
+    #[test]
+    fn test_epoll_create_zero_size() {
+        errno::set_errno(0);
+        assert_eq!(epoll_create(0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_epoll_create_large_size() {
+        errno::set_errno(0);
+        assert_eq!(epoll_create(1000), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- epoll_create1 with flags --
+
+    #[test]
+    fn test_epoll_create1_cloexec() {
+        errno::set_errno(0);
+        assert_eq!(epoll_create1(crate::fcntl::O_CLOEXEC), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- epoll_ctl all operations --
+
+    #[test]
+    fn test_epoll_ctl_del_enosys() {
+        errno::set_errno(0);
+        assert_eq!(epoll_ctl(3, EPOLL_CTL_DEL, 4, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_epoll_ctl_mod_enosys() {
+        errno::set_errno(0);
+        assert_eq!(epoll_ctl(3, EPOLL_CTL_MOD, 4, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- eventfd with different initval --
+
+    #[test]
+    fn test_eventfd_nonzero_initval() {
+        errno::set_errno(0);
+        assert_eq!(eventfd(42, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_eventfd_with_flags() {
+        errno::set_errno(0);
+        assert_eq!(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_eventfd_semaphore() {
+        errno::set_errno(0);
+        assert_eq!(eventfd(0, EFD_SEMAPHORE), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- eventfd_read with null --
+
+    #[test]
+    fn test_eventfd_read_null() {
+        errno::set_errno(0);
+        assert_eq!(eventfd_read(3, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- inotify_init1 with flags --
+
+    #[test]
+    fn test_inotify_init1_cloexec() {
+        errno::set_errno(0);
+        assert_eq!(inotify_init1(IN_CLOEXEC), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_inotify_init1_nonblock() {
+        errno::set_errno(0);
+        assert_eq!(inotify_init1(IN_NONBLOCK), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_inotify_init1_combined_flags() {
+        errno::set_errno(0);
+        assert_eq!(inotify_init1(IN_CLOEXEC | IN_NONBLOCK), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- inotify_add_watch with path --
+
+    #[test]
+    fn test_inotify_add_watch_with_path() {
+        errno::set_errno(0);
+        assert_eq!(inotify_add_watch(3, b"/tmp\0".as_ptr(), IN_MODIFY | IN_CREATE), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- inotify event flag single-bit checks --
+
+    #[test]
+    fn test_inotify_event_flags_single_bits() {
+        let flags = [
+            IN_ACCESS, IN_MODIFY, IN_ATTRIB, IN_CLOSE_WRITE,
+            IN_CLOSE_NOWRITE, IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO,
+            IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_MOVE_SELF,
+        ];
+        for f in flags {
+            assert_eq!(f.count_ones(), 1, "flag 0x{f:x} is not a single bit");
+        }
+    }
+
+    // -- signalfd with positive fd (modify existing) --
+
+    #[test]
+    fn test_signalfd_positive_fd() {
+        errno::set_errno(0);
+        assert_eq!(signalfd(3, core::ptr::null(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- timerfd_create with clock IDs --
+
+    #[test]
+    fn test_timerfd_create_monotonic() {
+        errno::set_errno(0);
+        assert_eq!(timerfd_create(1, 0), -1); // CLOCK_MONOTONIC = 1
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_timerfd_create_with_flags() {
+        errno::set_errno(0);
+        assert_eq!(timerfd_create(0, TFD_CLOEXEC | TFD_NONBLOCK), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- Epoll ctl ops are distinct --
+
+    #[test]
+    fn test_epoll_ctl_ops_distinct() {
+        assert_ne!(EPOLL_CTL_ADD, EPOLL_CTL_DEL);
+        assert_ne!(EPOLL_CTL_ADD, EPOLL_CTL_MOD);
+        assert_ne!(EPOLL_CTL_DEL, EPOLL_CTL_MOD);
+    }
+
+    // -- epoll_wait with timeout 0 (poll mode) --
+
+    #[test]
+    fn test_epoll_wait_poll_mode() {
+        errno::set_errno(0);
+        assert_eq!(epoll_wait(3, core::ptr::null_mut(), 10, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- TFD/EFD/IN flag values match Linux octal --
+
+    #[test]
+    fn test_cloexec_flags_consistent() {
+        // All CLOEXEC flags should have the same value across subsystems.
+        assert_eq!(EFD_CLOEXEC, TFD_CLOEXEC);
+        assert_eq!(EFD_CLOEXEC, IN_CLOEXEC);
+    }
+
+    #[test]
+    fn test_nonblock_flags_consistent() {
+        assert_eq!(EFD_NONBLOCK, TFD_NONBLOCK);
+        assert_eq!(EFD_NONBLOCK, IN_NONBLOCK);
+    }
 }

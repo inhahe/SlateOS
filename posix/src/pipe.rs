@@ -149,4 +149,54 @@ mod tests {
         assert_eq!(r1, r2);
         assert_eq!(e1, e2);
     }
+
+    // -- pipe2 null with O_NONBLOCK --
+
+    #[test]
+    fn pipe2_null_with_nonblock() {
+        let ret = pipe2(core::ptr::null_mut(), crate::fcntl::O_NONBLOCK);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // -- pipe2 null with combined flags --
+
+    #[test]
+    fn pipe2_null_with_combined_flags() {
+        let flags = crate::fcntl::O_CLOEXEC | crate::fcntl::O_NONBLOCK;
+        let ret = pipe2(core::ptr::null_mut(), flags);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // -- pipe null clears previous errno --
+
+    #[test]
+    fn pipe_null_sets_efault_not_previous() {
+        errno::set_errno(errno::ENOENT);
+        let ret = pipe(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // -- pipe2 null clears previous errno --
+
+    #[test]
+    fn pipe2_null_sets_efault_not_previous() {
+        errno::set_errno(errno::ENOENT);
+        let ret = pipe2(core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // -- pipe2 returns consistent results for same null input --
+
+    #[test]
+    fn pipe2_null_idempotent() {
+        for _ in 0..3 {
+            let ret = pipe2(core::ptr::null_mut(), 0);
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+    }
 }

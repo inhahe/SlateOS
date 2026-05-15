@@ -709,6 +709,49 @@ pub extern "C" fn scandir64(
 }
 
 // ---------------------------------------------------------------------------
+// getdents / getdents64 — raw Linux directory entry syscalls
+// ---------------------------------------------------------------------------
+
+/// Linux kernel directory entry for `getdents64`.
+///
+/// Programs normally use `readdir()` instead.  This struct exists for
+/// low-level compatibility with programs that use the raw syscall.
+#[repr(C)]
+pub struct LinuxDirent64 {
+    /// Inode number.
+    pub d_ino: u64,
+    /// Offset to next entry.
+    pub d_off: i64,
+    /// Length of this `linux_dirent64`.
+    pub d_reclen: u16,
+    /// File type (DT_* constant).
+    pub d_type: u8,
+    /// Filename (null-terminated, variable length).
+    pub d_name: [u8; 256],
+}
+
+/// Read directory entries via the raw Linux `getdents64` syscall.
+///
+/// Stub: returns -1 with ENOSYS.  Programs should use `readdir()` instead.
+/// A real implementation would fill `dirp` with packed `linux_dirent64`
+/// structs from the kernel directory listing.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getdents64(_fd: i32, _dirp: *mut u8, _count: usize) -> i64 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}
+
+/// Read directory entries via the raw Linux `getdents` syscall.
+///
+/// Stub: returns -1 with ENOSYS.  Same as `getdents64` but with the
+/// older 32-bit-inode struct layout.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getdents(_fd: i32, _dirp: *mut u8, _count: usize) -> i64 {
+    crate::errno::set_errno(crate::errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1167,5 +1210,33 @@ mod tests {
             None,
         );
         assert_eq!(ret, -1);
+    }
+
+    // -- getdents / getdents64 stubs --
+
+    #[test]
+    fn test_getdents64_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(getdents64(3, core::ptr::null_mut(), 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_getdents_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(getdents(3, core::ptr::null_mut(), 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_linux_dirent64_size() {
+        let size = core::mem::size_of::<LinuxDirent64>();
+        // d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + d_name(256) + padding
+        assert!(size >= 275, "LinuxDirent64 should be at least 275 bytes, got {size}");
+    }
+
+    #[test]
+    fn test_linux_dirent64_alignment() {
+        assert!(core::mem::align_of::<LinuxDirent64>() >= 8);
     }
 }

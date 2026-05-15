@@ -1795,6 +1795,7 @@ extern "C" fn kmain() -> ! {
         parent: 0,
         priority: sched::task::DEFAULT_PRIORITY,
         capabilities: init_caps,
+        fd_map: &[],
     };
     match proc::spawn::spawn_process(INIT_ELF, &spawn_opts) {
         Ok(result) => {

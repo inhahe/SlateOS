@@ -1247,6 +1247,39 @@ pub const SYS_THREAD_SET_PRIORITY: u64 = 515;
 /// exit_code < 0, indicating a crash).
 pub const SYS_PROCESS_CRASH_INFO: u64 = 516;
 
+/// Spawn a new process with file descriptor inheritance.
+///
+/// Like `SYS_PROCESS_SPAWN` (500), but additionally accepts a file
+/// descriptor map that specifies which kernel handles the child should
+/// inherit.  The kernel duplicates each parent handle and stores the
+/// mappings in the child's PCB.
+///
+/// `arg0`: pointer to ELF data in memory.
+/// `arg1`: ELF data length.
+/// `arg2`: pointer to name string (UTF-8).
+/// `arg3`: name length.
+/// `arg4`: pointer to `FdMapEntry` array (may be null if count is 0).
+/// `arg5`: number of `FdMapEntry` entries.
+///
+/// Each `FdMapEntry` is `{ fd: i32, _pad: i32, handle: u64 }` (16 bytes,
+/// C repr).  `fd` is the POSIX fd number in the child; `handle` is the
+/// kernel file handle in the parent to duplicate.
+///
+/// Returns: process ID on success, negative error on failure.
+pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
+
+/// Retrieve initial file descriptor mappings for the current process.
+///
+/// Called by the child process's POSIX layer during startup to discover
+/// which file descriptors were inherited from the parent.
+///
+/// `arg0`: pointer to output buffer (array of `FdMapEntry`).
+/// `arg1`: capacity of the output buffer (in entries, not bytes).
+///
+/// Returns: number of entries written on success, or negative error.
+/// The entries are consumed (one-shot) — subsequent calls return 0.
+pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
+
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------

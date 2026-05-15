@@ -85,6 +85,27 @@ pub const USER_STACK_GUARD: u64 = USER_STACK_TOP - MAX_STACK_SIZE;
 // Public types
 // ---------------------------------------------------------------------------
 
+/// A file descriptor mapping entry passed from userspace.
+///
+/// Used by `SYS_PROCESS_SPAWN_EX` to specify which kernel handles the
+/// child should inherit and at what POSIX fd numbers.  Also used by
+/// `SYS_PROCESS_GET_INITIAL_FDS` to return the mappings to the child.
+///
+/// Layout must match the userspace definition exactly (16 bytes, C ABI).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FdMapEntry {
+    /// Target POSIX fd number in the child (e.g. 0 = stdin, 1 = stdout).
+    pub fd: i32,
+    /// Padding for natural alignment of `handle`.
+    pub _pad: i32,
+    /// Kernel file handle ID.
+    ///
+    /// For `SYS_PROCESS_SPAWN_EX`: this is the *parent's* handle to dup.
+    /// For `SYS_PROCESS_GET_INITIAL_FDS`: this is the *child's* own handle.
+    pub handle: u64,
+}
+
 /// Result of a successful process spawn.
 #[derive(Debug, Clone, Copy)]
 pub struct SpawnResult {
@@ -121,6 +142,16 @@ pub struct SpawnOptions<'a> {
     /// Initial capabilities to grant (resource type, resource ID, rights).
     /// The parent must have these capabilities to delegate them.
     pub capabilities: &'a [(ResourceType, u64, Rights)],
+    /// Initial file descriptor map for the child process.
+    ///
+    /// Each entry is `(posix_fd_number, parent_kernel_handle)`.  During
+    /// spawn, each parent handle is duplicated via `handle::dup()` and
+    /// the resulting `(fd, new_handle)` pair is stored in the child's
+    /// PCB.  The child's POSIX layer reads this via
+    /// `SYS_PROCESS_GET_INITIAL_FDS` during startup.
+    ///
+    /// An empty slice means no fd inheritance (the default).
+    pub fd_map: &'a [(i32, u64)],
 }
 
 impl<'a> SpawnOptions<'a> {
@@ -132,6 +163,7 @@ impl<'a> SpawnOptions<'a> {
             parent: 0, // Kernel-spawned.
             priority: DEFAULT_PRIORITY,
             capabilities: &[],
+            fd_map: &[],
         }
     }
 
@@ -146,6 +178,17 @@ impl<'a> SpawnOptions<'a> {
     #[must_use]
     pub fn priority(mut self, priority: u8) -> Self {
         self.priority = priority;
+        self
+    }
+
+    /// Set the initial fd map for the child.
+    ///
+    /// Each entry is `(posix_fd_number, parent_kernel_handle)`.  The
+    /// parent's handles are duplicated — the child gets independent
+    /// handles that it owns.
+    #[must_use]
+    pub fn fd_map(mut self, map: &'a [(i32, u64)]) -> Self {
+        self.fd_map = map;
         self
     }
 }
@@ -298,6 +341,40 @@ pub fn spawn_process(
         if parent_ns != crate::ipc::namespace::ROOT_NAMESPACE {
             let _ = crate::ipc::namespace::attach(pid, parent_ns);
         }
+    }
+
+    // Step 5d: Apply fd inheritance map.
+    //
+    // If the parent passed an fd map, duplicate each parent handle and
+    // store the (posix_fd, child_handle) pairs in the child's PCB.
+    // The child's POSIX layer reads these during its init sequence via
+    // SYS_PROCESS_GET_INITIAL_FDS.
+    if !options.fd_map.is_empty() {
+        let mut initial_fds = alloc::vec::Vec::with_capacity(options.fd_map.len());
+        for &(fd_num, parent_handle) in options.fd_map {
+            match crate::fs::handle::dup(parent_handle) {
+                Ok(child_handle) => {
+                    serial_println!(
+                        "[spawn] fd {} → handle {} (duped from {})",
+                        fd_num, child_handle, parent_handle,
+                    );
+                    initial_fds.push((fd_num, child_handle));
+                }
+                Err(e) => {
+                    // Close any handles we already duped — don't leak.
+                    for &(_fd, h) in &initial_fds {
+                        let _ = crate::fs::handle::close(h);
+                    }
+                    serial_println!(
+                        "[spawn] Failed to dup handle {} for fd {}: {:?}",
+                        parent_handle, fd_num, e,
+                    );
+                    pcb::destroy(pid);
+                    return Err(e);
+                }
+            }
+        }
+        pcb::set_initial_fds(pid, initial_fds);
     }
 
     // Step 6: Create the entry info struct (heap-allocated, freed by
@@ -620,6 +697,11 @@ pub fn self_test() -> KernelResult<()> {
     test_seh_handler_resume()?;
     test_process_kill()?;
     test_no_frame_leak()?;
+    test_fd_map_entry_layout()?;
+    test_spawn_with_fd_map()?;
+    test_spawn_with_empty_fd_map()?;
+    test_spawn_fd_map_invalid_handle()?;
+    test_take_initial_fds_one_shot()?;
 
     Ok(())
 }
@@ -694,6 +776,7 @@ fn test_spawn_with_capabilities() -> KernelResult<()> {
         parent: 0,
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
+        fd_map: &[],
     };
 
     let result = spawn_process(&elf_data, &options)?;
@@ -1130,5 +1213,238 @@ fn test_no_frame_leak() -> KernelResult<()> {
         "[spawn]   No frame leak (before={}, after={}, delta={}): OK",
         before.free_frames, after.free_frames, leaked
     );
+    Ok(())
+}
+
+/// Test: FdMapEntry has the correct size and alignment for C ABI.
+fn test_fd_map_entry_layout() -> KernelResult<()> {
+    let size = core::mem::size_of::<FdMapEntry>();
+    let align = core::mem::align_of::<FdMapEntry>();
+
+    if size != 16 {
+        serial_println!(
+            "[spawn]   FAIL: FdMapEntry size should be 16, got {}",
+            size
+        );
+        return Err(KernelError::InternalError);
+    }
+    if align < 4 {
+        serial_println!(
+            "[spawn]   FAIL: FdMapEntry alignment should be ≥4, got {}",
+            align
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify field offsets are correct.
+    let entry = FdMapEntry { fd: 1, _pad: 0, handle: 42 };
+    if entry.fd != 1 || entry.handle != 42 {
+        serial_println!("[spawn]   FAIL: FdMapEntry field values wrong");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[spawn]   FdMapEntry layout (size={}, align={}): OK", size, align);
+    Ok(())
+}
+
+/// Test: Spawn a process with an fd map — handles are duped into child PCB.
+fn test_spawn_with_fd_map() -> KernelResult<()> {
+    use crate::fs::handle;
+
+    // Create a file to get a real kernel handle.
+    let parent_handle = handle::open(
+        "/test_fd_map_spawn.tmp",
+        handle::OpenFlags::READ.union(handle::OpenFlags::WRITE).union(handle::OpenFlags::CREATE),
+    )?;
+
+    // Spawn with fd_map: fd 1 → parent_handle.
+    let elf_data = elf::build_test_elf_public();
+    let fd_map = [(1_i32, parent_handle)];
+    let options = SpawnOptions::new("spawn-test-fdmap").fd_map(&fd_map);
+
+    let result = spawn_process(&elf_data, &options)?;
+
+    // The child's PCB should have initial_fds with one entry.
+    let child_fds = pcb::take_initial_fds(result.pid);
+    if child_fds.len() != 1 {
+        serial_println!(
+            "[spawn]   FAIL: expected 1 initial fd, got {}",
+            child_fds.len()
+        );
+        // Clean up.
+        for &(_fd, h) in &child_fds {
+            let _ = handle::close(h);
+        }
+        let _ = handle::close(parent_handle);
+        let _ = crate::fs::Vfs::remove("/test_fd_map_spawn.tmp");
+        return Err(KernelError::InternalError);
+    }
+
+    let (fd_num, child_handle) = child_fds[0];
+    if fd_num != 1 {
+        serial_println!(
+            "[spawn]   FAIL: expected fd 1, got {}",
+            fd_num
+        );
+    }
+
+    // The child handle should be different from the parent handle
+    // (it's a dup, not the same ID).
+    if child_handle == parent_handle {
+        serial_println!(
+            "[spawn]   FAIL: child handle {} should differ from parent handle {}",
+            child_handle, parent_handle
+        );
+    }
+
+    // Both handles should be valid (we can query their paths).
+    let parent_path = handle::handle_path(parent_handle)?;
+    let child_path = handle::handle_path(child_handle)?;
+    if parent_path != child_path {
+        serial_println!(
+            "[spawn]   FAIL: paths should match: parent='{}', child='{}'",
+            parent_path, child_path
+        );
+    }
+
+    // Clean up: close both handles, let the process die, destroy it.
+    let _ = handle::close(child_handle);
+    let _ = handle::close(parent_handle);
+
+    // Let the child run (exit via SYS_EXIT).
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    let _ = crate::fs::Vfs::remove("/test_fd_map_spawn.tmp");
+
+    serial_println!("[spawn]   Spawn with fd_map (1 entry, handle duped): OK");
+    Ok(())
+}
+
+/// Test: Spawn with an empty fd_map (default behavior, no fds inherited).
+fn test_spawn_with_empty_fd_map() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+    let options = SpawnOptions::new("spawn-test-empty-fdmap").fd_map(&[]);
+
+    let result = spawn_process(&elf_data, &options)?;
+
+    // No initial fds should be set.
+    let fds = pcb::take_initial_fds(result.pid);
+    if !fds.is_empty() {
+        serial_println!(
+            "[spawn]   FAIL: expected 0 initial fds, got {}",
+            fds.len()
+        );
+        // Clean up leaked handles.
+        for &(_fd, h) in &fds {
+            let _ = crate::fs::handle::close(h);
+        }
+        return Err(KernelError::InternalError);
+    }
+
+    // Clean up.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    serial_println!("[spawn]   Spawn with empty fd_map: OK");
+    Ok(())
+}
+
+/// Test: Spawn with an invalid handle in fd_map fails gracefully.
+fn test_spawn_fd_map_invalid_handle() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+
+    // Handle 999999 doesn't exist — dup should fail.
+    let fd_map = [(0_i32, 999_999_u64)];
+    let options = SpawnOptions::new("spawn-test-bad-fd").fd_map(&fd_map);
+
+    match spawn_process(&elf_data, &options) {
+        Ok(result) => {
+            // Should NOT succeed — clean up and fail.
+            crate::sched::yield_now();
+            crate::sched::yield_now();
+            crate::sched::reap_dead_tasks();
+            thread::on_thread_exit(result.task_id);
+            pcb::destroy(result.pid);
+            serial_println!(
+                "[spawn]   FAIL: spawn with invalid handle should fail"
+            );
+            Err(KernelError::InternalError)
+        }
+        Err(KernelError::InvalidHandle) => {
+            serial_println!("[spawn]   Spawn with invalid handle → InvalidHandle: OK");
+            Ok(())
+        }
+        Err(e) => {
+            // Any error is acceptable (InvalidHandle is expected, but
+            // other errors are fine too — the point is it doesn't succeed).
+            serial_println!(
+                "[spawn]   Spawn with invalid handle → {:?} (expected InvalidHandle): OK",
+                e
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Test: take_initial_fds is one-shot — second call returns empty.
+fn test_take_initial_fds_one_shot() -> KernelResult<()> {
+    use crate::fs::handle;
+
+    let parent_handle = handle::open(
+        "/test_fd_oneshot.tmp",
+        handle::OpenFlags::READ.union(handle::OpenFlags::WRITE).union(handle::OpenFlags::CREATE),
+    )?;
+
+    let elf_data = elf::build_test_elf_public();
+    let fd_map = [(0_i32, parent_handle)];
+    let options = SpawnOptions::new("spawn-test-oneshot").fd_map(&fd_map);
+
+    let result = spawn_process(&elf_data, &options)?;
+
+    // First take: should get 1 entry.
+    let fds = pcb::take_initial_fds(result.pid);
+    if fds.len() != 1 {
+        serial_println!(
+            "[spawn]   FAIL: first take expected 1 fd, got {}",
+            fds.len()
+        );
+    }
+
+    // Close the duped handle.
+    for &(_fd, h) in &fds {
+        let _ = handle::close(h);
+    }
+
+    // Second take: should get 0 entries (already consumed).
+    let fds2 = pcb::take_initial_fds(result.pid);
+    if !fds2.is_empty() {
+        serial_println!(
+            "[spawn]   FAIL: second take expected 0 fds, got {}",
+            fds2.len()
+        );
+        for &(_fd, h) in &fds2 {
+            let _ = handle::close(h);
+        }
+        return Err(KernelError::InternalError);
+    }
+
+    // Clean up.
+    let _ = handle::close(parent_handle);
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    let _ = crate::fs::Vfs::remove("/test_fd_oneshot.tmp");
+
+    serial_println!("[spawn]   take_initial_fds is one-shot: OK");
     Ok(())
 }

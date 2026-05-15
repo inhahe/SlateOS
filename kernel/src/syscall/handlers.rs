@@ -2239,6 +2239,170 @@ pub fn sys_process_spawn(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_PROCESS_SPAWN_EX` — spawn a new process with fd inheritance.
+///
+/// Like `sys_process_spawn` but additionally accepts a file descriptor
+/// map that specifies which kernel handles the child should inherit.
+///
+/// `arg0`: pointer to ELF data.
+/// `arg1`: ELF data length.
+/// `arg2`: pointer to name string.
+/// `arg3`: name length.
+/// `arg4`: pointer to `FdMapEntry` array (null = no fd inheritance).
+/// `arg5`: number of `FdMapEntry` entries.
+pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::spawn::{FdMapEntry, SpawnOptions, spawn_process};
+
+    let elf_ptr = args.arg0 as usize;
+    let elf_len = args.arg1 as usize;
+    let name_ptr = args.arg2 as usize;
+    let name_len = args.arg3 as usize;
+    let fd_map_ptr = args.arg4 as usize;
+    let fd_map_count = args.arg5 as usize;
+
+    if elf_len == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // Validate ELF data pointer.
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, elf_len) {
+        return SyscallResult::err(e);
+    }
+
+    // Validate name pointer (if provided).
+    if name_len > 0 && name_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, name_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // Validate fd map pointer (if provided).
+    // Cap at 256 entries — no reasonable process needs more fds inherited.
+    if fd_map_count > 256 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let fd_map_byte_len = fd_map_count
+        .checked_mul(core::mem::size_of::<FdMapEntry>())
+        .unwrap_or(usize::MAX);
+    if fd_map_count > 0 && fd_map_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, fd_map_byte_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // SAFETY: Validated above — elf_ptr is in user space and mapped.
+    let elf_data = unsafe {
+        core::slice::from_raw_parts(elf_ptr as *const u8, elf_len)
+    };
+
+    // Read the name.
+    let name = if name_len > 0 && name_ptr != 0 {
+        // SAFETY: Validated above.
+        let name_bytes = unsafe {
+            core::slice::from_raw_parts(name_ptr as *const u8, name_len)
+        };
+        core::str::from_utf8(name_bytes).unwrap_or("unnamed")
+    } else {
+        "unnamed"
+    };
+
+    // Read the fd map entries.
+    //
+    // Convert from the userspace FdMapEntry array to a Vec of (fd, handle)
+    // pairs that SpawnOptions expects.
+    let fd_pairs: alloc::vec::Vec<(i32, u64)> = if fd_map_count > 0 && fd_map_ptr != 0 {
+        // SAFETY: Validated above — fd_map_ptr points to mapped user memory
+        // of at least fd_map_count * size_of::<FdMapEntry>() bytes.
+        let entries = unsafe {
+            core::slice::from_raw_parts(fd_map_ptr as *const FdMapEntry, fd_map_count)
+        };
+        entries.iter().map(|e| (e.fd, e.handle)).collect()
+    } else {
+        alloc::vec::Vec::new()
+    };
+
+    let options = SpawnOptions::new(name).fd_map(&fd_pairs);
+
+    match spawn_process(elf_data, &options) {
+        Ok(result) => {
+            #[allow(clippy::cast_possible_wrap)]
+            SyscallResult::ok(result.pid as i64)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PROCESS_GET_INITIAL_FDS` — retrieve inherited fd mappings.
+///
+/// Called by the child process during startup to discover which file
+/// descriptors were inherited from the parent.
+///
+/// `arg0`: pointer to output buffer (array of `FdMapEntry`).
+/// `arg1`: capacity of the output buffer (in entries).
+///
+/// Returns: number of entries written, or negative error.
+/// Entries are consumed (one-shot) — subsequent calls return 0.
+pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::spawn::FdMapEntry;
+    use crate::proc::pcb;
+
+    let out_ptr = args.arg0 as usize;
+    let out_cap = args.arg1 as usize;
+
+    // Get the calling process's PID.
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return SyscallResult::ok(0), // Kernel task — no fds.
+    };
+
+    // Take the initial fds from the PCB (one-shot: clears them).
+    let fds = pcb::take_initial_fds(pid);
+
+    if fds.is_empty() {
+        return SyscallResult::ok(0);
+    }
+
+    // Clamp to output capacity.
+    let count = fds.len().min(out_cap);
+
+    if count > 0 && out_ptr != 0 {
+        let byte_len = count
+            .checked_mul(core::mem::size_of::<FdMapEntry>())
+            .unwrap_or(usize::MAX);
+
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg0, byte_len) {
+            // Put the fds back — caller can retry with a valid buffer.
+            pcb::set_initial_fds(pid, fds);
+            return SyscallResult::err(e);
+        }
+
+        // SAFETY: Validated above — out_ptr is writable user memory.
+        let out_slice = unsafe {
+            core::slice::from_raw_parts_mut(out_ptr as *mut FdMapEntry, count)
+        };
+
+        for (i, &(fd, handle)) in fds.iter().take(count).enumerate() {
+            if let Some(entry) = out_slice.get_mut(i) {
+                *entry = FdMapEntry {
+                    fd,
+                    _pad: 0,
+                    handle,
+                };
+            }
+        }
+
+        // If we couldn't deliver all entries (output buffer too small),
+        // put the remaining ones back.
+        if count < fds.len() {
+            let remaining: alloc::vec::Vec<(i32, u64)> = fds[count..].to_vec();
+            pcb::set_initial_fds(pid, remaining);
+        }
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(count as i64)
+}
+
 /// `SYS_PROCESS_WAIT` — wait for a child process to exit.
 ///
 /// `arg0`: child process ID.

@@ -215,6 +215,18 @@ pub struct Process {
     /// exception.  `None` for normal exits.  The parent can read this
     /// via `SYS_PROCESS_CRASH_INFO` to get diagnostics.
     pub crash_info: Option<CrashInfo>,
+    /// Initial file descriptor mappings inherited from parent.
+    ///
+    /// Each entry is `(posix_fd_number, kernel_handle_id)`.  Set by
+    /// `SYS_PROCESS_SPAWN_EX` when the parent passes an fd map.  The
+    /// child's POSIX layer reads this via `SYS_PROCESS_GET_INITIAL_FDS`
+    /// during startup and clears it (one-shot).
+    ///
+    /// The kernel handles stored here are *duplicates* of the parent's
+    /// handles — the child owns them independently.  If the child never
+    /// reads them (e.g., a non-POSIX process), they are cleaned up when
+    /// the process is reaped.
+    pub initial_fds: Vec<(i32, u64)>,
 }
 
 impl Process {
@@ -235,6 +247,7 @@ impl Process {
             vmas: Vec::new(),
             ipc_handles: Vec::new(),
             crash_info: None,
+            initial_fds: Vec::new(),
         }
     }
 }
@@ -561,7 +574,13 @@ pub fn try_reap(
     // Phase 1: Under PROCESS_TABLE lock — verify state, extract
     // process info, and remove from table.  We must extract all
     // fields needed for cleanup before dropping the lock.
-    let reaped: Option<(ExitInfo, u64, Vec<(crate::cap::ResourceType, u64)>)>;
+    #[allow(clippy::type_complexity)]
+    let reaped: Option<(
+        ExitInfo,
+        u64,
+        Vec<(crate::cap::ResourceType, u64)>,
+        Vec<(i32, u64)>,
+    )>;
 
     {
         let mut table = PROCESS_TABLE.lock();
@@ -582,22 +601,26 @@ pub fn try_reap(
         let crash = proc.crash_info;
         let pml4_phys = proc.pml4_phys;
 
-        // Extract the IPC handle list before removing.
+        // Extract the IPC handle list and initial fds before removing.
         let mut removed = table.remove(&child_pid);
         let ipc_handles = removed
             .as_mut()
             .map(|p| core::mem::take(&mut p.ipc_handles))
             .unwrap_or_default();
+        let initial_fds = removed
+            .as_mut()
+            .map(|p| core::mem::take(&mut p.initial_fds))
+            .unwrap_or_default();
 
         let info = ExitInfo { exit_code, crash };
-        reaped = Some((info, pml4_phys, ipc_handles));
+        reaped = Some((info, pml4_phys, ipc_handles, initial_fds));
     }
     // PROCESS_TABLE lock dropped here.
 
-    if let Some((info, pml4_phys, ipc_handles)) = reaped {
+    if let Some((info, pml4_phys, ipc_handles, initial_fds)) = reaped {
         // Phase 2: Cleanup without holding PROCESS_TABLE lock.
         // This avoids ABBA deadlocks with exception handler / DMA / IPC locks.
-        destroy_process_resources(child_pid, pml4_phys, &ipc_handles);
+        destroy_process_resources(child_pid, pml4_phys, &ipc_handles, &initial_fds);
         Ok(Some(info))
     } else {
         Ok(None)
@@ -931,12 +954,23 @@ fn destroy_process_resources(
     pid: ProcessId,
     pml4_phys: u64,
     ipc_handles: &[(crate::cap::ResourceType, u64)],
+    initial_fds: &[(i32, u64)],
 ) {
     // Remove exception handler registration (if any).
     crate::proc::exception::remove_handler(pid);
 
     // Close all IPC handles owned by this process.
     crate::ipc::cleanup_handles(ipc_handles);
+
+    // Close any unclaimed initial fd handles.
+    //
+    // If the child process never called SYS_PROCESS_GET_INITIAL_FDS
+    // (e.g., it crashed before init, or is a non-POSIX process), the
+    // duplicated handles are still in the global table.  Close them
+    // now to avoid handle leaks.
+    for &(_fd, handle) in initial_fds {
+        let _ = crate::fs::handle::close(handle);
+    }
 
     // Detach from namespace (idempotent — may already be done
     // during zombie transition, but safe to call again).
@@ -977,7 +1011,7 @@ pub fn destroy(pid: ProcessId) {
     // PROCESS_TABLE lock dropped — safe to acquire other locks.
 
     if let Some(proc) = removed {
-        destroy_process_resources(pid, proc.pml4_phys, &proc.ipc_handles);
+        destroy_process_resources(pid, proc.pml4_phys, &proc.ipc_handles, &proc.initial_fds);
     }
 }
 
@@ -1015,6 +1049,36 @@ pub fn deregister_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle
         }) {
             proc.ipc_handles.swap_remove(pos);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Initial fd mapping (for fd inheritance across spawn)
+// ---------------------------------------------------------------------------
+
+/// Store initial file descriptor mappings in a child process's PCB.
+///
+/// Called by `spawn_process()` when the parent passes an fd map.
+/// Each entry is `(posix_fd_number, kernel_handle_id)` where the
+/// handle is a *duplicate* that the child owns.
+pub fn set_initial_fds(pid: ProcessId, fds: Vec<(i32, u64)>) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.initial_fds = fds;
+    }
+}
+
+/// Take (move out) the initial fd mappings from a process's PCB.
+///
+/// Returns the fd map and clears it in the PCB.  This is a one-shot
+/// operation — the child calls `SYS_PROCESS_GET_INITIAL_FDS` once
+/// during startup, and subsequent calls return an empty vec.
+pub fn take_initial_fds(pid: ProcessId) -> Vec<(i32, u64)> {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        core::mem::take(&mut proc.initial_fds)
+    } else {
+        Vec::new()
     }
 }
 

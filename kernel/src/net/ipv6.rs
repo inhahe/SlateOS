@@ -693,6 +693,12 @@ pub fn process_ipv6(data: &[u8]) -> KernelResult<()> {
         return Ok(());
     }
 
+    // IPv6 firewall: check inbound packet before dispatching.
+    // Pass the upper-layer protocol and payload to the firewall.
+    if !super::firewall::check_inbound_v6(packet.upper_protocol, packet.src, packet.payload) {
+        return Ok(()); // Silently drop — firewall denied.
+    }
+
     match packet.upper_protocol {
         NH_ICMPV6 => super::icmpv6::process_icmpv6(&packet),
         NH_UDP => super::udp::process_udp_v6(&packet),
@@ -748,6 +754,11 @@ pub fn send_raw(
     hop_limit: u8,
     payload: &[u8],
 ) -> KernelResult<()> {
+    // IPv6 firewall: check outbound packet before sending.
+    if !super::firewall::check_outbound_v6(next_header, dst, payload) {
+        return Err(KernelError::PermissionDenied);
+    }
+
     let our_mac = interface::mac();
     let ip_packet = build_packet(src, dst, next_header, hop_limit, payload);
 

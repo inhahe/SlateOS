@@ -56,6 +56,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
 use super::interface::Ipv4Addr;
+use super::ipv6::{Ipv6Addr, NH_ICMPV6};
 use super::ipv4::{PROTO_ICMP, PROTO_TCP, PROTO_UDP};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
@@ -83,6 +84,12 @@ const MAX_NS_RULES: usize = 16;
 
 /// Maximum tracked connections per namespace.
 const MAX_NS_CONNTRACK: usize = 32;
+
+/// Maximum number of IPv6 firewall rules.
+const MAX_RULES6: usize = 32;
+
+/// Maximum tracked IPv6 connections for stateful filtering.
+const MAX_CONNTRACK6: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Firewall rule types
@@ -207,6 +214,84 @@ impl ConntrackEntry {
 }
 
 // ---------------------------------------------------------------------------
+// IPv6 firewall rule and connection tracking types
+// ---------------------------------------------------------------------------
+
+/// An IPv6 firewall rule.
+///
+/// Parallel to [`Rule`] but uses [`Ipv6Addr`] for source matching
+/// and maps the `Icmp` protocol selector to ICMPv6 (next-header 58).
+#[derive(Debug, Clone, Copy)]
+pub struct Rule6 {
+    /// Whether this rule slot is active.
+    pub active: bool,
+    /// Traffic direction.
+    pub direction: Direction,
+    /// Action to take.
+    pub action: Action,
+    /// Protocol filter.
+    ///
+    /// `Icmp` matches ICMPv6 (next-header 58) for IPv6 rules.
+    pub protocol: Protocol,
+    /// Source IPv6 address (:: = any).
+    pub src_ip: Ipv6Addr,
+    /// Source IP prefix length (0 = match all, 128 = exact match).
+    pub src_prefix: u8,
+    /// Destination port (0 = any).
+    pub dst_port: u16,
+    /// Rule priority (lower = higher priority, evaluated first).
+    pub priority: u16,
+    /// Number of packets this rule has matched.
+    pub match_count: u64,
+}
+
+impl Rule6 {
+    const fn empty() -> Self {
+        Self {
+            active: false,
+            direction: Direction::Both,
+            action: Action::Allow,
+            protocol: Protocol::Any,
+            src_ip: Ipv6Addr::UNSPECIFIED,
+            src_prefix: 0,
+            dst_port: 0,
+            priority: u16::MAX,
+            match_count: 0,
+        }
+    }
+}
+
+/// A tracked IPv6 connection for stateful filtering.
+#[derive(Clone, Copy)]
+struct ConntrackEntry6 {
+    /// Whether this entry is active.
+    active: bool,
+    /// Next-header / protocol (6=TCP, 17=UDP).
+    protocol: u8,
+    /// Local port.
+    local_port: u16,
+    /// Remote IPv6 address.
+    remote_ip: Ipv6Addr,
+    /// Remote port.
+    remote_port: u16,
+    /// Last activity timestamp (nanoseconds).
+    last_seen_ns: u64,
+}
+
+impl ConntrackEntry6 {
+    const fn empty() -> Self {
+        Self {
+            active: false,
+            protocol: 0,
+            local_port: 0,
+            remote_ip: Ipv6Addr::UNSPECIFIED,
+            remote_port: 0,
+            last_seen_ns: 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Global state
 // ---------------------------------------------------------------------------
 
@@ -231,6 +316,37 @@ static CONNTRACK: Mutex<[ConntrackEntry; MAX_CONNTRACK]> = Mutex::new({
 /// Counters.
 static PACKETS_ALLOWED: AtomicU64 = AtomicU64::new(0);
 static PACKETS_DENIED: AtomicU64 = AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// IPv6 global state
+// ---------------------------------------------------------------------------
+
+/// Whether the IPv6 firewall is enabled (independent of IPv4).
+///
+/// IPv4 and IPv6 firewalls are enabled/disabled separately because
+/// users typically configure IPv4 rules first.  Sharing a single
+/// enable flag would cause the default DROP policy to block all IPv6
+/// traffic before any v6 rules are added.
+static ENABLED6: AtomicBool = AtomicBool::new(false);
+
+/// Default policy for IPv6 traffic.
+static DEFAULT_POLICY6: Mutex<DefaultPolicy> = Mutex::new(DefaultPolicy::Accept);
+
+/// IPv6 rule table.
+static RULES6: Mutex<[Rule6; MAX_RULES6]> = Mutex::new({
+    const EMPTY: Rule6 = Rule6::empty();
+    [EMPTY; MAX_RULES6]
+});
+
+/// IPv6 connection tracking table.
+static CONNTRACK6: Mutex<[ConntrackEntry6; MAX_CONNTRACK6]> = Mutex::new({
+    const EMPTY: ConntrackEntry6 = ConntrackEntry6::empty();
+    [EMPTY; MAX_CONNTRACK6]
+});
+
+/// IPv6 packet counters.
+static PACKETS_ALLOWED6: AtomicU64 = AtomicU64::new(0);
+static PACKETS_DENIED6: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------
 // Per-namespace firewall state
@@ -497,6 +613,16 @@ pub fn tick_conntrack_cleanup() {
                 if entry.active && now.saturating_sub(entry.last_seen_ns) > CONNTRACK_EXPIRY_NS {
                     entry.active = false;
                 }
+            }
+        }
+    }
+
+    // Clean global IPv6 conntrack table.
+    {
+        let mut ct = CONNTRACK6.lock();
+        for entry in ct.iter_mut() {
+            if entry.active && now.saturating_sub(entry.last_seen_ns) > CONNTRACK_EXPIRY_NS {
+                entry.active = false;
             }
         }
     }
@@ -1263,6 +1389,470 @@ fn ip_matches(packet_ip: Ipv4Addr, rule_ip: Ipv4Addr, prefix_len: u8) -> bool {
     (pkt_u32 & mask) == (rule_u32 & mask)
 }
 
+// ===========================================================================
+// IPv6 firewall
+// ===========================================================================
+//
+// Parallel implementation to the IPv4 firewall above.  Uses the same
+// `Direction`, `Action`, `Protocol`, and `DefaultPolicy` enums but with
+// [`Rule6`] (IPv6 source addresses) and [`ConntrackEntry6`] (IPv6 remote
+// addresses).  The `Protocol::Icmp` variant maps to ICMPv6 (next-header 58)
+// for IPv6 rules — TCP (6) and UDP (17) use the same next-header values.
+
+// ---------------------------------------------------------------------------
+// Public API — IPv6 global firewall
+// ---------------------------------------------------------------------------
+
+/// Enable the IPv6 firewall.
+pub fn enable6() {
+    ENABLED6.store(true, Ordering::Relaxed);
+    serial_println!("[firewall] IPv6 firewall enabled");
+}
+
+/// Disable the IPv6 firewall (all IPv6 traffic passes through).
+pub fn disable6() {
+    ENABLED6.store(false, Ordering::Relaxed);
+    serial_println!("[firewall] IPv6 firewall disabled");
+}
+
+/// Check if the IPv6 firewall is enabled.
+pub fn is_enabled6() -> bool {
+    ENABLED6.load(Ordering::Relaxed)
+}
+
+/// Set the default policy for IPv6 traffic (when no rule matches).
+pub fn set_default_policy6(policy: DefaultPolicy) {
+    *DEFAULT_POLICY6.lock() = policy;
+    serial_println!("[firewall] IPv6 default policy: {:?}", policy);
+}
+
+/// Get the IPv6 default policy.
+pub fn default_policy6() -> DefaultPolicy {
+    *DEFAULT_POLICY6.lock()
+}
+
+/// Add an IPv6 firewall rule.
+///
+/// Returns the rule index, or error if the table is full.
+pub fn add_rule6(rule: Rule6) -> KernelResult<usize> {
+    let mut rules = RULES6.lock();
+    let slot = rules.iter().position(|r| !r.active)
+        .ok_or(KernelError::OutOfMemory)?;
+
+    let mut new_rule = rule;
+    new_rule.active = true;
+    rules[slot] = new_rule;
+
+    serial_println!(
+        "[firewall] IPv6 rule added: {:?} {:?} {:?} port={} prio={}",
+        rule.direction, rule.action, rule.protocol, rule.dst_port, rule.priority
+    );
+    Ok(slot)
+}
+
+/// Remove an IPv6 firewall rule by index.
+pub fn remove_rule6(index: usize) -> KernelResult<()> {
+    let mut rules = RULES6.lock();
+    let rule = rules.get_mut(index)
+        .ok_or(KernelError::InvalidArgument)?;
+    if !rule.active {
+        return Err(KernelError::InvalidArgument);
+    }
+    rule.active = false;
+    Ok(())
+}
+
+/// Get the number of active IPv6 rules.
+pub fn rule6_count() -> usize {
+    let rules = RULES6.lock();
+    rules.iter().filter(|r| r.active).count()
+}
+
+/// Clear all IPv6 rules.
+pub fn clear_rules6() {
+    let mut rules = RULES6.lock();
+    for rule in rules.iter_mut() {
+        rule.active = false;
+    }
+}
+
+/// Get IPv6 firewall statistics (allowed, denied).
+pub fn stats6() -> (u64, u64) {
+    (
+        PACKETS_ALLOWED6.load(Ordering::Relaxed),
+        PACKETS_DENIED6.load(Ordering::Relaxed),
+    )
+}
+
+/// Reset IPv6 statistics (global allow/deny counters).
+pub fn reset_stats6() {
+    PACKETS_ALLOWED6.store(0, Ordering::Relaxed);
+    PACKETS_DENIED6.store(0, Ordering::Relaxed);
+}
+
+/// Get per-rule match counts for all active IPv6 rules.
+///
+/// Returns an array of `RuleStats` and the count of active entries,
+/// sorted by priority (lower = first).
+#[allow(dead_code)] // Public API — used by shell commands.
+pub fn rule6_stats() -> ([RuleStats; MAX_RULES6], usize) {
+    let rules = RULES6.lock();
+    let mut out = [RuleStats::EMPTY; MAX_RULES6];
+    let mut count = 0;
+
+    for rule in rules.iter() {
+        if !rule.active {
+            continue;
+        }
+        if count < MAX_RULES6 {
+            out[count] = RuleStats {
+                priority: rule.priority,
+                protocol: rule.protocol,
+                action: rule.action,
+                direction: rule.direction,
+                match_count: rule.match_count,
+            };
+            count += 1;
+        }
+    }
+
+    // Sort by priority (lower = first).
+    let mut i = 1;
+    while i < count {
+        let key = out[i];
+        let mut j = i;
+        while j > 0 && out[j - 1].priority > key.priority {
+            out[j] = out[j - 1];
+            j -= 1;
+        }
+        out[j] = key;
+        i += 1;
+    }
+
+    (out, count)
+}
+
+/// Reset all IPv6 per-rule match counters to zero.
+#[allow(dead_code)] // Public API — used by shell commands.
+pub fn reset_rule6_counters() {
+    let mut rules = RULES6.lock();
+    for rule in rules.iter_mut() {
+        rule.match_count = 0;
+    }
+}
+
+/// Clear all IPv6 connection tracking entries.
+pub fn clear_conntrack6() {
+    let mut ct = CONNTRACK6.lock();
+    for entry in ct.iter_mut() {
+        entry.active = false;
+    }
+}
+
+/// Get number of active IPv6 conntrack entries.
+pub fn conntrack6_count() -> usize {
+    let ct = CONNTRACK6.lock();
+    ct.iter().filter(|e| e.active).count()
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 connection tracking management
+// ---------------------------------------------------------------------------
+
+/// Record an outbound IPv6 connection for stateful tracking.
+///
+/// Called when an outbound IPv6 packet is allowed so that reply
+/// packets will be automatically accepted.
+fn track_connection_v6(protocol: u8, local_port: u16, remote_ip: Ipv6Addr, remote_port: u16) {
+    let now = crate::hrtimer::now_ns();
+    let mut ct = CONNTRACK6.lock();
+
+    // Check if already tracked (refresh timestamp).
+    for entry in ct.iter_mut() {
+        if entry.active
+            && entry.protocol == protocol
+            && entry.local_port == local_port
+            && entry.remote_ip == remote_ip
+            && entry.remote_port == remote_port
+        {
+            entry.last_seen_ns = now;
+            return;
+        }
+    }
+
+    // Find a free slot (or expire the oldest).
+    let slot = ct.iter().position(|e| !e.active)
+        .or_else(|| {
+            ct.iter()
+                .enumerate()
+                .filter(|(_, e)| e.active)
+                .min_by_key(|(_, e)| e.last_seen_ns)
+                .map(|(i, _)| i)
+        });
+
+    if let Some(idx) = slot {
+        ct[idx] = ConntrackEntry6 {
+            active: true,
+            protocol,
+            local_port,
+            remote_ip,
+            remote_port,
+            last_seen_ns: now,
+        };
+    }
+}
+
+/// Check if an inbound IPv6 packet matches a tracked connection.
+///
+/// If it does, the entry's timestamp is refreshed.
+fn is_tracked_reply_v6(protocol: u8, src_ip: Ipv6Addr, src_port: u16, dst_port: u16) -> bool {
+    let now = crate::hrtimer::now_ns();
+    let mut ct = CONNTRACK6.lock();
+
+    for entry in ct.iter_mut() {
+        if !entry.active {
+            continue;
+        }
+
+        // Expire old entries.
+        if now.saturating_sub(entry.last_seen_ns) > CONNTRACK_EXPIRY_NS {
+            entry.active = false;
+            continue;
+        }
+
+        // Match: reply from (remote_ip, remote_port) to our local_port.
+        if entry.protocol == protocol
+            && entry.remote_ip == src_ip
+            && entry.remote_port == src_port
+            && entry.local_port == dst_port
+        {
+            entry.last_seen_ns = now;
+            return true;
+        }
+    }
+
+    false
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 packet filtering (hook functions)
+// ---------------------------------------------------------------------------
+
+/// Check whether an inbound IPv6 packet should be allowed.
+///
+/// Called from `ipv6::process_ipv6()` before dispatching to protocol
+/// handlers.
+///
+/// # Parameters
+///
+/// - `next_header`: upper-layer protocol (6=TCP, 17=UDP, 58=ICMPv6).
+/// - `src_ip`: source IPv6 address from the IPv6 header.
+/// - `payload`: transport-layer payload (TCP/UDP header + data).
+///
+/// Returns `true` if the packet should be allowed through.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn check_inbound_v6(next_header: u8, src_ip: Ipv6Addr, payload: &[u8]) -> bool {
+    if !ENABLED6.load(Ordering::Relaxed) {
+        return true;
+    }
+
+    let (src_port, dst_port) = extract_ports(next_header, payload);
+
+    // Check connection tracking first — tracked replies always pass.
+    if next_header == PROTO_TCP || next_header == PROTO_UDP {
+        if is_tracked_reply_v6(next_header, src_ip, src_port, dst_port) {
+            PACKETS_ALLOWED6.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+    }
+
+    // Check rules.
+    let action = match_rules6(Direction::In, next_header, src_ip, dst_port);
+
+    match action {
+        Some(Action::Allow) => {
+            PACKETS_ALLOWED6.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        Some(Action::Deny) => {
+            PACKETS_DENIED6.fetch_add(1, Ordering::Relaxed);
+            false
+        }
+        None => {
+            // No matching rule — use IPv6 default policy.
+            let policy = *DEFAULT_POLICY6.lock();
+            match policy {
+                DefaultPolicy::Accept => {
+                    PACKETS_ALLOWED6.fetch_add(1, Ordering::Relaxed);
+                    true
+                }
+                DefaultPolicy::Drop => {
+                    PACKETS_DENIED6.fetch_add(1, Ordering::Relaxed);
+                    false
+                }
+            }
+        }
+    }
+}
+
+/// Check whether an outbound IPv6 packet should be allowed.
+///
+/// Called from `ipv6::send_raw()` before constructing the frame.
+/// If allowed, also registers the connection for stateful tracking.
+///
+/// Returns `true` if the packet should be sent.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn check_outbound_v6(next_header: u8, dst_ip: Ipv6Addr, payload: &[u8]) -> bool {
+    if !ENABLED6.load(Ordering::Relaxed) {
+        return true;
+    }
+
+    let (src_port, dst_port) = extract_ports(next_header, payload);
+
+    // Check rules.  For outbound traffic the rule's `src_ip` field
+    // is matched against the destination (remote peer).
+    let action = match_rules6(Direction::Out, next_header, dst_ip, dst_port);
+
+    let allowed = match action {
+        Some(Action::Allow) => true,
+        Some(Action::Deny) => false,
+        None => {
+            let policy = *DEFAULT_POLICY6.lock();
+            policy == DefaultPolicy::Accept
+        }
+    };
+
+    if allowed {
+        PACKETS_ALLOWED6.fetch_add(1, Ordering::Relaxed);
+        // Track the connection for stateful reply filtering.
+        if (next_header == PROTO_TCP || next_header == PROTO_UDP) && src_port != 0 {
+            track_connection_v6(next_header, src_port, dst_ip, dst_port);
+        }
+    } else {
+        PACKETS_DENIED6.fetch_add(1, Ordering::Relaxed);
+    }
+
+    allowed
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 internal helpers
+// ---------------------------------------------------------------------------
+
+/// Match an IPv6 packet against the global IPv6 rule table.
+///
+/// Returns `Some(action)` if a rule matches, `None` if no rule matches.
+/// Increments the matching rule's `match_count`.
+fn match_rules6(direction: Direction, next_header: u8, ip: Ipv6Addr, port: u16) -> Option<Action> {
+    let mut rules = RULES6.lock();
+    match_rules6_in_table(&mut *rules, direction, next_header, ip, port)
+}
+
+/// Match an IPv6 packet against a given rule table.
+///
+/// Shared logic for both the global IPv6 firewall and (future)
+/// per-namespace IPv6 firewalls.
+#[allow(clippy::arithmetic_side_effects)]
+fn match_rules6_in_table(
+    rules: &mut [Rule6],
+    direction: Direction,
+    next_header: u8,
+    ip: Ipv6Addr,
+    port: u16,
+) -> Option<Action> {
+    let mut best: Option<(usize, u16, Action)> = None;
+
+    for (i, rule) in rules.iter().enumerate() {
+        if !rule.active {
+            continue;
+        }
+
+        // Check direction.
+        if rule.direction != Direction::Both && rule.direction != direction {
+            continue;
+        }
+
+        // Check protocol (Icmp maps to ICMPv6 for IPv6).
+        if !protocol6_matches(rule.protocol, next_header) {
+            continue;
+        }
+
+        // Check IPv6 address prefix.
+        if !ip6_matches(ip, rule.src_ip, rule.src_prefix) {
+            continue;
+        }
+
+        // Check port.
+        if rule.dst_port != 0 && rule.dst_port != port {
+            continue;
+        }
+
+        // This rule matches — keep the highest priority one.
+        match best {
+            None => {
+                best = Some((i, rule.priority, rule.action));
+                if rule.priority == 0 {
+                    break;
+                }
+            }
+            Some((_, best_prio, _)) => {
+                if rule.priority < best_prio {
+                    best = Some((i, rule.priority, rule.action));
+                    if rule.priority == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Increment the match counter for the winning rule.
+    if let Some((idx, _, action)) = best {
+        if let Some(rule) = rules.get_mut(idx) {
+            rule.match_count = rule.match_count.wrapping_add(1);
+        }
+        Some(action)
+    } else {
+        None
+    }
+}
+
+/// Check if an IPv6 next-header matches a protocol selector.
+///
+/// Maps `Protocol::Icmp` to ICMPv6 (next-header 58) for IPv6 rules.
+/// TCP (6) and UDP (17) use the same next-header values as IPv4.
+fn protocol6_matches(selector: Protocol, next_header: u8) -> bool {
+    match selector {
+        Protocol::Any => true,
+        Protocol::Tcp => next_header == PROTO_TCP,
+        Protocol::Udp => next_header == PROTO_UDP,
+        Protocol::Icmp => next_header == NH_ICMPV6,
+    }
+}
+
+/// Check if an IPv6 address matches a rule's IPv6/prefix.
+///
+/// Compares the first `prefix_len` bits of both 128-bit addresses.
+/// A prefix length of 0 or an unspecified rule IP matches everything.
+#[allow(clippy::arithmetic_side_effects)]
+fn ip6_matches(packet_ip: Ipv6Addr, rule_ip: Ipv6Addr, prefix_len: u8) -> bool {
+    if prefix_len == 0 || rule_ip.is_unspecified() {
+        return true; // Match any.
+    }
+    if prefix_len >= 128 {
+        return packet_ip == rule_ip;
+    }
+
+    // Convert to u128 and mask — same approach as IPv4's ip_matches
+    // but with 128-bit addresses instead of 32-bit.
+    let pkt = u128::from_be_bytes(packet_ip.0);
+    let rule = u128::from_be_bytes(rule_ip.0);
+    let shift = 128u32.saturating_sub(u32::from(prefix_len));
+    let mask = u128::MAX.checked_shl(shift).unwrap_or(0);
+
+    (pkt & mask) == (rule & mask)
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
@@ -1279,8 +1869,13 @@ pub fn self_test() -> KernelResult<()> {
     test_ns_firewall_isolation()?;
     test_ns_firewall_conntrack()?;
     test_ns_firewall_lifecycle()?;
+    test_v6_disabled_passes_all()?;
+    test_v6_default_policy_drop()?;
+    test_v6_rule_matching()?;
+    test_v6_ip6_prefix_match()?;
+    test_v6_conntrack()?;
 
-    serial_println!("[firewall] Firewall self-test PASSED (8 tests)");
+    serial_println!("[firewall] Firewall self-test PASSED (13 tests)");
     Ok(())
 }
 
@@ -1688,5 +2283,249 @@ fn test_ns_firewall_lifecycle() -> KernelResult<()> {
     }
 
     serial_println!("[firewall]   Per-namespace lifecycle: OK");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 self-tests (tests 9–13)
+// ---------------------------------------------------------------------------
+
+/// Test 9: When IPv6 firewall is disabled, all IPv6 packets pass.
+fn test_v6_disabled_passes_all() -> KernelResult<()> {
+    disable6();
+
+    let src = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ]); // 2001:db8::1
+
+    let allowed = check_inbound_v6(PROTO_TCP, src, &[0, 80, 0, 22]);
+    if !allowed {
+        serial_println!("[firewall]   FAIL: IPv6 disabled should allow all");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[firewall]   IPv6 disabled passes all: OK");
+    Ok(())
+}
+
+/// Test 10: IPv6 default policy DROP blocks when no rules match.
+fn test_v6_default_policy_drop() -> KernelResult<()> {
+    enable6();
+    set_default_policy6(DefaultPolicy::Drop);
+    clear_rules6();
+    clear_conntrack6();
+    reset_stats6();
+
+    let src = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ]);
+
+    let allowed = check_inbound_v6(PROTO_TCP, src, &[0, 80, 0, 22]);
+    if allowed {
+        serial_println!("[firewall]   FAIL: IPv6 DROP policy should deny");
+        disable6();
+        return Err(KernelError::InternalError);
+    }
+
+    let (_, denied) = stats6();
+    if denied == 0 {
+        serial_println!("[firewall]   FAIL: IPv6 denied counter not incremented");
+        disable6();
+        return Err(KernelError::InternalError);
+    }
+
+    set_default_policy6(DefaultPolicy::Accept);
+    disable6();
+    serial_println!("[firewall]   IPv6 default DROP policy: OK");
+    Ok(())
+}
+
+/// Test 11: IPv6 rule matching (allow TCP port 80, deny all else).
+fn test_v6_rule_matching() -> KernelResult<()> {
+    enable6();
+    set_default_policy6(DefaultPolicy::Drop);
+    clear_rules6();
+    clear_conntrack6();
+    reset_stats6();
+
+    // Allow inbound TCP port 80 from any IPv6 address.
+    let rule = Rule6 {
+        active: true,
+        direction: Direction::In,
+        action: Action::Allow,
+        protocol: Protocol::Tcp,
+        src_ip: Ipv6Addr::UNSPECIFIED,
+        src_prefix: 0,
+        dst_port: 80,
+        priority: 10,
+        match_count: 0,
+    };
+    add_rule6(rule)?;
+
+    let src = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05,
+    ]); // 2001:db8::5
+
+    // TCP to port 80 → allowed.
+    let tcp_80 = [48u8, 57, 0, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let allowed = check_inbound_v6(PROTO_TCP, src, &tcp_80);
+    if !allowed {
+        serial_println!("[firewall]   FAIL: IPv6 TCP port 80 should be allowed");
+        disable6();
+        return Err(KernelError::InternalError);
+    }
+
+    // TCP to port 22 → denied (default DROP).
+    let tcp_22 = [48u8, 57, 0, 22, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let allowed = check_inbound_v6(PROTO_TCP, src, &tcp_22);
+    if allowed {
+        serial_println!("[firewall]   FAIL: IPv6 TCP port 22 should be denied");
+        disable6();
+        return Err(KernelError::InternalError);
+    }
+
+    // ICMPv6 → denied (rule only allows TCP).
+    let allowed = check_inbound_v6(NH_ICMPV6, src, &[128, 0, 0, 0]);
+    if allowed {
+        serial_println!("[firewall]   FAIL: IPv6 ICMPv6 should be denied");
+        disable6();
+        return Err(KernelError::InternalError);
+    }
+
+    clear_rules6();
+    set_default_policy6(DefaultPolicy::Accept);
+    disable6();
+    serial_println!("[firewall]   IPv6 rule matching: OK");
+    Ok(())
+}
+
+/// Test 12: IPv6 prefix matching.
+fn test_v6_ip6_prefix_match() -> KernelResult<()> {
+    // 2001:db8:1::0/48 should match 2001:db8:1::100.
+    let net = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]); // 2001:db8:1::
+    let host = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+    ]); // 2001:db8:1::100
+
+    if !ip6_matches(host, net, 48) {
+        serial_println!("[firewall]   FAIL: /48 should match within prefix");
+        return Err(KernelError::InternalError);
+    }
+
+    // 2001:db8:2::1 should NOT match 2001:db8:1::/48.
+    let other = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ]); // 2001:db8:2::1
+    if ip6_matches(other, net, 48) {
+        serial_println!("[firewall]   FAIL: /48 should not match different prefix");
+        return Err(KernelError::InternalError);
+    }
+
+    // /0 matches everything.
+    if !ip6_matches(other, Ipv6Addr::UNSPECIFIED, 0) {
+        serial_println!("[firewall]   FAIL: /0 should match any");
+        return Err(KernelError::InternalError);
+    }
+
+    // /128 exact match.
+    if !ip6_matches(host, host, 128) {
+        serial_println!("[firewall]   FAIL: /128 should exact match");
+        return Err(KernelError::InternalError);
+    }
+    if ip6_matches(other, host, 128) {
+        serial_println!("[firewall]   FAIL: /128 should not match different IP");
+        return Err(KernelError::InternalError);
+    }
+
+    // /64 prefix match — different interface IDs, same prefix.
+    let host_a = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0xAB, 0xCD, 0x00, 0x12,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+    ]);
+    let host_b = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0xAB, 0xCD, 0x00, 0x12,
+        0xFF, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x99, 0x99,
+    ]);
+    if !ip6_matches(host_b, host_a, 64) {
+        serial_println!("[firewall]   FAIL: /64 should match same prefix");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[firewall]   IPv6 prefix matching: OK");
+    Ok(())
+}
+
+/// Test 13: IPv6 connection tracking (outbound creates entry, inbound reply passes).
+fn test_v6_conntrack() -> KernelResult<()> {
+    enable6();
+    set_default_policy6(DefaultPolicy::Drop);
+    clear_rules6();
+    clear_conntrack6();
+    reset_stats6();
+
+    // Allow all outbound IPv6.
+    let rule = Rule6 {
+        active: true,
+        direction: Direction::Out,
+        action: Action::Allow,
+        protocol: Protocol::Any,
+        src_ip: Ipv6Addr::UNSPECIFIED,
+        src_prefix: 0,
+        dst_port: 0,
+        priority: 1,
+        match_count: 0,
+    };
+    add_rule6(rule)?;
+
+    let server = Ipv6Addr([
+        0x26, 0x06, 0x28, 0x00, 0x02, 0x20, 0x00, 0x01,
+        0x02, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19, 0x46,
+    ]); // example server address
+
+    // Outbound TCP from local port 49200 to server port 80.
+    let tcp_out = [0xC0u8, 0x30, 0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let allowed = check_outbound_v6(PROTO_TCP, server, &tcp_out);
+    if !allowed {
+        serial_println!("[firewall]   FAIL: IPv6 outbound should be allowed");
+        disable6();
+        return Err(KernelError::InternalError);
+    }
+
+    // Inbound reply from server port 80 to our port 49200.
+    let tcp_reply = [0x00u8, 0x50, 0xC0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let allowed = check_inbound_v6(PROTO_TCP, server, &tcp_reply);
+    if !allowed {
+        serial_println!("[firewall]   FAIL: IPv6 reply should pass via conntrack");
+        disable6();
+        return Err(KernelError::InternalError);
+    }
+
+    // Inbound from a different IPv6 address should NOT be tracked.
+    let other = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x99,
+    ]);
+    let tcp_other = [0x00u8, 0x50, 0xC0, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let allowed = check_inbound_v6(PROTO_TCP, other, &tcp_other);
+    if allowed {
+        serial_println!("[firewall]   FAIL: IPv6 untracked IP should be denied");
+        disable6();
+        return Err(KernelError::InternalError);
+    }
+
+    // Clean up.
+    clear_rules6();
+    clear_conntrack6();
+    set_default_policy6(DefaultPolicy::Accept);
+    disable6();
+    serial_println!("[firewall]   IPv6 connection tracking: OK");
     Ok(())
 }

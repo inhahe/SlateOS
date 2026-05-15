@@ -188,10 +188,13 @@ pub fn self_test() -> KernelResult<()> {
         let info = interface::info();
         crate::serial_println!("[net]   Interface: up");
         crate::serial_println!("[net]   MAC: {}", info.mac);
-        crate::serial_println!("[net]   IP: {}", info.ip);
+        crate::serial_println!("[net]   IPv4: {}", info.ip);
         crate::serial_println!("[net]   Mask: {}", info.subnet_mask);
         crate::serial_println!("[net]   Gateway: {}", info.gateway);
         crate::serial_println!("[net]   DNS: {}", info.dns);
+        // IPv6 link-local address derived from MAC (RFC 4291 Appendix A).
+        let ll = ipv6::Ipv6Addr::from_mac_link_local(&info.mac);
+        crate::serial_println!("[net]   IPv6 LL: {}", ll);
     } else {
         crate::serial_println!("[net]   No network interface (non-fatal)");
     }
@@ -232,6 +235,10 @@ pub fn self_test() -> KernelResult<()> {
             );
         }
     }
+
+    // NDP neighbor cache.
+    let ndp_count = icmpv6::neighbor_cache_count();
+    crate::serial_println!("[net]   NDP neighbor cache: {} entries", ndp_count);
 
     // UDP socket summary.
     let (udp_socks, udp_count) = udp::all_sockets();

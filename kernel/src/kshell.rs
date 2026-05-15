@@ -63037,6 +63037,9 @@ fn cmd_net() {
     crate::console_println!("  Subnet mask:  {}", info.subnet_mask);
     crate::console_println!("  Gateway:      {}", info.gateway);
     crate::console_println!("  DNS server:   {}", info.dns);
+    // IPv6 link-local address derived from MAC (modified EUI-64, RFC 4291).
+    let ipv6_ll = crate::net::ipv6::Ipv6Addr::from_mac_link_local(&info.mac);
+    crate::console_println!("  IPv6 LL:      {}", ipv6_ll);
     crate::console_println!("  DHCP state:   {}", crate::net::dhcp::state_str());
 
     // Show link status for e1000.

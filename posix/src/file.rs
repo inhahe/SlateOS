@@ -3847,6 +3847,31 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    #[test]
+    fn test_lseek_seek_set_valid() {
+        // SEEK_SET is 0 — should be accepted.
+        let _ret = lseek(0, 0, crate::fcntl::SEEK_SET);
+        // Result depends on test host (fd 0 may not be seekable).
+    }
+
+    #[test]
+    fn test_lseek_seek_cur_valid() {
+        let _ret = lseek(0, 0, crate::fcntl::SEEK_CUR);
+    }
+
+    #[test]
+    fn test_lseek_seek_end_valid() {
+        let _ret = lseek(0, 0, crate::fcntl::SEEK_END);
+    }
+
+    #[test]
+    fn test_lseek_negative_one_whence() {
+        crate::errno::set_errno(0);
+        let result = lseek(0, 0, -1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
     // -- truncate negative length --
 
     #[test]

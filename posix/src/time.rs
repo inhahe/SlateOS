@@ -4348,4 +4348,99 @@ mod tests {
         let ret = usleep(0);
         let _ = ret;
     }
+
+    // ------------------------------------------------------------------
+    // Additional edge-case tests for time functions
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_clock_settime_monotonic_eperm() {
+        // Cannot set CLOCK_MONOTONIC.
+        let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = clock_settime(CLOCK_MONOTONIC, &raw const ts);
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_clock_settime_null_ts() {
+        // Null timespec → should not crash.
+        let _ret = clock_settime(CLOCK_REALTIME, core::ptr::null());
+    }
+
+    #[test]
+    fn test_settimeofday_null_tv() {
+        // Null timeval.
+        let _ret = settimeofday(core::ptr::null(), core::ptr::null());
+    }
+
+    #[test]
+    fn test_timegm_epoch() {
+        // 1970-01-01 00:00:00 → epoch 0
+        let mut tm = zero_tm();
+        tm.tm_year = 70;
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        let t = timegm(&raw mut tm);
+        assert_eq!(t, 0, "epoch should be 0");
+    }
+
+    #[test]
+    fn test_timegm_y2k() {
+        // 2000-01-01 00:00:00 → 946684800
+        let mut tm = zero_tm();
+        tm.tm_year = 100;
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        let t = timegm(&raw mut tm);
+        assert_eq!(t, 946_684_800);
+    }
+
+    #[test]
+    fn test_timelocal_epoch() {
+        // timelocal is an alias for mktime.
+        let mut tm = zero_tm();
+        tm.tm_year = 70;
+        tm.tm_mon = 0;
+        tm.tm_mday = 1;
+        let t = timelocal(&raw mut tm);
+        // Should be 0 (UTC = local on our OS).
+        assert_eq!(t, 0);
+    }
+
+    #[test]
+    fn test_time_no_crash() {
+        // time(NULL) — syscall result is unpredictable on test host.
+        let _t = time(core::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_time_with_output() {
+        // time(&t) should store the value when the syscall succeeds.
+        // On the test host the syscall may fail (returns -1 without
+        // writing to tloc), so just verify no crash.
+        let mut t: i64 = -999;
+        let ret = time(&raw mut t);
+        if ret >= 0 {
+            assert_eq!(ret, t, "time() return should equal stored value");
+        }
+        // If ret == -1, t may or may not have been written.
+    }
+
+    #[test]
+    fn test_clock_no_crash() {
+        // clock() — syscall result is unpredictable on test host.
+        let _c = clock();
+    }
+
+    #[test]
+    fn test_difftime_large_gap() {
+        // Large time difference (year-apart).
+        assert_eq!(difftime(31_536_000, 0), 31_536_000.0);
+    }
+
+    #[test]
+    fn test_usleep_small_value() {
+        // usleep(1) — 1 microsecond — should return quickly.
+        let _ret = usleep(1);
+    }
 }

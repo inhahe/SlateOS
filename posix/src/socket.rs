@@ -6950,4 +6950,81 @@ mod tests {
         let ret = sockatmark(999);
         assert_eq!(ret, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // socket — domain/type/protocol validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_socket_unsupported_domain_unix() {
+        crate::errno::set_errno(0);
+        let ret = socket(AF_UNIX, SOCK_STREAM, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAFNOSUPPORT);
+    }
+
+    #[test]
+    fn test_socket_unsupported_domain_inet6() {
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET6, SOCK_STREAM, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAFNOSUPPORT);
+    }
+
+    #[test]
+    fn test_socket_invalid_domain() {
+        crate::errno::set_errno(0);
+        let ret = socket(9999, SOCK_STREAM, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAFNOSUPPORT);
+    }
+
+    #[test]
+    fn test_socket_stream_wrong_protocol() {
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET, SOCK_STREAM, IPPROTO_UDP);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPROTONOSUPPORT);
+    }
+
+    #[test]
+    fn test_socket_dgram_wrong_protocol() {
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET, SOCK_DGRAM, IPPROTO_TCP);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPROTONOSUPPORT);
+    }
+
+    #[test]
+    fn test_socket_unsupported_type() {
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET, SOCK_RAW, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPROTONOSUPPORT);
+    }
+
+    // -----------------------------------------------------------------------
+    // listen — validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_listen_invalid_fd() {
+        crate::errno::set_errno(0);
+        let ret = listen(-1, 128);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // -----------------------------------------------------------------------
+    // setsockopt — validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_setsockopt_invalid_fd() {
+        crate::errno::set_errno(0);
+        let val: i32 = 1;
+        let ret = setsockopt(-1, SOL_SOCKET, SO_REUSEADDR, &raw const val as *const u8, 4);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
 }

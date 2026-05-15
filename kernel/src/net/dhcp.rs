@@ -937,6 +937,23 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
                 "[dhcp] NAK from server {} — offer rejected, restarting",
                 server_id
             );
+            // If we were renewing/rebinding, the server is telling us our
+            // current IP is no longer valid.  Release the interface config
+            // so we don't continue using a stale address.
+            if state == DhcpState::Renewing || state == DhcpState::Rebinding {
+                interface::configure(
+                    Ipv4Addr::UNSPECIFIED,
+                    Ipv4Addr::UNSPECIFIED,
+                    Ipv4Addr::UNSPECIFIED,
+                    Ipv4Addr::UNSPECIFIED,
+                );
+                super::dns::flush_cache();
+                super::arp::flush_cache();
+                *CURRENT_LEASE.lock() = DhcpLease::empty();
+                crate::serial_println!(
+                    "[dhcp] Released IP configuration after renewal NAK"
+                );
+            }
             // Clear offer and return to Idle so discovery can retry.
             *PENDING_OFFER.lock() = None;
             *DHCP_STATE.lock() = DhcpState::Idle;

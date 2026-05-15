@@ -293,3 +293,7 @@ pub mod wchar;
 pub mod wordexp;
 pub mod xattr;
 pub mod dirent;
+pub mod endian;
+pub mod paths;
+pub mod sys_random;
+pub mod tar;

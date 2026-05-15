@@ -371,3 +371,6 @@ pub mod linux_futex;
 pub mod linux_sockios;
 pub mod linux_fs;
 pub mod linux_magic;
+pub mod linux_ioprio;
+pub mod linux_membarrier;
+pub mod sys_wait_ext;

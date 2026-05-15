@@ -72,6 +72,8 @@
 //!   always falls back to default strings)
 //! - **Password Hashing**: `crypt`, `crypt_r` (stub — returns
 //!   `$0$<key>`), `encrypt`, `setkey` (DES stubs — ENOSYS)
+//! - **Language Information**: `nl_langinfo`, `nl_langinfo_l`
+//!   (C locale date/time formats, day/month names, codeset, etc.)
 //! - **Monetary Formatting**: `strfmon`, `strfmon_l` (C locale
 //!   decimal formatting with `%n`/`%i` specifiers)
 //! - **Search / Data Structures** (`<search.h>`): BST `tsearch`, `tfind`,
@@ -233,6 +235,7 @@ pub mod malloc;
 pub mod math;
 pub mod fdtable;
 pub mod file;
+pub mod langinfo;
 pub mod locale;
 pub mod mman;
 pub mod monetary;

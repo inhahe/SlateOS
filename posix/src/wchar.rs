@@ -1578,10 +1578,6 @@ pub unsafe extern "C" fn wcstof(
 }
 
 // ---------------------------------------------------------------------------
-// nl_langinfo
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // MB_CUR_MAX / mbrlen
 // ---------------------------------------------------------------------------
 
@@ -2158,33 +2154,11 @@ pub unsafe extern "C" fn wcsnrtombs(
 }
 
 // ---------------------------------------------------------------------------
-// nl_langinfo stub
+// nl_langinfo — delegated to langinfo module
 // ---------------------------------------------------------------------------
-
-/// Query locale-dependent information.
-///
-/// Returns reasonable defaults for the C locale.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn nl_langinfo(item: i32) -> *const u8 {
-    match item {
-        // CODESET
-        14 => c"UTF-8".as_ptr().cast::<u8>(),
-        // D_T_FMT
-        1 => c"%a %b %e %H:%M:%S %Y".as_ptr().cast::<u8>(),
-        // D_FMT
-        2 => c"%m/%d/%y".as_ptr().cast::<u8>(),
-        // T_FMT
-        3 => c"%H:%M:%S".as_ptr().cast::<u8>(),
-        // RADIXCHAR
-        4 => c".".as_ptr().cast::<u8>(),
-        // YESEXPR
-        6 => c"^[yY]".as_ptr().cast::<u8>(),
-        // NOEXPR
-        7 => c"^[nN]".as_ptr().cast::<u8>(),
-        // THOUSEP and everything else
-        _ => c"".as_ptr().cast::<u8>(),
-    }
-}
+// The full implementation with all POSIX items (day/month names, era,
+// codeset, etc.) lives in langinfo.rs.  No `no_mangle` here — the
+// langinfo module owns the exported symbol.
 
 // ---------------------------------------------------------------------------
 // Wide string case-insensitive comparison
@@ -3691,27 +3665,27 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // nl_langinfo
+    // nl_langinfo (delegated to crate::langinfo)
     // -------------------------------------------------------------------
 
     #[test]
     fn test_nl_langinfo_codeset() {
-        let s = nl_langinfo(14); // CODESET
+        let s = crate::langinfo::nl_langinfo(crate::langinfo::CODESET);
         assert!(!s.is_null());
-        // Should return "UTF-8".
-        assert_eq!(unsafe { *s }, b'U');
+        // Should return "ANSI_X3.4-1968" (C locale).
+        assert_eq!(unsafe { *s }, b'A');
     }
 
     #[test]
     fn test_nl_langinfo_radixchar() {
-        let s = nl_langinfo(4); // RADIXCHAR
+        let s = crate::langinfo::nl_langinfo(crate::langinfo::RADIXCHAR);
         assert!(!s.is_null());
         assert_eq!(unsafe { *s }, b'.');
     }
 
     #[test]
     fn test_nl_langinfo_unknown_item() {
-        let s = nl_langinfo(9999);
+        let s = crate::langinfo::nl_langinfo(9999);
         assert!(!s.is_null());
         // Should return empty string.
         assert_eq!(unsafe { *s }, 0);

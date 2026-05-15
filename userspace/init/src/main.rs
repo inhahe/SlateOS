@@ -54,6 +54,8 @@ const SYS_PROCESS_TRY_WAIT: u64 = 507;
 const SYS_NOTIFY_READY: u64 = 508;
 const SYS_PROCESS_IS_READY: u64 = 509;
 const SYS_PROCESS_SPAWN_EX: u64 = 517;
+const SYS_MMAP: u64 = 20;
+const SYS_MUNMAP: u64 = 21;
 const SYS_FS_READ_FILE: u64 = 600;
 const SYS_FS_WRITE_FILE: u64 = 601;
 const SYS_FS_DELETE: u64 = 602;
@@ -226,6 +228,22 @@ fn task_id() -> i64 {
 fn clock_monotonic() -> i64 {
     syscall0(SYS_CLOCK_MONOTONIC)
 }
+
+/// Map anonymous memory pages.  Returns the virtual address or
+/// negative error.  `size` is rounded up to the 16 KiB frame size.
+fn mmap(size: u64) -> i64 {
+    const MAP_WRITE: u64 = 1 << 1;
+    syscall4(SYS_MMAP, 0, size, MAP_WRITE, 0)
+}
+
+/// Unmap previously mapped memory.
+fn munmap(addr: u64, size: u64) -> i64 {
+    syscall2(SYS_MUNMAP, addr, size)
+}
+
+/// Maximum ELF size for stack-based loading (64 KiB).
+/// Larger files use mmap for dynamic allocation.
+const STACK_ELF_MAX: usize = 65536;
 
 /// Read a file into a buffer.  Returns bytes read or negative error.
 fn fs_read_file(path: &[u8], buf: &mut [u8]) -> i64 {
@@ -964,21 +982,85 @@ impl ServiceRegistry {
         let path = &path_buf[..path_len];
         let name = &name_buf[..name_len];
 
-        // Read the ELF binary from the filesystem.
-        // 64 KiB max — init has no heap.
-        let mut elf_buf = [0u8; 65536];
-        let result = fs_read_file(path, &mut elf_buf);
-        if result < 0 {
-            print("[svc] Failed to read ");
+        // Stat the ELF binary to get its size.
+        let mut stat_out = [0u8; 16];
+        let stat_ret = fs_stat(path, &mut stat_out);
+        if stat_ret < 0 {
+            print("[svc] Failed to stat ");
             console_write(path);
             print(": error ");
-            print_i64(result);
+            print_i64(stat_ret);
             print("\n");
-            return result;
+            return stat_ret;
+        }
+        let file_size = u64::from_le_bytes([
+            stat_out[0], stat_out[1], stat_out[2], stat_out[3],
+            stat_out[4], stat_out[5], stat_out[6], stat_out[7],
+        ]) as usize;
+
+        if file_size == 0 {
+            print("[svc] Empty ELF: ");
+            console_write(path);
+            print("\n");
+            return -1;
         }
 
-        let elf_len = result as usize;
-        let elf_data = &elf_buf[..elf_len];
+        // Read the ELF binary.  For files ≤ 64 KiB, use a stack buffer
+        // to avoid the mmap/munmap overhead.  Larger files use mmap.
+        let mut stack_buf = [0u8; STACK_ELF_MAX];
+        let (elf_ptr, elf_mmap_addr, elf_mmap_size): (*const u8, u64, u64);
+
+        if file_size <= STACK_ELF_MAX {
+            let result = fs_read_file(path, &mut stack_buf);
+            if result < 0 {
+                print("[svc] Failed to read ");
+                console_write(path);
+                print(": error ");
+                print_i64(result);
+                print("\n");
+                return result;
+            }
+            elf_ptr = stack_buf.as_ptr();
+            elf_mmap_addr = 0;
+            elf_mmap_size = 0;
+        } else {
+            // Allocate a buffer via mmap for large ELFs.
+            let mapped = mmap(file_size as u64);
+            if mapped < 0 {
+                print("[svc] mmap failed for ");
+                console_write(path);
+                print(": error ");
+                print_i64(mapped);
+                print("\n");
+                return mapped;
+            }
+            #[allow(clippy::cast_sign_loss)]
+            let addr = mapped as u64;
+            // SAFETY: mmap returned a valid writable buffer of at least
+            // `file_size` bytes.  We use it as a &mut [u8] for reading.
+            let buf = unsafe {
+                core::slice::from_raw_parts_mut(addr as *mut u8, file_size)
+            };
+            let result = fs_read_file(path, buf);
+            if result < 0 {
+                munmap(addr, file_size as u64);
+                print("[svc] Failed to read ");
+                console_write(path);
+                print(": error ");
+                print_i64(result);
+                print("\n");
+                return result;
+            }
+            elf_ptr = addr as *const u8;
+            elf_mmap_addr = addr;
+            elf_mmap_size = file_size as u64;
+        }
+
+        // SAFETY: elf_ptr points to `file_size` valid bytes (either
+        // stack_buf or mmap'd region).
+        let elf_data = unsafe {
+            core::slice::from_raw_parts(elf_ptr, file_size)
+        };
 
         // Build packed argv: [path\0arg1\0arg2\0...]
         let mut argv_buf = [0u8; MAX_PACKED_ARGS];
@@ -1040,6 +1122,12 @@ impl ServiceRegistry {
             &argv_buf[..argv_pos], argc,
             &envp_buf[..envp_pos], envc,
         );
+
+        // Free mmap'd buffer now that spawn has copied the ELF data.
+        if elf_mmap_addr != 0 {
+            munmap(elf_mmap_addr, elf_mmap_size);
+        }
+
         if pid < 0 {
             print("[svc] Failed to spawn ");
             console_write(name);
@@ -1431,21 +1519,76 @@ fn cmd_spawn(args: &[u8]) {
     // First word is the ELF path, remaining words are arguments.
     let (path, remaining_args) = split_first_word(args);
 
-    // Read the ELF from the filesystem.
-    // 64 KiB max — init has no heap, so this is a stack buffer.
-    let mut elf_buf = [0u8; 65536];
-    let result = fs_read_file(path, &mut elf_buf);
-    if result < 0 {
-        print("spawn: failed to read ");
+    // Stat the file to get its size.
+    let mut stat_out = [0u8; 16];
+    let stat_ret = fs_stat(path, &mut stat_out);
+    if stat_ret < 0 {
+        print("spawn: failed to stat ");
         console_write(path);
         print(": error ");
-        print_i64(result);
+        print_i64(stat_ret);
         print("\n");
         return;
     }
+    let file_size = u64::from_le_bytes([
+        stat_out[0], stat_out[1], stat_out[2], stat_out[3],
+        stat_out[4], stat_out[5], stat_out[6], stat_out[7],
+    ]) as usize;
+    if file_size == 0 {
+        print("spawn: empty file\n");
+        return;
+    }
 
-    let elf_len = result as usize;
-    let elf_data = &elf_buf[..elf_len];
+    // Read the ELF binary.  Stack buffer for small files, mmap for large.
+    let mut stack_buf = [0u8; STACK_ELF_MAX];
+    let (elf_ptr, elf_mmap_addr, elf_mmap_size): (*const u8, u64, u64);
+
+    if file_size <= STACK_ELF_MAX {
+        let result = fs_read_file(path, &mut stack_buf);
+        if result < 0 {
+            print("spawn: failed to read ");
+            console_write(path);
+            print(": error ");
+            print_i64(result);
+            print("\n");
+            return;
+        }
+        elf_ptr = stack_buf.as_ptr();
+        elf_mmap_addr = 0;
+        elf_mmap_size = 0;
+    } else {
+        let mapped = mmap(file_size as u64);
+        if mapped < 0 {
+            print("spawn: mmap failed: error ");
+            print_i64(mapped);
+            print("\n");
+            return;
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let addr = mapped as u64;
+        // SAFETY: mmap returned a valid writable buffer.
+        let buf = unsafe {
+            core::slice::from_raw_parts_mut(addr as *mut u8, file_size)
+        };
+        let result = fs_read_file(path, buf);
+        if result < 0 {
+            munmap(addr, file_size as u64);
+            print("spawn: failed to read ");
+            console_write(path);
+            print(": error ");
+            print_i64(result);
+            print("\n");
+            return;
+        }
+        elf_ptr = addr as *const u8;
+        elf_mmap_addr = addr;
+        elf_mmap_size = file_size as u64;
+    }
+
+    // SAFETY: elf_ptr points to file_size valid bytes.
+    let elf_data = unsafe {
+        core::slice::from_raw_parts(elf_ptr, file_size)
+    };
 
     // Extract filename from path for the process name.
     let name = {
@@ -1483,6 +1626,7 @@ fn cmd_spawn(args: &[u8]) {
         }
         if argv_pos + word.len() + 1 > MAX_PACKED_ARGS {
             print("spawn: argument list too long\n");
+            if elf_mmap_addr != 0 { munmap(elf_mmap_addr, elf_mmap_size); }
             return;
         }
         argv_data[argv_pos..argv_pos + word.len()].copy_from_slice(word);
@@ -1503,7 +1647,7 @@ fn cmd_spawn(args: &[u8]) {
         print(" arg(s)");
     }
     print(" (");
-    print_u64(elf_len as u64);
+    print_u64(file_size as u64);
     print(" bytes)...\n");
 
     let pid = process_spawn_ex(
@@ -1511,6 +1655,12 @@ fn cmd_spawn(args: &[u8]) {
         &argv_data[..argv_pos], argc,
         DEFAULT_ENVP, DEFAULT_ENVP_COUNT,
     );
+
+    // Free mmap'd buffer after spawn has copied the ELF.
+    if elf_mmap_addr != 0 {
+        munmap(elf_mmap_addr, elf_mmap_size);
+    }
+
     if pid < 0 {
         print("spawn: error ");
         print_i64(pid);

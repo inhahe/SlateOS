@@ -916,4 +916,144 @@ mod tests {
         reset_pg();
         assert_eq!(setpgrp(), 0);
     }
+
+    // -- Wait status: all signals 1-126 are signaled, not exited --
+
+    #[test]
+    fn test_all_signals_are_signaled() {
+        for sig in 1..=126i32 {
+            let status = sig;
+            assert!(wifsignaled(status), "signal {sig} should be signaled");
+            assert_eq!(wtermsig(status), sig, "wtermsig({sig})");
+            assert!(!wifexited(status), "signal {sig} should not be exited");
+        }
+    }
+
+    // -- Wait status: all exit codes 0-255 round-trip --
+
+    #[test]
+    fn test_all_exit_codes_roundtrip() {
+        for code in 0..=255i32 {
+            let status = code << 8;
+            assert!(wifexited(status), "exit {code} should be exited");
+            assert_eq!(wexitstatus(status), code, "wexitstatus({code})");
+        }
+    }
+
+    // -- Mutually exclusive status categories --
+
+    #[test]
+    fn test_normal_exit_not_signaled_or_continued() {
+        let status = 42 << 8;
+        assert!(wifexited(status));
+        assert!(!wifsignaled(status));
+        assert!(!wifcontinued(status));
+    }
+
+    #[test]
+    fn test_signal_death_not_exited_or_continued() {
+        let status = 11; // SIGSEGV
+        assert!(wifsignaled(status));
+        assert!(!wifexited(status));
+        assert!(!wifcontinued(status));
+    }
+
+    // -- Stub errno checks --
+
+    #[test]
+    fn test_fork_sets_enosys() {
+        crate::errno::set_errno(0);
+        fork();
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_vfork_sets_enosys() {
+        crate::errno::set_errno(0);
+        vfork();
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone_sets_enosys() {
+        crate::errno::set_errno(0);
+        clone(core::ptr::null(), core::ptr::null_mut(), 0, core::ptr::null_mut());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_unshare_sets_enosys() {
+        crate::errno::set_errno(0);
+        unshare(0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_setns_sets_enosys() {
+        crate::errno::set_errno(0);
+        setns(0, 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_sets_enosys() {
+        crate::errno::set_errno(0);
+        mount(core::ptr::null(), core::ptr::null(), core::ptr::null(), 0, core::ptr::null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_umount_sets_enosys() {
+        crate::errno::set_errno(0);
+        umount(core::ptr::null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_umount2_sets_enosys() {
+        crate::errno::set_errno(0);
+        umount2(core::ptr::null(), 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- WNOHANG and WUNTRACED are distinct bits --
+
+    #[test]
+    fn test_wait_flags_disjoint() {
+        assert_eq!(WNOHANG & WUNTRACED, 0);
+    }
+
+    // -- waitid P_ALL/P_PID idtype constants disjoint --
+
+    #[test]
+    fn test_waitid_idtype_distinct() {
+        assert_ne!(P_ALL, P_PID);
+        assert_ne!(P_PID, P_PGID);
+        assert_ne!(P_ALL, P_PGID);
+    }
+
+    // -- tcsetpgrp accepts max i32 --
+
+    #[test]
+    fn test_tcsetpgrp_max_pgrp() {
+        reset_pg();
+        assert_eq!(tcsetpgrp(0, i32::MAX), 0);
+        assert_eq!(tcgetpgrp(0), i32::MAX);
+    }
+
+    // -- getpgid for pid=0 returns our PGID --
+
+    #[test]
+    fn test_getpgid_zero_returns_our_pgid() {
+        reset_pg();
+        assert_eq!(getpgid(0), 42);
+    }
+
+    // -- getsid for pid=0 returns our SID --
+
+    #[test]
+    fn test_getsid_zero_returns_our_sid() {
+        reset_pg();
+        assert_eq!(getsid(0), 42);
+    }
 }

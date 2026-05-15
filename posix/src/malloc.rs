@@ -700,4 +700,154 @@ mod tests {
         let ptr = pvalloc(usize::MAX - 100);
         assert!(ptr.is_null(), "pvalloc(MAX-100) should return NULL");
     }
+
+    // -----------------------------------------------------------------------
+    // memalign validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn memalign_zero_alignment() {
+        let ptr = memalign(0, 100);
+        assert!(ptr.is_null(), "memalign(0, 100) should fail");
+    }
+
+    #[test]
+    fn memalign_non_power_of_two() {
+        let ptr = memalign(3, 100);
+        assert!(ptr.is_null(), "memalign(3, 100) should fail");
+    }
+
+    #[test]
+    fn memalign_zero_size() {
+        let ptr = memalign(16, 0);
+        assert!(ptr.is_null(), "memalign(16, 0) should return NULL");
+    }
+
+    // -----------------------------------------------------------------------
+    // valloc overflow
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn valloc_overflow() {
+        let ptr = valloc(usize::MAX);
+        assert!(ptr.is_null(), "valloc(MAX) should return NULL");
+    }
+
+    // -----------------------------------------------------------------------
+    // reallocarray valid parameters (without actual mmap)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reallocarray_null_zero_zero() {
+        let ptr = reallocarray(core::ptr::null_mut(), 0, 0);
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn reallocarray_one_one_null() {
+        // realloc(NULL, 1) would try mmap, which returns MAP_FAILED in test.
+        // Just verify it doesn't crash.
+        let ptr = reallocarray(core::ptr::null_mut(), 1, 1);
+        // mmap fails in test mode, so this should be null
+        assert!(ptr.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // posix_memalign: valid alignments with zero size
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn posix_memalign_valid_alignments_zero_size() {
+        // All power-of-two alignments >= 8 should succeed with size=0
+        for shift in 3..=20u32 {
+            let align = 1usize << shift;
+            let mut ptr: *mut u8 = 0x1234_usize as *mut u8;
+            let ret = posix_memalign(&raw mut ptr, align, 0);
+            assert_eq!(ret, 0, "posix_memalign(_, {align}, 0) should succeed");
+            assert!(ptr.is_null(), "size=0 should store NULL");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // calloc: both zero
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn calloc_both_zero() {
+        let ptr = calloc(0, 0);
+        assert!(ptr.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // malloc: small sizes don't crash (they just fail because no mmap)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn malloc_small_returns_null_in_test() {
+        // mmap is not available in test mode, so malloc should return NULL
+        let ptr = malloc(1);
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn malloc_page_size_returns_null_in_test() {
+        let ptr = malloc(16384);
+        assert!(ptr.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // realloc: overflow size returns NULL
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn realloc_null_overflow_size() {
+        let ptr = unsafe { realloc(core::ptr::null_mut(), usize::MAX) };
+        assert!(ptr.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // aligned_alloc: valid powers of two with zero size
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn aligned_alloc_valid_align_zero_size() {
+        for shift in 0..=16u32 {
+            let align = 1usize << shift;
+            let ptr = aligned_alloc(align, 0);
+            assert!(ptr.is_null(), "aligned_alloc({align}, 0) should return NULL");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // glibc alias behavior (if functions exist)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn libc_malloc_zero() {
+        let ptr = __libc_malloc(0);
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn libc_free_null() {
+        unsafe { __libc_free(core::ptr::null_mut()); }
+    }
+
+    #[test]
+    fn libc_realloc_null_zero() {
+        let ptr = unsafe { __libc_realloc(core::ptr::null_mut(), 0) };
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn libc_calloc_zero() {
+        let ptr = __libc_calloc(0, 0);
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn libc_memalign_zero_size() {
+        let ptr = __libc_memalign(16, 0);
+        assert!(ptr.is_null());
+    }
 }

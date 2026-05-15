@@ -686,6 +686,17 @@ pub fn run_all() {
     // Target from baselines.toml: < 10 µs (37000 cycles).
     bench_isr_latency();
 
+    // --- VFS benchmarks (fs zone) ---
+    bench_vfs_stat();
+    bench_vfs_read_write();
+    bench_vfs_readdir();
+
+    // --- Network benchmarks (net zone) ---
+    bench_net_ipv4_parse();
+    bench_net_ethernet_parse();
+    bench_net_arp_lookup();
+    bench_net_checksum();
+
     serial_println!("[bench] === Benchmarks complete ===");
 }
 
@@ -1889,6 +1900,236 @@ fn bench_isr_latency() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// VFS benchmarks (fs zone)
+// ---------------------------------------------------------------------------
+
+/// Benchmark VFS stat() — single path component lookup.
+///
+/// Measures the time to stat the root directory ("/"), which hits the
+/// VFS path-resolution hot path.  This is the simplest VFS operation
+/// and represents the cached-lookup fast path.
+///
+/// Target from baselines.toml: < 700 ns per component (Linux: ~350 ns).
+fn bench_vfs_stat() {
+    use crate::fs::vfs::Vfs;
+
+    // Verify VFS is available (it's initialized after self-tests).
+    if Vfs::stat("/").is_err() {
+        serial_println!("[bench] vfs_stat: SKIP (VFS not initialized)");
+        return;
+    }
+
+    let result = run("vfs_stat_root", 500, || {
+        let _ = core::hint::black_box(Vfs::stat("/"));
+    });
+
+    let target_ns = 700u64;
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   vfs_stat_root: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   vfs_stat_root: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns, target_ns
+        );
+    }
+}
+
+/// Benchmark VFS read + write cycle.
+///
+/// Writes a small file, reads it back, then deletes it.  Measures the
+/// combined cost of write_file + read_file for a 256-byte payload.
+/// This exercises the full VFS → driver → buffer path.
+fn bench_vfs_read_write() {
+    use crate::fs::vfs::Vfs;
+
+    // Test data: 256 bytes of pattern data.
+    let data: [u8; 256] = {
+        let mut buf = [0u8; 256];
+        for (i, b) in buf.iter_mut().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            { *b = (i & 0xFF) as u8; }
+        }
+        buf
+    };
+
+    let path = "/bench_rw_test.tmp";
+
+    // Verify VFS write works.
+    if Vfs::write_file(path, &data).is_err() {
+        serial_println!("[bench] vfs_read_write: SKIP (VFS write not available)");
+        return;
+    }
+
+    // Benchmark write.
+    let write_result = run("vfs_write_256", 200, || {
+        // write_file creates/overwrites the file.
+        let _ = core::hint::black_box(Vfs::write_file(path, &data));
+    });
+
+    // Benchmark read.
+    let read_result = run("vfs_read_256", 200, || {
+        let _ = core::hint::black_box(Vfs::read_file(path));
+    });
+
+    // Clean up.
+    let _ = Vfs::remove(path); // Best-effort cleanup.
+
+    serial_println!(
+        "[bench]   vfs_write_256: min {}ns, vfs_read_256: min {}ns",
+        write_result.min_ns, read_result.min_ns
+    );
+}
+
+/// Benchmark VFS readdir on root directory.
+///
+/// Measures the cost of listing all entries in the root directory.
+/// This exercises the VFS directory iteration path.
+fn bench_vfs_readdir() {
+    use crate::fs::vfs::Vfs;
+
+    if Vfs::readdir("/").is_err() {
+        serial_println!("[bench] vfs_readdir: SKIP (VFS not initialized)");
+        return;
+    }
+
+    let result = run("vfs_readdir_root", 200, || {
+        let _ = core::hint::black_box(Vfs::readdir("/"));
+    });
+
+    serial_println!(
+        "[bench]   vfs_readdir_root: min {}ns ({}ns mean)",
+        result.min_ns, result.mean_ns
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Network benchmarks (net zone)
+// ---------------------------------------------------------------------------
+
+/// Benchmark IPv4 packet parsing.
+///
+/// Parses a minimal 20-byte IPv4 header from a pre-built packet.
+/// This is the entry point for all received network traffic.
+fn bench_net_ipv4_parse() {
+    use crate::net::ipv4;
+
+    // Build a minimal valid IPv4 packet (20-byte header + 4-byte payload).
+    let packet: [u8; 24] = [
+        0x45, 0x00, 0x00, 0x18, // version/IHL=5, length=24
+        0x00, 0x01, 0x00, 0x00, // ID=1, flags=0, frag=0
+        0x40, 0x11, 0x00, 0x00, // TTL=64, proto=UDP, checksum=0
+        0x0A, 0x00, 0x00, 0x01, // src=10.0.0.1
+        0x0A, 0x00, 0x00, 0x02, // dst=10.0.0.2
+        0xDE, 0xAD, 0xBE, 0xEF, // payload
+    ];
+
+    let result = run("net_ipv4_parse", 2000, || {
+        let _ = core::hint::black_box(ipv4::Ipv4Packet::parse(&packet));
+    });
+
+    serial_println!(
+        "[bench]   net_ipv4_parse: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Benchmark Ethernet frame parsing.
+///
+/// Parses a minimal Ethernet frame header (14 bytes).
+fn bench_net_ethernet_parse() {
+    use crate::net::ethernet;
+
+    // Build a minimal Ethernet frame: 14-byte header + 4 bytes payload.
+    let frame: [u8; 18] = [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // dst MAC (broadcast)
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x01, // src MAC
+        0x08, 0x00,                           // EtherType: IPv4
+        0x45, 0x00, 0x00, 0x14,              // payload (IPv4 header start)
+    ];
+
+    let result = run("net_ethernet_parse", 2000, || {
+        let _ = core::hint::black_box(ethernet::EthernetFrame::parse(&frame));
+    });
+
+    serial_println!(
+        "[bench]   net_ethernet_parse: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Benchmark ARP table lookup.
+///
+/// Looks up a known-missing IP in the ARP cache.  This measures the
+/// hash lookup + miss path, which is the common case for the first
+/// packet to a new destination.
+fn bench_net_arp_lookup() {
+    use crate::net::arp;
+
+    // Use an IP that's unlikely to be in the cache.
+    let ip = crate::net::interface::Ipv4Addr([198, 51, 100, 1]);
+
+    let result = run("net_arp_lookup_miss", 2000, || {
+        let _ = core::hint::black_box(arp::lookup(ip));
+    });
+
+    serial_println!(
+        "[bench]   net_arp_lookup_miss: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Benchmark IP checksum computation.
+///
+/// Computes the one's-complement checksum over a 20-byte IPv4 header.
+/// This operation runs on every sent and received packet.
+fn bench_net_checksum() {
+    // 20-byte IPv4 header (with checksum field zeroed for computation).
+    let header: [u8; 20] = [
+        0x45, 0x00, 0x00, 0x28,
+        0x00, 0x01, 0x00, 0x00,
+        0x40, 0x06, 0x00, 0x00, // checksum = 0
+        0x0A, 0x00, 0x00, 0x01,
+        0x0A, 0x00, 0x00, 0x02,
+    ];
+
+    let result = run("net_ip_checksum_20b", 5000, || {
+        let _ = core::hint::black_box(internet_checksum(&header));
+    });
+
+    serial_println!(
+        "[bench]   net_ip_checksum_20b: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Internet checksum (RFC 1071) — one's complement sum of 16-bit words.
+///
+/// Duplicated here to avoid depending on a specific module's internal
+/// checksum function.  The benchmark measures pure computation, not
+/// module call overhead.
+fn internet_checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i + 1 < data.len() {
+        let word = ((data[i] as u32) << 8) | (data[i + 1] as u32);
+        sum = sum.wrapping_add(word);
+        i += 2;
+    }
+    // Handle odd byte.
+    if i < data.len() {
+        sum = sum.wrapping_add((data[i] as u32) << 8);
+    }
+    // Fold 32-bit sum to 16 bits.
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
 }
 
 // ---------------------------------------------------------------------------

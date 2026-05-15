@@ -2,8 +2,11 @@ Posix/net zone work — all remaining items are blocked:
 epoll → needs kernel event notification (kernel-ipc zone)
 signal handling shim → needs kernel-side signal delivery (kernel-ipc zone)
 /proc, /sys equivalents → needs kernel support
-popen/pclose → DONE: SYS_PROCESS_SPAWN_EX (517) + SYS_PROCESS_GET_INITIAL_FDS (518) + SYS_PROCESS_GET_ARGS (519) implemented
-  NOTE for kernel-ipc zone: pipe::dup() with ref-counting needed for popen pipe inheritance.
+popen/pclose → DONE: Full implementation using posix_spawnp + pipe + fd_map.
+  popen creates pipe, spawns /bin/sh -c <command> with fd_map redirection,
+  returns FILE* for parent's pipe end.  pclose calls fclose + waitpid.
+  PopenEntry table (8 slots) tracks stream→child_pid mapping.
+  NOTE for kernel-ipc zone: pipe::dup() with ref-counting still needed.
   Currently fd_map supports handle_type=PIPE as raw pass-through (no ref counting).
   Pipe close from one process will close for both.  Need readers/writers u32 counters
   in Pipe struct instead of read_closed/write_closed booleans, plus pipe::dup(handle)

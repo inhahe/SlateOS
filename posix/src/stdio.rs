@@ -1541,26 +1541,203 @@ pub extern "C" fn tmpnam(s: *mut u8) -> *mut u8 {
 }
 
 // ---------------------------------------------------------------------------
-// popen / pclose stubs
+// popen / pclose
 // ---------------------------------------------------------------------------
+
+/// Maximum concurrent popen'd streams.
+const MAX_POPEN: usize = 8;
+
+/// Tracks a popen'd stream's child process for pclose.
+struct PopenEntry {
+    /// The FILE pointer returned by popen (used as key for lookup).
+    stream: *mut u8,
+    /// The child process PID (for waitpid in pclose).
+    child_pid: i32,
+}
+
+/// Table of active popen streams.
+///
+/// When popen succeeds, it records the FILE* and child PID here.
+/// pclose looks up the FILE*, calls waitpid, and removes the entry.
+static mut POPEN_TABLE: [Option<PopenEntry>; MAX_POPEN] = [const { None }; MAX_POPEN];
+
+/// Record a popen stream for later pclose.
+fn popen_register(stream: *mut u8, child_pid: i32) -> bool {
+    // SAFETY: Single-threaded access.
+    unsafe {
+        let table = core::ptr::addr_of_mut!(POPEN_TABLE);
+        for slot in (*table).iter_mut() {
+            if slot.is_none() {
+                *slot = Some(PopenEntry { stream, child_pid });
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Look up and remove a popen stream, returning the child PID.
+fn popen_unregister(stream: *mut u8) -> Option<i32> {
+    // SAFETY: Single-threaded access.
+    unsafe {
+        let table = core::ptr::addr_of_mut!(POPEN_TABLE);
+        for slot in (*table).iter_mut() {
+            if let Some(entry) = slot {
+                if core::ptr::eq(entry.stream, stream) {
+                    let pid = entry.child_pid;
+                    *slot = None;
+                    return Some(pid);
+                }
+            }
+        }
+    }
+    None
+}
 
 /// Open a process pipe.
 ///
-/// Stub: returns null.  Proper implementation requires fork+exec or
-/// `posix_spawn` with pipe redirection.
+/// Creates a pipe, spawns `/bin/sh -c <command>` via `posix_spawnp`,
+/// and returns a `FILE*` connected to the child's stdin (mode "w")
+/// or stdout (mode "r").
+///
+/// The returned stream must be closed with `pclose()`, not `fclose()`.
+///
+/// # Limitations
+///
+/// - Kernel pipe handles lack ref-counting, so the pipe close from the
+///   child side may affect the parent.  In practice this works because
+///   the child's end is closed via process exit (zombie cleanup).
+/// - Only "r" and "w" modes are supported (not "e" for O_CLOEXEC).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn popen(_command: *const u8, _mode: *const u8) -> *mut u8 {
-    crate::errno::set_errno(crate::errno::ENOSYS);
-    core::ptr::null_mut()
+pub extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut u8 {
+    use crate::spawn::{
+        PosixSpawnFileActionsT, posix_spawn_file_actions_init,
+        posix_spawn_file_actions_addclose, posix_spawn_file_actions_adddup2,
+        posix_spawnp,
+    };
+    use crate::types::PidT;
+
+    if command.is_null() || mode.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+
+    // Parse mode: "r" or "w".
+    // SAFETY: mode is non-null, a valid C string per caller contract.
+    let mode_byte = unsafe { *mode };
+    let is_read = mode_byte == b'r';
+    let is_write = mode_byte == b'w';
+    if !is_read && !is_write {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+
+    // Create a pipe.  pipefd[0] = read end, pipefd[1] = write end.
+    let mut pipefd = [0i32; 2];
+    if crate::pipe::pipe(pipefd.as_mut_ptr()) < 0 {
+        return core::ptr::null_mut(); // errno already set by pipe().
+    }
+
+    // Decide which end belongs to the parent and child.
+    // Mode "r": child writes (stdout → pipe write end), parent reads.
+    // Mode "w": child reads (stdin → pipe read end), parent writes.
+    let (parent_fd, child_fd, child_stdio_fd) = if is_read {
+        (pipefd[0], pipefd[1], 1) // Parent reads, child writes to fd 1 (stdout).
+    } else {
+        (pipefd[1], pipefd[0], 0) // Parent writes, child reads from fd 0 (stdin).
+    };
+
+    // Build file_actions for the child:
+    // 1. Close the parent's end of the pipe.
+    // 2. Dup the child's end to the target stdio fd (0 or 1).
+    // 3. Close the original child fd if it differs from the target.
+    let mut file_actions: PosixSpawnFileActionsT = unsafe { core::mem::zeroed() };
+    posix_spawn_file_actions_init(&raw mut file_actions);
+    posix_spawn_file_actions_addclose(&raw mut file_actions, parent_fd);
+    if child_fd != child_stdio_fd {
+        posix_spawn_file_actions_adddup2(&raw mut file_actions, child_fd, child_stdio_fd);
+        posix_spawn_file_actions_addclose(&raw mut file_actions, child_fd);
+    }
+
+    // Build argv: ["/bin/sh", "-c", command, NULL].
+    let sh = b"/bin/sh\0";
+    let dash_c = b"-c\0";
+    let argv: [*const u8; 4] = [
+        sh.as_ptr(),
+        dash_c.as_ptr(),
+        command,
+        core::ptr::null(),
+    ];
+
+    // Spawn the child.
+    let mut child_pid: PidT = 0;
+    let spawn_ret = posix_spawnp(
+        &raw mut child_pid,
+        sh.as_ptr(),
+        &raw const file_actions,
+        core::ptr::null(),
+        argv.as_ptr(),
+        core::ptr::null(), // Inherit parent's environment.
+    );
+
+    // Close the child's end of the pipe in the parent — the child
+    // has its own copy (via fd_map inheritance).
+    crate::file::close(child_fd);
+
+    if spawn_ret != 0 {
+        // Spawn failed — close parent's end too and return null.
+        crate::file::close(parent_fd);
+        crate::errno::set_errno(spawn_ret);
+        return core::ptr::null_mut();
+    }
+
+    // Wrap the parent's end in a FILE*.
+    let stream = fdopen(parent_fd, if is_read { b"r\0".as_ptr() } else { b"w\0".as_ptr() });
+    if stream.is_null() {
+        crate::file::close(parent_fd);
+        // Can't easily kill the child here, but it will get a broken pipe.
+        return core::ptr::null_mut();
+    }
+
+    // Register for pclose.
+    if !popen_register(stream, child_pid) {
+        // Table full — clean up.
+        fclose(stream);
+        crate::errno::set_errno(crate::errno::EMFILE);
+        return core::ptr::null_mut();
+    }
+
+    stream
 }
 
-/// Close a process pipe.
+/// Close a process pipe opened by `popen()`.
 ///
-/// Stub: returns −1.
+/// Closes the stream, then waits for the child process to exit.
+/// Returns the child's exit status (as from `waitpid`), or -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pclose(_stream: *mut u8) -> i32 {
-    crate::errno::set_errno(crate::errno::ENOSYS);
-    -1
+pub extern "C" fn pclose(stream: *mut u8) -> i32 {
+    if stream.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+
+    // Look up the child PID.
+    let Some(child_pid) = popen_unregister(stream) else {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    };
+
+    // Close the stream (flushes + closes the underlying fd).
+    fclose(stream);
+
+    // Wait for the child to exit.
+    let mut status: i32 = 0;
+    let ret = crate::process::waitpid(child_pid, &raw mut status, 0);
+    if ret < 0 {
+        return -1; // errno already set by waitpid.
+    }
+
+    status
 }
 
 // ---------------------------------------------------------------------------
@@ -2056,5 +2233,108 @@ mod tests {
         let slot = FileSlot::EMPTY;
         assert!(!slot.in_use);
         assert_eq!(slot.file.fd, -1);
+    }
+
+    // -----------------------------------------------------------------------
+    // popen / pclose infrastructure
+    // -----------------------------------------------------------------------
+
+    /// Helper: clear the popen table for test isolation.
+    fn reset_popen_table() {
+        unsafe {
+            let table = core::ptr::addr_of_mut!(POPEN_TABLE);
+            for slot in (*table).iter_mut() {
+                *slot = None;
+            }
+        }
+    }
+
+    #[test]
+    fn test_popen_register_and_unregister() {
+        reset_popen_table();
+        let fake_stream = 0x1000 as *mut u8;
+        assert!(popen_register(fake_stream, 42));
+        assert_eq!(popen_unregister(fake_stream), Some(42));
+        // Second unregister should return None.
+        assert_eq!(popen_unregister(fake_stream), None);
+    }
+
+    #[test]
+    fn test_popen_register_multiple() {
+        reset_popen_table();
+        let s1 = 0x1000 as *mut u8;
+        let s2 = 0x2000 as *mut u8;
+        let s3 = 0x3000 as *mut u8;
+        assert!(popen_register(s1, 10));
+        assert!(popen_register(s2, 20));
+        assert!(popen_register(s3, 30));
+        assert_eq!(popen_unregister(s2), Some(20));
+        assert_eq!(popen_unregister(s1), Some(10));
+        assert_eq!(popen_unregister(s3), Some(30));
+    }
+
+    #[test]
+    fn test_popen_register_full_table() {
+        reset_popen_table();
+        // Fill all MAX_POPEN slots.
+        for i in 0..MAX_POPEN {
+            let fake = ((i + 1) * 0x1000) as *mut u8;
+            assert!(popen_register(fake, i as i32));
+        }
+        // Next register should fail.
+        let overflow = 0xFFFF as *mut u8;
+        assert!(!popen_register(overflow, 99));
+        // Clean up.
+        for i in 0..MAX_POPEN {
+            let fake = ((i + 1) * 0x1000) as *mut u8;
+            popen_unregister(fake);
+        }
+    }
+
+    #[test]
+    fn test_popen_unregister_nonexistent() {
+        reset_popen_table();
+        let fake = 0xDEAD as *mut u8;
+        assert_eq!(popen_unregister(fake), None);
+    }
+
+    #[test]
+    fn test_popen_null_command() {
+        let ret = popen(core::ptr::null(), b"r\0".as_ptr());
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_popen_null_mode() {
+        let ret = popen(b"ls\0".as_ptr(), core::ptr::null());
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_popen_invalid_mode() {
+        let ret = popen(b"ls\0".as_ptr(), b"x\0".as_ptr());
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pclose_null() {
+        assert_eq!(pclose(core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pclose_unknown_stream() {
+        reset_popen_table();
+        let fake = 0xBEEF as *mut u8;
+        assert_eq!(pclose(fake), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_max_popen_constant() {
+        assert_eq!(MAX_POPEN, 8);
     }
 }

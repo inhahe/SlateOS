@@ -529,6 +529,18 @@ const MAX_SVC_PATH: usize = 128;
 /// Maximum number of dependencies per service.
 const MAX_DEPS: usize = 4;
 
+/// Maximum number of extra arguments per service (argv[1..]).
+const MAX_SVC_ARGS: usize = 8;
+
+/// Maximum length of a single service argument.
+const MAX_SVC_ARG_LEN: usize = 64;
+
+/// Maximum number of per-service environment variables.
+const MAX_SVC_ENV: usize = 4;
+
+/// Maximum length of a single environment variable (KEY=VALUE).
+const MAX_SVC_ENV_LEN: usize = 128;
+
 /// Initial restart delay in nanoseconds (1 second).
 const BACKOFF_INITIAL_NS: u64 = 1_000_000_000;
 
@@ -595,6 +607,19 @@ struct Service {
 
     /// Whether this service is waiting on dependencies before first start.
     waiting_on_deps: bool,
+
+    /// Extra arguments (argv[1..]).  argv[0] is always the service path.
+    /// Parsed from `args:` in /etc/services.
+    svc_args: [[u8; MAX_SVC_ARG_LEN]; MAX_SVC_ARGS],
+    svc_arg_lens: [usize; MAX_SVC_ARGS],
+    svc_arg_count: usize,
+
+    /// Per-service environment variables (KEY=VALUE format).
+    /// Parsed from `env:` in /etc/services.  These are appended
+    /// after the default environment (PATH=/bin).
+    svc_env: [[u8; MAX_SVC_ENV_LEN]; MAX_SVC_ENV],
+    svc_env_lens: [usize; MAX_SVC_ENV],
+    svc_env_count: usize,
 }
 
 impl Service {
@@ -616,6 +641,12 @@ impl Service {
             dep_name_lens: [0; MAX_DEPS],
             dep_count: 0,
             waiting_on_deps: false,
+            svc_args: [[0u8; MAX_SVC_ARG_LEN]; MAX_SVC_ARGS],
+            svc_arg_lens: [0; MAX_SVC_ARGS],
+            svc_arg_count: 0,
+            svc_env: [[0u8; MAX_SVC_ENV_LEN]; MAX_SVC_ENV],
+            svc_env_lens: [0; MAX_SVC_ENV],
+            svc_env_count: 0,
         }
     }
 }
@@ -689,9 +720,95 @@ impl ServiceRegistry {
         svc.ready = false;
         svc.dep_count = 0;
         svc.waiting_on_deps = false;
+        svc.svc_arg_count = 0;
+        svc.svc_env_count = 0;
 
         self.count += 1;
         Some(idx)
+    }
+
+    /// Set extra arguments (argv[1..]) for a registered service.
+    ///
+    /// `args_str` is a comma-separated list of arguments, e.g.
+    /// `b"--verbose,-d,--port=8080"`.  Returns the number of args set.
+    fn set_arguments(&mut self, idx: usize, args_str: &[u8]) -> usize {
+        if idx >= MAX_SERVICES || !self.services[idx].active {
+            return 0;
+        }
+
+        let svc = &mut self.services[idx];
+        svc.svc_arg_count = 0;
+
+        if args_str.is_empty() {
+            return 0;
+        }
+
+        // Parse comma-separated arguments.
+        let mut start = 0;
+        while start < args_str.len() && svc.svc_arg_count < MAX_SVC_ARGS {
+            let mut end = start;
+            while end < args_str.len() && args_str[end] != b',' {
+                end += 1;
+            }
+
+            let arg = trim(&args_str[start..end]);
+            if !arg.is_empty() {
+                let alen = if arg.len() > MAX_SVC_ARG_LEN {
+                    MAX_SVC_ARG_LEN
+                } else {
+                    arg.len()
+                };
+                svc.svc_args[svc.svc_arg_count][..alen].copy_from_slice(&arg[..alen]);
+                svc.svc_arg_lens[svc.svc_arg_count] = alen;
+                svc.svc_arg_count += 1;
+            }
+
+            start = end + 1;
+        }
+
+        svc.svc_arg_count
+    }
+
+    /// Set per-service environment variables.
+    ///
+    /// `env_str` is a comma-separated list of KEY=VALUE pairs, e.g.
+    /// `b"PORT=8080,WORKERS=4"`.  Returns the number of env vars set.
+    fn set_env(&mut self, idx: usize, env_str: &[u8]) -> usize {
+        if idx >= MAX_SERVICES || !self.services[idx].active {
+            return 0;
+        }
+
+        let svc = &mut self.services[idx];
+        svc.svc_env_count = 0;
+
+        if env_str.is_empty() {
+            return 0;
+        }
+
+        // Parse comma-separated KEY=VALUE pairs.
+        let mut start = 0;
+        while start < env_str.len() && svc.svc_env_count < MAX_SVC_ENV {
+            let mut end = start;
+            while end < env_str.len() && env_str[end] != b',' {
+                end += 1;
+            }
+
+            let entry = trim(&env_str[start..end]);
+            if !entry.is_empty() {
+                let elen = if entry.len() > MAX_SVC_ENV_LEN {
+                    MAX_SVC_ENV_LEN
+                } else {
+                    entry.len()
+                };
+                svc.svc_env[svc.svc_env_count][..elen].copy_from_slice(&entry[..elen]);
+                svc.svc_env_lens[svc.svc_env_count] = elen;
+                svc.svc_env_count += 1;
+            }
+
+            start = end + 1;
+        }
+
+        svc.svc_env_count
     }
 
     /// Set dependencies for a registered service.
@@ -803,8 +920,8 @@ impl ServiceRegistry {
             return -1;
         }
 
-        // Copy path and name to local buffers to avoid borrowing `self`
-        // across the mutable update below.
+        // Copy path, name, args, and env to local buffers to avoid
+        // borrowing `self` across the mutable update below.
         let mut path_buf = [0u8; MAX_SVC_PATH];
         let path_len = self.services[idx].path_len;
         path_buf[..path_len].copy_from_slice(
@@ -816,6 +933,33 @@ impl ServiceRegistry {
         name_buf[..name_len].copy_from_slice(
             &self.services[idx].name[..name_len],
         );
+
+        // Snapshot service args and env before releasing the borrow.
+        let arg_count = self.services[idx].svc_arg_count;
+        let mut args_copy = [[0u8; MAX_SVC_ARG_LEN]; MAX_SVC_ARGS];
+        let mut arg_lens_copy = [0usize; MAX_SVC_ARGS];
+        let mut a = 0;
+        while a < arg_count {
+            let alen = self.services[idx].svc_arg_lens[a];
+            args_copy[a][..alen].copy_from_slice(
+                &self.services[idx].svc_args[a][..alen],
+            );
+            arg_lens_copy[a] = alen;
+            a += 1;
+        }
+
+        let env_count = self.services[idx].svc_env_count;
+        let mut env_copy = [[0u8; MAX_SVC_ENV_LEN]; MAX_SVC_ENV];
+        let mut env_lens_copy = [0usize; MAX_SVC_ENV];
+        let mut e = 0;
+        while e < env_count {
+            let elen = self.services[idx].svc_env_lens[e];
+            env_copy[e][..elen].copy_from_slice(
+                &self.services[idx].svc_env[e][..elen],
+            );
+            env_lens_copy[e] = elen;
+            e += 1;
+        }
 
         let path = &path_buf[..path_len];
         let name = &name_buf[..name_len];
@@ -836,16 +980,65 @@ impl ServiceRegistry {
         let elf_len = result as usize;
         let elf_data = &elf_buf[..elf_len];
 
-        // Build argv: argv[0] = service path (POSIX convention).
+        // Build packed argv: [path\0arg1\0arg2\0...]
         let mut argv_buf = [0u8; MAX_PACKED_ARGS];
+        let mut argc: usize = 0;
+
+        // argv[0] = service path (POSIX convention).
         argv_buf[..path_len].copy_from_slice(path);
-        // Null terminator already at path_len (buffer is zero-initialized).
-        let argv_total = path_len + 1;
+        let mut argv_pos = path_len;
+        argv_buf[argv_pos] = 0;
+        argv_pos += 1;
+        argc += 1;
+
+        // argv[1..] = per-service extra arguments.
+        a = 0;
+        while a < arg_count {
+            let alen = arg_lens_copy[a];
+            if argv_pos + alen < MAX_PACKED_ARGS {
+                argv_buf[argv_pos..argv_pos + alen].copy_from_slice(
+                    &args_copy[a][..alen],
+                );
+                argv_pos += alen;
+                argv_buf[argv_pos] = 0;
+                argv_pos += 1;
+                argc += 1;
+            }
+            a += 1;
+        }
+
+        // Build packed envp: default env + per-service env.
+        let mut envp_buf = [0u8; MAX_PACKED_ARGS];
+        let mut envc: usize = 0;
+
+        // Always include PATH=/bin.
+        let default_env = b"PATH=/bin";
+        envp_buf[..default_env.len()].copy_from_slice(default_env);
+        let mut envp_pos = default_env.len();
+        envp_buf[envp_pos] = 0;
+        envp_pos += 1;
+        envc += 1;
+
+        // Append per-service env vars.
+        e = 0;
+        while e < env_count {
+            let elen = env_lens_copy[e];
+            if envp_pos + elen < MAX_PACKED_ARGS {
+                envp_buf[envp_pos..envp_pos + elen].copy_from_slice(
+                    &env_copy[e][..elen],
+                );
+                envp_pos += elen;
+                envp_buf[envp_pos] = 0;
+                envp_pos += 1;
+                envc += 1;
+            }
+            e += 1;
+        }
 
         let pid = process_spawn_ex(
             elf_data, name,
-            &argv_buf[..argv_total], 1,
-            DEFAULT_ENVP, DEFAULT_ENVP_COUNT,
+            &argv_buf[..argv_pos], argc,
+            &envp_buf[..envp_pos], envc,
         );
         if pid < 0 {
             print("[svc] Failed to spawn ");
@@ -1526,6 +1719,28 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
                 if svc.waiting_on_deps {
                     print(" [waiting]");
                 }
+                print("\n  Args:     ");
+                if svc.svc_arg_count == 0 {
+                    print("(none)");
+                } else {
+                    let mut a = 0;
+                    while a < svc.svc_arg_count {
+                        if a > 0 { print(" "); }
+                        console_write(&svc.svc_args[a][..svc.svc_arg_lens[a]]);
+                        a += 1;
+                    }
+                }
+                print("\n  Env:      ");
+                if svc.svc_env_count == 0 {
+                    print("(default)");
+                } else {
+                    let mut e = 0;
+                    while e < svc.svc_env_count {
+                        if e > 0 { print(", "); }
+                        console_write(&svc.svc_env[e][..svc.svc_env_lens[e]]);
+                        e += 1;
+                    }
+                }
                 print("\n  Restart:  ");
                 if svc.auto_restart { print("yes"); } else { print("no"); }
                 print("\n  Crashes:  ");
@@ -1663,14 +1878,20 @@ const POLL_INTERVAL_ACTIVE_NS: u64 = 100_000_000;
 /// ```text
 /// # Comment lines start with '#'
 /// /bin/logger
-/// /bin/network depends:logger
-/// /bin/webserver depends:network,logger
+/// /bin/logger args:--verbose,-d
+/// /bin/network args:--dhcp depends:logger
+/// /bin/webserver args:--port,8080 env:PORT=8080 depends:logger,network
 /// ```
 ///
 /// Each non-empty, non-comment line is a path optionally followed by
-/// `depends:name1,name2,...`.  Services with no dependencies are
-/// started immediately.  Services with dependencies are queued and
-/// started automatically once all deps have signaled ready.
+/// keyword sections:
+///   - `args:a,b,c` — extra arguments (argv[1..])
+///   - `env:K=V,K2=V2` — per-service environment variables
+///   - `depends:svc1,svc2` — dependency names
+///
+/// Keywords can appear in any order.  Services with no dependencies
+/// are started immediately.  Services with dependencies are queued
+/// and started automatically once all deps have signaled ready.
 ///
 /// If the file doesn't exist, this is a no-op.
 fn load_startup_services(registry: &mut ServiceRegistry) {
@@ -1697,20 +1918,25 @@ fn load_startup_services(registry: &mut ServiceRegistry) {
 
         // Skip empty lines and comments.
         if !line.is_empty() && line[0] != b'#' {
-            // Check for "depends:..." suffix.
-            let (path, deps_str) = parse_service_line(line);
+            let parsed = parse_service_line(line);
 
-            match registry.register(path) {
+            match registry.register(parsed.path) {
                 Some(idx) => {
-                    if !deps_str.is_empty() {
-                        registry.set_dependencies(idx, deps_str);
+                    if !parsed.deps.is_empty() {
+                        registry.set_dependencies(idx, parsed.deps);
+                    }
+                    if !parsed.args.is_empty() {
+                        registry.set_arguments(idx, parsed.args);
+                    }
+                    if !parsed.env.is_empty() {
+                        registry.set_env(idx, parsed.env);
                     }
 
                     if registry.services[idx].dep_count > 0 {
                         // Has dependencies — don't start yet, mark as waiting.
                         registry.services[idx].waiting_on_deps = true;
                         print("[init] ");
-                        console_write(path);
+                        console_write(parsed.path);
                         print(" waiting on dependencies\n");
                     } else {
                         // No dependencies — start immediately.
@@ -1719,7 +1945,7 @@ fn load_startup_services(registry: &mut ServiceRegistry) {
                 }
                 None => {
                     print("[init] Warning: could not register ");
-                    console_write(path);
+                    console_write(parsed.path);
                     print(" (registry full?)\n");
                 }
             }
@@ -1729,43 +1955,101 @@ fn load_startup_services(registry: &mut ServiceRegistry) {
     }
 }
 
-/// Parse a service line into (path, deps_str).
-///
-/// Input: `b"/bin/foo depends:bar,baz"`
-/// Output: `(b"/bin/foo", b"bar,baz")`
-///
-/// If no `depends:` keyword, returns `(line, b"")`.
-fn parse_service_line(line: &[u8]) -> (&[u8], &[u8]) {
-    // Find "depends:" keyword.
-    let depends_kw = b"depends:";
-    let kw_len = depends_kw.len();
+/// Parsed fields from a service config line.
+struct ServiceLine<'a> {
+    path: &'a [u8],
+    args: &'a [u8],
+    env: &'a [u8],
+    deps: &'a [u8],
+}
 
+/// Find a keyword prefix (`"keyword:"`) in `line` and return the
+/// value after the colon (up to the next space or end of line) and
+/// the line with that keyword section removed.  Used by
+/// `parse_service_line` to extract `args:`, `env:`, `depends:`.
+fn find_keyword<'a>(line: &'a [u8], keyword: &[u8]) -> (Option<&'a [u8]>, &'a [u8]) {
+    let kw_len = keyword.len();
     let mut i = 0;
     while i + kw_len <= line.len() {
-        // Check if this position matches "depends:".
         let mut matches = true;
         let mut k = 0;
         while k < kw_len {
-            if line[i + k] != depends_kw[k] {
+            if line[i + k] != keyword[k] {
                 matches = false;
                 break;
             }
             k += 1;
         }
-
         if matches {
-            // Everything before the keyword (trimmed) is the path.
-            let path = trim(&line[..i]);
-            // Everything after is the dependency list.
-            let deps = trim(&line[i + kw_len..]);
-            return (path, deps);
+            // Find end of value (next space or end of line).
+            let val_start = i + kw_len;
+            let mut val_end = val_start;
+            while val_end < line.len()
+                && line[val_end] != b' '
+                && line[val_end] != b'\t'
+            {
+                val_end += 1;
+            }
+            let value = trim(&line[val_start..val_end]);
+            // Return the portion before this keyword as the remaining
+            // line.  Keywords always appear after the path, so the
+            // path is preserved.  We can't concatenate slices without
+            // allocation, so each caller gets progressively shorter
+            // remaining text — but since keywords don't overlap, this
+            // correctly isolates the path.
+            let before = trim(&line[..i]);
+            return (Some(value), before);
         }
-
         i += 1;
     }
+    (None, line)
+}
 
-    // No depends: keyword.
-    (line, &[])
+/// Parse a service config line into components.
+///
+/// Format: `/path/to/binary [args:a,b,c] [env:K=V,K2=V2] [depends:svc1,svc2]`
+///
+/// Keywords can appear in any order after the path.  Values after
+/// each keyword run until the next whitespace.
+///
+/// Examples:
+/// ```text
+/// /bin/logger
+/// /bin/logger args:--verbose
+/// /bin/network args:--dhcp depends:logger
+/// /bin/webserver args:--port,8080 env:PORT=8080 depends:logger,network
+/// ```
+fn parse_service_line(line: &[u8]) -> ServiceLine<'_> {
+    let mut remaining = line;
+    let mut deps: &[u8] = &[];
+    let mut args: &[u8] = &[];
+    let mut env: &[u8] = &[];
+
+    // Extract depends: keyword.
+    let (d, rest) = find_keyword(remaining, b"depends:");
+    if let Some(d_val) = d {
+        deps = d_val;
+        remaining = rest;
+    }
+
+    // Extract args: keyword.
+    let (a, rest) = find_keyword(remaining, b"args:");
+    if let Some(a_val) = a {
+        args = a_val;
+        remaining = rest;
+    }
+
+    // Extract env: keyword.
+    let (e, rest) = find_keyword(remaining, b"env:");
+    if let Some(e_val) = e {
+        env = e_val;
+        remaining = rest;
+    }
+
+    // What's left (trimmed) is the path.
+    let path = trim(remaining);
+
+    ServiceLine { path, args, env, deps }
 }
 
 /// Process entry point.  Called by the kernel via IRETQ to ring 3.

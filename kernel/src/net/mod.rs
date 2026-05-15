@@ -195,6 +195,20 @@ pub fn self_test() -> KernelResult<()> {
         // IPv6 link-local address derived from MAC (RFC 4291 Appendix A).
         let ll = ipv6::Ipv6Addr::from_mac_link_local(&info.mac);
         crate::serial_println!("[net]   IPv6 LL: {}", ll);
+        // SLAAC global addresses from Router Advertisements.
+        let (slaac_addrs, slaac_count) = icmpv6::slaac_addresses();
+        if slaac_count > 0 {
+            for i in 0..slaac_count {
+                if let Some((addr, prefix_len)) = slaac_addrs.get(i) {
+                    crate::serial_println!("[net]   IPv6 global: {}/{}", addr, prefix_len);
+                }
+            }
+        }
+        if icmpv6::ra_received() {
+            if let Some(rdnss) = icmpv6::slaac_rdnss() {
+                crate::serial_println!("[net]   IPv6 DNS (RA): {}", rdnss);
+            }
+        }
     } else {
         crate::serial_println!("[net]   No network interface (non-fatal)");
     }

@@ -1,12 +1,14 @@
 //! ICMPv6 (Internet Control Message Protocol for IPv6) implementation.
 //!
-//! Implements RFC 4443 (ICMPv6) and basic RFC 4861 (NDP) support:
+//! Implements RFC 4443 (ICMPv6) and RFC 4861 (NDP) support:
 //!
 //! - **Type 1**: Destination Unreachable
 //! - **Type 2**: Packet Too Big
 //! - **Type 3**: Time Exceeded
 //! - **Type 128**: Echo Request — generates Echo Reply
 //! - **Type 129**: Echo Reply — matched to outstanding pings
+//! - **Type 133**: Router Solicitation — sent to discover routers
+//! - **Type 134**: Router Advertisement — processed for SLAAC
 //! - **Type 135**: Neighbor Solicitation (NDP)
 //! - **Type 136**: Neighbor Advertisement (NDP)
 //!
@@ -24,6 +26,14 @@
 //! Maintains a small cache mapping IPv6 link-local addresses to MAC
 //! addresses, populated by Neighbor Advertisement messages.  Limited to
 //! 32 entries with LRU eviction.
+//!
+//! ## SLAAC — Stateless Address Autoconfiguration (RFC 4862)
+//!
+//! Processes Router Advertisements to auto-configure global IPv6 addresses.
+//! When an RA contains a Prefix Information option with the Autonomous (A)
+//! flag set, a global address is constructed from the prefix + modified
+//! EUI-64 interface ID.  Up to 4 global addresses can be configured.
+//! Also extracts RDNSS (RFC 8106) for DNS server discovery.
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -49,6 +59,10 @@ const ICMPV6_TIME_EXCEEDED: u8 = 3;
 const ICMPV6_ECHO_REQUEST: u8 = 128;
 /// Echo Reply.
 const ICMPV6_ECHO_REPLY: u8 = 129;
+/// Router Solicitation (NDP).
+const ICMPV6_ROUTER_SOLICITATION: u8 = 133;
+/// Router Advertisement (NDP).
+const ICMPV6_ROUTER_ADVERTISEMENT: u8 = 134;
 /// Neighbor Solicitation (NDP).
 const ICMPV6_NEIGHBOR_SOLICITATION: u8 = 135;
 /// Neighbor Advertisement (NDP).
@@ -225,6 +239,182 @@ pub fn neighbor_cache_count() -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// SLAAC — Stateless Address Autoconfiguration (RFC 4862)
+// ---------------------------------------------------------------------------
+
+/// NDP option type: Prefix Information (RFC 4861 §4.6.2).
+const NDP_OPT_PREFIX_INFO: u8 = 3;
+
+/// NDP option type: RDNSS — Recursive DNS Server (RFC 8106 §5.1).
+const NDP_OPT_RDNSS: u8 = 25;
+
+/// Maximum number of SLAAC-configured global addresses.
+const MAX_SLAAC_ADDRS: usize = 4;
+
+/// Maximum number of RDNSS entries from Router Advertisements.
+const MAX_RDNSS: usize = 2;
+
+/// A SLAAC-configured global IPv6 address.
+#[derive(Debug, Clone, Copy)]
+struct SlaacAddr {
+    /// Whether this slot is in use.
+    active: bool,
+    /// The configured global address.
+    addr: Ipv6Addr,
+    /// Prefix length (typically 64).
+    prefix_len: u8,
+    /// Valid lifetime (seconds), 0xFFFFFFFF = infinite.
+    valid_lifetime: u32,
+    /// Preferred lifetime (seconds), 0xFFFFFFFF = infinite.
+    preferred_lifetime: u32,
+    /// When this address was configured (monotonic ns).
+    configured_ns: u64,
+}
+
+impl SlaacAddr {
+    const fn empty() -> Self {
+        Self {
+            active: false,
+            addr: Ipv6Addr::UNSPECIFIED,
+            prefix_len: 0,
+            valid_lifetime: 0,
+            preferred_lifetime: 0,
+            configured_ns: 0,
+        }
+    }
+
+    /// Whether this address has expired based on valid_lifetime.
+    fn is_expired(&self, now_ns: u64) -> bool {
+        if self.valid_lifetime == 0xFFFF_FFFF {
+            return false; // Infinite lifetime.
+        }
+        let elapsed_s = now_ns.wrapping_sub(self.configured_ns) / 1_000_000_000;
+        elapsed_s > u64::from(self.valid_lifetime)
+    }
+}
+
+/// Parsed Prefix Information option from a Router Advertisement.
+#[derive(Debug, Clone, Copy)]
+struct PrefixInfo {
+    /// Prefix length (bits).
+    prefix_len: u8,
+    /// On-link flag (L).
+    #[allow(dead_code)] // Stored for completeness.
+    on_link: bool,
+    /// Autonomous flag (A) — allows SLAAC.
+    autonomous: bool,
+    /// Valid lifetime (seconds).
+    valid_lifetime: u32,
+    /// Preferred lifetime (seconds).
+    preferred_lifetime: u32,
+    /// The prefix (128 bits, only prefix_len bits significant).
+    prefix: Ipv6Addr,
+}
+
+/// Parsed RDNSS option from a Router Advertisement.
+#[derive(Debug, Clone, Copy)]
+struct RdnssInfo {
+    /// Lifetime (seconds), 0 means remove.
+    #[allow(dead_code)]
+    lifetime: u32,
+    /// DNS server IPv6 address.
+    addr: Ipv6Addr,
+}
+
+/// SLAAC state: configured addresses and RDNSS servers.
+struct SlaacState {
+    addrs: [SlaacAddr; MAX_SLAAC_ADDRS],
+    addr_count: usize,
+    /// RDNSS servers from Router Advertisements.
+    rdnss: [Ipv6Addr; MAX_RDNSS],
+    rdnss_count: usize,
+    /// Router's link-local address (from RA source).
+    router_ll: Ipv6Addr,
+    /// Whether we have received at least one RA.
+    ra_received: bool,
+}
+
+impl SlaacState {
+    const fn new() -> Self {
+        Self {
+            addrs: [SlaacAddr::empty(); MAX_SLAAC_ADDRS],
+            addr_count: 0,
+            rdnss: [Ipv6Addr::UNSPECIFIED; MAX_RDNSS],
+            rdnss_count: 0,
+            router_ll: Ipv6Addr::UNSPECIFIED,
+            ra_received: false,
+        }
+    }
+}
+
+static SLAAC_STATE: Mutex<SlaacState> = Mutex::new(SlaacState::new());
+
+/// Return the first active SLAAC global address (if any).
+#[allow(dead_code)] // Public API — called by kshell and net diagnostics.
+pub fn slaac_global_addr() -> Option<Ipv6Addr> {
+    let state = SLAAC_STATE.lock();
+    let now = crate::hrtimer::now_ns();
+    for entry in &state.addrs {
+        if entry.active && !entry.is_expired(now) {
+            return Some(entry.addr);
+        }
+    }
+    None
+}
+
+/// Return all active SLAAC addresses (for diagnostics).
+#[allow(dead_code)] // Public API — called by kshell net/ifconfig.
+pub fn slaac_addresses() -> ([(Ipv6Addr, u8); MAX_SLAAC_ADDRS], usize) {
+    let state = SLAAC_STATE.lock();
+    let now = crate::hrtimer::now_ns();
+    let mut result = [(Ipv6Addr::UNSPECIFIED, 0u8); MAX_SLAAC_ADDRS];
+    let mut count = 0;
+    for entry in &state.addrs {
+        if entry.active && !entry.is_expired(now) {
+            if let Some(slot) = result.get_mut(count) {
+                *slot = (entry.addr, entry.prefix_len);
+                count = count.wrapping_add(1);
+            }
+        }
+    }
+    (result, count)
+}
+
+/// Return the first RDNSS server from RA (if any).
+#[allow(dead_code)] // Public API for future DNS-over-IPv6.
+pub fn slaac_rdnss() -> Option<Ipv6Addr> {
+    let state = SLAAC_STATE.lock();
+    if state.rdnss_count > 0 {
+        return Some(state.rdnss[0]);
+    }
+    None
+}
+
+/// Check whether the given address is one of our SLAAC global addresses.
+fn is_our_slaac_addr(addr: &Ipv6Addr) -> bool {
+    let state = SLAAC_STATE.lock();
+    let now = crate::hrtimer::now_ns();
+    for entry in &state.addrs {
+        if entry.active && !entry.is_expired(now) && entry.addr == *addr {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a Router Advertisement has been received.
+#[allow(dead_code)] // Public API for network status.
+pub fn ra_received() -> bool {
+    SLAAC_STATE.lock().ra_received
+}
+
+/// The router's link-local address from the most recent RA.
+#[allow(dead_code)] // Public API.
+pub fn slaac_router() -> Ipv6Addr {
+    SLAAC_STATE.lock().router_ll
+}
+
+// ---------------------------------------------------------------------------
 // ICMPv6 checksum helpers
 // ---------------------------------------------------------------------------
 
@@ -280,6 +470,12 @@ pub fn process_icmpv6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
         }
         ICMPV6_ECHO_REPLY => {
             handle_echo_reply(ip_packet, data);
+        }
+        ICMPV6_ROUTER_SOLICITATION => {
+            // We're a host, not a router — ignore RS.
+        }
+        ICMPV6_ROUTER_ADVERTISEMENT => {
+            handle_router_advertisement(ip_packet, data);
         }
         ICMPV6_NEIGHBOR_SOLICITATION => {
             handle_neighbor_solicitation(ip_packet, data)?;
@@ -403,10 +599,11 @@ fn handle_neighbor_solicitation(ip_packet: &Ipv6Packet<'_>, data: &[u8]) -> Kern
     target.copy_from_slice(&data[8..24]);
     let target_addr = Ipv6Addr(target);
 
-    // Check if we're the target.
+    // Check if we're the target (link-local or any SLAAC global address).
     let our_mac = super::interface::mac();
     let our_ip = Ipv6Addr::from_mac_link_local(&our_mac);
-    if target_addr != our_ip {
+    let is_ours = target_addr == our_ip || is_our_slaac_addr(&target_addr);
+    if !is_ours {
         return Ok(()); // Not for us.
     }
 
@@ -561,6 +758,326 @@ fn send_neighbor_advertisement(
 }
 
 // ---------------------------------------------------------------------------
+// NDP: Router Solicitation / Advertisement (RFC 4861 §4.1–4.2)
+// ---------------------------------------------------------------------------
+
+/// Send a Router Solicitation (ICMPv6 type 133).
+///
+/// Sent to the all-routers multicast address (ff02::2) to prompt
+/// routers to send a Router Advertisement.  This is the first step
+/// in SLAAC (RFC 4862).
+///
+/// RS format (after ICMPv6 header):
+/// - Reserved (4 bytes)
+/// - Options: Source Link-Layer Address (type 1)
+#[allow(dead_code)] // Public API — called from kshell or net::init on IPv6 network.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn send_router_solicitation() -> KernelResult<()> {
+    let our_mac = super::interface::mac();
+    let our_ip = Ipv6Addr::from_mac_link_local(&our_mac);
+    let dst = Ipv6Addr::ALL_ROUTERS_LINK_LOCAL; // ff02::2
+
+    // Build RS message:
+    // Type (133) + Code (0) + Checksum (2) + Reserved (4) + SLLA option (8) = 16
+    let mut msg = Vec::with_capacity(16);
+    msg.push(ICMPV6_ROUTER_SOLICITATION); // Type
+    msg.push(0);                           // Code
+    msg.extend_from_slice(&[0, 0]);        // Checksum placeholder
+    msg.extend_from_slice(&[0, 0, 0, 0]);  // Reserved
+
+    // Source Link-Layer Address option (type 1, length 1 = 8 bytes).
+    msg.push(1); // Option type: Source LLA
+    msg.push(1); // Length: 1 (8 bytes)
+    msg.extend_from_slice(&our_mac.0);
+
+    let msg = finalize_checksum(&our_ip, &dst, msg);
+
+    crate::serial_println!(
+        "[icmpv6] Sending Router Solicitation from {} to {}",
+        our_ip, dst
+    );
+
+    ipv6::send_raw(our_ip, dst, NH_ICMPV6, 255, &msg)
+}
+
+/// Handle an incoming Router Advertisement (type 134).
+///
+/// RA format (after ICMPv6 header):
+/// - Cur Hop Limit (1 byte)
+/// - M|O flags + reserved (1 byte)
+/// - Router Lifetime (2 bytes)
+/// - Reachable Time (4 bytes)
+/// - Retrans Timer (4 bytes)
+/// - Options: Prefix Information (type 3), RDNSS (type 25), etc.
+///
+/// Extracts prefix information and configures global addresses via
+/// SLAAC (RFC 4862).  Also extracts RDNSS for DNS server discovery.
+#[allow(clippy::arithmetic_side_effects)]
+fn handle_router_advertisement(ip_packet: &Ipv6Packet<'_>, data: &[u8]) {
+    // RA must come from a link-local address.
+    if !ip_packet.src.is_link_local() {
+        crate::serial_println!(
+            "[icmpv6] RA from non-link-local {} — ignored",
+            ip_packet.src
+        );
+        return;
+    }
+
+    // Minimum RA: ICMPv6 header (4) + cur_hop (1) + flags (1) +
+    // router_lifetime (2) + reachable (4) + retrans (4) = 16 bytes.
+    if data.len() < 16 {
+        return;
+    }
+
+    let _cur_hop_limit = data[4];
+    let flags = data[5];
+    let _managed = (flags & 0x80) != 0; // M flag — managed (DHCPv6).
+    let _other = (flags & 0x40) != 0;   // O flag — other config (DHCPv6 for options).
+    let router_lifetime = u16::from_be_bytes([data[6], data[7]]);
+    let _reachable_time = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+    let _retrans_timer = u32::from_be_bytes([data[12], data[13], data[14], data[15]]);
+
+    crate::serial_println!(
+        "[icmpv6] Router Advertisement from {}: hop={}, lifetime={}s, flags=M:{} O:{}",
+        ip_packet.src, _cur_hop_limit, router_lifetime,
+        if _managed { "1" } else { "0" },
+        if _other { "1" } else { "0" }
+    );
+
+    // Extract the router's MAC from Source LLA option.
+    if let Some(router_mac) = parse_ndp_option_slla(&data[16..]) {
+        neighbor_update(ip_packet.src, router_mac);
+    }
+
+    // Parse RA options for Prefix Information and RDNSS.
+    let mut prefixes: [Option<PrefixInfo>; 4] = [None; 4];
+    let mut prefix_count = 0usize;
+    let mut rdnss_addrs: [Option<RdnssInfo>; MAX_RDNSS] = [None; MAX_RDNSS];
+    let mut rdnss_count = 0usize;
+
+    parse_ra_options(
+        &data[16..],
+        &mut prefixes,
+        &mut prefix_count,
+        &mut rdnss_addrs,
+        &mut rdnss_count,
+    );
+
+    // Configure addresses from Autonomous prefixes.
+    let our_mac = super::interface::mac();
+    let mut state = SLAAC_STATE.lock();
+    state.ra_received = true;
+    state.router_ll = ip_packet.src;
+
+    for i in 0..prefix_count {
+        if let Some(pi) = prefixes[i] {
+            if !pi.autonomous {
+                continue; // Not for SLAAC.
+            }
+            if pi.prefix_len != 64 {
+                // SLAAC requires a /64 prefix (RFC 4862 §5.5.3).
+                crate::serial_println!(
+                    "[icmpv6] Prefix /{} not /64 — skipping SLAAC",
+                    pi.prefix_len
+                );
+                continue;
+            }
+            if pi.prefix.is_link_local() {
+                continue; // Don't SLAAC with link-local prefix.
+            }
+
+            // Build global address: prefix (64 bits) + EUI-64 interface ID (64 bits).
+            let global = build_slaac_address(&pi.prefix, &our_mac);
+
+            crate::serial_println!(
+                "[icmpv6] SLAAC: {} (prefix /{}, valid={}s, preferred={}s)",
+                global, pi.prefix_len, pi.valid_lifetime, pi.preferred_lifetime
+            );
+
+            // Insert into SLAAC state (update if same prefix, else add new).
+            slaac_insert(
+                &mut state, global, pi.prefix_len,
+                pi.valid_lifetime, pi.preferred_lifetime,
+            );
+        }
+    }
+
+    // Store RDNSS servers.
+    let mut rdnss_idx = 0usize;
+    for i in 0..rdnss_count {
+        if let Some(ri) = rdnss_addrs[i] {
+            if rdnss_idx < MAX_RDNSS {
+                state.rdnss[rdnss_idx] = ri.addr;
+                rdnss_idx = rdnss_idx.wrapping_add(1);
+                crate::serial_println!(
+                    "[icmpv6] RDNSS: {}",
+                    ri.addr
+                );
+            }
+        }
+    }
+    state.rdnss_count = rdnss_idx;
+}
+
+/// Build a SLAAC global address from a /64 prefix and MAC address.
+///
+/// Uses modified EUI-64 (same as link-local generation) for the
+/// interface identifier (low 64 bits).
+fn build_slaac_address(prefix: &Ipv6Addr, mac: &MacAddress) -> Ipv6Addr {
+    let mut addr = [0u8; 16];
+    // Copy prefix (high 64 bits).
+    addr[..8].copy_from_slice(&prefix.0[..8]);
+    // Modified EUI-64 interface ID (low 64 bits).
+    addr[8] = mac.0[0] ^ 0x02; // Flip U/L bit.
+    addr[9] = mac.0[1];
+    addr[10] = mac.0[2];
+    addr[11] = 0xFF;
+    addr[12] = 0xFE;
+    addr[13] = mac.0[3];
+    addr[14] = mac.0[4];
+    addr[15] = mac.0[5];
+    Ipv6Addr(addr)
+}
+
+/// Insert or update a SLAAC address in the state table.
+fn slaac_insert(
+    state: &mut SlaacState,
+    addr: Ipv6Addr,
+    prefix_len: u8,
+    valid_lifetime: u32,
+    preferred_lifetime: u32,
+) {
+    let now = crate::hrtimer::now_ns();
+
+    // Update existing entry with same address.
+    for entry in state.addrs.iter_mut() {
+        if entry.active && entry.addr == addr {
+            entry.valid_lifetime = valid_lifetime;
+            entry.preferred_lifetime = preferred_lifetime;
+            entry.configured_ns = now;
+            return;
+        }
+    }
+
+    // Find an empty or expired slot.
+    for entry in state.addrs.iter_mut() {
+        if !entry.active || entry.is_expired(now) {
+            *entry = SlaacAddr {
+                active: true,
+                addr,
+                prefix_len,
+                valid_lifetime,
+                preferred_lifetime,
+                configured_ns: now,
+            };
+            if state.addr_count < MAX_SLAAC_ADDRS {
+                state.addr_count = state.addr_count.wrapping_add(1);
+            }
+            return;
+        }
+    }
+
+    // All slots full — log and skip.
+    crate::serial_println!(
+        "[icmpv6] SLAAC table full, cannot add {}",
+        addr
+    );
+}
+
+/// Parse Router Advertisement options.
+///
+/// Extracts Prefix Information (type 3) and RDNSS (type 25) options.
+#[allow(clippy::arithmetic_side_effects)]
+fn parse_ra_options(
+    mut opts: &[u8],
+    prefixes: &mut [Option<PrefixInfo>; 4],
+    prefix_count: &mut usize,
+    rdnss: &mut [Option<RdnssInfo>; MAX_RDNSS],
+    rdnss_count: &mut usize,
+) {
+    while opts.len() >= 2 {
+        let opt_type = opts[0];
+        let opt_len = opts[1] as usize;
+
+        // Length is in 8-octet units.  0 is invalid.
+        if opt_len == 0 {
+            return;
+        }
+
+        let total = opt_len * 8;
+        if opts.len() < total {
+            return;
+        }
+
+        match opt_type {
+            NDP_OPT_PREFIX_INFO if total >= 32 => {
+                // Prefix Information: 32 bytes total.
+                // Offset 2: Prefix Length (1 byte)
+                // Offset 3: L|A|Reserved flags (1 byte)
+                // Offset 4: Valid Lifetime (4 bytes)
+                // Offset 8: Preferred Lifetime (4 bytes)
+                // Offset 12: Reserved2 (4 bytes)
+                // Offset 16: Prefix (16 bytes)
+                if *prefix_count < prefixes.len() {
+                    let prefix_len = opts[2];
+                    let flags = opts[3];
+                    let on_link = (flags & 0x80) != 0;
+                    let autonomous = (flags & 0x40) != 0;
+                    let valid_lifetime = u32::from_be_bytes([
+                        opts[4], opts[5], opts[6], opts[7],
+                    ]);
+                    let preferred_lifetime = u32::from_be_bytes([
+                        opts[8], opts[9], opts[10], opts[11],
+                    ]);
+                    let mut prefix_bytes = [0u8; 16];
+                    prefix_bytes.copy_from_slice(&opts[16..32]);
+
+                    prefixes[*prefix_count] = Some(PrefixInfo {
+                        prefix_len,
+                        on_link,
+                        autonomous,
+                        valid_lifetime,
+                        preferred_lifetime,
+                        prefix: Ipv6Addr(prefix_bytes),
+                    });
+                    *prefix_count += 1;
+                }
+            }
+            NDP_OPT_RDNSS if total >= 24 => {
+                // RDNSS: minimum 24 bytes (header 8 + 1 address 16).
+                // Offset 2: Reserved (2 bytes)
+                // Offset 4: Lifetime (4 bytes)
+                // Offset 8: DNS server addresses (16 bytes each)
+                let lifetime = u32::from_be_bytes([
+                    opts[4], opts[5], opts[6], opts[7],
+                ]);
+                // Number of addresses = (total - 8) / 16.
+                let addr_bytes = total - 8;
+                let num_addrs = addr_bytes / 16;
+                for a in 0..num_addrs {
+                    if *rdnss_count >= rdnss.len() {
+                        break;
+                    }
+                    let off = 8 + a * 16;
+                    if off + 16 <= total {
+                        let mut addr_buf = [0u8; 16];
+                        addr_buf.copy_from_slice(&opts[off..off + 16]);
+                        rdnss[*rdnss_count] = Some(RdnssInfo {
+                            lifetime,
+                            addr: Ipv6Addr(addr_buf),
+                        });
+                        *rdnss_count += 1;
+                    }
+                }
+            }
+            _ => {} // Skip unknown options.
+        }
+
+        opts = &opts[total..];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -626,8 +1143,11 @@ pub fn self_test() -> KernelResult<()> {
     test_neighbor_solicitation_build()?;
     test_neighbor_advertisement_build()?;
     test_ping6_tracking()?;
+    test_ra_option_parsing()?;
+    test_slaac_address_build()?;
+    test_slaac_state()?;
 
-    crate::serial_println!("[icmpv6] ICMPv6 self-test PASSED (8 tests)");
+    crate::serial_println!("[icmpv6] ICMPv6 self-test PASSED (11 tests)");
     Ok(())
 }
 
@@ -959,5 +1479,216 @@ fn test_ping6_tracking() -> KernelResult<()> {
     }
 
     crate::serial_println!("[icmpv6]   ping6 tracking: OK");
+    Ok(())
+}
+
+/// Test RA option parsing (Prefix Information + RDNSS).
+#[allow(clippy::arithmetic_side_effects)]
+fn test_ra_option_parsing() -> KernelResult<()> {
+    // Build a synthetic RA options blob with:
+    // 1. Prefix Information (type 3, length 4 = 32 bytes):
+    //    - /64 prefix 2001:db8:1:: with A=1, L=1
+    //    - Valid lifetime: 7200s, Preferred: 3600s
+    // 2. RDNSS (type 25, length 3 = 24 bytes):
+    //    - Lifetime: 1800s
+    //    - One DNS address: 2001:4860:4860::8888
+
+    let mut opts = Vec::new();
+
+    // Prefix Information option: type=3, length=4 (32 bytes).
+    opts.push(NDP_OPT_PREFIX_INFO); // Type
+    opts.push(4);                    // Length (4 * 8 = 32 bytes)
+    opts.push(64);                   // Prefix length
+    opts.push(0xC0);                 // Flags: L=1, A=1
+    opts.extend_from_slice(&7200u32.to_be_bytes());  // Valid lifetime
+    opts.extend_from_slice(&3600u32.to_be_bytes());  // Preferred lifetime
+    opts.extend_from_slice(&[0, 0, 0, 0]);           // Reserved2
+    // Prefix: 2001:db8:1::
+    opts.extend_from_slice(&[
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
+
+    // RDNSS option: type=25, length=3 (24 bytes).
+    opts.push(NDP_OPT_RDNSS);       // Type
+    opts.push(3);                    // Length (3 * 8 = 24 bytes)
+    opts.extend_from_slice(&[0, 0]); // Reserved
+    opts.extend_from_slice(&1800u32.to_be_bytes()); // Lifetime
+    // DNS address: 2001:4860:4860::8888
+    opts.extend_from_slice(&[
+        0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0x88,
+    ]);
+
+    let mut prefixes: [Option<PrefixInfo>; 4] = [None; 4];
+    let mut prefix_count = 0;
+    let mut rdnss_addrs: [Option<RdnssInfo>; MAX_RDNSS] = [None; MAX_RDNSS];
+    let mut rdnss_count = 0;
+
+    parse_ra_options(
+        &opts,
+        &mut prefixes,
+        &mut prefix_count,
+        &mut rdnss_addrs,
+        &mut rdnss_count,
+    );
+
+    // Verify prefix info.
+    if prefix_count != 1 {
+        crate::serial_println!("[icmpv6]   FAIL: prefix_count = {}", prefix_count);
+        return Err(KernelError::InternalError);
+    }
+    if let Some(pi) = prefixes[0] {
+        if pi.prefix_len != 64 {
+            crate::serial_println!("[icmpv6]   FAIL: prefix_len = {}", pi.prefix_len);
+            return Err(KernelError::InternalError);
+        }
+        if !pi.autonomous {
+            crate::serial_println!("[icmpv6]   FAIL: A flag not set");
+            return Err(KernelError::InternalError);
+        }
+        if pi.valid_lifetime != 7200 {
+            crate::serial_println!("[icmpv6]   FAIL: valid_lifetime = {}", pi.valid_lifetime);
+            return Err(KernelError::InternalError);
+        }
+        if pi.preferred_lifetime != 3600 {
+            crate::serial_println!("[icmpv6]   FAIL: preferred_lifetime = {}", pi.preferred_lifetime);
+            return Err(KernelError::InternalError);
+        }
+        let expected_prefix = Ipv6Addr([
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]);
+        if pi.prefix != expected_prefix {
+            crate::serial_println!("[icmpv6]   FAIL: prefix = {}", pi.prefix);
+            return Err(KernelError::InternalError);
+        }
+    } else {
+        crate::serial_println!("[icmpv6]   FAIL: prefix not parsed");
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify RDNSS.
+    if rdnss_count != 1 {
+        crate::serial_println!("[icmpv6]   FAIL: rdnss_count = {}", rdnss_count);
+        return Err(KernelError::InternalError);
+    }
+    if let Some(ri) = rdnss_addrs[0] {
+        let expected_dns = Ipv6Addr([
+            0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0x88,
+        ]);
+        if ri.addr != expected_dns {
+            crate::serial_println!("[icmpv6]   FAIL: rdnss addr = {}", ri.addr);
+            return Err(KernelError::InternalError);
+        }
+    } else {
+        crate::serial_println!("[icmpv6]   FAIL: rdnss not parsed");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[icmpv6]   RA option parsing: OK");
+    Ok(())
+}
+
+/// Test SLAAC address construction from prefix + MAC.
+fn test_slaac_address_build() -> KernelResult<()> {
+    let prefix = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
+    let mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+
+    let addr = build_slaac_address(&prefix, &mac);
+
+    // Expected: 2001:db8:1::5054:ff:fe12:3456
+    // High 64 bits from prefix, low 64 bits from EUI-64:
+    // 52:54:00 → 50:54:00 (flip U/L bit) → 5054:00ff:fe12:3456
+    let expected = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
+        0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
+    ]);
+
+    if addr != expected {
+        crate::serial_println!("[icmpv6]   FAIL: SLAAC address = {}", addr);
+        crate::serial_println!("[icmpv6]   expected:             {}", expected);
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify the prefix is preserved.
+    for i in 0..8 {
+        if addr.0[i] != prefix.0[i] {
+            crate::serial_println!(
+                "[icmpv6]   FAIL: prefix byte {} mismatch: {} vs {}",
+                i, addr.0[i], prefix.0[i]
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[icmpv6]   SLAAC address build: OK");
+    Ok(())
+}
+
+/// Test SLAAC state insertion and lookup.
+fn test_slaac_state() -> KernelResult<()> {
+    let mut state = SlaacState::new();
+    let addr = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0x00, 0x00,
+        0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
+    ]);
+
+    // Initially empty.
+    if state.addr_count != 0 {
+        crate::serial_println!("[icmpv6]   FAIL: initial addr_count != 0");
+        return Err(KernelError::InternalError);
+    }
+    if state.ra_received {
+        crate::serial_println!("[icmpv6]   FAIL: initial ra_received");
+        return Err(KernelError::InternalError);
+    }
+
+    // Insert an address.
+    slaac_insert(&mut state, addr, 64, 7200, 3600);
+    if state.addr_count != 1 {
+        crate::serial_println!("[icmpv6]   FAIL: addr_count after insert = {}", state.addr_count);
+        return Err(KernelError::InternalError);
+    }
+    if !state.addrs[0].active {
+        crate::serial_println!("[icmpv6]   FAIL: first entry not active");
+        return Err(KernelError::InternalError);
+    }
+    if state.addrs[0].addr != addr {
+        crate::serial_println!("[icmpv6]   FAIL: stored addr mismatch");
+        return Err(KernelError::InternalError);
+    }
+    if state.addrs[0].prefix_len != 64 {
+        crate::serial_println!("[icmpv6]   FAIL: prefix_len = {}", state.addrs[0].prefix_len);
+        return Err(KernelError::InternalError);
+    }
+
+    // Update the same address (should not increase count).
+    slaac_insert(&mut state, addr, 64, 14400, 7200);
+    if state.addr_count != 1 {
+        crate::serial_println!("[icmpv6]   FAIL: addr_count after update = {}", state.addr_count);
+        return Err(KernelError::InternalError);
+    }
+    if state.addrs[0].valid_lifetime != 14400 {
+        crate::serial_println!("[icmpv6]   FAIL: valid_lifetime not updated");
+        return Err(KernelError::InternalError);
+    }
+
+    // Insert a different address.
+    let addr2 = Ipv6Addr([
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0x00, 0x00,
+        0x50, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
+    ]);
+    slaac_insert(&mut state, addr2, 64, 7200, 3600);
+    if state.addr_count != 2 {
+        crate::serial_println!("[icmpv6]   FAIL: addr_count after 2nd insert = {}", state.addr_count);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[icmpv6]   SLAAC state: OK");
     Ok(())
 }

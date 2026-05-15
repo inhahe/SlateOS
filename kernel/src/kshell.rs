@@ -3577,6 +3577,7 @@ const COMMANDS: &[&str] = &[
     "mount", "mv",
     "move", "net", "nl", "notifcenter", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "ping6", "printenv",
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
+    "rs", "rsolicit",
     "reboot", "recent", "ren", "renice", "rev", "rm",
     "usbpolicy", "usbpol", "applaunch", "alaunch", "sysprofiler", "sprof", "clipsync", "clsync",
     "netusage", "nusage", "touchscreen", "tscreen", "diskquota", "dquota", "appdefaults", "adef",
@@ -5422,6 +5423,7 @@ fn dispatch(line: &str) {
         "dhcp" => cmd_dhcp(),
         "ping" => cmd_ping(args),
         "ping6" => cmd_ping6(args),
+        "rs" | "rsolicit" => cmd_router_solicitation(),
         "nslookup" => cmd_dns(args),
         "wget" | "http" => cmd_wget(args),
         "fw" => cmd_firewall(args),
@@ -63040,6 +63042,18 @@ fn cmd_net() {
     // IPv6 link-local address derived from MAC (modified EUI-64, RFC 4291).
     let ipv6_ll = crate::net::ipv6::Ipv6Addr::from_mac_link_local(&info.mac);
     crate::console_println!("  IPv6 LL:      {}", ipv6_ll);
+    // SLAAC global addresses from Router Advertisements.
+    let (slaac_addrs, slaac_count) = crate::net::icmpv6::slaac_addresses();
+    for i in 0..slaac_count {
+        if let Some((addr, prefix_len)) = slaac_addrs.get(i) {
+            crate::console_println!("  IPv6 global:  {}/{}", addr, prefix_len);
+        }
+    }
+    if crate::net::icmpv6::ra_received() {
+        if let Some(rdnss) = crate::net::icmpv6::slaac_rdnss() {
+            crate::console_println!("  IPv6 DNS:     {}", rdnss);
+        }
+    }
     crate::console_println!("  DHCP state:   {}", crate::net::dhcp::state_str());
 
     // Show link status for e1000.
@@ -63636,6 +63650,48 @@ fn cmd_ping(args: &str) {
 }
 
 /// `ping6` — send ICMPv6 Echo Requests to an IPv6 address.
+/// `rs` / `rsolicit` — send an IPv6 Router Solicitation to discover routers.
+///
+/// Triggers SLAAC: if a router responds with a Router Advertisement
+/// containing a prefix, the system auto-configures a global IPv6 address.
+fn cmd_router_solicitation() {
+    crate::console_println!("Sending Router Solicitation (ff02::2)...");
+    match crate::net::icmpv6::send_router_solicitation() {
+        Ok(()) => {
+            // Poll for a bit to collect the RA response.
+            for _ in 0..2000 {
+                crate::net::poll();
+                for _ in 0..10_000 {
+                    core::hint::spin_loop();
+                }
+            }
+
+            if crate::net::icmpv6::ra_received() {
+                crate::console_println!("Router Advertisement received.");
+                // Show configured addresses.
+                let (addrs, count) = crate::net::icmpv6::slaac_addresses();
+                if count > 0 {
+                    for i in 0..count {
+                        if let Some((addr, plen)) = addrs.get(i) {
+                            crate::console_println!("  Global: {}/{}", addr, plen);
+                        }
+                    }
+                } else {
+                    crate::console_println!("  No prefixes with SLAAC flag.");
+                }
+                if let Some(rdnss) = crate::net::icmpv6::slaac_rdnss() {
+                    crate::console_println!("  DNS:    {}", rdnss);
+                }
+            } else {
+                crate::console_println!("No Router Advertisement received (timeout).");
+            }
+        }
+        Err(e) => {
+            crate::console_println!("Failed to send RS: {:?}", e);
+        }
+    }
+}
+
 fn cmd_ping6(args: &str) {
     if args.is_empty() {
         crate::console_println!("Usage: ping6 <ipv6-address>");

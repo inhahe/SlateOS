@@ -224,6 +224,39 @@ impl Ipv6Addr {
             && !self.is_multicast()
             && !self.is_link_local()
     }
+
+    /// Return a string representation of this address with a prefix length,
+    /// masking off the host portion (e.g. `"2001:db8:1::/64"`).
+    ///
+    /// Only the first `prefix_len` bits are kept; the rest are zeroed.
+    #[allow(dead_code)] // Public API.
+    pub fn prefix_string(self, prefix_len: u8) -> alloc::string::String {
+        use alloc::format;
+        let mut masked = self.0;
+        // Zero out host bits beyond prefix_len.
+        let full_bytes = (prefix_len / 8) as usize;
+        let remaining_bits = prefix_len % 8;
+        if full_bytes < 16 {
+            if remaining_bits > 0 {
+                // Partial byte: keep the top `remaining_bits` bits.
+                #[allow(clippy::arithmetic_side_effects)]
+                let mask = 0xFF_u8 << (8 - remaining_bits);
+                if let Some(b) = masked.get_mut(full_bytes) {
+                    *b &= mask;
+                }
+                // Zero all bytes after.
+                for b in masked.iter_mut().skip(full_bytes.saturating_add(1)) {
+                    *b = 0;
+                }
+            } else {
+                // Zero all bytes from full_bytes onwards.
+                for b in masked.iter_mut().skip(full_bytes) {
+                    *b = 0;
+                }
+            }
+        }
+        format!("{}/{}", Self(masked), prefix_len)
+    }
 }
 
 impl fmt::Display for Ipv6Addr {

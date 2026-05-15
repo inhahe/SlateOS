@@ -35844,6 +35844,7 @@ fn cmd_netstat(args: &str) {
             shell_println!("  netstat -s           Protocol statistics");
             shell_println!("  netstat -r           Routing table");
             shell_println!("  netstat -i           Interface statistics");
+            shell_println!("  netstat -6           IPv6 information (SLAAC, NDP, routing)");
             shell_println!("  netstat test         Run self-tests");
         }
         "-t" | "--tcp" => {
@@ -35890,6 +35891,9 @@ fn cmd_netstat(args: &str) {
                 Ok(()) => shell_println!("netstat self-test: PASSED"),
                 Err(e) => shell_println!("netstat self-test FAILED: {:?}", e),
             }
+        }
+        "-6" | "--ipv6" => {
+            shell_print!("{}", netstat::format_ipv6_info());
         }
         "-a" | _ => {
             // Default: show everything.

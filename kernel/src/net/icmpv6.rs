@@ -610,6 +610,18 @@ pub fn slaac_rdnss() -> Option<Ipv6Addr> {
     None
 }
 
+/// Return the default IPv6 router's link-local address (from RA source).
+///
+/// Returns `None` if no Router Advertisement has been received yet.
+#[allow(dead_code)] // Public API for routing diagnostics.
+pub fn default_router() -> Option<Ipv6Addr> {
+    let state = SLAAC_STATE.lock();
+    if state.ra_received && !state.router_ll.is_unspecified() {
+        return Some(state.router_ll);
+    }
+    None
+}
+
 /// Check whether the given address is one of our SLAAC global addresses.
 fn is_our_slaac_addr(addr: &Ipv6Addr) -> bool {
     let state = SLAAC_STATE.lock();

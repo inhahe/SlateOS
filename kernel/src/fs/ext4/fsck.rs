@@ -536,3 +536,253 @@ pub fn fsck_ext4(device: &str) -> KernelResult<Ext4FsckReport> {
 
     Ok(report)
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Tests for fsck helper functions: bitmap counting, inode classification,
+/// group descriptor field accessors, and report construction.
+pub fn self_test() -> KernelResult<()> {
+    use crate::error::KernelError;
+
+    crate::serial_println!("[ext4-fsck] Running self-test...");
+
+    test_count_used_bits()?;
+    test_bitmap_bit_set()?;
+    test_gd_free_counts()?;
+    test_inode_type_helpers()?;
+    test_inode_type_name()?;
+    test_report_construction()?;
+
+    crate::serial_println!("[ext4-fsck] Self-test PASSED (6 tests)");
+    Ok(())
+}
+
+/// Test count_used_bits with various bitmap patterns.
+fn test_count_used_bits() -> KernelResult<()> {
+    use crate::error::KernelError;
+
+    // All zeros — no used bits.
+    let zeros = [0u8; 4];
+    if count_used_bits(&zeros, 32) != 0 {
+        crate::serial_println!("[ext4-fsck]   FAIL: count_used_bits(zeros)");
+        return Err(KernelError::InternalError);
+    }
+
+    // All ones — all bits used.
+    let ones = [0xFF, 0xFF, 0xFF, 0xFF];
+    if count_used_bits(&ones, 32) != 32 {
+        crate::serial_println!("[ext4-fsck]   FAIL: count_used_bits(ones, 32)");
+        return Err(KernelError::InternalError);
+    }
+
+    // All ones but only count first 10 bits.
+    let count = count_used_bits(&ones, 10);
+    if count != 10 {
+        crate::serial_println!("[ext4-fsck]   FAIL: count_used_bits(ones, 10) = {}", count);
+        return Err(KernelError::InternalError);
+    }
+
+    // Specific pattern: 0b10101010 = 0xAA → 4 bits per byte.
+    let pattern = [0xAA, 0xAA];
+    let count = count_used_bits(&pattern, 16);
+    if count != 8 {
+        crate::serial_println!("[ext4-fsck]   FAIL: count_used_bits(0xAA, 16) = {}", count);
+        return Err(KernelError::InternalError);
+    }
+
+    // Partial: 0xFF but only count 3 bits → should be 3.
+    let full = [0xFF];
+    if count_used_bits(&full, 3) != 3 {
+        crate::serial_println!("[ext4-fsck]   FAIL: count_used_bits(0xFF, 3)");
+        return Err(KernelError::InternalError);
+    }
+
+    // Empty bitmap, 0 total → 0.
+    if count_used_bits(&[], 0) != 0 {
+        crate::serial_println!("[ext4-fsck]   FAIL: count_used_bits(empty, 0)");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-fsck]   count_used_bits: OK");
+    Ok(())
+}
+
+/// Test bitmap_bit_set.
+fn test_bitmap_bit_set() -> KernelResult<()> {
+    use crate::error::KernelError;
+
+    let bitmap = [0b0000_0001, 0b1000_0000]; // bit 0 set, bit 15 set.
+
+    if !bitmap_bit_set(&bitmap, 0) {
+        crate::serial_println!("[ext4-fsck]   FAIL: bit 0 not set");
+        return Err(KernelError::InternalError);
+    }
+    if bitmap_bit_set(&bitmap, 1) {
+        crate::serial_println!("[ext4-fsck]   FAIL: bit 1 should not be set");
+        return Err(KernelError::InternalError);
+    }
+    if !bitmap_bit_set(&bitmap, 15) {
+        crate::serial_println!("[ext4-fsck]   FAIL: bit 15 not set");
+        return Err(KernelError::InternalError);
+    }
+
+    // Out-of-bounds should return false, not panic.
+    if bitmap_bit_set(&bitmap, 100) {
+        crate::serial_println!("[ext4-fsck]   FAIL: OOB bit returned true");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-fsck]   bitmap_bit_set: OK");
+    Ok(())
+}
+
+/// Test gd_free_blocks and gd_free_inodes (32-bit and 64-bit).
+fn test_gd_free_counts() -> KernelResult<()> {
+    use crate::error::KernelError;
+
+    // SAFETY: Ext4GroupDesc is all integer fields — zeroed is valid.
+    let mut gd: ondisk::Ext4GroupDesc = unsafe { core::mem::zeroed() };
+
+    // 32-bit mode: only lo field matters.
+    gd.bg_free_blocks_count_lo = 500;
+    gd.bg_free_blocks_count_hi = 0xFFFF;
+    if gd_free_blocks(&gd, false) != 500 {
+        crate::serial_println!("[ext4-fsck]   FAIL: gd_free_blocks 32-bit");
+        return Err(KernelError::InternalError);
+    }
+
+    // 64-bit mode: lo | (hi << 16).
+    gd.bg_free_blocks_count_lo = 0x1234;
+    gd.bg_free_blocks_count_hi = 0x0005;
+    let count = gd_free_blocks(&gd, true);
+    if count != 0x0005_1234 {
+        crate::serial_println!(
+            "[ext4-fsck]   FAIL: gd_free_blocks 64-bit = {:#x}", count
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Same for inodes.
+    gd.bg_free_inodes_count_lo = 0xABCD;
+    gd.bg_free_inodes_count_hi = 0x0012;
+    let count = gd_free_inodes(&gd, true);
+    if count != 0x0012_ABCD {
+        crate::serial_println!(
+            "[ext4-fsck]   FAIL: gd_free_inodes 64-bit = {:#x}", count
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-fsck]   gd free counts: OK");
+    Ok(())
+}
+
+/// Test inode_is_regular, inode_is_dir, inode_is_symlink.
+fn test_inode_type_helpers() -> KernelResult<()> {
+    use crate::error::KernelError;
+
+    // SAFETY: Ext4Inode is all integer fields — zeroed is valid.
+    let mut inode: Ext4Inode = unsafe { core::mem::zeroed() };
+
+    // Regular file: mode = S_IFREG | 0644 = 0x81A4.
+    inode.i_mode = 0x81A4;
+    if !inode_is_regular(&inode) || inode_is_dir(&inode) || inode_is_symlink(&inode) {
+        crate::serial_println!("[ext4-fsck]   FAIL: regular file detection");
+        return Err(KernelError::InternalError);
+    }
+
+    // Directory: mode = S_IFDIR | 0755 = 0x41ED.
+    inode.i_mode = 0x41ED;
+    if inode_is_regular(&inode) || !inode_is_dir(&inode) || inode_is_symlink(&inode) {
+        crate::serial_println!("[ext4-fsck]   FAIL: directory detection");
+        return Err(KernelError::InternalError);
+    }
+
+    // Symlink: mode = S_IFLNK | 0777 = 0xA1FF.
+    inode.i_mode = 0xA1FF;
+    if inode_is_regular(&inode) || inode_is_dir(&inode) || !inode_is_symlink(&inode) {
+        crate::serial_println!("[ext4-fsck]   FAIL: symlink detection");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-fsck]   inode type helpers: OK");
+    Ok(())
+}
+
+/// Test inode_type_name for all known types.
+fn test_inode_type_name() -> KernelResult<()> {
+    use crate::error::KernelError;
+
+    let checks: &[(u16, &str)] = &[
+        (S_IFREG, "regular"),
+        (S_IFDIR, "directory"),
+        (S_IFLNK, "symlink"),
+        (0x6000, "block-dev"),
+        (0x2000, "char-dev"),
+        (0x1000, "fifo"),
+        (0xC000, "socket"),
+        (0x0000, "unknown"),
+    ];
+
+    for &(mode, expected) in checks {
+        let name = inode_type_name(mode);
+        if name != expected {
+            crate::serial_println!(
+                "[ext4-fsck]   FAIL: inode_type_name({:#x}) = '{}', expected '{}'",
+                mode, name, expected
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[ext4-fsck]   inode_type_name: OK");
+    Ok(())
+}
+
+/// Test Ext4FsckReport construction and methods.
+fn test_report_construction() -> KernelResult<()> {
+    use crate::error::KernelError;
+    use alloc::string::String;
+
+    let mut report = Ext4FsckReport::default();
+
+    // Initial state: all zeros.
+    if report.errors != 0 || report.warnings != 0 || !report.messages.is_empty() {
+        crate::serial_println!("[ext4-fsck]   FAIL: default report not clean");
+        return Err(KernelError::InternalError);
+    }
+
+    report.error(String::from("test error"));
+    report.warn(String::from("test warning"));
+    report.info(String::from("test info"));
+
+    if report.errors != 1 || report.warnings != 1 {
+        crate::serial_println!(
+            "[ext4-fsck]   FAIL: errors={}, warnings={}",
+            report.errors, report.warnings
+        );
+        return Err(KernelError::InternalError);
+    }
+    if report.messages.len() != 3 {
+        crate::serial_println!(
+            "[ext4-fsck]   FAIL: messages count = {}", report.messages.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify saturation: adding many errors shouldn't overflow.
+    for _ in 0..100 {
+        report.error(String::from("err"));
+    }
+    if report.errors != 101 {
+        crate::serial_println!(
+            "[ext4-fsck]   FAIL: errors after 100 more = {}", report.errors
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-fsck]   report construction: OK");
+    Ok(())
+}

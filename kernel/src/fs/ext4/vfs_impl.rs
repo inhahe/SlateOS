@@ -1638,7 +1638,235 @@ fn write_dotdot_entry(buf: &mut [u8], offset: usize, inode: u32, rec_len: usize)
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Self-test (in-kernel)
+// ---------------------------------------------------------------------------
+
+/// VFS integration layer tests — exercises pure helper functions that
+/// convert between ext4 on-disk formats and VFS types.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[ext4-vfs] Running self-test...");
+
+    test_split_parent_name()?;
+    test_inode_file_size()?;
+    test_inode_uid_gid_32()?;
+    test_dir_type_conversions()?;
+    test_write_dot_entries()?;
+
+    crate::serial_println!("[ext4-vfs] Self-test PASSED (5 tests)");
+    Ok(())
+}
+
+/// Test split_parent_name for various path patterns.
+fn test_split_parent_name() -> KernelResult<()> {
+    // Simple path.
+    let (parent, name) = split_parent_name("/foo/bar")?;
+    if parent != "/foo" || name != "bar" {
+        crate::serial_println!(
+            "[ext4-vfs]   FAIL: split('/foo/bar') = ('{}', '{}')", parent, name
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Root-level file.
+    let (parent, name) = split_parent_name("/file.txt")?;
+    if parent != "/" || name != "file.txt" {
+        crate::serial_println!(
+            "[ext4-vfs]   FAIL: split('/file.txt') = ('{}', '{}')", parent, name
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Deep path.
+    let (parent, name) = split_parent_name("/a/b/c/d")?;
+    if parent != "/a/b/c" || name != "d" {
+        crate::serial_println!("[ext4-vfs]   FAIL: split deep path");
+        return Err(KernelError::InternalError);
+    }
+
+    // Trailing slash should be stripped.
+    let (parent, name) = split_parent_name("/foo/bar/")?;
+    if parent != "/foo" || name != "bar" {
+        crate::serial_println!("[ext4-vfs]   FAIL: split trailing slash");
+        return Err(KernelError::InternalError);
+    }
+
+    // No slash → error.
+    if split_parent_name("file.txt").is_ok() {
+        crate::serial_println!("[ext4-vfs]   FAIL: no-slash should fail");
+        return Err(KernelError::InternalError);
+    }
+
+    // Root only → error.
+    if split_parent_name("/").is_ok() {
+        crate::serial_println!("[ext4-vfs]   FAIL: root-only should fail");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-vfs]   split_parent_name: OK");
+    Ok(())
+}
+
+/// Test inode_file_size for regular files, directories, and zeroed.
+fn test_inode_file_size() -> KernelResult<()> {
+    // SAFETY: Ext4Inode is all integer fields.
+    let mut inode: super::ondisk::Ext4Inode = unsafe { core::mem::zeroed() };
+
+    // Regular file: uses both lo and hi.
+    inode.i_mode = file_type::S_IFREG | 0o644;
+    inode.i_size_lo = 0x1234_5678;
+    inode.i_size_high = 0x0000_0001;
+    let size = inode_file_size(&inode);
+    if size != 0x0000_0001_1234_5678 {
+        crate::serial_println!(
+            "[ext4-vfs]   FAIL: regular file size = {:#x}", size
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Directory: ignores hi field.
+    inode.i_mode = file_type::S_IFDIR | 0o755;
+    inode.i_size_lo = 4096;
+    inode.i_size_high = 0xDEAD;
+    let size = inode_file_size(&inode);
+    if size != 4096 {
+        crate::serial_println!(
+            "[ext4-vfs]   FAIL: dir size = {} (should ignore hi)", size
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Zeroed inode.
+    let zero: super::ondisk::Ext4Inode = unsafe { core::mem::zeroed() };
+    if inode_file_size(&zero) != 0 {
+        crate::serial_println!("[ext4-vfs]   FAIL: zero inode size != 0");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-vfs]   inode_file_size: OK");
+    Ok(())
+}
+
+/// Test 32-bit UID/GID read/write (split across i_uid/i_gid and i_osd2).
+fn test_inode_uid_gid_32() -> KernelResult<()> {
+    let mut inode: super::ondisk::Ext4Inode = unsafe { core::mem::zeroed() };
+
+    // Set UID = 70000 (0x0001_1170) — exceeds 16-bit range.
+    set_inode_uid_32(&mut inode, 70000);
+    let uid = inode_uid_32(&inode);
+    if uid != 70000 {
+        crate::serial_println!(
+            "[ext4-vfs]   FAIL: UID readback = {}, expected 70000", uid
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify lo/hi split: lo = 70000 & 0xFFFF = 0x1170, hi = 1.
+    if inode.i_uid != 0x1170 {
+        crate::serial_println!(
+            "[ext4-vfs]   FAIL: i_uid = {:#x}, expected 0x1170", inode.i_uid
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Set GID = 100000 (0x0001_86A0).
+    set_inode_gid_32(&mut inode, 100000);
+    let gid = inode_gid_32(&inode);
+    if gid != 100000 {
+        crate::serial_println!(
+            "[ext4-vfs]   FAIL: GID readback = {}, expected 100000", gid
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // 16-bit range: UID = 1000. Hi should be 0.
+    set_inode_uid_32(&mut inode, 1000);
+    if inode_uid_32(&inode) != 1000 {
+        crate::serial_println!("[ext4-vfs]   FAIL: 16-bit UID");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-vfs]   inode uid/gid 32-bit: OK");
+    Ok(())
+}
+
+/// Test dir_type_to_entry_type and mode_to_entry_type conversions.
+fn test_dir_type_conversions() -> KernelResult<()> {
+    use super::ondisk::dir_type;
+    use crate::fs::vfs::EntryType;
+
+    if dir_type_to_entry_type(dir_type::DIR) != EntryType::Directory {
+        crate::serial_println!("[ext4-vfs]   FAIL: DIR type");
+        return Err(KernelError::InternalError);
+    }
+    if dir_type_to_entry_type(dir_type::REG_FILE) != EntryType::File {
+        crate::serial_println!("[ext4-vfs]   FAIL: REG_FILE type");
+        return Err(KernelError::InternalError);
+    }
+    if dir_type_to_entry_type(dir_type::SYMLINK) != EntryType::Symlink {
+        crate::serial_println!("[ext4-vfs]   FAIL: SYMLINK type");
+        return Err(KernelError::InternalError);
+    }
+    // Unknown types fall back to File.
+    if dir_type_to_entry_type(dir_type::CHRDEV) != EntryType::File {
+        crate::serial_println!("[ext4-vfs]   FAIL: CHRDEV fallback");
+        return Err(KernelError::InternalError);
+    }
+
+    // mode_to_entry_type.
+    if mode_to_entry_type(file_type::S_IFDIR) != EntryType::Directory {
+        crate::serial_println!("[ext4-vfs]   FAIL: mode DIR");
+        return Err(KernelError::InternalError);
+    }
+    if mode_to_entry_type(file_type::S_IFREG) != EntryType::File {
+        crate::serial_println!("[ext4-vfs]   FAIL: mode REG");
+        return Err(KernelError::InternalError);
+    }
+    if mode_to_entry_type(file_type::S_IFLNK) != EntryType::Symlink {
+        crate::serial_println!("[ext4-vfs]   FAIL: mode LNK");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-vfs]   dir type conversions: OK");
+    Ok(())
+}
+
+/// Test write_dot_entry and write_dotdot_entry encoding.
+fn test_write_dot_entries() -> KernelResult<()> {
+    let mut buf = [0u8; 32];
+
+    // Write "." entry.
+    write_dot_entry(&mut buf, 0, 42, 12);
+    let ino = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let rec_len = u16::from_le_bytes([buf[4], buf[5]]);
+    if ino != 42 || rec_len != 12 || buf[6] != 1 || buf[8] != b'.' {
+        crate::serial_println!("[ext4-vfs]   FAIL: dot entry encoding");
+        return Err(KernelError::InternalError);
+    }
+    if buf[7] != super::ondisk::dir_type::DIR {
+        crate::serial_println!("[ext4-vfs]   FAIL: dot entry file_type");
+        return Err(KernelError::InternalError);
+    }
+
+    // Write ".." entry.
+    let mut buf2 = [0u8; 32];
+    write_dotdot_entry(&mut buf2, 0, 99, 1012);
+    let ino = u32::from_le_bytes([buf2[0], buf2[1], buf2[2], buf2[3]]);
+    let rec_len = u16::from_le_bytes([buf2[4], buf2[5]]);
+    if ino != 99 || rec_len != 1012 || buf2[6] != 2 {
+        crate::serial_println!("[ext4-vfs]   FAIL: dotdot entry encoding");
+        return Err(KernelError::InternalError);
+    }
+    if buf2[8] != b'.' || buf2[9] != b'.' {
+        crate::serial_println!("[ext4-vfs]   FAIL: dotdot name bytes");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-vfs]   write dot entries: OK");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests (#[cfg(test)] — only runs with `cargo test`, not in kernel)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

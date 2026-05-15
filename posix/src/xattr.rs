@@ -433,4 +433,86 @@ mod tests {
         assert_eq!(result, -1);
         assert_eq!(errno::get_errno(), errno::ENOTSUP);
     }
+
+    // -- setxattr with XATTR_REPLACE flag --
+
+    #[test]
+    fn test_setxattr_replace_flag_enotsup() {
+        errno::set_errno(0);
+        let result = setxattr(
+            b"/tmp/test\0".as_ptr(),
+            b"user.test\0".as_ptr(),
+            b"value\0".as_ptr(),
+            5,
+            XATTR_REPLACE,
+        );
+        assert_eq!(result, -1);
+        assert_eq!(errno::get_errno(), errno::ENOTSUP);
+    }
+
+    // -- fd-based variants with negative/zero fds --
+
+    #[test]
+    fn test_fgetxattr_fd_zero() {
+        assert_eq!(fgetxattr(0, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0), -1);
+    }
+
+    #[test]
+    fn test_fsetxattr_fd_zero() {
+        assert_eq!(fsetxattr(0, b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, 0), -1);
+    }
+
+    #[test]
+    fn test_flistxattr_fd_zero() {
+        assert_eq!(flistxattr(0, core::ptr::null_mut(), 0), -1);
+    }
+
+    #[test]
+    fn test_fremovexattr_fd_zero() {
+        assert_eq!(fremovexattr(0, b"user.test\0".as_ptr()), -1);
+    }
+
+    #[test]
+    fn test_fgetxattr_negative_fd() {
+        assert_eq!(fgetxattr(-1, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0), -1);
+    }
+
+    #[test]
+    fn test_fsetxattr_negative_fd() {
+        assert_eq!(fsetxattr(-1, b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, 0), -1);
+    }
+
+    #[test]
+    fn test_flistxattr_negative_fd() {
+        assert_eq!(flistxattr(-1, core::ptr::null_mut(), 0), -1);
+    }
+
+    #[test]
+    fn test_fremovexattr_negative_fd() {
+        assert_eq!(fremovexattr(-1, b"user.test\0".as_ptr()), -1);
+    }
+
+    // -- lgetxattr / lsetxattr / llistxattr / lremovexattr null args --
+
+    #[test]
+    fn test_lgetxattr_null_name() {
+        assert_eq!(lgetxattr(b"/tmp\0".as_ptr(), core::ptr::null(), core::ptr::null_mut(), 0), -1);
+    }
+
+    #[test]
+    fn test_lsetxattr_null_name() {
+        assert_eq!(lsetxattr(b"/tmp\0".as_ptr(), core::ptr::null(), core::ptr::null(), 0, 0), -1);
+    }
+
+    #[test]
+    fn test_lremovexattr_null_name() {
+        assert_eq!(lremovexattr(b"/tmp\0".as_ptr(), core::ptr::null()), -1);
+    }
+
+    #[test]
+    fn test_llistxattr_null_path_enotsup() {
+        errno::set_errno(0);
+        assert_eq!(llistxattr(core::ptr::null(), core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOTSUP);
+    }
 }

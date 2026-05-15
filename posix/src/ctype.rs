@@ -921,4 +921,343 @@ mod tests {
     fn test_ctype_get_mb_cur_max() {
         assert_eq!(__ctype_get_mb_cur_max(), 4);
     }
+
+    // -----------------------------------------------------------------------
+    // Locale-aware variants — individual function tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_isalpha_l_all_lowercase() {
+        for c in b'a'..=b'z' {
+            assert_ne!(isalpha_l(i32::from(c), 0), 0);
+        }
+    }
+
+    #[test]
+    fn test_isdigit_l_all_digits() {
+        for c in b'0'..=b'9' {
+            assert_ne!(isdigit_l(i32::from(c), 0), 0);
+        }
+        assert_eq!(isdigit_l(i32::from(b'a'), 0), 0);
+    }
+
+    #[test]
+    fn test_isalnum_l_rejects_punct() {
+        assert_eq!(isalnum_l(i32::from(b'!'), 0), 0);
+        assert_eq!(isalnum_l(i32::from(b'@'), 0), 0);
+        assert_eq!(isalnum_l(i32::from(b' '), 0), 0);
+    }
+
+    #[test]
+    fn test_isspace_l_all_whitespace() {
+        assert_ne!(isspace_l(i32::from(b' '), 0), 0);
+        assert_ne!(isspace_l(i32::from(b'\t'), 0), 0);
+        assert_ne!(isspace_l(i32::from(b'\n'), 0), 0);
+        assert_ne!(isspace_l(0x0b, 0), 0); // vertical tab
+        assert_ne!(isspace_l(0x0c, 0), 0); // form feed
+        assert_ne!(isspace_l(i32::from(b'\r'), 0), 0);
+    }
+
+    #[test]
+    fn test_isupper_l_all_uppercase() {
+        for c in b'A'..=b'Z' {
+            assert_ne!(isupper_l(i32::from(c), 0), 0);
+        }
+        assert_eq!(isupper_l(i32::from(b'a'), 0), 0);
+    }
+
+    #[test]
+    fn test_islower_l_all_lowercase() {
+        for c in b'a'..=b'z' {
+            assert_ne!(islower_l(i32::from(c), 0), 0);
+        }
+        assert_eq!(islower_l(i32::from(b'A'), 0), 0);
+    }
+
+    #[test]
+    fn test_isprint_l_boundaries() {
+        assert_ne!(isprint_l(0x20, 0), 0);  // space
+        assert_ne!(isprint_l(0x7e, 0), 0);  // '~'
+        assert_eq!(isprint_l(0x1f, 0), 0);  // US
+        assert_eq!(isprint_l(0x7f, 0), 0);  // DEL
+    }
+
+    #[test]
+    fn test_iscntrl_l_boundaries() {
+        assert_ne!(iscntrl_l(0x00, 0), 0); // NUL
+        assert_ne!(iscntrl_l(0x1f, 0), 0); // US
+        assert_ne!(iscntrl_l(0x7f, 0), 0); // DEL
+        assert_eq!(iscntrl_l(0x20, 0), 0); // space
+    }
+
+    #[test]
+    fn test_ispunct_l_samples() {
+        assert_ne!(ispunct_l(i32::from(b'!'), 0), 0);
+        assert_ne!(ispunct_l(i32::from(b'@'), 0), 0);
+        assert_ne!(ispunct_l(i32::from(b'~'), 0), 0);
+        assert_eq!(ispunct_l(i32::from(b'A'), 0), 0);
+    }
+
+    #[test]
+    fn test_isxdigit_l_boundaries() {
+        assert_ne!(isxdigit_l(i32::from(b'0'), 0), 0);
+        assert_ne!(isxdigit_l(i32::from(b'9'), 0), 0);
+        assert_ne!(isxdigit_l(i32::from(b'a'), 0), 0);
+        assert_ne!(isxdigit_l(i32::from(b'f'), 0), 0);
+        assert_ne!(isxdigit_l(i32::from(b'A'), 0), 0);
+        assert_ne!(isxdigit_l(i32::from(b'F'), 0), 0);
+        assert_eq!(isxdigit_l(i32::from(b'g'), 0), 0);
+        assert_eq!(isxdigit_l(i32::from(b'G'), 0), 0);
+    }
+
+    #[test]
+    fn test_isgraph_l_space_excluded() {
+        assert_ne!(isgraph_l(i32::from(b'A'), 0), 0);
+        assert_eq!(isgraph_l(i32::from(b' '), 0), 0);
+    }
+
+    #[test]
+    fn test_isblank_l_only_space_tab() {
+        assert_ne!(isblank_l(i32::from(b' '), 0), 0);
+        assert_ne!(isblank_l(i32::from(b'\t'), 0), 0);
+        assert_eq!(isblank_l(i32::from(b'\n'), 0), 0);
+    }
+
+    #[test]
+    fn test_toupper_l_conversion() {
+        for c in b'a'..=b'z' {
+            assert_eq!(toupper_l(i32::from(c), 0), i32::from(c - 32));
+        }
+        assert_eq!(toupper_l(i32::from(b'5'), 0), i32::from(b'5'));
+    }
+
+    #[test]
+    fn test_tolower_l_conversion() {
+        for c in b'A'..=b'Z' {
+            assert_eq!(tolower_l(i32::from(c), 0), i32::from(c + 32));
+        }
+        assert_eq!(tolower_l(i32::from(b'9'), 0), i32::from(b'9'));
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-classification consistency tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_graph_is_print_minus_space() {
+        // For all ASCII chars: isgraph(c) iff (isprint(c) && c != ' ')
+        for c in 0..=127i32 {
+            let g = isgraph(c) != 0;
+            let p = isprint(c) != 0;
+            let is_space = c == i32::from(b' ');
+            assert_eq!(g, p && !is_space, "isgraph/isprint mismatch at {c}");
+        }
+    }
+
+    #[test]
+    fn test_alnum_is_alpha_or_digit() {
+        for c in 0..=127i32 {
+            let an = isalnum(c) != 0;
+            let a = isalpha(c) != 0;
+            let d = isdigit(c) != 0;
+            assert_eq!(an, a || d, "isalnum mismatch at {c}");
+        }
+    }
+
+    #[test]
+    fn test_alpha_is_upper_or_lower() {
+        for c in 0..=127i32 {
+            let a = isalpha(c) != 0;
+            let u = isupper(c) != 0;
+            let l = islower(c) != 0;
+            assert_eq!(a, u || l, "isalpha mismatch at {c}");
+        }
+    }
+
+    #[test]
+    fn test_xdigit_superset_of_digit() {
+        for c in 0..=127i32 {
+            if isdigit(c) != 0 {
+                assert_ne!(isxdigit(c), 0, "digit {c} should be xdigit too");
+            }
+        }
+    }
+
+    #[test]
+    fn test_print_covers_graph_and_space() {
+        // Every graph char is printable; space is printable but not graph
+        for c in 0..=127i32 {
+            if isgraph(c) != 0 {
+                assert_ne!(isprint(c), 0, "graph char {c} must be printable");
+            }
+        }
+        assert_ne!(isprint(i32::from(b' ')), 0);
+        assert_eq!(isgraph(i32::from(b' ')), 0);
+    }
+
+    #[test]
+    fn test_cntrl_and_print_disjoint() {
+        // Control and printable chars should never overlap
+        for c in 0..=127i32 {
+            let ctrl = iscntrl(c) != 0;
+            let prt = isprint(c) != 0;
+            assert!(!(ctrl && prt), "char {c} is both control and printable");
+        }
+    }
+
+    #[test]
+    fn test_blank_subset_of_space() {
+        // Every blank char should also be a space char
+        for c in 0..=127i32 {
+            if isblank(c) != 0 {
+                assert_ne!(isspace(c), 0, "blank char {c} should be space too");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // glibc ctype table consistency tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ctype_table_space_bit() {
+        let pp = __ctype_b_loc();
+        let p = unsafe { *pp };
+        let flags = unsafe { *p.offset(i32::from(b' ') as isize) };
+        assert_ne!(flags & _ISS, 0, "space should have _ISS bit");
+        assert_ne!(flags & _ISB, 0, "space should have _ISB (blank) bit");
+        assert_ne!(flags & _ISP, 0, "space should have _ISP (print) bit");
+    }
+
+    #[test]
+    fn test_ctype_table_control_char() {
+        let pp = __ctype_b_loc();
+        let p = unsafe { *pp };
+        // NUL should have control bit
+        let flags = unsafe { *p.offset(0) };
+        assert_ne!(flags & _ISC, 0, "NUL should have control bit");
+        assert_eq!(flags & _ISP, 0, "NUL should not have print bit");
+    }
+
+    #[test]
+    fn test_ctype_table_punct_chars() {
+        let pp = __ctype_b_loc();
+        let p = unsafe { *pp };
+        // '!' should have punct + print + graph bits
+        let flags = unsafe { *p.offset(i32::from(b'!') as isize) };
+        assert_ne!(flags & _ISN, 0, "'!' should have punct bit");
+        assert_ne!(flags & _ISP, 0, "'!' should have print bit");
+        assert_ne!(flags & _ISG, 0, "'!' should have graph bit");
+    }
+
+    #[test]
+    fn test_ctype_table_xdigit() {
+        let pp = __ctype_b_loc();
+        let p = unsafe { *pp };
+        // 'a' should have xdigit + alpha + lower bits
+        let flags = unsafe { *p.offset(i32::from(b'a') as isize) };
+        assert_ne!(flags & _ISX, 0, "'a' should have xdigit bit");
+        assert_ne!(flags & _ISA, 0, "'a' should have alpha bit");
+        assert_ne!(flags & _ISL, 0, "'a' should have lower bit");
+    }
+
+    #[test]
+    fn test_ctype_table_upper_digit() {
+        let pp = __ctype_b_loc();
+        let p = unsafe { *pp };
+        // 'Z' should have upper + alpha + alnum bits
+        let flags = unsafe { *p.offset(i32::from(b'Z') as isize) };
+        assert_ne!(flags & _ISU, 0, "'Z' should have upper bit");
+        assert_ne!(flags & _ISA, 0, "'Z' should have alpha bit");
+        assert_ne!(flags & _ISALNUM, 0, "'Z' should have alnum bit");
+    }
+
+    #[test]
+    fn test_ctype_tolower_all_uppercase() {
+        let pp = __ctype_tolower_loc();
+        let p = unsafe { *pp };
+        for c in b'A'..=b'Z' {
+            let result = unsafe { *p.offset(i32::from(c) as isize) };
+            assert_eq!(result, i32::from(c + 32), "tolower table: {c}");
+        }
+    }
+
+    #[test]
+    fn test_ctype_toupper_all_lowercase() {
+        let pp = __ctype_toupper_loc();
+        let p = unsafe { *pp };
+        for c in b'a'..=b'z' {
+            let result = unsafe { *p.offset(i32::from(c) as isize) };
+            assert_eq!(result, i32::from(c - 32), "toupper table: {c}");
+        }
+    }
+
+    #[test]
+    fn test_ctype_tolower_digits_unchanged() {
+        let pp = __ctype_tolower_loc();
+        let p = unsafe { *pp };
+        for c in b'0'..=b'9' {
+            let result = unsafe { *p.offset(i32::from(c) as isize) };
+            assert_eq!(result, i32::from(c));
+        }
+    }
+
+    #[test]
+    fn test_ctype_toupper_digits_unchanged() {
+        let pp = __ctype_toupper_loc();
+        let p = unsafe { *pp };
+        for c in b'0'..=b'9' {
+            let result = unsafe { *p.offset(i32::from(c) as isize) };
+            assert_eq!(result, i32::from(c));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // toupper / tolower roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_toupper_tolower_roundtrip() {
+        for c in b'a'..=b'z' {
+            let upper = toupper(i32::from(c));
+            let back = tolower(upper);
+            assert_eq!(back, i32::from(c), "roundtrip failed for '{}'", c as char);
+        }
+    }
+
+    #[test]
+    fn test_tolower_toupper_roundtrip() {
+        for c in b'A'..=b'Z' {
+            let lower = tolower(i32::from(c));
+            let back = toupper(lower);
+            assert_eq!(back, i32::from(c), "roundtrip failed for '{}'", c as char);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // isspace: complete whitespace list
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_isspace_exactly_six_chars() {
+        let mut count = 0;
+        for c in 0..=127i32 {
+            if isspace(c) != 0 {
+                count += 1;
+            }
+        }
+        // POSIX whitespace: space, \t, \n, \v, \f, \r = 6 chars
+        assert_eq!(count, 6, "exactly 6 ASCII whitespace characters");
+    }
+
+    #[test]
+    fn test_isblank_exactly_two_chars() {
+        let mut count = 0;
+        for c in 0..=127i32 {
+            if isblank(c) != 0 {
+                count += 1;
+            }
+        }
+        assert_eq!(count, 2, "exactly 2 blank characters (space and tab)");
+    }
 }

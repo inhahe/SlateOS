@@ -279,4 +279,109 @@ mod tests {
         // 4 pointers on x86_64 = 32 bytes
         assert_eq!(core::mem::size_of::<DlInfo>(), 32);
     }
+
+    #[test]
+    fn test_dlinfo_alignment() {
+        // Pointers are 8-byte aligned on x86_64
+        assert_eq!(core::mem::align_of::<DlInfo>(), 8);
+    }
+
+    // -- dlopen with various flags --
+
+    #[test]
+    fn test_dlopen_rtld_now() {
+        assert!(dlopen(b"libfoo.so\0".as_ptr(), RTLD_NOW).is_null());
+    }
+
+    #[test]
+    fn test_dlopen_rtld_global() {
+        assert!(dlopen(b"libfoo.so\0".as_ptr(), RTLD_LAZY | RTLD_GLOBAL).is_null());
+    }
+
+    // -- dlsym with various symbols --
+
+    #[test]
+    fn test_dlsym_null_symbol() {
+        assert!(dlsym(core::ptr::null_mut(), core::ptr::null()).is_null());
+    }
+
+    #[test]
+    fn test_dlsym_rtld_default() {
+        assert!(dlsym(RTLD_DEFAULT, b"printf\0".as_ptr()).is_null());
+    }
+
+    // -- dlclose with non-null handle --
+
+    #[test]
+    fn test_dlclose_nonzero_handle() {
+        assert_eq!(dlclose(1usize as *mut u8), -1);
+    }
+
+    // -- dlerror sequence tests --
+
+    #[test]
+    fn test_dlerror_after_dlsym_then_clear() {
+        let _ = dlerror(); // clear
+        let _ = dlsym(core::ptr::null_mut(), b"foo\0".as_ptr());
+        let err = dlerror();
+        assert!(!err.is_null());
+        let err2 = dlerror();
+        assert!(err2.is_null());
+    }
+
+    #[test]
+    fn test_dlerror_message_starts_with_d() {
+        let _ = dlerror(); // clear
+        let _ = dlclose(core::ptr::null_mut());
+        let err = dlerror();
+        assert!(!err.is_null());
+        assert_eq!(unsafe { *err }, b'd'); // "dynamic linking..."
+    }
+
+    // -- dladdr with non-null info fields --
+
+    #[test]
+    fn test_dladdr_with_address() {
+        let mut info = DlInfo {
+            dli_fname: core::ptr::null(),
+            dli_fbase: core::ptr::null_mut(),
+            dli_sname: core::ptr::null(),
+            dli_saddr: core::ptr::null_mut(),
+        };
+        // Using a non-null address — should still return 0
+        assert_eq!(dladdr(0x1000 as *const core::ffi::c_void, &raw mut info), 0);
+    }
+
+    // -- dl_iterate_phdr with callback --
+
+    extern "C" fn dummy_phdr_callback(_info: *mut u8, _size: usize, _data: *mut u8) -> i32 {
+        42 // should not be called
+    }
+
+    #[test]
+    fn test_dl_iterate_phdr_with_callback() {
+        let ret = dl_iterate_phdr(Some(dummy_phdr_callback), core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    // -- __tls_get_addr with non-null arg --
+
+    #[test]
+    fn test_tls_get_addr_nonzero_arg() {
+        let mut ti: u8 = 0;
+        assert!(__tls_get_addr(&raw mut ti).is_null());
+    }
+
+    // -- RTLD constants are distinct --
+
+    #[test]
+    fn test_rtld_lazy_now_disjoint() {
+        assert_eq!(RTLD_LAZY & RTLD_NOW, 0);
+    }
+
+    #[test]
+    fn test_rtld_global_local_disjoint() {
+        // RTLD_LOCAL is 0, so any value & 0 == 0
+        assert_eq!(RTLD_GLOBAL & RTLD_LOCAL, 0);
+    }
 }

@@ -402,6 +402,203 @@ mod tests {
         // Verify all are non-zero.
         assert_ne!(all, 0);
     }
+
+    // -- mmap zero-length returns EINVAL --
+
+    #[test]
+    fn test_mmap_zero_length_einval() {
+        crate::errno::set_errno(0);
+        let ret = mmap(
+            core::ptr::null_mut(),
+            0,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- munmap validates inputs --
+
+    #[test]
+    fn test_munmap_null_addr() {
+        crate::errno::set_errno(0);
+        assert_eq!(munmap(core::ptr::null_mut(), 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_munmap_zero_length() {
+        crate::errno::set_errno(0);
+        assert_eq!(munmap(0x1000 as *mut core::ffi::c_void, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- mprotect validates inputs --
+
+    #[test]
+    fn test_mprotect_null_addr() {
+        crate::errno::set_errno(0);
+        assert_eq!(mprotect(core::ptr::null_mut(), 4096, PROT_READ), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mprotect_zero_length() {
+        crate::errno::set_errno(0);
+        assert_eq!(mprotect(0x1000 as *mut core::ffi::c_void, 0, PROT_READ), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- mmap64 is alias for mmap --
+
+    #[test]
+    fn test_mmap64_zero_length_einval() {
+        crate::errno::set_errno(0);
+        let ret = mmap64(core::ptr::null_mut(), 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- shm stubs set errno --
+
+    #[test]
+    fn test_shm_open_sets_errno() {
+        crate::errno::set_errno(0);
+        let ret = shm_open(b"/shm_test\0".as_ptr(), 0, 0o644);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_shm_unlink_sets_errno() {
+        crate::errno::set_errno(0);
+        let ret = shm_unlink(b"/shm_test\0".as_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_shm_open_null_name() {
+        assert_eq!(shm_open(core::ptr::null(), 0, 0), -1);
+    }
+
+    #[test]
+    fn test_shm_unlink_null_name() {
+        assert_eq!(shm_unlink(core::ptr::null()), -1);
+    }
+
+    // -- memfd_create sets errno --
+
+    #[test]
+    fn test_memfd_create_sets_errno() {
+        crate::errno::set_errno(0);
+        assert_eq!(memfd_create(b"test\0".as_ptr(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_memfd_create_null_name() {
+        assert_eq!(memfd_create(core::ptr::null(), 0), -1);
+    }
+
+    // -- mremap sets errno --
+
+    #[test]
+    fn test_mremap_sets_errno() {
+        crate::errno::set_errno(0);
+        let ret = mremap(core::ptr::null_mut(), 4096, 8192, 0);
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mremap_with_maymove() {
+        let ret = mremap(0x1000 as *mut core::ffi::c_void, 4096, 8192, MREMAP_MAYMOVE);
+        assert_eq!(ret, MAP_FAILED);
+    }
+
+    // -- Stubs accept various argument combos --
+
+    #[test]
+    fn test_mlock_with_nonzero_addr() {
+        assert_eq!(mlock(0x1000 as *const core::ffi::c_void, 16384), 0);
+    }
+
+    #[test]
+    fn test_munlock_with_nonzero_addr() {
+        assert_eq!(munlock(0x1000 as *const core::ffi::c_void, 16384), 0);
+    }
+
+    #[test]
+    fn test_mlockall_mcl_current() {
+        assert_eq!(mlockall(MCL_CURRENT), 0);
+    }
+
+    #[test]
+    fn test_mlockall_mcl_future() {
+        assert_eq!(mlockall(MCL_FUTURE), 0);
+    }
+
+    #[test]
+    fn test_mlockall_combined_flags() {
+        assert_eq!(mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT), 0);
+    }
+
+    #[test]
+    fn test_msync_ms_async() {
+        assert_eq!(msync(core::ptr::null_mut(), 4096, MS_ASYNC), 0);
+    }
+
+    #[test]
+    fn test_msync_ms_invalidate() {
+        assert_eq!(msync(core::ptr::null_mut(), 4096, MS_SYNC | MS_INVALIDATE), 0);
+    }
+
+    #[test]
+    fn test_madvise_all_advice_values() {
+        assert_eq!(madvise(core::ptr::null_mut(), 4096, MADV_RANDOM), 0);
+        assert_eq!(madvise(core::ptr::null_mut(), 4096, MADV_SEQUENTIAL), 0);
+        assert_eq!(madvise(core::ptr::null_mut(), 4096, MADV_WILLNEED), 0);
+        assert_eq!(madvise(core::ptr::null_mut(), 4096, MADV_DONTNEED), 0);
+    }
+
+    #[test]
+    fn test_posix_madvise_all_values() {
+        assert_eq!(posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_RANDOM), 0);
+        assert_eq!(posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_WILLNEED), 0);
+        assert_eq!(posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_DONTNEED), 0);
+    }
+
+    // -- MS_ASYNC and MS_SYNC are distinct --
+
+    #[test]
+    fn test_msync_flags_disjoint() {
+        assert_eq!(MS_ASYNC & MS_SYNC, 0);
+        assert_eq!(MS_ASYNC & MS_INVALIDATE, 0);
+    }
+
+    // -- Prot flags are distinct single bits --
+
+    #[test]
+    fn test_prot_flags_single_bits() {
+        assert_eq!(PROT_READ.count_ones(), 1);
+        assert_eq!(PROT_WRITE.count_ones(), 1);
+        assert_eq!(PROT_EXEC.count_ones(), 1);
+    }
+
+    // -- POSIX_MADV_* match MADV_* values --
+
+    #[test]
+    fn test_posix_madv_matches_madv() {
+        assert_eq!(POSIX_MADV_NORMAL, MADV_NORMAL);
+        assert_eq!(POSIX_MADV_RANDOM, MADV_RANDOM);
+        assert_eq!(POSIX_MADV_SEQUENTIAL, MADV_SEQUENTIAL);
+        assert_eq!(POSIX_MADV_WILLNEED, MADV_WILLNEED);
+        assert_eq!(POSIX_MADV_DONTNEED, MADV_DONTNEED);
+    }
 }
 
 // ---------------------------------------------------------------------------

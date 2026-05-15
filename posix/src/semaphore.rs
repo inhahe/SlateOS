@@ -521,4 +521,192 @@ mod tests {
         // AtomicI32 = 4 bytes
         assert_eq!(core::mem::size_of::<SemT>(), 4);
     }
+
+    #[test]
+    fn test_sem_alignment() {
+        assert_eq!(core::mem::align_of::<SemT>(), 4);
+    }
+
+    // -- sem_init sets errno for null --
+
+    #[test]
+    fn test_sem_init_null_sets_einval() {
+        crate::errno::set_errno(0);
+        let ret = sem_init(core::ptr::null_mut(), 0, 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sem_init_overflow_sets_einval() {
+        crate::errno::set_errno(0);
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        let ret = sem_init(&raw mut sem, 0, u32::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- sem_wait null sets errno --
+
+    #[test]
+    fn test_sem_wait_null_einval() {
+        crate::errno::set_errno(0);
+        let ret = sem_wait(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- sem_trywait sets EAGAIN --
+
+    #[test]
+    fn test_sem_trywait_zero_sets_eagain() {
+        crate::errno::set_errno(0);
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 0);
+        let ret = sem_trywait(&raw mut sem);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAGAIN);
+    }
+
+    #[test]
+    fn test_sem_trywait_null_sets_einval() {
+        crate::errno::set_errno(0);
+        let ret = sem_trywait(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- sem_post overflow sets EOVERFLOW --
+
+    #[test]
+    fn test_sem_post_overflow_sets_eoverflow() {
+        crate::errno::set_errno(0);
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(i32::MAX),
+        };
+        let ret = sem_post(&raw mut sem);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOVERFLOW);
+    }
+
+    #[test]
+    fn test_sem_post_null_sets_einval() {
+        crate::errno::set_errno(0);
+        let ret = sem_post(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- Named semaphore stubs set ENOSYS --
+
+    #[test]
+    fn test_sem_open_sets_enosys() {
+        crate::errno::set_errno(0);
+        let _ = sem_open(b"/test\0".as_ptr(), 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_sem_close_sets_enosys() {
+        crate::errno::set_errno(0);
+        let _ = sem_close(core::ptr::null_mut());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_sem_unlink_sets_enosys() {
+        crate::errno::set_errno(0);
+        let _ = sem_unlink(b"/test\0".as_ptr());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- sem_timedwait null checks --
+
+    #[test]
+    fn test_sem_timedwait_null_sem() {
+        crate::errno::set_errno(0);
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = sem_timedwait(core::ptr::null_mut(), &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sem_timedwait_null_abstime() {
+        crate::errno::set_errno(0);
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 0);
+        let ret = sem_timedwait(&raw mut sem, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- sem_init with pshared (ignored but accepted) --
+
+    #[test]
+    fn test_sem_init_pshared_nonzero() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        // pshared=1 should still succeed (we ignore it)
+        let ret = sem_init(&raw mut sem, 1, 10);
+        assert_eq!(ret, 0);
+        let mut val: i32 = 0;
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, 10);
+    }
+
+    // -- SEM_FAILED constant --
+
+    #[test]
+    fn test_sem_failed_is_null() {
+        assert!(SEM_FAILED.is_null());
+    }
+
+    // -- Multiple post/trywait cycles --
+
+    #[test]
+    fn test_sem_multiple_cycles() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 0);
+
+        for _ in 0..5 {
+            assert_eq!(sem_post(&raw mut sem), 0);
+            assert_eq!(sem_post(&raw mut sem), 0);
+            assert_eq!(sem_trywait(&raw mut sem), 0);
+            assert_eq!(sem_trywait(&raw mut sem), 0);
+            assert_eq!(sem_trywait(&raw mut sem), -1); // empty
+        }
+    }
+
+    // -- sem_getvalue after operations --
+
+    #[test]
+    fn test_sem_getvalue_tracks_operations() {
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        };
+        sem_init(&raw mut sem, 0, 5);
+        let mut val: i32 = 0;
+
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, 5);
+
+        sem_trywait(&raw mut sem);
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, 4);
+
+        sem_post(&raw mut sem);
+        sem_post(&raw mut sem);
+        sem_getvalue(&raw mut sem, &raw mut val);
+        assert_eq!(val, 6);
+    }
 }

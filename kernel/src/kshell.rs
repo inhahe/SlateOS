@@ -3670,6 +3670,7 @@ const COMMANDS: &[&str] = &[
     "wol", "wakeonlan",
     "pcap", "tcpdump",
     "traceroute", "tracert",
+    "traceroute6", "tracert6",
     "igmp",
     "lldp",
     "netstat", "ss",
@@ -4882,6 +4883,7 @@ fn dispatch(line: &str) {
         "wol" | "wakeonlan" => cmd_wol(args),
         "pcap" | "tcpdump" => cmd_pcap(args),
         "traceroute" | "tracert" => cmd_traceroute(args),
+        "traceroute6" | "tracert6" => cmd_traceroute6(args),
         "igmp" => cmd_igmp(args),
         "lldp" => cmd_lldp(args),
         "netstat" | "ss" => cmd_netstat(args),
@@ -35548,6 +35550,116 @@ fn cmd_traceroute(args: &str) {
                 }
                 Err(e) => {
                     shell_println!("traceroute failed: {:?}", e);
+                }
+            }
+        }
+    }
+}
+
+/// `traceroute6` — Trace route to an IPv6 destination.
+fn cmd_traceroute6(args: &str) {
+    use alloc::format;
+    use crate::net::traceroute;
+    use crate::net::ipv6::Ipv6Addr;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("traceroute6 — trace the path to an IPv6 destination");
+            shell_println!("  traceroute6 <IPv6>           Trace route (default 30 hops, 3 probes)");
+            shell_println!("  traceroute6 <IPv6> -m <N>    Max N hops");
+            shell_println!("  traceroute6 <IPv6> -q <N>    N probes per hop");
+            shell_println!("  traceroute6 status           Show statistics");
+            shell_println!("  traceroute6 test             Run self-tests");
+        }
+        "status" | "stats" => {
+            let s = traceroute::stats6();
+            shell_println!("Traceroute6 Statistics");
+            shell_println!("  Active:          {}", if s.active { "yes" } else { "no" });
+            shell_println!("  Total traces:    {}", s.total_traces);
+            shell_println!("  Probes sent:     {}", s.total_probes_sent);
+            shell_println!("  Probes timeout:  {}", s.total_probes_timeout);
+            shell_println!("  Last hop count:  {}", s.last_hops);
+        }
+        "test" => {
+            match traceroute::self_test() {
+                Ok(()) => shell_println!("traceroute self-test: PASSED"),
+                Err(e) => shell_println!("traceroute self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            // First arg is an IPv6 address or hostname.
+            let dst = match Ipv6Addr::parse(sub) {
+                Some(ip) => ip,
+                None => {
+                    // Try AAAA DNS resolution.
+                    match crate::net::dns::resolve6(sub) {
+                        Ok(ip) => {
+                            shell_println!("traceroute6 to {} ({})", sub, ip);
+                            ip
+                        }
+                        Err(_) => {
+                            shell_println!("Cannot resolve '{}' — use IPv6 address", sub);
+                            return;
+                        }
+                    }
+                }
+            };
+
+            // Parse optional flags.
+            let mut max_hops: Option<u8> = None;
+            let mut probes: Option<u8> = None;
+            let mut i = 1;
+            while i < parts.len() {
+                match parts.get(i).copied() {
+                    Some("-m") => {
+                        max_hops = parts.get(i + 1).and_then(|s| s.parse::<u8>().ok());
+                        i += 2;
+                    }
+                    Some("-q") => {
+                        probes = parts.get(i + 1).and_then(|s| s.parse::<u8>().ok());
+                        i += 2;
+                    }
+                    _ => { i += 1; }
+                }
+            }
+
+            shell_println!("traceroute6 to {} (max {} hops, {} probes/hop)",
+                dst,
+                max_hops.unwrap_or(30),
+                probes.unwrap_or(3),
+            );
+
+            match traceroute::trace6(dst, max_hops, probes, None) {
+                Ok(result) => {
+                    // Print per-hop results.
+                    for hop in &result.hops {
+                        let mut line = format!("{:>2}  ", hop.hop);
+                        let mut last_ip = Ipv6Addr::UNSPECIFIED;
+                        for probe in &hop.probes {
+                            if probe.received {
+                                if probe.addr != last_ip {
+                                    if !last_ip.is_unspecified() {
+                                        line.push_str("  ");
+                                    }
+                                    line.push_str(&format!("{}", probe.addr));
+                                    last_ip = probe.addr;
+                                }
+                                line.push_str(&format!("  {}", traceroute::format_rtt(probe.rtt_ns)));
+                            } else {
+                                line.push_str("  *");
+                            }
+                        }
+                        shell_println!("{}", line);
+                    }
+                    if result.reached {
+                        shell_println!("\nDestination reached in {} hops", result.hops.len());
+                    } else {
+                        shell_println!("\nDestination NOT reached after {} hops", result.hops.len());
+                    }
+                }
+                Err(e) => {
+                    shell_println!("traceroute6 failed: {:?}", e);
                 }
             }
         }
@@ -68109,7 +68221,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "ping6" | "udp6" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

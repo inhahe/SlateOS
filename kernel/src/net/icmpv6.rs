@@ -77,6 +77,12 @@ const PING6_ID: u16 = 0x6789;
 /// Maximum outstanding ping6 entries.
 const MAX_OUTSTANDING: usize = 16;
 
+/// Traceroute6 identifier (distinct from `PING6_ID` to avoid conflicts).
+const TRACEROUTE6_ID: u16 = 0x9ABC;
+
+/// Maximum concurrent traceroute6 probes.
+const MAX_TRACE6_PROBES: usize = 32;
+
 // ---------------------------------------------------------------------------
 // ICMPv6 Echo tracking
 // ---------------------------------------------------------------------------
@@ -147,6 +153,220 @@ fn match_outstanding(seq: u16) -> Option<u64> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Traceroute6 probe tracking
+// ---------------------------------------------------------------------------
+
+/// Traceroute6 probe next sequence number.
+static TRACE6_SEQ: AtomicU16 = AtomicU16::new(1);
+
+/// A traceroute6 probe awaiting Time Exceeded or Echo Reply.
+#[derive(Debug, Clone, Copy)]
+struct TraceProbe6 {
+    /// Whether this slot is in use.
+    active: bool,
+    /// Sequence number.
+    seq: u16,
+    /// Timestamp when sent (ns).
+    sent_ns: u64,
+    /// Hop limit used for this probe.
+    #[allow(dead_code)] // Spec-defined field, kept for diagnostics.
+    hop_limit: u8,
+    /// Set when a reply (Time Exceeded or Echo Reply) is received.
+    reply_received: bool,
+    /// IPv6 address of the replying router (or destination).
+    reply_ip: Ipv6Addr,
+    /// RTT in nanoseconds (set when reply received).
+    rtt_ns: u64,
+    /// True if we received an Echo Reply (reached destination).
+    reached_dst: bool,
+}
+
+impl TraceProbe6 {
+    const fn empty() -> Self {
+        Self {
+            active: false,
+            seq: 0,
+            sent_ns: 0,
+            hop_limit: 0,
+            reply_received: false,
+            reply_ip: Ipv6Addr::UNSPECIFIED,
+            rtt_ns: 0,
+            reached_dst: false,
+        }
+    }
+}
+
+/// Table of outstanding traceroute6 probes.
+static TRACE6_PROBES: Mutex<[TraceProbe6; MAX_TRACE6_PROBES]> =
+    Mutex::new([TraceProbe6::empty(); MAX_TRACE6_PROBES]);
+
+/// Record an outstanding traceroute6 probe for correlation.
+pub fn record_trace6_probe(seq: u16, hop_limit: u8) {
+    let now = crate::hrtimer::now_ns();
+    let mut table = TRACE6_PROBES.lock();
+
+    for slot in table.iter_mut() {
+        if !slot.active {
+            *slot = TraceProbe6 {
+                active: true,
+                seq,
+                sent_ns: now,
+                hop_limit,
+                reply_received: false,
+                reply_ip: Ipv6Addr::UNSPECIFIED,
+                rtt_ns: 0,
+                reached_dst: false,
+            };
+            return;
+        }
+    }
+
+    // All full — evict the oldest.
+    let mut oldest_idx = 0;
+    let mut oldest_time = u64::MAX;
+    for (i, slot) in table.iter().enumerate() {
+        if slot.sent_ns < oldest_time {
+            oldest_time = slot.sent_ns;
+            oldest_idx = i;
+        }
+    }
+    if let Some(slot) = table.get_mut(oldest_idx) {
+        *slot = TraceProbe6 {
+            active: true,
+            seq,
+            sent_ns: now,
+            hop_limit,
+            reply_received: false,
+            reply_ip: Ipv6Addr::UNSPECIFIED,
+            rtt_ns: 0,
+            reached_dst: false,
+        };
+    }
+}
+
+/// Check if a traceroute6 probe has received a reply.
+///
+/// Returns `Some((reply_ip, rtt_ns, reached_dst))` if a reply arrived.
+pub fn check_trace6_reply(seq: u16) -> Option<(Ipv6Addr, u64, bool)> {
+    let mut table = TRACE6_PROBES.lock();
+    for slot in table.iter_mut() {
+        if slot.active && slot.seq == seq && slot.reply_received {
+            let result = (slot.reply_ip, slot.rtt_ns, slot.reached_dst);
+            slot.active = false;
+            return Some(result);
+        }
+    }
+    None
+}
+
+/// Allocate a traceroute6 sequence number.
+pub fn next_trace6_seq() -> u16 {
+    TRACE6_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Get the traceroute6 probe ICMPv6 identifier.
+pub fn trace6_id() -> u16 {
+    TRACEROUTE6_ID
+}
+
+/// Build an ICMPv6 echo request for traceroute6 (uses `TRACEROUTE6_ID`).
+///
+/// The checksum is computed using the IPv6 pseudo-header, so `src` and `dst`
+/// are required.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn build_trace6_echo_request(src: &Ipv6Addr, dst: &Ipv6Addr, seq: u16) -> Vec<u8> {
+    let payload = b"traceroute6 probe";
+    let total = 8usize.saturating_add(payload.len());
+    let mut msg = Vec::with_capacity(total);
+    msg.push(ICMPV6_ECHO_REQUEST); // Type
+    msg.push(0);                    // Code
+    msg.extend_from_slice(&[0, 0]); // Checksum placeholder
+    msg.extend_from_slice(&TRACEROUTE6_ID.to_be_bytes()); // ID
+    msg.extend_from_slice(&seq.to_be_bytes());             // Seq
+    msg.extend_from_slice(payload);
+    finalize_checksum(src, dst, msg)
+}
+
+/// Match a Time Exceeded against traceroute6 probes.
+///
+/// ICMPv6 Time Exceeded (type 3) format after ICMPv6 header:
+///   Unused (4 bytes) | As much of the original invoking packet as possible
+///
+/// The original IPv6 header is always 40 bytes (no variable IHL), followed
+/// by the original ICMPv6 echo request.  We extract the identifier and
+/// sequence number to correlate with our outstanding probes.
+fn match_trace6_time_exceeded(from_ip: Ipv6Addr, data: &[u8]) {
+    // Need: ICMPv6 hdr(4) + unused(4) + IPv6 hdr(40) + ICMPv6 echo(8) = 56.
+    if data.len() < 56 {
+        return;
+    }
+
+    // Original IPv6 header starts at offset 8 (after ICMPv6 header + unused).
+    let orig_ipv6 = match data.get(8..) {
+        Some(d) => d,
+        None => return,
+    };
+
+    // Next header at byte 6 of IPv6 header.
+    let next_header = match orig_ipv6.get(6) {
+        Some(&nh) => nh,
+        None => return,
+    };
+    if next_header != NH_ICMPV6 {
+        return; // Not an ICMPv6 probe.
+    }
+
+    // Original ICMPv6 header starts after the 40-byte IPv6 header.
+    let orig_icmpv6 = match orig_ipv6.get(40..) {
+        Some(d) if d.len() >= 8 => d,
+        _ => return,
+    };
+
+    // Check type = Echo Request (128).
+    if orig_icmpv6[0] != ICMPV6_ECHO_REQUEST {
+        return;
+    }
+
+    let id = u16::from_be_bytes([orig_icmpv6[4], orig_icmpv6[5]]);
+    let seq = u16::from_be_bytes([orig_icmpv6[6], orig_icmpv6[7]]);
+
+    if id != TRACEROUTE6_ID {
+        return; // Not our traceroute6 probe.
+    }
+
+    let now = crate::hrtimer::now_ns();
+    let mut table = TRACE6_PROBES.lock();
+    for slot in table.iter_mut() {
+        if slot.active && slot.seq == seq && !slot.reply_received {
+            slot.reply_received = true;
+            slot.reply_ip = from_ip;
+            slot.rtt_ns = now.saturating_sub(slot.sent_ns);
+            slot.reached_dst = false;
+            return;
+        }
+    }
+}
+
+/// Match an Echo Reply against traceroute6 probes (destination reached).
+fn match_trace6_echo_reply(from_ip: Ipv6Addr, id: u16, seq: u16) {
+    if id != TRACEROUTE6_ID {
+        return;
+    }
+
+    let now = crate::hrtimer::now_ns();
+    let mut table = TRACE6_PROBES.lock();
+    for slot in table.iter_mut() {
+        if slot.active && slot.seq == seq && !slot.reply_received {
+            slot.reply_received = true;
+            slot.reply_ip = from_ip;
+            slot.rtt_ns = now.saturating_sub(slot.sent_ns);
+            slot.reached_dst = true;
+            return;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +723,8 @@ pub fn process_icmpv6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
                 "[icmpv6] Time Exceeded from {} (code {})",
                 ip_packet.src, _code
             );
+            // Correlate with outstanding traceroute6 probes.
+            match_trace6_time_exceeded(ip_packet.src, data);
         }
         _ => {
             // Unknown type — silently ignore.
@@ -535,14 +757,20 @@ fn handle_echo_request(ip_packet: &Ipv6Packet<'_>, data: &[u8]) -> KernelResult<
     ipv6::send_raw(our_ip, ip_packet.src, NH_ICMPV6, 64, &reply)
 }
 
-/// Handle an incoming Echo Reply — match to outstanding ping6.
-fn handle_echo_reply(_ip_packet: &Ipv6Packet<'_>, data: &[u8]) {
+/// Handle an incoming Echo Reply — match to outstanding ping6 or traceroute6.
+fn handle_echo_reply(ip_packet: &Ipv6Packet<'_>, data: &[u8]) {
     if data.len() < 8 {
         return;
     }
 
     let id = u16::from_be_bytes([data[4], data[5]]);
     let seq = u16::from_be_bytes([data[6], data[7]]);
+
+    // Check if this is a traceroute6 probe reply (destination reached).
+    if id == TRACEROUTE6_ID {
+        match_trace6_echo_reply(ip_packet.src, id, seq);
+        return;
+    }
 
     if id != PING6_ID {
         return; // Not our ping6.
@@ -558,18 +786,18 @@ fn handle_echo_reply(_ip_packet: &Ipv6Packet<'_>, data: &[u8]) {
             let rtt_ms = rtt_us / 1000;
             crate::serial_println!(
                 "[icmpv6] Echo reply from {} seq={} rtt={} ms",
-                _ip_packet.src, seq, rtt_ms
+                ip_packet.src, seq, rtt_ms
             );
         } else {
             crate::serial_println!(
                 "[icmpv6] Echo reply from {} seq={} rtt={} us",
-                _ip_packet.src, seq, rtt_us
+                ip_packet.src, seq, rtt_us
             );
         }
     } else {
         crate::serial_println!(
             "[icmpv6] Echo reply from {} seq={}",
-            _ip_packet.src, seq
+            ip_packet.src, seq
         );
     }
 
@@ -1143,11 +1371,13 @@ pub fn self_test() -> KernelResult<()> {
     test_neighbor_solicitation_build()?;
     test_neighbor_advertisement_build()?;
     test_ping6_tracking()?;
+    test_trace6_echo_request()?;
+    test_trace6_probe_tracking()?;
     test_ra_option_parsing()?;
     test_slaac_address_build()?;
     test_slaac_state()?;
 
-    crate::serial_println!("[icmpv6] ICMPv6 self-test PASSED (11 tests)");
+    crate::serial_println!("[icmpv6] ICMPv6 self-test PASSED (13 tests)");
     Ok(())
 }
 
@@ -1690,5 +1920,126 @@ fn test_slaac_state() -> KernelResult<()> {
     }
 
     crate::serial_println!("[icmpv6]   SLAAC state: OK");
+    Ok(())
+}
+
+/// Test that `build_trace6_echo_request` produces a valid ICMPv6 echo request.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_trace6_echo_request() -> KernelResult<()> {
+    let src = Ipv6Addr::LOOPBACK;
+    let dst = Ipv6Addr([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    let seq = 42u16;
+    let pkt = build_trace6_echo_request(&src, &dst, seq);
+
+    if pkt.len() < 8 {
+        crate::serial_println!("[icmpv6]   FAIL: trace6 request too short ({})", pkt.len());
+        return Err(KernelError::InternalError);
+    }
+
+    // Type = 128 (Echo Request).
+    if pkt[0] != ICMPV6_ECHO_REQUEST {
+        crate::serial_println!("[icmpv6]   FAIL: trace6 type = {}", pkt[0]);
+        return Err(KernelError::InternalError);
+    }
+    // Code = 0.
+    if pkt[1] != 0 {
+        crate::serial_println!("[icmpv6]   FAIL: trace6 code = {}", pkt[1]);
+        return Err(KernelError::InternalError);
+    }
+    // Identifier = TRACEROUTE6_ID.
+    let id = u16::from_be_bytes([pkt[4], pkt[5]]);
+    if id != TRACEROUTE6_ID {
+        crate::serial_println!("[icmpv6]   FAIL: trace6 id = {:#06x}", id);
+        return Err(KernelError::InternalError);
+    }
+    // Sequence number.
+    let s = u16::from_be_bytes([pkt[6], pkt[7]]);
+    if s != seq {
+        crate::serial_println!("[icmpv6]   FAIL: trace6 seq = {}", s);
+        return Err(KernelError::InternalError);
+    }
+    // Checksum must be non-zero (computed via pseudo-header).
+    let cksum = u16::from_be_bytes([pkt[2], pkt[3]]);
+    if cksum == 0 {
+        crate::serial_println!("[icmpv6]   FAIL: trace6 checksum is zero");
+        return Err(KernelError::InternalError);
+    }
+    // Verify the checksum is valid.
+    if !verify_checksum(&src, &dst, &pkt) {
+        crate::serial_println!("[icmpv6]   FAIL: trace6 checksum verification failed");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[icmpv6]   trace6 echo request: OK");
+    Ok(())
+}
+
+/// Test traceroute6 probe tracking: record, seq allocation, and check.
+fn test_trace6_probe_tracking() -> KernelResult<()> {
+    // Sequence numbers should increment.
+    let s1 = next_trace6_seq();
+    let s2 = next_trace6_seq();
+    if s2 != s1.wrapping_add(1) {
+        crate::serial_println!("[icmpv6]   FAIL: trace6 seq not incrementing");
+        return Err(KernelError::InternalError);
+    }
+
+    // trace6_id should return TRACEROUTE6_ID.
+    if trace6_id() != TRACEROUTE6_ID {
+        crate::serial_println!("[icmpv6]   FAIL: trace6_id mismatch");
+        return Err(KernelError::InternalError);
+    }
+
+    // Record a probe, then check — no reply yet, so check should return None.
+    let seq = next_trace6_seq();
+    record_trace6_probe(seq, 5);
+    if check_trace6_reply(seq).is_some() {
+        crate::serial_println!("[icmpv6]   FAIL: trace6 reply before sending");
+        return Err(KernelError::InternalError);
+    }
+
+    // Simulate a reply by directly manipulating the probe table.
+    {
+        let mut table = TRACE6_PROBES.lock();
+        for slot in table.iter_mut() {
+            if slot.active && slot.seq == seq {
+                slot.reply_received = true;
+                slot.reply_ip = Ipv6Addr::LOOPBACK;
+                slot.rtt_ns = 12345;
+                slot.reached_dst = true;
+                break;
+            }
+        }
+    }
+
+    // Now check should return the reply.
+    match check_trace6_reply(seq) {
+        Some((ip, rtt, reached)) => {
+            if ip != Ipv6Addr::LOOPBACK {
+                crate::serial_println!("[icmpv6]   FAIL: trace6 reply ip mismatch");
+                return Err(KernelError::InternalError);
+            }
+            if rtt != 12345 {
+                crate::serial_println!("[icmpv6]   FAIL: trace6 reply rtt = {}", rtt);
+                return Err(KernelError::InternalError);
+            }
+            if !reached {
+                crate::serial_println!("[icmpv6]   FAIL: trace6 reached_dst not set");
+                return Err(KernelError::InternalError);
+            }
+        }
+        None => {
+            crate::serial_println!("[icmpv6]   FAIL: trace6 reply not found after simulated reply");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Second check should return None (slot consumed).
+    if check_trace6_reply(seq).is_some() {
+        crate::serial_println!("[icmpv6]   FAIL: trace6 consumed slot matched again");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[icmpv6]   trace6 probe tracking: OK");
     Ok(())
 }

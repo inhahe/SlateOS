@@ -1,33 +1,36 @@
 //! Traceroute — trace the path packets take to a destination.
 //!
-//! Sends ICMP echo requests with increasing TTL values to discover
-//! each hop along the route to a destination.  Intermediate routers
-//! respond with ICMP Time Exceeded; the destination responds with
-//! ICMP Echo Reply.
+//! Supports both IPv4 (`trace()`) and IPv6 (`trace6()`) traceroute.
+//!
+//! Sends ICMP / ICMPv6 echo requests with increasing TTL / hop-limit
+//! values to discover each hop along the route to a destination.
+//! Intermediate routers respond with Time Exceeded; the destination
+//! responds with Echo Reply.
 //!
 //! ## Algorithm
 //!
 //! ```text
 //! for ttl in 1..=max_hops:
-//!   send ICMP Echo Request with TTL=ttl
+//!   send ICMP Echo Request with TTL=ttl  (or ICMPv6 with hop_limit)
 //!   wait for reply:
-//!     - ICMP Time Exceeded  → record hop (router IP, RTT)
-//!     - ICMP Echo Reply     → record final hop (destination IP, RTT), done
+//!     - Time Exceeded       → record hop (router IP, RTT)
+//!     - Echo Reply          → record final hop (destination IP, RTT), done
 //!     - timeout             → record hop as "*" (no response)
 //! ```
 //!
 //! ## Usage
 //!
 //! ```text
-//! traceroute 8.8.8.8          — trace route to Google DNS
-//! traceroute 10.0.2.2 -m 15   — max 15 hops
-//! traceroute 10.0.2.2 -q 3    — 3 probes per hop
+//! traceroute 8.8.8.8               — IPv4 trace route
+//! traceroute 10.0.2.2 -m 15        — max 15 hops
+//! traceroute6 2001:4860:4860::8888 — IPv6 trace route
+//! traceroute6 fe80::1 -q 1         — 1 probe per hop
 //! ```
 //!
 //! ## Limitations
 //!
-//! - Uses ICMP echo requests (some firewalls may block these).
-//! - Single traceroute at a time (global probe state).
+//! - Uses ICMP/ICMPv6 echo requests (some firewalls may block these).
+//! - Single traceroute at a time per address family (global probe state).
 //! - Polling-based (calls net::poll() in a loop).
 
 use alloc::string::String;
@@ -40,6 +43,8 @@ use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
 use super::ipv4;
 use super::icmp;
+use super::ipv6::{self, Ipv6Addr, NH_ICMPV6};
+use super::icmpv6;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -303,6 +308,284 @@ pub fn format_trace(result: &TraceResult) -> String {
     out
 }
 
+// ===========================================================================
+// IPv6 Traceroute
+// ===========================================================================
+
+/// Whether an IPv6 traceroute is currently in progress.
+static ACTIVE6: AtomicBool = AtomicBool::new(false);
+
+// IPv6 statistics.
+static TOTAL_TRACES6: AtomicU64 = AtomicU64::new(0);
+static TOTAL_PROBES_SENT6: AtomicU64 = AtomicU64::new(0);
+static TOTAL_PROBES_TIMEOUT6: AtomicU64 = AtomicU64::new(0);
+static LAST_HOPS6: AtomicU32 = AtomicU32::new(0);
+
+// ---------------------------------------------------------------------------
+// IPv6 Hop result
+// ---------------------------------------------------------------------------
+
+/// Result for a single IPv6 probe at a given hop.
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeResult6 {
+    /// RTT in nanoseconds (0 if timed out).
+    pub rtt_ns: u64,
+    /// IPv6 address of the responding router/host.
+    pub addr: Ipv6Addr,
+    /// Whether a response was received.
+    pub received: bool,
+    /// Whether this probe reached the final destination.
+    pub reached_dst: bool,
+}
+
+/// Result for a single hop (may include multiple probes).
+#[derive(Debug, Clone)]
+pub struct HopResult6 {
+    /// Hop-limit / hop number (1-based).
+    pub hop: u8,
+    /// Per-probe results.
+    pub probes: Vec<ProbeResult6>,
+}
+
+/// Full IPv6 traceroute result.
+#[derive(Debug, Clone)]
+pub struct TraceResult6 {
+    /// Destination IPv6 address.
+    pub destination: Ipv6Addr,
+    /// Per-hop results.
+    pub hops: Vec<HopResult6>,
+    /// Whether the destination was reached.
+    pub reached: bool,
+    /// Total probes sent.
+    pub probes_sent: u32,
+    /// Total probes that timed out.
+    pub probes_timeout: u32,
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 Public API
+// ---------------------------------------------------------------------------
+
+/// Check if an IPv6 traceroute is currently running.
+#[allow(dead_code)] // Public API.
+pub fn is_active6() -> bool {
+    ACTIVE6.load(Ordering::Relaxed)
+}
+
+/// Run an IPv6 traceroute to the given destination.
+///
+/// Sends ICMPv6 echo requests with increasing hop-limit values.
+/// Intermediate routers respond with ICMPv6 Time Exceeded (type 3);
+/// the destination responds with ICMPv6 Echo Reply (type 129).
+///
+/// # Parameters
+///
+/// - `dst`: Destination IPv6 address.
+/// - `max_hops`: Maximum number of hops (default 30).
+/// - `probes_per_hop`: Number of probes per hop (default 3).
+/// - `timeout_polls`: Timeout per probe in poll iterations (default 500).
+pub fn trace6(
+    dst: Ipv6Addr,
+    max_hops: Option<u8>,
+    probes_per_hop: Option<u8>,
+    timeout_polls: Option<u32>,
+) -> KernelResult<TraceResult6> {
+    // Only one traceroute6 at a time.
+    if ACTIVE6.swap(true, Ordering::Relaxed) {
+        return Err(KernelError::DeviceBusy);
+    }
+
+    let max = max_hops.unwrap_or(DEFAULT_MAX_HOPS);
+    let probes = probes_per_hop.unwrap_or(DEFAULT_PROBES_PER_HOP);
+    let timeout = timeout_polls.unwrap_or(DEFAULT_TIMEOUT_POLLS);
+
+    let mut result = TraceResult6 {
+        destination: dst,
+        hops: Vec::with_capacity(max as usize),
+        reached: false,
+        probes_sent: 0,
+        probes_timeout: 0,
+    };
+
+    TOTAL_TRACES6.fetch_add(1, Ordering::Relaxed);
+
+    for hop_limit in 1..=max {
+        let mut hop = HopResult6 {
+            hop: hop_limit,
+            probes: Vec::with_capacity(probes as usize),
+        };
+
+        for _ in 0..probes {
+            let probe_result = send_probe6(dst, hop_limit, timeout);
+            result.probes_sent = result.probes_sent.saturating_add(1);
+            TOTAL_PROBES_SENT6.fetch_add(1, Ordering::Relaxed);
+
+            if !probe_result.received {
+                result.probes_timeout = result.probes_timeout.saturating_add(1);
+                TOTAL_PROBES_TIMEOUT6.fetch_add(1, Ordering::Relaxed);
+            }
+
+            if probe_result.reached_dst {
+                result.reached = true;
+            }
+
+            hop.probes.push(probe_result);
+        }
+
+        result.hops.push(hop);
+        LAST_HOPS6.store(hop_limit as u32, Ordering::Relaxed);
+
+        if result.reached {
+            break;
+        }
+    }
+
+    ACTIVE6.store(false, Ordering::Relaxed);
+    Ok(result)
+}
+
+/// Send a single IPv6 traceroute probe and wait for a reply.
+fn send_probe6(dst: Ipv6Addr, hop_limit: u8, timeout_polls: u32) -> ProbeResult6 {
+    let seq = icmpv6::next_trace6_seq();
+
+    // Choose source address: SLAAC global for non-link-local, otherwise link-local.
+    let our_mac = super::interface::mac();
+    let link_local = Ipv6Addr::from_mac_link_local(&our_mac);
+    let src = if dst.is_link_local() {
+        link_local
+    } else {
+        icmpv6::slaac_global_addr().unwrap_or(link_local)
+    };
+
+    let pkt = icmpv6::build_trace6_echo_request(&src, &dst, seq);
+
+    // Record the probe for correlation.
+    icmpv6::record_trace6_probe(seq, hop_limit);
+
+    // Send with custom hop limit.
+    if ipv6::send_raw(src, dst, NH_ICMPV6, hop_limit, &pkt).is_err() {
+        return ProbeResult6 {
+            rtt_ns: 0,
+            addr: Ipv6Addr::UNSPECIFIED,
+            received: false,
+            reached_dst: false,
+        };
+    }
+
+    // Poll for a reply.
+    for _ in 0..timeout_polls {
+        super::poll();
+
+        if let Some((reply_ip, rtt_ns, reached)) = icmpv6::check_trace6_reply(seq) {
+            return ProbeResult6 {
+                rtt_ns,
+                addr: reply_ip,
+                received: true,
+                reached_dst: reached,
+            };
+        }
+    }
+
+    // Timeout.
+    ProbeResult6 {
+        rtt_ns: 0,
+        addr: Ipv6Addr::UNSPECIFIED,
+        received: false,
+        reached_dst: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 Formatting helpers
+// ---------------------------------------------------------------------------
+
+/// Format a complete IPv6 trace result as a human-readable string.
+pub fn format_trace6(result: &TraceResult6) -> String {
+    let mut out = String::with_capacity(512);
+
+    out.push_str(&format!(
+        "traceroute6 to {} (max {} hops, {} probes/hop)\n",
+        result.destination,
+        result.hops.len(),
+        result.hops.first().map_or(0, |h| h.probes.len()),
+    ));
+
+    for hop in &result.hops {
+        out.push_str(&format!("{:>2}  ", hop.hop));
+
+        let mut last_ip = Ipv6Addr::UNSPECIFIED;
+        for probe in &hop.probes {
+            if probe.received {
+                if probe.addr != last_ip {
+                    if !last_ip.is_unspecified() {
+                        out.push_str("  ");
+                    }
+                    out.push_str(&format!("{}", probe.addr));
+                    last_ip = probe.addr;
+                }
+                out.push_str(&format!("  {}", format_rtt(probe.rtt_ns)));
+            } else {
+                out.push_str("  *");
+            }
+        }
+        out.push('\n');
+    }
+
+    if result.reached {
+        out.push_str(&format!(
+            "\nDestination reached in {} hops ({} probes, {} timeouts)\n",
+            result.hops.len(), result.probes_sent, result.probes_timeout
+        ));
+    } else {
+        out.push_str(&format!(
+            "\nDestination NOT reached after {} hops ({} probes, {} timeouts)\n",
+            result.hops.len(), result.probes_sent, result.probes_timeout
+        ));
+    }
+
+    out
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 Statistics
+// ---------------------------------------------------------------------------
+
+/// IPv6 traceroute statistics.
+#[derive(Debug)]
+pub struct TracerouteStats6 {
+    pub active: bool,
+    pub total_traces: u64,
+    pub total_probes_sent: u64,
+    pub total_probes_timeout: u64,
+    pub last_hops: u32,
+}
+
+/// Get IPv6 traceroute statistics.
+pub fn stats6() -> TracerouteStats6 {
+    TracerouteStats6 {
+        active: ACTIVE6.load(Ordering::Relaxed),
+        total_traces: TOTAL_TRACES6.load(Ordering::Relaxed),
+        total_probes_sent: TOTAL_PROBES_SENT6.load(Ordering::Relaxed),
+        total_probes_timeout: TOTAL_PROBES_TIMEOUT6.load(Ordering::Relaxed),
+        last_hops: LAST_HOPS6.load(Ordering::Relaxed),
+    }
+}
+
+/// Generate procfs content for `/proc/traceroute6`.
+pub fn procfs_content6() -> String {
+    let s = stats6();
+
+    let mut out = String::with_capacity(256);
+    out.push_str("Traceroute6\n");
+    out.push_str("===========\n\n");
+    out.push_str(&format!("Active:          {}\n", if s.active { "yes" } else { "no" }));
+    out.push_str(&format!("Total traces:    {}\n", s.total_traces));
+    out.push_str(&format!("Probes sent:     {}\n", s.total_probes_sent));
+    out.push_str(&format!("Probes timeout:  {}\n", s.total_probes_timeout));
+    out.push_str(&format!("Last hop count:  {}\n", s.last_hops));
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------
@@ -543,6 +826,163 @@ pub fn self_test() -> KernelResult<()> {
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[traceroute]   test 10 (seq allocation) PASSED");
+    }
+
+    // --- Test 11: IPv6 ProbeResult6 defaults ---
+    {
+        let pr = ProbeResult6 {
+            rtt_ns: 0,
+            addr: Ipv6Addr::UNSPECIFIED,
+            received: false,
+            reached_dst: false,
+        };
+        assert!(!pr.received, "v6 default not received");
+        assert!(!pr.reached_dst, "v6 default not reached");
+        assert!(pr.addr.is_unspecified(), "v6 default addr");
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[traceroute]   test 11 (ProbeResult6 defaults) PASSED");
+    }
+
+    // --- Test 12: IPv6 HopResult6 construction ---
+    {
+        let hop = HopResult6 {
+            hop: 3,
+            probes: alloc::vec![
+                ProbeResult6 {
+                    rtt_ns: 5000,
+                    addr: Ipv6Addr::LOOPBACK,
+                    received: true,
+                    reached_dst: false,
+                },
+                ProbeResult6 {
+                    rtt_ns: 0,
+                    addr: Ipv6Addr::UNSPECIFIED,
+                    received: false,
+                    reached_dst: false,
+                },
+            ],
+        };
+        assert!(hop.hop == 3, "v6 hop number");
+        assert!(hop.probes.len() == 2, "v6 probe count");
+        assert!(hop.probes[0].received, "v6 first probe received");
+        assert!(!hop.probes[1].received, "v6 second probe timeout");
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[traceroute]   test 12 (HopResult6 construction) PASSED");
+    }
+
+    // --- Test 13: IPv6 TraceResult6 formatting ---
+    {
+        let result = TraceResult6 {
+            destination: Ipv6Addr::LOOPBACK,
+            hops: alloc::vec![
+                HopResult6 {
+                    hop: 1,
+                    probes: alloc::vec![ProbeResult6 {
+                        rtt_ns: 2_000_000,
+                        addr: Ipv6Addr([0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+                        received: true,
+                        reached_dst: false,
+                    }],
+                },
+                HopResult6 {
+                    hop: 2,
+                    probes: alloc::vec![ProbeResult6 {
+                        rtt_ns: 5_000_000,
+                        addr: Ipv6Addr::LOOPBACK,
+                        received: true,
+                        reached_dst: true,
+                    }],
+                },
+            ],
+            reached: true,
+            probes_sent: 2,
+            probes_timeout: 0,
+        };
+
+        let formatted = format_trace6(&result);
+        assert!(formatted.contains("traceroute6 to"), "v6 header");
+        assert!(formatted.contains("::1"), "v6 destination");
+        assert!(formatted.contains("Destination reached"), "v6 reached");
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[traceroute]   test 13 (trace6 formatting) PASSED");
+    }
+
+    // --- Test 14: IPv6 timeout probe formatting ---
+    {
+        let result = TraceResult6 {
+            destination: Ipv6Addr([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            hops: alloc::vec![HopResult6 {
+                hop: 1,
+                probes: alloc::vec![ProbeResult6 {
+                    rtt_ns: 0,
+                    addr: Ipv6Addr::UNSPECIFIED,
+                    received: false,
+                    reached_dst: false,
+                }],
+            }],
+            reached: false,
+            probes_sent: 1,
+            probes_timeout: 1,
+        };
+
+        let formatted = format_trace6(&result);
+        assert!(formatted.contains("*"), "v6 timeout star");
+        assert!(formatted.contains("NOT reached"), "v6 not reached");
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[traceroute]   test 14 (v6 timeout formatting) PASSED");
+    }
+
+    // --- Test 15: IPv6 stats / procfs ---
+    {
+        let s = stats6();
+        assert!(!s.active || s.active, "v6 active is bool");
+
+        let content = procfs_content6();
+        assert!(content.contains("Traceroute6"), "v6 header");
+        assert!(content.contains("Active:"), "v6 active field");
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[traceroute]   test 15 (v6 stats/procfs) PASSED");
+    }
+
+    // --- Test 16: IPv6 sequence number allocation ---
+    {
+        let s1 = icmpv6::next_trace6_seq();
+        let s2 = icmpv6::next_trace6_seq();
+        assert!(s2 == s1.wrapping_add(1), "v6 seq increments");
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[traceroute]   test 16 (v6 seq allocation) PASSED");
+    }
+
+    // --- Test 17: IPv6 echo request construction ---
+    {
+        let src = Ipv6Addr::LOOPBACK;
+        let dst = Ipv6Addr([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let seq = 99u16;
+        let pkt = icmpv6::build_trace6_echo_request(&src, &dst, seq);
+
+        // Type = 128 (Echo Request).
+        assert!(*pkt.get(0).unwrap_or(&0) == 128, "v6 type");
+        // ID = TRACEROUTE6_ID.
+        let id = u16::from_be_bytes([
+            *pkt.get(4).unwrap_or(&0),
+            *pkt.get(5).unwrap_or(&0),
+        ]);
+        assert!(id == icmpv6::trace6_id(), "v6 traceroute ID");
+        // Seq.
+        let s = u16::from_be_bytes([
+            *pkt.get(6).unwrap_or(&0),
+            *pkt.get(7).unwrap_or(&0),
+        ]);
+        assert!(s == seq, "v6 sequence number");
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[traceroute]   test 17 (v6 echo request) PASSED");
     }
 
     crate::serial_println!("[traceroute] All {} self-tests PASSED", passed);

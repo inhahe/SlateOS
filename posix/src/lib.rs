@@ -363,3 +363,8 @@ pub mod sys_capability;
 pub mod sys_mman_ext;
 pub mod sys_prctl_caps;
 pub mod sys_ttydefaults;
+pub mod sys_auxv;
+pub mod sys_sysctl;
+pub mod net_if_packet;
+pub mod linux_input;
+pub mod linux_futex;

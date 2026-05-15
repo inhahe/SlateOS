@@ -73,6 +73,9 @@
 //! - **Database Operations** (stubs): `dbm_open`, `dbm_close`,
 //!   `dbm_store`, `dbm_fetch`, `dbm_delete`, `dbm_firstkey`,
 //!   `dbm_nextkey`, `dbm_error`, `dbm_clearerr`
+//! - **DNS Resolver** (stubs): `res_init`, `res_query`, `res_search`,
+//!   `res_mkquery`, `res_send`, `dn_expand`, `dn_comp`, `dn_skipname`,
+//!   `ns_get16`/`ns_get32`/`ns_put16`/`ns_put32`
 //! - **Process Times**: `times` (CPU time accounting stub)
 //! - **System V IPC** (stubs): `msgget`/`msgsnd`/`msgrcv`/`msgctl`,
 //!   `semget`/`semop`/`semtimedop`/`semctl`,
@@ -254,6 +257,7 @@ pub mod poll;
 pub mod printf;
 pub mod pthread;
 pub mod regex;
+pub mod resolv;
 pub mod scanf;
 pub mod sched;
 pub mod search;

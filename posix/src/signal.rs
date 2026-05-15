@@ -10,7 +10,8 @@
 //! signals are never actually delivered (our OS uses IPC messages for
 //! process control).  This means `signal(SIGPIPE, SIG_IGN)` succeeds
 //! (many programs do this at startup), but no handler ever fires.
-//! `kill()` and `sigprocmask()` remain stubs returning ENOSYS.
+//! `sigprocmask()` stores the blocked mask so get/set round-trips work.
+//! `kill()` remains a stub returning ENOSYS.
 
 use crate::errno;
 
@@ -108,6 +109,19 @@ const DEFAULT_SIGACTION: Sigaction = Sigaction {
 /// Stores the full `Sigaction` so that `sigaction(sig, NULL, &old)`
 /// returns the correct `sa_mask`, `sa_flags`, and `sa_restorer`.
 static mut ACTIONS: [Sigaction; NSIG as usize] = [DEFAULT_SIGACTION; NSIG as usize];
+
+/// Process-wide blocked signal mask.
+///
+/// Updated by `sigprocmask`.  Read back by `sigprocmask` (old mask)
+/// and `sigpending` (which returns the intersection of blocked and
+/// pending signals — but since we have no signal delivery, pending
+/// is always empty, so `sigpending` still returns empty).
+///
+/// Storing the mask is important for programs that do
+/// `sigprocmask(SIG_BLOCK, ..., &old)` and later restore with
+/// `sigprocmask(SIG_SETMASK, &old, NULL)` — the old mask must
+/// round-trip correctly.
+static mut BLOCKED_MASK: SigsetT = SigsetT::EMPTY;
 
 /// Install a signal handler.
 ///
@@ -268,20 +282,66 @@ pub extern "C" fn raise(sig: i32) -> i32 {
 
 /// Examine and change blocked signals.
 ///
-/// Stub: succeeds silently (stores nothing).  Many programs call
-/// `sigprocmask(SIG_BLOCK, &set, &oldset)` during initialization
-/// and expect success.
+/// Stores the signal mask in process-local state so that
+/// `sigprocmask(SIG_BLOCK, ..., &old)` followed by
+/// `sigprocmask(SIG_SETMASK, &old, NULL)` round-trips correctly.
+///
+/// Signal delivery is not implemented (our OS uses IPC), so the
+/// mask only affects what `sigprocmask` returns, not actual behavior.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigprocmask(
-    _how: i32,
-    _set: *const SigsetT,
+    how: i32,
+    set: *const SigsetT,
     oldset: *mut SigsetT,
 ) -> i32 {
-    // Return empty old set if requested.
+    // SAFETY: single-threaded access to BLOCKED_MASK.
+    let current = unsafe { core::ptr::addr_of!(BLOCKED_MASK).read() };
+
+    // Return old mask if requested.
     if !oldset.is_null() {
-        unsafe { *oldset = SigsetT::EMPTY; }
+        // SAFETY: oldset verified non-null.
+        unsafe { *oldset = current; }
     }
-    0 // Succeed silently.
+
+    // Apply new mask if set is non-null.
+    if !set.is_null() {
+        // SAFETY: set verified non-null.
+        let new_set = unsafe { *set };
+        let new_mask = match how {
+            SIG_BLOCK => {
+                // Add signals in `set` to the blocked set.
+                let mut result = current;
+                let mut i = 0;
+                while i < 16 {
+                    result.bits[i] |= new_set.bits[i];
+                    i = i.wrapping_add(1);
+                }
+                result
+            }
+            SIG_UNBLOCK => {
+                // Remove signals in `set` from the blocked set.
+                let mut result = current;
+                let mut i = 0;
+                while i < 16 {
+                    result.bits[i] &= !new_set.bits[i];
+                    i = i.wrapping_add(1);
+                }
+                result
+            }
+            SIG_SETMASK => {
+                // Replace the blocked set entirely.
+                new_set
+            }
+            _ => {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+        };
+        // SAFETY: single-threaded access.
+        unsafe { core::ptr::addr_of_mut!(BLOCKED_MASK).write(new_mask); }
+    }
+
+    0
 }
 
 /// Wait for a signal.
@@ -1138,18 +1198,138 @@ mod tests {
 
     // -- sigprocmask --
 
+    /// Reset the blocked signal mask to empty.
+    ///
+    /// Must be called at the start of sigprocmask tests because the
+    /// global BLOCKED_MASK persists between tests.
+    fn reset_blocked_mask() {
+        // SAFETY: single-threaded, tests run with --test-threads=1.
+        unsafe { core::ptr::addr_of_mut!(BLOCKED_MASK).write(SigsetT::EMPTY); }
+    }
+
     #[test]
     fn test_sigprocmask_returns_empty_old_set() {
+        reset_blocked_mask();
         let mut oldset = SigsetT { bits: [0xDEAD; 16] };
-        let ret = sigprocmask(0, core::ptr::null(), &raw mut oldset);
+        let ret = sigprocmask(SIG_SETMASK, core::ptr::null(), &raw mut oldset);
         assert_eq!(ret, 0);
         assert_eq!(oldset, SigsetT::EMPTY);
     }
 
     #[test]
     fn test_sigprocmask_null_oldset() {
-        let ret = sigprocmask(0, core::ptr::null(), core::ptr::null_mut());
+        reset_blocked_mask();
+        let ret = sigprocmask(SIG_SETMASK, core::ptr::null(), core::ptr::null_mut());
         assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_sigprocmask_set_mask_round_trip() {
+        reset_blocked_mask();
+        // Set a mask.
+        let mut set = SigsetT::EMPTY;
+        set.bits[0] = 0x0000_0000_0000_2002; // SIGINT(2) + SIGPIPE(13)
+        let ret = sigprocmask(SIG_SETMASK, &raw const set, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+
+        // Read it back.
+        let mut oldset = SigsetT::EMPTY;
+        let ret = sigprocmask(SIG_SETMASK, core::ptr::null(), &raw mut oldset);
+        assert_eq!(ret, 0);
+        assert_eq!(oldset.bits[0], 0x0000_0000_0000_2002);
+    }
+
+    #[test]
+    fn test_sigprocmask_block_adds_signals() {
+        reset_blocked_mask();
+        // Start with SIGINT blocked.
+        let mut set = SigsetT::EMPTY;
+        set.bits[0] = 1 << 1; // SIGINT = signal 2, bit index 1
+        sigprocmask(SIG_SETMASK, &raw const set, core::ptr::null_mut());
+
+        // Block SIGPIPE additionally.
+        let mut add = SigsetT::EMPTY;
+        add.bits[0] = 1 << 12; // SIGPIPE = signal 13, bit index 12
+        let mut old = SigsetT::EMPTY;
+        let ret = sigprocmask(SIG_BLOCK, &raw const add, &raw mut old);
+        assert_eq!(ret, 0);
+        // Old mask should have only SIGINT.
+        assert_eq!(old.bits[0], 1 << 1);
+
+        // New mask should have both.
+        let mut current = SigsetT::EMPTY;
+        sigprocmask(SIG_SETMASK, core::ptr::null(), &raw mut current);
+        assert_eq!(current.bits[0], (1 << 1) | (1 << 12));
+    }
+
+    #[test]
+    fn test_sigprocmask_unblock_removes_signals() {
+        reset_blocked_mask();
+        // Block SIGINT and SIGPIPE.
+        let mut set = SigsetT::EMPTY;
+        set.bits[0] = (1 << 1) | (1 << 12);
+        sigprocmask(SIG_SETMASK, &raw const set, core::ptr::null_mut());
+
+        // Unblock SIGINT.
+        let mut remove = SigsetT::EMPTY;
+        remove.bits[0] = 1 << 1;
+        let ret = sigprocmask(SIG_UNBLOCK, &raw const remove, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+
+        // Only SIGPIPE should remain.
+        let mut current = SigsetT::EMPTY;
+        sigprocmask(SIG_SETMASK, core::ptr::null(), &raw mut current);
+        assert_eq!(current.bits[0], 1 << 12);
+    }
+
+    #[test]
+    fn test_sigprocmask_setmask_replaces() {
+        reset_blocked_mask();
+        // Block SIGINT.
+        let mut set = SigsetT::EMPTY;
+        set.bits[0] = 1 << 1;
+        sigprocmask(SIG_SETMASK, &raw const set, core::ptr::null_mut());
+
+        // Replace with SIGTERM.
+        let mut new = SigsetT::EMPTY;
+        new.bits[0] = 1 << 14; // SIGTERM = 15, bit index 14
+        let mut old = SigsetT::EMPTY;
+        let ret = sigprocmask(SIG_SETMASK, &raw const new, &raw mut old);
+        assert_eq!(ret, 0);
+        // Old should have SIGINT.
+        assert_eq!(old.bits[0], 1 << 1);
+
+        // Current should have only SIGTERM.
+        let mut current = SigsetT::EMPTY;
+        sigprocmask(SIG_SETMASK, core::ptr::null(), &raw mut current);
+        assert_eq!(current.bits[0], 1 << 14);
+    }
+
+    #[test]
+    fn test_sigprocmask_invalid_how() {
+        reset_blocked_mask();
+        let set = SigsetT::EMPTY;
+        let ret = sigprocmask(999, &raw const set, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_sigprocmask_null_set_no_change() {
+        reset_blocked_mask();
+        // Set an initial mask.
+        let mut set = SigsetT::EMPTY;
+        set.bits[0] = 0xFF;
+        sigprocmask(SIG_SETMASK, &raw const set, core::ptr::null_mut());
+
+        // Pass null set — should not change the mask.
+        let mut old = SigsetT::EMPTY;
+        sigprocmask(SIG_SETMASK, core::ptr::null(), &raw mut old);
+        assert_eq!(old.bits[0], 0xFF);
+
+        // Verify it's still unchanged.
+        let mut check = SigsetT::EMPTY;
+        sigprocmask(SIG_SETMASK, core::ptr::null(), &raw mut check);
+        assert_eq!(check.bits[0], 0xFF);
     }
 
     // -- sigsuspend --

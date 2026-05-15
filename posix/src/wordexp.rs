@@ -7,8 +7,8 @@
 //! ## Limitations
 //!
 //! This is a minimal implementation:
-//! - Tilde expansion (`~` → home directory) is not supported (returns
-//!   the literal `~`).
+//! - Tilde expansion (`~` or `~/path` → `$HOME` or `$HOME/path`) is
+//!   supported.  `~user` is not (would need passwd lookup).
 //! - Variable expansion (`$VAR`) is supported for environment variables.
 //! - Command substitution (`` `cmd` `` or `$(cmd)`) is not supported
 //!   (returns `WRDE_CMDSUB` if `WRDE_NOCMD` is set, otherwise the
@@ -312,8 +312,8 @@ struct ExpandedWord {
     len: usize,
 }
 
-/// Expand a single word: strip quotes, expand `$VAR`, handle command
-/// substitution.
+/// Expand a single word: strip quotes, expand `~`, `$VAR`, handle
+/// command substitution.
 fn expand_single_word(
     input: &[u8],
     start: usize,
@@ -325,6 +325,41 @@ fn expand_single_word(
         len: 0,
     };
     let mut rp = start;
+
+    // Tilde expansion: only at the start of a word.
+    // `~` or `~/...` expands to $HOME.  `~user` is not supported
+    // (would need a passwd database lookup).
+    if rp < end && input.get(rp).copied().unwrap_or(0) == b'~' {
+        let next = if rp.wrapping_add(1) < end {
+            input.get(rp.wrapping_add(1)).copied().unwrap_or(0)
+        } else {
+            0 // end of word
+        };
+        // Expand if ~ is alone or followed by /
+        if next == 0 || next == b'/' || rp.wrapping_add(1) >= end {
+            // SAFETY: "HOME\0" is a valid C string on the stack.
+            let home = unsafe { crate::environ::getenv(b"HOME\0".as_ptr()) };
+            if !home.is_null() {
+                // Append HOME value.
+                let mut hi: usize = 0;
+                loop {
+                    // SAFETY: home is a valid C string from getenv.
+                    let hc = unsafe { *home.add(hi) };
+                    if hc == 0 {
+                        break;
+                    }
+                    emit_byte(&mut exp, hc);
+                    hi = hi.wrapping_add(1);
+                }
+            } else {
+                // HOME not set — emit literal ~.
+                emit_byte(&mut exp, b'~');
+            }
+            rp = rp.wrapping_add(1); // Skip the ~
+        }
+        // If next char is something other than / or end, fall through
+        // to normal processing (literal ~user).
+    }
 
     while rp < end {
         let c = input.get(rp).copied().unwrap_or(0);
@@ -1128,5 +1163,89 @@ mod tests {
         let words = split_texts(input);
         assert_eq!(words.len(), 2);
         assert_eq!(words[0], b"he'l'\"l\"o");
+    }
+
+    // =======================================================================
+    // Tilde expansion
+    // =======================================================================
+
+    /// Helper to reset environment and set HOME for tilde tests.
+    fn setup_home(home: &[u8]) {
+        crate::environ::clearenv();
+        unsafe {
+            crate::environ::setenv(
+                b"HOME\0".as_ptr(),
+                home.as_ptr(),
+                1,
+            );
+        }
+    }
+
+    #[test]
+    fn tilde_alone_expands_to_home() {
+        setup_home(b"/users/alice\0");
+        let input = b"~";
+        let result = expand_single_word(input, 0, input.len(), 0);
+        let exp = result.unwrap();
+        assert_eq!(&exp.buf[..exp.len], b"/users/alice");
+    }
+
+    #[test]
+    fn tilde_slash_expands_to_home_slash() {
+        setup_home(b"/home/bob\0");
+        let input = b"~/Documents";
+        let result = expand_single_word(input, 0, input.len(), 0);
+        let exp = result.unwrap();
+        assert_eq!(&exp.buf[..exp.len], b"/home/bob/Documents");
+    }
+
+    #[test]
+    fn tilde_user_not_expanded() {
+        setup_home(b"/home/me\0");
+        // ~otheruser should be left as a literal (we don't do passwd lookups).
+        let input = b"~otheruser";
+        let result = expand_single_word(input, 0, input.len(), 0);
+        let exp = result.unwrap();
+        assert_eq!(&exp.buf[..exp.len], b"~otheruser");
+    }
+
+    #[test]
+    fn tilde_no_home_set_returns_literal() {
+        crate::environ::clearenv();
+        // HOME is not set.
+        let input = b"~";
+        let result = expand_single_word(input, 0, input.len(), 0);
+        let exp = result.unwrap();
+        assert_eq!(&exp.buf[..exp.len], b"~");
+    }
+
+    #[test]
+    fn tilde_slash_no_home_returns_literal_plus_path() {
+        crate::environ::clearenv();
+        let input = b"~/foo";
+        let result = expand_single_word(input, 0, input.len(), 0);
+        let exp = result.unwrap();
+        assert_eq!(&exp.buf[..exp.len], b"~/foo");
+    }
+
+    #[test]
+    fn tilde_not_at_word_start() {
+        setup_home(b"/home/me\0");
+        // Tilde in the middle of a word is literal.
+        let input = b"foo~bar";
+        let result = expand_single_word(input, 0, input.len(), 0);
+        let exp = result.unwrap();
+        assert_eq!(&exp.buf[..exp.len], b"foo~bar");
+    }
+
+    #[test]
+    fn tilde_with_home_trailing_slash() {
+        setup_home(b"/home/user/\0");
+        let input = b"~/bin";
+        let result = expand_single_word(input, 0, input.len(), 0);
+        let exp = result.unwrap();
+        // HOME has trailing slash, path gets /home/user//bin.
+        // This is fine — double slashes are equivalent to single in POSIX.
+        assert_eq!(&exp.buf[..exp.len], b"/home/user//bin");
     }
 }

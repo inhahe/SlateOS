@@ -287,6 +287,71 @@ pub extern "C" fn cpu_count(set: *const CpuSetT) -> i32 {
     count as i32
 }
 
+/// Compute the bitwise AND of two CPU sets (intersection).
+///
+/// `destset = srcset1 & srcset2`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cpu_and(destset: *mut CpuSetT, srcset1: *const CpuSetT, srcset2: *const CpuSetT) {
+    if destset.is_null() || srcset1.is_null() || srcset2.is_null() {
+        return;
+    }
+    // SAFETY: all pointers verified non-null.
+    let mut i: usize = 0;
+    while i < 16 {
+        unsafe { (*destset).bits[i] = (*srcset1).bits[i] & (*srcset2).bits[i]; }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Compute the bitwise OR of two CPU sets (union).
+///
+/// `destset = srcset1 | srcset2`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cpu_or(destset: *mut CpuSetT, srcset1: *const CpuSetT, srcset2: *const CpuSetT) {
+    if destset.is_null() || srcset1.is_null() || srcset2.is_null() {
+        return;
+    }
+    let mut i: usize = 0;
+    while i < 16 {
+        unsafe { (*destset).bits[i] = (*srcset1).bits[i] | (*srcset2).bits[i]; }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Compute the bitwise XOR of two CPU sets (symmetric difference).
+///
+/// `destset = srcset1 ^ srcset2`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cpu_xor(destset: *mut CpuSetT, srcset1: *const CpuSetT, srcset2: *const CpuSetT) {
+    if destset.is_null() || srcset1.is_null() || srcset2.is_null() {
+        return;
+    }
+    let mut i: usize = 0;
+    while i < 16 {
+        unsafe { (*destset).bits[i] = (*srcset1).bits[i] ^ (*srcset2).bits[i]; }
+        i = i.wrapping_add(1);
+    }
+}
+
+/// Test if two CPU sets are equal.
+///
+/// Returns 1 if the sets are identical, 0 otherwise.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn cpu_equal(set1: *const CpuSetT, set2: *const CpuSetT) -> i32 {
+    if set1.is_null() || set2.is_null() {
+        return 0;
+    }
+    let mut i: usize = 0;
+    while i < 16 {
+        // SAFETY: both pointers verified non-null.
+        if unsafe { (*set1).bits[i] != (*set2).bits[i] } {
+            return 0;
+        }
+        i = i.wrapping_add(1);
+    }
+    1
+}
+
 /// Get the CPU number on which the calling thread is running.
 ///
 /// Stub: always returns 0 (single-CPU assumption until SMP is
@@ -569,5 +634,154 @@ mod tests {
         let set = CpuSetT { bits: [0xFF; 16] };
         assert_eq!(cpu_isset(-1, &raw const set), 0);
         assert_eq!(cpu_isset(1024, &raw const set), 0);
+    }
+
+    // -- cpu_and --
+
+    #[test]
+    fn test_cpu_and_basic() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut b = CpuSetT { bits: [0; 16] };
+        let mut dest = CpuSetT { bits: [0xFF; 16] };
+        cpu_set(0, &raw mut a);
+        cpu_set(1, &raw mut a);
+        cpu_set(2, &raw mut a);
+        cpu_set(1, &raw mut b);
+        cpu_set(2, &raw mut b);
+        cpu_set(3, &raw mut b);
+        cpu_and(&raw mut dest, &raw const a, &raw const b);
+        // Intersection: CPUs 1 and 2.
+        assert_eq!(cpu_isset(0, &raw const dest), 0);
+        assert_eq!(cpu_isset(1, &raw const dest), 1);
+        assert_eq!(cpu_isset(2, &raw const dest), 1);
+        assert_eq!(cpu_isset(3, &raw const dest), 0);
+        assert_eq!(cpu_count(&raw const dest), 2);
+    }
+
+    #[test]
+    fn test_cpu_and_disjoint() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut b = CpuSetT { bits: [0; 16] };
+        let mut dest = CpuSetT { bits: [0xFF; 16] };
+        cpu_set(0, &raw mut a);
+        cpu_set(1, &raw mut b);
+        cpu_and(&raw mut dest, &raw const a, &raw const b);
+        assert_eq!(cpu_count(&raw const dest), 0);
+    }
+
+    #[test]
+    fn test_cpu_and_null_safety() {
+        let set = CpuSetT { bits: [0; 16] };
+        let mut dest = CpuSetT { bits: [0xFF; 16] };
+        // Should not crash.
+        cpu_and(core::ptr::null_mut(), &raw const set, &raw const set);
+        cpu_and(&raw mut dest, core::ptr::null(), &raw const set);
+        cpu_and(&raw mut dest, &raw const set, core::ptr::null());
+    }
+
+    // -- cpu_or --
+
+    #[test]
+    fn test_cpu_or_basic() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut b = CpuSetT { bits: [0; 16] };
+        let mut dest = CpuSetT { bits: [0; 16] };
+        cpu_set(0, &raw mut a);
+        cpu_set(1, &raw mut b);
+        cpu_or(&raw mut dest, &raw const a, &raw const b);
+        assert_eq!(cpu_isset(0, &raw const dest), 1);
+        assert_eq!(cpu_isset(1, &raw const dest), 1);
+        assert_eq!(cpu_count(&raw const dest), 2);
+    }
+
+    #[test]
+    fn test_cpu_or_overlapping() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut b = CpuSetT { bits: [0; 16] };
+        let mut dest = CpuSetT { bits: [0; 16] };
+        cpu_set(5, &raw mut a);
+        cpu_set(5, &raw mut b);
+        cpu_set(10, &raw mut b);
+        cpu_or(&raw mut dest, &raw const a, &raw const b);
+        assert_eq!(cpu_isset(5, &raw const dest), 1);
+        assert_eq!(cpu_isset(10, &raw const dest), 1);
+        assert_eq!(cpu_count(&raw const dest), 2);
+    }
+
+    // -- cpu_xor --
+
+    #[test]
+    fn test_cpu_xor_basic() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut b = CpuSetT { bits: [0; 16] };
+        let mut dest = CpuSetT { bits: [0; 16] };
+        cpu_set(0, &raw mut a);
+        cpu_set(1, &raw mut a);
+        cpu_set(1, &raw mut b);
+        cpu_set(2, &raw mut b);
+        cpu_xor(&raw mut dest, &raw const a, &raw const b);
+        // Symmetric difference: CPUs 0 and 2.
+        assert_eq!(cpu_isset(0, &raw const dest), 1);
+        assert_eq!(cpu_isset(1, &raw const dest), 0);
+        assert_eq!(cpu_isset(2, &raw const dest), 1);
+        assert_eq!(cpu_count(&raw const dest), 2);
+    }
+
+    #[test]
+    fn test_cpu_xor_same_sets() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut dest = CpuSetT { bits: [0xFF; 16] };
+        cpu_set(0, &raw mut a);
+        cpu_set(5, &raw mut a);
+        cpu_xor(&raw mut dest, &raw const a, &raw const a);
+        // XOR of a set with itself is empty.
+        assert_eq!(cpu_count(&raw const dest), 0);
+    }
+
+    // -- cpu_equal --
+
+    #[test]
+    fn test_cpu_equal_identical() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut b = CpuSetT { bits: [0; 16] };
+        cpu_set(3, &raw mut a);
+        cpu_set(3, &raw mut b);
+        assert_eq!(cpu_equal(&raw const a, &raw const b), 1);
+    }
+
+    #[test]
+    fn test_cpu_equal_different() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut b = CpuSetT { bits: [0; 16] };
+        cpu_set(3, &raw mut a);
+        cpu_set(4, &raw mut b);
+        assert_eq!(cpu_equal(&raw const a, &raw const b), 0);
+    }
+
+    #[test]
+    fn test_cpu_equal_both_empty() {
+        let a = CpuSetT { bits: [0; 16] };
+        let b = CpuSetT { bits: [0; 16] };
+        assert_eq!(cpu_equal(&raw const a, &raw const b), 1);
+    }
+
+    #[test]
+    fn test_cpu_equal_null_returns_zero() {
+        let a = CpuSetT { bits: [0; 16] };
+        assert_eq!(cpu_equal(core::ptr::null(), &raw const a), 0);
+        assert_eq!(cpu_equal(&raw const a, core::ptr::null()), 0);
+        assert_eq!(cpu_equal(core::ptr::null(), core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_cpu_equal_high_cpus() {
+        let mut a = CpuSetT { bits: [0; 16] };
+        let mut b = CpuSetT { bits: [0; 16] };
+        cpu_set(1023, &raw mut a);
+        cpu_set(1023, &raw mut b);
+        assert_eq!(cpu_equal(&raw const a, &raw const b), 1);
+
+        cpu_set(0, &raw mut a);
+        assert_eq!(cpu_equal(&raw const a, &raw const b), 0);
     }
 }

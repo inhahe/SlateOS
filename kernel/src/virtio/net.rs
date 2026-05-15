@@ -331,39 +331,55 @@ impl VirtioNetDevice {
 
     /// Poll for received packets.
     ///
-    /// Returns `Some((frame_data, length))` if a packet was received,
+    /// Returns `Some(frame_data)` if a packet was received,
     /// `None` if no packets are pending.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn recv(&mut self) -> Option<Vec<u8>> {
-        let used = self.rx_queue.poll_used()?;
-        let (head_idx, total_len) = used;
+        let (head_idx, total_len) = self.rx_queue.poll_used()?;
+        let max_bufs = NUM_RX_BUFS.min(frame::FRAME_SIZE / RX_BUF_SIZE);
 
-        // Free the descriptor chain.
+        // Identify which RX buffer slot this descriptor chain belongs to
+        // by reading the header descriptor's physical address and computing
+        // the offset within our RX frame.  Must be done BEFORE free_chain
+        // because freeing overwrites descriptor metadata.
+        let desc_addr = self.rx_queue.desc_phys_addr(head_idx);
+        let rx_phys_base = self.rx_frame.addr();
+        let buf_idx = if desc_addr >= rx_phys_base {
+            ((desc_addr - rx_phys_base) as usize) / RX_BUF_SIZE
+        } else {
+            // Corrupt descriptor — can't determine slot.
+            self.rx_queue.free_chain(head_idx);
+            self.rx_pending = self.rx_pending.wrapping_sub(1);
+            return None;
+        };
+
+        // Free the descriptor chain (returns descriptors to the free list).
         self.rx_queue.free_chain(head_idx);
         self.rx_pending = self.rx_pending.wrapping_sub(1);
 
-        // The total_len includes the virtio-net header.
-        let frame_len = (total_len as usize).saturating_sub(NET_HDR_SIZE);
-        if frame_len == 0 {
-            // Refill and try again.
-            self.refill_rx_one();
+        // Validate the buffer index.
+        if buf_idx >= max_bufs {
+            crate::serial_println!(
+                "[virtio-net] WARNING: RX desc addr {:#x} maps to invalid slot {}",
+                desc_addr, buf_idx
+            );
             return None;
         }
 
-        // Find which RX buffer this was.
-        // For simplicity, since we pre-populated sequentially, the
-        // head_idx maps to a buffer slot.  However, the device may
-        // return them in any order.  We need to read from the right
-        // buffer based on the descriptor's address.
-        //
-        // Since we used sequential descriptors, head_idx / 2 gives
-        // the buffer index (each chain is 2 descriptors).
-        let buf_idx = (head_idx as usize) / 2;
-        let buf_offset = buf_idx * RX_BUF_SIZE + NET_HDR_SIZE;
+        // The total_len includes the virtio-net header.
+        let frame_len = (total_len as usize).saturating_sub(NET_HDR_SIZE);
+        if frame_len == 0 || frame_len > MAX_FRAME_SIZE {
+            // Empty or oversized frame — discard but recycle the buffer.
+            self.refill_rx_slot(buf_idx);
+            return None;
+        }
 
+        // Read the Ethernet frame data from the correct buffer slot.
+        let buf_offset = buf_idx * RX_BUF_SIZE + NET_HDR_SIZE;
         let mut frame = Vec::with_capacity(frame_len);
-        // SAFETY: rx_virt points to our allocated RX frame; buf_offset
-        // and frame_len are bounded by the frame size.
+        // SAFETY: buf_idx < max_bufs (checked above), so buf_offset + frame_len
+        // ≤ max_bufs * RX_BUF_SIZE ≤ FRAME_SIZE.  rx_virt points to our
+        // exclusively-owned RX frame mapped via HHDM.
         unsafe {
             let src = self.rx_virt.add(buf_offset);
             for i in 0..frame_len {
@@ -371,25 +387,28 @@ impl VirtioNetDevice {
             }
         }
 
-        // Refill the slot.
-        self.refill_rx_one();
+        // Recycle this specific buffer slot back to the device.
+        self.refill_rx_slot(buf_idx);
 
         Some(frame)
     }
 
-    /// Refill one RX buffer slot.
+    /// Resubmit a specific RX buffer slot to the device.
+    ///
+    /// After [`recv`] consumes a buffer, this returns it to the RX
+    /// available ring so the device can fill it with the next packet.
+    /// Unlike the old `refill_rx_one`, this targets the exact slot that
+    /// was freed, avoiding buffer aliasing.
     #[allow(clippy::arithmetic_side_effects)]
-    fn refill_rx_one(&mut self) {
+    fn refill_rx_slot(&mut self, slot: usize) {
         let rx_phys_base = self.rx_frame.addr();
         let max_bufs = NUM_RX_BUFS.min(frame::FRAME_SIZE / RX_BUF_SIZE);
 
-        // Find a free slot (just use a simple sequential approach).
-        if self.rx_pending >= max_bufs as u16 {
-            return;
+        if slot >= max_bufs {
+            return; // Invalid slot — defensive.
         }
 
-        let i = self.rx_pending as usize;
-        let buf_offset = i * RX_BUF_SIZE;
+        let buf_offset = slot * RX_BUF_SIZE;
         let header_phys = rx_phys_base + buf_offset as u64;
         let data_phys = header_phys + NET_HDR_SIZE as u64;
 

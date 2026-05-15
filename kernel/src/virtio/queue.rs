@@ -223,6 +223,18 @@ impl Virtqueue {
         }
     }
 
+    /// Read the physical address stored in descriptor `idx`.
+    ///
+    /// Used by drivers to identify which DMA buffer a completed
+    /// descriptor chain belongs to — e.g., mapping the `head_idx`
+    /// returned by [`poll_used`] back to a buffer slot index.
+    ///
+    /// Must be called **before** [`free_chain`], which overwrites
+    /// descriptor metadata.
+    pub fn desc_phys_addr(&self, idx: u16) -> u64 {
+        self.desc(idx).addr
+    }
+
     /// Get a reference to descriptor `idx`.
     fn desc(&self, idx: u16) -> &VirtqDesc {
         // SAFETY: idx is within 0..queue_size (ensured by alloc_desc).

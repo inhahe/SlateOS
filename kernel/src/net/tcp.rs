@@ -167,6 +167,12 @@ const RTO_MAX_NS: u64 = 60_000_000_000;
 /// Initial RTO before any measurements (1 second, per RFC 6298 §2.1).
 const RTO_INITIAL_NS: u64 = 1_000_000_000;
 
+/// Maximum number of consecutive RTO-based retransmissions before
+/// aborting the connection.  Matches Linux `tcp_retries2` default (15).
+/// With exponential backoff starting at 1s and capping at 60s, this
+/// covers roughly 1+2+4+8+16+32+60×9 ≈ 603 seconds (~10 minutes).
+const MAX_RETRANSMITS: u16 = 15;
+
 /// Alpha factor for SRTT: 1/8 (shift right by 3).  RFC 6298 §2.3.
 const SRTT_ALPHA_SHIFT: u32 = 3;
 
@@ -305,6 +311,11 @@ struct TcpConnection {
     local_read_closed: bool,
     /// Retransmit counter (incremented each poll cycle).
     retransmit_timer: u32,
+    /// Number of consecutive RTO-based retransmissions without receiving
+    /// an ACK.  Incremented in `tick_retransmit()`, reset to 0 when an
+    /// ACK advances `snd_una`.  Connection is aborted when this reaches
+    /// `MAX_RETRANSMITS` (15), matching Linux `tcp_retries2`.
+    retransmit_count: u16,
 
     // -- RTT estimation (Jacobson/Karels, RFC 6298) --
 
@@ -511,6 +522,7 @@ impl TcpConnection {
             local_write_closed: false,
             local_read_closed: false,
             retransmit_timer: 0,
+            retransmit_count: 0,
             srtt_ns_x8: 0,
             rttvar_ns_x4: 0,
             rto_ns: RTO_INITIAL_NS,
@@ -3862,8 +3874,10 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 let bytes_acked = conn.snd_una.wrapping_sub(old_una);
 
                 if bytes_acked > 0 {
-                    // New data acknowledged — reset duplicate ACK counter.
+                    // New data acknowledged — reset retransmit and dup-ACK
+                    // counters.  Forward progress means the path is working.
                     conn.dup_ack_count = 0;
+                    conn.retransmit_count = 0;
 
                     // Trim retransmit buffer: discard acknowledged data.
                     tx_buffer_trim(conn, bytes_acked);
@@ -4089,6 +4103,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 let bytes_acked = conn.snd_una.wrapping_sub(old_una);
                 if bytes_acked > 0 {
                     conn.dup_ack_count = 0;
+                    conn.retransmit_count = 0;
                     tx_buffer_trim(conn, bytes_acked);
                     if conn.ts_ok {
                         if let Some((_tsval, tsecr)) = seg_opts.timestamp {
@@ -4660,6 +4675,21 @@ pub fn tick_retransmit() {
             continue;
         }
 
+        // Check retransmit limit — abort if exceeded.
+        conn.retransmit_count = conn.retransmit_count.saturating_add(1);
+        if conn.retransmit_count > MAX_RETRANSMITS {
+            crate::serial_println!(
+                "[tcp] SYN retransmit exhausted ({} retries) for port {} → {}:{}",
+                conn.retransmit_count, conn.local_port, conn.remote_ip, conn.remote_port
+            );
+            conn.last_error = TCP_ERR_TIMEDOUT;
+            conn.active = false;
+            conn.tx_buffer.clear();
+            conn.nagle_buf.clear();
+            conn.ooo_buf.clear();
+            continue;
+        }
+
         // Retransmit the SYN.
         let lp = conn.local_port;
         let ri = conn.remote_ip;
@@ -4672,8 +4702,8 @@ pub fn tick_retransmit() {
         conn.last_activity_ns = now;
 
         crate::serial_println!(
-            "[tcp] SYN retransmit to {}:{} (port {}, rto={}ms)",
-            ri, rp, lp, conn.rto_ns / 1_000_000
+            "[tcp] SYN retransmit #{} to {}:{} (port {}, rto={}ms)",
+            conn.retransmit_count, ri, rp, lp, conn.rto_ns / 1_000_000
         );
 
         // Drop lock before sending.
@@ -4709,6 +4739,21 @@ pub fn tick_retransmit() {
             }
         );
         if elapsed < conn.rto_ns {
+            continue;
+        }
+
+        // Check retransmit limit for FIN/data retransmission.
+        conn.retransmit_count = conn.retransmit_count.saturating_add(1);
+        if conn.retransmit_count > MAX_RETRANSMITS {
+            crate::serial_println!(
+                "[tcp] {:?} retransmit exhausted ({} retries) for port {} — aborting",
+                conn.state, conn.retransmit_count, conn.local_port
+            );
+            conn.last_error = TCP_ERR_TIMEDOUT;
+            conn.active = false;
+            conn.tx_buffer.clear();
+            conn.nagle_buf.clear();
+            conn.ooo_buf.clear();
             continue;
         }
 
@@ -4780,7 +4825,21 @@ pub fn tick_retransmit() {
             continue;
         }
 
-        // RTO expired — retransmit.
+        // RTO expired — check retransmit limit before resending.
+        conn.retransmit_count = conn.retransmit_count.saturating_add(1);
+        if conn.retransmit_count > MAX_RETRANSMITS {
+            crate::serial_println!(
+                "[tcp] Retransmit exhausted ({} retries) for port {} → {}:{} — aborting",
+                conn.retransmit_count, conn.local_port, conn.remote_ip, conn.remote_port
+            );
+            conn.last_error = TCP_ERR_TIMEDOUT;
+            conn.active = false;
+            conn.tx_buffer.clear();
+            conn.nagle_buf.clear();
+            conn.ooo_buf.clear();
+            continue;
+        }
+
         if let Some((lp, ri, rp, seq, ack, wnd, data, len, r_ts_ok, r_ts_recent)) = retransmit_from_buffer(conn) {
             // Exponential backoff (RFC 6298 §5.5).
             conn.rto_ns = conn.rto_ns.saturating_mul(2).min(RTO_MAX_NS);
@@ -4791,8 +4850,8 @@ pub fn tick_retransmit() {
             let rto_ecn = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
 
             crate::serial_println!(
-                "[tcp] RTO retransmit: {} bytes from seq {} (port {}, rto={}ms)",
-                len, seq, lp, conn.rto_ns / 1_000_000
+                "[tcp] RTO retransmit #{}: {} bytes from seq {} (port {}, rto={}ms)",
+                conn.retransmit_count, len, seq, lp, conn.rto_ns / 1_000_000
             );
 
             // Drop lock before sending.

@@ -599,6 +599,22 @@ mod tests {
         assert_eq!(POSIX_MADV_WILLNEED, MADV_WILLNEED);
         assert_eq!(POSIX_MADV_DONTNEED, MADV_DONTNEED);
     }
+
+    // -- mincore returns ENOSYS --
+
+    #[test]
+    fn test_mincore_returns_enosys() {
+        crate::errno::set_errno(0);
+        let ret = mincore(core::ptr::null_mut(), 4096, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mincore_with_addr() {
+        let ret = mincore(0x1000 as *mut core::ffi::c_void, 4096, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -704,4 +720,23 @@ pub extern "C" fn mremap(
 ) -> *mut core::ffi::c_void {
     errno::set_errno(errno::ENOSYS);
     MAP_FAILED
+}
+
+// ---------------------------------------------------------------------------
+// mincore — query page residency
+// ---------------------------------------------------------------------------
+
+/// Determine whether pages are resident in memory.
+///
+/// Stub: returns -1 with ENOSYS.  A real implementation would query
+/// the page table to determine which pages in the range are physically
+/// resident.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn mincore(
+    _addr: *mut core::ffi::c_void,
+    _length: SizeT,
+    _vec: *mut u8,
+) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
 }

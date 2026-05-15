@@ -125,16 +125,25 @@ impl FilterBitmap {
 
     /// Count how many syscalls are allowed.
     fn count_allowed(&self) -> usize {
+        let full_words = MAX_SYSCALL_NR / 64;
+        let remaining_bits = MAX_SYSCALL_NR % 64;
+
         let mut count = 0usize;
-        for &word in &self.words {
+
+        // Count all bits in fully-covered words.
+        for word in self.words.iter().take(full_words) {
             count = count.saturating_add(word.count_ones() as usize);
         }
-        // The bitmap may have trailing bits beyond MAX_SYSCALL_NR
-        // (BITMAP_WORDS × 64 can exceed MAX_SYSCALL_NR).  Cap the
-        // count so it reflects only valid syscall numbers.
-        if count > MAX_SYSCALL_NR {
-            count = MAX_SYSCALL_NR;
+
+        // For the partial final word, mask off bits beyond MAX_SYSCALL_NR.
+        if remaining_bits > 0 {
+            if let Some(&last_word) = self.words.get(full_words) {
+                // Keep only the lower `remaining_bits` bits.
+                let mask = (1u64 << remaining_bits).wrapping_sub(1);
+                count = count.saturating_add((last_word & mask).count_ones() as usize);
+            }
         }
+
         count
     }
 
@@ -559,7 +568,7 @@ pub fn self_test() {
     // Test 5: Deny count tracking.
     let _ = check(200, 10); // denied
     let _ = check(200, 10); // denied again
-    assert_eq!(deny_count(200), 4); // 2 from test 4 + 2 from test 5
+    assert_eq!(deny_count(200), 5); // 3 from test 4 (check 10,11,12) + 2 from test 5
     serial_println!("[scfilter]   Deny count tracking: OK");
 
     // Test 6: Install deny-all filter.

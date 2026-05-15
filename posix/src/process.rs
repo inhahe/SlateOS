@@ -553,6 +553,33 @@ pub extern "C" fn umount2(_target: *const u8, _flags: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// reboot — system reboot
+// ---------------------------------------------------------------------------
+
+/// Linux reboot magic values.
+pub const LINUX_REBOOT_MAGIC1: u32 = 0xfee1_dead;
+pub const LINUX_REBOOT_MAGIC2: u32 = 672274793;
+
+/// Reboot commands.
+pub const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
+pub const LINUX_REBOOT_CMD_HALT: u32 = 0xCDEF0123;
+pub const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321FEDC;
+pub const LINUX_REBOOT_CMD_CAD_ON: u32 = 0x89ABCDEF;
+pub const LINUX_REBOOT_CMD_CAD_OFF: u32 = 0;
+
+/// Reboot the system.
+///
+/// Stub: returns -1 with EPERM.  A real implementation would validate
+/// the magic values and send a shutdown/reboot command to the kernel.
+/// We stub this as EPERM because unprivileged processes should not
+/// be able to reboot.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn reboot(_cmd: i32) -> i32 {
+    errno::set_errno(errno::EPERM);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1055,5 +1082,39 @@ mod tests {
     fn test_getsid_zero_returns_our_sid() {
         reset_pg();
         assert_eq!(getsid(0), 42);
+    }
+
+    // -- reboot stub --
+
+    #[test]
+    fn test_reboot_returns_eperm() {
+        crate::errno::set_errno(0);
+        assert_eq!(reboot(LINUX_REBOOT_CMD_RESTART as i32), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    #[test]
+    fn test_reboot_halt() {
+        assert_eq!(reboot(LINUX_REBOOT_CMD_HALT as i32), -1);
+    }
+
+    #[test]
+    fn test_reboot_power_off() {
+        assert_eq!(reboot(LINUX_REBOOT_CMD_POWER_OFF as i32), -1);
+    }
+
+    // -- reboot constants --
+
+    #[test]
+    fn test_reboot_magic_values() {
+        assert_eq!(LINUX_REBOOT_MAGIC1, 0xfee1_dead);
+        assert_eq!(LINUX_REBOOT_MAGIC2, 672274793);
+    }
+
+    #[test]
+    fn test_reboot_cmd_constants_distinct() {
+        assert_ne!(LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_CMD_HALT);
+        assert_ne!(LINUX_REBOOT_CMD_HALT, LINUX_REBOOT_CMD_POWER_OFF);
+        assert_ne!(LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_CMD_POWER_OFF);
     }
 }

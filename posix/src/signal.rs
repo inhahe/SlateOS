@@ -344,6 +344,32 @@ pub extern "C" fn sigprocmask(
     0
 }
 
+/// Examine and change the signal mask of the calling thread.
+///
+/// Identical to `sigprocmask` in our single-threaded implementation.
+/// POSIX specifies that `pthread_sigmask` is the thread-safe version
+/// of `sigprocmask`.
+///
+/// Returns 0 on success, or an error number directly (not via errno).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_sigmask(
+    how: i32,
+    set: *const SigsetT,
+    oldset: *mut SigsetT,
+) -> i32 {
+    // In our single-threaded model, pthread_sigmask is identical to
+    // sigprocmask.  The only difference per POSIX is that
+    // pthread_sigmask returns the error code directly instead of
+    // returning -1 and setting errno.
+    let ret = sigprocmask(how, set, oldset);
+    if ret < 0 {
+        // sigprocmask sets errno — extract it as the return value.
+        errno::get_errno()
+    } else {
+        0
+    }
+}
+
 /// Wait for a signal.
 ///
 /// Stub: sets errno to EINTR and returns -1 (POSIX specifies
@@ -1624,6 +1650,67 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(raise(0), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- pthread_sigmask --
+
+    #[test]
+    fn test_pthread_sigmask_get_current() {
+        let mut oldset = SigsetT::EMPTY;
+        let ret = pthread_sigmask(SIG_SETMASK, core::ptr::null(), &raw mut oldset);
+        assert_eq!(ret, 0, "pthread_sigmask should succeed with null set");
+    }
+
+    #[test]
+    fn test_pthread_sigmask_block() {
+        // Save current mask.
+        let mut old = SigsetT::EMPTY;
+        pthread_sigmask(SIG_SETMASK, core::ptr::null(), &raw mut old);
+
+        // Block signal 10.
+        let mut block = SigsetT::EMPTY;
+        unsafe { sigaddset(&raw mut block, 10); }
+        let ret = pthread_sigmask(SIG_BLOCK, &raw const block, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+
+        // Check it's blocked.
+        let mut current = SigsetT::EMPTY;
+        pthread_sigmask(SIG_SETMASK, core::ptr::null(), &raw mut current);
+        assert_ne!(unsafe { sigismember(&raw const current, 10) }, 0, "Signal 10 should be blocked");
+
+        // Restore.
+        pthread_sigmask(SIG_SETMASK, &raw const old, core::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_pthread_sigmask_invalid_how() {
+        let set = SigsetT::EMPTY;
+        let ret = pthread_sigmask(999, &raw const set, core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL, "Invalid how should return EINVAL");
+    }
+
+    #[test]
+    fn test_pthread_sigmask_unblock() {
+        // Save current mask.
+        let mut old = SigsetT::EMPTY;
+        pthread_sigmask(SIG_SETMASK, core::ptr::null(), &raw mut old);
+
+        // Block signal 5.
+        let mut block = SigsetT::EMPTY;
+        unsafe { sigaddset(&raw mut block, 5); }
+        pthread_sigmask(SIG_BLOCK, &raw const block, core::ptr::null_mut());
+
+        // Unblock signal 5.
+        let ret = pthread_sigmask(SIG_UNBLOCK, &raw const block, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+
+        // Verify unblocked.
+        let mut current = SigsetT::EMPTY;
+        pthread_sigmask(SIG_SETMASK, core::ptr::null(), &raw mut current);
+        assert_eq!(unsafe { sigismember(&raw const current, 5) }, 0, "Signal 5 should be unblocked");
+
+        // Restore.
+        pthread_sigmask(SIG_SETMASK, &raw const old, core::ptr::null_mut());
     }
 
 }

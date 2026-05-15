@@ -178,6 +178,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     }
 }
 
+pub mod aio;
 pub mod assert;
 pub mod crt;
 pub mod ctype;

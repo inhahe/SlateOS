@@ -4318,4 +4318,61 @@ mod tests {
         let r2 = copysignf(-0.0, 1.0);
         assert_eq!(r2.to_bits(), 0.0f32.to_bits(), "copysignf(-0, 1) = +0");
     }
+
+    // -----------------------------------------------------------------------
+    // __copysign (GNU alias)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_copysign_alias_positive() {
+        let r = __copysign(3.0, 1.0);
+        assert_eq!(r, 3.0);
+    }
+
+    #[test]
+    fn test_copysign_alias_negative() {
+        let r = __copysign(3.0, -1.0);
+        assert_eq!(r, -3.0);
+    }
+
+    #[test]
+    fn test_copysign_alias_matches_copysign() {
+        let vals = [1.0, -1.0, 0.0, f64::INFINITY, f64::NAN];
+        for &x in &vals {
+            for &y in &vals {
+                let a = __copysign(x, y);
+                let b = copysign(x, y);
+                assert_eq!(a.to_bits(), b.to_bits(),
+                    "__copysign({x}, {y}) should match copysign");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // gamma (deprecated alias for lgamma)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gamma_is_lgamma() {
+        let vals = [1.0, 2.0, 5.0, 0.5, 10.0];
+        for &x in &vals {
+            #[allow(clippy::float_cmp)]
+            {
+                assert_eq!(gamma(x), lgamma(x),
+                    "gamma({x}) should equal lgamma({x})");
+            }
+        }
+    }
+
+    #[test]
+    fn test_gamma_one() {
+        // gamma(1) = lgamma(1) = ln(0!) = 0.
+        assert_approx(gamma(1.0), 0.0, 1e-6, "gamma(1) ≈ 0");
+    }
+
+    #[test]
+    fn test_gamma_two() {
+        // gamma(2) = lgamma(2) = ln(1!) = 0.
+        assert_approx(gamma(2.0), 0.0, 1e-6, "gamma(2) ≈ 0");
+    }
 }

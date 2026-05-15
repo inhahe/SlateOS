@@ -53,6 +53,7 @@ const SYS_PROCESS_TRY_WAIT: u64 = 507;
 #[allow(dead_code)] // Services call this, not init itself.
 const SYS_NOTIFY_READY: u64 = 508;
 const SYS_PROCESS_IS_READY: u64 = 509;
+const SYS_PROCESS_SPAWN_EX: u64 = 517;
 const SYS_FS_READ_FILE: u64 = 600;
 const SYS_FS_WRITE_FILE: u64 = 601;
 const SYS_FS_DELETE: u64 = 602;
@@ -286,8 +287,9 @@ fn fs_rmdir(path: &[u8]) -> i64 {
     )
 }
 
-/// Spawn a new process from ELF data in memory.
+/// Spawn a new process from ELF data in memory (simple variant).
 /// Returns the child PID (positive) or negative error.
+#[allow(dead_code)]
 fn process_spawn(elf: &[u8], name: &[u8]) -> i64 {
     syscall4(
         SYS_PROCESS_SPAWN,
@@ -296,6 +298,58 @@ fn process_spawn(elf: &[u8], name: &[u8]) -> i64 {
         name.as_ptr() as u64,
         name.len() as u64,
     )
+}
+
+/// Extended spawn arguments struct (matches kernel's SpawnExArgs layout).
+#[repr(C)]
+struct SpawnExArgs {
+    elf_ptr: u64,
+    elf_len: u64,
+    name_ptr: u64,
+    name_len: u64,
+    fd_map_ptr: u64,
+    fd_map_count: u64,
+    argv_ptr: u64,
+    argv_len: u64,
+    argc: u64,
+    envp_ptr: u64,
+    envp_len: u64,
+    envc: u64,
+}
+
+/// Spawn a process with arguments and environment variables.
+///
+/// `elf`: raw ELF binary data.
+/// `name`: process name.
+/// `argv_data`: packed null-terminated argument strings.
+/// `argc`: number of arguments.
+/// `envp_data`: packed null-terminated environment strings.
+/// `envc`: number of environment variables.
+///
+/// Returns: child PID (positive) or negative error.
+fn process_spawn_ex(
+    elf: &[u8],
+    name: &[u8],
+    argv_data: &[u8],
+    argc: usize,
+    envp_data: &[u8],
+    envc: usize,
+) -> i64 {
+    let args = SpawnExArgs {
+        elf_ptr: elf.as_ptr() as u64,
+        elf_len: elf.len() as u64,
+        name_ptr: name.as_ptr() as u64,
+        name_len: name.len() as u64,
+        fd_map_ptr: 0,
+        fd_map_count: 0,
+        argv_ptr: argv_data.as_ptr() as u64,
+        argv_len: argv_data.len() as u64,
+        argc: argc as u64,
+        envp_ptr: envp_data.as_ptr() as u64,
+        envp_len: envp_data.len() as u64,
+        envc: envc as u64,
+    };
+    syscall1(SYS_PROCESS_SPAWN_EX, &args as *const SpawnExArgs as u64)
 }
 
 /// Wait for a child process to exit.
@@ -486,6 +540,16 @@ const BACKOFF_MULTIPLIER: u32 = 1;
 
 /// How long a service must run before we reset its backoff (10 seconds).
 const BACKOFF_RESET_THRESHOLD_NS: u64 = 10_000_000_000;
+
+/// Maximum size of packed argv/envp data for `process_spawn_ex()`.
+const MAX_PACKED_ARGS: usize = 1024;
+
+/// Default environment passed to spawned processes.
+/// Packed null-terminated format: "PATH=/bin\0".
+const DEFAULT_ENVP: &[u8] = b"PATH=/bin\0";
+
+/// Number of entries in `DEFAULT_ENVP`.
+const DEFAULT_ENVP_COUNT: usize = 1;
 
 /// A registered service entry.
 struct Service {
@@ -772,7 +836,17 @@ impl ServiceRegistry {
         let elf_len = result as usize;
         let elf_data = &elf_buf[..elf_len];
 
-        let pid = process_spawn(elf_data, name);
+        // Build argv: argv[0] = service path (POSIX convention).
+        let mut argv_buf = [0u8; MAX_PACKED_ARGS];
+        argv_buf[..path_len].copy_from_slice(path);
+        // Null terminator already at path_len (buffer is zero-initialized).
+        let argv_total = path_len + 1;
+
+        let pid = process_spawn_ex(
+            elf_data, name,
+            &argv_buf[..argv_total], 1,
+            DEFAULT_ENVP, DEFAULT_ENVP_COUNT,
+        );
         if pid < 0 {
             print("[svc] Failed to spawn ");
             console_write(name);
@@ -1151,20 +1225,26 @@ fn cmd_rm(args: &[u8]) {
     }
 }
 
-/// `spawn <path>` — load an ELF from the filesystem and run it.
+/// `spawn <path> [args...]` — load an ELF from the filesystem and run
+/// it, optionally passing command-line arguments.  The path becomes
+/// argv[0]; any additional words become argv[1..].  A default
+/// environment (PATH=/bin) is always passed.
 fn cmd_spawn(args: &[u8]) {
     if args.is_empty() {
         print("spawn: missing path\n");
         return;
     }
 
+    // First word is the ELF path, remaining words are arguments.
+    let (path, remaining_args) = split_first_word(args);
+
     // Read the ELF from the filesystem.
     // 64 KiB max — init has no heap, so this is a stack buffer.
     let mut elf_buf = [0u8; 65536];
-    let result = fs_read_file(args, &mut elf_buf);
+    let result = fs_read_file(path, &mut elf_buf);
     if result < 0 {
         print("spawn: failed to read ");
-        console_write(args);
+        console_write(path);
         print(": error ");
         print_i64(result);
         print("\n");
@@ -1178,22 +1258,66 @@ fn cmd_spawn(args: &[u8]) {
     let name = {
         let mut last_slash = 0;
         let mut i = 0;
-        while i < args.len() {
-            if args[i] == b'/' {
+        while i < path.len() {
+            if path[i] == b'/' {
                 last_slash = i + 1;
             }
             i += 1;
         }
-        &args[last_slash..]
+        &path[last_slash..]
     };
 
+    // Build packed argv: [path\0arg1\0arg2\0...]
+    let mut argv_data = [0u8; MAX_PACKED_ARGS];
+    let mut argv_pos: usize = 0;
+    let mut argc: usize = 0;
+
+    // argv[0] = path.
+    if path.len() < MAX_PACKED_ARGS {
+        argv_data[argv_pos..argv_pos + path.len()].copy_from_slice(path);
+        argv_pos += path.len();
+        argv_data[argv_pos] = 0;
+        argv_pos += 1;
+        argc += 1;
+    }
+
+    // Parse remaining arguments (space-separated).
+    let mut rest = remaining_args;
+    while !rest.is_empty() && argc < 32 {
+        let (word, next) = split_first_word(rest);
+        if word.is_empty() {
+            break;
+        }
+        if argv_pos + word.len() + 1 > MAX_PACKED_ARGS {
+            print("spawn: argument list too long\n");
+            return;
+        }
+        argv_data[argv_pos..argv_pos + word.len()].copy_from_slice(word);
+        argv_pos += word.len();
+        argv_data[argv_pos] = 0;
+        argv_pos += 1;
+        argc += 1;
+        rest = next;
+    }
+
     print("Spawning ");
-    console_write(args);
+    console_write(path);
+    if argc > 1 {
+        print(" with ");
+        #[allow(clippy::arithmetic_side_effects)]
+        let extra = argc as u64 - 1;
+        print_u64(extra);
+        print(" arg(s)");
+    }
     print(" (");
     print_u64(elf_len as u64);
     print(" bytes)...\n");
 
-    let pid = process_spawn(elf_data, name);
+    let pid = process_spawn_ex(
+        elf_data, name,
+        &argv_data[..argv_pos], argc,
+        DEFAULT_ENVP, DEFAULT_ENVP_COUNT,
+    );
     if pid < 0 {
         print("spawn: error ");
         print_i64(pid);
@@ -1452,7 +1576,7 @@ fn execute(line: &[u8], registry: &mut ServiceRegistry) {
         print("  mkdir <path>   - create directory\n");
         print("  rmdir <path>   - remove empty directory\n");
         print("  rm <path>      - delete a file\n");
-        print("  spawn <path>   - run an ELF program (blocking)\n");
+        print("  spawn <p> [args] - run an ELF program (blocking)\n");
         print("  svc start <p>  - register & start a service\n");
         print("  svc stop <n>   - stop a service\n");
         print("  svc restart <n>- restart a service\n");

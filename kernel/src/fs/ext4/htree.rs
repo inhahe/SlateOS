@@ -1086,41 +1086,57 @@ fn write_leaf_entries(
 #[allow(clippy::too_many_arguments)]
 fn add_dx_entry(
     driver: &mut Ext4Driver,
-    _dir_ino: u32,
-    _dir_inode: &mut super::ondisk::Ext4Inode,
+    dir_ino: u32,
+    dir_inode: &mut super::ondisk::Ext4Inode,
     root_phys: u64,
     hash: u32,
     block: u32,
     indirect_levels: u8,
     _target_leaf_logical: u32,
 ) -> KernelResult<()> {
-    // For indirect_levels == 0: add directly to dx_root.
-    // For indirect_levels == 1: we'd need to find the correct dx_node and add there.
-    // We only support level 0 for now (covers most real-world directories).
-
-    if indirect_levels > 0 {
-        // TODO: Support adding entries to dx_nodes at indirect level 1.
-        // For now, return an error that will cause the caller to fall back.
-        return Err(KernelError::NotSupported);
+    if indirect_levels == 0 {
+        // Direct: add entry to the dx_root's entry array.
+        add_dx_entry_to_node(driver, root_phys, DX_ROOT_ENTRIES_OFFSET, hash, block)
+    } else if indirect_levels == 1 {
+        // Single indirect: find the correct dx_node, then add there.
+        add_dx_entry_indirect(driver, dir_ino, dir_inode, root_phys, hash, block)
+    } else {
+        // Two-level indirect — very rare, not supported.
+        Err(KernelError::NotSupported)
     }
+}
 
-    let mut root_data = driver.read_block(root_phys)?;
+/// Add a (hash, block) entry to a dx_node or dx_root entry array.
+///
+/// `node_phys` is the physical block address of the node.
+/// `entries_base` is the byte offset of the first DxEntry (DxCountLimit)
+/// within the block — `DX_ROOT_ENTRIES_OFFSET` for the root, or
+/// `DX_NODE_HEADER_SIZE` for intermediate nodes.
+fn add_dx_entry_to_node(
+    driver: &mut Ext4Driver,
+    node_phys: u64,
+    entries_base: usize,
+    hash: u32,
+    block: u32,
+) -> KernelResult<()> {
+    let mut node_data = driver.read_block(node_phys)?;
 
     // Read current count/limit.
-    let cl_bytes = root_data
-        .get(DX_ROOT_ENTRIES_OFFSET..DX_ROOT_ENTRIES_OFFSET + 4)
+    let cl_bytes = node_data
+        .get(entries_base..entries_base + 4)
         .ok_or(KernelError::IoError)?;
     let cl: DxCountLimit = read_struct_pub(cl_bytes)?;
 
     if cl.count >= cl.limit {
-        // Root is full — would need to promote to indirect level.
-        // Not supported yet.
+        // Node is full — would need to split the dx_node.
+        // dx_node splitting is extremely rare (requires thousands of files
+        // per hash bucket).  Return NotSupported; the caller will fall back
+        // to a non-htree path.
         return Err(KernelError::NotSupported);
     }
 
     // Insert the new (hash, block) entry at the correct sorted position.
     let count = cl.count as usize;
-    let entries_base = DX_ROOT_ENTRIES_OFFSET;
 
     // Read all current entries.
     let mut dx_entries: Vec<(u32, u32)> = Vec::with_capacity(count);
@@ -1128,11 +1144,11 @@ fn add_dx_entry(
         let off = entries_base + i * 8;
         if i == 0 {
             // Entry 0 is the count/limit + default block.
-            let default_block = read_u32(&root_data, off + 4)?;
+            let default_block = read_u32(&node_data, off + 4)?;
             dx_entries.push((0, default_block));
         } else {
-            let h = read_u32(&root_data, off)?;
-            let b = read_u32(&root_data, off + 4)?;
+            let h = read_u32(&node_data, off)?;
+            let b = read_u32(&node_data, off + 4)?;
             dx_entries.push((h, b));
         }
     }
@@ -1151,10 +1167,10 @@ fn add_dx_entry(
 
     // Write updated count.
     let new_count = (count + 1) as u16;
-    if let Some(d) = root_data.get_mut(entries_base..entries_base + 2) {
+    if let Some(d) = node_data.get_mut(entries_base..entries_base + 2) {
         d.copy_from_slice(&cl.limit.to_le_bytes());
     }
-    if let Some(d) = root_data.get_mut(entries_base + 2..entries_base + 4) {
+    if let Some(d) = node_data.get_mut(entries_base + 2..entries_base + 4) {
         d.copy_from_slice(&new_count.to_le_bytes());
     }
 
@@ -1163,23 +1179,72 @@ fn add_dx_entry(
         let off = entries_base + i * 8;
         if i == 0 {
             // Entry 0: keep count/limit in first 4 bytes, write block in next 4.
-            if let Some(d) = root_data.get_mut(off + 4..off + 8) {
+            if let Some(d) = node_data.get_mut(off + 4..off + 8) {
                 d.copy_from_slice(&b.to_le_bytes());
             }
         } else {
-            if let Some(d) = root_data.get_mut(off..off + 4) {
+            if let Some(d) = node_data.get_mut(off..off + 4) {
                 d.copy_from_slice(&h.to_le_bytes());
             }
-            if let Some(d) = root_data.get_mut(off + 4..off + 8) {
+            if let Some(d) = node_data.get_mut(off + 4..off + 8) {
                 d.copy_from_slice(&b.to_le_bytes());
             }
         }
     }
 
-    // Write the updated root block.
-    driver.write_block_raw(root_phys, &root_data)?;
+    // Write the updated node block.
+    driver.write_block_raw(node_phys, &node_data)?;
 
     Ok(())
+}
+
+/// Handle `add_dx_entry` for indirect_levels == 1.
+///
+/// The dx_root's entries point to intermediate dx_node blocks, which
+/// in turn point to leaf blocks.  We need to:
+///
+/// 1. Read the dx_root to find which dx_node covers our hash range.
+/// 2. Map the dx_node's logical block number to a physical block.
+/// 3. Add the new (hash, block) entry to that dx_node.
+///
+/// Based on Linux `fs/ext4/namei.c` `ext4_dx_add_entry` with
+/// `levels > 0`.
+fn add_dx_entry_indirect(
+    driver: &mut Ext4Driver,
+    dir_ino: u32,
+    dir_inode: &mut super::ondisk::Ext4Inode,
+    root_phys: u64,
+    hash: u32,
+    block: u32,
+) -> KernelResult<()> {
+    let root_data = driver.read_block(root_phys)?;
+
+    // Read the root's count/limit to find which dx_node covers our hash.
+    let cl_bytes = root_data
+        .get(DX_ROOT_ENTRIES_OFFSET..DX_ROOT_ENTRIES_OFFSET + 4)
+        .ok_or(KernelError::IoError)?;
+    let root_cl: DxCountLimit = read_struct_pub(cl_bytes)?;
+
+    // Find the dx_node block that covers our hash.  At indirect level 1,
+    // the root's entries point to dx_node blocks (not leaves).
+    let dx_node_logical = find_leaf_block(
+        &root_data,
+        DX_ROOT_ENTRIES_OFFSET,
+        root_cl.count as usize,
+        hash,
+    )?;
+
+    // Map logical → physical for the dx_node.
+    let dx_node_phys = match driver.logical_to_physical(
+        dir_ino, dir_inode, u64::from(dx_node_logical),
+    ) {
+        Ok(Some(pb)) => pb,
+        _ => return Err(KernelError::IoError),
+    };
+
+    // Add the new entry to the dx_node.  dx_nodes have entries starting
+    // at DX_NODE_HEADER_SIZE (8 bytes past the fake dir entry header).
+    add_dx_entry_to_node(driver, dx_node_phys, DX_NODE_HEADER_SIZE, hash, block)
 }
 
 // ---------------------------------------------------------------------------

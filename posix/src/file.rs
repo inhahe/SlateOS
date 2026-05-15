@@ -1803,13 +1803,33 @@ pub extern "C" fn lchown(_path: *const u8, _owner: UidT, _group: GidT) -> i32 {
     0
 }
 
+/// Process-local file mode creation mask.
+///
+/// Initialized to 0o022 (typical POSIX default: owner rw, group/other r).
+/// umask() reads and writes this value atomically (single-threaded).
+static mut UMASK_VALUE: ModeT = 0o022;
+
 /// Set file mode creation mask.
 ///
-/// Stub: returns 0o022 (previous mask) and ignores the new mask.
+/// Stores the new mask and returns the previous one.  While the kernel
+/// doesn't enforce permissions yet, this gives correct POSIX semantics
+/// for programs that query or chain umask values.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn umask(_cmask: ModeT) -> ModeT {
-    // No permission system yet — return a typical default mask.
-    0o022
+pub extern "C" fn umask(cmask: ModeT) -> ModeT {
+    // SAFETY: Single-threaded access to UMASK_VALUE.
+    let previous = unsafe { core::ptr::addr_of!(UMASK_VALUE).read() };
+    // Only the low 9 bits (rwxrwxrwx) are meaningful for the mask.
+    unsafe { core::ptr::addr_of_mut!(UMASK_VALUE).write(cmask & 0o777); }
+    previous
+}
+
+/// Get the current umask value without modifying it.
+///
+/// Not a POSIX function, but useful for internal callers that need
+/// to apply the mask (e.g., open, mkdir) without side effects.
+pub(crate) fn get_umask() -> ModeT {
+    // SAFETY: Single-threaded access.
+    unsafe { core::ptr::addr_of!(UMASK_VALUE).read() }
 }
 
 // ---------------------------------------------------------------------------
@@ -2452,9 +2472,36 @@ mod tests {
 
     #[test]
     fn test_umask_returns_previous() {
-        // Stub always returns 0o022.
+        // Reset to known state.
+        umask(0o022);
+        // Setting a new mask returns the previous one.
         assert_eq!(umask(0o077), 0o022);
-        assert_eq!(umask(0), 0o022);
+        // Now previous should be 0o077.
+        assert_eq!(umask(0o000), 0o077);
+        // And previous should be 0o000.
+        assert_eq!(umask(0o022), 0o000);
+    }
+
+    #[test]
+    fn test_umask_masks_high_bits() {
+        // Reset to known state.
+        umask(0o022);
+        // Setting bits beyond the low 9 should be masked off.
+        let prev = umask(0o70777); // Only 0o777 should stick.
+        assert_eq!(prev, 0o022);
+        let val = umask(0o022); // Read back what was stored.
+        assert_eq!(val, 0o777);
+    }
+
+    #[test]
+    fn test_get_umask_no_side_effect() {
+        umask(0o137);
+        let val = get_umask();
+        assert_eq!(val, 0o137);
+        // Reading should not change the value.
+        assert_eq!(get_umask(), 0o137);
+        // Clean up.
+        umask(0o022);
     }
 
     #[test]

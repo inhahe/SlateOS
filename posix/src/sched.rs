@@ -105,10 +105,14 @@ pub extern "C" fn sched_setparam(
 
 /// Get the minimum priority for a scheduling policy.
 ///
-/// Returns 0 for all policies.
+/// Returns 1 for real-time policies (`SCHED_FIFO`, `SCHED_RR`),
+/// 0 for all others.  Matches Linux behavior.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sched_get_priority_min(_policy: i32) -> i32 {
-    0
+pub extern "C" fn sched_get_priority_min(policy: i32) -> i32 {
+    match policy {
+        SCHED_FIFO | SCHED_RR => 1,
+        _ => 0,
+    }
 }
 
 /// Get the maximum priority for a scheduling policy.
@@ -122,6 +126,11 @@ pub extern "C" fn sched_get_priority_max(policy: i32) -> i32 {
     }
 }
 
+/// Default round-robin time quantum in nanoseconds (100 ms).
+///
+/// Typical Linux default for `SCHED_RR`.  Used by `sched_rr_get_interval`.
+const RR_QUANTUM_NS: i64 = 100_000_000;
+
 /// Get the round-robin time quantum.
 ///
 /// Returns 100ms (a typical default) for all processes.
@@ -134,11 +143,10 @@ pub extern "C" fn sched_rr_get_interval(
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // Return 100ms quantum.
     // SAFETY: tp verified non-null.
     unsafe {
         (*tp).tv_sec = 0;
-        (*tp).tv_nsec = 100_000_000; // 100ms.
+        (*tp).tv_nsec = RR_QUANTUM_NS;
     }
     0
 }
@@ -377,10 +385,17 @@ mod tests {
     // -- Priority range --
 
     #[test]
-    fn test_sched_priority_min() {
+    fn test_sched_priority_min_other() {
         assert_eq!(sched_get_priority_min(SCHED_OTHER), 0);
-        assert_eq!(sched_get_priority_min(SCHED_FIFO), 0);
-        assert_eq!(sched_get_priority_min(SCHED_RR), 0);
+        assert_eq!(sched_get_priority_min(SCHED_BATCH), 0);
+        assert_eq!(sched_get_priority_min(SCHED_IDLE), 0);
+    }
+
+    #[test]
+    fn test_sched_priority_min_realtime() {
+        // Real-time policies have min priority 1 (matching Linux).
+        assert_eq!(sched_get_priority_min(SCHED_FIFO), 1);
+        assert_eq!(sched_get_priority_min(SCHED_RR), 1);
     }
 
     #[test]

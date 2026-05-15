@@ -13,6 +13,32 @@
 use crate::errno;
 
 // ---------------------------------------------------------------------------
+// Default filesystem statistics constants
+// ---------------------------------------------------------------------------
+//
+// These values are returned by statvfs/statfs when the kernel doesn't
+// have real filesystem statistics syscalls.  Centralized here so they
+// are easy to update when the kernel gains support.
+
+/// Default filesystem block size (matches OS 16 KiB page size).
+const DEFAULT_BLOCK_SIZE: u64 = 16384;
+
+/// Default total filesystem size in bytes (10 GiB).
+const DEFAULT_FS_TOTAL_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Default free space in bytes (1 GiB).
+const DEFAULT_FS_FREE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Default total inode count.
+const DEFAULT_INODE_TOTAL: u64 = 1_000_000;
+
+/// Default free inode count.
+const DEFAULT_INODE_FREE: u64 = 500_000;
+
+/// Maximum filename length (same as Linux ext4).
+const DEFAULT_NAMEMAX: u64 = 255;
+
+// ---------------------------------------------------------------------------
 // Structures
 // ---------------------------------------------------------------------------
 
@@ -92,22 +118,20 @@ pub extern "C" fn fstatvfs(_fd: i32, buf: *mut Statvfs) -> i32 {
 fn fill_defaults(buf: *mut Statvfs) {
     // SAFETY: Caller verified buf is non-null.
     let s = unsafe { &mut *buf };
-    // Our OS uses 16 KiB pages; filesystem block size matches.
-    s.f_bsize = 16384;
-    s.f_frsize = 16384;
-    // 10 GiB filesystem with 16 KiB blocks.
+    s.f_bsize = DEFAULT_BLOCK_SIZE;
+    s.f_frsize = DEFAULT_BLOCK_SIZE;
     #[allow(clippy::arithmetic_side_effects)]
     {
-        s.f_blocks = 10 * 1024 * 1024 * 1024 / 16384; // 10 GiB
-        s.f_bfree = 1024 * 1024 * 1024 / 16384;       // 1 GiB
+        s.f_blocks = DEFAULT_FS_TOTAL_BYTES / DEFAULT_BLOCK_SIZE;
+        s.f_bfree = DEFAULT_FS_FREE_BYTES / DEFAULT_BLOCK_SIZE;
     }
     s.f_bavail = s.f_bfree;
-    s.f_files = 1_000_000;
-    s.f_ffree = 500_000;
+    s.f_files = DEFAULT_INODE_TOTAL;
+    s.f_ffree = DEFAULT_INODE_FREE;
     s.f_favail = s.f_ffree;
     s.f_fsid = 1;
     s.f_flag = 0;
-    s.f_namemax = 255;
+    s.f_namemax = DEFAULT_NAMEMAX;
 }
 
 // ===========================================================================
@@ -156,18 +180,18 @@ fn fill_statfs_defaults(buf: *mut Statfs) {
     // SAFETY: Caller verified buf is non-null.
     let s = unsafe { &mut *buf };
     s.f_type = EXT4_SUPER_MAGIC;
-    s.f_bsize = 16384;
+    s.f_bsize = DEFAULT_BLOCK_SIZE as i64;
     #[allow(clippy::arithmetic_side_effects)]
     {
-        s.f_blocks = 10 * 1024 * 1024 * 1024 / 16384;
-        s.f_bfree = 1024 * 1024 * 1024 / 16384;
+        s.f_blocks = DEFAULT_FS_TOTAL_BYTES / DEFAULT_BLOCK_SIZE;
+        s.f_bfree = DEFAULT_FS_FREE_BYTES / DEFAULT_BLOCK_SIZE;
     }
     s.f_bavail = s.f_bfree;
-    s.f_files = 1_000_000;
-    s.f_ffree = 500_000;
+    s.f_files = DEFAULT_INODE_TOTAL;
+    s.f_ffree = DEFAULT_INODE_FREE;
     s.f_fsid = [1, 0];
-    s.f_namelen = 255;
-    s.f_frsize = 16384;
+    s.f_namelen = DEFAULT_NAMEMAX as i64;
+    s.f_frsize = DEFAULT_BLOCK_SIZE as i64;
     s.f_flags = 0;
     s.f_spare = [0; 4];
 }
@@ -537,5 +561,68 @@ mod tests {
         assert_eq!(ret1, ret2);
         assert_eq!(buf1.f_type, buf2.f_type);
         assert_eq!(buf1.f_bsize, buf2.f_bsize);
+    }
+
+    // -----------------------------------------------------------------------
+    // Constants are consistent across statvfs and statfs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn statvfs_and_statfs_agree_on_block_size() {
+        let path = b"/\0";
+        let mut vbuf = unsafe { mem::zeroed::<Statvfs>() };
+        let mut sbuf = unsafe { mem::zeroed::<Statfs>() };
+        statvfs(path.as_ptr(), &mut vbuf);
+        statfs(path.as_ptr(), &mut sbuf);
+        assert_eq!(vbuf.f_bsize, sbuf.f_bsize as u64);
+        assert_eq!(vbuf.f_frsize, sbuf.f_frsize as u64);
+    }
+
+    #[test]
+    fn statvfs_and_statfs_agree_on_space() {
+        let path = b"/\0";
+        let mut vbuf = unsafe { mem::zeroed::<Statvfs>() };
+        let mut sbuf = unsafe { mem::zeroed::<Statfs>() };
+        statvfs(path.as_ptr(), &mut vbuf);
+        statfs(path.as_ptr(), &mut sbuf);
+        assert_eq!(vbuf.f_blocks, sbuf.f_blocks);
+        assert_eq!(vbuf.f_bfree, sbuf.f_bfree);
+        assert_eq!(vbuf.f_files, sbuf.f_files);
+        assert_eq!(vbuf.f_ffree, sbuf.f_ffree);
+    }
+
+    #[test]
+    fn statvfs_and_statfs_agree_on_namemax() {
+        let path = b"/\0";
+        let mut vbuf = unsafe { mem::zeroed::<Statvfs>() };
+        let mut sbuf = unsafe { mem::zeroed::<Statfs>() };
+        statvfs(path.as_ptr(), &mut vbuf);
+        statfs(path.as_ptr(), &mut sbuf);
+        assert_eq!(vbuf.f_namemax, sbuf.f_namelen as u64);
+    }
+
+    // -----------------------------------------------------------------------
+    // Named constant verification
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn default_constants_match_design() {
+        // Block size matches OS 16 KiB page size.
+        assert_eq!(DEFAULT_BLOCK_SIZE, 16384);
+        // Total filesystem is 10 GiB.
+        assert_eq!(DEFAULT_FS_TOTAL_BYTES, 10 * 1024 * 1024 * 1024);
+        // Free space is 1 GiB.
+        assert_eq!(DEFAULT_FS_FREE_BYTES, 1024 * 1024 * 1024);
+        // Inodes match expected values.
+        assert_eq!(DEFAULT_INODE_TOTAL, 1_000_000);
+        assert_eq!(DEFAULT_INODE_FREE, 500_000);
+        // Namemax matches ext4.
+        assert_eq!(DEFAULT_NAMEMAX, 255);
+    }
+
+    #[test]
+    fn free_does_not_exceed_total() {
+        assert!(DEFAULT_FS_FREE_BYTES <= DEFAULT_FS_TOTAL_BYTES);
+        assert!(DEFAULT_INODE_FREE <= DEFAULT_INODE_TOTAL);
     }
 }

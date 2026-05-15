@@ -117,10 +117,10 @@ static mut RLIMITS: [Rlimit; RLIMIT_NLIMITS] = {
         rlim_max: RLIM_INFINITY,
     };
 
-    // Open files: 256 (our fd table size).
+    // Open files: matches fd table size.
     limits[RLIMIT_NOFILE as usize] = Rlimit {
-        rlim_cur: 256,
-        rlim_max: 256,
+        rlim_cur: crate::fdtable::MAX_FDS as u64,
+        rlim_max: crate::fdtable::MAX_FDS as u64,
     };
 
     // Core dumps: 0 (disabled — we don't support them).
@@ -381,10 +381,10 @@ mod tests {
                 rlim_cur: 8 * 1024 * 1024,
                 rlim_max: RLIM_INFINITY,
             };
-            // Open files: 256/256.
+            // Open files: matches fd table size.
             limits[RLIMIT_NOFILE as usize] = Rlimit {
-                rlim_cur: 256,
-                rlim_max: 256,
+                rlim_cur: crate::fdtable::MAX_FDS as u64,
+                rlim_max: crate::fdtable::MAX_FDS as u64,
             };
             // Core: 0/0.
             limits[RLIMIT_CORE as usize] = Rlimit {
@@ -496,8 +496,8 @@ mod tests {
         reset_global_state();
         let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
         assert_eq!(getrlimit(RLIMIT_NOFILE, &mut rl), 0);
-        assert_eq!(rl.rlim_cur, 256);
-        assert_eq!(rl.rlim_max, 256);
+        assert_eq!(rl.rlim_cur, crate::fdtable::MAX_FDS as u64);
+        assert_eq!(rl.rlim_max, crate::fdtable::MAX_FDS as u64);
     }
 
     #[test]
@@ -857,7 +857,28 @@ mod tests {
         let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
         let ret = prlimit64(0, RLIMIT_NOFILE, core::ptr::null(), &mut old);
         assert_eq!(ret, 0);
-        assert_eq!(old.rlim_cur, 256);
-        assert_eq!(old.rlim_max, 256);
+        assert_eq!(old.rlim_cur, crate::fdtable::MAX_FDS as u64);
+        assert_eq!(old.rlim_max, crate::fdtable::MAX_FDS as u64);
+    }
+
+    // -----------------------------------------------------------------------
+    // RLIMIT_NOFILE matches fd table size
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rlimit_nofile_matches_fdtable_max() {
+        reset_global_state();
+        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_NOFILE, &mut rl), 0);
+        assert_eq!(
+            rl.rlim_cur,
+            crate::fdtable::MAX_FDS as u64,
+            "RLIMIT_NOFILE soft must match fdtable::MAX_FDS"
+        );
+        assert_eq!(
+            rl.rlim_max,
+            crate::fdtable::MAX_FDS as u64,
+            "RLIMIT_NOFILE hard must match fdtable::MAX_FDS"
+        );
     }
 }

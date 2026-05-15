@@ -1106,6 +1106,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ICMPv6 (RFC 4443/4861): Echo Request/Reply (ping6), NDP Neighbor Solicitation/Advertisement, neighbor cache (32 entries, LRU eviction), Source/Target Link-Layer Address option parsing, checksum via IPv6 pseudo-header, 8 self-tests
   - [x] DNS AAAA records (RFC 3596): resolve6() for IPv6 address resolution, AAAA query/response parsing (16-byte RDATA), separate 16-entry AAAA cache with TTL/negative caching/LRU eviction, IPv6 reverse DNS (ip6.arpa nibble-reversed PTR), CNAME chasing, refactored generic query builder, `dns -6` kshell command, 4 self-tests
   - [x] SLAAC (RFC 4862): Router Solicitation/Advertisement (ICMPv6 types 133/134), Prefix Information option parsing (type 3), RDNSS extraction (RFC 8106, type 25), auto-configure global IPv6 from prefix + EUI-64, 4-address SLAAC state table with lifetime/expiry, NS answers for global addresses, `rs`/`rsolicit` kshell command, 3 new self-tests
+  - [x] UDP over IPv6: process_udp_v6() with mandatory checksum verification (RFC 8200 §8.1), DatagramV6 type with separate IPv6 receive queue per socket, send_v6() with IPv6 pseudo-header checksum, SLAAC-aware source address selection, IPv6 UDP dispatch wired in IPv6 packet processor, recv_v6()/peek_v6()/rx_ready_v6() API, 2 new self-tests
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close, abort, peer_addr (SYS_TCP_CONNECT through SYS_TCP_PEER_ADDR)

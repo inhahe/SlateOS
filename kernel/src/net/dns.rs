@@ -461,17 +461,25 @@ struct DnsResult {
 /// has CNAMEs but no matching A record (caller should re-query for
 /// the CNAME target).
 #[allow(clippy::arithmetic_side_effects)]
-fn parse_response(data: &[u8], expected_id: u16) -> KernelResult<DnsResult> {
-    parse_response_inner(data, expected_id, None)
+fn parse_response(
+    data: &[u8],
+    expected_id: u16,
+    cname_out: &mut Option<String>,
+) -> KernelResult<DnsResult> {
+    parse_response_inner(data, expected_id, None, cname_out)
 }
 
 /// Inner response parser that can optionally look for an A record
 /// matching a specific name (used during CNAME resolution).
+///
+/// If the response contains only a CNAME (no A record), the CNAME
+/// target is written to `cname_out` for the caller to chase.
 #[allow(clippy::arithmetic_side_effects)]
 fn parse_response_inner(
     data: &[u8],
     expected_id: u16,
     target_name: Option<&str>,
+    cname_out: &mut Option<String>,
 ) -> KernelResult<DnsResult> {
     if data.len() < 12 {
         return Err(KernelError::InvalidArgument);
@@ -503,6 +511,9 @@ fn parse_response_inner(
     let mut offset = 12;
     for _ in 0..qdcount {
         offset = skip_name(data, offset)?;
+        if offset.checked_add(4).map_or(true, |end| end > data.len()) {
+            return Err(KernelError::InvalidArgument);
+        }
         offset += 4; // QTYPE + QCLASS.
     }
 
@@ -579,11 +590,10 @@ fn parse_response_inner(
     }
 
     // No A record found.  If we got a CNAME, the caller may need to
-    // send a follow-up query.  Return NotFound — the caller checks
-    // `last_cname_target()` for follow-up.
+    // send a follow-up query.  Return NotFound — the caller uses
+    // `cname_out` for follow-up.
     if cname_target.is_some() {
-        // Store the CNAME target for the caller to re-query.
-        *LAST_CNAME.lock() = cname_target;
+        *cname_out = cname_target;
         return Err(KernelError::NotFound);
     }
 
@@ -625,6 +635,9 @@ fn parse_ptr_response(data: &[u8], expected_id: u16) -> KernelResult<String> {
     let mut offset = 12;
     for _ in 0..qdcount {
         offset = skip_name(data, offset)?;
+        if offset.checked_add(4).map_or(true, |end| end > data.len()) {
+            return Err(KernelError::InvalidArgument);
+        }
         offset += 4; // QTYPE + QCLASS.
     }
 
@@ -667,7 +680,12 @@ fn parse_ptr_response(data: &[u8], expected_id: u16) -> KernelResult<String> {
 }
 
 /// Case-insensitive DNS name comparison.
+///
+/// Strips trailing dots before comparing so that `"example.com."`
+/// matches `"example.com"` (FQDN vs non-FQDN forms of the same name).
 fn names_eq_case_insensitive(a: &str, b: &str) -> bool {
+    let a = a.strip_suffix('.').unwrap_or(a);
+    let b = b.strip_suffix('.').unwrap_or(b);
     if a.len() != b.len() {
         return false;
     }
@@ -676,11 +694,9 @@ fn names_eq_case_insensitive(a: &str, b: &str) -> bool {
         .all(|(x, y)| x.to_ascii_lowercase() == y.to_ascii_lowercase())
 }
 
-/// Storage for the last CNAME target from a response that had no A record.
-///
-/// Used by `resolve()` to send follow-up queries for CNAME chains
-/// that span multiple DNS responses.
-static LAST_CNAME: Mutex<Option<String>> = Mutex::new(None);
+// CNAME targets are now passed directly via `cname_out` parameters
+// instead of global state, eliminating races between concurrent
+// DNS resolutions.
 
 /// Decode a DNS name at the given offset into a dotted string.
 ///
@@ -708,7 +724,11 @@ fn decode_name(data: &[u8], mut offset: usize) -> KernelResult<(String, usize)> 
             break;
         }
 
-        if len & 0xC0 == 0xC0 {
+        if len & 0xC0 != 0 {
+            if len & 0xC0 != 0xC0 {
+                // Reserved label type (0x40-0xBF) — reject.
+                return Err(KernelError::InvalidArgument);
+            }
             // Compression pointer — two bytes encode a 14-bit offset.
             if ptr_offset + 1 >= data.len() {
                 return Err(KernelError::InvalidArgument);
@@ -719,7 +739,12 @@ fn decode_name(data: &[u8], mut offset: usize) -> KernelResult<(String, usize)> 
                 offset = ptr_offset + 2;
                 jumped = true;
             }
-            ptr_offset = (usize::from(len & 0x3F) << 8) | usize::from(data[ptr_offset + 1]);
+            let target = (usize::from(len & 0x3F) << 8) | usize::from(data[ptr_offset + 1]);
+            // Pointers must point strictly backward to prevent loops.
+            if target >= ptr_offset {
+                return Err(KernelError::InvalidArgument);
+            }
+            ptr_offset = target;
             continue;
         }
 
@@ -771,7 +796,11 @@ fn skip_name(data: &[u8], mut offset: usize) -> KernelResult<usize> {
             return Ok(offset + 1);
         }
 
-        if len & 0xC0 == 0xC0 {
+        if len & 0xC0 != 0 {
+            if len & 0xC0 != 0xC0 {
+                // Reserved label type (0x40-0xBF) — reject.
+                return Err(KernelError::InvalidArgument);
+            }
             // Compression pointer (2 bytes) — name ends after the pointer.
             // We don't follow it; we just advance past it.
             if offset + 1 >= data.len() {
@@ -801,9 +830,10 @@ fn skip_name(data: &[u8], mut offset: usize) -> KernelResult<usize> {
 #[allow(clippy::arithmetic_side_effects)]
 pub fn resolve(name: &str) -> KernelResult<Ipv4Addr> {
     let mut current_name = String::from(name);
+    let mut cname_out = None;
 
     for hop in 0..MAX_CNAME_HOPS {
-        match resolve_single(&current_name) {
+        match resolve_single(&current_name, &mut cname_out) {
             Ok(ip) => {
                 // Cache under the original name too, if we followed CNAMEs.
                 if hop > 0 {
@@ -814,9 +844,8 @@ pub fn resolve(name: &str) -> KernelResult<Ipv4Addr> {
                 return Ok(ip);
             }
             Err(KernelError::NotFound) => {
-                // Check if parse_response stored a CNAME target to follow.
-                let cname = LAST_CNAME.lock().take();
-                if let Some(target) = cname {
+                // Check if parse_response returned a CNAME target to follow.
+                if let Some(target) = cname_out.take() {
                     crate::serial_println!(
                         "[dns] Following CNAME: {} → {} (hop {})",
                         current_name, target, hop + 1
@@ -875,9 +904,9 @@ const DNS_ATTEMPT_POLLS: [usize; MAX_DNS_ATTEMPTS] = [1000, 2000, 4000];
 /// Sends a DNS A record query and waits for a response.  On timeout,
 /// retransmits the query with an increasing wait window (1s → 2s → 4s).
 /// Returns `Ok(ip)` on success, `Err(NotFound)` if no A record was
-/// found (check `LAST_CNAME` for CNAME follow-up), or another error.
+/// found (check `cname_out` for CNAME follow-up), or another error.
 #[allow(clippy::arithmetic_side_effects)]
-fn resolve_single(name: &str) -> KernelResult<Ipv4Addr> {
+fn resolve_single(name: &str, cname_out: &mut Option<String>) -> KernelResult<Ipv4Addr> {
     let now_ns = crate::hrtimer::now_ns();
 
     // Check cache first (positive and negative entries).
@@ -907,7 +936,7 @@ fn resolve_single(name: &str) -> KernelResult<Ipv4Addr> {
     crate::serial_println!("[dns] Resolving '{}' via {}...", name, dns_server);
 
     // Clear any previous CNAME target.
-    *LAST_CNAME.lock() = None;
+    *cname_out = None;
 
     // Use a unique transaction ID and ephemeral port per query.
     let query_id = next_query_id();
@@ -947,7 +976,7 @@ fn resolve_single(name: &str) -> KernelResult<Ipv4Addr> {
                     continue;
                 }
                 super::udp::close(sock);
-                match parse_response(&dgram.data, query_id) {
+                match parse_response(&dgram.data, query_id, cname_out) {
                     Ok(result) => {
                         crate::serial_println!(
                             "[dns] Resolved '{}' → {} (TTL {}s)",
@@ -960,7 +989,7 @@ fn resolve_single(name: &str) -> KernelResult<Ipv4Addr> {
                     Err(KernelError::NotFound) => {
                         // CNAME-only or NXDOMAIN — don't retry, it's a
                         // definitive answer from the server.
-                        if LAST_CNAME.lock().is_none() {
+                        if cname_out.is_none() {
                             let cache_now = crate::hrtimer::now_ns();
                             DNS_CACHE.lock().insert(
                                 name,

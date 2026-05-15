@@ -1286,6 +1286,7 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
         conn.local_write_closed = false;
         conn.local_read_closed = false;
         conn.retransmit_timer = 0;
+        conn.retransmit_count = 0; // Clear stale count from recycled slot.
         conn.srtt_ns_x8 = 0;
         conn.rttvar_ns_x4 = 0;
         conn.rto_ns = RTO_INITIAL_NS;
@@ -1459,6 +1460,7 @@ pub fn connect_start(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usiz
         conn.local_write_closed = false;
         conn.local_read_closed = false;
         conn.retransmit_timer = 0;
+        conn.retransmit_count = 0; // Clear stale count from recycled slot.
         conn.srtt_ns_x8 = 0;
         conn.rttvar_ns_x4 = 0;
         conn.rto_ns = RTO_INITIAL_NS;
@@ -2064,10 +2066,9 @@ fn build_ts_and_sack_options(conn: &TcpConnection) -> ([u8; 40], usize) {
     (buf, pos)
 }
 
-fn build_sack_option(conn: &TcpConnection) -> ([u8; 34], usize) {
+fn build_sack_option(conn: &TcpConnection) -> ([u8; 36], usize) {
     // Max: 2 (NOP+NOP) + 2 (kind+len) + 4*8 (4 blocks × 8 bytes) = 36.
-    // But we limit to 34 bytes (for options ≤ 40 total).
-    let mut buf = [0u8; 34];
+    let mut buf = [0u8; 36];
 
     if !conn.sack_ok || conn.sack_block_count == 0 {
         return (buf, 0);
@@ -3391,6 +3392,7 @@ fn handle_incoming_syn(
         conn.local_read_closed = false;
         conn.dup_ack_count = 0;
         conn.retransmit_timer = 0;
+        conn.retransmit_count = 0; // Clear stale count from recycled slot.
         conn.srtt_ns_x8 = 0;
         conn.rttvar_ns_x4 = 0;
         conn.rto_ns = RTO_INITIAL_NS;
@@ -4084,8 +4086,12 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
                 // fall through to send a plain ACK.
             }
 
-            // Process FIN.
-            if flags & TCP_FIN != 0 {
+            // Process FIN — only if all preceding data has been received.
+            // FIN's implicit sequence byte follows the payload, so the
+            // FIN is in-order when seq + payload_len == rcv_nxt.
+            if flags & TCP_FIN != 0
+                && seq.wrapping_add(payload.len() as u32) == conn.rcv_nxt
+            {
                 conn.rcv_nxt = conn.rcv_nxt.wrapping_add(1);
                 conn.remote_closed = true;
                 conn.state = TcpState::CloseWait;
@@ -4443,7 +4449,7 @@ pub fn tick_keepalive() {
             let snd_nxt = conn.snd_nxt;
             let rcv_nxt = conn.rcv_nxt;
 
-            conn.last_error = TCP_ERR_NONE; // Normal close by local side.
+            conn.last_error = TCP_ERR_TIMEDOUT; // Keepalive failure.
             conn.active = false;
             conn.state = TcpState::Closed;
             conn.rx_buffer.clear();

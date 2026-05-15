@@ -467,8 +467,9 @@ fn send_request(requested_ip: Ipv4Addr, server_ip: Ipv4Addr) -> KernelResult<()>
 /// Used at T1 — extends the lease by contacting the original server.
 fn send_renew(our_ip: Ipv4Addr, server_ip: Ipv4Addr) -> KernelResult<()> {
     let our_mac = interface::mac();
-    let xid = new_xid();
-    let _ = xid; // new_xid stores globally; used by build_dhcp_renew_message
+    // NOTE: do NOT call new_xid() here — the XID is set once at the
+    // start of the renewal transaction (Bound→Renewing transition).
+    // Retransmits must reuse the same XID so the server's ACK matches.
 
     let dhcp_msg = build_dhcp_renew_message(&our_mac, our_ip);
     let ip_udp_packet = build_dhcp_ip_udp_unicast(&dhcp_msg, our_ip, server_ip);
@@ -556,6 +557,9 @@ pub fn tick_renewal() {
                 let our_ip = lease.client_ip;
                 let server = lease.server_ip;
                 drop(lease);
+                // Generate a fresh XID for the entire renewal transaction.
+                // Retransmits will reuse this XID so server ACKs match.
+                new_xid();
                 // Reset retry state for the new renewal phase.
                 let mut retry = RENEWAL_RETRY.lock();
                 retry.reset();
@@ -583,7 +587,15 @@ pub fn tick_renewal() {
                 // T2 expired — escalate to rebinding (broadcast).
                 let our_ip = lease.client_ip;
                 drop(lease);
-                RENEWAL_RETRY.lock().reset();
+                // Generate a fresh XID for the rebinding transaction.
+                new_xid();
+                // Reset retry state and stamp the first attempt so we
+                // don't retransmit immediately on the next tick.
+                let mut retry = RENEWAL_RETRY.lock();
+                retry.reset();
+                retry.last_attempt_ns = crate::hrtimer::now_ns();
+                retry.retries = 1;
+                drop(retry);
                 crate::serial_println!(
                     "[dhcp] T2 expired ({}s elapsed) — escalating to rebind",
                     elapsed_secs
@@ -822,6 +834,17 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
         Some(DHCP_ACK) if state == DhcpState::Requesting
             || state == DhcpState::Renewing
             || state == DhcpState::Rebinding => {
+            // During renewal/rebinding, the server may leave yiaddr=0
+            // (RFC 2131 §4.3.2) meaning "keep your current IP".  Substitute
+            // the current lease IP so downstream logic works correctly.
+            let offered_ip = if (state == DhcpState::Renewing || state == DhcpState::Rebinding)
+                && offered_ip.is_unspecified()
+            {
+                CURRENT_LEASE.lock().client_ip
+            } else {
+                offered_ip
+            };
+
             // During renewal/rebinding, verify the ACK is for the IP we
             // currently hold.  A spoofed ACK for a different IP could
             // silently reassign our address.

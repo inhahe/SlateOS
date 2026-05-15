@@ -1131,3 +1131,351 @@ pub fn reverse_resolve(ip: Ipv4Addr) -> KernelResult<String> {
     );
     Err(KernelError::TimedOut)
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// DNS unit tests — exercises name encoding/decoding, query building,
+/// response parsing, cache insert/lookup, and case-insensitive matching.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[dns] Running DNS self-test...");
+
+    test_encode_name()?;
+    test_decode_name()?;
+    test_skip_name()?;
+    test_names_case_insensitive()?;
+    test_build_query_structure()?;
+    test_parse_response_a_record()?;
+    test_cache_insert_lookup()?;
+    test_cache_negative_entry()?;
+
+    crate::serial_println!("[dns] DNS self-test PASSED (8 tests)");
+    Ok(())
+}
+
+/// Test encode_name produces correct DNS wire format.
+fn test_encode_name() -> KernelResult<()> {
+    let mut buf = Vec::new();
+    encode_name(&mut buf, "example.com");
+
+    // Expected: \x07example\x03com\x00
+    let expected: &[u8] = &[
+        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+        3, b'c', b'o', b'm',
+        0,
+    ];
+    if buf.as_slice() != expected {
+        crate::serial_println!("[dns]   FAIL: encode_name mismatch (len={})", buf.len());
+        return Err(KernelError::InternalError);
+    }
+
+    // FQDN with trailing dot should produce the same output.
+    let mut buf2 = Vec::new();
+    encode_name(&mut buf2, "example.com.");
+    if buf2.as_slice() != expected {
+        crate::serial_println!("[dns]   FAIL: FQDN encode mismatch");
+        return Err(KernelError::InternalError);
+    }
+
+    // Single-label name.
+    let mut buf3 = Vec::new();
+    encode_name(&mut buf3, "localhost");
+    let expected3: &[u8] = &[
+        9, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't',
+        0,
+    ];
+    if buf3.as_slice() != expected3 {
+        crate::serial_println!("[dns]   FAIL: single-label encode mismatch");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dns]   encode_name: OK");
+    Ok(())
+}
+
+/// Test decode_name on known wire-format data.
+fn test_decode_name() -> KernelResult<()> {
+    // Wire data: \x07example\x03com\x00
+    let wire: &[u8] = &[
+        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+        3, b'c', b'o', b'm',
+        0,
+    ];
+    let (name, end_offset) = decode_name(wire, 0)?;
+    if name != "example.com" {
+        crate::serial_println!("[dns]   FAIL: decoded '{}', expected 'example.com'", name);
+        return Err(KernelError::InternalError);
+    }
+    if end_offset != 13 {
+        crate::serial_println!("[dns]   FAIL: end_offset = {}, expected 13", end_offset);
+        return Err(KernelError::InternalError);
+    }
+
+    // Test with compression pointer: build wire data where a name points back.
+    // Layout: offset 0 = \x07example\x03com\x00 (13 bytes)
+    //         offset 13 = \x03www + compression pointer to offset 0
+    let mut wire2 = Vec::from(wire);
+    wire2.extend_from_slice(&[
+        3, b'w', b'w', b'w',       // "www" label
+        0xC0, 0x00,                 // compression pointer → offset 0
+    ]);
+    let (name2, end2) = decode_name(&wire2, 13)?;
+    if name2 != "www.example.com" {
+        crate::serial_println!("[dns]   FAIL: compressed name = '{}'", name2);
+        return Err(KernelError::InternalError);
+    }
+    // end_offset should be right after the pointer (13 + 4 label bytes + 2 pointer bytes = 19).
+    if end2 != 19 {
+        crate::serial_println!("[dns]   FAIL: compressed end_offset = {}", end2);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dns]   decode_name: OK");
+    Ok(())
+}
+
+/// Test skip_name correctly advances past names.
+fn test_skip_name() -> KernelResult<()> {
+    // Simple name: \x07example\x03com\x00 (13 bytes).
+    let wire: &[u8] = &[
+        7, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
+        3, b'c', b'o', b'm',
+        0,
+    ];
+    let after = skip_name(wire, 0)?;
+    if after != 13 {
+        crate::serial_println!("[dns]   FAIL: skip simple name = {}", after);
+        return Err(KernelError::InternalError);
+    }
+
+    // Name with compression pointer at the end.
+    let wire2: &[u8] = &[
+        3, b'w', b'w', b'w',
+        0xC0, 0x00, // pointer to offset 0
+    ];
+    let after2 = skip_name(wire2, 0)?;
+    // Should advance past the 4-byte label + 2-byte pointer = 6.
+    if after2 != 6 {
+        crate::serial_println!("[dns]   FAIL: skip compressed name = {}", after2);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dns]   skip_name: OK");
+    Ok(())
+}
+
+/// Test case-insensitive name comparison.
+fn test_names_case_insensitive() -> KernelResult<()> {
+    if !names_eq_case_insensitive("example.com", "EXAMPLE.COM") {
+        crate::serial_println!("[dns]   FAIL: case-insensitive match failed");
+        return Err(KernelError::InternalError);
+    }
+    if !names_eq_case_insensitive("Example.Com.", "example.com.") {
+        crate::serial_println!("[dns]   FAIL: mixed case + FQDN match failed");
+        return Err(KernelError::InternalError);
+    }
+    if !names_eq_case_insensitive("example.com.", "example.com") {
+        crate::serial_println!("[dns]   FAIL: FQDN vs non-FQDN match failed");
+        return Err(KernelError::InternalError);
+    }
+    if names_eq_case_insensitive("example.com", "example.org") {
+        crate::serial_println!("[dns]   FAIL: different names matched");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dns]   names case-insensitive: OK");
+    Ok(())
+}
+
+/// Test build_query produces valid DNS query structure.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_build_query_structure() -> KernelResult<()> {
+    let query = build_query("test.dev", 0x1234);
+
+    // Minimum: 12 header + name encoding + 4 (qtype+qclass).
+    if query.len() < 12 + 4 {
+        crate::serial_println!("[dns]   FAIL: query too short ({})", query.len());
+        return Err(KernelError::InternalError);
+    }
+
+    // Check transaction ID.
+    let id = u16::from_be_bytes([query[0], query[1]]);
+    if id != 0x1234 {
+        crate::serial_println!("[dns]   FAIL: query ID = {:#06x}", id);
+        return Err(KernelError::InternalError);
+    }
+
+    // Check flags: standard query, RD set.
+    let flags = u16::from_be_bytes([query[2], query[3]]);
+    if flags != FLAGS_QUERY_RD {
+        crate::serial_println!("[dns]   FAIL: flags = {:#06x}", flags);
+        return Err(KernelError::InternalError);
+    }
+
+    // QDCOUNT = 1.
+    let qdcount = u16::from_be_bytes([query[4], query[5]]);
+    if qdcount != 1 {
+        crate::serial_println!("[dns]   FAIL: QDCOUNT = {}", qdcount);
+        return Err(KernelError::InternalError);
+    }
+
+    // Check that name is encoded starting at offset 12.
+    // "test.dev" → \x04test\x03dev\x00 (10 bytes).
+    if query.len() < 12 + 10 + 4 {
+        crate::serial_println!("[dns]   FAIL: query too short for name");
+        return Err(KernelError::InternalError);
+    }
+    if query[12] != 4 || query[17] != 3 {
+        crate::serial_println!("[dns]   FAIL: name label lengths wrong");
+        return Err(KernelError::InternalError);
+    }
+
+    // QTYPE = A (1) at end-2, QCLASS = IN (1) at end.
+    let qtype = u16::from_be_bytes([query[query.len() - 4], query[query.len() - 3]]);
+    let qclass = u16::from_be_bytes([query[query.len() - 2], query[query.len() - 1]]);
+    if qtype != TYPE_A {
+        crate::serial_println!("[dns]   FAIL: QTYPE = {}", qtype);
+        return Err(KernelError::InternalError);
+    }
+    if qclass != CLASS_IN {
+        crate::serial_println!("[dns]   FAIL: QCLASS = {}", qclass);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dns]   build_query structure: OK");
+    Ok(())
+}
+
+/// Test parse_response with a hand-crafted A record response.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_parse_response_a_record() -> KernelResult<()> {
+    // Build a synthetic DNS response for "test.dev" → 93.184.216.34.
+    let query_id: u16 = 0xABCD;
+    let mut resp = Vec::new();
+
+    // Header.
+    resp.extend_from_slice(&query_id.to_be_bytes()); // ID
+    resp.extend_from_slice(&0x8180u16.to_be_bytes()); // Flags: QR=1, RD=1, RA=1
+    resp.extend_from_slice(&1u16.to_be_bytes());      // QDCOUNT = 1
+    resp.extend_from_slice(&1u16.to_be_bytes());      // ANCOUNT = 1
+    resp.extend_from_slice(&0u16.to_be_bytes());      // NSCOUNT = 0
+    resp.extend_from_slice(&0u16.to_be_bytes());      // ARCOUNT = 0
+
+    // Question section: "test.dev" IN A
+    encode_name(&mut resp, "test.dev");
+    resp.extend_from_slice(&TYPE_A.to_be_bytes());
+    resp.extend_from_slice(&CLASS_IN.to_be_bytes());
+
+    // Answer section: test.dev A 300 93.184.216.34
+    encode_name(&mut resp, "test.dev");
+    resp.extend_from_slice(&TYPE_A.to_be_bytes());     // TYPE
+    resp.extend_from_slice(&CLASS_IN.to_be_bytes());    // CLASS
+    resp.extend_from_slice(&300u32.to_be_bytes());      // TTL = 300s
+    resp.extend_from_slice(&4u16.to_be_bytes());        // RDLENGTH = 4
+    resp.extend_from_slice(&[93, 184, 216, 34]);        // RDATA
+
+    let mut cname_out = None;
+    let result = parse_response(&resp, query_id, &mut cname_out)?;
+
+    if result.ip != Ipv4Addr([93, 184, 216, 34]) {
+        crate::serial_println!("[dns]   FAIL: parsed IP = {}", result.ip);
+        return Err(KernelError::InternalError);
+    }
+    if result.ttl_secs != 300 {
+        crate::serial_println!("[dns]   FAIL: parsed TTL = {}", result.ttl_secs);
+        return Err(KernelError::InternalError);
+    }
+
+    // Wrong query ID should be rejected.
+    let mut cname_out2 = None;
+    if parse_response(&resp, 0x9999, &mut cname_out2).is_ok() {
+        crate::serial_println!("[dns]   FAIL: accepted wrong query ID");
+        return Err(KernelError::InternalError);
+    }
+
+    // Too-short response should be rejected.
+    let mut cname_out3 = None;
+    if parse_response(&resp[..5], query_id, &mut cname_out3).is_ok() {
+        crate::serial_println!("[dns]   FAIL: accepted too-short response");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dns]   parse response A record: OK");
+    Ok(())
+}
+
+/// Test DNS cache insert and lookup.
+fn test_cache_insert_lookup() -> KernelResult<()> {
+    let mut cache = DnsCache::new();
+    let now = crate::hrtimer::now_ns();
+    let ip = Ipv4Addr([1, 2, 3, 4]);
+
+    // Insert and lookup.
+    cache.insert("cached.example", ip, 120, now);
+
+    match cache.lookup("cached.example", now) {
+        Some(Some(found)) if found == ip => {} // OK.
+        Some(Some(found)) => {
+            crate::serial_println!("[dns]   FAIL: cache lookup = {}", found);
+            return Err(KernelError::InternalError);
+        }
+        Some(None) => {
+            crate::serial_println!("[dns]   FAIL: cache returned negative for positive entry");
+            return Err(KernelError::InternalError);
+        }
+        None => {
+            crate::serial_println!("[dns]   FAIL: cache miss after insert");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Case-insensitive lookup.
+    match cache.lookup("CACHED.EXAMPLE", now) {
+        Some(Some(found)) if found == ip => {} // OK.
+        _ => {
+            crate::serial_println!("[dns]   FAIL: case-insensitive lookup failed");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Entry not present.
+    if cache.lookup("nonexistent.test", now).is_some() {
+        crate::serial_println!("[dns]   FAIL: found nonexistent entry");
+        return Err(KernelError::InternalError);
+    }
+
+    // Expired entry (far future timestamp).
+    let far_future = now.wrapping_add(1_000_000_000_000); // ~1000s
+    if cache.lookup("cached.example", far_future).is_some() {
+        crate::serial_println!("[dns]   FAIL: expired entry still returned");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[dns]   cache insert/lookup: OK");
+    Ok(())
+}
+
+/// Test DNS negative cache entry.
+fn test_cache_negative_entry() -> KernelResult<()> {
+    let mut cache = DnsCache::new();
+    let now = crate::hrtimer::now_ns();
+
+    // Insert a negative entry (NXDOMAIN sentinel: 0.0.0.0).
+    cache.insert("nxdomain.test", Ipv4Addr::UNSPECIFIED, 60, now);
+
+    match cache.lookup("nxdomain.test", now) {
+        Some(None) => {} // Negative hit — correct.
+        Some(Some(ip)) => {
+            crate::serial_println!("[dns]   FAIL: negative entry returned positive IP {}", ip);
+            return Err(KernelError::InternalError);
+        }
+        None => {
+            crate::serial_println!("[dns]   FAIL: negative entry not found");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[dns]   cache negative entry: OK");
+    Ok(())
+}

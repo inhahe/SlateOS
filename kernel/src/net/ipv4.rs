@@ -951,6 +951,336 @@ fn build_fragment(
     pkt
 }
 
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// IPv4 unit tests — exercises checksum, parsing, building, fragmentation
+/// flags, transport checksums, multicast MAC mapping, and subnet broadcast.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[ipv4] Running IPv4 self-test...");
+
+    test_ip_checksum()?;
+    test_build_parse_roundtrip()?;
+    test_parse_too_short()?;
+    test_parse_wrong_version()?;
+    test_parse_bad_checksum()?;
+    test_fragment_flags()?;
+    test_transport_checksum_roundtrip()?;
+    test_multicast_mac_mapping()?;
+    test_subnet_broadcast()?;
+
+    crate::serial_println!("[ipv4] IPv4 self-test PASSED (9 tests)");
+    Ok(())
+}
+
+/// Test ip_checksum with a known-good header.
+fn test_ip_checksum() -> KernelResult<()> {
+    // Build a valid IP header with build_packet, then verify that
+    // ip_checksum over it returns 0 (property of a correct header).
+    let src = Ipv4Addr([192, 168, 1, 1]);
+    let dst = Ipv4Addr([10, 0, 0, 1]);
+    let pkt = build_packet(src, dst, PROTO_UDP, b"test payload");
+
+    // The first 20 bytes are the IP header.
+    let hdr = &pkt[..IPV4_HEADER_SIZE];
+    let check = ip_checksum(hdr);
+    if check != 0 {
+        crate::serial_println!("[ipv4]   FAIL: checksum of valid header = {:#06x}, expected 0", check);
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify that corrupting a byte breaks the checksum.
+    let mut corrupted = [0u8; 20];
+    corrupted.copy_from_slice(hdr);
+    corrupted[5] ^= 0xFF; // Flip bits in DSCP/ECN byte.
+    let check2 = ip_checksum(&corrupted);
+    if check2 == 0 {
+        crate::serial_println!("[ipv4]   FAIL: corrupted header still has valid checksum");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ipv4]   ip_checksum: OK");
+    Ok(())
+}
+
+/// Test build_packet + parse round-trip.
+fn test_build_parse_roundtrip() -> KernelResult<()> {
+    let src = Ipv4Addr([172, 16, 0, 1]);
+    let dst = Ipv4Addr([172, 16, 0, 2]);
+    let payload = b"Hello, IPv4!";
+
+    let pkt = build_packet(src, dst, PROTO_TCP, payload);
+    let parsed = Ipv4Packet::parse(&pkt)?;
+
+    if parsed.version != 4 {
+        crate::serial_println!("[ipv4]   FAIL: version = {}", parsed.version);
+        return Err(KernelError::InternalError);
+    }
+    if parsed.ihl != 5 {
+        crate::serial_println!("[ipv4]   FAIL: ihl = {}", parsed.ihl);
+        return Err(KernelError::InternalError);
+    }
+    if parsed.protocol != PROTO_TCP {
+        crate::serial_println!("[ipv4]   FAIL: protocol = {}", parsed.protocol);
+        return Err(KernelError::InternalError);
+    }
+    if parsed.src != src || parsed.dst != dst {
+        crate::serial_println!("[ipv4]   FAIL: src/dst mismatch");
+        return Err(KernelError::InternalError);
+    }
+    if parsed.payload != payload {
+        crate::serial_println!("[ipv4]   FAIL: payload mismatch (len={})", parsed.payload.len());
+        return Err(KernelError::InternalError);
+    }
+    if parsed.ttl != DEFAULT_TTL {
+        crate::serial_println!("[ipv4]   FAIL: ttl = {}, expected {}", parsed.ttl, DEFAULT_TTL);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ipv4]   build/parse round-trip: OK");
+    Ok(())
+}
+
+/// Test that parse rejects too-short input.
+fn test_parse_too_short() -> KernelResult<()> {
+    let short = [0u8; 10];
+    if Ipv4Packet::parse(&short).is_ok() {
+        crate::serial_println!("[ipv4]   FAIL: accepted 10-byte packet");
+        return Err(KernelError::InternalError);
+    }
+
+    // Empty input.
+    if Ipv4Packet::parse(&[]).is_ok() {
+        crate::serial_println!("[ipv4]   FAIL: accepted empty packet");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ipv4]   parse too-short: OK (rejected)");
+    Ok(())
+}
+
+/// Test that parse rejects non-IPv4 version.
+fn test_parse_wrong_version() -> KernelResult<()> {
+    let src = Ipv4Addr([10, 0, 0, 1]);
+    let dst = Ipv4Addr([10, 0, 0, 2]);
+    let mut pkt = build_packet(src, dst, PROTO_UDP, b"x");
+
+    // Change version from 4 to 6 (byte 0 high nibble).
+    pkt[0] = 0x65; // version=6, IHL=5
+    // Recompute checksum for the mangled header (otherwise checksum
+    // fails before version check).
+    pkt[10] = 0;
+    pkt[11] = 0;
+    let cksum = ip_checksum(&pkt[..IPV4_HEADER_SIZE]);
+    pkt[10] = (cksum >> 8) as u8;
+    pkt[11] = cksum as u8;
+
+    if Ipv4Packet::parse(&pkt).is_ok() {
+        crate::serial_println!("[ipv4]   FAIL: accepted version 6 packet");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ipv4]   parse wrong version: OK (rejected)");
+    Ok(())
+}
+
+/// Test that parse rejects a packet with bad checksum.
+fn test_parse_bad_checksum() -> KernelResult<()> {
+    let src = Ipv4Addr([10, 1, 1, 1]);
+    let dst = Ipv4Addr([10, 2, 2, 2]);
+    let mut pkt = build_packet(src, dst, PROTO_ICMP, b"ping");
+
+    // Corrupt the TTL field (byte 8).
+    pkt[8] = 0;
+
+    if Ipv4Packet::parse(&pkt).is_ok() {
+        crate::serial_println!("[ipv4]   FAIL: accepted packet with bad checksum");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ipv4]   parse bad checksum: OK (rejected)");
+    Ok(())
+}
+
+/// Test MF flag and fragment offset parsing.
+fn test_fragment_flags() -> KernelResult<()> {
+    let src = Ipv4Addr([10, 0, 0, 1]);
+    let dst = Ipv4Addr([10, 0, 0, 2]);
+    let payload = b"fragment test";
+
+    // Build a normal packet (DF set, no fragmentation).
+    let pkt = build_packet(src, dst, PROTO_UDP, payload);
+    let parsed = Ipv4Packet::parse(&pkt)?;
+
+    if parsed.more_fragments() {
+        crate::serial_println!("[ipv4]   FAIL: DF packet has MF set");
+        return Err(KernelError::InternalError);
+    }
+    if parsed.fragment_offset() != 0 {
+        crate::serial_println!("[ipv4]   FAIL: DF packet has non-zero offset");
+        return Err(KernelError::InternalError);
+    }
+    if parsed.is_fragment() {
+        crate::serial_println!("[ipv4]   FAIL: DF packet is_fragment() == true");
+        return Err(KernelError::InternalError);
+    }
+
+    // Build a fragment with MF=1, offset=185 (1480 bytes / 8 = 185).
+    let frag = build_fragment(
+        src, dst, PROTO_UDP, payload,
+        42, // ip_id
+        185, // offset in 8-byte units
+        true, // more_fragments
+    );
+    let parsed_frag = Ipv4Packet::parse(&frag)?;
+
+    if !parsed_frag.more_fragments() {
+        crate::serial_println!("[ipv4]   FAIL: fragment should have MF set");
+        return Err(KernelError::InternalError);
+    }
+    if parsed_frag.fragment_offset() != 185 {
+        crate::serial_println!("[ipv4]   FAIL: offset = {}, expected 185", parsed_frag.fragment_offset());
+        return Err(KernelError::InternalError);
+    }
+    if !parsed_frag.is_fragment() {
+        crate::serial_println!("[ipv4]   FAIL: is_fragment() should be true");
+        return Err(KernelError::InternalError);
+    }
+
+    // Last fragment (MF=0, offset=370).
+    let last_frag = build_fragment(src, dst, PROTO_UDP, payload, 42, 370, false);
+    let parsed_last = Ipv4Packet::parse(&last_frag)?;
+
+    if parsed_last.more_fragments() {
+        crate::serial_println!("[ipv4]   FAIL: last fragment has MF set");
+        return Err(KernelError::InternalError);
+    }
+    if parsed_last.fragment_offset() != 370 {
+        crate::serial_println!("[ipv4]   FAIL: last frag offset = {}", parsed_last.fragment_offset());
+        return Err(KernelError::InternalError);
+    }
+    // Last fragment still is_fragment() because offset != 0.
+    if !parsed_last.is_fragment() {
+        crate::serial_println!("[ipv4]   FAIL: last frag should still be a fragment");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ipv4]   fragment flags: OK");
+    Ok(())
+}
+
+/// Test compute_transport_checksum + verify_transport_checksum round-trip.
+fn test_transport_checksum_roundtrip() -> KernelResult<()> {
+    let src = Ipv4Addr([192, 168, 0, 10]);
+    let dst = Ipv4Addr([192, 168, 0, 20]);
+
+    // Build a fake UDP segment: src_port(2) + dst_port(2) + len(2) + cksum(2) + data.
+    let data = b"test data";
+    let udp_len: u16 = 8 + data.len() as u16;
+    let mut segment = Vec::with_capacity(udp_len as usize);
+    segment.extend_from_slice(&1234u16.to_be_bytes()); // src port
+    segment.extend_from_slice(&5678u16.to_be_bytes()); // dst port
+    segment.extend_from_slice(&udp_len.to_be_bytes()); // length
+    segment.extend_from_slice(&0u16.to_be_bytes());    // checksum = 0 (to compute)
+    segment.extend_from_slice(data);
+
+    // Compute checksum.
+    let cksum = compute_transport_checksum(src, dst, PROTO_UDP, &segment);
+
+    // Write checksum into the segment.
+    segment[6] = (cksum >> 8) as u8;
+    segment[7] = cksum as u8;
+
+    // Verify.
+    if !verify_transport_checksum(src, dst, PROTO_UDP, &segment) {
+        crate::serial_println!("[ipv4]   FAIL: transport checksum verify failed after compute");
+        return Err(KernelError::InternalError);
+    }
+
+    // Corrupt a byte and verify rejection.
+    let orig = segment[8];
+    segment[8] ^= 0xFF;
+    if verify_transport_checksum(src, dst, PROTO_UDP, &segment) {
+        crate::serial_println!("[ipv4]   FAIL: corrupted segment passed verification");
+        return Err(KernelError::InternalError);
+    }
+    segment[8] = orig; // restore
+
+    // Test UDP with checksum = 0 (means "no checksum", should pass).
+    segment[6] = 0;
+    segment[7] = 0;
+    if !verify_transport_checksum(src, dst, PROTO_UDP, &segment) {
+        crate::serial_println!("[ipv4]   FAIL: UDP cksum=0 should be accepted");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ipv4]   transport checksum round-trip: OK");
+    Ok(())
+}
+
+/// Test multicast MAC mapping per RFC 1112.
+fn test_multicast_mac_mapping() -> KernelResult<()> {
+    // 224.0.0.1 → 01:00:5E:00:00:01
+    let mac = multicast_mac(Ipv4Addr([224, 0, 0, 1]));
+    if mac.0 != [0x01, 0x00, 0x5E, 0x00, 0x00, 0x01] {
+        crate::serial_println!("[ipv4]   FAIL: 224.0.0.1 → wrong MAC {:?}", mac.0);
+        return Err(KernelError::InternalError);
+    }
+
+    // 239.255.255.250 (SSDP) → 01:00:5E:7F:FF:FA
+    let mac2 = multicast_mac(Ipv4Addr([239, 255, 255, 250]));
+    if mac2.0 != [0x01, 0x00, 0x5E, 0x7F, 0xFF, 0xFA] {
+        crate::serial_println!("[ipv4]   FAIL: 239.255.255.250 → wrong MAC {:?}", mac2.0);
+        return Err(KernelError::InternalError);
+    }
+
+    // 224.128.0.5 → 01:00:5E:00:00:05 (high bit of byte[1] is masked)
+    let mac3 = multicast_mac(Ipv4Addr([224, 128, 0, 5]));
+    if mac3.0 != [0x01, 0x00, 0x5E, 0x00, 0x00, 0x05] {
+        crate::serial_println!("[ipv4]   FAIL: 224.128.0.5 → wrong MAC {:?}", mac3.0);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ipv4]   multicast MAC mapping: OK");
+    Ok(())
+}
+
+/// Test subnet broadcast detection.
+fn test_subnet_broadcast() -> KernelResult<()> {
+    let our_ip = Ipv4Addr([192, 168, 1, 100]);
+    let mask = Ipv4Addr([255, 255, 255, 0]);
+
+    // 192.168.1.255 is the subnet broadcast for /24.
+    if !is_subnet_broadcast(Ipv4Addr([192, 168, 1, 255]), our_ip, mask) {
+        crate::serial_println!("[ipv4]   FAIL: 192.168.1.255 should be subnet broadcast");
+        return Err(KernelError::InternalError);
+    }
+
+    // 192.168.1.100 is not broadcast.
+    if is_subnet_broadcast(Ipv4Addr([192, 168, 1, 100]), our_ip, mask) {
+        crate::serial_println!("[ipv4]   FAIL: 192.168.1.100 is not broadcast");
+        return Err(KernelError::InternalError);
+    }
+
+    // 192.168.2.255 is NOT broadcast for 192.168.1.0/24.
+    if is_subnet_broadcast(Ipv4Addr([192, 168, 2, 255]), our_ip, mask) {
+        crate::serial_println!("[ipv4]   FAIL: 192.168.2.255 wrong subnet");
+        return Err(KernelError::InternalError);
+    }
+
+    // /16 subnet: 10.1.255.255 is broadcast for 10.1.0.0/16.
+    let our_ip2 = Ipv4Addr([10, 1, 50, 1]);
+    let mask2 = Ipv4Addr([255, 255, 0, 0]);
+    if !is_subnet_broadcast(Ipv4Addr([10, 1, 255, 255]), our_ip2, mask2) {
+        crate::serial_println!("[ipv4]   FAIL: 10.1.255.255 should be /16 broadcast");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ipv4]   subnet broadcast: OK");
+    Ok(())
+}
+
 /// Determine the next-hop IP for a destination within a namespace.
 ///
 /// For the root namespace, uses the global interface configuration

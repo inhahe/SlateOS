@@ -787,6 +787,216 @@ pub fn last_rtt_ns() -> u64 {
     LAST_RTT_NS.load(Ordering::Relaxed)
 }
 
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// ICMP unit tests — exercises echo request building, checksum verification,
+/// traceroute probe building, ping tracking, and reason string lookups.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[icmp] Running ICMP self-test...");
+
+    test_build_echo_request_checksum()?;
+    test_verify_checksum_valid()?;
+    test_verify_checksum_invalid()?;
+    test_build_trace_echo_request()?;
+    test_ping_tracking()?;
+    test_reason_strings()?;
+
+    crate::serial_println!("[icmp] ICMP self-test PASSED (6 tests)");
+    Ok(())
+}
+
+/// Test that build_echo_request produces a valid ICMP checksum.
+fn test_build_echo_request_checksum() -> KernelResult<()> {
+    let pkt = build_echo_request(42);
+
+    // Minimum size: 8 bytes header + payload "ping from kernel!" (17 bytes).
+    if pkt.len() < ICMP_HEADER_SIZE {
+        crate::serial_println!("[icmp]   FAIL: echo request too short ({})", pkt.len());
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Type must be Echo Request (8).
+    if pkt[0] != ICMP_ECHO_REQUEST {
+        crate::serial_println!("[icmp]   FAIL: type = {}, expected {}", pkt[0], ICMP_ECHO_REQUEST);
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Code must be 0.
+    if pkt[1] != 0 {
+        crate::serial_println!("[icmp]   FAIL: code = {}", pkt[1]);
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Identifier must be PING_ID.
+    let id = u16::from_be_bytes([pkt[4], pkt[5]]);
+    if id != PING_ID {
+        crate::serial_println!("[icmp]   FAIL: id = {:#06x}, expected {:#06x}", id, PING_ID);
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Sequence number must be 42.
+    let seq = u16::from_be_bytes([pkt[6], pkt[7]]);
+    if seq != 42 {
+        crate::serial_println!("[icmp]   FAIL: seq = {}, expected 42", seq);
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Checksum should be valid (folds to 0).
+    if !verify_checksum(&pkt) {
+        crate::serial_println!("[icmp]   FAIL: echo request has invalid checksum");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    crate::serial_println!("[icmp]   build echo request checksum: OK");
+    Ok(())
+}
+
+/// Test verify_checksum with a known-valid ICMP packet.
+fn test_verify_checksum_valid() -> KernelResult<()> {
+    // Build a valid echo request and verify it passes.
+    let pkt = build_echo_request(100);
+    if !verify_checksum(&pkt) {
+        crate::serial_println!("[icmp]   FAIL: valid packet rejected by verify_checksum");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    crate::serial_println!("[icmp]   verify checksum (valid): OK");
+    Ok(())
+}
+
+/// Test verify_checksum rejects a corrupted ICMP packet.
+fn test_verify_checksum_invalid() -> KernelResult<()> {
+    let mut pkt = build_echo_request(200);
+
+    // Corrupt a payload byte.
+    if let Some(b) = pkt.get_mut(10) {
+        *b ^= 0xFF;
+    }
+
+    if verify_checksum(&pkt) {
+        crate::serial_println!("[icmp]   FAIL: corrupted packet passed verify_checksum");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    crate::serial_println!("[icmp]   verify checksum (invalid): OK (rejected)");
+    Ok(())
+}
+
+/// Test that build_trace_echo_request produces valid ICMP.
+fn test_build_trace_echo_request() -> KernelResult<()> {
+    let pkt = build_trace_echo_request(7);
+
+    if pkt.len() < ICMP_HEADER_SIZE {
+        crate::serial_println!("[icmp]   FAIL: trace request too short");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Type must be Echo Request (8).
+    if pkt[0] != ICMP_ECHO_REQUEST {
+        crate::serial_println!("[icmp]   FAIL: trace type = {}", pkt[0]);
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Identifier must be TRACEROUTE_ID.
+    let id = u16::from_be_bytes([pkt[4], pkt[5]]);
+    if id != TRACEROUTE_ID {
+        crate::serial_println!("[icmp]   FAIL: trace id = {:#06x}", id);
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Sequence must be 7.
+    let seq = u16::from_be_bytes([pkt[6], pkt[7]]);
+    if seq != 7 {
+        crate::serial_println!("[icmp]   FAIL: trace seq = {}", seq);
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Checksum must be valid.
+    if !verify_checksum(&pkt) {
+        crate::serial_println!("[icmp]   FAIL: trace request bad checksum");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    crate::serial_println!("[icmp]   build trace echo request: OK");
+    Ok(())
+}
+
+/// Test record_outstanding + match_outstanding for ping RTT tracking.
+fn test_ping_tracking() -> KernelResult<()> {
+    let dst = Ipv4Addr([8, 8, 8, 8]);
+
+    // Record an outstanding ping with seq=999.
+    record_outstanding(999, dst);
+
+    // Matching should return Some(rtt).
+    match match_outstanding(999) {
+        Some(rtt) => {
+            // RTT should be very small (we just recorded it).
+            if rtt > 1_000_000_000 {
+                crate::serial_println!("[icmp]   FAIL: RTT {} ns too large", rtt);
+                return Err(crate::error::KernelError::InternalError);
+            }
+        }
+        None => {
+            crate::serial_println!("[icmp]   FAIL: outstanding ping not found");
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+
+    // Second match should return None (slot was consumed).
+    if match_outstanding(999).is_some() {
+        crate::serial_println!("[icmp]   FAIL: consumed slot matched again");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Non-existent seq should return None.
+    if match_outstanding(12345).is_some() {
+        crate::serial_println!("[icmp]   FAIL: non-existent seq matched");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    crate::serial_println!("[icmp]   ping tracking: OK");
+    Ok(())
+}
+
+/// Test that reason string lookups return expected values.
+fn test_reason_strings() -> KernelResult<()> {
+    // Destination Unreachable codes.
+    if dest_unreachable_reason(0) != "network unreachable" {
+        crate::serial_println!("[icmp]   FAIL: wrong reason for code 0");
+        return Err(crate::error::KernelError::InternalError);
+    }
+    if dest_unreachable_reason(3) != "port unreachable" {
+        crate::serial_println!("[icmp]   FAIL: wrong reason for code 3");
+        return Err(crate::error::KernelError::InternalError);
+    }
+    if dest_unreachable_reason(4) != "fragmentation needed but DF set" {
+        crate::serial_println!("[icmp]   FAIL: wrong reason for code 4");
+        return Err(crate::error::KernelError::InternalError);
+    }
+    if dest_unreachable_reason(255) != "unknown" {
+        crate::serial_println!("[icmp]   FAIL: unknown code should return 'unknown'");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Time Exceeded codes.
+    if time_exceeded_reason(0) != "TTL exceeded in transit" {
+        crate::serial_println!("[icmp]   FAIL: wrong time_exceeded reason");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    // Redirect codes.
+    if redirect_reason(1) != "redirect for host" {
+        crate::serial_println!("[icmp]   FAIL: wrong redirect reason");
+        return Err(crate::error::KernelError::InternalError);
+    }
+
+    crate::serial_println!("[icmp]   reason strings: OK");
+    Ok(())
+}
+
 /// Send an ICMP Destination Unreachable (Port Unreachable) message.
 ///
 /// Per RFC 792 / RFC 1122 §3.2.2.1, when a UDP datagram arrives at a

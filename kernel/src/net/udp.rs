@@ -723,3 +723,236 @@ pub fn all_sockets() -> ([UdpSocketInfo; MAX_SOCKETS], usize) {
 
     (out, count)
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// UDP unit tests — exercises socket bind/close, ephemeral port allocation,
+/// multicast group management, and socket state queries.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[udp] Running UDP self-test...");
+
+    test_bind_close()?;
+    test_bind_duplicate()?;
+    test_ephemeral_port()?;
+    test_multicast_join_leave()?;
+    test_rx_ready_empty()?;
+    test_connected_mode()?;
+
+    crate::serial_println!("[udp] UDP self-test PASSED (6 tests)");
+    Ok(())
+}
+
+/// Test basic bind + local_port + close lifecycle.
+fn test_bind_close() -> KernelResult<()> {
+    let handle = bind(55555)?;
+
+    // local_port should return the bound port.
+    match local_port(handle) {
+        Some(55555) => {}
+        Some(p) => {
+            crate::serial_println!("[udp]   FAIL: local_port = {}, expected 55555", p);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+        None => {
+            crate::serial_println!("[udp]   FAIL: local_port returned None");
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close(handle);
+
+    // After close, local_port should return None.
+    if local_port(handle).is_some() {
+        crate::serial_println!("[udp]   FAIL: local_port still Some after close");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[udp]   bind/close lifecycle: OK");
+    Ok(())
+}
+
+/// Test that binding to the same port twice is rejected.
+fn test_bind_duplicate() -> KernelResult<()> {
+    let h1 = bind(55556)?;
+
+    match bind(55556) {
+        Err(KernelError::AlreadyExists) => {} // Expected.
+        Ok(h2) => {
+            crate::serial_println!("[udp]   FAIL: duplicate bind succeeded");
+            close(h2);
+            close(h1);
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            crate::serial_println!("[udp]   FAIL: unexpected error {:?}", e);
+            close(h1);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close(h1);
+
+    // After close, the port should be available again.
+    let h2 = bind(55556)?;
+    close(h2);
+
+    crate::serial_println!("[udp]   bind duplicate: OK (rejected)");
+    Ok(())
+}
+
+/// Test ephemeral port allocation (port 0).
+fn test_ephemeral_port() -> KernelResult<()> {
+    let h1 = bind(0)?;
+    let p1 = local_port(h1);
+
+    if p1.is_none() {
+        crate::serial_println!("[udp]   FAIL: ephemeral port returned None");
+        close(h1);
+        return Err(KernelError::InternalError);
+    }
+    let p1 = p1.unwrap_or(0);
+
+    if p1 < 49152 {
+        crate::serial_println!("[udp]   FAIL: ephemeral port {} below IANA range", p1);
+        close(h1);
+        return Err(KernelError::InternalError);
+    }
+
+    // Second ephemeral should be different.
+    let h2 = bind(0)?;
+    let p2 = local_port(h2).unwrap_or(0);
+
+    if p1 == p2 {
+        crate::serial_println!("[udp]   FAIL: two ephemeral ports are identical ({})", p1);
+        close(h1);
+        close(h2);
+        return Err(KernelError::InternalError);
+    }
+
+    close(h1);
+    close(h2);
+
+    crate::serial_println!("[udp]   ephemeral port: OK (p1={}, p2={})", p1, p2);
+    Ok(())
+}
+
+/// Test multicast group join, leave, and is_multicast_member.
+fn test_multicast_join_leave() -> KernelResult<()> {
+    let handle = bind(55557)?;
+    let mcast = Ipv4Addr([224, 0, 0, 251]); // mDNS multicast
+
+    // Not a member before join.
+    if is_multicast_member(mcast) {
+        crate::serial_println!("[udp]   FAIL: member before join");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    join_group(handle, mcast)?;
+
+    // Should be a member now.
+    if !is_multicast_member(mcast) {
+        crate::serial_println!("[udp]   FAIL: not member after join");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    // Double-join should fail.
+    match join_group(handle, mcast) {
+        Err(KernelError::AlreadyExists) => {} // Expected.
+        other => {
+            crate::serial_println!("[udp]   FAIL: double join didn't return AlreadyExists: {:?}", other);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Non-multicast address should be rejected.
+    match join_group(handle, Ipv4Addr([10, 0, 0, 1])) {
+        Err(KernelError::InvalidArgument) => {} // Expected.
+        other => {
+            crate::serial_println!("[udp]   FAIL: unicast join didn't fail: {:?}", other);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    leave_group(handle, mcast)?;
+
+    // Should no longer be a member.
+    if is_multicast_member(mcast) {
+        crate::serial_println!("[udp]   FAIL: still member after leave");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    close(handle);
+
+    crate::serial_println!("[udp]   multicast join/leave: OK");
+    Ok(())
+}
+
+/// Test rx_ready and rx_front_bytes on an empty socket.
+fn test_rx_ready_empty() -> KernelResult<()> {
+    let handle = bind(55558)?;
+
+    if rx_ready(handle) != 0 {
+        crate::serial_println!("[udp]   FAIL: rx_ready non-zero on new socket");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    if rx_front_bytes(handle) != 0 {
+        crate::serial_println!("[udp]   FAIL: rx_front_bytes non-zero on new socket");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    // recv on empty queue should return None.
+    if recv(handle).is_some() {
+        crate::serial_println!("[udp]   FAIL: recv returned data on empty socket");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    // Invalid handle should return 0.
+    if rx_ready(99) != 0 {
+        crate::serial_println!("[udp]   FAIL: rx_ready for invalid handle != 0");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    close(handle);
+    crate::serial_println!("[udp]   rx_ready/rx_front_bytes empty: OK");
+    Ok(())
+}
+
+/// Test connected mode (peer filter).
+fn test_connected_mode() -> KernelResult<()> {
+    let handle = bind(55559)?;
+    let peer_ip = Ipv4Addr([10, 0, 0, 1]);
+
+    // Connect to a peer.
+    connect(handle, peer_ip, 8080)?;
+
+    // Disconnect.
+    connect(handle, Ipv4Addr::UNSPECIFIED, 0)?;
+
+    // Connect on invalid handle should fail.
+    match connect(99, peer_ip, 8080) {
+        Err(KernelError::InvalidArgument) => {} // Expected.
+        other => {
+            crate::serial_println!("[udp]   FAIL: connect on invalid handle: {:?}", other);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close(handle);
+    crate::serial_println!("[udp]   connected mode: OK");
+    Ok(())
+}

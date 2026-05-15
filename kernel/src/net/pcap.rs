@@ -192,6 +192,12 @@ impl CaptureFilter {
                 return false;
             }
             let ihl = (*data.get(14).unwrap_or(&0) & 0x0F) as usize;
+            // RFC 791: IHL minimum is 5 (20-byte header).  Malformed
+            // packets with IHL < 5 would compute a wrong transport offset,
+            // reading ports from the IP header instead of TCP/UDP.
+            if ihl < 5 {
+                return false;
+            }
             let ip_header_offset = 14usize;
             let transport_offset = ip_header_offset.saturating_add(ihl.saturating_mul(4));
 

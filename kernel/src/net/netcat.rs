@@ -189,11 +189,16 @@ pub fn scan_ports(host: Ipv4Addr, start: u16, end: u16) -> Vec<PortScanResult> {
     let mut results = Vec::with_capacity((actual_end.saturating_sub(start).saturating_add(1)) as usize);
 
     let mut port = start;
-    while port <= actual_end {
+    loop {
         let open = check_port_open(host, port);
         results.push(PortScanResult { port, open });
-        port = port.saturating_add(1);
-        if port == 0 { break; } // Overflow guard.
+        // Stop after scanning actual_end.  We check *after* scanning so
+        // that port == actual_end == u16::MAX is handled correctly
+        // (saturating_add would stay at MAX, causing an infinite loop).
+        if port >= actual_end {
+            break;
+        }
+        port = port.wrapping_add(1);
     }
 
     results

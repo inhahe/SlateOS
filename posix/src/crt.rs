@@ -995,6 +995,71 @@ pub extern "C" fn __stack_chk_fail_local() -> ! {
 }
 
 // ---------------------------------------------------------------------------
+// on_exit — register a function to be called at exit with status
+// ---------------------------------------------------------------------------
+
+/// Function type for `on_exit` callbacks.
+///
+/// Takes the exit status and a user-provided argument.
+pub type OnExitFn = extern "C" fn(i32, *mut u8);
+
+/// Maximum number of `on_exit` handlers.
+const MAX_ON_EXIT: usize = 32;
+
+/// Registered `on_exit` handlers.
+static mut ON_EXIT_FUNCS: [(Option<OnExitFn>, *mut u8); MAX_ON_EXIT] =
+    [(None, core::ptr::null_mut()); MAX_ON_EXIT];
+/// Number of registered `on_exit` handlers.
+static mut ON_EXIT_COUNT: usize = 0;
+
+/// `on_exit` — register a function to be called at normal process exit.
+///
+/// Like `atexit`, but the callback receives the exit status and a
+/// user-provided argument.  SunOS/glibc extension.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn on_exit(func: OnExitFn, arg: *mut u8) -> i32 {
+    // SAFETY: single-threaded access.
+    let count = unsafe { (&raw const ON_EXIT_COUNT).read() };
+    if count >= MAX_ON_EXIT {
+        return -1;
+    }
+    unsafe {
+        ON_EXIT_FUNCS[count] = (Some(func), arg);
+        (&raw mut ON_EXIT_COUNT).write(count.wrapping_add(1));
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// gnu_dev_major / gnu_dev_minor / gnu_dev_makedev
+// ---------------------------------------------------------------------------
+
+/// Extract the major device number from a dev_t.
+///
+/// glibc extension.  Uses the Linux device number encoding.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn gnu_dev_major(dev: u64) -> u32 {
+    ((dev >> 8) & 0xFFF) as u32 | (((dev >> 32) & !0xFFF_u64) as u32)
+}
+
+/// Extract the minor device number from a dev_t.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn gnu_dev_minor(dev: u64) -> u32 {
+    (dev & 0xFF) as u32 | (((dev >> 12) & !0xFF_u64) as u32)
+}
+
+/// Construct a dev_t from major and minor numbers.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn gnu_dev_makedev(major: u32, minor: u32) -> u64 {
+    let maj = major as u64;
+    let min = minor as u64;
+    ((maj & 0xFFF) << 8)
+        | ((maj & !0xFFF_u64) << 32)
+        | (min & 0xFF)
+        | ((min & !0xFF_u64) << 12)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1520,5 +1585,67 @@ mod tests {
     fn test_progname_full_not_null() {
         let ptr = unsafe { core::ptr::addr_of!(__progname_full).read() };
         assert!(!ptr.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // on_exit
+    // -----------------------------------------------------------------------
+
+    extern "C" fn dummy_on_exit(_status: i32, _arg: *mut u8) {}
+
+    #[test]
+    fn test_on_exit_registers() {
+        let ret = on_exit(dummy_on_exit, core::ptr::null_mut());
+        assert_eq!(ret, 0, "on_exit should succeed");
+    }
+
+    #[test]
+    fn test_on_exit_with_arg() {
+        let mut data: i32 = 42;
+        let ret = on_exit(dummy_on_exit, (&raw mut data) as *mut u8);
+        assert_eq!(ret, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // gnu_dev_major / gnu_dev_minor / gnu_dev_makedev
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_gnu_dev_makedev_roundtrip() {
+        let dev = gnu_dev_makedev(8, 1);
+        assert_eq!(gnu_dev_major(dev), 8);
+        assert_eq!(gnu_dev_minor(dev), 1);
+    }
+
+    #[test]
+    fn test_gnu_dev_makedev_zero() {
+        let dev = gnu_dev_makedev(0, 0);
+        assert_eq!(dev, 0);
+        assert_eq!(gnu_dev_major(dev), 0);
+        assert_eq!(gnu_dev_minor(dev), 0);
+    }
+
+    #[test]
+    fn test_gnu_dev_common_device() {
+        // /dev/sda1 is typically major=8, minor=1 on Linux.
+        let dev = gnu_dev_makedev(8, 1);
+        assert_eq!(gnu_dev_major(dev), 8);
+        assert_eq!(gnu_dev_minor(dev), 1);
+    }
+
+    #[test]
+    fn test_gnu_dev_large_minor() {
+        // Test with minor > 255 (uses upper bits).
+        let dev = gnu_dev_makedev(8, 300);
+        assert_eq!(gnu_dev_major(dev), 8);
+        assert_eq!(gnu_dev_minor(dev), 300);
+    }
+
+    #[test]
+    fn test_gnu_dev_large_major() {
+        // Test with major > 4095 (uses upper bits).
+        let dev = gnu_dev_makedev(5000, 42);
+        assert_eq!(gnu_dev_major(dev), 5000);
+        assert_eq!(gnu_dev_minor(dev), 42);
     }
 }

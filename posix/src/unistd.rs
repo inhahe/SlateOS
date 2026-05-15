@@ -1873,6 +1873,41 @@ pub unsafe extern "C" fn tmpnam_r(s: *mut u8) -> *mut u8 {
 }
 
 // ---------------------------------------------------------------------------
+// get_current_dir_name — glibc extension
+// ---------------------------------------------------------------------------
+
+/// `get_current_dir_name` — get the current working directory.
+///
+/// Like `getcwd`, but allocates the buffer with `malloc`.
+/// The caller must `free` the returned pointer.
+///
+/// glibc extension.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn get_current_dir_name() -> *mut u8 {
+    let mut buf = [0u8; PATH_MAX];
+    let ret = getcwd(buf.as_mut_ptr(), PATH_MAX);
+    if ret.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    // Find length.
+    let mut len: usize = 0;
+    while len < PATH_MAX && buf[len] != 0 {
+        len = len.wrapping_add(1);
+    }
+
+    // Allocate and copy.
+    let alloc_size = len.wrapping_add(1); // Include null terminator.
+    let ptr = unsafe { crate::malloc::malloc(alloc_size) };
+    if ptr.is_null() {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: ptr is valid for alloc_size bytes.
+    unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, alloc_size); }
+    ptr
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -3283,5 +3318,24 @@ mod tests {
         // On our OS, tmpnam generates /tmp/tmp_XXXXXX.
         // On test host it may succeed or fail; just verify no crash.
         let _ = ret;
+    }
+
+    // ------------------------------------------------------------------
+    // get_current_dir_name
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_get_current_dir_name_returns_something() {
+        // get_current_dir_name allocates a string with the CWD.
+        // On test host, CWD is initialized to "/" or the actual cwd.
+        let ptr = get_current_dir_name();
+        // May return null if getcwd fails on test host.
+        if !ptr.is_null() {
+            // Should be a non-empty string.
+            let first = unsafe { *ptr };
+            assert_eq!(first, b'/', "CWD should start with '/'");
+            // Free the allocation.
+            unsafe { crate::malloc::free(ptr); }
+        }
     }
 }

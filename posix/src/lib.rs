@@ -124,7 +124,8 @@
 //!   `readahead`, `sync_file_range`, `name_to_handle_at`,
 //!   `open_by_handle_at`, `get_nprocs`/`get_nprocs_conf`,
 //!   `get_phys_pages`/`get_avphys_pages`, `futimesat`, `tmpnam_r`,
-//!   `scandirat`
+//!   `scandirat`, `get_current_dir_name`
+//! - **Device Numbers**: `gnu_dev_major`/`gnu_dev_minor`/`gnu_dev_makedev`
 //! - **Dynamic Linking** (stubs): `dlopen`, `dlsym`, `dlclose`, `dlerror`,
 //!   `dladdr`, `dl_iterate_phdr`, `__tls_get_addr`
 //! - **Directories**: `opendir`, `closedir`, `readdir`, `rewinddir`,

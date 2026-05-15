@@ -109,3 +109,152 @@ pub fn process_frame(data: &[u8]) -> KernelResult<()> {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Ethernet frame parsing and construction tests.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[ethernet] Running self-test...");
+
+    test_parse_valid_frame()?;
+    test_parse_too_short()?;
+    test_build_frame_roundtrip()?;
+    test_broadcast_mac()?;
+    test_ethertype_constants()?;
+
+    crate::serial_println!("[ethernet] Self-test PASSED (5 tests)");
+    Ok(())
+}
+
+/// Parse a valid Ethernet frame with known bytes.
+fn test_parse_valid_frame() -> KernelResult<()> {
+    // Build a frame: dst=ff:ff:ff:ff:ff:ff, src=AA:BB:CC:DD:EE:FF,
+    // ethertype=0x0800 (IPv4), payload=[1,2,3,4].
+    let mut raw = [0u8; 18]; // 14 header + 4 payload
+    // Dst MAC: broadcast.
+    raw[0..6].copy_from_slice(&[0xFF; 6]);
+    // Src MAC.
+    raw[6..12].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    // EtherType: IPv4 big-endian → [0x08, 0x00].
+    raw[12] = 0x08;
+    raw[13] = 0x00;
+    // Payload.
+    raw[14..18].copy_from_slice(&[1, 2, 3, 4]);
+
+    let frame = EthernetFrame::parse(&raw)?;
+
+    if frame.dst.0 != [0xFF; 6] {
+        crate::serial_println!("[ethernet]   FAIL: dst MAC");
+        return Err(KernelError::InternalError);
+    }
+    if frame.src.0 != [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF] {
+        crate::serial_println!("[ethernet]   FAIL: src MAC");
+        return Err(KernelError::InternalError);
+    }
+    if frame.ethertype != ETHERTYPE_IPV4 {
+        crate::serial_println!(
+            "[ethernet]   FAIL: ethertype = {:#06x}", frame.ethertype
+        );
+        return Err(KernelError::InternalError);
+    }
+    if frame.payload != &[1, 2, 3, 4] {
+        crate::serial_println!("[ethernet]   FAIL: payload");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ethernet]   parse valid frame: OK");
+    Ok(())
+}
+
+/// Parse rejects frames shorter than 14 bytes.
+fn test_parse_too_short() -> KernelResult<()> {
+    let short = [0u8; 13];
+    match EthernetFrame::parse(&short) {
+        Err(KernelError::InvalidArgument) => {}
+        other => {
+            crate::serial_println!(
+                "[ethernet]   FAIL: parse(13 bytes) = {:?}",
+                other.map(|_| ())
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Exactly 14 bytes should succeed (empty payload).
+    let exact = [0u8; 14];
+    let frame = EthernetFrame::parse(&exact)?;
+    if !frame.payload.is_empty() {
+        crate::serial_println!("[ethernet]   FAIL: 14-byte payload not empty");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ethernet]   parse too short: OK");
+    Ok(())
+}
+
+/// Build a frame and parse it back — roundtrip test.
+fn test_build_frame_roundtrip() -> KernelResult<()> {
+    let dst = MacAddress([0x01, 0x02, 0x03, 0x04, 0x05, 0x06]);
+    let src = MacAddress([0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F]);
+    let payload = [0xDE, 0xAD, 0xBE, 0xEF];
+
+    let frame_bytes = build_frame(&dst, &src, ETHERTYPE_ARP, &payload);
+
+    // Should be 14 + 4 = 18 bytes.
+    if frame_bytes.len() != 18 {
+        crate::serial_println!(
+            "[ethernet]   FAIL: frame length = {}", frame_bytes.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Parse it back.
+    let parsed = EthernetFrame::parse(&frame_bytes)?;
+    if parsed.dst.0 != dst.0 {
+        crate::serial_println!("[ethernet]   FAIL: roundtrip dst");
+        return Err(KernelError::InternalError);
+    }
+    if parsed.src.0 != src.0 {
+        crate::serial_println!("[ethernet]   FAIL: roundtrip src");
+        return Err(KernelError::InternalError);
+    }
+    if parsed.ethertype != ETHERTYPE_ARP {
+        crate::serial_println!("[ethernet]   FAIL: roundtrip ethertype");
+        return Err(KernelError::InternalError);
+    }
+    if parsed.payload != &payload {
+        crate::serial_println!("[ethernet]   FAIL: roundtrip payload");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ethernet]   build/parse roundtrip: OK");
+    Ok(())
+}
+
+/// Verify BROADCAST_MAC constant.
+fn test_broadcast_mac() -> KernelResult<()> {
+    if BROADCAST_MAC.0 != [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF] {
+        crate::serial_println!("[ethernet]   FAIL: BROADCAST_MAC");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ethernet]   broadcast MAC: OK");
+    Ok(())
+}
+
+/// Verify EtherType constants.
+fn test_ethertype_constants() -> KernelResult<()> {
+    if ETHERTYPE_IPV4 != 0x0800 {
+        crate::serial_println!("[ethernet]   FAIL: ETHERTYPE_IPV4");
+        return Err(KernelError::InternalError);
+    }
+    if ETHERTYPE_ARP != 0x0806 {
+        crate::serial_println!("[ethernet]   FAIL: ETHERTYPE_ARP");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ethernet]   ethertype constants: OK");
+    Ok(())
+}

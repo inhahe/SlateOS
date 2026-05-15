@@ -381,7 +381,152 @@ pub fn tick_expire() {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Self-test (in-kernel)
+// ---------------------------------------------------------------------------
+
+/// IPv4 reassembly unit tests — exercises FragEntry methods directly
+/// without touching global state or the timer.
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    crate::serial_println!("[frag] Running self-test...");
+
+    test_single_fragment()?;
+    test_two_fragments_ordered()?;
+    test_two_fragments_reversed()?;
+    test_empty_fragment_rejected()?;
+    test_oversized_fragment_rejected()?;
+
+    crate::serial_println!("[frag] Self-test PASSED (5 tests)");
+    Ok(())
+}
+
+/// A single fragment with MF=false at offset 0 should complete immediately.
+fn test_single_fragment() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let mut entry = FragEntry::empty();
+    let data = [0xAA; 100];
+    let complete = entry.add_fragment(0, &data, false);
+
+    if !complete {
+        crate::serial_println!("[frag]   FAIL: single fragment not complete");
+        return Err(KernelError::InternalError);
+    }
+    if entry.total_len != Some(100) {
+        crate::serial_println!(
+            "[frag]   FAIL: total_len = {:?}", entry.total_len
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Verify buffer content.
+    if entry.buffer.len() < 100 || entry.buffer[0] != 0xAA || entry.buffer[99] != 0xAA {
+        crate::serial_println!("[frag]   FAIL: buffer content");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[frag]   single fragment: OK");
+    Ok(())
+}
+
+/// Two ordered fragments: first(offset=0, MF=true) + last(offset=16, MF=false).
+fn test_two_fragments_ordered() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let mut entry = FragEntry::empty();
+
+    // Fragment 1: 16 bytes at offset 0, more coming.
+    let frag1 = [0x11u8; 16];
+    let complete = entry.add_fragment(0, &frag1, true);
+    if complete {
+        crate::serial_println!("[frag]   FAIL: completed too early");
+        return Err(KernelError::InternalError);
+    }
+
+    // Fragment 2: 8 bytes at offset 16, last fragment.
+    let frag2 = [0x22u8; 8];
+    let complete = entry.add_fragment(16, &frag2, false);
+    if !complete {
+        crate::serial_println!("[frag]   FAIL: not complete after last fragment");
+        return Err(KernelError::InternalError);
+    }
+    if entry.total_len != Some(24) {
+        crate::serial_println!(
+            "[frag]   FAIL: total_len = {:?}", entry.total_len
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Verify buffer: first 16 bytes = 0x11, next 8 = 0x22.
+    if entry.buffer.get(0) != Some(&0x11) || entry.buffer.get(16) != Some(&0x22) {
+        crate::serial_println!("[frag]   FAIL: buffer content mixed");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[frag]   two fragments ordered: OK");
+    Ok(())
+}
+
+/// Two fragments received in reverse order.
+fn test_two_fragments_reversed() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let mut entry = FragEntry::empty();
+
+    // Last fragment first: 8 bytes at offset 16, MF=false.
+    let frag2 = [0xBBu8; 8];
+    let complete = entry.add_fragment(16, &frag2, false);
+    if complete {
+        // total_len is known but offset 0-15 not received yet.
+        crate::serial_println!("[frag]   FAIL: completed too early (reversed)");
+        return Err(KernelError::InternalError);
+    }
+
+    // First fragment: 16 bytes at offset 0, MF=true.
+    let frag1 = [0xAAu8; 16];
+    let complete = entry.add_fragment(0, &frag1, true);
+    if !complete {
+        crate::serial_println!("[frag]   FAIL: not complete after reversed assembly");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[frag]   two fragments reversed: OK");
+    Ok(())
+}
+
+/// Empty data should not complete (and should not panic).
+fn test_empty_fragment_rejected() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let mut entry = FragEntry::empty();
+    let complete = entry.add_fragment(0, &[], false);
+    if complete {
+        crate::serial_println!("[frag]   FAIL: empty fragment completed");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[frag]   empty fragment rejected: OK");
+    Ok(())
+}
+
+/// Fragments exceeding MAX_PAYLOAD should be rejected.
+fn test_oversized_fragment_rejected() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let mut entry = FragEntry::empty();
+    // offset near max + data that would exceed MAX_PAYLOAD.
+    let data = [0u8; 100];
+    let complete = entry.add_fragment(MAX_PAYLOAD, &data, false);
+    if complete {
+        crate::serial_println!("[frag]   FAIL: oversized fragment accepted");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[frag]   oversized fragment rejected: OK");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests (#[cfg(test)] — only runs with `cargo test`, not in kernel)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

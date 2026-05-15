@@ -369,3 +369,175 @@ pub fn stats() -> InterfaceStats {
         rx_drops: RX_DROPS.load(Ordering::Relaxed),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Network interface unit tests — exercises Ipv4Addr methods and
+/// InterfaceInfo defaults.
+pub fn self_test() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    crate::serial_println!("[interface] Running self-test...");
+
+    test_ipv4_addr_constructors()?;
+    test_ipv4_addr_u32_roundtrip()?;
+    test_ipv4_addr_classification()?;
+    test_ipv4_same_subnet()?;
+    test_interface_info_default()?;
+
+    crate::serial_println!("[interface] Self-test PASSED (5 tests)");
+    Ok(())
+}
+
+/// Test Ipv4Addr constructors and constants.
+fn test_ipv4_addr_constructors() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let addr = Ipv4Addr::new(192, 168, 1, 100);
+    if addr.0 != [192, 168, 1, 100] {
+        crate::serial_println!("[interface]   FAIL: new() octets");
+        return Err(KernelError::InternalError);
+    }
+
+    if Ipv4Addr::UNSPECIFIED.0 != [0, 0, 0, 0] {
+        crate::serial_println!("[interface]   FAIL: UNSPECIFIED");
+        return Err(KernelError::InternalError);
+    }
+    if Ipv4Addr::BROADCAST.0 != [255, 255, 255, 255] {
+        crate::serial_println!("[interface]   FAIL: BROADCAST");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[interface]   ipv4 constructors: OK");
+    Ok(())
+}
+
+/// Test to_u32 / from_u32 roundtrip.
+fn test_ipv4_addr_u32_roundtrip() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let addr = Ipv4Addr::new(10, 0, 1, 255);
+    let val = addr.to_u32();
+    // 10.0.1.255 in network order = 0x0A0001FF.
+    if val != 0x0A00_01FF {
+        crate::serial_println!(
+            "[interface]   FAIL: to_u32 = {:#010x}", val
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let back = Ipv4Addr::from_u32(val);
+    if back != addr {
+        crate::serial_println!("[interface]   FAIL: from_u32 roundtrip");
+        return Err(KernelError::InternalError);
+    }
+
+    // 0xFFFFFFFF → 255.255.255.255.
+    let bcast = Ipv4Addr::from_u32(0xFFFF_FFFF);
+    if bcast != Ipv4Addr::BROADCAST {
+        crate::serial_println!("[interface]   FAIL: from_u32(0xFFFFFFFF)");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[interface]   ipv4 u32 roundtrip: OK");
+    Ok(())
+}
+
+/// Test is_unspecified, is_broadcast, is_multicast.
+fn test_ipv4_addr_classification() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    if !Ipv4Addr::UNSPECIFIED.is_unspecified() {
+        crate::serial_println!("[interface]   FAIL: UNSPECIFIED.is_unspecified()");
+        return Err(KernelError::InternalError);
+    }
+    if Ipv4Addr::new(10, 0, 0, 1).is_unspecified() {
+        crate::serial_println!("[interface]   FAIL: 10.0.0.1 should not be unspecified");
+        return Err(KernelError::InternalError);
+    }
+
+    if !Ipv4Addr::BROADCAST.is_broadcast() {
+        crate::serial_println!("[interface]   FAIL: BROADCAST.is_broadcast()");
+        return Err(KernelError::InternalError);
+    }
+
+    // 224.0.0.1 is multicast (all hosts).
+    if !Ipv4Addr::new(224, 0, 0, 1).is_multicast() {
+        crate::serial_println!("[interface]   FAIL: 224.0.0.1 not multicast");
+        return Err(KernelError::InternalError);
+    }
+    // 239.255.255.255 is multicast (last multicast address).
+    if !Ipv4Addr::new(239, 255, 255, 255).is_multicast() {
+        crate::serial_println!("[interface]   FAIL: 239.x not multicast");
+        return Err(KernelError::InternalError);
+    }
+    // 240.0.0.0 is NOT multicast (class E reserved).
+    if Ipv4Addr::new(240, 0, 0, 0).is_multicast() {
+        crate::serial_println!("[interface]   FAIL: 240.0.0.0 should not be multicast");
+        return Err(KernelError::InternalError);
+    }
+    // 10.0.0.1 is NOT multicast.
+    if Ipv4Addr::new(10, 0, 0, 1).is_multicast() {
+        crate::serial_println!("[interface]   FAIL: 10.0.0.1 should not be multicast");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[interface]   ipv4 classification: OK");
+    Ok(())
+}
+
+/// Test same_subnet().
+fn test_ipv4_same_subnet() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let mask = Ipv4Addr::new(255, 255, 255, 0);
+
+    // Same /24 subnet.
+    let a = Ipv4Addr::new(192, 168, 1, 10);
+    let b = Ipv4Addr::new(192, 168, 1, 20);
+    if !a.same_subnet(b, mask) {
+        crate::serial_println!("[interface]   FAIL: same subnet not detected");
+        return Err(KernelError::InternalError);
+    }
+
+    // Different subnet.
+    let c = Ipv4Addr::new(192, 168, 2, 10);
+    if a.same_subnet(c, mask) {
+        crate::serial_println!("[interface]   FAIL: different subnet not detected");
+        return Err(KernelError::InternalError);
+    }
+
+    // /16 mask.
+    let mask16 = Ipv4Addr::new(255, 255, 0, 0);
+    if !a.same_subnet(c, mask16) {
+        crate::serial_println!("[interface]   FAIL: /16 same subnet");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[interface]   same_subnet: OK");
+    Ok(())
+}
+
+/// Test InterfaceInfo default values.
+fn test_interface_info_default() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let info = InterfaceInfo::default();
+    if info.up {
+        crate::serial_println!("[interface]   FAIL: default should be down");
+        return Err(KernelError::InternalError);
+    }
+    if !info.ip.is_unspecified() {
+        crate::serial_println!("[interface]   FAIL: default IP should be 0.0.0.0");
+        return Err(KernelError::InternalError);
+    }
+    if info.mac.0 != [0; 6] {
+        crate::serial_println!("[interface]   FAIL: default MAC should be zero");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[interface]   InterfaceInfo default: OK");
+    Ok(())
+}

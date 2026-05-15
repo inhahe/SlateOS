@@ -73,6 +73,8 @@
 //! - **Database Operations** (stubs): `dbm_open`, `dbm_close`,
 //!   `dbm_store`, `dbm_fetch`, `dbm_delete`, `dbm_firstkey`,
 //!   `dbm_nextkey`, `dbm_error`, `dbm_clearerr`
+//! - **Backtrace** (stubs): `backtrace`, `backtrace_symbols`,
+//!   `backtrace_symbols_fd`
 //! - **DNS Resolver** (stubs): `res_init`, `res_query`, `res_search`,
 //!   `res_mkquery`, `res_send`, `dn_expand`, `dn_comp`, `dn_skipname`,
 //!   `ns_get16`/`ns_get32`/`ns_put16`/`ns_put32`
@@ -229,6 +231,7 @@ pub mod environ;
 pub mod epoll;
 pub mod err;
 pub mod errno;
+pub mod execinfo;
 pub mod fcntl;
 pub mod fcntl_ops;
 pub mod fmtmsg;

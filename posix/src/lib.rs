@@ -67,6 +67,7 @@
 //!   (pathname expansion), `wordexp`/`wordfree` (word expansion)
 //! - **Character Encoding**: `iconv_open`, `iconv`, `iconv_close`
 //!   (UTF-8/ASCII conversions)
+//! - **Formatted Messages**: `fmtmsg` (structured error/warning display)
 //! - **Search / Data Structures** (`<search.h>`): BST `tsearch`, `tfind`,
 //!   `tdelete`, `twalk`, `tdestroy`; hash table `hcreate`, `hdestroy`,
 //!   `hsearch`; linear search `lfind`, `lsearch`; linked list `insque`,
@@ -211,6 +212,7 @@ pub mod err;
 pub mod errno;
 pub mod fcntl;
 pub mod fcntl_ops;
+pub mod fmtmsg;
 pub mod fnmatch;
 pub mod ftw;
 pub mod getopt;

@@ -910,6 +910,10 @@ pub const _PC_CHOWN_RESTRICTED: i32 = 6;
 pub const _PC_NO_TRUNC: i32 = 7;
 #[allow(non_upper_case_globals)]
 pub const _PC_VDISABLE: i32 = 8;
+#[allow(non_upper_case_globals)]
+pub const _PC_FILESIZEBITS: i32 = 13;
+#[allow(non_upper_case_globals)]
+pub const _PC_SYMLINK_MAX: i32 = 19;
 
 /// Get configurable pathname variables.
 ///
@@ -928,6 +932,8 @@ pub extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
         _PC_CHOWN_RESTRICTED => 1,                                // chown restricted to root.
         _PC_NO_TRUNC => 1,                                        // Long names cause error.
         _PC_VDISABLE => 0,                                        // Characters can be disabled.
+        _PC_FILESIZEBITS => 64,                                   // Max file size bits.
+        _PC_SYMLINK_MAX => i64::from(crate::limits::SYMLINK_MAX), // Max symlink target length.
         _ => {
             errno::set_errno(errno::EINVAL);
             -1
@@ -1797,6 +1803,19 @@ mod tests {
         // fpathconf should return the same values as pathconf.
         assert_eq!(fpathconf(0, _PC_PATH_MAX), pathconf(core::ptr::null(), _PC_PATH_MAX));
         assert_eq!(fpathconf(0, _PC_NAME_MAX), pathconf(core::ptr::null(), _PC_NAME_MAX));
+    }
+
+    #[test]
+    fn test_pathconf_filesizebits() {
+        assert_eq!(pathconf(core::ptr::null(), _PC_FILESIZEBITS), 64);
+    }
+
+    #[test]
+    fn test_pathconf_symlink_max() {
+        assert_eq!(
+            pathconf(core::ptr::null(), _PC_SYMLINK_MAX),
+            i64::from(crate::limits::SYMLINK_MAX)
+        );
     }
 
     // ------------------------------------------------------------------

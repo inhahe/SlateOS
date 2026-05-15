@@ -1,20 +1,31 @@
-//! POSIX `<search.h>` — binary search tree operations.
+//! POSIX `<search.h>` — search and data structure operations.
 //!
-//! Implements the standard POSIX tree functions: `tsearch`, `tfind`,
-//! `tdelete`, `twalk`, and the glibc extension `tdestroy`.
+//! Implements all standard POSIX `<search.h>` functions:
 //!
-//! These functions manage an unbalanced binary search tree where each
-//! node stores a `*const u8` (void pointer to user data).  The tree
-//! is accessed through a "root pointer" (`*mut *mut u8`) — a pointer
-//! to the pointer that holds the root node address.
+//! - **Binary search tree**: `tsearch`, `tfind`, `tdelete`, `twalk`,
+//!   and the glibc extension `tdestroy`.
+//! - **Hash table**: `hcreate`, `hdestroy`, `hsearch` (global hash
+//!   table with separate chaining).
+//! - **Linear search**: `lsearch` (search + insert), `lfind`
+//!   (search only).
+//! - **Linked list**: `insque` (insert), `remque` (remove) for
+//!   doubly-linked lists.
 //!
-//! ## Design
+//! ## BST Design
 //!
 //! - Nodes are allocated via `malloc` and freed via `free`.
 //! - The comparison function has the standard C prototype:
 //!   `int compar(const void *a, const void *b)`.
 //! - `twalk` visits nodes in the POSIX-defined order: preorder,
 //!   postorder (= in-order), endorder, and leaf.
+//!
+//! ## Hash Table Design
+//!
+//! - Single global hash table (POSIX spec only defines one table).
+//! - Separate chaining with singly-linked bucket lists.
+//! - FNV-1a hash on the key string bytes.
+//! - `hcreate(nel)` allocates at least `nel` buckets.
+//! - `hsearch(ENTER)` inserts if not found; `hsearch(FIND)` never inserts.
 
 use crate::errno;
 
@@ -306,6 +317,375 @@ pub extern "C" fn tdestroy(root: *mut u8, free_fn: TdestroyFn) {
     tdestroy_recursive(root.cast::<Node>(), free_fn);
 }
 
+// ===========================================================================
+// Hash table (hcreate / hdestroy / hsearch)
+// ===========================================================================
+
+/// Hash table entry (public, matches POSIX `ENTRY` struct).
+#[repr(C)]
+pub struct Entry {
+    /// Key string (NUL-terminated).
+    pub key: *mut u8,
+    /// Associated data.
+    pub data: *mut u8,
+}
+
+/// Hash action: find existing entry only.
+pub const FIND: i32 = 0;
+/// Hash action: enter (insert if not found).
+pub const ENTER: i32 = 1;
+
+/// Bucket node for separate chaining.
+#[repr(C)]
+struct HashNode {
+    entry: Entry,
+    next: *mut HashNode,
+}
+
+/// Global hash table state.
+struct HashTable {
+    buckets: *mut *mut HashNode,
+    size: usize,
+}
+
+/// Global hash table (POSIX only defines one table at a time).
+static mut HTAB: HashTable = HashTable {
+    buckets: core::ptr::null_mut(),
+    size: 0,
+};
+
+/// FNV-1a hash for NUL-terminated strings.
+fn fnv1a_hash(key: *const u8) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+
+    let mut h = FNV_OFFSET;
+    if !key.is_null() {
+        let mut p = key;
+        // SAFETY: key is a valid NUL-terminated string per POSIX contract.
+        unsafe {
+            while *p != 0 {
+                h ^= *p as u64;
+                h = h.wrapping_mul(FNV_PRIME);
+                p = p.add(1);
+            }
+        }
+    }
+    h
+}
+
+/// Compare two NUL-terminated C strings for equality.
+///
+/// Returns true if the strings are byte-for-byte equal.
+fn c_str_eq(a: *const u8, b: *const u8) -> bool {
+    if a.is_null() || b.is_null() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    // SAFETY: both pointers are valid NUL-terminated strings.
+    unsafe {
+        let mut pa = a;
+        let mut pb = b;
+        loop {
+            if *pa != *pb {
+                return false;
+            }
+            if *pa == 0 {
+                return true;
+            }
+            pa = pa.add(1);
+            pb = pb.add(1);
+        }
+    }
+}
+
+/// `hcreate` — create a hash table.
+///
+/// Creates a global hash table with at least `nel` entries capacity.
+/// Returns non-zero on success, 0 on failure (sets errno).
+///
+/// POSIX: only one hash table may be active at a time.  Calling
+/// `hcreate` when a table already exists is undefined behavior;
+/// we silently destroy the old one.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn hcreate(nel: usize) -> i32 {
+    // SAFETY: single-threaded access to global state.
+    unsafe {
+        // Destroy any existing table.
+        if !HTAB.buckets.is_null() {
+            hdestroy();
+        }
+
+        // Allocate at least `nel` buckets (use next power of two for
+        // good distribution, minimum 16).
+        let mut size = 16_usize;
+        while size < nel {
+            size = match size.checked_mul(2) {
+                Some(s) => s,
+                None => {
+                    errno::set_errno(errno::ENOMEM);
+                    return 0;
+                }
+            };
+        }
+
+        let alloc_bytes = match size.checked_mul(core::mem::size_of::<*mut HashNode>()) {
+            Some(b) => b,
+            None => {
+                errno::set_errno(errno::ENOMEM);
+                return 0;
+            }
+        };
+
+        let ptr = crate::malloc::malloc(alloc_bytes);
+        if ptr.is_null() {
+            errno::set_errno(errno::ENOMEM);
+            return 0;
+        }
+
+        // Zero all bucket pointers.
+        core::ptr::write_bytes(ptr, 0, alloc_bytes);
+
+        HTAB.buckets = ptr.cast::<*mut HashNode>();
+        HTAB.size = size;
+    }
+    1 // success
+}
+
+/// `hdestroy` — destroy the global hash table.
+///
+/// Frees all bucket chains and the bucket array.  Does not free
+/// the key or data pointers in each entry (POSIX does not require it).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn hdestroy() {
+    // SAFETY: single-threaded access.
+    unsafe {
+        if HTAB.buckets.is_null() {
+            return;
+        }
+
+        // Free all chains.
+        let mut i: usize = 0;
+        while i < HTAB.size {
+            let mut node = *HTAB.buckets.add(i);
+            while !node.is_null() {
+                let next = (*node).next;
+                crate::malloc::free(node.cast::<u8>());
+                node = next;
+            }
+            i = i.wrapping_add(1);
+        }
+
+        crate::malloc::free(HTAB.buckets.cast::<u8>());
+        HTAB.buckets = core::ptr::null_mut();
+        HTAB.size = 0;
+    }
+}
+
+/// `hsearch` — search or enter an item in the hash table.
+///
+/// If `action` is `FIND`, searches for the entry with key `item.key`.
+/// If `action` is `ENTER`, inserts the entry if not found.
+///
+/// Returns a pointer to the matching `Entry`, or null if not found
+/// (FIND) or allocation failed (ENTER).  Sets errno to ESRCH on
+/// not-found, ENOMEM on allocation failure.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn hsearch(item: Entry, action: i32) -> *mut Entry {
+    // SAFETY: single-threaded access to global table.
+    unsafe {
+        if HTAB.buckets.is_null() || HTAB.size == 0 {
+            errno::set_errno(errno::ESRCH);
+            return core::ptr::null_mut();
+        }
+
+        let hash = fnv1a_hash(item.key);
+        let idx = (hash as usize) & (HTAB.size.wrapping_sub(1));
+        let bucket = HTAB.buckets.add(idx);
+
+        // Search the chain.
+        let mut node = *bucket;
+        while !node.is_null() {
+            if c_str_eq((*node).entry.key, item.key) {
+                return &raw mut (*node).entry;
+            }
+            node = (*node).next;
+        }
+
+        // Not found.
+        if action == FIND {
+            errno::set_errno(errno::ESRCH);
+            return core::ptr::null_mut();
+        }
+
+        // ENTER: allocate a new node and prepend to bucket.
+        let new_node = crate::malloc::malloc(core::mem::size_of::<HashNode>());
+        if new_node.is_null() {
+            errno::set_errno(errno::ENOMEM);
+            return core::ptr::null_mut();
+        }
+        let new_node = new_node.cast::<HashNode>();
+        (*new_node).entry.key = item.key;
+        (*new_node).entry.data = item.data;
+        (*new_node).next = *bucket;
+        *bucket = new_node;
+
+        &raw mut (*new_node).entry
+    }
+}
+
+// ===========================================================================
+// Linear search (lsearch / lfind)
+// ===========================================================================
+
+/// Linear search comparison function type.
+pub type LsearchComparFn = extern "C" fn(*const u8, *const u8) -> i32;
+
+/// `lfind` — linear search without insertion.
+///
+/// Searches the array `base` of `*nelp` elements, each of `width`
+/// bytes, for a member matching `key` using `compar`.
+///
+/// Returns a pointer to the matching element, or null if not found.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lfind(
+    key: *const u8,
+    base: *const u8,
+    nelp: *const usize,
+    width: usize,
+    compar: LsearchComparFn,
+) -> *const u8 {
+    if key.is_null() || base.is_null() || nelp.is_null() || width == 0 {
+        return core::ptr::null();
+    }
+
+    // SAFETY: nelp is valid per caller's contract.
+    let n = unsafe { *nelp };
+    let mut i: usize = 0;
+    while i < n {
+        // SAFETY: base + i*width is within the array.
+        let elem = unsafe { base.add(i.wrapping_mul(width)) };
+        if compar(key, elem) == 0 {
+            return elem;
+        }
+        i = i.wrapping_add(1);
+    }
+    core::ptr::null()
+}
+
+/// `lsearch` — linear search with insertion.
+///
+/// Like `lfind`, but if the key is not found, appends it to the array
+/// (copies `width` bytes from `key` to the end) and increments `*nelp`.
+///
+/// Returns a pointer to the matching or newly-inserted element.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lsearch(
+    key: *const u8,
+    base: *mut u8,
+    nelp: *mut usize,
+    width: usize,
+    compar: LsearchComparFn,
+) -> *mut u8 {
+    if key.is_null() || base.is_null() || nelp.is_null() || width == 0 {
+        return core::ptr::null_mut();
+    }
+
+    // Search first.
+    let found = lfind(key, base, nelp, width, compar);
+    if !found.is_null() {
+        return found as *mut u8;
+    }
+
+    // Not found — append.
+    // SAFETY: nelp is valid, and caller guarantees the array has room.
+    unsafe {
+        let n = *nelp;
+        let dest = base.add(n.wrapping_mul(width));
+        core::ptr::copy_nonoverlapping(key, dest, width);
+        *nelp = n.wrapping_add(1);
+        dest
+    }
+}
+
+// ===========================================================================
+// Linked list (insque / remque)
+// ===========================================================================
+
+/// Doubly-linked list element layout for `insque`/`remque`.
+///
+/// The first two fields of the user's struct must be forward and
+/// backward pointers (like POSIX requires).
+#[repr(C)]
+struct QueueEntry {
+    /// Forward pointer (next element).
+    next: *mut QueueEntry,
+    /// Backward pointer (previous element).
+    prev: *mut QueueEntry,
+    // User data follows...
+}
+
+/// `insque` — insert an element into a doubly-linked list.
+///
+/// Inserts `elem` after `pred`.  If `pred` is null, `elem` becomes
+/// the sole element (head of a new list).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn insque(elem: *mut u8, pred: *mut u8) {
+    if elem.is_null() {
+        return;
+    }
+
+    let e = elem.cast::<QueueEntry>();
+
+    if pred.is_null() {
+        // Start a new list — elem points to itself / null.
+        // SAFETY: elem is valid per caller.
+        unsafe {
+            (*e).next = core::ptr::null_mut();
+            (*e).prev = core::ptr::null_mut();
+        }
+        return;
+    }
+
+    let p = pred.cast::<QueueEntry>();
+    // SAFETY: pred and elem are valid per caller.
+    unsafe {
+        let after = (*p).next;
+        (*e).next = after;
+        (*e).prev = p;
+        (*p).next = e;
+        if !after.is_null() {
+            (*after).prev = e;
+        }
+    }
+}
+
+/// `remque` — remove an element from a doubly-linked list.
+///
+/// Unlinks `elem` from the list by patching the forward and backward
+/// pointers of its neighbors.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn remque(elem: *mut u8) {
+    if elem.is_null() {
+        return;
+    }
+
+    let e = elem.cast::<QueueEntry>();
+    // SAFETY: elem is valid per caller.
+    unsafe {
+        let prev = (*e).prev;
+        let next = (*e).next;
+        if !prev.is_null() {
+            (*prev).next = next;
+        }
+        if !next.is_null() {
+            (*next).prev = prev;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -534,5 +914,521 @@ mod tests {
         // Node: key(*const u8) + left(*mut Node) + right(*mut Node)
         // = 3 pointers = 24 bytes on 64-bit.
         assert_eq!(core::mem::size_of::<Node>(), 24);
+    }
+
+    // ===================================================================
+    // Hash table tests
+    // ===================================================================
+
+    #[test]
+    fn test_hash_action_constants() {
+        assert_eq!(FIND, 0);
+        assert_eq!(ENTER, 1);
+    }
+
+    #[test]
+    fn test_entry_layout() {
+        // Entry: key(*mut u8) + data(*mut u8) = 16 bytes on 64-bit.
+        assert_eq!(core::mem::size_of::<Entry>(), 16);
+    }
+
+    #[test]
+    fn test_fnv1a_empty() {
+        let empty = b"\0";
+        let h = fnv1a_hash(empty.as_ptr());
+        // FNV-1a offset basis (no bytes hashed).
+        assert_eq!(h, 0xcbf2_9ce4_8422_2325);
+    }
+
+    #[test]
+    fn test_fnv1a_null() {
+        let h = fnv1a_hash(core::ptr::null());
+        assert_eq!(h, 0xcbf2_9ce4_8422_2325);
+    }
+
+    #[test]
+    fn test_fnv1a_different_strings() {
+        let a = b"hello\0";
+        let b = b"world\0";
+        let ha = fnv1a_hash(a.as_ptr());
+        let hb = fnv1a_hash(b.as_ptr());
+        assert_ne!(ha, hb, "different strings should hash differently");
+    }
+
+    #[test]
+    fn test_fnv1a_same_string() {
+        let s = b"test\0";
+        let h1 = fnv1a_hash(s.as_ptr());
+        let h2 = fnv1a_hash(s.as_ptr());
+        assert_eq!(h1, h2, "same string should hash identically");
+    }
+
+    #[test]
+    fn test_c_str_eq_same() {
+        let a = b"hello\0";
+        assert!(c_str_eq(a.as_ptr(), a.as_ptr()));
+    }
+
+    #[test]
+    fn test_c_str_eq_equal() {
+        let a = b"hello\0";
+        let b = b"hello\0";
+        assert!(c_str_eq(a.as_ptr(), b.as_ptr()));
+    }
+
+    #[test]
+    fn test_c_str_eq_different() {
+        let a = b"hello\0";
+        let b = b"world\0";
+        assert!(!c_str_eq(a.as_ptr(), b.as_ptr()));
+    }
+
+    #[test]
+    fn test_c_str_eq_null() {
+        let a = b"hello\0";
+        assert!(!c_str_eq(a.as_ptr(), core::ptr::null()));
+        assert!(!c_str_eq(core::ptr::null(), a.as_ptr()));
+    }
+
+    #[test]
+    fn test_c_str_eq_both_null() {
+        assert!(!c_str_eq(core::ptr::null(), core::ptr::null()));
+    }
+
+    #[test]
+    fn test_hcreate_basic() {
+        let ret = hcreate(10);
+        // malloc may fail — skip if so.
+        if ret == 0 { return; }
+        assert_eq!(ret, 1);
+        hdestroy();
+    }
+
+    #[test]
+    fn test_hdestroy_no_table() {
+        // Calling hdestroy with no table should be safe.
+        hdestroy();
+    }
+
+    #[test]
+    fn test_hsearch_no_table() {
+        // Make sure no table exists.
+        hdestroy();
+        let item = Entry {
+            key: b"key\0".as_ptr() as *mut u8,
+            data: core::ptr::null_mut(),
+        };
+        let ret = hsearch(item, FIND);
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_hsearch_enter_and_find() {
+        hdestroy(); // ensure clean state
+        if hcreate(32) == 0 { return; } // malloc fail
+
+        let key = b"mykey\0";
+        let data = 42usize as *mut u8;
+        let item = Entry {
+            key: key.as_ptr() as *mut u8,
+            data,
+        };
+
+        // Enter the item.
+        let entered = hsearch(item, ENTER);
+        if entered.is_null() {
+            hdestroy();
+            return; // malloc fail
+        }
+
+        // Find it back.
+        let find_item = Entry {
+            key: key.as_ptr() as *mut u8,
+            data: core::ptr::null_mut(),
+        };
+        let found = hsearch(find_item, FIND);
+        assert!(!found.is_null(), "should find entered item");
+        assert_eq!(unsafe { (*found).data }, data);
+
+        hdestroy();
+    }
+
+    #[test]
+    fn test_hsearch_find_nonexistent() {
+        hdestroy();
+        if hcreate(32) == 0 { return; }
+
+        let item = Entry {
+            key: b"nosuchkey\0".as_ptr() as *mut u8,
+            data: core::ptr::null_mut(),
+        };
+        let found = hsearch(item, FIND);
+        assert!(found.is_null());
+
+        hdestroy();
+    }
+
+    #[test]
+    fn test_hsearch_enter_multiple() {
+        hdestroy();
+        if hcreate(64) == 0 { return; }
+
+        let keys: [&[u8]; 4] = [b"alpha\0", b"beta\0", b"gamma\0", b"delta\0"];
+        for (i, k) in keys.iter().enumerate() {
+            let item = Entry {
+                key: k.as_ptr() as *mut u8,
+                data: i as *mut u8,
+            };
+            let r = hsearch(item, ENTER);
+            if r.is_null() {
+                hdestroy();
+                return; // malloc fail
+            }
+        }
+
+        // Verify all findable.
+        for (i, k) in keys.iter().enumerate() {
+            let item = Entry {
+                key: k.as_ptr() as *mut u8,
+                data: core::ptr::null_mut(),
+            };
+            let f = hsearch(item, FIND);
+            assert!(!f.is_null(), "should find key {:?}", core::str::from_utf8(&k[..k.len()-1]));
+            assert_eq!(unsafe { (*f).data }, i as *mut u8);
+        }
+
+        hdestroy();
+    }
+
+    #[test]
+    fn test_hsearch_enter_duplicate_returns_existing() {
+        hdestroy();
+        if hcreate(32) == 0 { return; }
+
+        let key = b"dupkey\0";
+        let item1 = Entry {
+            key: key.as_ptr() as *mut u8,
+            data: 1 as *mut u8,
+        };
+        let e1 = hsearch(item1, ENTER);
+        if e1.is_null() { hdestroy(); return; }
+
+        // Enter again with different data — should return existing.
+        let item2 = Entry {
+            key: key.as_ptr() as *mut u8,
+            data: 2 as *mut u8,
+        };
+        let e2 = hsearch(item2, ENTER);
+        assert!(!e2.is_null());
+        // POSIX: ENTER with existing key returns existing entry (data unchanged).
+        assert_eq!(unsafe { (*e2).data }, 1 as *mut u8);
+
+        hdestroy();
+    }
+
+    // ===================================================================
+    // Linear search tests
+    // ===================================================================
+
+    extern "C" fn i32_compar(a: *const u8, b: *const u8) -> i32 {
+        let va = a.cast::<i32>();
+        let vb = b.cast::<i32>();
+        let a_val = unsafe { *va };
+        let b_val = unsafe { *vb };
+        a_val.wrapping_sub(b_val)
+    }
+
+    #[test]
+    fn test_lfind_found() {
+        let arr: [i32; 5] = [10, 20, 30, 40, 50];
+        let key: i32 = 30;
+        let nel: usize = 5;
+        let width = core::mem::size_of::<i32>();
+
+        let result = lfind(
+            (&raw const key).cast::<u8>(),
+            arr.as_ptr().cast::<u8>(),
+            &raw const nel,
+            width,
+            i32_compar,
+        );
+        assert!(!result.is_null());
+        assert_eq!(unsafe { *(result.cast::<i32>()) }, 30);
+    }
+
+    #[test]
+    fn test_lfind_not_found() {
+        let arr: [i32; 5] = [10, 20, 30, 40, 50];
+        let key: i32 = 99;
+        let nel: usize = 5;
+        let width = core::mem::size_of::<i32>();
+
+        let result = lfind(
+            (&raw const key).cast::<u8>(),
+            arr.as_ptr().cast::<u8>(),
+            &raw const nel,
+            width,
+            i32_compar,
+        );
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_lfind_empty_array() {
+        let key: i32 = 1;
+        let nel: usize = 0;
+        let width = core::mem::size_of::<i32>();
+
+        let result = lfind(
+            (&raw const key).cast::<u8>(),
+            core::ptr::null(),
+            &raw const nel,
+            width,
+            i32_compar,
+        );
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_lfind_null_key() {
+        let arr: [i32; 3] = [1, 2, 3];
+        let nel: usize = 3;
+        let result = lfind(
+            core::ptr::null(),
+            arr.as_ptr().cast::<u8>(),
+            &raw const nel,
+            4,
+            i32_compar,
+        );
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_lfind_first_element() {
+        let arr: [i32; 3] = [100, 200, 300];
+        let key: i32 = 100;
+        let nel: usize = 3;
+        let width = core::mem::size_of::<i32>();
+
+        let result = lfind(
+            (&raw const key).cast::<u8>(),
+            arr.as_ptr().cast::<u8>(),
+            &raw const nel,
+            width,
+            i32_compar,
+        );
+        assert!(!result.is_null());
+        // Should point to the first element.
+        assert_eq!(result as usize, arr.as_ptr() as usize);
+    }
+
+    #[test]
+    fn test_lfind_last_element() {
+        let arr: [i32; 3] = [100, 200, 300];
+        let key: i32 = 300;
+        let nel: usize = 3;
+        let width = core::mem::size_of::<i32>();
+
+        let result = lfind(
+            (&raw const key).cast::<u8>(),
+            arr.as_ptr().cast::<u8>(),
+            &raw const nel,
+            width,
+            i32_compar,
+        );
+        assert!(!result.is_null());
+        assert_eq!(unsafe { *(result.cast::<i32>()) }, 300);
+    }
+
+    #[test]
+    fn test_lsearch_found() {
+        let mut arr: [i32; 8] = [10, 20, 30, 0, 0, 0, 0, 0];
+        let key: i32 = 20;
+        let mut nel: usize = 3;
+        let width = core::mem::size_of::<i32>();
+
+        let result = lsearch(
+            (&raw const key).cast::<u8>(),
+            arr.as_mut_ptr().cast::<u8>(),
+            &raw mut nel,
+            width,
+            i32_compar,
+        );
+        assert!(!result.is_null());
+        assert_eq!(nel, 3, "nel should not change when found");
+        assert_eq!(unsafe { *(result.cast::<i32>()) }, 20);
+    }
+
+    #[test]
+    fn test_lsearch_insert() {
+        let mut arr: [i32; 8] = [10, 20, 30, 0, 0, 0, 0, 0];
+        let key: i32 = 99;
+        let mut nel: usize = 3;
+        let width = core::mem::size_of::<i32>();
+
+        let result = lsearch(
+            (&raw const key).cast::<u8>(),
+            arr.as_mut_ptr().cast::<u8>(),
+            &raw mut nel,
+            width,
+            i32_compar,
+        );
+        assert!(!result.is_null());
+        assert_eq!(nel, 4, "nel should increment on insert");
+        assert_eq!(arr[3], 99, "inserted value should be at end");
+    }
+
+    #[test]
+    fn test_lsearch_null_params() {
+        let result = lsearch(
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            4,
+            i32_compar,
+        );
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_lsearch_zero_width() {
+        let mut arr: [i32; 4] = [1, 2, 3, 0];
+        let key: i32 = 1;
+        let mut nel: usize = 3;
+        let result = lsearch(
+            (&raw const key).cast::<u8>(),
+            arr.as_mut_ptr().cast::<u8>(),
+            &raw mut nel,
+            0,
+            i32_compar,
+        );
+        assert!(result.is_null());
+    }
+
+    // ===================================================================
+    // Linked list tests
+    // ===================================================================
+
+    /// Test struct matching the QueueEntry layout requirement.
+    #[repr(C)]
+    struct TestQueueItem {
+        next: *mut TestQueueItem,
+        prev: *mut TestQueueItem,
+        value: i32,
+    }
+
+    impl TestQueueItem {
+        fn new(value: i32) -> Self {
+            Self {
+                next: core::ptr::null_mut(),
+                prev: core::ptr::null_mut(),
+                value,
+            }
+        }
+    }
+
+    #[test]
+    fn test_insque_null_elem() {
+        // Should not crash.
+        insque(core::ptr::null_mut(), core::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_remque_null() {
+        // Should not crash.
+        remque(core::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_insque_single_element() {
+        let mut a = TestQueueItem::new(1);
+        insque((&raw mut a).cast::<u8>(), core::ptr::null_mut());
+        assert!(a.next.is_null());
+        assert!(a.prev.is_null());
+    }
+
+    #[test]
+    fn test_insque_two_elements() {
+        let mut a = TestQueueItem::new(1);
+        let mut b = TestQueueItem::new(2);
+
+        insque((&raw mut a).cast::<u8>(), core::ptr::null_mut());
+        insque((&raw mut b).cast::<u8>(), (&raw mut a).cast::<u8>());
+
+        // a -> b -> null
+        assert_eq!(a.next, &raw mut b);
+        assert!(a.prev.is_null());
+        assert!(b.next.is_null());
+        assert_eq!(b.prev, &raw mut a);
+    }
+
+    #[test]
+    fn test_insque_three_elements() {
+        let mut a = TestQueueItem::new(1);
+        let mut b = TestQueueItem::new(2);
+        let mut c = TestQueueItem::new(3);
+
+        insque((&raw mut a).cast::<u8>(), core::ptr::null_mut());
+        insque((&raw mut b).cast::<u8>(), (&raw mut a).cast::<u8>());
+        // Insert c between a and b.
+        insque((&raw mut c).cast::<u8>(), (&raw mut a).cast::<u8>());
+
+        // a -> c -> b -> null
+        assert_eq!(a.next, &raw mut c);
+        assert_eq!(c.prev, &raw mut a);
+        assert_eq!(c.next, &raw mut b);
+        assert_eq!(b.prev, &raw mut c);
+    }
+
+    #[test]
+    fn test_remque_middle() {
+        let mut a = TestQueueItem::new(1);
+        let mut b = TestQueueItem::new(2);
+        let mut c = TestQueueItem::new(3);
+
+        insque((&raw mut a).cast::<u8>(), core::ptr::null_mut());
+        insque((&raw mut b).cast::<u8>(), (&raw mut a).cast::<u8>());
+        insque((&raw mut c).cast::<u8>(), (&raw mut b).cast::<u8>());
+
+        // a -> b -> c -> null
+        // Remove b.
+        remque((&raw mut b).cast::<u8>());
+
+        // a -> c -> null
+        assert_eq!(a.next, &raw mut c);
+        assert_eq!(c.prev, &raw mut a);
+    }
+
+    #[test]
+    fn test_remque_tail() {
+        let mut a = TestQueueItem::new(1);
+        let mut b = TestQueueItem::new(2);
+
+        insque((&raw mut a).cast::<u8>(), core::ptr::null_mut());
+        insque((&raw mut b).cast::<u8>(), (&raw mut a).cast::<u8>());
+
+        remque((&raw mut b).cast::<u8>());
+
+        assert!(a.next.is_null());
+    }
+
+    #[test]
+    fn test_remque_head_with_successor() {
+        let mut a = TestQueueItem::new(1);
+        let mut b = TestQueueItem::new(2);
+
+        insque((&raw mut a).cast::<u8>(), core::ptr::null_mut());
+        insque((&raw mut b).cast::<u8>(), (&raw mut a).cast::<u8>());
+
+        remque((&raw mut a).cast::<u8>());
+
+        // b's prev should now be null.
+        assert!(b.prev.is_null());
+    }
+
+    #[test]
+    fn test_queue_entry_layout() {
+        // QueueEntry: next + prev = 2 pointers = 16 bytes.
+        assert_eq!(core::mem::size_of::<QueueEntry>(), 16);
     }
 }

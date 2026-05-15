@@ -67,8 +67,10 @@
 //!   (pathname expansion), `wordexp`/`wordfree` (word expansion)
 //! - **Character Encoding**: `iconv_open`, `iconv`, `iconv_close`
 //!   (UTF-8/ASCII conversions)
-//! - **Binary Search Tree**: `tsearch`, `tfind`, `tdelete`, `twalk`,
-//!   `tdestroy` (POSIX `<search.h>` BST operations)
+//! - **Search / Data Structures** (`<search.h>`): BST `tsearch`, `tfind`,
+//!   `tdelete`, `twalk`, `tdestroy`; hash table `hcreate`, `hdestroy`,
+//!   `hsearch`; linear search `lfind`, `lsearch`; linked list `insque`,
+//!   `remque`
 //! - **Resource Limits**: `getrlimit`, `setrlimit`, `getrusage`,
 //!   `prlimit`/`prlimit64`
 //! - **Timers**: `timer_create`, `timer_settime`, `timer_gettime`,

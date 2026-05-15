@@ -261,6 +261,35 @@ pub fn close_fd(fd: i32) -> Option<FdEntry> {
     }
 }
 
+/// Clear the entire fd table.
+///
+/// Sets every slot to `None` without closing any kernel handles.
+/// Used during child startup to reinitialize the table from inherited
+/// fd mappings (the child's handles are different from the parent's
+/// default console handles).
+pub fn clear_all() {
+    // SAFETY: Single-threaded access during early startup.
+    unsafe {
+        let table = &mut *table_ptr();
+        let mut i = 0usize;
+        while i < MAX_FDS {
+            if let Some(slot) = table.get_mut(i) {
+                *slot = None;
+            }
+            i = i.wrapping_add(1);
+        }
+    }
+}
+
+/// Install an fd entry at a specific slot.
+///
+/// Convenience wrapper over `install_fd` that discards the old entry.
+/// Intended for child-side fd table initialization where there is no
+/// old entry to close (table was just cleared).
+pub fn set_fd(fd: i32, kind: HandleKind, handle: u64) {
+    let _ = install_fd(fd, kind, handle);
+}
+
 /// Get the per-fd flags for an fd.
 #[must_use]
 pub fn get_fd_flags(fd: i32) -> Option<u32> {
@@ -969,5 +998,51 @@ mod tests {
     #[test]
     fn test_fd_path_constant() {
         assert_eq!(FD_PATH_MAX, 4096);
+    }
+
+    // -- clear_all / set_fd --
+
+    #[test]
+    fn test_clear_all_removes_entries() {
+        // First verify fd 0 exists (default console).
+        assert!(get_fd(0).is_some(), "fd 0 should exist before clear");
+
+        clear_all();
+
+        // After clear, all fds should be gone.
+        assert!(get_fd(0).is_none(), "fd 0 should be gone after clear");
+        assert!(get_fd(1).is_none(), "fd 1 should be gone after clear");
+        assert!(get_fd(2).is_none(), "fd 2 should be gone after clear");
+
+        // Restore defaults so other tests aren't affected.
+        install_fd(0, HandleKind::Console, 0);
+        install_fd(1, HandleKind::Console, 1);
+        install_fd(2, HandleKind::Console, 2);
+    }
+
+    #[test]
+    fn test_set_fd_installs_entry() {
+        set_fd(10, HandleKind::File, 42);
+        let entry = get_fd(10);
+        assert!(entry.is_some());
+        let e = entry.unwrap();
+        assert_eq!(e.kind, HandleKind::File);
+        assert_eq!(e.handle, 42);
+
+        // Clean up.
+        close_fd(10);
+    }
+
+    #[test]
+    fn test_set_fd_overwrites_existing() {
+        set_fd(11, HandleKind::Pipe, 100);
+        set_fd(11, HandleKind::File, 200);
+
+        let e = get_fd(11).unwrap();
+        assert_eq!(e.kind, HandleKind::File);
+        assert_eq!(e.handle, 200);
+
+        // Clean up.
+        close_fd(11);
     }
 }

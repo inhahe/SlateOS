@@ -181,6 +181,88 @@ static mut INIT_ARGV: [*const u8; MAX_INIT_PTRS + 1] = [core::ptr::null(); MAX_I
 /// Static envp pointer array (null-terminated).
 static mut INIT_ENVP: [*const u8; MAX_INIT_PTRS + 1] = [core::ptr::null(); MAX_INIT_PTRS + 1];
 
+/// Maximum number of inherited fd map entries we can receive.
+///
+/// Matches [`crate::spawn::MAX_FD_MAP`] and covers the common case
+/// (3 standard fds + redirected pipes).
+const MAX_INIT_FDS: usize = 32;
+
+/// Static buffer for `SYS_PROCESS_GET_INITIAL_FDS` output.
+static mut INIT_FDS_BUF: [crate::spawn::FdMapEntry; MAX_INIT_FDS] = [crate::spawn::FdMapEntry {
+    fd: 0,
+    handle_type: 0,
+    _pad: [0; 3],
+    handle: 0,
+}; MAX_INIT_FDS];
+
+/// Retrieve inherited file descriptors from the kernel.
+///
+/// The parent's `posix_spawn` builds an fd_map and passes it to the
+/// kernel via `SYS_PROCESS_SPAWN_EX`.  During spawn, the kernel dups
+/// each parent handle and stores the `(fd, child_handle)` pairs in
+/// our PCB.  This function retrieves them and reinitializes the fd
+/// table so we start with the correct handles.
+///
+/// Must be called exactly once, early in startup (before any I/O).
+///
+/// # Safety
+///
+/// Writes to static `INIT_FDS_BUF` and to the fd table.  Must be
+/// called from single-threaded context.
+unsafe fn retrieve_initial_fds() {
+    use crate::spawn::{FdMapEntry, fd_handle_type};
+    use crate::fdtable::{self, HandleKind};
+    use crate::syscall::{syscall2, SYS_PROCESS_GET_INITIAL_FDS};
+
+    let buf_ptr = addr_of_mut!(INIT_FDS_BUF);
+    let buf = unsafe { (*buf_ptr).as_mut_ptr() };
+
+    // Call SYS_PROCESS_GET_INITIAL_FDS.  Returns the number of entries
+    // written, or 0 if no fds were inherited.
+    let ret = syscall2(
+        SYS_PROCESS_GET_INITIAL_FDS,
+        buf as u64,
+        MAX_INIT_FDS as u64,
+    );
+
+    if ret <= 0 {
+        return; // No inherited fds — keep default console setup.
+    }
+
+    let count = ret as usize;
+
+    // Read the entries from the buffer.
+    let entries = unsafe {
+        core::slice::from_raw_parts(buf as *const FdMapEntry, count.min(MAX_INIT_FDS))
+    };
+
+    if entries.is_empty() {
+        return;
+    }
+
+    // Clear the existing fd table (default stdin/stdout/stderr) and
+    // reinitialize from the inherited entries.
+    //
+    // We first close all default fds (0/1/2 console), then install
+    // the inherited ones.  This ensures the child sees exactly the
+    // fds the parent intended.
+    fdtable::clear_all();
+
+    for entry in entries {
+        let kind = match entry.handle_type {
+            fd_handle_type::FILE => HandleKind::File,
+            fd_handle_type::PIPE => HandleKind::Pipe,
+            fd_handle_type::TCP_SOCKET => HandleKind::TcpStream,
+            fd_handle_type::UDP_SOCKET => HandleKind::UdpSocket,
+            fd_handle_type::CONSOLE => HandleKind::Console,
+            _ => HandleKind::File, // Unknown — default to file.
+        };
+
+        // Install this fd at the specified number.
+        fdtable::set_fd(entry.fd, kind, entry.handle);
+    }
+}
+
 /// Retrieve initial arguments from the kernel via `SYS_PROCESS_GET_ARGS`.
 ///
 /// The kernel stores argv/envp data passed by the parent via
@@ -352,9 +434,12 @@ pub unsafe extern "C" fn __libc_start_main(
     _rtld_fini: usize, // Unused (glibc compat).
     _stack_end: *mut u8,
 ) -> ! {
-    // Initialize the fd table (stdin/stdout/stderr).
-    // The fd table is statically initialized, so this is a no-op,
-    // but explicit initialization would go here.
+    // Retrieve inherited file descriptors from the kernel.
+    // The parent's posix_spawn builds an fd_map and passes it to the
+    // kernel; we retrieve it here and reinitialize our fd table.
+    // Must happen before any I/O (including arg retrieval, which
+    // doesn't use fds but sets the pattern for startup order).
+    unsafe { retrieve_initial_fds(); }
 
     // Try to retrieve args from the kernel.  The parent may have
     // passed argv/envp via SYS_PROCESS_SPAWN_EX, which are stored
@@ -1239,5 +1324,30 @@ mod tests {
     fn test_init_envp_has_null_terminator_space() {
         let len = unsafe { (*addr_of_mut!(INIT_ENVP)).len() };
         assert_eq!(len, MAX_INIT_PTRS + 1);
+    }
+
+    // -- retrieve_initial_fds constants --
+
+    #[test]
+    fn test_max_init_fds() {
+        assert_eq!(MAX_INIT_FDS, 32);
+    }
+
+    #[test]
+    fn test_init_fds_buf_size() {
+        // Buffer must hold MAX_INIT_FDS entries of FdMapEntry (16 bytes each).
+        let buf_size = unsafe { (*addr_of_mut!(INIT_FDS_BUF)).len() };
+        assert_eq!(buf_size, MAX_INIT_FDS);
+    }
+
+    #[test]
+    fn test_init_fds_buf_zeroed() {
+        // All entries should be zeroed at startup.
+        let entries = unsafe { &*addr_of_mut!(INIT_FDS_BUF) };
+        for entry in entries.iter() {
+            assert_eq!(entry.fd, 0);
+            assert_eq!(entry.handle_type, 0);
+            assert_eq!(entry.handle, 0);
+        }
     }
 }

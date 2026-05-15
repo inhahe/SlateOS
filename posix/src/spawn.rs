@@ -32,14 +32,25 @@
 //!
 //! `execve` passes argv/envp via `SYS_PROCESS_EXEC` args 2–5.
 //!
+//! ## File Descriptor Inheritance
+//!
+//! `posix_spawn` builds an fd_map from the parent's fd table and
+//! file_actions, then passes it to the kernel via `SYS_PROCESS_SPAWN_EX`.
+//! The child retrieves inherited fds during startup via
+//! `SYS_PROCESS_GET_INITIAL_FDS` (handled in `crt.rs`) and reinitializes
+//! its fd table accordingly.
+//!
+//! File actions are applied in order against a virtual fd table seeded
+//! from the parent's inheritable (non-`FD_CLOEXEC`) fds:
+//! - **close**: removes the fd from the child's view
+//! - **dup2**: copies a handle from one fd to another
+//! - **open**: not yet supported (requires kernel extension)
+//!
 //! ## Limitations
 //!
-//! - `posix_spawn` file_actions are recorded but not yet applied via
-//!   the fd_map mechanism.  The kernel supports fd inheritance via
-//!   `SYS_PROCESS_SPAWN_EX` fd_map, but the child-side fd retrieval
-//!   (`SYS_PROCESS_GET_INITIAL_FDS`) is not wired into child startup
-//!   yet.  File_actions will be effective once the child's `_start`
-//!   calls `SYS_PROCESS_GET_INITIAL_FDS` and reinitializes its fd table.
+//! - `posix_spawn_file_actions_addopen` records the action but it is
+//!   currently ignored during fd_map building (the kernel would need to
+//!   open the file on behalf of the child).
 //! - `posix_spawnattr` flags are stored but only `POSIX_SPAWN_SETPGROUP`
 //!   is meaningfully supported (spawn attributes are recorded for
 //!   forward compatibility).
@@ -103,6 +114,49 @@ pub struct SpawnArgsHeader {
     /// Total bytes of packed envp data (including null terminators).
     pub envp_data_len: u32,
 }
+
+// ---------------------------------------------------------------------------
+// FdMapEntry — file descriptor inheritance ABI
+// ---------------------------------------------------------------------------
+
+/// Handle type constants for `FdMapEntry`.
+///
+/// Must match `kernel/src/proc/spawn.rs fd_handle_type`.
+pub mod fd_handle_type {
+    /// Regular file handle (kernel dups via `fs::handle::dup()`).
+    pub const FILE: u8 = 0;
+    /// Pipe handle (raw pass-through — no kernel-level dup yet).
+    pub const PIPE: u8 = 1;
+    /// TCP socket handle.
+    pub const TCP_SOCKET: u8 = 2;
+    /// UDP socket handle.
+    pub const UDP_SOCKET: u8 = 3;
+    /// Console I/O (stdin/stdout/stderr virtual handle).
+    pub const CONSOLE: u8 = 4;
+}
+
+/// A file descriptor mapping entry for `SYS_PROCESS_SPAWN_EX`.
+///
+/// Tells the kernel which of the parent's handles the child should
+/// inherit and at which POSIX fd numbers.  Layout must match
+/// `kernel/src/proc/spawn.rs FdMapEntry` exactly (16 bytes, C ABI).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FdMapEntry {
+    /// Target POSIX fd number in the child.
+    pub fd: i32,
+    /// Handle type (see [`fd_handle_type`] constants).
+    pub handle_type: u8,
+    /// Reserved padding (set to 0).
+    pub _pad: [u8; 3],
+    /// Parent's kernel handle to dup into the child.
+    pub handle: u64,
+}
+
+/// Maximum number of fd mappings we can build.
+///
+/// Covers three standard fds + the file actions limit (16).
+const MAX_FD_MAP: usize = 32;
 
 // ---------------------------------------------------------------------------
 // posix_spawn_file_actions
@@ -438,6 +492,140 @@ pub extern "C" fn posix_spawnattr_getpgroup(
 }
 
 // ---------------------------------------------------------------------------
+// fd_map building from file_actions
+// ---------------------------------------------------------------------------
+
+/// Convert a `HandleKind` to the kernel's `fd_handle_type` constant.
+fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
+    use crate::fdtable::HandleKind;
+    match kind {
+        HandleKind::File => fd_handle_type::FILE,
+        HandleKind::Pipe => fd_handle_type::PIPE,
+        HandleKind::Console => fd_handle_type::CONSOLE,
+        HandleKind::TcpStream | HandleKind::TcpListener => fd_handle_type::TCP_SOCKET,
+        HandleKind::UdpSocket => fd_handle_type::UDP_SOCKET,
+    }
+}
+
+/// Build an fd_map array from the parent's fd table and file_actions.
+///
+/// Simulates what the child needs to see: starts with the parent's
+/// inheritable fds (non-`FD_CLOEXEC`), then applies file_actions in
+/// order (close removes an entry, dup2 clones an entry to a new fd,
+/// open is deferred — we can't open files on behalf of the child
+/// from userspace, so open actions are ignored with a TODO).
+///
+/// Returns the number of valid entries written to `out`.
+///
+/// # Design
+///
+/// We build a "virtual fd table" that represents what the child's fd
+/// table should look like after applying all file_actions.  Each slot
+/// stores `Option<(u8, u64)>` — the handle type and parent handle.
+///
+/// After applying all actions, we flatten the non-empty slots into
+/// the output `FdMapEntry` array.
+fn build_fd_map(
+    file_actions: *const PosixSpawnFileActionsT,
+    out: &mut [FdMapEntry; MAX_FD_MAP],
+) -> usize {
+    use crate::fdtable;
+
+    // Virtual fd table: mirrors what the child should see.
+    // We only track fds 0..MAX_FD_MAP because that's the most we can
+    // pass to the kernel anyway.
+    let mut virt: [Option<(u8, u64)>; MAX_FD_MAP] = [None; MAX_FD_MAP];
+
+    // Step 1: Populate from parent's open fds that don't have FD_CLOEXEC.
+    // For the child's fd_map, we include all inheritable fds from the
+    // parent so the child starts with the same I/O handles.
+    let mut idx = 0usize;
+    while idx < MAX_FD_MAP {
+        #[allow(clippy::cast_possible_wrap)]
+        let fd = idx as i32;
+        if let Some(entry) = fdtable::get_fd(fd) {
+            // Skip close-on-exec fds — they shouldn't be inherited.
+            if entry.flags & fdtable::FD_CLOEXEC == 0 {
+                virt[idx] = Some((kind_to_handle_type(entry.kind), entry.handle));
+            }
+        }
+        idx = idx.wrapping_add(1);
+    }
+
+    // Step 2: Apply file_actions in order.
+    if !file_actions.is_null() {
+        // SAFETY: file_actions is non-null (checked above).  The caller
+        // guarantees it was initialized via posix_spawn_file_actions_init.
+        let acts = unsafe { &*file_actions };
+        let mut action_idx = 0usize;
+        while action_idx < acts.count && action_idx < MAX_FILE_ACTIONS {
+            // SAFETY: action_idx < acts.count <= MAX_FILE_ACTIONS.
+            if let Some(slot) = acts.actions.get(action_idx) {
+                match slot.tag {
+                    1 => {
+                        // Close: remove this fd from the virtual table.
+                        #[allow(clippy::cast_sign_loss)]
+                        let fd_u = slot.fd as usize;
+                        if fd_u < MAX_FD_MAP {
+                            virt[fd_u] = None;
+                        }
+                    }
+                    2 => {
+                        // Dup2(fd → newfd): copy fd's entry to newfd.
+                        // The source fd must exist in the parent's fd table
+                        // (not just the virtual table — dup2 operates on
+                        // the parent's actual handles).
+                        #[allow(clippy::cast_sign_loss)]
+                        let src_u = slot.fd as usize;
+                        #[allow(clippy::cast_sign_loss)]
+                        let dst_u = slot.newfd as usize;
+                        if dst_u < MAX_FD_MAP && src_u < MAX_FD_MAP {
+                            // Copy the entry from the virtual table (which
+                            // already reflects prior actions).
+                            virt[dst_u] = virt[src_u];
+                        }
+                    }
+                    3 => {
+                        // Open: can't open files on behalf of the child
+                        // from userspace (the kernel would need to do it
+                        // with the child's credentials).  Skip for now.
+                        //
+                        // TODO: implement open actions via a kernel
+                        // extension that accepts (path, flags, mode) in
+                        // the fd_map, or by opening the file in the parent
+                        // and passing the resulting handle.
+                    }
+                    _ => {} // Unknown tag — skip.
+                }
+            }
+            action_idx = action_idx.wrapping_add(1);
+        }
+    }
+
+    // Step 3: Flatten to FdMapEntry array.
+    let mut count = 0usize;
+    let mut flat_idx = 0usize;
+    while flat_idx < MAX_FD_MAP {
+        if let Some((handle_type, handle)) = virt[flat_idx] {
+            if count < MAX_FD_MAP {
+                #[allow(clippy::cast_possible_wrap)]
+                let fd = flat_idx as i32;
+                out[count] = FdMapEntry {
+                    fd,
+                    handle_type,
+                    _pad: [0; 3],
+                    handle,
+                };
+                count = count.wrapping_add(1);
+            }
+        }
+        flat_idx = flat_idx.wrapping_add(1);
+    }
+
+    count
+}
+
+// ---------------------------------------------------------------------------
 // posix_spawn
 // ---------------------------------------------------------------------------
 
@@ -452,9 +640,9 @@ pub extern "C" fn posix_spawnattr_getpgroup(
 /// - `pid`: Output parameter for child PID (may be null).
 /// - `path`: Path to the ELF binary (null-terminated C string).
 /// - `file_actions`: File actions to apply in the child (close, dup2, open).
-///   Currently recorded but not yet applied via the kernel's fd_map
-///   mechanism — requires child-side `SYS_PROCESS_GET_INITIAL_FDS`
-///   retrieval to be wired into the child's startup code.
+///   Applied to the parent's fd table to build the kernel fd_map.
+///   The child retrieves inherited fds via `SYS_PROCESS_GET_INITIAL_FDS`
+///   during startup.
 /// - `attrp`: Spawn attributes (flags, process group).  Recorded but most
 ///   flags have no effect yet.
 /// - `argv`: Null-terminated array of argument strings for the child.
@@ -475,20 +663,14 @@ pub extern "C" fn posix_spawn(
     argv: *const *const u8,
     envp: *const *const u8,
 ) -> i32 {
-    // Note: file_actions are properly stored but cannot be applied to
-    // the child yet because the child's startup doesn't call
-    // SYS_PROCESS_GET_INITIAL_FDS to retrieve inherited fds.  When
-    // the child's _start is updated to do this, we'll build an fd_map
-    // from file_actions and the parent's fd table.
-    let _action_count = if file_actions.is_null() {
-        0
-    } else {
-        // SAFETY: file_actions is non-null (checked above).
-        unsafe { (*file_actions).count }
-    };
     if path.is_null() {
         return errno::EINVAL;
     }
+
+    // Build the fd_map from the parent's fd table + file_actions.
+    // This tells the kernel which handles the child should inherit.
+    let mut fd_map = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+    let fd_map_count = build_fd_map(file_actions, &mut fd_map);
 
     // Resolve relative paths against CWD.
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
@@ -520,10 +702,8 @@ pub extern "C" fn posix_spawn(
         elf_len: data_size as u64,
         name_ptr: resolved.as_ptr() as u64,
         name_len: resolved_len as u64,
-        // fd_map not passed yet — requires child-side
-        // SYS_PROCESS_GET_INITIAL_FDS retrieval in child startup.
-        fd_map_ptr: 0,
-        fd_map_count: 0,
+        fd_map_ptr: if fd_map_count > 0 { fd_map.as_ptr() as u64 } else { 0 },
+        fd_map_count: fd_map_count as u64,
         argv_ptr: if argv_packed_len > 0 { argv_buf.as_ptr() as u64 } else { 0 },
         argv_len: argv_packed_len as u64,
         argc: argc as u64,
@@ -1533,5 +1713,212 @@ mod tests {
         assert_eq!(packed_len, 11);
         assert_eq!(&buf[..6], b"alpha\0");
         assert_eq!(&buf[6..11], b"beta\0");
+    }
+
+    // -- FdMapEntry ABI --
+
+    #[test]
+    fn test_fd_map_entry_size() {
+        assert_eq!(core::mem::size_of::<FdMapEntry>(), 16);
+    }
+
+    #[test]
+    fn test_fd_map_entry_align() {
+        assert_eq!(core::mem::align_of::<FdMapEntry>(), 8);
+    }
+
+    #[test]
+    fn test_fd_map_entry_field_offsets() {
+        let entry = FdMapEntry {
+            fd: 0, handle_type: 0, _pad: [0; 3], handle: 0,
+        };
+        let base = &entry as *const _ as usize;
+        assert_eq!(&entry.fd as *const _ as usize - base, 0);
+        assert_eq!(&entry.handle_type as *const _ as usize - base, 4);
+        assert_eq!(&entry.handle as *const _ as usize - base, 8);
+    }
+
+    // -- fd_handle_type constants --
+
+    #[test]
+    fn test_fd_handle_type_values() {
+        assert_eq!(fd_handle_type::FILE, 0);
+        assert_eq!(fd_handle_type::PIPE, 1);
+        assert_eq!(fd_handle_type::TCP_SOCKET, 2);
+        assert_eq!(fd_handle_type::UDP_SOCKET, 3);
+        assert_eq!(fd_handle_type::CONSOLE, 4);
+    }
+
+    #[test]
+    fn test_fd_handle_type_distinct() {
+        let vals = [
+            fd_handle_type::FILE,
+            fd_handle_type::PIPE,
+            fd_handle_type::TCP_SOCKET,
+            fd_handle_type::UDP_SOCKET,
+            fd_handle_type::CONSOLE,
+        ];
+        for i in 0..vals.len() {
+            for j in (i + 1)..vals.len() {
+                assert_ne!(vals[i], vals[j], "types {} and {} collide", i, j);
+            }
+        }
+    }
+
+    // -- kind_to_handle_type --
+
+    #[test]
+    fn test_kind_to_handle_type_file() {
+        use crate::fdtable::HandleKind;
+        assert_eq!(kind_to_handle_type(HandleKind::File), fd_handle_type::FILE);
+    }
+
+    #[test]
+    fn test_kind_to_handle_type_pipe() {
+        use crate::fdtable::HandleKind;
+        assert_eq!(kind_to_handle_type(HandleKind::Pipe), fd_handle_type::PIPE);
+    }
+
+    #[test]
+    fn test_kind_to_handle_type_console() {
+        use crate::fdtable::HandleKind;
+        assert_eq!(kind_to_handle_type(HandleKind::Console), fd_handle_type::CONSOLE);
+    }
+
+    #[test]
+    fn test_kind_to_handle_type_tcp() {
+        use crate::fdtable::HandleKind;
+        assert_eq!(kind_to_handle_type(HandleKind::TcpStream), fd_handle_type::TCP_SOCKET);
+        assert_eq!(kind_to_handle_type(HandleKind::TcpListener), fd_handle_type::TCP_SOCKET);
+    }
+
+    #[test]
+    fn test_kind_to_handle_type_udp() {
+        use crate::fdtable::HandleKind;
+        assert_eq!(kind_to_handle_type(HandleKind::UdpSocket), fd_handle_type::UDP_SOCKET);
+    }
+
+    // -- build_fd_map --
+
+    #[test]
+    fn test_build_fd_map_no_actions() {
+        // With no file_actions (null), the fd_map should contain
+        // the parent's inheritable fds.  In the test environment,
+        // fds 0/1/2 are pre-initialized as Console handles.
+        let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+        let count = build_fd_map(core::ptr::null(), &mut out);
+
+        // Should have at least fds 0, 1, 2 (Console).
+        assert!(count >= 3, "expected at least 3 fds, got {}", count);
+
+        // Verify first three are Console type.
+        assert_eq!(out[0].fd, 0);
+        assert_eq!(out[0].handle_type, fd_handle_type::CONSOLE);
+        assert_eq!(out[1].fd, 1);
+        assert_eq!(out[1].handle_type, fd_handle_type::CONSOLE);
+        assert_eq!(out[2].fd, 2);
+        assert_eq!(out[2].handle_type, fd_handle_type::CONSOLE);
+    }
+
+    #[test]
+    fn test_build_fd_map_with_close() {
+        // Create file_actions that close fd 1 (stdout).
+        let mut acts = PosixSpawnFileActionsT {
+            count: 0,
+            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
+            _pad: [0; 8],
+        };
+        posix_spawn_file_actions_init(&raw mut acts);
+        posix_spawn_file_actions_addclose(&raw mut acts, 1);
+
+        let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+        let count = build_fd_map(&raw const acts, &mut out);
+
+        // fd 1 should be gone.  We should have fd 0 and fd 2.
+        let has_fd1 = out[..count].iter().any(|e| e.fd == 1);
+        assert!(!has_fd1, "fd 1 should have been closed");
+
+        let has_fd0 = out[..count].iter().any(|e| e.fd == 0);
+        let has_fd2 = out[..count].iter().any(|e| e.fd == 2);
+        assert!(has_fd0, "fd 0 should still exist");
+        assert!(has_fd2, "fd 2 should still exist");
+    }
+
+    #[test]
+    fn test_build_fd_map_with_dup2() {
+        // Create file_actions that dup2(2, 1) — redirect stdout to stderr.
+        let mut acts = PosixSpawnFileActionsT {
+            count: 0,
+            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
+            _pad: [0; 8],
+        };
+        posix_spawn_file_actions_init(&raw mut acts);
+        posix_spawn_file_actions_adddup2(&raw mut acts, 2, 1);
+
+        let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+        let count = build_fd_map(&raw const acts, &mut out);
+
+        // fd 1 should now have the same handle as fd 2.
+        let fd1 = out[..count].iter().find(|e| e.fd == 1);
+        let fd2 = out[..count].iter().find(|e| e.fd == 2);
+        assert!(fd1.is_some(), "fd 1 should exist");
+        assert!(fd2.is_some(), "fd 2 should exist");
+        assert_eq!(
+            fd1.unwrap().handle,
+            fd2.unwrap().handle,
+            "fd 1 and fd 2 should share the same handle after dup2",
+        );
+    }
+
+    #[test]
+    fn test_build_fd_map_close_then_dup2() {
+        // Close fd 1, then dup2(2, 1) — common shell pattern for
+        // redirecting stdout to a pipe.
+        let mut acts = PosixSpawnFileActionsT {
+            count: 0,
+            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
+            _pad: [0; 8],
+        };
+        posix_spawn_file_actions_init(&raw mut acts);
+        posix_spawn_file_actions_addclose(&raw mut acts, 1);
+        posix_spawn_file_actions_adddup2(&raw mut acts, 2, 1);
+
+        let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+        let count = build_fd_map(&raw const acts, &mut out);
+
+        // fd 1 should exist (recreated by dup2) with fd 2's handle.
+        let fd1 = out[..count].iter().find(|e| e.fd == 1);
+        let fd2 = out[..count].iter().find(|e| e.fd == 2);
+        assert!(fd1.is_some(), "fd 1 should be recreated by dup2");
+        assert!(fd2.is_some(), "fd 2 should still exist");
+        assert_eq!(fd1.unwrap().handle, fd2.unwrap().handle);
+    }
+
+    #[test]
+    fn test_build_fd_map_close_all_standard() {
+        // Close all three standard fds.
+        let mut acts = PosixSpawnFileActionsT {
+            count: 0,
+            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
+            _pad: [0; 8],
+        };
+        posix_spawn_file_actions_init(&raw mut acts);
+        posix_spawn_file_actions_addclose(&raw mut acts, 0);
+        posix_spawn_file_actions_addclose(&raw mut acts, 1);
+        posix_spawn_file_actions_addclose(&raw mut acts, 2);
+
+        let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+        let count = build_fd_map(&raw const acts, &mut out);
+
+        // No standard fds should remain.
+        let has_0_1_2 = out[..count].iter().any(|e| e.fd <= 2);
+        assert!(!has_0_1_2, "all standard fds should be closed");
+    }
+
+    #[test]
+    fn test_max_fd_map_constant() {
+        assert_eq!(MAX_FD_MAP, 32);
+        // Must be large enough for 3 standard fds + MAX_FILE_ACTIONS.
+        assert!(MAX_FD_MAP >= 3 + MAX_FILE_ACTIONS);
     }
 }

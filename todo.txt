@@ -244,9 +244,21 @@ Remaining net improvements (diminishing returns):
   - kernel/src/syscall/number.rs (kernel-ipc zone — osb's zone)
   - posix/src/spawn.rs (posix zone — osb's zone)
   The posix execve() now packs argv/envp C string arrays and passes
-  them to the kernel.  posix_spawn() still uses old SYS_PROCESS_SPAWN
-  and ignores argv/envp — updating it to use SYS_PROCESS_SPAWN_EX
-  is the osb session's responsibility.
+  them to the kernel.  posix_spawn() now uses SYS_PROCESS_SPAWN_EX
+  with argv/envp passing (commit 83ebed8).  Child retrieves args via
+  SYS_PROCESS_GET_ARGS in __libc_start_main.
+  fd_map building from file_actions: DONE.  posix_spawn() now builds
+  FdMapEntry array from parent's fd table + file_actions (close/dup2)
+  and passes it to SYS_PROCESS_SPAWN_EX.  Child retrieves inherited
+  fds via SYS_PROCESS_GET_INITIAL_FDS in crt.rs retrieve_initial_fds()
+  and reinitializes fdtable.  Pipeline: parent builds fd_map → kernel
+  dups handles into child PCB → child retrieves at startup.
+  NOTE: kernel's sys_process_get_initial_fds currently stores (fd, handle)
+  pairs without handle_type.  The child gets handle_type=FILE for all
+  entries.  This means pipes/sockets inherited via fd_map won't have the
+  correct HandleKind in the child.  Needs kernel-side fix to store
+  (fd, handle_type, handle) triples in PCB.initial_fds.
+  Open file_actions (addopen) are ignored — requires kernel extension.
 
 ## Judgment Calls
 

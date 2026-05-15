@@ -467,6 +467,8 @@ fn query_stream_info(dev: &mut VirtioSndDevice, num_streams: u32) -> KernelResul
     }
 
     // Read response status.
+    // SAFETY: resp_offset is within the DMA frame.  Volatile read because
+    // the device writes this field asynchronously via DMA.
     let status = unsafe {
         core::ptr::read_volatile((ctl_virt.add(resp_offset)) as *const u32)
     };
@@ -480,6 +482,9 @@ fn query_stream_info(dev: &mut VirtioSndDevice, num_streams: u32) -> KernelResul
     let mut num_input = 0u32;
     for i in 0..count as usize {
         let entry_offset = resp_offset + 4 + i * core::mem::size_of::<VirtioSndPcmInfo>();
+        // SAFETY: entry_offset is within the DMA frame (resp_offset + 4 +
+        // i * size < FRAME_SIZE, ensured by count ≤ MAX_STREAMS and the
+        // sizes involved).  VirtioSndPcmInfo is #[repr(C)].
         let info = unsafe {
             core::ptr::read(ctl_virt.add(entry_offset) as *const VirtioSndPcmInfo)
         };
@@ -515,12 +520,15 @@ fn control_stream_cmd(dev: &mut VirtioSndDevice, code: u32, stream_id: u32) -> K
         hdr: VirtioSndHdr { code },
         stream_id,
     };
+    // SAFETY: ctl_virt points to our DMA frame (FRAME_SIZE bytes).
+    // VirtioSndPcmHdr is #[repr(C)] and fits at offset 0.
     unsafe {
         core::ptr::write(ctl_virt as *mut VirtioSndPcmHdr, req);
     }
 
     // Response at offset 64 (just a status u32).
     let resp_offset: usize = 64;
+    // SAFETY: resp_offset + 4 < FRAME_SIZE; zeroing the response area.
     unsafe {
         core::ptr::write_bytes(ctl_virt.add(resp_offset), 0, 4);
     }
@@ -548,6 +556,8 @@ fn control_stream_cmd(dev: &mut VirtioSndDevice, code: u32, stream_id: u32) -> K
         core::hint::spin_loop();
     }
 
+    // SAFETY: resp_offset is within the DMA frame.  Volatile read because
+    // the device writes this asynchronously via DMA.
     let status = unsafe {
         core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32)
     };
@@ -587,12 +597,15 @@ fn set_params(
         rate,
         _padding: 0,
     };
+    // SAFETY: ctl_virt points to our DMA frame.  VirtioSndPcmSetParams is
+    // #[repr(C)] and fits at offset 0 within FRAME_SIZE.
     unsafe {
         core::ptr::write(ctl_virt as *mut VirtioSndPcmSetParams, req);
     }
 
     // Response at offset 64.
     let resp_offset: usize = 64;
+    // SAFETY: resp_offset + 4 < FRAME_SIZE; zeroing the response area.
     unsafe {
         core::ptr::write_bytes(ctl_virt.add(resp_offset), 0, 4);
     }
@@ -620,6 +633,8 @@ fn set_params(
         core::hint::spin_loop();
     }
 
+    // SAFETY: resp_offset is within the DMA frame.  Volatile read because
+    // the device writes this asynchronously.
     let status = unsafe {
         core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32)
     };
@@ -656,11 +671,15 @@ fn submit_pcm_buffer(dev: &mut VirtioSndDevice, stream_id: u32, pcm_data: &[u8])
 
     // Write transfer header.
     let xfer = VirtioSndPcmXfer { stream_id };
+    // SAFETY: pcm_virt points to the start of the PCM DMA frame
+    // (FRAME_SIZE bytes).  VirtioSndPcmXfer is 4 bytes at offset 0.
     unsafe {
         core::ptr::write(pcm_virt as *mut VirtioSndPcmXfer, xfer);
     }
 
     // Copy PCM data after header.
+    // SAFETY: data_len ≤ max_data = FRAME_SIZE - 12, so offset 4 + data_len
+    // stays within the DMA frame.  pcm_data is a valid slice of ≥ data_len bytes.
     unsafe {
         core::ptr::copy_nonoverlapping(
             pcm_data.as_ptr(),
@@ -671,6 +690,8 @@ fn submit_pcm_buffer(dev: &mut VirtioSndDevice, stream_id: u32, pcm_data: &[u8])
 
     // Zero the status area.
     let status_offset: usize = 8192;
+    // SAFETY: status_offset + 8 ≤ FRAME_SIZE (16384).  Zeroing the
+    // response area before the device writes to it.
     unsafe {
         core::ptr::write_bytes(pcm_virt.add(status_offset), 0, 8);
     }
@@ -705,6 +726,8 @@ fn submit_pcm_buffer(dev: &mut VirtioSndDevice, stream_id: u32, pcm_data: &[u8])
     }
 
     // Check status.
+    // SAFETY: status_offset is within the PCM DMA frame.  Volatile read
+    // because the device wrote this field asynchronously via DMA.
     let status = unsafe {
         core::ptr::read_volatile(pcm_virt.add(status_offset) as *const u32)
     };

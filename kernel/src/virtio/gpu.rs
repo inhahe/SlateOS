@@ -281,6 +281,9 @@ impl VirtioModernTransport {
 
     /// Write device status.
     fn set_status(&self, status: u8) {
+        // SAFETY: common_cfg points to mapped MMIO for the device (set
+        // during transport setup).  COMMON_STATUS is within the common
+        // config region.
         unsafe { core::ptr::write_volatile(self.common_cfg.add(COMMON_STATUS), status); }
     }
 
@@ -297,6 +300,8 @@ impl VirtioModernTransport {
 
     /// Read 32-bit device feature (select page first).
     fn device_features(&self, page: u32) -> u32 {
+        // SAFETY: common_cfg points to mapped MMIO.  DFSELECT and DF are
+        // within the common config region per the virtio spec layout.
         unsafe {
             core::ptr::write_volatile(
                 self.common_cfg.add(COMMON_DFSELECT) as *mut u32,
@@ -308,6 +313,8 @@ impl VirtioModernTransport {
 
     /// Write 32-bit guest feature (select page first).
     fn set_guest_features(&self, page: u32, features: u32) {
+        // SAFETY: common_cfg points to mapped MMIO.  GFSELECT and GF are
+        // within the common config region.
         unsafe {
             core::ptr::write_volatile(
                 self.common_cfg.add(COMMON_GFSELECT) as *mut u32,
@@ -322,6 +329,8 @@ impl VirtioModernTransport {
 
     /// Read number of queues.
     fn num_queues(&self) -> u16 {
+        // SAFETY: common_cfg points to mapped MMIO.  NUMQ is within
+        // the common config region.
         unsafe {
             core::ptr::read_volatile(self.common_cfg.add(COMMON_NUMQ) as *const u16)
         }
@@ -329,6 +338,8 @@ impl VirtioModernTransport {
 
     /// Select a queue for configuration.
     fn select_queue(&self, index: u16) {
+        // SAFETY: common_cfg points to mapped MMIO.  QSELECT is within
+        // the common config region.
         unsafe {
             core::ptr::write_volatile(
                 self.common_cfg.add(COMMON_QSELECT) as *mut u16,
@@ -339,6 +350,8 @@ impl VirtioModernTransport {
 
     /// Read the selected queue's size.
     fn queue_size(&self) -> u16 {
+        // SAFETY: common_cfg points to mapped MMIO.  QSIZE is within
+        // the common config region.
         unsafe {
             core::ptr::read_volatile(self.common_cfg.add(COMMON_QSIZE) as *const u16)
         }
@@ -347,6 +360,8 @@ impl VirtioModernTransport {
     /// Set the selected queue's descriptor table physical address.
     #[allow(clippy::cast_possible_truncation)]
     fn set_queue_desc(&self, addr: u64) {
+        // SAFETY: common_cfg points to mapped MMIO.  QDESC_LO/HI are
+        // within the common config region.
         unsafe {
             core::ptr::write_volatile(
                 self.common_cfg.add(COMMON_QDESC_LO) as *mut u32,
@@ -362,6 +377,8 @@ impl VirtioModernTransport {
     /// Set the selected queue's driver (available) ring physical address.
     #[allow(clippy::cast_possible_truncation)]
     fn set_queue_driver(&self, addr: u64) {
+        // SAFETY: common_cfg points to mapped MMIO.  QDRIVER_LO/HI are
+        // within the common config region.
         unsafe {
             core::ptr::write_volatile(
                 self.common_cfg.add(COMMON_QDRIVER_LO) as *mut u32,
@@ -377,6 +394,8 @@ impl VirtioModernTransport {
     /// Set the selected queue's device (used) ring physical address.
     #[allow(clippy::cast_possible_truncation)]
     fn set_queue_device(&self, addr: u64) {
+        // SAFETY: common_cfg points to mapped MMIO.  QDEVICE_LO/HI are
+        // within the common config region.
         unsafe {
             core::ptr::write_volatile(
                 self.common_cfg.add(COMMON_QDEVICE_LO) as *mut u32,
@@ -391,6 +410,8 @@ impl VirtioModernTransport {
 
     /// Enable the selected queue.
     fn enable_queue(&self) {
+        // SAFETY: common_cfg points to mapped MMIO.  QENABLE is within
+        // the common config region.
         unsafe {
             core::ptr::write_volatile(
                 self.common_cfg.add(COMMON_QENABLE) as *mut u16,
@@ -401,6 +422,8 @@ impl VirtioModernTransport {
 
     /// Read the notify offset for the selected queue.
     fn queue_notify_off(&self) -> u16 {
+        // SAFETY: common_cfg points to mapped MMIO.  QNOFF is within
+        // the common config region.
         unsafe {
             core::ptr::read_volatile(self.common_cfg.add(COMMON_QNOFF) as *const u16)
         }
@@ -415,9 +438,15 @@ impl VirtioModernTransport {
         // queue gets a 16-bit doorbell slot), and we just write the queue index.
         self.select_queue(queue_index);
         let off = self.queue_notify_off();
+        // SAFETY: notify_cfg points to the mapped notification BAR region.
+        // The offset is queue_notify_off * notify_off_multiplier, which the
+        // device guarantees stays within the notify region.
         let notify_addr = unsafe {
             self.notify_cfg.add((off as u32 * self.notify_off_multiplier) as usize)
         };
+        // SAFETY: notify_addr is within the mapped notify BAR region
+        // (computed above).  Writing the queue index to this doorbell
+        // tells the device to process the queue.
         unsafe {
             core::ptr::write_volatile(notify_addr as *mut u16, queue_index);
         }
@@ -425,6 +454,8 @@ impl VirtioModernTransport {
 
     /// Read a device-specific config u32.
     fn read_device_config32(&self, offset: usize) -> u32 {
+        // SAFETY: device_cfg points to the mapped device-specific config
+        // BAR region.  Callers pass offsets within the documented config.
         unsafe {
             core::ptr::read_volatile(self.device_cfg.add(offset) as *const u32)
         }
@@ -557,6 +588,8 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
 
     // Allocate DMA frame for control messages.
     let ctl_frame = frame::alloc_frame()?;
+    // SAFETY: We just allocated this frame; the HHDM maps it as writable
+    // kernel memory.  Zeroing the entire frame is within bounds.
     unsafe {
         let ctl_virt = (ctl_frame.addr() + hhdm_offset) as *mut u8;
         core::ptr::write_bytes(ctl_virt, 0, FRAME_SIZE);
@@ -599,11 +632,15 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
             serial_println!("[virtio-gpu] Failed to alloc FB frame {}: {:?}", i, e);
             // Free already allocated.
             for frame in &fb_frames {
+                // SAFETY: These frames were allocated above and are not
+                // aliased.  Failure to free is logged but not fatal.
                 unsafe { let _ = frame::free_frame(*frame); }
             }
             e
         })?;
         // Zero the frame.
+        // SAFETY: Just allocated; HHDM maps it writable.  Zeroing one
+        // FRAME_SIZE region stays within bounds of the allocated frame.
         unsafe {
             let virt = (f.addr() + hhdm_offset) as *mut u8;
             core::ptr::write_bytes(virt, 0, FRAME_SIZE);
@@ -770,7 +807,8 @@ fn setup_modern_transport(
                 let _ = unsafe {
                     page_table::map_frame(pml4_phys, va, frame, mmio_flags)
                 };
-                // Flush TLB for this page.
+                // SAFETY: Flushing the TLB for a page we just mapped is
+                // always safe and ensures subsequent accesses use the new mapping.
                 unsafe { page_table::flush_frame(va); }
             }
         }
@@ -860,10 +898,15 @@ fn send_ctrl_cmd(
     let ctl_virt = (ctl_phys + dev.hhdm_offset) as *mut u8;
 
     // Write request at offset 0.
+    // SAFETY: ctl_virt points to the DMA control frame (FRAME_SIZE bytes,
+    // HHDM-mapped).  req_data.len() < FRAME_SIZE (all GPU commands are
+    // small), so this stays in bounds.  No aliasing — we own ctl_frame.
     unsafe {
         core::ptr::copy_nonoverlapping(req_data.as_ptr(), ctl_virt, req_data.len());
     }
     // Zero response area.
+    // SAFETY: resp_offset + resp_size <= FRAME_SIZE (checked by callers
+    // that compute offsets from known struct sizes).
     unsafe {
         core::ptr::write_bytes(ctl_virt.add(resp_offset), 0, resp_size);
     }
@@ -891,6 +934,8 @@ fn send_ctrl_cmd(
     }
 
     // Read response type.
+    // SAFETY: The device has written the response at resp_offset within
+    // the DMA frame.  Volatile read because the device writes asynchronously.
     let resp_type = unsafe {
         core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32)
     };
@@ -900,6 +945,9 @@ fn send_ctrl_cmd(
 /// Query display information.
 fn get_display_info(dev: &mut VirtioGpuDevice) -> KernelResult<(u32, u32)> {
     let hdr = VirtioGpuCtrlHdr::new(VIRTIO_GPU_CMD_GET_DISPLAY_INFO);
+    // SAFETY: VirtioGpuCtrlHdr is #[repr(C)], so its byte layout is
+    // well-defined and matches the virtio wire format.  The slice covers
+    // exactly size_of::<VirtioGpuCtrlHdr>() bytes from a valid local.
     let req_bytes = unsafe {
         core::slice::from_raw_parts(
             &hdr as *const _ as *const u8,
@@ -917,6 +965,10 @@ fn get_display_info(dev: &mut VirtioGpuDevice) -> KernelResult<(u32, u32)> {
     }
 
     let ctl_virt = (dev.ctl_frame.addr() + dev.hhdm_offset) as *mut u8;
+    // SAFETY: The device wrote a VirtioGpuRespDisplayInfo at resp_offset
+    // within the DMA frame.  The struct is #[repr(C)] and the response
+    // type was validated above.  Reading it fully is within frame bounds
+    // (resp_offset + size_of::<VirtioGpuRespDisplayInfo>() < FRAME_SIZE).
     let resp = unsafe {
         core::ptr::read(ctl_virt.add(resp_offset) as *const VirtioGpuRespDisplayInfo)
     };
@@ -947,6 +999,8 @@ fn create_resource_2d(dev: &mut VirtioGpuDevice, width: u32, height: u32) -> Ker
         width,
         height,
     };
+    // SAFETY: VirtioGpuResourceCreate2d is #[repr(C)], so its byte layout
+    // matches the virtio wire format.  The slice covers exactly its size.
     let req_bytes = unsafe {
         core::slice::from_raw_parts(
             &req as *const _ as *const u8,
@@ -991,6 +1045,9 @@ fn attach_backing(dev: &mut VirtioGpuDevice, resource_id: u32) -> KernelResult<(
         resource_id,
         nr_entries: num_frames as u32,
     };
+    // SAFETY: ctl_virt points to the start of the DMA control frame.
+    // VirtioGpuResourceAttachBacking is #[repr(C)] and fits within the
+    // frame (header_size < FRAME_SIZE).
     unsafe {
         core::ptr::write(ctl_virt as *mut VirtioGpuResourceAttachBacking, req_hdr);
     }
@@ -1002,6 +1059,8 @@ fn attach_backing(dev: &mut VirtioGpuDevice, resource_id: u32) -> KernelResult<(
             length: FRAME_SIZE as u32,
             _padding: 0,
         };
+        // SAFETY: header_size + i * entry_size < total_req_size, which was
+        // checked against FRAME_SIZE above.  VirtioGpuMemEntry is #[repr(C)].
         unsafe {
             core::ptr::write(
                 ctl_virt.add(header_size + i * entry_size) as *mut VirtioGpuMemEntry,
@@ -1011,6 +1070,7 @@ fn attach_backing(dev: &mut VirtioGpuDevice, resource_id: u32) -> KernelResult<(
     }
 
     // Zero response.
+    // SAFETY: resp_offset + resp_size <= FRAME_SIZE (checked above).
     unsafe { core::ptr::write_bytes(ctl_virt.add(resp_offset), 0, resp_size); }
 
     // Submit.
@@ -1030,6 +1090,8 @@ fn attach_backing(dev: &mut VirtioGpuDevice, resource_id: u32) -> KernelResult<(
         core::hint::spin_loop();
     }
 
+    // SAFETY: Device wrote the response at resp_offset within the DMA
+    // frame.  Volatile read because the device writes asynchronously.
     let resp_type = unsafe {
         core::ptr::read_volatile(ctl_virt.add(resp_offset) as *const u32)
     };
@@ -1054,6 +1116,8 @@ fn set_scanout(
         scanout_id,
         resource_id,
     };
+    // SAFETY: VirtioGpuSetScanout is #[repr(C)]; the slice covers
+    // exactly its size from a valid stack local.
     let req_bytes = unsafe {
         core::slice::from_raw_parts(
             &req as *const _ as *const u8,
@@ -1081,6 +1145,8 @@ fn transfer_to_host_2d(
         resource_id,
         _padding: 0,
     };
+    // SAFETY: VirtioGpuTransferToHost2d is #[repr(C)]; the slice covers
+    // exactly its size from a valid stack local.
     let req_bytes = unsafe {
         core::slice::from_raw_parts(
             &req as *const _ as *const u8,
@@ -1107,6 +1173,8 @@ fn resource_flush(
         resource_id,
         _padding: 0,
     };
+    // SAFETY: VirtioGpuResourceFlush is #[repr(C)]; the slice covers
+    // exactly its size from a valid stack local.
     let req_bytes = unsafe {
         core::slice::from_raw_parts(
             &req as *const _ as *const u8,
@@ -1159,6 +1227,10 @@ pub fn set_pixel(x: u32, y: u32, color: u32) {
 
     if let Some(frame) = dev.fb_frames.get(frame_idx) {
         let virt = (frame.addr() + dev.hhdm_offset) as *mut u8;
+        // SAFETY: frame_offset < FRAME_SIZE (since offset < total_bytes =
+        // width*height*4, and frame_idx/frame_offset partition it into
+        // FRAME_SIZE chunks).  We use volatile because the framebuffer
+        // memory is accessed by the GPU device.
         unsafe {
             core::ptr::write_volatile(virt.add(frame_offset) as *mut u32, color);
         }
@@ -1199,6 +1271,8 @@ pub fn fill(color: u32) -> KernelResult<()> {
         let virt = (frame.addr() + dev.hhdm_offset) as *mut u32;
         let remaining = total_bytes.saturating_sub(filled);
         let pixels = remaining.min(FRAME_SIZE) / 4;
+        // SAFETY: pixels * 4 <= FRAME_SIZE, so all writes stay within
+        // the allocated frame.  Volatile because the GPU reads this memory.
         unsafe {
             for p in 0..pixels {
                 core::ptr::write_volatile(virt.add(p), color);
@@ -1242,6 +1316,9 @@ pub fn self_test() {
 
         // Write a pixel, read back.
         set_pixel(0, 0, 0xFF_FF0000);
+        // SAFETY: addr is the HHDM-mapped framebuffer base returned by
+        // framebuffer_addr().  Reading the first u32 is within the first
+        // frame's bounds.
         let pixel = unsafe { core::ptr::read_volatile(addr as *const u32) };
         if pixel == 0xFF_FF0000 {
             serial_println!("[virtio-gpu]   Pixel write/read: OK");

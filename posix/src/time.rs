@@ -1931,13 +1931,27 @@ pub const ITIMER_VIRTUAL: i32 = 1;
 /// Profiling timer (user + system CPU time).
 pub const ITIMER_PROF: i32 = 2;
 
+/// Number of interval timer types (ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF).
+const ITIMER_COUNT: usize = 3;
+
+/// Per-timer-type storage for `setitimer`/`getitimer`.
+///
+/// Indexed by the `which` parameter (0 = REAL, 1 = VIRTUAL, 2 = PROF).
+/// The timers never actually fire (no signal delivery), but we store the
+/// values so `getitimer` returns what `setitimer` set.  This makes
+/// programs that read back their own timer settings work correctly.
+static mut ITIMER_STATE: [Itimerval; ITIMER_COUNT] = [Itimerval {
+    it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
+    it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+}; ITIMER_COUNT];
+
 /// Set an interval timer.
 ///
-/// Stub: validates arguments and stores nothing.  Returns 0 (success)
-/// but the timer never fires because we don't have signal delivery.
+/// Stores the timer value so `getitimer` can retrieve it.  The timer
+/// never actually fires because we don't have signal delivery.
 /// Programs that use `setitimer` for periodic alarms won't get
-/// SIGALRM/SIGVTALRM/SIGPROF, but at least they won't fail to link
-/// or get an error return.
+/// SIGALRM/SIGVTALRM/SIGPROF, but they will see their own settings
+/// reflected back via `getitimer`.
 ///
 /// # Safety
 ///
@@ -1957,21 +1971,36 @@ pub extern "C" fn setitimer(
         return -1;
     }
 
-    // Return zeroed old value if requested (no timer was previously set).
+    #[allow(clippy::cast_sign_loss)]
+    let idx = which as usize;
+
+    // Return old value if requested.
     if !old_value.is_null() {
-        // SAFETY: old_value verified non-null.
+        // SAFETY: old_value verified non-null; idx < ITIMER_COUNT.
         unsafe {
-            core::ptr::write_bytes(old_value, 0, 1);
+            let state = core::ptr::addr_of_mut!(ITIMER_STATE);
+            if let Some(entry) = (*state).get(idx) {
+                *old_value = *entry;
+            }
         }
     }
 
-    // Silently accept — timer never fires.
+    // Store the new value.
+    // SAFETY: single-threaded; idx < ITIMER_COUNT.
+    unsafe {
+        let state = core::ptr::addr_of_mut!(ITIMER_STATE);
+        if let Some(entry) = (*state).get_mut(idx) {
+            *entry = *new_value;
+        }
+    }
+
     0
 }
 
 /// Get the current value of an interval timer.
 ///
-/// Stub: always returns a zeroed timer (no time remaining, no interval).
+/// Returns the value last set by `setitimer`, or zeros if never set.
+/// The timer never actually counts down (no kernel timer integration).
 ///
 /// # Safety
 ///
@@ -1987,9 +2016,15 @@ pub extern "C" fn getitimer(which: i32, curr_value: *mut Itimerval) -> i32 {
         return -1;
     }
 
-    // SAFETY: curr_value verified non-null.
+    #[allow(clippy::cast_sign_loss)]
+    let idx = which as usize;
+
+    // SAFETY: curr_value verified non-null; idx < ITIMER_COUNT.
     unsafe {
-        core::ptr::write_bytes(curr_value, 0, 1);
+        let state = core::ptr::addr_of_mut!(ITIMER_STATE);
+        if let Some(entry) = (*state).get(idx) {
+            *curr_value = *entry;
+        }
     }
     0
 }
@@ -3829,13 +3864,20 @@ mod tests {
 
     // -- timer_create / timer_settime / timer_gettime / timer_delete --
 
-    /// Helper: reset TIMER_TABLE to empty for isolation between tests.
+    /// Helper: reset TIMER_TABLE and ITIMER_STATE for isolation.
     fn reset_timers() {
         // SAFETY: single-threaded test, no concurrent access.
         unsafe {
             let table = core::ptr::addr_of_mut!(TIMER_TABLE).as_mut().unwrap();
             for slot in table.iter_mut() {
                 *slot = None;
+            }
+            let state = core::ptr::addr_of_mut!(ITIMER_STATE).as_mut().unwrap();
+            for entry in state.iter_mut() {
+                *entry = Itimerval {
+                    it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
+                    it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+                };
             }
         }
     }
@@ -4040,6 +4082,7 @@ mod tests {
 
     #[test]
     fn test_setitimer_valid_which() {
+        reset_timers();
         let val = Itimerval {
             it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
             it_value: Timeval { tv_sec: 1, tv_usec: 0 },
@@ -4051,6 +4094,7 @@ mod tests {
 
     #[test]
     fn test_setitimer_invalid_which() {
+        reset_timers();
         let val = Itimerval {
             it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
             it_value: Timeval { tv_sec: 0, tv_usec: 0 },
@@ -4068,8 +4112,10 @@ mod tests {
     }
 
     #[test]
-    fn test_setitimer_returns_zeroed_old() {
-        let val = Itimerval {
+    fn test_setitimer_returns_old_value() {
+        reset_timers();
+        // First set: old should be zeros (fresh state).
+        let val1 = Itimerval {
             it_interval: Timeval { tv_sec: 1, tv_usec: 100 },
             it_value: Timeval { tv_sec: 5, tv_usec: 200 },
         };
@@ -4077,15 +4123,47 @@ mod tests {
             it_interval: Timeval { tv_sec: 99, tv_usec: 99 },
             it_value: Timeval { tv_sec: 99, tv_usec: 99 },
         };
-        assert_eq!(setitimer(ITIMER_REAL, &raw const val, &raw mut old), 0);
+        assert_eq!(setitimer(ITIMER_REAL, &raw const val1, &raw mut old), 0);
         assert_eq!(old.it_interval.tv_sec, 0);
         assert_eq!(old.it_interval.tv_usec, 0);
         assert_eq!(old.it_value.tv_sec, 0);
         assert_eq!(old.it_value.tv_usec, 0);
+
+        // Second set: old should be val1.
+        let val2 = Itimerval {
+            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+        };
+        assert_eq!(setitimer(ITIMER_REAL, &raw const val2, &raw mut old), 0);
+        assert_eq!(old.it_interval.tv_sec, 1);
+        assert_eq!(old.it_interval.tv_usec, 100);
+        assert_eq!(old.it_value.tv_sec, 5);
+        assert_eq!(old.it_value.tv_usec, 200);
     }
 
     #[test]
-    fn test_getitimer_valid_which() {
+    fn test_getitimer_returns_set_value() {
+        reset_timers();
+        let val = Itimerval {
+            it_interval: Timeval { tv_sec: 3, tv_usec: 500 },
+            it_value: Timeval { tv_sec: 7, tv_usec: 999 },
+        };
+        setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
+
+        let mut out = Itimerval {
+            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+        };
+        assert_eq!(getitimer(ITIMER_REAL, &raw mut out), 0);
+        assert_eq!(out.it_interval.tv_sec, 3);
+        assert_eq!(out.it_interval.tv_usec, 500);
+        assert_eq!(out.it_value.tv_sec, 7);
+        assert_eq!(out.it_value.tv_usec, 999);
+    }
+
+    #[test]
+    fn test_getitimer_fresh_returns_zeros() {
+        reset_timers();
         let mut val = Itimerval {
             it_interval: Timeval { tv_sec: 99, tv_usec: 99 },
             it_value: Timeval { tv_sec: 99, tv_usec: 99 },
@@ -4093,6 +4171,25 @@ mod tests {
         assert_eq!(getitimer(ITIMER_REAL, &raw mut val), 0);
         assert_eq!(val.it_interval.tv_sec, 0);
         assert_eq!(val.it_value.tv_sec, 0);
+    }
+
+    #[test]
+    fn test_getitimer_per_timer_type_isolation() {
+        reset_timers();
+        // Set ITIMER_REAL, verify ITIMER_VIRTUAL is still zeros.
+        let val = Itimerval {
+            it_interval: Timeval { tv_sec: 10, tv_usec: 0 },
+            it_value: Timeval { tv_sec: 20, tv_usec: 0 },
+        };
+        setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
+
+        let mut out = Itimerval {
+            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+        };
+        assert_eq!(getitimer(ITIMER_VIRTUAL, &raw mut out), 0);
+        assert_eq!(out.it_interval.tv_sec, 0);
+        assert_eq!(out.it_value.tv_sec, 0);
     }
 
     #[test]

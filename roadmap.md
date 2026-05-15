@@ -299,6 +299,12 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] PCB initial_fds: one-shot retrieval by child's POSIX layer
   - [x] Cleanup of unclaimed handles on process death (no handle leaks)
   - [x] 5 tests: layout, fd_map spawn, empty map, invalid handle, one-shot semantics
+- [x] argv/envp passing across spawn (SYS_PROCESS_GET_ARGS)
+  - [x] SpawnExArgs struct (96 bytes, repr(C)) for struct-pointer syscall interface
+  - [x] SpawnOptions.argv/envp stored in child PCB (256KB total limit)
+  - [x] SpawnArgsHeader output format (16 bytes + packed null-terminated strings)
+  - [x] One-shot retrieval, cleanup on process death
+  - [x] 5 tests: header layout, argv spawn, argv+envp spawn, one-shot, SpawnExArgs layout
 
 ---
 

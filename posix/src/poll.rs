@@ -55,8 +55,14 @@ pub const POLLNVAL: i16 = 0x0020;
 
 /// Alias for `POLLIN`.
 pub const POLLRDNORM: i16 = 0x0040;
+/// Priority band data may be read.
+pub const POLLRDBAND: i16 = 0x0080;
 /// Alias for `POLLOUT`.
 pub const POLLWRNORM: i16 = 0x0100;
+/// Priority data may be written.
+pub const POLLWRBAND: i16 = 0x0200;
+/// Peer closed connection or shut down writing half (Linux extension).
+pub const POLLRDHUP: i16 = 0x2000;
 
 // ---------------------------------------------------------------------------
 // select() constants
@@ -852,14 +858,18 @@ mod tests {
         assert_eq!(POLLHUP, 0x0010);
         assert_eq!(POLLNVAL, 0x0020);
         assert_eq!(POLLRDNORM, 0x0040);
+        assert_eq!(POLLRDBAND, 0x0080);
         assert_eq!(POLLWRNORM, 0x0100);
+        assert_eq!(POLLWRBAND, 0x0200);
+        assert_eq!(POLLRDHUP, 0x2000);
     }
 
     #[test]
     fn test_poll_flags_are_disjoint() {
-        let flags: [i16; 8] = [
+        let flags: [i16; 11] = [
             POLLIN, POLLPRI, POLLOUT, POLLERR,
-            POLLHUP, POLLNVAL, POLLRDNORM, POLLWRNORM,
+            POLLHUP, POLLNVAL, POLLRDNORM, POLLRDBAND,
+            POLLWRNORM, POLLWRBAND, POLLRDHUP,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

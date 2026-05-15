@@ -36,6 +36,14 @@ pub const O_NOFOLLOW: i32 = 0o400_000;
 pub const O_CLOEXEC: i32 = 0o2_000_000;
 /// Open directory only.
 pub const O_DIRECTORY: i32 = 0o200_000;
+/// Don't update access time.
+pub const O_NOATIME: i32 = 0o1_000_000;
+/// Resolve pathname, don't open (Linux 2.6.39+).
+pub const O_PATH: i32 = 0o10_000_000;
+/// Create unnamed temporary file (Linux 3.11+).
+pub const O_TMPFILE: i32 = 0o20_200_000;
+/// Data integrity sync (write data + necessary metadata).
+pub const O_DSYNC: i32 = 0o10_000;
 
 // ---------------------------------------------------------------------------
 // lseek() whence
@@ -151,6 +159,23 @@ mod tests {
         assert_eq!(O_NOFOLLOW, 0o400_000);
         assert_eq!(O_DIRECTORY, 65536);
         assert_eq!(O_NOFOLLOW, 131072);
+    }
+
+    #[test]
+    fn test_extended_open_flags() {
+        assert_eq!(O_NOATIME, 0o1_000_000);
+        assert_eq!(O_PATH, 0o10_000_000);
+        assert_eq!(O_TMPFILE, 0o20_200_000);
+        assert_eq!(O_DSYNC, 0o10_000);
+    }
+
+    #[test]
+    fn test_open_flags_no_collisions() {
+        // Each flag should be a distinct bit or combination.
+        // O_TMPFILE includes O_DIRECTORY as a sub-flag (Linux design).
+        assert_ne!(O_NOATIME, O_PATH);
+        assert_ne!(O_NOATIME, O_DSYNC);
+        assert_ne!(O_PATH, O_DSYNC);
     }
 
     #[test]

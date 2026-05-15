@@ -3576,6 +3576,7 @@ const COMMANDS: &[&str] = &[
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
     "move", "net", "nl", "notifcenter", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "ping6", "printenv",
+    "udp6",
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
     "rs", "rsolicit",
     "reboot", "recent", "ren", "renice", "rev", "rm",
@@ -5423,6 +5424,7 @@ fn dispatch(line: &str) {
         "dhcp" => cmd_dhcp(),
         "ping" => cmd_ping(args),
         "ping6" => cmd_ping6(args),
+        "udp6" => cmd_udp6(args),
         "rs" | "rsolicit" => cmd_router_solicitation(),
         "nslookup" => cmd_dns(args),
         "wget" | "http" => cmd_wget(args),
@@ -63759,6 +63761,128 @@ fn cmd_ping6(args: &str) {
     );
 }
 
+/// `udp6` — send and receive UDP datagrams over IPv6.
+///
+/// Usage:
+///   udp6 send <ipv6-addr> <port> <message>   — send a UDP datagram
+///   udp6 listen <port> [timeout_ms]           — listen for datagrams
+fn cmd_udp6(args: &str) {
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+
+    match sub {
+        "send" | "s" => {
+            if parts.len() < 4 {
+                crate::console_println!("Usage: udp6 send <ipv6-addr> <port> <message...>");
+                return;
+            }
+            let dst = match crate::net::ipv6::Ipv6Addr::parse(parts[1]) {
+                Some(addr) => addr,
+                None => {
+                    crate::console_println!("Invalid IPv6 address: {}", parts[1]);
+                    return;
+                }
+            };
+            let port: u16 = match parts[2].parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    crate::console_println!("Invalid port: {}", parts[2]);
+                    return;
+                }
+            };
+            // Reconstruct message from remaining parts.
+            let msg: alloc::string::String = parts[3..].join(" ");
+            let src_port: u16 = 49200; // Use a fixed ephemeral port for simplicity.
+
+            crate::console_println!("Sending {} bytes to [{}]:{} ...", msg.len(), dst, port);
+            match crate::net::udp::send_v6(src_port, dst, port, msg.as_bytes()) {
+                Ok(()) => crate::console_println!("Sent."),
+                Err(e) => crate::console_println!("Send failed: {:?}", e),
+            }
+        }
+        "listen" | "l" => {
+            let port: u16 = match parts.get(1).unwrap_or(&"0").parse() {
+                Ok(p) if p > 0 => p,
+                _ => {
+                    crate::console_println!("Usage: udp6 listen <port> [timeout_ms]");
+                    return;
+                }
+            };
+            let timeout_ms: u64 = parts.get(2)
+                .unwrap_or(&"5000")
+                .parse()
+                .unwrap_or(5000);
+
+            let handle = match crate::net::udp::bind(port) {
+                Ok(h) => h,
+                Err(e) => {
+                    crate::console_println!("Bind port {} failed: {:?}", port, e);
+                    return;
+                }
+            };
+
+            crate::console_println!(
+                "Listening on UDP6 port {} for {}ms ...",
+                port, timeout_ms
+            );
+
+            let start = crate::hrtimer::now_ns();
+            #[allow(clippy::arithmetic_side_effects)]
+            let deadline = start + timeout_ms * 1_000_000;
+            let mut count: u32 = 0;
+
+            loop {
+                crate::net::poll();
+
+                // Check for IPv6 datagrams.
+                while let Some(dgram) = crate::net::udp::recv_v6(handle) {
+                    count = count.saturating_add(1);
+                    crate::console_println!(
+                        "[{}]:{} → {} bytes",
+                        dgram.src_ip, dgram.src_port, dgram.data.len()
+                    );
+                    // Try to display as text if it looks like UTF-8.
+                    if let Ok(text) = core::str::from_utf8(&dgram.data) {
+                        crate::console_println!("  \"{}\"", text);
+                    } else {
+                        // Show first 32 bytes as hex.
+                        let show = dgram.data.len().min(32);
+                        let hex: alloc::string::String = dgram.data[..show]
+                            .iter()
+                            .map(|b| alloc::format!("{:02x}", b))
+                            .collect::<alloc::vec::Vec<_>>()
+                            .join(" ");
+                        crate::console_println!("  [{}]", hex);
+                    }
+                }
+
+                // Also drain IPv4 datagrams so we don't fill that queue.
+                while crate::net::udp::recv(handle).is_some() {}
+
+                if crate::hrtimer::now_ns() >= deadline {
+                    break;
+                }
+
+                for _ in 0..10_000 {
+                    core::hint::spin_loop();
+                }
+            }
+
+            crate::net::udp::close(handle);
+            crate::console_println!("Received {} IPv6 datagrams.", count);
+        }
+        _ => {
+            crate::console_println!("Usage:");
+            crate::console_println!("  udp6 send <ipv6-addr> <port> <message>");
+            crate::console_println!("  udp6 listen <port> [timeout_ms]");
+            crate::console_println!();
+            crate::console_println!("Examples:");
+            crate::console_println!("  udp6 send fe80::1 5000 Hello world");
+            crate::console_println!("  udp6 listen 5000 10000");
+        }
+    }
+}
+
 /// `firewall` — manage packet filtering rules.
 ///
 /// Usage:
@@ -67984,7 +68108,7 @@ fn is_builtin(name: &str) -> bool {
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
-        | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "ping6" | "nslookup"
+        | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "ping6" | "udp6" | "nslookup"
         | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"

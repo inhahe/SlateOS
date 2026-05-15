@@ -373,7 +373,10 @@ pub fn pre_check(op: FsOp, path: &str, secondary_path: Option<&str>) -> KernelRe
         .filter(|i| {
             i.active
                 && i.mask.contains(op_mask)
-                && (i.path_prefix.is_empty() || path.starts_with(&i.path_prefix))
+                && (i.path_prefix.is_empty()
+                    || path == i.path_prefix
+                    || (path.starts_with(&i.path_prefix)
+                        && path.as_bytes().get(i.path_prefix.len()) == Some(&b'/')))
         })
         .map(|i| (i.id, i.handler))
         .collect();

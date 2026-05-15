@@ -560,12 +560,18 @@ fn matches_filter(entry: &WalkEntry, opts: &WalkOptions) -> bool {
 /// Check if a path should be excluded.
 fn is_excluded(path: &str, opts: &WalkOptions) -> bool {
     for prefix in DEFAULT_EXCLUDES {
-        if path.starts_with(prefix) {
+        if path == *prefix
+            || (path.starts_with(prefix)
+                && path.as_bytes().get(prefix.len()) == Some(&b'/'))
+        {
             return true;
         }
     }
     for prefix in &opts.excludes {
-        if path.starts_with(prefix.as_str()) {
+        if path == prefix.as_str()
+            || (path.starts_with(prefix.as_str())
+                && path.as_bytes().get(prefix.len()) == Some(&b'/'))
+        {
             return true;
         }
     }

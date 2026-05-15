@@ -306,7 +306,10 @@ pub fn emit(event_type: FsEventType, path: &str, new_path: Option<&str>) {
         }
 
         // Does the path match the watched directory?
-        let matched = if path.starts_with(&watch.path) {
+        let matched = if path == watch.path
+            || (path.starts_with(&watch.path)
+                && path.as_bytes().get(watch.path.len()) == Some(&b'/'))
+        {
             // Path is inside the watched directory.
             if watch.recursive {
                 true
@@ -327,7 +330,10 @@ pub fn emit(event_type: FsEventType, path: &str, new_path: Option<&str>) {
         if !matched {
             // Also check for rename where new_path matches.
             if let Some(np) = new_path {
-                let np_matched = if np.starts_with(&watch.path) {
+                let np_matched = if np == watch.path
+                    || (np.starts_with(&watch.path)
+                        && np.as_bytes().get(watch.path.len()) == Some(&b'/'))
+                {
                     if watch.recursive {
                         true
                     } else {

@@ -158,7 +158,11 @@ pub fn effective_policy(path: &str) -> AtimePolicy {
     let mut best: Option<&MountOverride> = None;
     let mut best_len = 0;
     for entry in overrides.iter() {
-        if path.starts_with(&entry.mount_path) && entry.mount_path.len() > best_len {
+        if (path == entry.mount_path
+            || (path.starts_with(&entry.mount_path)
+                && path.as_bytes().get(entry.mount_path.len()) == Some(&b'/')))
+            && entry.mount_path.len() > best_len
+        {
             best = Some(entry);
             best_len = entry.mount_path.len();
         }

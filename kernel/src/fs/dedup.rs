@@ -323,9 +323,12 @@ fn collect_files(
         return;
     }
 
-    // Check exclude prefixes.
+    // Check exclude prefixes (with path-boundary check).
     for excl in &config.exclude_prefixes {
-        if path.starts_with(excl.as_str()) {
+        if path == excl.as_str()
+            || (path.starts_with(excl.as_str())
+                && path.as_bytes().get(excl.len()) == Some(&b'/'))
+        {
             return;
         }
     }

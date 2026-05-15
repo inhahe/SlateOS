@@ -299,7 +299,10 @@ pub fn columns_for_dir(dir_path: &str) -> Vec<FieldStat> {
     let mut field_counts: Vec<(String, String, usize)> = Vec::new();
 
     for entry in index.iter() {
-        if !entry.path.starts_with(prefix.as_str()) {
+        if entry.path != prefix.as_str()
+            && !(entry.path.starts_with(prefix.as_str())
+                 && entry.path.as_bytes().get(prefix.len()) == Some(&b'/'))
+        {
             continue;
         }
         // Only direct children (no subdirectories).

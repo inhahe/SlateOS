@@ -194,7 +194,10 @@ pub fn search(needle: &str, root: Option<&str>) -> Vec<(String, String)> {
 
     for (path, comment) in &store.comments {
         if let Some(root_path) = root {
-            if !path.starts_with(root_path) {
+            if path != root_path
+                && !(path.starts_with(root_path)
+                     && path.as_bytes().get(root_path.len()) == Some(&b'/'))
+            {
                 continue;
             }
         }
@@ -215,7 +218,10 @@ pub fn list(root: Option<&str>) -> Vec<(String, String)> {
     let store = STORE.lock();
     store.comments.iter()
         .filter(|(path, _)| {
-            root.map_or(true, |r| path.starts_with(r))
+            root.map_or(true, |r| {
+                path.as_str() == r
+                    || (path.starts_with(r) && path.as_bytes().get(r.len()) == Some(&b'/'))
+            })
         })
         .map(|(p, c)| (p.clone(), c.clone()))
         .collect()
@@ -247,7 +253,11 @@ pub fn rename_path(old_path: &str, new_path: &str) -> KernelResult<()> {
 pub fn remove_under(path_prefix: &str) -> usize {
     let mut store = STORE.lock();
     let to_remove: Vec<String> = store.comments.keys()
-        .filter(|p| p.starts_with(path_prefix))
+        .filter(|p| {
+            *p == path_prefix
+                || (p.starts_with(path_prefix)
+                    && p.as_bytes().get(path_prefix.len()) == Some(&b'/'))
+        })
         .cloned()
         .collect();
     let count = to_remove.len();

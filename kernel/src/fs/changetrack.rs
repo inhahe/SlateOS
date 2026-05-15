@@ -439,14 +439,22 @@ fn matches_filter(entry: &JournalEntry, filter: &ChangeFilter) -> bool {
         let path_matches = filter
             .path_prefixes
             .iter()
-            .any(|pfx| entry.path.starts_with(pfx.as_str()));
+            .any(|pfx| {
+                entry.path == pfx.as_str()
+                    || (entry.path.starts_with(pfx.as_str())
+                        && entry.path.as_bytes().get(pfx.len()) == Some(&b'/'))
+            });
         if !path_matches {
             // For renames, also check old_path.
             if !entry.old_path.is_empty() {
                 let old_matches = filter
                     .path_prefixes
                     .iter()
-                    .any(|pfx| entry.old_path.starts_with(pfx.as_str()));
+                    .any(|pfx| {
+                        entry.old_path == pfx.as_str()
+                            || (entry.old_path.starts_with(pfx.as_str())
+                                && entry.old_path.as_bytes().get(pfx.len()) == Some(&b'/'))
+                    });
                 if !old_matches {
                     return false;
                 }

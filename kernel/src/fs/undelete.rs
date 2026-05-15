@@ -254,7 +254,10 @@ pub fn recover(original_path: &str, dest: Option<&str>) -> KernelResult<Recovery
 
 fn matches_filter(path: &str, filter: &ScanFilter) -> bool {
     if let Some(ref prefix) = filter.path_prefix {
-        if !path.starts_with(prefix.as_str()) {
+        if path != prefix.as_str()
+            && !(path.starts_with(prefix.as_str())
+                 && path.as_bytes().get(prefix.len()) == Some(&b'/'))
+        {
             return false;
         }
     }

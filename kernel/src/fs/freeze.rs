@@ -259,7 +259,10 @@ pub fn is_frozen(path: &str) -> bool {
 
     // Longest prefix match.
     for entry in table.iter_mut() {
-        if path.starts_with(&entry.mountpoint) {
+        if path == entry.mountpoint
+            || (path.starts_with(&entry.mountpoint)
+                && path.as_bytes().get(entry.mountpoint.len()) == Some(&b'/'))
+        {
             entry.blocked_writes += 1;
             BLOCKED_WRITE_COUNT.fetch_add(1, Ordering::Relaxed);
             return true;

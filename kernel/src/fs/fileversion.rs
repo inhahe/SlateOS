@@ -164,7 +164,11 @@ pub fn capture_version(path: &str, data: &[u8], uid: u32) -> KernelResult<u64> {
 
         // Check if path is covered by a watched path.
         let policy = state.watched_paths.iter()
-            .find(|w| path.starts_with(&w.path))
+            .find(|w| {
+                path == w.path
+                    || (path.starts_with(&w.path)
+                        && path.as_bytes().get(w.path.len()) == Some(&b'/'))
+            })
             .map(|w| w.policy)
             .unwrap_or(state.default_policy);
 
@@ -173,7 +177,11 @@ pub fn capture_version(path: &str, data: &[u8], uid: u32) -> KernelResult<u64> {
         }
 
         // Check for max version size.
-        if let Some(wp) = state.watched_paths.iter().find(|w| path.starts_with(&w.path)) {
+        if let Some(wp) = state.watched_paths.iter().find(|w| {
+            path == w.path
+                || (path.starts_with(&w.path)
+                    && path.as_bytes().get(w.path.len()) == Some(&b'/'))
+        }) {
             if wp.max_version_size > 0 && data.len() as u64 > wp.max_version_size {
                 return Err(KernelError::FileTooLarge);
             }

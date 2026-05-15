@@ -360,7 +360,10 @@ pub fn list_entries(prefix: Option<&str>, max: usize) -> (Vec<(String, Hash256, 
 
     for (path, entry) in inner.baseline.iter() {
         if let Some(pfx) = prefix {
-            if !path.starts_with(pfx) {
+            if path != pfx
+                && !(path.starts_with(pfx)
+                     && path.as_bytes().get(pfx.len()) == Some(&b'/'))
+            {
                 continue;
             }
         }
@@ -452,7 +455,9 @@ pub fn verify_dir(dir: &str) -> (Vec<VerifyResult>, VerifySummary) {
             if dir == "/" {
                 true // All paths under root.
             } else {
-                p.starts_with(&prefix) || *p == dir
+                *p == dir
+                    || (p.starts_with(&prefix)
+                        && p.as_bytes().get(prefix.len()) == Some(&b'/'))
             }
         })
         .map(|(p, e)| (p.clone(), e.hash, e.size))

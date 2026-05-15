@@ -295,7 +295,11 @@ pub fn unregister_path(path: &str) -> bool {
 /// Check if a path is registered for direct I/O.
 pub fn is_dio_path(path: &str) -> bool {
     let paths = DIO_PATHS.lock();
-    paths.iter().any(|e| e.path == path || path.starts_with(&e.path))
+    paths.iter().any(|e| {
+        e.path == path
+            || (path.starts_with(&e.path)
+                && path.as_bytes().get(e.path.len()) == Some(&b'/'))
+    })
 }
 
 /// List all registered direct I/O paths.

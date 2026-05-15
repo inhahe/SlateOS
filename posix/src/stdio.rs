@@ -2337,4 +2337,642 @@ mod tests {
     fn test_max_popen_constant() {
         assert_eq!(MAX_POPEN, 8);
     }
+
+    // -----------------------------------------------------------------------
+    // Exported constants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_seek_constants() {
+        assert_eq!(SEEK_SET, 0);
+        assert_eq!(SEEK_CUR, 1);
+        assert_eq!(SEEK_END, 2);
+    }
+
+    #[test]
+    fn test_ionbf_iolbf_iofbf_values() {
+        assert_eq!(_IONBF, 2);
+        assert_eq!(_IOLBF, 1);
+        assert_eq!(_IOFBF, 0);
+    }
+
+    #[test]
+    fn test_bufsiz_value() {
+        // glibc defines BUFSIZ as 8192.
+        assert_eq!(BUFSIZ, 8192);
+    }
+
+    #[test]
+    fn test_filename_max_value() {
+        // glibc defines FILENAME_MAX as 4096.
+        assert_eq!(FILENAME_MAX, 4096);
+    }
+
+    #[test]
+    fn test_l_tmpnam_value() {
+        // Must be large enough for "/tmp/tmp_NNNNNN\0" = 16 chars + null.
+        assert!(L_TMPNAM >= 17, "L_TMPNAM too small for tmpnam format");
+    }
+
+    #[test]
+    fn test_fpos_t_is_i64() {
+        assert_eq!(
+            core::mem::size_of::<FposT>(),
+            core::mem::size_of::<i64>(),
+            "FposT must be i64-sized"
+        );
+    }
+
+    #[test]
+    fn test_max_open_files() {
+        assert_eq!(MAX_OPEN_FILES, 16);
+    }
+
+    // -----------------------------------------------------------------------
+    // Buffer direction constants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_buf_dir_constants_distinct() {
+        assert_ne!(BUF_DIR_IDLE, BUF_DIR_READ);
+        assert_ne!(BUF_DIR_IDLE, BUF_DIR_WRITE);
+        assert_ne!(BUF_DIR_READ, BUF_DIR_WRITE);
+    }
+
+    // -----------------------------------------------------------------------
+    // Global FILE* symbols
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stdout_symbol() {
+        assert_eq!(stdout, STDOUT_SENTINEL);
+    }
+
+    #[test]
+    fn test_stderr_symbol() {
+        assert_eq!(stderr, STDERR_SENTINEL);
+    }
+
+    #[test]
+    fn test_stdin_symbol() {
+        assert_eq!(stdin, STDIN_SENTINEL);
+    }
+
+    #[test]
+    fn test_glibc_stdin_alias() {
+        assert_eq!(_IO_stdin_, STDIN_SENTINEL);
+    }
+
+    #[test]
+    fn test_glibc_stdout_alias() {
+        assert_eq!(_IO_stdout_, STDOUT_SENTINEL);
+    }
+
+    #[test]
+    fn test_glibc_stderr_alias() {
+        assert_eq!(_IO_stderr_, STDERR_SENTINEL);
+    }
+
+    // -----------------------------------------------------------------------
+    // fileno — returns fd for sentinel streams
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fileno_stdin() {
+        assert_eq!(fileno(STDIN_SENTINEL as *mut u8), STDIN_FD);
+    }
+
+    #[test]
+    fn test_fileno_stdout() {
+        assert_eq!(fileno(STDOUT_SENTINEL as *mut u8), STDOUT_FD);
+    }
+
+    #[test]
+    fn test_fileno_stderr() {
+        assert_eq!(fileno(STDERR_SENTINEL as *mut u8), STDERR_FD);
+    }
+
+    // -----------------------------------------------------------------------
+    // feof / ferror / clearerr — flag manipulation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_feof_initially_zero() {
+        // stdout starts with no EOF flag.
+        // Reset flag state first to avoid interference from prior tests.
+        let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
+        unsafe { (*file).flags &= !FLAG_EOF; }
+        assert_eq!(feof(STDOUT_SENTINEL as *mut u8), 0);
+    }
+
+    #[test]
+    fn test_ferror_initially_zero() {
+        let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
+        unsafe { (*file).flags &= !FLAG_ERR; }
+        assert_eq!(ferror(STDOUT_SENTINEL as *mut u8), 0);
+    }
+
+    #[test]
+    fn test_feof_after_setting_flag() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_flags = unsafe { (*file).flags };
+        unsafe { (*file).flags |= FLAG_EOF; }
+        assert_ne!(feof(STDERR_SENTINEL as *mut u8), 0);
+        // Restore.
+        unsafe { (*file).flags = old_flags; }
+    }
+
+    #[test]
+    fn test_ferror_after_setting_flag() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_flags = unsafe { (*file).flags };
+        unsafe { (*file).flags |= FLAG_ERR; }
+        assert_ne!(ferror(STDERR_SENTINEL as *mut u8), 0);
+        // Restore.
+        unsafe { (*file).flags = old_flags; }
+    }
+
+    #[test]
+    fn test_clearerr_clears_both_flags() {
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_flags = unsafe { (*file).flags };
+        unsafe { (*file).flags |= FLAG_EOF | FLAG_ERR; }
+        clearerr(STDERR_SENTINEL as *mut u8);
+        assert_eq!(feof(STDERR_SENTINEL as *mut u8), 0);
+        assert_eq!(ferror(STDERR_SENTINEL as *mut u8), 0);
+        // Restore.
+        unsafe { (*file).flags = old_flags; }
+    }
+
+    // -----------------------------------------------------------------------
+    // ungetc — pushback
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ungetc_stores_byte() {
+        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        let old_byte = unsafe { (*file).ungetc_byte };
+        let old_flags = unsafe { (*file).flags };
+
+        let ret = ungetc(b'X' as i32, STDIN_SENTINEL as *mut u8);
+        assert_eq!(ret, b'X' as i32);
+        assert_eq!(unsafe { (*file).ungetc_byte }, b'X' as i16);
+
+        // Restore.
+        unsafe {
+            (*file).ungetc_byte = old_byte;
+            (*file).flags = old_flags;
+        }
+    }
+
+    #[test]
+    fn test_ungetc_eof_returns_eof() {
+        let ret = ungetc(EOF, STDIN_SENTINEL as *mut u8);
+        assert_eq!(ret, EOF, "ungetc(EOF) must return EOF");
+    }
+
+    #[test]
+    fn test_ungetc_clears_eof_flag() {
+        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        let old_flags = unsafe { (*file).flags };
+        let old_byte = unsafe { (*file).ungetc_byte };
+
+        // Set EOF flag.
+        unsafe { (*file).flags |= FLAG_EOF; }
+        // Push back a byte — should clear EOF.
+        ungetc(b'A' as i32, STDIN_SENTINEL as *mut u8);
+        assert_eq!(feof(STDIN_SENTINEL as *mut u8), 0, "ungetc must clear EOF");
+
+        // Restore.
+        unsafe {
+            (*file).ungetc_byte = old_byte;
+            (*file).flags = old_flags;
+        }
+    }
+
+    #[test]
+    fn test_ungetc_masks_to_byte() {
+        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        let old_byte = unsafe { (*file).ungetc_byte };
+
+        // 0x1FF & 0xFF = 0xFF (should store only the low byte).
+        let ret = ungetc(0x1FF, STDIN_SENTINEL as *mut u8);
+        assert_eq!(ret, 0xFF);
+        assert_eq!(unsafe { (*file).ungetc_byte }, 0xFF);
+
+        // Restore.
+        unsafe { (*file).ungetc_byte = old_byte; }
+    }
+
+    // -----------------------------------------------------------------------
+    // fdopen — error paths and standard streams
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fdopen_negative_fd() {
+        let ret = fdopen(-1, b"r\0".as_ptr());
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fdopen_stdin_returns_sentinel() {
+        let ret = fdopen(STDIN_FD, b"r\0".as_ptr());
+        assert_eq!(ret as usize, STDIN_SENTINEL);
+    }
+
+    #[test]
+    fn test_fdopen_stdout_returns_sentinel() {
+        let ret = fdopen(STDOUT_FD, b"w\0".as_ptr());
+        assert_eq!(ret as usize, STDOUT_SENTINEL);
+    }
+
+    #[test]
+    fn test_fdopen_stderr_returns_sentinel() {
+        let ret = fdopen(STDERR_FD, b"w\0".as_ptr());
+        assert_eq!(ret as usize, STDERR_SENTINEL);
+    }
+
+    // -----------------------------------------------------------------------
+    // fopen — null argument handling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fopen_null_path() {
+        let ret = unsafe { fopen(core::ptr::null(), b"r\0".as_ptr()) };
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fopen_null_mode() {
+        let ret = unsafe { fopen(b"/tmp/test\0".as_ptr(), core::ptr::null()) };
+        assert!(ret.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // fgetpos / fsetpos — null pointer errors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fgetpos_null_pos() {
+        let ret = fgetpos(STDOUT_SENTINEL as *mut u8, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fsetpos_null_pos() {
+        let ret = fsetpos(STDOUT_SENTINEL as *mut u8, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // setvbuf — mode validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_setvbuf_invalid_mode() {
+        let ret = setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 99, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setvbuf_valid_modes() {
+        // Each valid mode (0=_IOFBF, 1=_IOLBF, 2=_IONBF) should succeed.
+        // Test on stderr (unbuffered) since we can restore its mode.
+        let file = stream_to_file(STDERR_SENTINEL as *mut u8);
+        let old_mode = unsafe { (*file).buf_mode };
+
+        for mode in 0..3 {
+            let ret = setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), mode, 0);
+            assert_eq!(ret, 0, "setvbuf mode {mode} should succeed");
+        }
+
+        // Restore stderr's original mode (unbuffered).
+        unsafe { (*file).buf_mode = old_mode; }
+    }
+
+    // -----------------------------------------------------------------------
+    // tmpnam — filename generation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tmpnam_user_buffer() {
+        let mut buf = [0u8; L_TMPNAM];
+        let ret = tmpnam(buf.as_mut_ptr());
+        assert_eq!(ret, buf.as_mut_ptr());
+        // Should start with "/tmp/tmp_".
+        assert_eq!(&buf[..9], b"/tmp/tmp_");
+        // Should be null-terminated within L_TMPNAM.
+        let has_null = buf.iter().any(|&b| b == 0);
+        assert!(has_null, "tmpnam result must be null-terminated");
+    }
+
+    #[test]
+    fn test_tmpnam_null_uses_static() {
+        let ret1 = tmpnam(core::ptr::null_mut());
+        assert!(!ret1.is_null());
+        // Should start with "/tmp/tmp_".
+        let prefix = unsafe { core::slice::from_raw_parts(ret1, 9) };
+        assert_eq!(prefix, b"/tmp/tmp_");
+    }
+
+    #[test]
+    fn test_tmpnam_generates_unique_names() {
+        let mut buf1 = [0u8; L_TMPNAM];
+        let mut buf2 = [0u8; L_TMPNAM];
+        tmpnam(buf1.as_mut_ptr());
+        tmpnam(buf2.as_mut_ptr());
+        // Two consecutive calls should produce different names.
+        assert_ne!(buf1, buf2, "tmpnam must generate unique names");
+    }
+
+    // -----------------------------------------------------------------------
+    // getdelim / getline — null-argument errors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_getdelim_null_lineptr() {
+        let mut n: usize = 0;
+        let ret = unsafe {
+            getdelim(
+                core::ptr::null_mut(),
+                &raw mut n,
+                b'\n' as i32,
+                STDIN_SENTINEL as *mut u8,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getdelim_null_n() {
+        let mut lineptr: *mut u8 = core::ptr::null_mut();
+        let ret = unsafe {
+            getdelim(
+                &raw mut lineptr,
+                core::ptr::null_mut(),
+                b'\n' as i32,
+                STDIN_SENTINEL as *mut u8,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // puts — null pointer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_puts_null() {
+        let ret = unsafe { puts(core::ptr::null()) };
+        assert_eq!(ret, EOF);
+    }
+
+    // -----------------------------------------------------------------------
+    // fputs — null pointer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fputs_null_string() {
+        let ret = unsafe { fputs(core::ptr::null(), STDOUT_SENTINEL as *mut u8) };
+        assert_eq!(ret, EOF);
+    }
+
+    // -----------------------------------------------------------------------
+    // fwrite — null/zero args
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fwrite_null_ptr() {
+        let ret = unsafe {
+            fwrite(core::ptr::null(), 1, 10, STDOUT_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_fwrite_zero_size() {
+        let data = [1u8; 10];
+        let ret = unsafe {
+            fwrite(data.as_ptr(), 0, 10, STDOUT_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_fwrite_zero_nmemb() {
+        let data = [1u8; 10];
+        let ret = unsafe {
+            fwrite(data.as_ptr(), 1, 0, STDOUT_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // fread — null/zero args
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fread_null_ptr() {
+        let ret = unsafe {
+            fread(core::ptr::null_mut(), 1, 10, STDIN_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_fread_zero_size() {
+        let mut buf = [0u8; 10];
+        let ret = unsafe {
+            fread(buf.as_mut_ptr(), 0, 10, STDIN_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_fread_zero_nmemb() {
+        let mut buf = [0u8; 10];
+        let ret = unsafe {
+            fread(buf.as_mut_ptr(), 1, 0, STDIN_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // fgets — null/zero args
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fgets_null_buf() {
+        let ret = fgets(core::ptr::null_mut(), 100, STDIN_SENTINEL as *mut u8);
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_fgets_zero_size() {
+        let mut buf = [0u8; 10];
+        let ret = fgets(buf.as_mut_ptr(), 0, STDIN_SENTINEL as *mut u8);
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_fgets_negative_size() {
+        let mut buf = [0u8; 10];
+        let ret = fgets(buf.as_mut_ptr(), -1, STDIN_SENTINEL as *mut u8);
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_fgets_size_one() {
+        // POSIX: size=1 writes NUL and returns buf (empty string, no read).
+        let mut buf = [0xFFu8; 10];
+        let ret = fgets(buf.as_mut_ptr(), 1, STDIN_SENTINEL as *mut u8);
+        assert_eq!(ret, buf.as_mut_ptr());
+        assert_eq!(buf[0], 0, "size=1 must write NUL terminator");
+    }
+
+    // -----------------------------------------------------------------------
+    // flockfile / ftrylockfile / funlockfile — stubs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_flockfile_is_noop() {
+        // Should not crash — our locking is a no-op.
+        flockfile(STDOUT_SENTINEL as *mut core::ffi::c_void);
+    }
+
+    #[test]
+    fn test_ftrylockfile_always_succeeds() {
+        assert_eq!(ftrylockfile(STDOUT_SENTINEL as *mut core::ffi::c_void), 0);
+    }
+
+    #[test]
+    fn test_funlockfile_is_noop() {
+        funlockfile(STDOUT_SENTINEL as *mut core::ffi::c_void);
+    }
+
+    // -----------------------------------------------------------------------
+    // File struct size
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_file_struct_contains_buffer() {
+        // FILE must be large enough to hold the BUF_SIZE buffer.
+        let size = core::mem::size_of::<File>();
+        assert!(
+            size >= BUF_SIZE,
+            "File struct ({size} bytes) must be at least BUF_SIZE ({BUF_SIZE})"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // alloc_file / free_file round trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_alloc_free_file_round_trip() {
+        // Reset pool state to avoid interference.
+        // SAFETY: Single-threaded test.
+        unsafe {
+            let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
+            let mut i: usize = 0;
+            while i < MAX_OPEN_FILES {
+                (*pool.add(i)).in_use = false;
+                i += 1;
+            }
+        }
+
+        let f = alloc_file(42, BUF_MODE_FULL);
+        assert!(!f.is_null(), "alloc_file should succeed with empty pool");
+        let fd = unsafe { (*f).fd };
+        assert_eq!(fd, 42);
+        let mode = unsafe { (*f).buf_mode };
+        assert_eq!(mode, BUF_MODE_FULL);
+
+        free_file(f);
+
+        // After freeing, should be able to allocate again.
+        let f2 = alloc_file(99, BUF_MODE_LINE);
+        assert!(!f2.is_null());
+        let fd2 = unsafe { (*f2).fd };
+        assert_eq!(fd2, 99);
+        free_file(f2);
+    }
+
+    #[test]
+    fn test_alloc_file_pool_exhaustion() {
+        // Reset pool.
+        unsafe {
+            let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
+            let mut i: usize = 0;
+            while i < MAX_OPEN_FILES {
+                (*pool.add(i)).in_use = false;
+                i += 1;
+            }
+        }
+
+        // Allocate all slots.
+        let mut ptrs = [core::ptr::null_mut::<File>(); MAX_OPEN_FILES];
+        for i in 0..MAX_OPEN_FILES {
+            ptrs[i] = alloc_file(i as i32 + 10, BUF_MODE_FULL);
+            assert!(!ptrs[i].is_null(), "slot {i} should be available");
+        }
+
+        // Next allocation should fail.
+        let overflow = alloc_file(999, BUF_MODE_FULL);
+        assert!(overflow.is_null(), "pool should be exhausted");
+
+        // Free all.
+        for p in &ptrs {
+            free_file(*p);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // File::new initializer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_file_new_various_modes() {
+        for mode in [BUF_MODE_FULL, BUF_MODE_LINE, BUF_MODE_NONE] {
+            let f = File::new(7, mode);
+            assert_eq!(f.fd, 7);
+            assert_eq!(f.buf_mode, mode);
+            assert_eq!(f.buf_pos, 0);
+            assert_eq!(f.buf_len, 0);
+            assert_eq!(f.buf_dir, BUF_DIR_IDLE);
+            assert_eq!(f.flags, 0);
+            assert_eq!(f.ungetc_byte, -1);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // remove / stdio_rename — null pointer handling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_remove_null() {
+        // remove(null) should return error (delegates to unlink).
+        let ret = remove(core::ptr::null());
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_stdio_rename_null_old() {
+        let ret = stdio_rename(core::ptr::null(), b"/tmp/new\0".as_ptr());
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_stdio_rename_null_new() {
+        let ret = stdio_rename(b"/tmp/old\0".as_ptr(), core::ptr::null());
+        assert_eq!(ret, -1);
+    }
 }

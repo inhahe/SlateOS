@@ -966,4 +966,159 @@ mod tests {
     fn test_max_open_dirs() {
         assert_eq!(MAX_OPEN_DIRS, 8);
     }
+
+    // -- Null pointer handling --
+
+    #[test]
+    fn test_readdir_null() {
+        let ret = readdir(core::ptr::null_mut());
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_closedir_null() {
+        let ret = closedir(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_rewinddir_null_is_noop() {
+        // Should not crash.
+        rewinddir(core::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_telldir_null() {
+        let ret = telldir(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_seekdir_null_is_noop() {
+        // Should not crash.
+        seekdir(core::ptr::null_mut(), 5);
+    }
+
+    #[test]
+    fn test_seekdir_negative_loc_is_noop() {
+        // Negative loc should be silently ignored.
+        // We can't test this without a real Dir, but we can test null+negative.
+        seekdir(core::ptr::null_mut(), -1);
+    }
+
+    #[test]
+    fn test_dirfd_null() {
+        let ret = dirfd(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_opendir_null() {
+        let ret = opendir(core::ptr::null());
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // -- readdir_r null pointer handling --
+
+    #[test]
+    fn test_readdir_r_null_dirp() {
+        let mut entry = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let mut result: *mut Dirent = core::ptr::null_mut();
+        let ret = readdir_r(core::ptr::null_mut(), &raw mut entry, &raw mut result);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_readdir_r_null_entry() {
+        // Use a fake non-null dirp to test the entry null check.
+        let fake_dirp = 0x1000 as *mut Dir;
+        let mut result: *mut Dirent = core::ptr::null_mut();
+        let ret = readdir_r(fake_dirp, core::ptr::null_mut(), &raw mut result);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_readdir_r_null_result() {
+        let fake_dirp = 0x1000 as *mut Dir;
+        let mut entry = Dirent {
+            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_name: [0u8; 256],
+        };
+        let ret = readdir_r(fake_dirp, &raw mut entry, core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    // -- scandir null pointer handling --
+
+    #[test]
+    fn test_scandir_null_dirname() {
+        let mut list: *mut *mut Dirent = core::ptr::null_mut();
+        let ret = scandir(
+            core::ptr::null(),
+            &raw mut list,
+            None,
+            None,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_scandir_null_namelist() {
+        let ret = scandir(
+            b"/tmp\0".as_ptr(),
+            core::ptr::null_mut(),
+            None,
+            None,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -- fdopendir error handling --
+
+    #[test]
+    fn test_fdopendir_invalid_fd() {
+        // fd 999 is not open.
+        let ret = fdopendir(999);
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_fdopendir_negative_fd() {
+        let ret = fdopendir(-1);
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // -- DirSlot layout --
+
+    #[test]
+    fn test_dir_slot_empty_state() {
+        let slot = DirSlot::EMPTY;
+        assert!(!slot.in_use);
+        assert_eq!(slot.dir.count, 0);
+        assert_eq!(slot.dir.pos, 0);
+        assert_eq!(slot.dir.owned_fd, -1);
+    }
+
+    // -- Buffer size validation --
+
+    #[test]
+    fn test_dir_buffer_capacity() {
+        // The buffer must hold MAX_DIR_ENTRIES * DIR_ENTRY_SIZE bytes.
+        let expected = MAX_DIR_ENTRIES * DIR_ENTRY_SIZE;
+        assert_eq!(
+            expected,
+            256 * 264,
+            "Buffer capacity must be 256 * 264 = 67584 bytes"
+        );
+    }
 }

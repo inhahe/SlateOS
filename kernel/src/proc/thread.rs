@@ -130,11 +130,12 @@ pub fn spawn(
     if let Err(e) = pcb::add_thread(pid, task_id) {
         // Process disappeared between our check and the add — very
         // unlikely with single-CPU, but handle defensively.
-        // The scheduler task is already spawned; mark it for cleanup.
+        // Kill the orphaned scheduler task so its stack is freed.
         serial_println!(
             "[thread] Failed to register task {} with process {}: {:?}",
             task_id, pid, e
         );
+        sched::kill_task(task_id);
         return Err(e);
     }
 

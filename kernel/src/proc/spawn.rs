@@ -49,6 +49,13 @@ use crate::proc::pcb::ProcessId;
 use crate::sched::task::{TaskId, DEFAULT_PRIORITY};
 use crate::serial_println;
 
+/// Exit code set when exec fails after tearing down the old address space.
+///
+/// The process cannot resume its old code (it's been freed), so it must
+/// exit.  We use -126 by analogy with shell convention (126 = "command
+/// found but not executable").
+const KILLED_EXIT_CODE: i32 = -126;
+
 // ---------------------------------------------------------------------------
 // User stack configuration
 // ---------------------------------------------------------------------------
@@ -713,14 +720,28 @@ pub fn exec_process(
     // has an empty user-half after clear_user_address_space + TLB flush.
     // `elf_file` was validated by `elf::parse` above.  load_segments
     // allocates frames and maps them into the process's address space.
+    //
+    // After the teardown above, any failure leaves the process with an
+    // empty user address space.  The calling thread is handling SYSCALL
+    // in kernel mode — if we return an error, the SYSRET will jump to
+    // the old user_rip which no longer exists, causing an immediate #PF.
+    // To make failure deterministic, we set the exit code and return
+    // the error so the syscall handler knows to exit the thread cleanly.
     if let Err(e) = unsafe { elf::load_segments(&elf_file, pml4_phys) } {
         serial_println!("[exec] Failed to load new ELF segments: {:?}", e);
-        // Process is in a broken state — caller should kill it.
+        let _ = pcb::set_exit_code(pid, KILLED_EXIT_CODE);
         return Err(e);
     }
 
     // Step 5: Allocate and map a fresh user stack.
-    let user_rsp = setup_user_stack(pml4_phys)?;
+    let user_rsp = match setup_user_stack(pml4_phys) {
+        Ok(rsp) => rsp,
+        Err(e) => {
+            serial_println!("[exec] Failed to set up user stack: {:?}", e);
+            let _ = pcb::set_exit_code(pid, KILLED_EXIT_CODE);
+            return Err(e);
+        }
+    };
 
     // Step 6: Store argv/envp in the PCB for the new process image.
     //

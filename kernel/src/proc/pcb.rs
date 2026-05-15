@@ -697,6 +697,21 @@ pub fn is_ready(pid: ProcessId) -> KernelResult<bool> {
     Ok(proc.ready)
 }
 
+/// Check whether a process exists and is in the Running state.
+///
+/// Returns `true` if the PID is found in the process table and its state
+/// is `ProcessState::Running`.  Returns `false` if the process does not
+/// exist, is a zombie (exited but not yet reaped), or is still being
+/// created.  This is used by the driver monitor (`drvmon`) to detect
+/// crashed driver processes.
+pub fn is_process_running(pid: ProcessId) -> bool {
+    let table = PROCESS_TABLE.lock();
+    match table.get(&pid) {
+        Some(proc) => proc.state == ProcessState::Running,
+        None => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-process VMA management (for lazy/demand-paged allocations)
 // ---------------------------------------------------------------------------

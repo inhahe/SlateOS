@@ -533,8 +533,17 @@ pub fn tick() -> Vec<u32> {
                 }
             }
             HealthMode::ProcessAlive => {
-                // In a real implementation, check if the PID is still alive.
-                // For now, trust the crash reporting system.
+                // Check whether the driver's process is still alive in the
+                // process table.  A pid of 0 means the driver has no process
+                // (kernel-internal or stopped), so we skip it.
+                if drv.pid != 0
+                    && !crate::proc::pcb::is_process_running(
+                        u64::from(drv.pid),
+                    )
+                {
+                    drv.health = DriverHealth::Unresponsive;
+                    needs_attention.push(drv.id);
+                }
             }
         }
     }

@@ -3175,4 +3175,487 @@ mod tests {
     fn test_c_strlen_pub_hello() {
         assert_eq!(unsafe { c_strlen_pub(b"hello\0".as_ptr()) }, 5);
     }
+
+    // -- close: invalid fd returns EBADF --
+
+    #[test]
+    fn test_close_invalid_fd() {
+        let result = close(9999);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_close_negative_fd() {
+        let result = close(-1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // -- dup: invalid fd returns EBADF --
+
+    #[test]
+    fn test_dup_invalid_fd() {
+        let result = dup(9999);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_dup_negative_fd() {
+        let result = dup(-1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // -- dup2: invalid fds --
+
+    #[test]
+    fn test_dup2_invalid_oldfd() {
+        let result = dup2(9999, 5);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_dup2_negative_newfd() {
+        // Even if oldfd is invalid, we should get EBADF for oldfd first.
+        let result = dup2(9999, -1);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_dup2_same_invalid_fd() {
+        // dup2(fd, fd) when fd is invalid → EBADF.
+        let result = dup2(9999, 9999);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // -- fsync / fdatasync: invalid fd returns EBADF --
+
+    #[test]
+    fn test_fsync_invalid_fd() {
+        let result = fsync(9999);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fdatasync_invalid_fd() {
+        let result = fdatasync(9999);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // -- LP64 aliases (64-bit variants) delegate to base functions --
+
+    #[test]
+    fn test_lseek64_invalid_whence() {
+        // lseek64 delegates to lseek; same invalid-whence behavior.
+        let result = lseek64(0, 0, 99);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_stat64_null_path() {
+        let mut buf = crate::stat::Stat::zeroed();
+        assert_eq!(stat64(core::ptr::null(), &raw mut buf), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_stat64_null_buf() {
+        assert_eq!(stat64(b"/tmp\0".as_ptr(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_fstat64_null_buf() {
+        assert_eq!(fstat64(0, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_lstat64_null_path() {
+        let mut buf = crate::stat::Stat::zeroed();
+        assert_eq!(lstat64(core::ptr::null(), &raw mut buf), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_lstat64_null_buf() {
+        assert_eq!(lstat64(b"/tmp\0".as_ptr(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- glibc __xstat family --
+
+    #[test]
+    fn test_xstat_null_path() {
+        let mut buf = crate::stat::Stat::zeroed();
+        assert_eq!(__xstat(1, core::ptr::null(), &raw mut buf), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_xstat_null_buf() {
+        assert_eq!(__xstat(1, b"/tmp\0".as_ptr(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_fxstat_null_buf() {
+        assert_eq!(__fxstat(1, 0, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_lxstat_null_path() {
+        let mut buf = crate::stat::Stat::zeroed();
+        assert_eq!(__lxstat(1, core::ptr::null(), &raw mut buf), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_lxstat_null_buf() {
+        assert_eq!(__lxstat(1, b"/tmp\0".as_ptr(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_xstat64_null_path() {
+        let mut buf = crate::stat::Stat::zeroed();
+        assert_eq!(__xstat64(3, core::ptr::null(), &raw mut buf), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_xstat64_null_buf() {
+        assert_eq!(__xstat64(3, b"/tmp\0".as_ptr(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_fxstat64_null_buf() {
+        assert_eq!(__fxstat64(3, 0, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_lxstat64_null_path() {
+        let mut buf = crate::stat::Stat::zeroed();
+        assert_eq!(__lxstat64(3, core::ptr::null(), &raw mut buf), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_lxstat64_null_buf() {
+        assert_eq!(__lxstat64(3, b"/tmp\0".as_ptr(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- FORTIFY_SOURCE _chk wrappers --
+
+    #[test]
+    fn test_read_chk_zero_count() {
+        // __read_chk delegates to read; zero count returns 0.
+        assert_eq!(__read_chk(0, core::ptr::null_mut(), 0, 0), 0);
+    }
+
+    #[test]
+    fn test_read_chk_null_buf() {
+        assert_eq!(__read_chk(0, core::ptr::null_mut(), 10, 10), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_pread_chk_null_buf() {
+        assert_eq!(__pread_chk(0, core::ptr::null_mut(), 10, 0, 10), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_pread_chk_zero_count() {
+        assert_eq!(__pread_chk(0, core::ptr::null_mut(), 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_pread_chk_negative_offset() {
+        let mut buf = [0u8; 10];
+        assert_eq!(__pread_chk(0, buf.as_mut_ptr(), 10, -1, 10), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pread64_chk_null_buf() {
+        assert_eq!(__pread64_chk(0, core::ptr::null_mut(), 10, 0, 10), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_pread64_chk_zero_count() {
+        assert_eq!(__pread64_chk(0, core::ptr::null_mut(), 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_realpath_chk_null_path() {
+        let mut buf = [0u8; 256];
+        let result = __realpath_chk(core::ptr::null(), buf.as_mut_ptr(), 256);
+        assert!(result.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- *at() functions with AT_FDCWD delegate to non-at versions --
+
+    #[test]
+    fn test_faccessat_atfdcwd_null() {
+        // faccessat(AT_FDCWD, NULL, ...) → access(NULL, ...) → EFAULT.
+        assert_eq!(faccessat(AT_FDCWD, core::ptr::null(), 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_openat_atfdcwd_null() {
+        // openat(AT_FDCWD, NULL, ...) → open(NULL, ...) → EFAULT.
+        assert_eq!(openat(AT_FDCWD, core::ptr::null(), 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_fstatat_atfdcwd_null_path() {
+        let mut buf = crate::stat::Stat::zeroed();
+        assert_eq!(fstatat(AT_FDCWD, core::ptr::null(), &raw mut buf, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_fstatat_atfdcwd_null_buf() {
+        assert_eq!(fstatat(AT_FDCWD, b"/tmp\0".as_ptr(), core::ptr::null_mut(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_fstatat_nofollow_delegates_to_lstat() {
+        // With AT_SYMLINK_NOFOLLOW and AT_FDCWD, should delegate to lstat.
+        // Verify it hits the same null-check as lstat.
+        let mut buf = crate::stat::Stat::zeroed();
+        assert_eq!(fstatat(AT_FDCWD, core::ptr::null(), &raw mut buf, AT_SYMLINK_NOFOLLOW), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_unlinkat_atfdcwd_null() {
+        assert_eq!(unlinkat(AT_FDCWD, core::ptr::null(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_unlinkat_removedir_delegates_to_rmdir() {
+        // AT_REMOVEDIR flag should make unlinkat act like rmdir.
+        assert_eq!(unlinkat(AT_FDCWD, core::ptr::null(), AT_REMOVEDIR), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_renameat_atfdcwd_null_old() {
+        assert_eq!(renameat(AT_FDCWD, core::ptr::null(), AT_FDCWD, b"/b\0".as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_renameat_atfdcwd_null_new() {
+        assert_eq!(renameat(AT_FDCWD, b"/a\0".as_ptr(), AT_FDCWD, core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mkdirat_atfdcwd_null() {
+        assert_eq!(mkdirat(AT_FDCWD, core::ptr::null(), 0o755), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_readlinkat_atfdcwd_null_path() {
+        let mut buf = [0u8; 64];
+        assert_eq!(readlinkat(AT_FDCWD, core::ptr::null(), buf.as_mut_ptr(), 64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_readlinkat_atfdcwd_null_buf() {
+        assert_eq!(readlinkat(AT_FDCWD, b"/link\0".as_ptr(), core::ptr::null_mut(), 64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_symlinkat_atfdcwd_null_target() {
+        assert_eq!(symlinkat(core::ptr::null(), AT_FDCWD, b"/link\0".as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_symlinkat_atfdcwd_null_linkpath() {
+        assert_eq!(symlinkat(b"/target\0".as_ptr(), AT_FDCWD, core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_linkat_atfdcwd_null_old() {
+        assert_eq!(linkat(AT_FDCWD, core::ptr::null(), AT_FDCWD, b"/b\0".as_ptr(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_linkat_atfdcwd_null_new() {
+        assert_eq!(linkat(AT_FDCWD, b"/a\0".as_ptr(), AT_FDCWD, core::ptr::null(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_fchmodat_atfdcwd_delegates() {
+        // fchmodat(AT_FDCWD, ...) → chmod(...) → 0.
+        assert_eq!(fchmodat(AT_FDCWD, b"/tmp\0".as_ptr(), 0o755, 0), 0);
+    }
+
+    #[test]
+    fn test_fchownat_atfdcwd_delegates() {
+        // fchownat(AT_FDCWD, ...) → chown(...) → 0.
+        assert_eq!(fchownat(AT_FDCWD, b"/tmp\0".as_ptr(), 0, 0, 0), 0);
+    }
+
+    // -- *at() functions with invalid dirfd (not AT_FDCWD, relative path) --
+
+    #[test]
+    fn test_faccessat_invalid_dirfd() {
+        // Relative path + invalid dirfd → EBADF.
+        assert_eq!(faccessat(9999, b"file.txt\0".as_ptr(), 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_openat_invalid_dirfd() {
+        assert_eq!(openat(9999, b"file.txt\0".as_ptr(), 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fstatat_invalid_dirfd() {
+        let mut buf = crate::stat::Stat::zeroed();
+        assert_eq!(fstatat(9999, b"file.txt\0".as_ptr(), &raw mut buf, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_unlinkat_invalid_dirfd() {
+        assert_eq!(unlinkat(9999, b"file.txt\0".as_ptr(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_mkdirat_invalid_dirfd() {
+        assert_eq!(mkdirat(9999, b"subdir\0".as_ptr(), 0o755), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_readlinkat_invalid_dirfd() {
+        let mut buf = [0u8; 64];
+        assert_eq!(readlinkat(9999, b"link\0".as_ptr(), buf.as_mut_ptr(), 64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_symlinkat_invalid_dirfd() {
+        assert_eq!(symlinkat(b"/target\0".as_ptr(), 9999, b"link\0".as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_linkat_invalid_dirfd() {
+        assert_eq!(linkat(9999, b"a\0".as_ptr(), AT_FDCWD, b"/b\0".as_ptr(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fchmodat_invalid_dirfd() {
+        assert_eq!(fchmodat(9999, b"file\0".as_ptr(), 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fchownat_invalid_dirfd() {
+        assert_eq!(fchownat(9999, b"file\0".as_ptr(), 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // -- *at() functions with absolute path ignore dirfd --
+
+    #[test]
+    fn test_faccessat_absolute_ignores_dirfd() {
+        // Absolute path: dirfd is ignored, delegates to access().
+        // We can't test success (no kernel), but we can test it doesn't
+        // fail with EBADF for the dirfd — it gets past the dirfd check.
+        // It will fail later in the syscall (no kernel), but not EBADF.
+        let result = faccessat(9999, b"/\0".as_ptr(), 0, 0);
+        // Should not be EBADF — the absolute path means dirfd was ignored.
+        if result == -1 {
+            assert_ne!(crate::errno::get_errno(), crate::errno::EBADF);
+        }
+    }
+
+    #[test]
+    fn test_fchmodat_absolute_ignores_dirfd() {
+        // Absolute path + invalid dirfd → chmod (stub returning 0).
+        assert_eq!(fchmodat(9999, b"/tmp\0".as_ptr(), 0o755, 0), 0);
+    }
+
+    #[test]
+    fn test_fchownat_absolute_ignores_dirfd() {
+        // Absolute path + invalid dirfd → chown (stub returning 0).
+        assert_eq!(fchownat(9999, b"/tmp\0".as_ptr(), 0, 0, 0), 0);
+    }
+
+    // -- sendfile / copy_file_range: zero-length --
+
+    #[test]
+    fn test_sendfile_zero_count() {
+        // Copying zero bytes should return 0 immediately.
+        let result = sendfile(1, 0, core::ptr::null_mut(), 0);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_copy_file_range_zero_len() {
+        // Copying zero bytes should return 0 immediately.
+        let result = copy_file_range(
+            0, core::ptr::null_mut(),
+            1, core::ptr::null_mut(),
+            0, 0,
+        );
+        assert_eq!(result, 0);
+    }
+
+    // -- sendfile with offset pointer --
+
+    #[test]
+    fn test_sendfile_with_offset_zero_count() {
+        let mut off: i64 = 100;
+        let result = sendfile(1, 0, &raw mut off, 0);
+        assert_eq!(result, 0);
+        // Offset should not change for zero-length transfer.
+        assert_eq!(off, 100);
+    }
+
+    // -- renameat with AT_FDCWD both sides --
+
+    #[test]
+    fn test_renameat_atfdcwd_both_null() {
+        // Both null → delegates to rename(NULL, NULL) → EFAULT.
+        let result = renameat(AT_FDCWD, core::ptr::null(), AT_FDCWD, core::ptr::null());
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
 }

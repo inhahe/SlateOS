@@ -93,6 +93,9 @@
 //! - **BSD Error Functions**: `err`, `errx`, `warn`, `warnx` (and `v*`
 //!   variants)
 //! - **Timezone**: `tzset`, `tzname`, `timezone`, `daylight`
+//! - **Extended Attributes** (stubs): `getxattr`, `lgetxattr`, `fgetxattr`,
+//!   `setxattr`, `lsetxattr`, `fsetxattr`, `listxattr`, `llistxattr`,
+//!   `flistxattr`, `removexattr`, `lremovexattr`, `fremovexattr`
 //! - **Misc**: `getcwd`, `chdir`, `realpath`, `errno`, `sysconf`,
 //!   `getenv`/`setenv`, `pread`, `pwrite`, `readv`, `writev`,
 //!   `basename`, `dirname`, `getopt`/`getopt_long`/`getopt_long_only`,
@@ -230,4 +233,5 @@ pub mod utsname;
 pub mod wait;
 pub mod wchar;
 pub mod wordexp;
+pub mod xattr;
 pub mod dirent;

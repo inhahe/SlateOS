@@ -402,3 +402,299 @@ impl ParsedSuperblock {
 pub const fn superblock_device_offset() -> u64 {
     SUPERBLOCK_OFFSET
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Superblock parsing and accessor tests.
+///
+/// Constructs synthetic superblock byte buffers and verifies that
+/// `parse()` correctly rejects invalid data and correctly computes
+/// all derived fields.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[ext4-superblock] Running self-test...");
+
+    test_parse_too_short()?;
+    test_parse_bad_magic()?;
+    test_parse_valid_4k()?;
+    test_parse_64bit_mode()?;
+    test_inode_group_index()?;
+    test_group_desc_offset()?;
+    test_size_accessors()?;
+
+    crate::serial_println!("[ext4-superblock] Self-test PASSED (7 tests)");
+    Ok(())
+}
+
+/// Helper: create a 1024-byte zeroed superblock buffer with defaults
+/// that will pass basic validation.
+fn make_valid_sb_buf() -> [u8; 1024] {
+    let mut buf = [0u8; 1024];
+
+    // s_magic at offset 0x38: 0xEF53 LE.
+    buf[0x38] = 0x53;
+    buf[0x39] = 0xEF;
+
+    // s_log_block_size at offset 0x18: 2 → block_size = 1024 << 2 = 4096.
+    buf[0x18] = 2;
+
+    // s_blocks_per_group at offset 0x20: 32768 = 0x8000 LE.
+    buf[0x20] = 0x00;
+    buf[0x21] = 0x80;
+
+    // s_blocks_count_lo at offset 0x04: 32768 (1 group's worth).
+    buf[0x04] = 0x00;
+    buf[0x05] = 0x80;
+
+    // s_inodes_per_group at offset 0x28: 8192 = 0x2000.
+    buf[0x28] = 0x00;
+    buf[0x29] = 0x20;
+
+    // s_inodes_count at offset 0x00: 8192.
+    buf[0x00] = 0x00;
+    buf[0x01] = 0x20;
+
+    // s_rev_level at offset 0x4C: 1 (dynamic inodes).
+    buf[0x4C] = 1;
+
+    // s_inode_size at offset 0x58: 256 = 0x0100.
+    buf[0x58] = 0x00;
+    buf[0x59] = 0x01;
+
+    // s_feature_incompat at offset 0x60: FILETYPE | EXTENTS = 0x0042.
+    buf[0x60] = 0x42;
+
+    // s_free_blocks_count_lo at offset 0x0C: 16384 = 0x4000.
+    buf[0x0C] = 0x00;
+    buf[0x0D] = 0x40;
+
+    buf
+}
+
+/// Parse must reject data shorter than 1024 bytes.
+fn test_parse_too_short() -> KernelResult<()> {
+    let short_buf = [0u8; 512];
+    match parse(&short_buf) {
+        Err(KernelError::InvalidArgument) => {}
+        other => {
+            crate::serial_println!(
+                "[ext4-superblock]   FAIL: parse(512 bytes) = {:?}",
+                other.map(|_| ())
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[ext4-superblock]   parse too short: OK");
+    Ok(())
+}
+
+/// Parse must reject bad magic number.
+fn test_parse_bad_magic() -> KernelResult<()> {
+    let buf = [0u8; 1024]; // All zeros → magic = 0.
+    match parse(&buf) {
+        Err(KernelError::InvalidExecutable) => {}
+        other => {
+            crate::serial_println!(
+                "[ext4-superblock]   FAIL: parse(bad magic) = {:?}",
+                other.map(|_| ())
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[ext4-superblock]   parse bad magic: OK");
+    Ok(())
+}
+
+/// Parse a valid 4K-block, 32-bit-mode superblock.
+fn test_parse_valid_4k() -> KernelResult<()> {
+    let buf = make_valid_sb_buf();
+    let sb = parse(&buf)?;
+
+    if sb.block_size != 4096 {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: block_size = {}", sb.block_size
+        );
+        return Err(KernelError::InternalError);
+    }
+    if sb.block_count != 32768 {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: block_count = {}", sb.block_count
+        );
+        return Err(KernelError::InternalError);
+    }
+    if sb.free_block_count != 16384 {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: free_block_count = {}", sb.free_block_count
+        );
+        return Err(KernelError::InternalError);
+    }
+    if sb.inode_size != 256 {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: inode_size = {}", sb.inode_size
+        );
+        return Err(KernelError::InternalError);
+    }
+    if sb.group_count != 1 {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: group_count = {}", sb.group_count
+        );
+        return Err(KernelError::InternalError);
+    }
+    // 32-bit mode: desc_size should be 32.
+    if sb.desc_size != 32 || sb.is_64bit {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: desc_size={}, is_64bit={}",
+            sb.desc_size, sb.is_64bit
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !sb.has_extents {
+        crate::serial_println!("[ext4-superblock]   FAIL: has_extents should be true");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-superblock]   parse valid 4K: OK");
+    Ok(())
+}
+
+/// Parse a 64-bit mode superblock with larger group descriptors.
+fn test_parse_64bit_mode() -> KernelResult<()> {
+    let mut buf = make_valid_sb_buf();
+
+    // Add BIT64 to incompat: 0x0042 | 0x0080 = 0x00C2.
+    buf[0x60] = 0xC2;
+
+    // s_desc_size at offset 0xFE: 64 = 0x0040.
+    buf[0xFE] = 0x40;
+
+    // s_blocks_count_hi at offset 0x150: 1 → total = 0x1_0000_8000.
+    buf[0x150] = 1;
+
+    let sb = parse(&buf)?;
+
+    if !sb.is_64bit {
+        crate::serial_println!("[ext4-superblock]   FAIL: not 64-bit");
+        return Err(KernelError::InternalError);
+    }
+    if sb.desc_size != 64 {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: desc_size = {}", sb.desc_size
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Total blocks = lo(0x8000) | hi(1) << 32 = 0x100008000.
+    let expected: u64 = 0x1_0000_8000;
+    if sb.block_count != expected {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: block_count = {:#x}, expected {:#x}",
+            sb.block_count, expected
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-superblock]   parse 64-bit mode: OK");
+    Ok(())
+}
+
+/// Test inode_group() and inode_index_in_group().
+fn test_inode_group_index() -> KernelResult<()> {
+    let buf = make_valid_sb_buf();
+    let sb = parse(&buf)?;
+    // s_inodes_per_group = 8192.
+
+    // Inode 1 → group 0, index 0.
+    if sb.inode_group(1) != 0 || sb.inode_index_in_group(1) != 0 {
+        crate::serial_println!("[ext4-superblock]   FAIL: inode 1 group/index");
+        return Err(KernelError::InternalError);
+    }
+
+    // Inode 2 (root) → group 0, index 1.
+    if sb.inode_group(2) != 0 || sb.inode_index_in_group(2) != 1 {
+        crate::serial_println!("[ext4-superblock]   FAIL: inode 2 group/index");
+        return Err(KernelError::InternalError);
+    }
+
+    // Inode 8192 → group 0, index 8191 (last in group 0).
+    if sb.inode_group(8192) != 0 || sb.inode_index_in_group(8192) != 8191 {
+        crate::serial_println!("[ext4-superblock]   FAIL: inode 8192 group/index");
+        return Err(KernelError::InternalError);
+    }
+
+    // Inode 8193 → group 1, index 0.
+    if sb.inode_group(8193) != 1 || sb.inode_index_in_group(8193) != 0 {
+        crate::serial_println!("[ext4-superblock]   FAIL: inode 8193 group/index");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-superblock]   inode group/index: OK");
+    Ok(())
+}
+
+/// Test group_desc_offset() computation.
+fn test_group_desc_offset() -> KernelResult<()> {
+    let buf = make_valid_sb_buf();
+    let sb = parse(&buf)?;
+    // block_size=4096, s_first_data_block=0 (for 4K blocks).
+    // GDT block = 0 + 1 = 1. GDT byte offset = 1 * 4096 = 4096.
+    // desc_size = 32 (32-bit mode).
+
+    let off0 = sb.group_desc_offset(0);
+    if off0 != 4096 {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: gd_offset(0) = {}", off0
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let off1 = sb.group_desc_offset(1);
+    if off1 != 4096 + 32 {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: gd_offset(1) = {}", off1
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let off10 = sb.group_desc_offset(10);
+    if off10 != 4096 + 320 {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: gd_offset(10) = {}", off10
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-superblock]   group desc offset: OK");
+    Ok(())
+}
+
+/// Test total_bytes() and free_bytes().
+fn test_size_accessors() -> KernelResult<()> {
+    let buf = make_valid_sb_buf();
+    let sb = parse(&buf)?;
+
+    // block_count = 32768, block_size = 4096.
+    // total = 32768 * 4096 = 128 MiB = 134217728.
+    let total = sb.total_bytes();
+    if total != 134_217_728 {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: total_bytes = {}", total
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // free_block_count = 16384.
+    // free = 16384 * 4096 = 64 MiB = 67108864.
+    let free = sb.free_bytes();
+    if free != 67_108_864 {
+        crate::serial_println!(
+            "[ext4-superblock]   FAIL: free_bytes = {}", free
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-superblock]   size accessors: OK");
+    Ok(())
+}

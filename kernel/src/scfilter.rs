@@ -129,6 +129,12 @@ impl FilterBitmap {
         for &word in &self.words {
             count = count.saturating_add(word.count_ones() as usize);
         }
+        // The bitmap may have trailing bits beyond MAX_SYSCALL_NR
+        // (BITMAP_WORDS × 64 can exceed MAX_SYSCALL_NR).  Cap the
+        // count so it reflects only valid syscall numbers.
+        if count > MAX_SYSCALL_NR {
+            count = MAX_SYSCALL_NR;
+        }
         count
     }
 

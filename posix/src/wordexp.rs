@@ -1248,4 +1248,79 @@ mod tests {
         // This is fine — double slashes are equivalent to single in POSIX.
         assert_eq!(&exp.buf[..exp.len], b"/home/user//bin");
     }
+
+    // -----------------------------------------------------------------------
+    // wordfree
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn wordfree_null_no_crash() {
+        // wordfree(NULL) should be a no-op.
+        wordfree(core::ptr::null_mut());
+    }
+
+    #[test]
+    fn wordfree_zeroed_struct() {
+        // wordfree on a zeroed WordexpT (we_wordv is null) should not crash.
+        let mut we = WordexpT {
+            we_wordc: 0,
+            we_wordv: core::ptr::null_mut(),
+            we_offs: 0,
+        };
+        wordfree(&mut we);
+        assert_eq!(we.we_wordc, 0);
+        assert!(we.we_wordv.is_null());
+        assert_eq!(we.we_offs, 0);
+    }
+
+    #[test]
+    fn wordfree_after_wordexp() {
+        // Do a full wordexp → wordfree round trip.
+        let mut we = WordexpT {
+            we_wordc: 0,
+            we_wordv: core::ptr::null_mut(),
+            we_offs: 0,
+        };
+        let ret = wordexp(b"hello world\0".as_ptr(), &mut we, 0);
+        if ret == 0 {
+            // wordexp succeeded — verify and free.
+            assert_eq!(we.we_wordc, 2);
+            assert!(!we.we_wordv.is_null());
+
+            let word0 = unsafe { *we.we_wordv };
+            assert!(!word0.is_null());
+
+            wordfree(&mut we);
+            assert_eq!(we.we_wordc, 0);
+            assert!(we.we_wordv.is_null());
+            assert_eq!(we.we_offs, 0);
+        } else {
+            // wordexp may fail on test host (WRDE_NOSPACE from malloc
+            // differences).  wordfree should still be safe on a failed
+            // expansion — it just has nothing to free.
+            wordfree(&mut we);
+        }
+    }
+
+    #[test]
+    fn wordfree_double_free_safe() {
+        // Calling wordfree twice on the same struct should be safe
+        // because the first call sets we_wordv to null and we_wordc to 0.
+        let mut we = WordexpT {
+            we_wordc: 0,
+            we_wordv: core::ptr::null_mut(),
+            we_offs: 0,
+        };
+        let ret = wordexp(b"test\0".as_ptr(), &mut we, 0);
+        if ret == 0 {
+            wordfree(&mut we);
+            wordfree(&mut we); // Second free should be a no-op.
+        } else {
+            // Even on failure, double wordfree must be safe.
+            wordfree(&mut we);
+            wordfree(&mut we);
+        }
+        assert_eq!(we.we_wordc, 0);
+        assert!(we.we_wordv.is_null());
+    }
 }

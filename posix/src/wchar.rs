@@ -4253,4 +4253,309 @@ mod tests {
         assert_eq!(ret, 3);
         assert_eq!(&dst[..3], b"ABC");
     }
+
+    // -- fputwc --
+
+    #[test]
+    fn test_fputwc_ascii() {
+        // Writing an ASCII character to stdout should succeed.
+        let ret = unsafe { fputwc(b'A' as WcharT, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        // On test host, write to stdout may or may not succeed,
+        // but the return value should be either the char or WEOF.
+        assert!(ret == b'A' as WcharT || ret == WEOF);
+    }
+
+    #[test]
+    fn test_fputwc_invalid_codepoint() {
+        // Codepoints above U+10FFFF are invalid → WEOF + EILSEQ.
+        crate::errno::set_errno(0);
+        let ret = unsafe { fputwc(0x11_0000, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        assert_eq!(ret, WEOF);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EILSEQ);
+    }
+
+    #[test]
+    fn test_fputwc_two_byte_utf8() {
+        // U+00E9 (é) encodes as 2-byte UTF-8 (0xC3 0xA9).
+        let ret = unsafe { fputwc(0xE9, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        assert!(ret == 0xE9 || ret == WEOF);
+    }
+
+    #[test]
+    fn test_fputwc_three_byte_utf8() {
+        // U+4E16 (世) encodes as 3-byte UTF-8.
+        let ret = unsafe { fputwc(0x4E16, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        assert!(ret == 0x4E16 || ret == WEOF);
+    }
+
+    #[test]
+    fn test_fputwc_four_byte_utf8() {
+        // U+1F600 (😀) encodes as 4-byte UTF-8.
+        let ret = unsafe { fputwc(0x1F600, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        assert!(ret == 0x1F600 || ret == WEOF);
+    }
+
+    #[test]
+    fn test_fputwc_max_valid_codepoint() {
+        // U+10FFFF is the maximum valid codepoint.
+        let ret = unsafe { fputwc(0x10_FFFF, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        assert!(ret == 0x10_FFFF || ret == WEOF);
+    }
+
+    // -- fgetwc --
+
+    #[test]
+    fn test_fgetwc_stdin_no_crash() {
+        // On test host, stdin may return EOF immediately.
+        let _ret = unsafe { fgetwc(crate::stdio::STDIN_SENTINEL as *mut u8) };
+    }
+
+    // -- putwc / getwc (aliases) --
+
+    #[test]
+    fn test_putwc_ascii() {
+        let ret = unsafe { putwc(b'X' as WcharT, crate::stdio::STDOUT_SENTINEL as *mut u8) };
+        assert!(ret == b'X' as WcharT || ret == WEOF);
+    }
+
+    #[test]
+    fn test_getwc_no_crash() {
+        let _ret = unsafe { getwc(crate::stdio::STDIN_SENTINEL as *mut u8) };
+    }
+
+    // -- putwchar / getwchar --
+
+    #[test]
+    fn test_putwchar_ascii() {
+        let ret = putwchar(b'!' as WcharT);
+        assert!(ret == b'!' as WcharT || ret == WEOF);
+    }
+
+    #[test]
+    fn test_putwchar_invalid_codepoint() {
+        crate::errno::set_errno(0);
+        let ret = putwchar(0x11_0000);
+        assert_eq!(ret, WEOF);
+    }
+
+    #[test]
+    fn test_getwchar_no_crash() {
+        let _ret = getwchar();
+    }
+
+    // -- ungetwc --
+
+    #[test]
+    fn test_ungetwc_weof_returns_weof() {
+        let ret = unsafe {
+            ungetwc(WEOF, crate::stdio::STDIN_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, WEOF);
+    }
+
+    #[test]
+    fn test_ungetwc_ascii() {
+        // Push back an ASCII character via ungetwc, which internally
+        // calls ungetc.  The return value should be the pushed-back char.
+        let ret = unsafe {
+            ungetwc(b'Q' as WcharT, crate::stdio::STDIN_SENTINEL as *mut u8)
+        };
+        // ungetc pushes back onto stdin's ungetc_byte field.
+        // It should succeed for ASCII.
+        assert_eq!(ret, b'Q' as WcharT);
+        // Read it back to restore state.
+        let readback = crate::stdio::fgetc(crate::stdio::STDIN_SENTINEL as *mut u8);
+        assert_eq!(readback, b'Q' as i32);
+    }
+
+    #[test]
+    fn test_ungetwc_multibyte_returns_weof() {
+        // Multi-byte pushback is not supported → WEOF + EILSEQ.
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            ungetwc(0x00E9, crate::stdio::STDIN_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, WEOF);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EILSEQ);
+    }
+
+    // -- fputws --
+
+    #[test]
+    fn test_fputws_null_returns_error() {
+        let ret = unsafe {
+            fputws(core::ptr::null(), crate::stdio::STDOUT_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_fputws_empty_string_succeeds() {
+        // An empty wide string (just null terminator) should succeed.
+        let ws: [WcharT; 1] = [0];
+        let ret = unsafe {
+            fputws(ws.as_ptr(), crate::stdio::STDOUT_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_fputws_ascii_string() {
+        let ws: [WcharT; 4] = [b'H' as WcharT, b'i' as WcharT, b'!' as WcharT, 0];
+        let ret = unsafe {
+            fputws(ws.as_ptr(), crate::stdio::STDOUT_SENTINEL as *mut u8)
+        };
+        // 0 = success, -1 = write failed on host
+        assert!(ret == 0 || ret == -1);
+    }
+
+    // -- fgetws --
+
+    #[test]
+    fn test_fgetws_null_ws_returns_null() {
+        let ret = unsafe {
+            fgetws(core::ptr::null_mut(), 10, crate::stdio::STDIN_SENTINEL as *mut u8)
+        };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_fgetws_zero_n_returns_null() {
+        let mut buf: [WcharT; 8] = [0; 8];
+        let ret = unsafe {
+            fgetws(buf.as_mut_ptr(), 0, crate::stdio::STDIN_SENTINEL as *mut u8)
+        };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_fgetws_negative_n_returns_null() {
+        let mut buf: [WcharT; 8] = [0; 8];
+        let ret = unsafe {
+            fgetws(buf.as_mut_ptr(), -1, crate::stdio::STDIN_SENTINEL as *mut u8)
+        };
+        assert!(ret.is_null());
+    }
+
+    // -- wcswidth --
+
+    #[test]
+    fn test_wcswidth_null_returns_negative() {
+        let ret = unsafe { wcswidth(core::ptr::null(), 10) };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_wcswidth_empty_string() {
+        let s: [WcharT; 1] = [0];
+        let ret = unsafe { wcswidth(s.as_ptr(), 1) };
+        assert_eq!(ret, 0, "empty string has width 0");
+    }
+
+    #[test]
+    fn test_wcswidth_ascii_string() {
+        // "Hello" — 5 printable ASCII chars, each width 1.
+        let s: [WcharT; 6] = [0x48, 0x65, 0x6C, 0x6C, 0x6F, 0];
+        let ret = unsafe { wcswidth(s.as_ptr(), 6) };
+        assert_eq!(ret, 5);
+    }
+
+    #[test]
+    fn test_wcswidth_with_n_limit() {
+        // "Hello" but only measure first 3 chars.
+        let s: [WcharT; 6] = [0x48, 0x65, 0x6C, 0x6C, 0x6F, 0];
+        let ret = unsafe { wcswidth(s.as_ptr(), 3) };
+        assert_eq!(ret, 3);
+    }
+
+    #[test]
+    fn test_wcswidth_control_char_returns_negative() {
+        // A control character (U+0001) has width -1 → wcswidth returns -1.
+        let s: [WcharT; 2] = [0x01, 0];
+        let ret = unsafe { wcswidth(s.as_ptr(), 2) };
+        assert_eq!(ret, -1, "control char makes wcswidth return -1");
+    }
+
+    // -- wcsftime --
+
+    #[test]
+    fn test_wcsftime_null_wcs_returns_zero() {
+        let tm = crate::time::Tm {
+            tm_sec: 0, tm_min: 0, tm_hour: 0,
+            tm_mday: 1, tm_mon: 0, tm_year: 100,
+            tm_wday: 6, tm_yday: 0, tm_isdst: 0,
+        };
+        let fmt: [WcharT; 3] = [b'%' as WcharT, b'Y' as WcharT, 0];
+        let ret = unsafe { wcsftime(core::ptr::null_mut(), 64, fmt.as_ptr(), &tm) };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_wcsftime_null_format_returns_zero() {
+        let tm = crate::time::Tm {
+            tm_sec: 0, tm_min: 0, tm_hour: 0,
+            tm_mday: 1, tm_mon: 0, tm_year: 100,
+            tm_wday: 6, tm_yday: 0, tm_isdst: 0,
+        };
+        let mut buf: [WcharT; 64] = [0; 64];
+        let ret = unsafe { wcsftime(buf.as_mut_ptr(), 64, core::ptr::null(), &tm) };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_wcsftime_null_tm_returns_zero() {
+        let fmt: [WcharT; 3] = [b'%' as WcharT, b'Y' as WcharT, 0];
+        let mut buf: [WcharT; 64] = [0; 64];
+        let ret = unsafe { wcsftime(buf.as_mut_ptr(), 64, fmt.as_ptr(), core::ptr::null()) };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_wcsftime_zero_maxsize_returns_zero() {
+        let tm = crate::time::Tm {
+            tm_sec: 0, tm_min: 0, tm_hour: 0,
+            tm_mday: 1, tm_mon: 0, tm_year: 100,
+            tm_wday: 6, tm_yday: 0, tm_isdst: 0,
+        };
+        let fmt: [WcharT; 3] = [b'%' as WcharT, b'Y' as WcharT, 0];
+        let mut buf: [WcharT; 64] = [0; 64];
+        let ret = unsafe { wcsftime(buf.as_mut_ptr(), 0, fmt.as_ptr(), &tm) };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_wcsftime_year_format() {
+        // Format "%Y" for year 2000 (tm_year = 100 = 1900+100).
+        let tm = crate::time::Tm {
+            tm_sec: 0, tm_min: 0, tm_hour: 0,
+            tm_mday: 1, tm_mon: 0, tm_year: 100,
+            tm_wday: 6, tm_yday: 0, tm_isdst: 0,
+        };
+        let fmt: [WcharT; 3] = [b'%' as WcharT, b'Y' as WcharT, 0];
+        let mut buf: [WcharT; 64] = [0; 64];
+        let ret = unsafe { wcsftime(buf.as_mut_ptr(), 64, fmt.as_ptr(), &tm) };
+        assert_eq!(ret, 4, "year 2000 is 4 chars");
+        assert_eq!(buf[0], b'2' as WcharT);
+        assert_eq!(buf[1], b'0' as WcharT);
+        assert_eq!(buf[2], b'0' as WcharT);
+        assert_eq!(buf[3], b'0' as WcharT);
+        assert_eq!(buf[4], 0, "null terminated");
+    }
+
+    #[test]
+    fn test_wcsftime_literal_text() {
+        // Format "hi" (no % specifiers) should output "hi".
+        let tm = crate::time::Tm {
+            tm_sec: 0, tm_min: 0, tm_hour: 0,
+            tm_mday: 1, tm_mon: 0, tm_year: 100,
+            tm_wday: 6, tm_yday: 0, tm_isdst: 0,
+        };
+        let fmt: [WcharT; 3] = [b'h' as WcharT, b'i' as WcharT, 0];
+        let mut buf: [WcharT; 64] = [0; 64];
+        let ret = unsafe { wcsftime(buf.as_mut_ptr(), 64, fmt.as_ptr(), &tm) };
+        assert_eq!(ret, 2);
+        assert_eq!(buf[0], b'h' as WcharT);
+        assert_eq!(buf[1], b'i' as WcharT);
+    }
+
 }

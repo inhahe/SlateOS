@@ -2762,6 +2762,102 @@ pub extern "C" fn __realpath_chk(
 }
 
 // ---------------------------------------------------------------------------
+// readahead — Linux read-ahead hint
+// ---------------------------------------------------------------------------
+
+/// Initiate file read-ahead into the page cache.
+///
+/// This is a Linux-specific hint that tells the kernel to read `count`
+/// bytes starting at `offset` from the file into the page cache,
+/// anticipating future reads.
+///
+/// Since our kernel doesn't have a page cache yet, this is a no-op
+/// that returns 0 (success).  The fd and offset are validated.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn readahead(fd: Fd, offset: i64, count: usize) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if offset < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // No-op: our kernel has no page cache to prefetch into.
+    let _ = count;
+    0
+}
+
+// ---------------------------------------------------------------------------
+// sync_file_range — fine-grained sync control
+// ---------------------------------------------------------------------------
+
+/// Sync file flags.
+pub const SYNC_FILE_RANGE_WAIT_BEFORE: u32 = 1;
+pub const SYNC_FILE_RANGE_WRITE: u32 = 2;
+pub const SYNC_FILE_RANGE_WAIT_AFTER: u32 = 4;
+
+/// Sync a file range to disk.
+///
+/// This Linux-specific function provides fine-grained control over
+/// syncing file data to disk.  Since we don't have a writeback cache,
+/// this delegates to fsync for the full file.
+///
+/// Returns 0 on success, -1 on error.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sync_file_range(fd: Fd, _offset: i64, _nbytes: i64, _flags: u32) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    // Delegate to fsync — we don't have fine-grained range sync.
+    fsync(fd)
+}
+
+// ---------------------------------------------------------------------------
+// name_to_handle_at / open_by_handle_at — file handle operations
+// ---------------------------------------------------------------------------
+
+/// File handle structure for `name_to_handle_at` / `open_by_handle_at`.
+#[repr(C)]
+pub struct FileHandle {
+    /// Size of `f_handle` in bytes.
+    pub handle_bytes: u32,
+    /// Handle type (filesystem-specific).
+    pub handle_type: i32,
+    // f_handle follows — variable-length.
+}
+
+/// Obtain a file handle for a path.
+///
+/// Stub: returns -1 with ENOSYS.  File handles require kernel support
+/// for exporting/importing filesystem-level identifiers.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn name_to_handle_at(
+    _dirfd: Fd,
+    _pathname: *const u8,
+    _handle: *mut FileHandle,
+    _mount_id: *mut i32,
+    _flags: i32,
+) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Open a file using a file handle.
+///
+/// Stub: returns -1 with ENOSYS.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn open_by_handle_at(
+    _mount_fd: Fd,
+    _handle: *mut FileHandle,
+    _flags: i32,
+) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -4355,5 +4451,115 @@ mod tests {
         let ret = pwritev(0, &iov, 1, -1);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // readahead
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_readahead_success() {
+        // readahead with valid fd, offset, count → 0.
+        let ret = readahead(0, 0, 4096);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_readahead_negative_fd() {
+        crate::errno::set_errno(0);
+        let ret = readahead(-1, 0, 4096);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_readahead_negative_offset() {
+        crate::errno::set_errno(0);
+        let ret = readahead(0, -1, 4096);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_readahead_zero_count() {
+        // Zero count is valid — just a no-op.
+        let ret = readahead(0, 0, 0);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_readahead_large_count() {
+        // Large count is fine — we don't actually do anything.
+        let ret = readahead(0, 1000, usize::MAX);
+        assert_eq!(ret, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // sync_file_range
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sync_file_range_negative_fd() {
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(-1, 0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_sync_file_range_valid_fd_no_crash() {
+        // On test host, fd 0 (stdin) may or may not support fsync.
+        let _ret = sync_file_range(0, 0, 4096, SYNC_FILE_RANGE_WRITE);
+    }
+
+    #[test]
+    fn test_sync_file_range_flag_constants() {
+        assert_eq!(SYNC_FILE_RANGE_WAIT_BEFORE, 1);
+        assert_eq!(SYNC_FILE_RANGE_WRITE, 2);
+        assert_eq!(SYNC_FILE_RANGE_WAIT_AFTER, 4);
+        // Flags should be distinct bit fields.
+        assert_eq!(
+            SYNC_FILE_RANGE_WAIT_BEFORE & SYNC_FILE_RANGE_WRITE,
+            0,
+            "flags must be distinct bits"
+        );
+        assert_eq!(
+            SYNC_FILE_RANGE_WRITE & SYNC_FILE_RANGE_WAIT_AFTER,
+            0,
+            "flags must be distinct bits"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // name_to_handle_at / open_by_handle_at
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_name_to_handle_at_returns_enosys() {
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            -100, // AT_FDCWD
+            b"/tmp\0".as_ptr(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_open_by_handle_at_returns_enosys() {
+        crate::errno::set_errno(0);
+        let ret = open_by_handle_at(3, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_file_handle_struct_layout() {
+        // FileHandle header: handle_bytes (u32) + handle_type (i32) = 8 bytes.
+        assert_eq!(core::mem::size_of::<FileHandle>(), 8);
+        assert!(core::mem::align_of::<FileHandle>() >= 4);
     }
 }

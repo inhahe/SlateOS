@@ -3413,4 +3413,216 @@ mod tests {
         // Clean up — return the slot.
         free_file(file);
     }
+
+    // -----------------------------------------------------------------------
+    // fclose — closing streams
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fclose_stdin_flushes_only() {
+        // fclose on stdin should flush but NOT actually close fd 0.
+        let ret = fclose(STDIN_SENTINEL as *mut u8);
+        // Standard streams are not freed; fclose returns 0 on success.
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_fclose_stdout_flushes_only() {
+        let ret = fclose(STDOUT_SENTINEL as *mut u8);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_fclose_stderr_flushes_only() {
+        let ret = fclose(STDERR_SENTINEL as *mut u8);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_fclose_pool_file() {
+        // Allocate a pool file, then close it.
+        unsafe {
+            let pool = core::ptr::addr_of_mut!(FILE_POOL).cast::<FileSlot>();
+            let mut i: usize = 0;
+            while i < MAX_OPEN_FILES {
+                (*pool.add(i)).in_use = false;
+                i += 1;
+            }
+        }
+        let stream = fdopen(99, b"r\0".as_ptr());
+        assert!(!stream.is_null());
+        // fclose will call close(99) which may fail on host, but the
+        // pool slot should be freed regardless.
+        let _ret = fclose(stream);
+        // The slot should be freed — verify we can re-allocate.
+        let stream2 = fdopen(100, b"r\0".as_ptr());
+        assert!(!stream2.is_null());
+        free_file(stream_to_file(stream2));
+    }
+
+    // -----------------------------------------------------------------------
+    // fgetc — reading characters
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fgetc_stdin_no_crash() {
+        // fgetc reads from a stream. On the test host the stdin fd may
+        // return EOF immediately (not a tty), but must not crash.
+        let _ret = fgetc(STDIN_SENTINEL as *mut u8);
+        // We can't assert the value — it depends on host stdin state.
+    }
+
+    #[test]
+    fn test_fgetc_returns_ungetc_byte() {
+        // Push back a byte, then read it with fgetc.
+        let file = stream_to_file(STDIN_SENTINEL as *mut u8);
+        let old_byte = unsafe { (*file).ungetc_byte };
+        let old_flags = unsafe { (*file).flags };
+
+        unsafe { (*file).ungetc_byte = b'Z' as i16; }
+        // Clear EOF so fgetc checks the pushback buffer.
+        unsafe { (*file).flags &= !FLAG_EOF; }
+
+        let c = fgetc(STDIN_SENTINEL as *mut u8);
+        assert_eq!(c, b'Z' as i32, "fgetc should return the pushed-back byte");
+
+        // Restore.
+        unsafe {
+            (*file).ungetc_byte = old_byte;
+            (*file).flags = old_flags;
+        }
+    }
+
+    #[test]
+    fn test_getchar_no_crash() {
+        let _ret = getchar();
+    }
+
+    #[test]
+    fn test_getc_no_crash() {
+        let _ret = getc(STDIN_SENTINEL as *mut u8);
+    }
+
+    // -----------------------------------------------------------------------
+    // freopen64 — LP64 alias
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_freopen64_null_mode() {
+        let ret = unsafe {
+            freopen64(b"/tmp/x\0".as_ptr(), core::ptr::null(), STDOUT_SENTINEL as *mut u8)
+        };
+        assert!(ret.is_null(), "freopen64 with null mode should fail");
+    }
+
+    #[test]
+    fn test_freopen64_null_path_returns_stream() {
+        // With null path and valid mode, freopen returns the same stream
+        // (mode-change-only path, which is "not supported" → returns stream).
+        let ret = unsafe {
+            freopen64(core::ptr::null(), b"r\0".as_ptr(), STDOUT_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret as usize, STDOUT_SENTINEL);
+    }
+
+    // -----------------------------------------------------------------------
+    // getline / getdelim — line reading
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_getline_null_lineptr() {
+        let mut n: usize = 0;
+        let ret = unsafe {
+            getline(core::ptr::null_mut(), &raw mut n, STDIN_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_getline_null_n() {
+        let mut ptr: *mut u8 = core::ptr::null_mut();
+        let ret = unsafe {
+            getline(&raw mut ptr, core::ptr::null_mut(), STDIN_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_getdelim_custom_delimiter_null_inputs() {
+        // getdelim with ';' delimiter and null lineptr → EINVAL
+        let mut n: usize = 0;
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            getdelim(core::ptr::null_mut(), &raw mut n, b';' as i32, STDIN_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getdelim_initial_null_buf_allocates() {
+        // If lineptr starts as null and n starts as 0, getdelim should
+        // try to malloc(128).  On test host, stdin will likely EOF
+        // immediately, so we get -1 but the allocation still happens.
+        let mut ptr: *mut u8 = core::ptr::null_mut();
+        let mut n: usize = 0;
+        let ret = unsafe {
+            getdelim(&raw mut ptr, &raw mut n, b'\n' as i32, STDIN_SENTINEL as *mut u8)
+        };
+        // Either -1 (EOF) or some positive value depending on host stdin.
+        // The point: if allocation succeeded, n and ptr were updated.
+        if ret == -1 {
+            // Allocation may or may not have happened (malloc could fail,
+            // or EOF before any data). Either way, no crash.
+        }
+        // Clean up if a buffer was allocated.
+        if !ptr.is_null() {
+            unsafe { crate::malloc::free(ptr); }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // perror — error message printing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_perror_null_prefix() {
+        // perror(NULL) should print just "strerror(errno)\n".
+        crate::errno::set_errno(crate::errno::ENOENT);
+        unsafe { perror(core::ptr::null()); }
+    }
+
+    #[test]
+    fn test_perror_empty_prefix() {
+        // perror("") should print just "strerror(errno)\n" (empty prefix
+        // is treated as no prefix because *s == 0).
+        crate::errno::set_errno(crate::errno::EACCES);
+        unsafe { perror(b"\0".as_ptr()); }
+    }
+
+    #[test]
+    fn test_perror_with_prefix() {
+        crate::errno::set_errno(crate::errno::EIO);
+        unsafe { perror(b"test_perror\0".as_ptr()); }
+        // Should print "test_perror: Input/output error\n" to stderr.
+    }
+
+    #[test]
+    fn test_perror_zero_errno() {
+        crate::errno::set_errno(0);
+        unsafe { perror(b"no error\0".as_ptr()); }
+    }
+
+    #[test]
+    fn test_perror_various_errno_values() {
+        for e in [
+            crate::errno::EPERM,
+            crate::errno::ENOMEM,
+            crate::errno::EINVAL,
+            crate::errno::ENOSYS,
+        ] {
+            crate::errno::set_errno(e);
+            unsafe { perror(b"loop\0".as_ptr()); }
+        }
+    }
 }

@@ -113,7 +113,9 @@
 //!   `getentropy`, `clock_nanosleep`, `clock_settime`,
 //!   `fchdir` (via path tracking), `getdomainname`/`setdomainname`,
 //!   `getdtablesize`, `preadv2`/`pwritev2`, `fadvise64`,
-//!   `arch_prctl`, `ioprio_get`/`ioprio_set`, `membarrier`
+//!   `arch_prctl`, `ioprio_get`/`ioprio_set`, `membarrier`,
+//!   `readahead`, `sync_file_range`, `name_to_handle_at`,
+//!   `open_by_handle_at`
 //! - **Dynamic Linking** (stubs): `dlopen`, `dlsym`, `dlclose`, `dlerror`,
 //!   `dladdr`, `dl_iterate_phdr`, `__tls_get_addr`
 //! - **Directories**: `opendir`, `closedir`, `readdir`, `rewinddir`,

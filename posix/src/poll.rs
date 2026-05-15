@@ -877,6 +877,18 @@ mod tests {
         assert_eq!(FD_SET_WORDS, 4);  // 256 / 64
     }
 
+    #[test]
+    fn test_fd_setsize_matches_max_fds() {
+        // FD_SETSIZE must cover all possible fds in our table.
+        // If MAX_FDS grows beyond FD_SETSIZE, select() won't be able
+        // to monitor all fds, which is a subtle bug.
+        assert_eq!(
+            FD_SETSIZE,
+            crate::fdtable::MAX_FDS,
+            "FD_SETSIZE must match fdtable::MAX_FDS"
+        );
+    }
+
     // -- Timeval tests --
 
     #[test]

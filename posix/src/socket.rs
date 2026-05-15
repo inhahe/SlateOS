@@ -349,11 +349,11 @@ pub type SocklenT = u32;
 
 /// Maximum sockets tracked in the metadata table.
 ///
-/// Must be >= MAX_FDS (256) so that socket metadata can be stored for
-/// any valid fd index.  If a socket gets fd >= MAX_SOCKETS, all
-/// metadata operations (setsockopt, timeouts, keepalive, etc.) silently
-/// fail — which is why this must match the fd table capacity.
-const MAX_SOCKETS: usize = 256;
+/// Derived from `fdtable::MAX_FDS` so that socket metadata can be
+/// stored for any valid fd index.  If a socket gets fd >= MAX_SOCKETS,
+/// all metadata operations (setsockopt, timeouts, keepalive, etc.)
+/// silently fail — which is why this must match the fd table capacity.
+const MAX_SOCKETS: usize = crate::fdtable::MAX_FDS;
 
 /// Per-fd socket state that the kernel doesn't track for us.
 ///

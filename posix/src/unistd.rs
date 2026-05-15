@@ -716,8 +716,7 @@ pub extern "C" fn setdomainname(name: *const u8, len: usize) -> i32 {
 /// new code.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getdtablesize() -> i32 {
-    // Match our fd table size.
-    256
+    crate::fdtable::MAX_FDS as i32
 }
 
 /// Set an alarm timer.
@@ -762,14 +761,16 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
             // TODO: Query actual CPU count from kernel.
             1
         }
-        _SC_OPEN_MAX | _SC_LOGIN_NAME_MAX => 256,  // Max open fds / max login name.
+        _SC_OPEN_MAX => crate::fdtable::MAX_FDS as i64,
+        _SC_LOGIN_NAME_MAX => i64::from(crate::limits::LOGIN_NAME_MAX),
         _SC_CLK_TCK => 100,            // 100 Hz timer tick (Linux default).
-        _SC_ARG_MAX => 131_072,         // 128 KiB argument limit.
-        _SC_CHILD_MAX | _SC_IOV_MAX => 1024,  // Max child processes / max iovec entries.
-        _SC_NGROUPS_MAX => 32,          // Max supplementary groups.
+        _SC_ARG_MAX => i64::from(crate::limits::ARG_MAX),
+        _SC_CHILD_MAX => 1024,         // Max child processes.
+        _SC_IOV_MAX => i64::from(crate::limits::IOV_MAX),
+        _SC_NGROUPS_MAX => i64::from(crate::limits::NGROUPS_MAX),
         _SC_VERSION | _SC_THREADS => 200_809,  // POSIX.1-2008 / threads supported (version).
-        _SC_HOST_NAME_MAX => HOST_NAME_MAX as i64, // Matches our HOSTNAME_BUF size.
-        _SC_LINE_MAX => 2048,           // Max line length.
+        _SC_HOST_NAME_MAX => HOST_NAME_MAX as i64,
+        _SC_LINE_MAX => i64::from(crate::limits::LINE_MAX),
         _SC_THREAD_STACK_MIN => 65536,  // 64 KiB minimum thread stack.
         _SC_PHYS_PAGES => 8192,         // ~128 MiB at 16 KiB pages (TODO: query kernel).
         _SC_AVPHYS_PAGES => 4096,       // ~64 MiB available (TODO: query kernel).
@@ -1532,7 +1533,7 @@ mod tests {
 
     #[test]
     fn test_sysconf_open_max() {
-        assert_eq!(sysconf(_SC_OPEN_MAX), 256);
+        assert_eq!(sysconf(_SC_OPEN_MAX), crate::fdtable::MAX_FDS as i64);
     }
 
     #[test]
@@ -1571,7 +1572,17 @@ mod tests {
 
     #[test]
     fn test_getdtablesize() {
-        assert_eq!(getdtablesize(), 256);
+        assert_eq!(getdtablesize(), crate::fdtable::MAX_FDS as i32);
+    }
+
+    #[test]
+    fn test_getdtablesize_matches_sysconf() {
+        // These must agree — both derive from fdtable::MAX_FDS.
+        assert_eq!(
+            getdtablesize() as i64,
+            sysconf(_SC_OPEN_MAX),
+            "getdtablesize() and sysconf(_SC_OPEN_MAX) must match"
+        );
     }
 
     // ------------------------------------------------------------------

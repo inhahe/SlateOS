@@ -832,7 +832,7 @@ pub extern "C" fn dup3(oldfd: Fd, newfd: Fd, flags: i32) -> Fd {
 /// and `CLOSE_RANGE_CLOEXEC`, neither of which is meaningful for us).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn close_range(first: u32, last: u32, _flags: u32) -> i32 {
-    // Cap at MAX_FDS-1: no fd above 255 can be open in our table,
+    // Cap at MAX_FDS-1: no fd beyond the table limit can be open,
     // and iterating up to u32::MAX would take ~4 billion iterations
     // due to wrapping.  Programs commonly pass UINT_MAX as `last`
     // to close "everything from first upward."

@@ -72,6 +72,8 @@
 //!   always falls back to default strings)
 //! - **Password Hashing**: `crypt`, `crypt_r` (stub — returns
 //!   `$0$<key>`), `encrypt`, `setkey` (DES stubs — ENOSYS)
+//! - **Monetary Formatting**: `strfmon`, `strfmon_l` (C locale
+//!   decimal formatting with `%n`/`%i` specifiers)
 //! - **Search / Data Structures** (`<search.h>`): BST `tsearch`, `tfind`,
 //!   `tdelete`, `twalk`, `tdestroy`; hash table `hcreate`, `hdestroy`,
 //!   `hsearch`; linear search `lfind`, `lsearch`; linked list `insque`,
@@ -233,6 +235,7 @@ pub mod fdtable;
 pub mod file;
 pub mod locale;
 pub mod mman;
+pub mod monetary;
 pub mod nl_types;
 pub mod mqueue;
 pub mod pipe;

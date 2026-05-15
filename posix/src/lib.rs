@@ -73,6 +73,9 @@
 //! - **Database Operations** (stubs): `dbm_open`, `dbm_close`,
 //!   `dbm_store`, `dbm_fetch`, `dbm_delete`, `dbm_firstkey`,
 //!   `dbm_nextkey`, `dbm_error`, `dbm_clearerr`
+//! - **System V IPC** (stubs): `msgget`/`msgsnd`/`msgrcv`/`msgctl`,
+//!   `semget`/`semop`/`semtimedop`/`semctl`,
+//!   `shmget`/`shmat`/`shmdt`/`shmctl`
 //! - **Password Hashing**: `crypt`, `crypt_r` (stub — returns
 //!   `$0$<key>`), `encrypt`, `setkey` (DES stubs — ENOSYS)
 //! - **Language Information**: `nl_langinfo`, `nl_langinfo_l`
@@ -267,6 +270,9 @@ pub mod stdlib;
 pub mod string;
 pub mod syscall;
 pub mod syslog;
+pub mod sysv_msg;
+pub mod sysv_sem;
+pub mod sysv_shm;
 pub mod time;
 pub mod types;
 pub mod resource;

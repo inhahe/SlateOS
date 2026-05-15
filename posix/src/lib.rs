@@ -368,3 +368,6 @@ pub mod sys_sysctl;
 pub mod net_if_packet;
 pub mod linux_input;
 pub mod linux_futex;
+pub mod linux_sockios;
+pub mod linux_fs;
+pub mod linux_magic;

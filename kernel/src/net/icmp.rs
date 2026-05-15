@@ -662,11 +662,12 @@ fn handle_echo_reply(ip_packet: &Ipv4Packet<'_>, data: &[u8]) {
         return; // Not our ping.
     }
 
-    LAST_REPLY_SEQ.store(seq, Ordering::Relaxed);
-
     // Try to match against outstanding pings for RTT.
+    // Store RTT *before* seq: the consumer in wait_reply_rtt() observes
+    // seq via Acquire, so the preceding Release on RTT guarantees the
+    // RTT value is visible when seq becomes visible.
     if let Some(rtt_ns) = match_outstanding(seq) {
-        LAST_RTT_NS.store(rtt_ns, Ordering::Relaxed);
+        LAST_RTT_NS.store(rtt_ns, Ordering::Release);
 
         // Format RTT in human-readable units.
         #[allow(clippy::arithmetic_side_effects)]
@@ -690,6 +691,11 @@ fn handle_echo_reply(ip_packet: &Ipv4Packet<'_>, data: &[u8]) {
             ip_packet.src, seq
         );
     }
+
+    // Store seq last — this is the signal that the reply arrived.
+    // Uses Release so that the preceding RTT store is visible to
+    // consumers that Acquire-load LAST_REPLY_SEQ.
+    LAST_REPLY_SEQ.store(seq, Ordering::Release);
 }
 
 /// Send an ICMP echo reply in response to a request.
@@ -740,7 +746,7 @@ pub fn wait_reply(seq: u16, timeout_polls: u32) -> bool {
     for _ in 0..timeout_polls {
         super::poll();
 
-        if LAST_REPLY_SEQ.load(Ordering::Relaxed) == seq {
+        if LAST_REPLY_SEQ.load(Ordering::Acquire) == seq {
             return true;
         }
 
@@ -759,8 +765,11 @@ pub fn wait_reply_rtt(seq: u16, timeout_polls: u32) -> Option<u64> {
     for _ in 0..timeout_polls {
         super::poll();
 
-        if LAST_REPLY_SEQ.load(Ordering::Relaxed) == seq {
-            return Some(LAST_RTT_NS.load(Ordering::Relaxed));
+        // Acquire-load seq: if we see the new seq, the Release store
+        // on LAST_RTT_NS is guaranteed to have completed, so the RTT
+        // we read next is the correct value for this ping.
+        if LAST_REPLY_SEQ.load(Ordering::Acquire) == seq {
+            return Some(LAST_RTT_NS.load(Ordering::Acquire));
         }
 
         for _ in 0..10_000 {

@@ -445,11 +445,16 @@ fn decode_dns_name(data: &[u8], offset: usize) -> (String, usize) {
         }
 
         let label_len = len as usize;
+        let label_start = pos.saturating_add(1);
+        let label_end = label_start.saturating_add(label_len);
+        // Break on truncated label — don't advance `pos` past the
+        // buffer or produce a partial name that could pollute the cache.
+        if label_end > data.len() {
+            break;
+        }
         if !name.is_empty() {
             name.push('.');
         }
-        let label_start = pos.saturating_add(1);
-        let label_end = label_start.saturating_add(label_len);
         if let Some(slice) = data.get(label_start..label_end) {
             if let Ok(s) = core::str::from_utf8(slice) {
                 name.push_str(s);

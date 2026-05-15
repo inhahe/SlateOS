@@ -45,6 +45,7 @@ use crate::error::{KernelError, KernelResult};
 
 use super::ethernet::{self, ETHERTYPE_IPV4};
 use super::interface::{self, Ipv4Addr};
+use crate::virtio::net::MacAddress;
 
 /// Global IP identification counter for fragmented packets.
 /// Incremented for each new datagram that requires fragmentation.
@@ -570,6 +571,15 @@ fn dispatch_reassembled(
     }
 }
 
+/// Compute the Ethernet multicast MAC for an IPv4 multicast address (RFC 1112).
+///
+/// The low 23 bits of the IPv4 multicast address are mapped into the
+/// Ethernet MAC `01:00:5E:<IP[1]&0x7F>:<IP[2]>:<IP[3]>`.  This covers
+/// all standard IPv4 multicast (224.0.0.0/4) including mDNS, IGMP, etc.
+fn multicast_mac(ip: Ipv4Addr) -> MacAddress {
+    MacAddress([0x01, 0x00, 0x5E, ip.0[1] & 0x7F, ip.0[2], ip.0[3]])
+}
+
 /// Send an IPv4 packet via the root network namespace.
 ///
 /// Convenience wrapper around `send_ns()` that uses the root
@@ -604,6 +614,9 @@ pub fn send_with_ttl(dst: Ipv4Addr, protocol: u8, payload: &[u8], ttl: u8) -> Ke
             && is_subnet_broadcast(dst, iface_info.ip, iface_info.subnet_mask))
     {
         ethernet::BROADCAST_MAC
+    } else if dst.is_multicast() {
+        // RFC 1112: IPv4 multicast → Ethernet multicast MAC mapping.
+        multicast_mac(dst)
     } else {
         let next_hop = resolve_next_hop(ns_id, our_ip, dst);
         super::arp::resolve(next_hop)?
@@ -755,6 +768,9 @@ fn send_ns_ecn(
             && is_subnet_broadcast(dst, iface_info.ip, iface_info.subnet_mask))
     {
         ethernet::BROADCAST_MAC
+    } else if dst.is_multicast() {
+        // RFC 1112: IPv4 multicast → Ethernet multicast MAC mapping.
+        multicast_mac(dst)
     } else {
         let next_hop = resolve_next_hop(ns_id, our_ip, dst);
         super::arp::resolve(next_hop)?
@@ -808,6 +824,9 @@ fn send_fragmentable_ns(
             && is_subnet_broadcast(dst, iface_info.ip, iface_info.subnet_mask))
     {
         ethernet::BROADCAST_MAC
+    } else if dst.is_multicast() {
+        // RFC 1112: IPv4 multicast → Ethernet multicast MAC mapping.
+        multicast_mac(dst)
     } else {
         let next_hop = resolve_next_hop(ns_id, our_ip, dst);
         super::arp::resolve(next_hop)?

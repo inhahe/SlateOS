@@ -658,7 +658,10 @@ pub fn check_outbound(protocol: u8, dst_ip: Ipv4Addr, payload: &[u8]) -> bool {
     // Extract port info.
     let (src_port, dst_port) = extract_ports(protocol, payload);
 
-    // Check rules.
+    // Check rules.  For outbound traffic we match against `dst_ip`
+    // (the remote peer), not our own source IP.  This means the rule's
+    // `src_ip` field acts as a "remote peer" filter: for inbound it
+    // matches the packet's source, for outbound it matches the destination.
     let action = match_rules(Direction::Out, protocol, dst_ip, dst_port);
 
     let allowed = match action {
@@ -965,7 +968,9 @@ pub fn check_outbound_ns(
 
     let (src_port, dst_port) = extract_ports(protocol, payload);
 
-    // Check rules.
+    // Check rules.  Same as check_outbound(): for outbound traffic the
+    // rule's `src_ip` field is matched against the destination (remote
+    // peer), not the namespace's own source IP.
     let action = match_rules_in_table(&mut table[idx].rules, Direction::Out, protocol, dst_ip, dst_port);
 
     let allowed = match action {

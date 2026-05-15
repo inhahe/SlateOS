@@ -1290,7 +1290,7 @@ impl ServiceRegistry {
 
             if svc.auto_restart {
                 // Schedule restart with current backoff.
-                svc.restart_after_ns = now_ns + svc.backoff_ns;
+                svc.restart_after_ns = now_ns.saturating_add(svc.backoff_ns);
                 print("[svc] Will restart ");
                 console_write(&name_copy[..name_len]);
                 print(" in ");

@@ -3757,7 +3757,7 @@ impl Ext4Driver {
                     d.copy_from_slice(&block_count.to_le_bytes());
                 }
                 if let Some(d) = i_block.get_mut(new_off + 6..new_off + 8) {
-                    d.copy_from_slice(&(phys_block as u16).to_le_bytes()); // ee_start_hi
+                    d.copy_from_slice(&((phys_block >> 32) as u16).to_le_bytes()); // ee_start_hi
                 }
                 if let Some(d) = i_block.get_mut(new_off + 8..new_off + 12) {
                     d.copy_from_slice(&(phys_block as u32).to_le_bytes()); // ee_start_lo

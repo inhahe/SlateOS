@@ -73,6 +73,7 @@
 //! - **Database Operations** (stubs): `dbm_open`, `dbm_close`,
 //!   `dbm_store`, `dbm_fetch`, `dbm_delete`, `dbm_firstkey`,
 //!   `dbm_nextkey`, `dbm_error`, `dbm_clearerr`
+//! - **Process Times**: `times` (CPU time accounting stub)
 //! - **System V IPC** (stubs): `msgget`/`msgsnd`/`msgrcv`/`msgctl`,
 //!   `semget`/`semop`/`semtimedop`/`semctl`,
 //!   `shmget`/`shmat`/`shmdt`/`shmctl`
@@ -269,6 +270,7 @@ pub mod stdio;
 pub mod stdlib;
 pub mod string;
 pub mod syscall;
+pub mod sys_times;
 pub mod syslog;
 pub mod sysv_msg;
 pub mod sysv_sem;

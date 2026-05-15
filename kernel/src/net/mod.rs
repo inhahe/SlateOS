@@ -2,10 +2,12 @@
 //!
 //! Provides basic network protocol support:
 //! - Ethernet frame parsing/building
-//! - ARP (address resolution: IP → MAC)
+//! - ARP (address resolution: IPv4 → MAC)
 //! - IPv4 (packet parsing/building with fragmentation reassembly)
+//! - IPv6 (packet parsing/building, extension header traversal)
+//! - ICMPv6 (echo request/reply, NDP neighbor solicitation/advertisement)
 //! - UDP (connectionless datagrams)
-//! - DHCP client (automatic IP configuration)
+//! - DHCP client (automatic IPv4 configuration)
 //!
 //! ## Design note
 //!
@@ -25,8 +27,10 @@ pub mod frag;
 pub mod ftp;
 pub mod http;
 pub mod icmp;
+pub mod icmpv6;
 pub mod igmp;
 pub mod iperf;
+pub mod ipv6;
 pub mod lldp;
 pub mod ndisc;
 pub mod netcat;
@@ -262,7 +266,9 @@ pub fn self_test() -> KernelResult<()> {
 
     ethernet::self_test()?;
     ipv4::self_test()?;
+    ipv6::self_test()?;
     icmp::self_test()?;
+    icmpv6::self_test()?;
     arp::self_test()?;
     udp::self_test()?;
     dns::self_test()?;

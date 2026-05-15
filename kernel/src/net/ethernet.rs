@@ -19,6 +19,8 @@ use crate::virtio::net::MacAddress;
 pub const ETHERTYPE_IPV4: u16 = 0x0800;
 /// EtherType: ARP.
 pub const ETHERTYPE_ARP: u16 = 0x0806;
+/// EtherType: IPv6.
+pub const ETHERTYPE_IPV6: u16 = 0x86DD;
 
 /// Ethernet header size (dest MAC + src MAC + EtherType).
 pub const ETH_HEADER_SIZE: usize = 14;
@@ -102,6 +104,7 @@ pub fn process_frame(data: &[u8]) -> KernelResult<()> {
     match frame.ethertype {
         ETHERTYPE_ARP => super::arp::process_arp(frame.payload),
         ETHERTYPE_IPV4 => super::ipv4::process_ipv4(frame.payload),
+        ETHERTYPE_IPV6 => super::ipv6::process_ipv6(frame.payload),
         super::lldp::ETHERTYPE_LLDP => super::lldp::process_frame(&frame.src, frame.payload),
         _ => {
             // Unknown protocol — silently drop.
@@ -252,6 +255,10 @@ fn test_ethertype_constants() -> KernelResult<()> {
     }
     if ETHERTYPE_ARP != 0x0806 {
         crate::serial_println!("[ethernet]   FAIL: ETHERTYPE_ARP");
+        return Err(KernelError::InternalError);
+    }
+    if ETHERTYPE_IPV6 != 0x86DD {
+        crate::serial_println!("[ethernet]   FAIL: ETHERTYPE_IPV6");
         return Err(KernelError::InternalError);
     }
 

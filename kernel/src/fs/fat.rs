@@ -2064,10 +2064,12 @@ impl FatFs {
             // Last cluster already marked 0xFFFF.
         }
 
-        // Write data to each cluster.
+        // Write data to each cluster.  If any sector write fails,
+        // free the entire chain to avoid orphaning allocated clusters.
         let mut offset = 0usize;
+        let mut write_err: Option<KernelError> = None;
 
-        for &cluster in &clusters {
+        'write: for &cluster in &clusters {
             let lba = u64::from(self.bpb.cluster_to_lba(cluster));
 
             for s in 0..u32::from(self.bpb.sectors_per_cluster) {
@@ -2075,7 +2077,10 @@ impl FatFs {
 
                 if offset >= data.len() {
                     // Zero-fill remaining sectors in the cluster.
-                    self.write_sector(lba + u64::from(s), &sector_buf)?;
+                    if let Err(e) = self.write_sector(lba + u64::from(s), &sector_buf) {
+                        write_err = Some(e);
+                        break 'write;
+                    }
                     continue;
                 }
 
@@ -2083,9 +2088,18 @@ impl FatFs {
                 if let Some(src) = data.get(offset..offset + to_copy) {
                     sector_buf[..to_copy].copy_from_slice(src);
                 }
-                self.write_sector(lba + u64::from(s), &sector_buf)?;
+                if let Err(e) = self.write_sector(lba + u64::from(s), &sector_buf) {
+                    write_err = Some(e);
+                    break 'write;
+                }
                 offset += to_copy;
             }
+        }
+
+        if let Some(e) = write_err {
+            // Free the allocated chain to avoid orphaning clusters.
+            let _ = self.free_chain(clusters[0]); // best-effort cleanup
+            return Err(e);
         }
 
         Ok(clusters[0])
@@ -3538,15 +3552,15 @@ impl FileSystem for FatFs {
             // Destination is a file — remove it before creating the new entry.
             // Free the destination's cluster chain first.
             if dest_entry.first_cluster >= 2 {
-                let _ = self.free_chain(dest_entry.first_cluster);
+                self.free_chain(dest_entry.first_cluster)?;
             }
             // Find and delete the destination's directory entry + LFN entries.
             let dest_name83 = dest_entry.name;
             if let Ok((d_lba, d_off, true)) =
                 self.find_or_create_slot_in(to_parent_cluster, &dest_name83)
             {
-                let _ = self.delete_lfn_entries(d_lba, d_off, &dest_name83);
-                let _ = self.delete_dir_entry(d_lba, d_off);
+                self.delete_lfn_entries(d_lba, d_off, &dest_name83)?;
+                self.delete_dir_entry(d_lba, d_off)?;
             }
         }
 

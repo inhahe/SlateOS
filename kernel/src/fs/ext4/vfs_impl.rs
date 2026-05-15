@@ -1250,6 +1250,13 @@ impl FileSystem for Ext4Fs {
             return Err(KernelError::AlreadyExists);
         }
 
+        // Reject if link count would overflow u16.  Adding the directory
+        // entry before checking would leave a dangling hard link if we
+        // refused to increment the count afterward.
+        if inode.i_links_count == u16::MAX {
+            return Err(KernelError::InvalidArgument);
+        }
+
         // Determine the directory entry file type byte.
         let ftype_byte = match mode_type {
             file_type::S_IFREG => super::ondisk::dir_type::REG_FILE,
@@ -1264,7 +1271,7 @@ impl FileSystem for Ext4Fs {
         )?;
         self.driver.write_inode(parent_ino, &parent_inode)?;
 
-        // Increment the link count.
+        // Increment the link count.  Overflow already rejected above.
         inode.i_links_count = inode.i_links_count.saturating_add(1);
         self.driver.write_inode(existing_ino, &inode)?;
 

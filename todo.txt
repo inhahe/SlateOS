@@ -234,6 +234,20 @@ Remaining net improvements (diminishing returns):
   allowed_count() to MAX_SYSCALL_NR, or clear bits >= MAX_SYSCALL_NR in
   install().  Zone: kernel-ipc / kernel-security.
 
+## Cross-Zone Changes (osa session)
+
+- SYS_PROCESS_EXEC now accepts argv/envp via args 2-5 (packed
+  null-terminated strings, same format as SpawnExArgs).  This required
+  changes in:
+  - kernel/src/proc/spawn.rs (kernel-process zone — osa's zone)
+  - kernel/src/syscall/handlers.rs (kernel-ipc zone — osb's zone)
+  - kernel/src/syscall/number.rs (kernel-ipc zone — osb's zone)
+  - posix/src/spawn.rs (posix zone — osb's zone)
+  The posix execve() now packs argv/envp C string arrays and passes
+  them to the kernel.  posix_spawn() still uses old SYS_PROCESS_SPAWN
+  and ignores argv/envp — updating it to use SYS_PROCESS_SPAWN_EX
+  is the osb session's responsibility.
+
 ## Judgment Calls
 
 - boot-test.ps1 and the copy-to-ESP step: Limine loads the kernel from

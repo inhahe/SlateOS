@@ -37,7 +37,6 @@
 //!
 //! ## Current Limitations
 //!
-//! - No argument passing (argc/argv/envp) yet.
 //! - No dynamic linking (only static executables).
 
 use alloc::boxed::Box;
@@ -634,6 +633,12 @@ pub fn spawn_process(
 ///
 /// - `pid` — the process to exec.
 /// - `elf_data` — raw bytes of the new ELF64 executable.
+/// - `argv` — command-line arguments for the new process image.
+/// - `envp` — environment variables for the new process image.
+///
+/// The argv/envp data is stored in the PCB (replacing any previous
+/// values) and can be read by the new binary via
+/// `SYS_PROCESS_GET_ARGS`.
 ///
 /// # Errors
 ///
@@ -644,6 +649,8 @@ pub fn spawn_process(
 pub fn exec_process(
     pid: ProcessId,
     elf_data: &[u8],
+    argv: &[&[u8]],
+    envp: &[&[u8]],
 ) -> KernelResult<ExecResult> {
     // Step 1: Parse and validate the ELF binary BEFORE tearing down
     // the old address space.  If the ELF is bad, the process keeps
@@ -704,6 +711,33 @@ pub fn exec_process(
 
     // Step 5: Allocate and map a fresh user stack.
     let user_rsp = setup_user_stack(pml4_phys)?;
+
+    // Step 6: Store argv/envp in the PCB for the new process image.
+    //
+    // This replaces any previous argv/envp (from the original spawn or
+    // a prior exec).  The new binary reads them via SYS_PROCESS_GET_ARGS.
+    if !argv.is_empty() || !envp.is_empty() {
+        let argv_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> = argv
+            .iter()
+            .map(|a| a.to_vec())
+            .collect();
+        let envp_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> = envp
+            .iter()
+            .map(|e| e.to_vec())
+            .collect();
+        if let Err(e) = pcb::set_initial_args(pid, argv_vecs, envp_vecs) {
+            serial_println!(
+                "[exec] Failed to set args for process {}: {:?}",
+                pid, e,
+            );
+            // Non-fatal — process can still run without args.
+        } else {
+            serial_println!(
+                "[exec] Stored {} argv, {} envp entries for process {}",
+                argv.len(), envp.len(), pid,
+            );
+        }
+    }
 
     serial_println!(
         "[exec] Process {} exec complete: entry={:#x}, rsp={:#x}",

@@ -3076,6 +3076,14 @@ pub fn sys_process_kill(args: &super::dispatch::SyscallArgs) -> super::dispatch:
 ///
 /// `frame.arg0`: pointer to ELF data in user memory.
 /// `frame.arg1`: length of the ELF data (bytes).
+/// `frame.arg2`: pointer to packed argv data (0 = no args).
+/// `frame.arg3`: total byte length of packed argv data.
+/// `frame.arg4`: pointer to packed envp data (0 = no env).
+/// `frame.arg5`: total byte length of packed envp data.
+///
+/// Argv/envp are copied into kernel buffers before the old address
+/// space is torn down, then stored in the PCB for the new binary to
+/// read via `SYS_PROCESS_GET_ARGS`.
 ///
 /// On success: returns 0 in RAX, with user_rip and user_rsp in the
 /// frame modified to point at the new binary.  All other saved
@@ -3092,6 +3100,10 @@ pub fn sys_process_exec_with_frame(
 
     let elf_ptr = frame.arg0 as usize;
     let elf_len = frame.arg1 as usize;
+    let argv_ptr = frame.arg2 as usize;
+    let argv_len = frame.arg3 as usize;
+    let envp_ptr = frame.arg4 as usize;
+    let envp_len = frame.arg5 as usize;
 
     // Validate arguments.
     if elf_len == 0 {
@@ -3113,6 +3125,27 @@ pub fn sys_process_exec_with_frame(
         return e.code() as i64;
     }
 
+    // Validate argv pointer (if provided).
+    const MAX_PACKED_BYTES: usize = 256 * 1024;
+    if argv_len > MAX_PACKED_BYTES {
+        return KernelError::InvalidArgument.code() as i64;
+    }
+    if argv_len > 0 && argv_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(frame.arg2, argv_len) {
+            return e.code() as i64;
+        }
+    }
+
+    // Validate envp pointer (if provided).
+    if envp_len > MAX_PACKED_BYTES {
+        return KernelError::InvalidArgument.code() as i64;
+    }
+    if envp_len > 0 && envp_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(frame.arg4, envp_len) {
+            return e.code() as i64;
+        }
+    }
+
     // Read the ELF data from userspace.
     //
     // SAFETY: Validated above — elf_ptr is in user space and mapped.
@@ -3125,8 +3158,43 @@ pub fn sys_process_exec_with_frame(
     // tear down the user address space (which would unmap the source).
     let elf_copy = alloc::vec::Vec::from(elf_data);
 
-    // Exec: validate ELF, tear down old AS, load new AS, set up stack.
-    match exec_process(pid, &elf_copy) {
+    // Copy argv/envp into kernel buffers before address space teardown.
+    let argv_copy = if argv_len > 0 && argv_ptr != 0 {
+        // SAFETY: Validated above — argv_ptr is mapped user memory.
+        let data = unsafe {
+            core::slice::from_raw_parts(argv_ptr as *const u8, argv_len)
+        };
+        alloc::vec::Vec::from(data)
+    } else {
+        alloc::vec::Vec::new()
+    };
+
+    let envp_copy = if envp_len > 0 && envp_ptr != 0 {
+        // SAFETY: Validated above — envp_ptr is mapped user memory.
+        let data = unsafe {
+            core::slice::from_raw_parts(envp_ptr as *const u8, envp_len)
+        };
+        alloc::vec::Vec::from(data)
+    } else {
+        alloc::vec::Vec::new()
+    };
+
+    // Parse the copied packed strings into slices.
+    // Count is derived from the packed data (count null terminators).
+    let argv_slices: alloc::vec::Vec<&[u8]> = if !argv_copy.is_empty() {
+        parse_packed_strings(&argv_copy, usize::MAX)
+    } else {
+        alloc::vec::Vec::new()
+    };
+    let envp_slices: alloc::vec::Vec<&[u8]> = if !envp_copy.is_empty() {
+        parse_packed_strings(&envp_copy, usize::MAX)
+    } else {
+        alloc::vec::Vec::new()
+    };
+
+    // Exec: validate ELF, tear down old AS, load new AS, set up stack,
+    // store argv/envp.
+    match exec_process(pid, &elf_copy, &argv_slices, &envp_slices) {
         Ok(result) => {
             // Success: rewrite the saved frame so SYSRET returns to the
             // new entry point with a fresh stack and clean registers.

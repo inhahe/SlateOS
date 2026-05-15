@@ -1105,6 +1105,15 @@ pub const SYS_PROCESS_TRY_WAIT: u64 = 507;
 ///
 /// `arg0`: pointer to ELF data in user memory.
 /// `arg1`: length of the ELF data (bytes).
+/// `arg2`: pointer to packed null-terminated argv data (0 = no args).
+/// `arg3`: total byte length of the packed argv data.
+/// `arg4`: pointer to packed null-terminated envp data (0 = no env).
+/// `arg5`: total byte length of the packed envp data.
+///
+/// The packed argv/envp format is the same as `SYS_PROCESS_SPAWN_EX`:
+/// null-terminated strings concatenated without padding.
+///
+/// The new process image reads argv/envp via `SYS_PROCESS_GET_ARGS`.
 ///
 /// On success this syscall does NOT return — the process begins
 /// executing the new binary's entry point.  On failure (e.g., invalid

@@ -28,7 +28,8 @@
 //!   in the child because the kernel's `SYS_PROCESS_SPAWN` does not yet
 //!   support fd inheritance.  Actions are stored correctly and will be
 //!   effective once the kernel-process zone adds fd passing to spawn.
-//! - `argv` and `envp` are not yet passed to the child process.
+//! - `posix_spawn` `argv`/`envp` are passed via `SYS_PROCESS_SPAWN_EX`.
+//!   `execve` `argv`/`envp` are passed via `SYS_PROCESS_EXEC` args 2–5.
 //! - `posix_spawnattr` flags are stored but only `POSIX_SPAWN_SETPGROUP`
 //!   is meaningfully supported (spawn attributes are recorded for
 //!   forward compatibility).
@@ -500,16 +501,23 @@ pub extern "C" fn posix_spawnp(
 // execve (proper implementation)
 // ---------------------------------------------------------------------------
 
+/// Maximum size for packed argv/envp buffers during exec.
+const EXEC_PACKED_MAX: usize = 128 * 1024;
+
 /// Replace the current process image with a new program.
 ///
 /// Reads the ELF binary at `path` and calls `SYS_PROCESS_EXEC` to
 /// replace the current process.  On success, this function does not
 /// return.  On failure, returns -1 with errno set.
+///
+/// `argv` and `envp` are null-terminated arrays of null-terminated C
+/// strings.  They are packed into contiguous buffers and passed to the
+/// kernel so the new binary can read them via `SYS_PROCESS_GET_ARGS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn execve(
     path: *const u8,
-    _argv: *const *const u8,
-    _envp: *const *const u8,
+    argv: *const *const u8,
+    envp: *const *const u8,
 ) -> i32 {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -534,11 +542,23 @@ pub extern "C" fn execve(
         }
     };
 
-    // Replace the current process image.
-    let ret = syscall2(
+    // Pack argv into a contiguous null-terminated buffer.
+    let mut argv_buf = [0u8; EXEC_PACKED_MAX];
+    let argv_len = pack_cstring_array(argv, &mut argv_buf);
+
+    // Pack envp into a contiguous null-terminated buffer.
+    let mut envp_buf = [0u8; EXEC_PACKED_MAX];
+    let envp_len = pack_cstring_array(envp, &mut envp_buf);
+
+    // Replace the current process image with argv/envp.
+    let ret = syscall6(
         SYS_PROCESS_EXEC,
         buf_ptr as u64,
         data_size as u64,
+        if argv_len > 0 { argv_buf.as_ptr() as u64 } else { 0 },
+        argv_len as u64,
+        if envp_len > 0 { envp_buf.as_ptr() as u64 } else { 0 },
+        envp_len as u64,
     );
 
     // If we get here, exec failed.  Free the buffer (must use
@@ -546,6 +566,42 @@ pub extern "C" fn execve(
     let _ = mman::munmap(buf_ptr.cast::<core::ffi::c_void>(), alloc_size);
     let _ = errno::translate(ret);
     -1
+}
+
+/// Pack a null-terminated array of C strings into a contiguous buffer.
+///
+/// Each string is copied with its null terminator.  Returns the total
+/// byte length written.  If `array` is null, returns 0.
+fn pack_cstring_array(array: *const *const u8, buf: &mut [u8]) -> usize {
+    if array.is_null() {
+        return 0;
+    }
+    let mut pos = 0usize;
+    let mut i = 0usize;
+    loop {
+        // SAFETY: Caller guarantees array is null-terminated.
+        let ptr = unsafe { *array.add(i) };
+        if ptr.is_null() {
+            break;
+        }
+        let slen = unsafe { crate::file::c_strlen_pub(ptr) };
+        // Need slen + 1 bytes (string + null terminator).
+        let needed = slen + 1;
+        if pos + needed > buf.len() {
+            break; // Truncate silently if buffer is full.
+        }
+        // SAFETY: ptr points to a valid C string of length slen.
+        unsafe {
+            core::ptr::copy_nonoverlapping(ptr, buf.as_mut_ptr().add(pos), slen);
+        }
+        // Explicit null terminator.
+        if let Some(b) = buf.get_mut(pos + slen) {
+            *b = 0;
+        }
+        pos += needed;
+        i += 1;
+    }
+    pos
 }
 
 // ---------------------------------------------------------------------------
@@ -573,7 +629,6 @@ pub extern "C" fn execvp(
 
     // If `file` contains a '/', use it directly.
     if contains_slash(file, file_len) {
-        // Pass null envp — execve ignores it currently anyway.
         return execve(file, argv, core::ptr::null());
     }
 

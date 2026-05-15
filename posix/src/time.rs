@@ -27,10 +27,31 @@ use crate::types::*;
 // Clock IDs
 // ---------------------------------------------------------------------------
 
-/// Monotonic clock (does not set wall time, cannot go backward).
-pub const CLOCK_MONOTONIC: ClockidT = 1;
 /// Realtime clock (wall clock, can be set).
 pub const CLOCK_REALTIME: ClockidT = 0;
+/// Monotonic clock (does not set wall time, cannot go backward).
+pub const CLOCK_MONOTONIC: ClockidT = 1;
+/// Process-wide CPU-time clock.
+///
+/// Programs use this to measure their own CPU usage.  We map it to
+/// CLOCK_MONOTONIC since we don't have per-process CPU accounting yet.
+pub const CLOCK_PROCESS_CPUTIME_ID: ClockidT = 2;
+/// Thread-specific CPU-time clock.
+///
+/// We map it to CLOCK_MONOTONIC (single-threaded, no per-thread
+/// accounting yet).
+pub const CLOCK_THREAD_CPUTIME_ID: ClockidT = 3;
+/// Like CLOCK_MONOTONIC but provides raw hardware time without NTP
+/// adjustments.  We use the same monotonic source for all clocks.
+pub const CLOCK_MONOTONIC_RAW: ClockidT = 4;
+/// Coarse (fast but lower resolution) realtime clock.  We return
+/// the same precision as CLOCK_REALTIME.
+pub const CLOCK_REALTIME_COARSE: ClockidT = 5;
+/// Coarse (fast but lower resolution) monotonic clock.
+pub const CLOCK_MONOTONIC_COARSE: ClockidT = 6;
+/// Time since boot (includes time spent suspended).  Maps to our
+/// monotonic clock (we don't track suspend time separately).
+pub const CLOCK_BOOTTIME: ClockidT = 7;
 
 // ---------------------------------------------------------------------------
 // timeval
@@ -128,8 +149,10 @@ pub extern "C" fn usleep(usec: u32) -> i32 {
 
 /// Get time from a specific clock.
 ///
-/// Currently only `CLOCK_MONOTONIC` is supported (maps to our
-/// native `SYS_CLOCK_MONOTONIC`).
+/// All supported clock IDs (`CLOCK_REALTIME`, `CLOCK_MONOTONIC`,
+/// `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`,
+/// `CLOCK_MONOTONIC_RAW`, `CLOCK_*_COARSE`, `CLOCK_BOOTTIME`)
+/// currently map to the same underlying monotonic clock.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -139,28 +162,40 @@ pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
         return -1;
     }
 
-    match clk_id {
-        CLOCK_MONOTONIC | CLOCK_REALTIME => {
-            let ns = syscall0(SYS_CLOCK_MONOTONIC);
-            if ns < 0 {
-                return errno::translate(ns) as i32;
-            }
+    if !is_valid_clock(clk_id) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
 
-            let ns = ns as u64;
-            unsafe {
-                #[allow(clippy::arithmetic_side_effects)]
-                {
-                    (*tp).tv_sec = (ns / 1_000_000_000) as TimeT;
-                    (*tp).tv_nsec = (ns % 1_000_000_000) as i64;
-                }
-            }
-            0
-        }
-        _ => {
-            errno::set_errno(errno::EINVAL);
-            -1
+    let ns = syscall0(SYS_CLOCK_MONOTONIC);
+    if ns < 0 {
+        return errno::translate(ns) as i32;
+    }
+
+    let ns = ns as u64;
+    unsafe {
+        #[allow(clippy::arithmetic_side_effects)]
+        {
+            (*tp).tv_sec = (ns / 1_000_000_000) as TimeT;
+            (*tp).tv_nsec = (ns % 1_000_000_000) as i64;
         }
     }
+    0
+}
+
+/// Check whether a clock ID is one we recognize.
+fn is_valid_clock(clk_id: ClockidT) -> bool {
+    matches!(
+        clk_id,
+        CLOCK_REALTIME
+            | CLOCK_MONOTONIC
+            | CLOCK_PROCESS_CPUTIME_ID
+            | CLOCK_THREAD_CPUTIME_ID
+            | CLOCK_MONOTONIC_RAW
+            | CLOCK_REALTIME_COARSE
+            | CLOCK_MONOTONIC_COARSE
+            | CLOCK_BOOTTIME
+    )
 }
 
 /// Get the resolution of a clock.
@@ -168,22 +203,19 @@ pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
-    match clk_id {
-        CLOCK_MONOTONIC | CLOCK_REALTIME => {
-            if !res.is_null() {
-                // Our kernel timer resolution is 1 nanosecond (TSC-based).
-                unsafe {
-                    (*res).tv_sec = 0;
-                    (*res).tv_nsec = 1;
-                }
-            }
-            0
-        }
-        _ => {
-            errno::set_errno(errno::EINVAL);
-            -1
+    if !is_valid_clock(clk_id) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    if !res.is_null() {
+        // Our kernel timer resolution is 1 nanosecond (TSC-based).
+        unsafe {
+            (*res).tv_sec = 0;
+            (*res).tv_nsec = 1;
         }
     }
+    0
 }
 
 /// Set the clock.
@@ -218,7 +250,7 @@ pub extern "C" fn clock_nanosleep(
         return errno::EINVAL;
     }
 
-    if clk_id != CLOCK_MONOTONIC && clk_id != CLOCK_REALTIME {
+    if !is_valid_clock(clk_id) {
         return errno::EINVAL;
     }
 
@@ -2758,6 +2790,29 @@ mod tests {
     fn test_clock_id_values() {
         assert_eq!(CLOCK_REALTIME, 0);
         assert_eq!(CLOCK_MONOTONIC, 1);
+        assert_eq!(CLOCK_PROCESS_CPUTIME_ID, 2);
+        assert_eq!(CLOCK_THREAD_CPUTIME_ID, 3);
+        assert_eq!(CLOCK_MONOTONIC_RAW, 4);
+        assert_eq!(CLOCK_REALTIME_COARSE, 5);
+        assert_eq!(CLOCK_MONOTONIC_COARSE, 6);
+        assert_eq!(CLOCK_BOOTTIME, 7);
+    }
+
+    #[test]
+    fn test_is_valid_clock() {
+        // All defined clock IDs should be valid.
+        assert!(is_valid_clock(CLOCK_REALTIME));
+        assert!(is_valid_clock(CLOCK_MONOTONIC));
+        assert!(is_valid_clock(CLOCK_PROCESS_CPUTIME_ID));
+        assert!(is_valid_clock(CLOCK_THREAD_CPUTIME_ID));
+        assert!(is_valid_clock(CLOCK_MONOTONIC_RAW));
+        assert!(is_valid_clock(CLOCK_REALTIME_COARSE));
+        assert!(is_valid_clock(CLOCK_MONOTONIC_COARSE));
+        assert!(is_valid_clock(CLOCK_BOOTTIME));
+        // Invalid clock IDs should be rejected.
+        assert!(!is_valid_clock(-1));
+        assert!(!is_valid_clock(99));
+        assert!(!is_valid_clock(8));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Posix Zone — Blocked Work Items
 
-The posix zone is fully audited and tested (2700 tests, all pass).
+The posix zone is fully audited and tested (2744 tests, all pass).
 All remaining implementation work is blocked on kernel features
 built by other zones. Here's exactly what's needed:
 
@@ -122,7 +122,7 @@ CLK_TCK, etc.) but programs like `ps`, `top`, `free` need /proc.
 
 ## What the posix session accomplished (for context)
 
-- 2722 tests (all pass), up from ~2200 at start
+- 2744 tests (all pass), up from ~2200 at start
 - Fixed lgamma_r sign inversion bug
 - Improved atan accuracy from 2% to 1e-15 relative error
 - Exhaustive audit of all 58 source files
@@ -135,3 +135,13 @@ CLK_TCK, etc.) but programs like `ps`, `top`, `free` need /proc.
   `unlinkat`, `renameat`, `mkdirat`, `readlinkat`, `symlinkat`,
   `linkat`, `fchmodat`, `fchownat`, `faccessat`) — relative paths
   resolved against stored dirfd path
+- Implemented `fdopendir()` via fd-path tracking, `dirfd()` returns
+  owned fd, `closedir()` closes owned fd
+- Implemented `setdomainname()`/`getdomainname()` with mutable buffer
+- Implemented `umask()` with proper state tracking (stores mask,
+  returns previous value, masks to low 9 bits)
+- Fixed `sched_get_priority_min()` to return 1 for FIFO/RR (matching
+  Linux)
+- Eliminated all hardcoded constant drift: `OPEN_MAX`, `RLIMIT_NOFILE`,
+  `HOST_NAME_MAX`, `DEFAULT_NAMEMAX`, pathconf values all reference
+  their source definitions (`fdtable::MAX_FDS`, `limits::*`)

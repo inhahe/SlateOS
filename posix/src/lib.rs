@@ -70,6 +70,9 @@
 //! - **Formatted Messages**: `fmtmsg` (structured error/warning display)
 //! - **Message Catalogs**: `catopen`, `catgets`, `catclose` (stubs —
 //!   always falls back to default strings)
+//! - **Database Operations** (stubs): `dbm_open`, `dbm_close`,
+//!   `dbm_store`, `dbm_fetch`, `dbm_delete`, `dbm_firstkey`,
+//!   `dbm_nextkey`, `dbm_error`, `dbm_clearerr`
 //! - **Password Hashing**: `crypt`, `crypt_r` (stub — returns
 //!   `$0$<key>`), `encrypt`, `setkey` (DES stubs — ENOSYS)
 //! - **Language Information**: `nl_langinfo`, `nl_langinfo_l`
@@ -239,6 +242,7 @@ pub mod langinfo;
 pub mod locale;
 pub mod mman;
 pub mod monetary;
+pub mod ndbm;
 pub mod nl_types;
 pub mod mqueue;
 pub mod pipe;

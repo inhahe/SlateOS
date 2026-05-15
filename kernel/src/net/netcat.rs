@@ -132,18 +132,18 @@ pub fn tcp_listen(port: u16) -> KernelResult<(usize, Ipv4Addr, u16)> {
                     // Get peer address.
                     let peer = super::tcp::peer_addr(conn_handle)
                         .unwrap_or((Ipv4Addr::UNSPECIFIED, 0));
-                    super::tcp::close_listener(listener);
+                    let _ = super::tcp::close_listener(listener);
                     return Ok((conn_handle, peer.0, peer.1));
                 }
                 Err(e) => {
-                    super::tcp::close_listener(listener);
+                    let _ = super::tcp::close_listener(listener);
                     return Err(e);
                 }
             }
         }
     }
 
-    super::tcp::close_listener(listener);
+    let _ = super::tcp::close_listener(listener);
     Err(KernelError::TimedOut)
 }
 
@@ -344,8 +344,9 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 3: Stats accessible ---
     {
         let s = stats();
-        assert!(s.tcp_connects >= 0 || s.tcp_connects == 0, "connects valid");
-        assert!(s.bytes_sent >= 0 || s.bytes_sent == 0, "bytes valid");
+        // Verify counters are accessible and u64-typed.
+        let _ = s.tcp_connects;
+        let _ = s.bytes_sent;
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[nc]   test 3 (stats) PASSED");

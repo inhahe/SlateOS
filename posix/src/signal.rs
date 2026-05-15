@@ -1713,4 +1713,69 @@ mod tests {
         pthread_sigmask(SIG_SETMASK, &raw const old, core::ptr::null_mut());
     }
 
+    // -----------------------------------------------------------------------
+    // psignal
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_psignal_null_prefix() {
+        // psignal with null prefix should print just the signal description.
+        unsafe { psignal(crate::signal::SIGTERM, core::ptr::null()); }
+    }
+
+    #[test]
+    fn test_psignal_empty_prefix() {
+        // Empty prefix → no "prefix: " part, just signal description.
+        unsafe { psignal(crate::signal::SIGINT, b"\0".as_ptr()); }
+    }
+
+    #[test]
+    fn test_psignal_with_prefix() {
+        unsafe { psignal(crate::signal::SIGKILL, b"test\0".as_ptr()); }
+    }
+
+    #[test]
+    fn test_psignal_invalid_signal() {
+        // Invalid signal number should still not crash.
+        unsafe { psignal(9999, b"bad sig\0".as_ptr()); }
+    }
+
+    // -----------------------------------------------------------------------
+    // sigwait
+    // -----------------------------------------------------------------------
+
+    // Note: sigwait sleeps for 1 second so we don't test it by default.
+    // Just verify the function signature compiles and the return type is correct.
+
+    // -----------------------------------------------------------------------
+    // __libc_current_sigrtmin / __libc_current_sigrtmax
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sigrtmin_function() {
+        let val = __libc_current_sigrtmin();
+        assert_eq!(val, 32);
+        assert_eq!(val, SIGRTMIN);
+    }
+
+    #[test]
+    fn test_sigrtmax_function() {
+        let val = __libc_current_sigrtmax();
+        assert_eq!(val, 64);
+        assert_eq!(val, SIGRTMAX);
+    }
+
+    #[test]
+    fn test_sigrtmin_less_than_sigrtmax() {
+        assert!(
+            __libc_current_sigrtmin() < __libc_current_sigrtmax(),
+            "SIGRTMIN must be less than SIGRTMAX"
+        );
+    }
+
+    #[test]
+    fn test_sigrt_range_is_nonempty() {
+        let range = __libc_current_sigrtmax() - __libc_current_sigrtmin();
+        assert!(range > 0, "realtime signal range must be nonempty");
+    }
 }

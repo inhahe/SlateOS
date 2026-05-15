@@ -3780,4 +3780,358 @@ mod tests {
         let val = unsafe { strtol(s.as_ptr(), &raw mut end, 0) };
         assert_eq!(val, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // strtoll / strtoull — LP64 aliases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strtoll_positive() {
+        let s = b"12345\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtoll(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, 12345);
+    }
+
+    #[test]
+    fn test_strtoll_negative() {
+        let s = b"-42\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtoll(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, -42);
+    }
+
+    #[test]
+    fn test_strtoull_positive() {
+        let s = b"999\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtoull(s.as_ptr(), &raw mut end, 10) };
+        assert_eq!(val, 999);
+    }
+
+    #[test]
+    fn test_strtoull_hex() {
+        let s = b"0xFF\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtoull(s.as_ptr(), &raw mut end, 0) };
+        assert_eq!(val, 255);
+    }
+
+    // -----------------------------------------------------------------------
+    // strtold — LP64 alias for strtod
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_strtold_basic() {
+        let s = b"3.14\0";
+        let mut end: *const u8 = core::ptr::null();
+        let val = unsafe { strtold(s.as_ptr(), &raw mut end) };
+        assert!((val - 3.14).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_strtold_null() {
+        let val = unsafe { strtold(core::ptr::null(), core::ptr::null_mut()) };
+        assert_eq!(val, 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // atof
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_atof_basic() {
+        let val = unsafe { atof(b"2.5\0".as_ptr()) };
+        assert!((val - 2.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_atof_negative() {
+        let val = unsafe { atof(b"-1.5\0".as_ptr()) };
+        assert!((val - (-1.5)).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_atof_zero() {
+        let val = unsafe { atof(b"0\0".as_ptr()) };
+        assert_eq!(val, 0.0);
+    }
+
+    #[test]
+    fn test_atof_with_exponent() {
+        let val = unsafe { atof(b"1e3\0".as_ptr()) };
+        assert!((val - 1000.0).abs() < 0.1);
+    }
+
+    // -----------------------------------------------------------------------
+    // srandom / random
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_srandom_random_deterministic() {
+        srandom(42);
+        let a = random();
+        srandom(42);
+        let b = random();
+        assert_eq!(a, b, "Same seed should produce same sequence");
+    }
+
+    #[test]
+    fn test_random_range() {
+        srandom(1);
+        for _ in 0..20 {
+            let val = random();
+            assert!(val >= 0, "random() must be non-negative");
+            assert!(val < (1_i64 << 31), "random() must be < 2^31");
+        }
+    }
+
+    #[test]
+    fn test_random_different_seeds_differ() {
+        srandom(1);
+        let a = random();
+        srandom(999);
+        let b = random();
+        assert_ne!(a, b, "Different seeds should produce different values");
+    }
+
+    // -----------------------------------------------------------------------
+    // initstate / setstate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_initstate_valid() {
+        let mut buf = [0u8; 256];
+        let ret = unsafe { initstate(42, buf.as_mut_ptr(), 256) };
+        assert!(!ret.is_null());
+        assert_eq!(ret, buf.as_mut_ptr());
+    }
+
+    #[test]
+    fn test_initstate_null_returns_null() {
+        let ret = unsafe { initstate(42, core::ptr::null_mut(), 256) };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_initstate_too_small_returns_null() {
+        let mut buf = [0u8; 4];
+        let ret = unsafe { initstate(42, buf.as_mut_ptr(), 4) };
+        assert!(ret.is_null(), "Buffer too small for initstate");
+    }
+
+    #[test]
+    fn test_setstate_returns_input() {
+        let mut buf = [0u8; 256];
+        let ret = unsafe { setstate(buf.as_mut_ptr()) };
+        assert_eq!(ret, buf.as_mut_ptr());
+    }
+
+    #[test]
+    fn test_setstate_null_returns_null() {
+        let ret = unsafe { setstate(core::ptr::null_mut()) };
+        assert!(ret.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // drand48 / lrand48 / mrand48 / srand48 / seed48
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_srand48_drand48_deterministic() {
+        srand48(123);
+        let a = drand48();
+        srand48(123);
+        let b = drand48();
+        assert_eq!(a, b, "Same seed should produce same drand48 value");
+    }
+
+    #[test]
+    fn test_drand48_range() {
+        srand48(42);
+        for _ in 0..20 {
+            let val = drand48();
+            assert!(val >= 0.0, "drand48 must be >= 0");
+            assert!(val < 1.0, "drand48 must be < 1");
+        }
+    }
+
+    #[test]
+    fn test_lrand48_range() {
+        srand48(42);
+        for _ in 0..20 {
+            let val = lrand48();
+            assert!(val >= 0, "lrand48 must be non-negative");
+            assert!(val < (1_i64 << 31), "lrand48 must be < 2^31");
+        }
+    }
+
+    #[test]
+    fn test_mrand48_signed() {
+        // mrand48 returns values in [-2^31, 2^31).
+        srand48(42);
+        // Just verify it doesn't crash and produces i64 values.
+        for _ in 0..20 {
+            let _val = mrand48();
+        }
+    }
+
+    #[test]
+    fn test_seed48_returns_old_seed() {
+        srand48(0);
+        let seed: [u16; 3] = [0x1234, 0x5678, 0x9ABC];
+        let old = seed48(seed.as_ptr());
+        assert!(!old.is_null(), "seed48 must return non-null old seed");
+    }
+
+    #[test]
+    fn test_seed48_null_returns_old_seed() {
+        let old = seed48(core::ptr::null());
+        assert!(!old.is_null(), "seed48(NULL) must still return old seed pointer");
+    }
+
+    #[test]
+    fn test_seed48_updates_state() {
+        let seed: [u16; 3] = [1, 2, 3];
+        seed48(seed.as_ptr());
+        let a = drand48();
+
+        // Re-seed with the same value.
+        seed48(seed.as_ptr());
+        let b = drand48();
+        assert_eq!(a, b, "Re-seeding with same values should reproduce sequence");
+    }
+
+    // -----------------------------------------------------------------------
+    // nrand48 / erand48 / jrand48
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_nrand48_caller_state() {
+        let mut xsubi: [u16; 3] = [1, 2, 3];
+        let val = nrand48(xsubi.as_mut_ptr());
+        assert!(val >= 0, "nrand48 must be non-negative");
+        assert!(val < (1_i64 << 31), "nrand48 must be < 2^31");
+        // State should have been updated.
+        assert!(
+            xsubi != [1, 2, 3],
+            "nrand48 must update caller state"
+        );
+    }
+
+    #[test]
+    fn test_nrand48_null_returns_zero() {
+        assert_eq!(nrand48(core::ptr::null_mut()), 0);
+    }
+
+    #[test]
+    fn test_erand48_range() {
+        let mut xsubi: [u16; 3] = [10, 20, 30];
+        let val = erand48(xsubi.as_mut_ptr());
+        assert!(val >= 0.0, "erand48 must be >= 0");
+        assert!(val < 1.0, "erand48 must be < 1");
+    }
+
+    #[test]
+    fn test_erand48_null_returns_zero() {
+        assert_eq!(erand48(core::ptr::null_mut()), 0.0);
+    }
+
+    #[test]
+    fn test_erand48_deterministic() {
+        let mut a: [u16; 3] = [100, 200, 300];
+        let mut b: [u16; 3] = [100, 200, 300];
+        let va = erand48(a.as_mut_ptr());
+        let vb = erand48(b.as_mut_ptr());
+        assert_eq!(va, vb, "Same state should produce same erand48 value");
+        assert_eq!(a, b, "States should match after identical sequences");
+    }
+
+    #[test]
+    fn test_jrand48_caller_state() {
+        let mut xsubi: [u16; 3] = [5, 10, 15];
+        let _val = jrand48(xsubi.as_mut_ptr());
+        // jrand48 returns signed values and updates state.
+        assert!(
+            xsubi != [5, 10, 15],
+            "jrand48 must update caller state"
+        );
+    }
+
+    #[test]
+    fn test_jrand48_null_returns_zero() {
+        assert_eq!(jrand48(core::ptr::null_mut()), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // mktemp / mkstemp / mkostemp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mktemp_null_returns_null() {
+        let ret = unsafe { mktemp(core::ptr::null_mut()) };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_mktemp_too_short() {
+        let mut tmpl = *b"XX\0";
+        crate::errno::set_errno(0);
+        let ret = unsafe { mktemp(tmpl.as_mut_ptr()) };
+        // Should fail — template needs at least 6 trailing X's.
+        assert!(ret.is_null() || unsafe { *ret } == 0);
+    }
+
+    #[test]
+    fn test_mkstemp_null_returns_error() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { mkstemp(core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mkstemp_too_short_template() {
+        let mut tmpl = *b"ab\0";
+        crate::errno::set_errno(0);
+        let ret = unsafe { mkstemp(tmpl.as_mut_ptr()) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mkostemp_null_returns_error() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { mkostemp(core::ptr::null_mut(), 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // tmpfile
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tmpfile_no_crash() {
+        // tmpfile tries to create a temp file. On test host it may or
+        // may not succeed depending on filesystem access.
+        let ret = tmpfile();
+        if !ret.is_null() {
+            // If it succeeded, close the FILE*.
+            crate::stdio::fclose(ret);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // system
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_system_null_checks_shell() {
+        // system(NULL) checks if a command processor is available.
+        // On test host, /bin/sh might not exist → returns 0.
+        let ret = system(core::ptr::null());
+        // Result is either 0 (no shell) or non-zero (shell available).
+        let _ = ret;
+    }
 }

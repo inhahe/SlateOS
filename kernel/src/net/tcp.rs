@@ -5062,6 +5062,7 @@ pub fn self_test() -> KernelResult<()> {
     test_try_accept_empty()?;
     test_parse_tcp_options()?;
     test_sack_blocks()?;
+    test_seq_lt()?;
 
     crate::serial_println!("[tcp] TCP self-test PASSED");
     Ok(())
@@ -5284,5 +5285,69 @@ fn test_sack_blocks() -> KernelResult<()> {
     }
 
     crate::serial_println!("[tcp]   SACK block management: OK");
+    Ok(())
+}
+
+/// Test 6: seq_lt() modular 32-bit sequence number comparison.
+fn test_seq_lt() -> KernelResult<()> {
+    // Basic ordering.
+    if !seq_lt(0, 1) {
+        crate::serial_println!("[tcp]   FAIL: seq_lt(0, 1) expected true");
+        return Err(KernelError::InternalError);
+    }
+    if seq_lt(1, 0) {
+        crate::serial_println!("[tcp]   FAIL: seq_lt(1, 0) expected false");
+        return Err(KernelError::InternalError);
+    }
+    // Equal values: a < b is false when a == b.
+    if seq_lt(100, 100) {
+        crate::serial_println!("[tcp]   FAIL: seq_lt(100, 100) expected false");
+        return Err(KernelError::InternalError);
+    }
+
+    // Wrap-around: MAX is before 0 in modular arithmetic (distance 1).
+    if !seq_lt(u32::MAX, 0) {
+        crate::serial_println!("[tcp]   FAIL: seq_lt(MAX, 0) expected true");
+        return Err(KernelError::InternalError);
+    }
+    if seq_lt(0, u32::MAX) {
+        crate::serial_println!("[tcp]   FAIL: seq_lt(0, MAX) expected false");
+        return Err(KernelError::InternalError);
+    }
+
+    // Wrap-around near the midpoint: 2^31-1 apart is the maximum valid
+    // "less than" distance.
+    let a = 1_000_000_000u32;
+    let b = a.wrapping_add(0x7FFF_FFFF); // a + 2^31 - 1
+    if !seq_lt(a, b) {
+        crate::serial_println!("[tcp]   FAIL: seq_lt(a, a+2^31-1) expected true");
+        return Err(KernelError::InternalError);
+    }
+
+    // Exactly 2^31 apart: (a - b) as i32 == i32::MIN, which is < 0,
+    // so seq_lt returns true (by convention this edge case goes to "less").
+    let c = a.wrapping_add(0x8000_0000);
+    if !seq_lt(a, c) {
+        crate::serial_println!("[tcp]   FAIL: seq_lt(a, a+2^31) expected true");
+        return Err(KernelError::InternalError);
+    }
+
+    // Just past halfway: 2^31 + 1 apart means b is "before" a.
+    let d = a.wrapping_add(0x8000_0001);
+    if seq_lt(a, d) {
+        crate::serial_println!("[tcp]   FAIL: seq_lt(a, a+2^31+1) expected false");
+        return Err(KernelError::InternalError);
+    }
+
+    // OOO guard scenario: seq behind ooo_base near wrap boundary.
+    let ooo_base: u32 = 10;
+    let stale_seq: u32 = u32::MAX.wrapping_sub(5); // 0xFFFF_FFFA
+    // stale_seq is "before" ooo_base in sequence space.
+    if !seq_lt(stale_seq, ooo_base) {
+        crate::serial_println!("[tcp]   FAIL: stale segment not detected as behind ooo_base");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[tcp]   seq_lt modular comparison: OK");
     Ok(())
 }

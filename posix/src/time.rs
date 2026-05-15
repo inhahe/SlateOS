@@ -3826,4 +3826,299 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
+
+    // -- timer_create / timer_settime / timer_gettime / timer_delete --
+
+    /// Helper: reset TIMER_TABLE to empty for isolation between tests.
+    fn reset_timers() {
+        // SAFETY: single-threaded test, no concurrent access.
+        unsafe {
+            let table = core::ptr::addr_of_mut!(TIMER_TABLE).as_mut().unwrap();
+            for slot in table.iter_mut() {
+                *slot = None;
+            }
+        }
+    }
+
+    #[test]
+    fn test_timer_create_basic() {
+        reset_timers();
+        let mut id: TimerT = 999;
+        let ret = timer_create(CLOCK_MONOTONIC, core::ptr::null(), &raw mut id);
+        assert_eq!(ret, 0);
+        assert_eq!(id, 0); // First slot.
+        // Clean up.
+        timer_delete(id);
+    }
+
+    #[test]
+    fn test_timer_create_multiple() {
+        reset_timers();
+        let mut id1: TimerT = 0;
+        let mut id2: TimerT = 0;
+        assert_eq!(timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id1), 0);
+        assert_eq!(timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id2), 0);
+        assert_ne!(id1, id2, "two timers should get distinct IDs");
+        timer_delete(id1);
+        timer_delete(id2);
+    }
+
+    #[test]
+    fn test_timer_create_null_timerid() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timer_create_reuse_deleted_slot() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        assert_eq!(timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id), 0);
+        let first_id = id;
+        assert_eq!(timer_delete(id), 0);
+
+        // Create again — should reuse slot 0.
+        assert_eq!(timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id), 0);
+        assert_eq!(id, first_id, "deleted slot should be reused");
+        timer_delete(id);
+    }
+
+    #[test]
+    fn test_timer_delete_invalid() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        // Delete a timer that was never created → EINVAL.
+        let ret = timer_delete(0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timer_delete_double_delete() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        assert_eq!(timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id), 0);
+        assert_eq!(timer_delete(id), 0);
+        // Second delete should fail.
+        crate::errno::set_errno(0);
+        assert_eq!(timer_delete(id), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timer_settime_basic() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+
+        let new_val = Itimerspec {
+            it_interval: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 5, tv_nsec: 0 },
+        };
+        let ret = timer_settime(id, 0, &raw const new_val, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        timer_delete(id);
+    }
+
+    #[test]
+    fn test_timer_settime_returns_old_value() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+
+        // Set initial value.
+        let val1 = Itimerspec {
+            it_interval: Timespec { tv_sec: 2, tv_nsec: 100 },
+            it_value: Timespec { tv_sec: 10, tv_nsec: 200 },
+        };
+        timer_settime(id, 0, &raw const val1, core::ptr::null_mut());
+
+        // Set new value and retrieve old.
+        let val2 = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        let mut old = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        let ret = timer_settime(id, 0, &raw const val2, &raw mut old);
+        assert_eq!(ret, 0);
+        assert_eq!(old.it_interval.tv_sec, 2);
+        assert_eq!(old.it_interval.tv_nsec, 100);
+        assert_eq!(old.it_value.tv_sec, 10);
+        assert_eq!(old.it_value.tv_nsec, 200);
+        timer_delete(id);
+    }
+
+    #[test]
+    fn test_timer_settime_null_new_value() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, 0, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        timer_delete(id);
+    }
+
+    #[test]
+    fn test_timer_settime_invalid_timer() {
+        reset_timers();
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(0, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timer_gettime_retrieves_set_value() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 3, tv_nsec: 500 },
+            it_value: Timespec { tv_sec: 7, tv_nsec: 999 },
+        };
+        timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+
+        let mut out = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        let ret = timer_gettime(id, &raw mut out);
+        assert_eq!(ret, 0);
+        assert_eq!(out.it_interval.tv_sec, 3);
+        assert_eq!(out.it_interval.tv_nsec, 500);
+        assert_eq!(out.it_value.tv_sec, 7);
+        assert_eq!(out.it_value.tv_nsec, 999);
+        timer_delete(id);
+    }
+
+    #[test]
+    fn test_timer_gettime_null_curr_value() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        crate::errno::set_errno(0);
+        let ret = timer_gettime(id, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        timer_delete(id);
+    }
+
+    #[test]
+    fn test_timer_gettime_invalid_timer() {
+        reset_timers();
+        let mut out = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_gettime(0, &raw mut out);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timer_getoverrun_returns_zero() {
+        assert_eq!(timer_getoverrun(0), 0);
+        assert_eq!(timer_getoverrun(99), 0);
+    }
+
+    // -- setitimer / getitimer --
+
+    #[test]
+    fn test_setitimer_valid_which() {
+        let val = Itimerval {
+            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_value: Timeval { tv_sec: 1, tv_usec: 0 },
+        };
+        assert_eq!(setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut()), 0);
+        assert_eq!(setitimer(ITIMER_VIRTUAL, &raw const val, core::ptr::null_mut()), 0);
+        assert_eq!(setitimer(ITIMER_PROF, &raw const val, core::ptr::null_mut()), 0);
+    }
+
+    #[test]
+    fn test_setitimer_invalid_which() {
+        let val = Itimerval {
+            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+        };
+        crate::errno::set_errno(0);
+        assert_eq!(setitimer(99, &raw const val, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setitimer_null_new_value() {
+        crate::errno::set_errno(0);
+        assert_eq!(setitimer(ITIMER_REAL, core::ptr::null(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_setitimer_returns_zeroed_old() {
+        let val = Itimerval {
+            it_interval: Timeval { tv_sec: 1, tv_usec: 100 },
+            it_value: Timeval { tv_sec: 5, tv_usec: 200 },
+        };
+        let mut old = Itimerval {
+            it_interval: Timeval { tv_sec: 99, tv_usec: 99 },
+            it_value: Timeval { tv_sec: 99, tv_usec: 99 },
+        };
+        assert_eq!(setitimer(ITIMER_REAL, &raw const val, &raw mut old), 0);
+        assert_eq!(old.it_interval.tv_sec, 0);
+        assert_eq!(old.it_interval.tv_usec, 0);
+        assert_eq!(old.it_value.tv_sec, 0);
+        assert_eq!(old.it_value.tv_usec, 0);
+    }
+
+    #[test]
+    fn test_getitimer_valid_which() {
+        let mut val = Itimerval {
+            it_interval: Timeval { tv_sec: 99, tv_usec: 99 },
+            it_value: Timeval { tv_sec: 99, tv_usec: 99 },
+        };
+        assert_eq!(getitimer(ITIMER_REAL, &raw mut val), 0);
+        assert_eq!(val.it_interval.tv_sec, 0);
+        assert_eq!(val.it_value.tv_sec, 0);
+    }
+
+    #[test]
+    fn test_getitimer_invalid_which() {
+        let mut val = Itimerval {
+            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+        };
+        crate::errno::set_errno(0);
+        assert_eq!(getitimer(-1, &raw mut val), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getitimer_null_curr_value() {
+        crate::errno::set_errno(0);
+        assert_eq!(getitimer(ITIMER_REAL, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- Itimerval / Itimerspec constants --
+
+    #[test]
+    fn test_itimer_constants() {
+        assert_eq!(ITIMER_REAL, 0);
+        assert_eq!(ITIMER_VIRTUAL, 1);
+        assert_eq!(ITIMER_PROF, 2);
+    }
 }

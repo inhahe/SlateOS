@@ -1892,10 +1892,11 @@ impl FatFs {
             return Err(KernelError::DiskFull);
         }
 
+        // Use saturating_sub to avoid underflow panic on corrupted BPBs.
         let data_sectors = self.bpb.total_sectors()
-            - u32::from(self.bpb.reserved_sectors)
-            - u32::from(self.bpb.num_fats) * self.bpb.sectors_per_fat()
-            - self.bpb.root_dir_sectors();
+            .saturating_sub(u32::from(self.bpb.reserved_sectors))
+            .saturating_sub(u32::from(self.bpb.num_fats).saturating_mul(self.bpb.sectors_per_fat()))
+            .saturating_sub(self.bpb.root_dir_sectors());
         let total_clusters = data_sectors / u32::from(self.bpb.sectors_per_cluster);
 
         let bps = u32::from(self.bpb.bytes_per_sector);

@@ -357,7 +357,7 @@ pub fn alloc_blocks(
         let gd = group_descs.get_mut(group_idx).ok_or(KernelError::IoError)?;
 
         let free = group_desc_free_blocks(gd, sb.is_64bit);
-        if (free as u32) < count {
+        if free < u64::from(count) {
             continue;
         }
 
@@ -596,7 +596,8 @@ fn group_desc_inode_bitmap(gd: &Ext4GroupDesc, is_64bit: bool) -> u64 {
 fn group_desc_free_blocks(gd: &Ext4GroupDesc, is_64bit: bool) -> u64 {
     let lo = u64::from(gd.bg_free_blocks_count_lo);
     if is_64bit {
-        lo | (u64::from(gd.bg_free_blocks_count_hi) << 32)
+        // lo is bits 0-15, hi is bits 16-31 — combined 32-bit count.
+        lo | (u64::from(gd.bg_free_blocks_count_hi) << 16)
     } else {
         lo
     }
@@ -606,7 +607,8 @@ fn group_desc_free_blocks(gd: &Ext4GroupDesc, is_64bit: bool) -> u64 {
 fn group_desc_free_inodes(gd: &Ext4GroupDesc, is_64bit: bool) -> u64 {
     let lo = u64::from(gd.bg_free_inodes_count_lo);
     if is_64bit {
-        lo | (u64::from(gd.bg_free_inodes_count_hi) << 32)
+        // lo is bits 0-15, hi is bits 16-31 — combined 32-bit count.
+        lo | (u64::from(gd.bg_free_inodes_count_hi) << 16)
     } else {
         lo
     }
@@ -618,7 +620,7 @@ fn decrement_gd_free_blocks(gd: &mut Ext4GroupDesc, is_64bit: bool) {
     let new_val = current.saturating_sub(1);
     gd.bg_free_blocks_count_lo = new_val as u16;
     if is_64bit {
-        gd.bg_free_blocks_count_hi = (new_val >> 32) as u16;
+        gd.bg_free_blocks_count_hi = (new_val >> 16) as u16;
     }
 }
 
@@ -628,7 +630,7 @@ fn increment_gd_free_blocks(gd: &mut Ext4GroupDesc, is_64bit: bool) {
     let new_val = current.saturating_add(1);
     gd.bg_free_blocks_count_lo = new_val as u16;
     if is_64bit {
-        gd.bg_free_blocks_count_hi = (new_val >> 32) as u16;
+        gd.bg_free_blocks_count_hi = (new_val >> 16) as u16;
     }
 }
 
@@ -638,7 +640,7 @@ fn decrement_gd_free_inodes(gd: &mut Ext4GroupDesc, is_64bit: bool) {
     let new_val = current.saturating_sub(1);
     gd.bg_free_inodes_count_lo = new_val as u16;
     if is_64bit {
-        gd.bg_free_inodes_count_hi = (new_val >> 32) as u16;
+        gd.bg_free_inodes_count_hi = (new_val >> 16) as u16;
     }
 }
 
@@ -648,7 +650,7 @@ fn increment_gd_free_inodes(gd: &mut Ext4GroupDesc, is_64bit: bool) {
     let new_val = current.saturating_add(1);
     gd.bg_free_inodes_count_lo = new_val as u16;
     if is_64bit {
-        gd.bg_free_inodes_count_hi = (new_val >> 32) as u16;
+        gd.bg_free_inodes_count_hi = (new_val >> 16) as u16;
     }
 }
 

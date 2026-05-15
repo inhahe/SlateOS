@@ -413,13 +413,21 @@ impl Journal {
         let tag_size: usize = 8;
         let mut tag_offset = header_size;
 
-        for (i, (fs_block, _)) in txn.blocks.iter().enumerate() {
-            if tag_offset.saturating_add(tag_size) > block_size {
-                // Descriptor block is full — would need a continuation.
-                // For simplicity, limit transactions to fit in one descriptor.
-                break;
-            }
+        // Verify all tags fit in one descriptor block.  A partial commit
+        // (some tags written, some silently dropped) would leave LAST_TAG
+        // unset and cause journal replay to misparse the transaction.
+        let required_space = header_size.saturating_add(
+            txn.blocks.len().saturating_mul(tag_size)
+        );
+        if required_space > block_size {
+            crate::serial_println!(
+                "[ext4-journal] Transaction too large: {} blocks, need {} bytes but descriptor block is {} bytes",
+                txn.blocks.len(), required_space, block_size,
+            );
+            return Err(KernelError::IoError);
+        }
 
+        for (i, (fs_block, _)) in txn.blocks.iter().enumerate() {
             let mut flags = tag_flags::SAME_UUID;
             if i == txn.blocks.len().saturating_sub(1) {
                 flags |= tag_flags::LAST_TAG;

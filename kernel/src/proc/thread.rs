@@ -120,8 +120,11 @@ pub fn spawn(
     }
 
     // Look up the process's PML4 so the scheduler can switch CR3
-    // on context switch.  pml4_phys == 0 means "kernel address space."
-    let pml4 = pcb::get_pml4(pid).unwrap_or(0);
+    // on context switch.  We verified the process exists above, so a
+    // missing PML4 is an internal inconsistency — never silently default
+    // to kernel address space (0) for a userspace process.
+    let pml4 = pcb::get_pml4(pid)
+        .ok_or(KernelError::InternalError)?;
 
     // Create the scheduler task.
     let task_id = sched::spawn(name, priority, entry, arg, pml4)?;

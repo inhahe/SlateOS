@@ -1875,6 +1875,22 @@ fn ooo_store(conn: &mut TcpConnection, seq: u32, data: &[u8]) {
         conn.ooo_base = conn.rcv_nxt;
     }
 
+    // Reject segments behind ooo_base (retransmissions/stale data).
+    // seq_lt uses signed 32-bit comparison, correctly handling wrap at 2^32.
+    if seq_lt(seq, conn.ooo_base) {
+        // Segment starts before our buffer base.  Compute how many bytes
+        // of data, if any, fall *after* ooo_base.
+        let behind = conn.ooo_base.wrapping_sub(seq) as usize;
+        if behind >= data.len() {
+            // Entire segment is behind ooo_base — discard.
+            return;
+        }
+        // Partial overlap: store only the portion at/after ooo_base.
+        // Recurse with the trimmed data starting at ooo_base.
+        ooo_store(conn, conn.ooo_base, &data[behind..]);
+        return;
+    }
+
     // Compute offset into the buffer.
     let offset = seq.wrapping_sub(conn.ooo_base) as usize;
     let end = offset.saturating_add(data.len());

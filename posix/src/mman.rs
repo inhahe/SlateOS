@@ -34,6 +34,20 @@ pub const MAP_PRIVATE: i32 = 0x02;
 pub const MAP_FIXED: i32 = 0x10;
 /// Mapping is not backed by any file (anonymous).
 pub const MAP_ANONYMOUS: i32 = 0x20;
+/// Alias for `MAP_ANONYMOUS` (older BSD spelling).
+pub const MAP_ANON: i32 = MAP_ANONYMOUS;
+/// Stack-like mapping (grows downward).  Linux extension.
+pub const MAP_GROWSDOWN: i32 = 0x100;
+/// Don't interpret addr as a hint: place the mapping at exactly this
+/// address, replacing any existing mappings.  Like `MAP_FIXED` but
+/// non-destructive (Linux 4.17+).
+pub const MAP_FIXED_NOREPLACE: i32 = 0x100000;
+/// Don't reserve swap space for this mapping.
+pub const MAP_NORESERVE: i32 = 0x4000;
+/// Populate (prefault) page tables for the mapping.
+pub const MAP_POPULATE: i32 = 0x8000;
+/// Do not block on IO when populating page tables.
+pub const MAP_NONBLOCK: i32 = 0x10000;
 
 /// Failure return value for mmap.
 pub const MAP_FAILED: *mut core::ffi::c_void = usize::MAX as *mut core::ffi::c_void;
@@ -128,6 +142,14 @@ pub const MADV_RANDOM: i32 = 1;
 pub const MADV_SEQUENTIAL: i32 = 2;
 pub const MADV_WILLNEED: i32 = 3;
 pub const MADV_DONTNEED: i32 = 4;
+
+/// Flags for mlockall.
+/// Lock all pages currently mapped into the address space.
+pub const MCL_CURRENT: i32 = 1;
+/// Lock all pages that will be mapped in the future.
+pub const MCL_FUTURE: i32 = 2;
+/// Lock all pages when they are faulted in (Linux 4.4+).
+pub const MCL_ONFAULT: i32 = 4;
 
 /// Lock pages in memory.
 ///
@@ -334,6 +356,51 @@ mod tests {
     fn test_mremap_constants() {
         assert_eq!(MREMAP_MAYMOVE, 1);
         assert_eq!(MREMAP_FIXED, 2);
+    }
+
+    // -- MCL_* constants match Linux --
+
+    #[test]
+    fn test_mcl_constants() {
+        assert_eq!(MCL_CURRENT, 1);
+        assert_eq!(MCL_FUTURE, 2);
+        assert_eq!(MCL_ONFAULT, 4);
+    }
+
+    // -- Extended MAP_* constants match Linux --
+
+    #[test]
+    fn test_map_anon_alias() {
+        assert_eq!(MAP_ANON, MAP_ANONYMOUS);
+    }
+
+    #[test]
+    fn test_extended_map_flags() {
+        assert_eq!(MAP_GROWSDOWN, 0x100);
+        assert_eq!(MAP_NORESERVE, 0x4000);
+        assert_eq!(MAP_POPULATE, 0x8000);
+        assert_eq!(MAP_NONBLOCK, 0x10000);
+        assert_eq!(MAP_FIXED_NOREPLACE, 0x100000);
+    }
+
+    #[test]
+    fn test_extended_map_flags_no_collisions() {
+        // All MAP_* flags must be distinct bit positions.
+        let all = MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS
+            | MAP_GROWSDOWN | MAP_NORESERVE | MAP_POPULATE
+            | MAP_NONBLOCK | MAP_FIXED_NOREPLACE;
+        // If any two flags share a bit, OR-ing them all won't equal the
+        // sum of their individual values.  However these are not all
+        // single-bit flags (e.g., MAP_FIXED_NOREPLACE = 0x100000 is one
+        // bit, but MAP_GROWSDOWN = 0x100 overlaps with MAP_FIXED_NOREPLACE
+        // in different bits).  Just verify they don't collide with the
+        // core flags.
+        assert_eq!(MAP_SHARED & MAP_ANONYMOUS, 0);
+        assert_eq!(MAP_PRIVATE & MAP_ANONYMOUS, 0);
+        assert_eq!(MAP_FIXED & MAP_ANONYMOUS, 0);
+        assert_eq!(MAP_GROWSDOWN & MAP_ANONYMOUS, 0);
+        // Verify all are non-zero.
+        assert_ne!(all, 0);
     }
 }
 

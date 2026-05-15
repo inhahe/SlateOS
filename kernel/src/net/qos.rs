@@ -694,6 +694,7 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 9: List rules ---
     {
         clear_rules();
+        // Ignore errors — test 9 verifies list_rules(); the rules are best-effort setup.
         add_rule(ClassifyMatch::DstPort(80), 2).ok();
         add_rule(ClassifyMatch::Protocol(1), 7).ok();
 

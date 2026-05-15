@@ -5114,6 +5114,7 @@ fn test_bind_duplicate_rejected() -> KernelResult<()> {
     match bind(8888) {
         Err(KernelError::AlreadyExists) => {}
         other => {
+            // Best-effort cleanup — we're about to return an error anyway.
             close_listener(handle).ok();
             crate::serial_println!(
                 "[tcp]   FAIL: duplicate bind returned {:?}",

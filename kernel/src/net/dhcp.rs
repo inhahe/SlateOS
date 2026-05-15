@@ -570,6 +570,7 @@ pub fn tick_renewal() {
                     "[dhcp] T1 expired ({}s elapsed) — initiating renewal",
                     elapsed_secs
                 );
+                // Renewal send failure is non-fatal — we'll retry on next tick.
                 let _ = send_renew(our_ip, server);
             }
         }
@@ -600,6 +601,7 @@ pub fn tick_renewal() {
                     "[dhcp] T2 expired ({}s elapsed) — escalating to rebind",
                     elapsed_secs
                 );
+                // Rebind send failure is non-fatal — we'll retry on next tick.
                 let _ = send_rebind(our_ip);
             } else {
                 // Still within T1..T2 — retransmit renewal REQUEST
@@ -619,6 +621,7 @@ pub fn tick_renewal() {
                         "[dhcp] RENEW retransmit #{} to {} for {}",
                         attempt, server, our_ip
                     );
+                    // Send failure is non-fatal — will retry with backoff.
                     let _ = send_renew(our_ip, server);
                 }
             }

@@ -222,6 +222,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 pub mod aio;
+pub mod alloca;
 pub mod assert;
 pub mod crt;
 pub mod crypt;
@@ -255,6 +256,7 @@ pub mod mman;
 pub mod monetary;
 pub mod ndbm;
 pub mod net_ethernet;
+pub mod net_if;
 pub mod net_route;
 pub mod netdb;
 pub mod netinet;
@@ -307,5 +309,7 @@ pub mod sys_param;
 pub mod sysexits;
 pub mod sys_random;
 pub mod tar;
+pub mod stropts;
 pub mod uchar;
 pub mod ulimit;
+pub mod values;

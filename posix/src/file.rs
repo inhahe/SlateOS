@@ -1520,6 +1520,8 @@ pub const AT_FDCWD: i32 = -100;
 pub const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
 /// AT_REMOVEDIR: unlinkat should remove a directory.
 pub const AT_REMOVEDIR: i32 = 0x200;
+/// AT_SYMLINK_FOLLOW: follow symlinks (e.g., in `linkat`).
+pub const AT_SYMLINK_FOLLOW: i32 = 0x400;
 /// AT_EMPTY_PATH: operate on the fd itself (Linux 2.6.39+).
 pub const AT_EMPTY_PATH: i32 = 0x1000;
 /// AT_EACCESS: check using effective IDs in faccessat.
@@ -2645,10 +2647,26 @@ mod tests {
         assert!(!is_absolute_path(core::ptr::null()));
     }
 
-    // -- AT_FDCWD constant --
+    // -- AT_* constants --
 
     #[test]
     fn test_at_fdcwd_value() {
         assert_eq!(AT_FDCWD, -100);
+    }
+
+    #[test]
+    fn test_at_flag_values() {
+        assert_eq!(AT_SYMLINK_NOFOLLOW, 0x100);
+        assert_eq!(AT_REMOVEDIR, 0x200);
+        assert_eq!(AT_SYMLINK_FOLLOW, 0x400);
+        assert_eq!(AT_EMPTY_PATH, 0x1000);
+        assert_eq!(AT_EACCESS, 0x200);
+    }
+
+    #[test]
+    fn test_at_symlink_flags_distinct() {
+        // AT_SYMLINK_NOFOLLOW and AT_SYMLINK_FOLLOW must be different bits.
+        assert_ne!(AT_SYMLINK_NOFOLLOW, AT_SYMLINK_FOLLOW);
+        assert_eq!(AT_SYMLINK_NOFOLLOW & AT_SYMLINK_FOLLOW, 0);
     }
 }

@@ -57,6 +57,14 @@ pub const TCSETS: u64 = 0x5402;
 pub const TCSETSW: u64 = 0x5403;
 /// Set termios after draining output and flushing input.
 pub const TCSETSF: u64 = 0x5404;
+/// Make this the controlling terminal (for session leaders).
+pub const TIOCSCTTY: u64 = 0x540E;
+/// Get foreground process group of terminal.
+pub const TIOCGPGRP: u64 = 0x540F;
+/// Set foreground process group of terminal.
+pub const TIOCSPGRP: u64 = 0x5410;
+/// Release controlling terminal.
+pub const TIOCNOTTY: u64 = 0x5422;
 
 // ---------------------------------------------------------------------------
 // tcsetattr `optional_actions` constants
@@ -270,6 +278,13 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
         FIONREAD => handle_fionread(entry.kind, entry.handle, arg),
         TCGETS => handle_tcgets(entry.kind, arg),
         TCSETS | TCSETSW | TCSETSF => handle_tcsets(entry.kind),
+        TIOCGPGRP => handle_tiocgpgrp(entry.kind, arg),
+        TIOCSPGRP => handle_tiocspgrp(entry.kind, arg),
+        TIOCSCTTY | TIOCNOTTY => {
+            // Accept silently — we don't have real TTY sessions yet.
+            // Many programs call these during startup/shutdown.
+            0
+        }
         _ => {
             errno::set_errno(errno::ENOTTY);
             -1
@@ -453,6 +468,45 @@ fn handle_tcsets(kind: HandleKind) -> i32 {
     }
     // Accept silently.
     0
+}
+
+/// TIOCGPGRP — get the foreground process group of a terminal.
+///
+/// Returns the PGID via the integer pointer `arg`.  Delegates to
+/// `tcgetpgrp()` which tracks the foreground PGID in process-local state.
+fn handle_tiocgpgrp(kind: HandleKind, arg: *mut u8) -> i32 {
+    if kind != HandleKind::Console {
+        errno::set_errno(errno::ENOTTY);
+        return -1;
+    }
+    if arg.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    let pgrp = crate::process::tcgetpgrp(0);
+    // SAFETY: arg must be at least sizeof(i32) per ioctl contract.
+    unsafe {
+        core::ptr::write_unaligned(arg.cast::<i32>(), pgrp);
+    }
+    0
+}
+
+/// TIOCSPGRP — set the foreground process group of a terminal.
+///
+/// Reads the PGID from the integer pointer `arg` and delegates to
+/// `tcsetpgrp()`.
+fn handle_tiocspgrp(kind: HandleKind, arg: *mut u8) -> i32 {
+    if kind != HandleKind::Console {
+        errno::set_errno(errno::ENOTTY);
+        return -1;
+    }
+    if arg.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: arg must be at least sizeof(i32) per ioctl contract.
+    let pgrp = unsafe { core::ptr::read_unaligned(arg.cast::<i32>()) };
+    crate::process::tcsetpgrp(0, pgrp)
 }
 
 // ---------------------------------------------------------------------------
@@ -914,6 +968,20 @@ mod tests {
         assert_eq!(TCSETS, 0x5402);
         assert_eq!(FIONBIO, 0x5421);
         assert_eq!(FIONREAD, 0x541B);
+    }
+
+    #[test]
+    fn test_tty_control_constants_match_linux() {
+        assert_eq!(TIOCSCTTY, 0x540E);
+        assert_eq!(TIOCGPGRP, 0x540F);
+        assert_eq!(TIOCSPGRP, 0x5410);
+        assert_eq!(TIOCNOTTY, 0x5422);
+    }
+
+    #[test]
+    fn test_tcsetsw_tcsetsf_values() {
+        assert_eq!(TCSETSW, 0x5403);
+        assert_eq!(TCSETSF, 0x5404);
     }
 
     // -- cfmakeraw tests --

@@ -75,6 +75,19 @@ pub fn probe(device: &str) -> bool {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[ext4] Running self-test...");
 
+    // --- Phase 0: Per-module unit tests (no I/O needed) ---
+    serial_println!("[ext4] Phase 0: Per-module unit tests...");
+    ondisk::self_test()?;
+    superblock::self_test()?;
+    io::self_test()?;
+    balloc::self_test()?;
+    journal::self_test()?;
+    fsck::self_test()?;
+    driver::self_test()?;
+    vfs_impl::self_test()?;
+    serial_println!("[ext4] Phase 0: All per-module tests passed.");
+
+    // --- Phase 1: Integration tests (need a mounted ext4 filesystem) ---
     // Check if an ext4 filesystem is mounted anywhere.
     let mounts = crate::fs::Vfs::mounts();
     let ext4_mount = mounts.iter().find(|(_, fs_type)| fs_type == "ext4");

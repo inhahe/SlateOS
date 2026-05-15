@@ -1542,6 +1542,242 @@ pub extern "C" fn getresgid(rgid: *mut GidT, egid: *mut GidT, sgid: *mut GidT) -
 }
 
 // ---------------------------------------------------------------------------
+// sysinfo — system information
+// ---------------------------------------------------------------------------
+
+/// System information structure (Linux `struct sysinfo`).
+#[repr(C)]
+pub struct Sysinfo {
+    /// Seconds since boot.
+    pub uptime: i64,
+    /// 1, 5, and 15 minute load averages (scaled by 65536).
+    pub loads: [u64; 3],
+    /// Total usable main memory size (bytes).
+    pub totalram: u64,
+    /// Available memory size (bytes).
+    pub freeram: u64,
+    /// Amount of shared memory (bytes).
+    pub sharedram: u64,
+    /// Memory used by buffers (bytes).
+    pub bufferram: u64,
+    /// Total swap space size (bytes).
+    pub totalswap: u64,
+    /// Swap space still available (bytes).
+    pub freeswap: u64,
+    /// Number of current processes.
+    pub procs: u16,
+    /// Padding.
+    _pad: [u8; 6],
+    /// Total high memory size (bytes).
+    pub totalhigh: u64,
+    /// Available high memory size (bytes).
+    pub freehigh: u64,
+    /// Memory unit size in bytes.
+    pub mem_unit: u32,
+    /// Padding to 64 bytes.
+    _padding: [u8; 4],
+}
+
+/// Return overall system statistics.
+///
+/// Fills the `Sysinfo` structure with synthetic values since our
+/// kernel doesn't track all of these yet.  The uptime is derived
+/// from the monotonic clock.
+///
+/// Returns 0 on success, -1 on error.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
+    if info.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // Get uptime from monotonic clock (nanoseconds → seconds).
+    let mono_ns = syscall0(SYS_CLOCK_MONOTONIC);
+    let uptime = if mono_ns > 0 { mono_ns / 1_000_000_000 } else { 0 };
+
+    // SAFETY: info is verified non-null.
+    unsafe {
+        let s = &mut *info;
+        s.uptime = uptime;
+        s.loads = [0; 3]; // No load tracking yet.
+        s.totalram = 256 * 1024 * 1024; // 256 MiB default.
+        s.freeram = 128 * 1024 * 1024;  // 128 MiB default.
+        s.sharedram = 0;
+        s.bufferram = 0;
+        s.totalswap = 0;
+        s.freeswap = 0;
+        s.procs = 1;
+        s._pad = [0; 6];
+        s.totalhigh = 0;
+        s.freehigh = 0;
+        s.mem_unit = 1;
+        s._padding = [0; 4];
+    }
+
+    0
+}
+
+// ---------------------------------------------------------------------------
+// mntent — mount table parsing
+// ---------------------------------------------------------------------------
+
+/// Mount table entry (matches `struct mntent`).
+#[repr(C)]
+pub struct Mntent {
+    /// Name of mounted filesystem.
+    pub mnt_fsname: *mut u8,
+    /// Filesystem path prefix (mount point).
+    pub mnt_dir: *mut u8,
+    /// Mount type.
+    pub mnt_type: *mut u8,
+    /// Mount options.
+    pub mnt_opts: *mut u8,
+    /// Dump frequency.
+    pub mnt_freq: i32,
+    /// Pass number for fsck.
+    pub mnt_passno: i32,
+}
+
+/// Open a mount table file for reading.
+///
+/// Stub: returns null (our OS doesn't have /etc/mtab or /proc/mounts
+/// yet).  Programs that need mount information should query the kernel
+/// directly via our mount-list syscall (when implemented).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn setmntent(_filename: *const u8, _type: *const u8) -> *mut u8 {
+    // Return null "FILE*" — signals no mount table available.
+    core::ptr::null_mut()
+}
+
+/// Read the next mount table entry.
+///
+/// Stub: returns null (no mount table).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getmntent(_stream: *mut u8) -> *mut Mntent {
+    core::ptr::null_mut()
+}
+
+/// Thread-safe version of `getmntent`.
+///
+/// Stub: returns null (no mount table).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getmntent_r(
+    _stream: *mut u8,
+    _mntbuf: *mut Mntent,
+    _buf: *mut u8,
+    _buflen: i32,
+) -> *mut Mntent {
+    core::ptr::null_mut()
+}
+
+/// Close a mount table file.
+///
+/// Stub: returns 1 (success) even though we never open anything.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn endmntent(_stream: *mut u8) -> i32 {
+    1 // glibc always returns 1.
+}
+
+/// Check if a mount option is present.
+///
+/// Stub: returns null (option not found).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn hasmntopt(_mnt: *const Mntent, _opt: *const u8) -> *mut u8 {
+    core::ptr::null_mut()
+}
+
+// ---------------------------------------------------------------------------
+// personality — process execution domain
+// ---------------------------------------------------------------------------
+
+/// Set the process execution domain.
+///
+/// Stub: if `persona` is 0xFFFFFFFF, return current personality (0).
+/// Otherwise accept and return 0 (previous personality).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn personality(persona: u64) -> i32 {
+    if persona == 0xFFFF_FFFF {
+        // Query current personality.
+        return 0; // PER_LINUX
+    }
+    // Accept any personality (no-op).
+    0
+}
+
+// ---------------------------------------------------------------------------
+// ptrace — process trace
+// ---------------------------------------------------------------------------
+
+/// Process trace (debugging interface).
+///
+/// Stub: returns -1 with ENOSYS.  A real ptrace implementation
+/// requires kernel-level support for breakpoints, single-step, and
+/// memory/register access.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ptrace(_request: i32, _pid: i32, _addr: u64, _data: u64) -> i64 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// ptrace request codes.
+pub const PTRACE_TRACEME: i32 = 0;
+/// Peek at a word in the child's text area.
+pub const PTRACE_PEEKTEXT: i32 = 1;
+/// Peek at a word in the child's data area.
+pub const PTRACE_PEEKDATA: i32 = 2;
+/// Write a word to the child's text area.
+pub const PTRACE_POKETEXT: i32 = 4;
+/// Write a word to the child's data area.
+pub const PTRACE_POKEDATA: i32 = 5;
+/// Continue the stopped child.
+pub const PTRACE_CONT: i32 = 7;
+/// Kill the child.
+pub const PTRACE_KILL: i32 = 8;
+/// Single-step the child.
+pub const PTRACE_SINGLESTEP: i32 = 9;
+/// Attach to a process.
+pub const PTRACE_ATTACH: i32 = 16;
+/// Detach from a process.
+pub const PTRACE_DETACH: i32 = 17;
+
+// ---------------------------------------------------------------------------
+// swapon / swapoff
+// ---------------------------------------------------------------------------
+
+/// Enable swapping on a device.
+///
+/// Stub: returns -1 with ENOSYS (our OS uses committed memory, no swap).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn swapon(_path: *const u8, _swapflags: i32) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Disable swapping on a device.
+///
+/// Stub: returns -1 with ENOSYS.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn swapoff(_path: *const u8) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
+// klogctl — kernel log control
+// ---------------------------------------------------------------------------
+
+/// Control the kernel log.
+///
+/// Stub: returns -1 with ENOSYS.  Our OS uses structured text
+/// logging (JSON-lines), not the Linux klog interface.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn klogctl(_cmd: i32, _buf: *mut u8, _len: i32) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2664,6 +2900,162 @@ mod tests {
         let mut groups: [GidT; 5] = [99; 5];
         let ret = getgroups(5, groups.as_mut_ptr());
         assert_eq!(ret, 0, "getgroups should return 0 (no supplementary groups)");
+    }
+
+    // ------------------------------------------------------------------
+    // sysinfo
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_sysinfo_null() {
+        errno::set_errno(0);
+        assert_eq!(sysinfo(core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_sysinfo_fills_struct() {
+        let mut info = core::mem::MaybeUninit::<Sysinfo>::zeroed();
+        let ret = sysinfo(info.as_mut_ptr());
+        assert_eq!(ret, 0);
+        let info = unsafe { info.assume_init() };
+        assert!(info.totalram > 0, "totalram should be > 0");
+        assert!(info.freeram > 0, "freeram should be > 0");
+        assert_eq!(info.mem_unit, 1, "mem_unit should be 1 (byte units)");
+        assert!(info.procs >= 1, "procs should be at least 1");
+    }
+
+    #[test]
+    fn test_sysinfo_uptime_non_negative() {
+        let mut info = core::mem::MaybeUninit::<Sysinfo>::zeroed();
+        let _ = sysinfo(info.as_mut_ptr());
+        let info = unsafe { info.assume_init() };
+        assert!(info.uptime >= 0, "uptime should be non-negative");
+    }
+
+    #[test]
+    fn test_sysinfo_size() {
+        // Sysinfo should be reasonably sized.
+        let size = core::mem::size_of::<Sysinfo>();
+        assert!(size >= 64, "Sysinfo should be at least 64 bytes, got {size}");
+    }
+
+    // ------------------------------------------------------------------
+    // mntent stubs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_setmntent_returns_null() {
+        let ret = setmntent(b"/etc/mtab\0".as_ptr(), b"r\0".as_ptr());
+        assert!(ret.is_null(), "setmntent should return null (no mount table)");
+    }
+
+    #[test]
+    fn test_getmntent_returns_null() {
+        let ret = getmntent(core::ptr::null_mut());
+        assert!(ret.is_null(), "getmntent should return null");
+    }
+
+    #[test]
+    fn test_getmntent_r_returns_null() {
+        let mut mntbuf = core::mem::MaybeUninit::<Mntent>::zeroed();
+        let mut buf = [0u8; 256];
+        let ret = getmntent_r(
+            core::ptr::null_mut(),
+            mntbuf.as_mut_ptr(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert!(ret.is_null(), "getmntent_r should return null");
+    }
+
+    #[test]
+    fn test_endmntent_returns_one() {
+        assert_eq!(endmntent(core::ptr::null_mut()), 1);
+    }
+
+    #[test]
+    fn test_hasmntopt_returns_null() {
+        let ret = hasmntopt(core::ptr::null(), b"rw\0".as_ptr());
+        assert!(ret.is_null(), "hasmntopt should return null");
+    }
+
+    #[test]
+    fn test_mntent_size() {
+        let size = core::mem::size_of::<Mntent>();
+        // 4 pointers + 2 i32 = 4*8 + 2*4 = 40 on 64-bit.
+        assert!(size >= 40, "Mntent should be at least 40 bytes, got {size}");
+    }
+
+    // ------------------------------------------------------------------
+    // personality
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_personality_query() {
+        // 0xFFFFFFFF queries current personality.
+        let ret = personality(0xFFFF_FFFF);
+        assert_eq!(ret, 0, "Should return PER_LINUX (0)");
+    }
+
+    #[test]
+    fn test_personality_set() {
+        let ret = personality(0);
+        assert_eq!(ret, 0, "Setting PER_LINUX should succeed");
+    }
+
+    // ------------------------------------------------------------------
+    // ptrace
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_ptrace_enosys() {
+        errno::set_errno(0);
+        assert_eq!(ptrace(PTRACE_TRACEME, 0, 0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_ptrace_constants() {
+        assert_eq!(PTRACE_TRACEME, 0);
+        assert_eq!(PTRACE_PEEKTEXT, 1);
+        assert_eq!(PTRACE_PEEKDATA, 2);
+        assert_eq!(PTRACE_POKETEXT, 4);
+        assert_eq!(PTRACE_POKEDATA, 5);
+        assert_eq!(PTRACE_CONT, 7);
+        assert_eq!(PTRACE_KILL, 8);
+        assert_eq!(PTRACE_SINGLESTEP, 9);
+        assert_eq!(PTRACE_ATTACH, 16);
+        assert_eq!(PTRACE_DETACH, 17);
+    }
+
+    // ------------------------------------------------------------------
+    // swapon / swapoff
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_swapon_enosys() {
+        errno::set_errno(0);
+        assert_eq!(swapon(b"/dev/sda2\0".as_ptr(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_swapoff_enosys() {
+        errno::set_errno(0);
+        assert_eq!(swapoff(b"/dev/sda2\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // ------------------------------------------------------------------
+    // klogctl
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_klogctl_enosys() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(0, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
 }

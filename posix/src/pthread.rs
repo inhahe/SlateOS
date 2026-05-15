@@ -3034,4 +3034,99 @@ mod tests {
         assert_eq!(ret, 0);
         assert_eq!(buf[0], 0, "Empty name should give empty string");
     }
+
+    // -----------------------------------------------------------------------
+    // pthread_create — error paths
+    // -----------------------------------------------------------------------
+
+    // Note: We can't fully test pthread_create because the kernel syscall
+    // goes to the Windows kernel in test mode.  We can test that it returns
+    // a non-crashing value when called (the mmap + syscall may fail).
+
+    #[test]
+    fn test_pthread_create_no_crash() {
+        extern "C" fn dummy(_arg: *mut u8) -> *mut u8 {
+            core::ptr::null_mut()
+        }
+        let mut tid: PthreadT = 0;
+        // This will likely fail (EAGAIN) because the kernel syscall
+        // is meaningless on Windows, but must not crash.
+        let _ret = pthread_create(&raw mut tid, core::ptr::null(), dummy, core::ptr::null_mut());
+    }
+
+    // -----------------------------------------------------------------------
+    // pthread_join — error paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pthread_join_invalid_thread() {
+        // Joining a nonexistent thread — syscall returns unpredictable
+        // values on test host, so accept either 0 or ESRCH.
+        let mut retval: *mut u8 = core::ptr::null_mut();
+        let ret = pthread_join(0xDEAD_BEEF, &raw mut retval);
+        assert!(ret == 0 || ret == crate::errno::ESRCH,
+                "expected 0 or ESRCH, got {ret}");
+    }
+
+    #[test]
+    fn test_pthread_join_null_retval() {
+        // Null retval pointer should be fine (just don't store the value).
+        // Syscall result is unpredictable on test host.
+        let ret = pthread_join(0xDEAD_BEEF, core::ptr::null_mut());
+        assert!(ret == 0 || ret == crate::errno::ESRCH,
+                "expected 0 or ESRCH, got {ret}");
+    }
+
+    // -----------------------------------------------------------------------
+    // pthread_detach — error paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pthread_detach_nonexistent() {
+        let ret = pthread_detach(0xDEAD_BEEF);
+        assert_eq!(ret, crate::errno::ESRCH);
+    }
+
+    // -----------------------------------------------------------------------
+    // pthread_barrier_wait — null pointer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pthread_barrier_wait_null() {
+        let ret = pthread_barrier_wait(core::ptr::null_mut());
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------------
+    // pthread_mutex_timedlock — null pointer, error paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pthread_mutex_timedlock_null_mutex() {
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = pthread_mutex_timedlock(core::ptr::null_mut(), &ts);
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pthread_mutex_timedlock_null_abstime() {
+        // SAFETY: zero-init is valid for PthreadMutexT (all-zeros = unlocked).
+        let mut m: PthreadMutexT = unsafe { core::mem::zeroed() };
+        unsafe { pthread_mutex_init(&raw mut m, core::ptr::null()); }
+        let ret = pthread_mutex_timedlock(&raw mut m, core::ptr::null());
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pthread_mutex_timedlock_unlocked() {
+        // timedlock on an unlocked mutex should succeed immediately.
+        // SAFETY: zero-init is valid for PthreadMutexT (all-zeros = unlocked).
+        let mut m: PthreadMutexT = unsafe { core::mem::zeroed() };
+        unsafe { pthread_mutex_init(&raw mut m, core::ptr::null()); }
+        let ts = crate::stat::Timespec { tv_sec: 999_999, tv_nsec: 0 };
+        let ret = pthread_mutex_timedlock(&raw mut m, &ts);
+        assert_eq!(ret, 0, "timedlock on unlocked mutex should succeed");
+        // Unlock.
+        unsafe { pthread_mutex_unlock(&raw mut m); }
+    }
 }

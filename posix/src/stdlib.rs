@@ -1776,6 +1776,94 @@ pub unsafe extern "C" fn getsubopt(
 }
 
 // ---------------------------------------------------------------------------
+// a64l / l64a — base-64 encoding (POSIX XSI)
+// ---------------------------------------------------------------------------
+
+/// Base-64 digit set for `a64l`/`l64a`.
+///
+/// POSIX XSI base-64 encoding:
+///   '.' = 0, '/' = 1, '0'-'9' = 2-11, 'A'-'Z' = 12-37, 'a'-'z' = 38-63
+const BASE64_DIGITS: &[u8; 64] =
+    b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/// Decode a single base-64 digit to its 6-bit value.
+///
+/// Returns -1 for invalid characters.
+fn base64_decode_digit(c: u8) -> i32 {
+    match c {
+        b'.' => 0,
+        b'/' => 1,
+        b'0'..=b'9' => (c - b'0') as i32 + 2,
+        b'A'..=b'Z' => (c - b'A') as i32 + 12,
+        b'a'..=b'z' => (c - b'a') as i32 + 38,
+        _ => -1,
+    }
+}
+
+/// `a64l` — convert a base-64 string to a long integer.
+///
+/// Decodes up to 6 characters of the POSIX XSI base-64 encoding.
+/// Returns 0 for null or empty strings.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn a64l(s: *const u8) -> i64 {
+    if s.is_null() {
+        return 0;
+    }
+
+    let mut result: i64 = 0;
+    let mut shift: u32 = 0;
+    let mut i: usize = 0;
+
+    while i < 6 {
+        // SAFETY: we stop at the null terminator.
+        let c = unsafe { *s.add(i) };
+        if c == 0 {
+            break;
+        }
+        let val = base64_decode_digit(c);
+        if val < 0 {
+            break; // Invalid character — stop.
+        }
+        result |= (val as i64) << shift;
+        shift = shift.wrapping_add(6);
+        i = i.wrapping_add(1);
+    }
+
+    result
+}
+
+/// Static buffer for `l64a` output (max 7 bytes: 6 digits + null).
+static mut L64A_BUF: [u8; 7] = [0; 7];
+
+/// `l64a` — convert a long integer to a base-64 string.
+///
+/// Encodes the low 32 bits of `n` into POSIX XSI base-64 format.
+/// Returns a pointer to a static buffer (not thread-safe).
+/// Returns "" for n == 0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn l64a(n: i64) -> *const u8 {
+    // SAFETY: single-threaded access to static buffer.
+    let buf = unsafe { &raw mut L64A_BUF };
+
+    if n == 0 {
+        unsafe { (*buf)[0] = 0; }
+        return unsafe { (*buf).as_ptr() };
+    }
+
+    let mut val = n as u32; // Use low 32 bits.
+    let mut i: usize = 0;
+    while val != 0 && i < 6 {
+        let digit = (val & 0x3F) as usize;
+        unsafe { (*buf)[i] = BASE64_DIGITS[digit]; }
+        val >>= 6;
+        i = i.wrapping_add(1);
+    }
+    unsafe { (*buf)[i] = 0; } // Null terminate.
+
+    unsafe { (*buf).as_ptr() }
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -4303,5 +4391,103 @@ mod tests {
         let mut tmpl = *b"/tmp/testXXXXXX.txt\0";
         let _ret = unsafe { mkostemps(tmpl.as_mut_ptr(), 4, 0) };
         // Just verify no crash.
+    }
+
+    // -----------------------------------------------------------------------
+    // a64l — base-64 string to long
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_a64l_null() {
+        assert_eq!(a64l(core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_a64l_empty() {
+        assert_eq!(a64l(b"\0".as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_a64l_dot() {
+        // '.' encodes 0.
+        assert_eq!(a64l(b".\0".as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_a64l_slash() {
+        // '/' encodes 1.
+        assert_eq!(a64l(b"/\0".as_ptr()), 1);
+    }
+
+    #[test]
+    fn test_a64l_zero_char() {
+        // '0' encodes 2.
+        assert_eq!(a64l(b"0\0".as_ptr()), 2);
+    }
+
+    #[test]
+    fn test_a64l_nine_char() {
+        // '9' encodes 11.
+        assert_eq!(a64l(b"9\0".as_ptr()), 11);
+    }
+
+    #[test]
+    fn test_a64l_uppercase_a() {
+        // 'A' encodes 12.
+        assert_eq!(a64l(b"A\0".as_ptr()), 12);
+    }
+
+    #[test]
+    fn test_a64l_lowercase_a() {
+        // 'a' encodes 38.
+        assert_eq!(a64l(b"a\0".as_ptr()), 38);
+    }
+
+    #[test]
+    fn test_a64l_two_chars() {
+        // "//" → 1 | (1 << 6) = 1 + 64 = 65.
+        assert_eq!(a64l(b"//\0".as_ptr()), 65);
+    }
+
+    // -----------------------------------------------------------------------
+    // l64a — long to base-64 string
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_l64a_zero() {
+        let result = l64a(0);
+        assert!(!result.is_null());
+        assert_eq!(unsafe { *result }, 0, "l64a(0) should return empty string");
+    }
+
+    #[test]
+    fn test_l64a_one() {
+        let result = l64a(1);
+        assert!(!result.is_null());
+        assert_eq!(unsafe { *result }, b'/', "l64a(1) should be '/'");
+    }
+
+    #[test]
+    fn test_l64a_two() {
+        let result = l64a(2);
+        assert!(!result.is_null());
+        assert_eq!(unsafe { *result }, b'0', "l64a(2) should be '0'");
+    }
+
+    #[test]
+    fn test_a64l_l64a_roundtrip() {
+        // Encode then decode should give back the original.
+        for val in [1i64, 42, 255, 1000, 12345, 0x3FFFF] {
+            let encoded = l64a(val);
+            let decoded = a64l(encoded);
+            assert_eq!(decoded, val, "roundtrip failed for {val}");
+        }
+    }
+
+    #[test]
+    fn test_l64a_63() {
+        // 63 → 'z' (last base-64 digit).
+        let result = l64a(63);
+        assert_eq!(unsafe { *result }, b'z');
     }
 }

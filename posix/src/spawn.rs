@@ -430,6 +430,43 @@ pub extern "C" fn posix_spawn_file_actions_addchdir_np(
 }
 
 // ---------------------------------------------------------------------------
+// posix_spawn_file_actions_addclosefrom_np — close all fds >= lowfd
+// ---------------------------------------------------------------------------
+
+/// Record a "close all fds from `lowfd` upward" action.
+///
+/// Non-portable glibc/macOS extension.  During `posix_spawn`, all
+/// file descriptors ≥ `lowfd` will be closed in the child.
+///
+/// We store this as tag 5 (closefrom), with `fd` set to `lowfd`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawn_file_actions_addclosefrom_np(
+    acts: *mut PosixSpawnFileActionsT,
+    lowfd: i32,
+) -> i32 {
+    if acts.is_null() {
+        return errno::EINVAL;
+    }
+    if lowfd < 0 {
+        return errno::EBADF;
+    }
+    let a = unsafe { &mut *acts };
+    if a.count >= MAX_FILE_ACTIONS {
+        return errno::ENOMEM;
+    }
+    if let Some(slot) = a.actions.get_mut(a.count) {
+        // Tag 5 = Closefrom action.
+        *slot = FileActionSlot {
+            tag: 5,
+            fd: lowfd,
+            ..FileActionSlot::empty()
+        };
+    }
+    a.count = a.count.wrapping_add(1);
+    0
+}
+
+// ---------------------------------------------------------------------------
 // posix_spawnattr
 // ---------------------------------------------------------------------------
 
@@ -2258,5 +2295,57 @@ mod tests {
         // Should return -1 (exec replaces process on success, so any
         // return means failure).
         assert_eq!(ret, -1);
+    }
+
+    // -----------------------------------------------------------------------
+    // posix_spawn_file_actions_addclosefrom_np
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_addclosefrom_np_null_acts() {
+        let ret = posix_spawn_file_actions_addclosefrom_np(core::ptr::null_mut(), 3);
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_addclosefrom_np_negative_fd() {
+        let mut acts = PosixSpawnFileActionsT {
+            count: 0,
+            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
+            _pad: [0; 8],
+        };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_addclosefrom_np(&raw mut acts, -1);
+        assert_eq!(ret, crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_addclosefrom_np_success() {
+        let mut acts = PosixSpawnFileActionsT {
+            count: 0,
+            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
+            _pad: [0; 8],
+        };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_addclosefrom_np(&raw mut acts, 3);
+        assert_eq!(ret, 0);
+        assert_eq!(acts.count, 1);
+        assert_eq!(acts.actions[0].tag, 5, "closefrom action tag should be 5");
+        assert_eq!(acts.actions[0].fd, 3);
+    }
+
+    #[test]
+    fn test_addclosefrom_np_full() {
+        let mut acts = PosixSpawnFileActionsT {
+            count: 0,
+            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
+            _pad: [0; 8],
+        };
+        posix_spawn_file_actions_init(&raw mut acts);
+        for _ in 0..MAX_FILE_ACTIONS {
+            posix_spawn_file_actions_addclose(&raw mut acts, 0);
+        }
+        let ret = posix_spawn_file_actions_addclosefrom_np(&raw mut acts, 3);
+        assert_eq!(ret, crate::errno::ENOMEM, "full actions should return ENOMEM");
     }
 }

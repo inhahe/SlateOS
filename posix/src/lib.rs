@@ -35,7 +35,8 @@
 //!   `posix_spawnp`, `execve`, `execvp`, `execv`, `execvpe`, `fexecve`,
 //!   `vfork`, `waitpid`, `sleep`, `nanosleep`, `getpgrp`, `setpgid`,
 //!   `setsid`, `getsid`, `pidfd_open`, `pidfd_send_signal`, `pidfd_getfd`,
-//!   `issetugid`, `posix_spawn_file_actions_addchdir_np`, `clone3`,
+//!   `issetugid`, `posix_spawn_file_actions_addchdir_np`,
+//!   `posix_spawn_file_actions_addclosefrom_np`, `clone3`,
 //!   `process_vm_readv`/`process_vm_writev`, `kcmp`
 //! - **Memory**: `mmap`, `munmap`, `mprotect`, `mmap64`, `mremap`,
 //!   `mlock`/`mlock2`/`munlock`/`mlockall`/`munlockall`, `msync`, `madvise`,
@@ -50,7 +51,7 @@
 //!   `posix_memalign`/`aligned_alloc`/`valloc`/`memalign`/`reallocarray`,
 //!   `malloc_usable_size`,
 //!   `setjmp`/`longjmp`/`sigsetjmp`/`siglongjmp`, `qsort`, `bsearch`,
-//!   `atoi`/`atol`/`atoll`/`strtol`/`strtoul`,
+//!   `atoi`/`atol`/`atoll`/`strtol`/`strtoul`, `a64l`/`l64a`,
 //!   `random`/`srandom`/`initstate`/`setstate`,
 //!   `drand48`/`lrand48`/`mrand48`/`srand48`/`seed48`/`nrand48`/`erand48`/`jrand48`,
 //!   `mktemp`,

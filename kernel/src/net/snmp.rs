@@ -159,10 +159,17 @@ impl Oid {
 
         let mut bytes = Vec::new();
 
-        // First two components are encoded as: first * 40 + second.
+        // BER rule: first two components encode as first * 40 + second.
+        // For standard OIDs (first < 3, small second), this fits in one byte.
+        // For large combined values (first==2 and second >= 48), use base-128.
         let first = self.components[0];
         let second = self.components[1];
-        bytes.push((first * 40 + second) as u8);
+        let combined = first.saturating_mul(40).saturating_add(second);
+        if combined < 128 {
+            bytes.push(combined as u8);
+        } else {
+            encode_base128(&mut bytes, combined);
+        }
 
         // Remaining components use base-128 encoding.
         for &comp in &self.components[2..] {
@@ -348,8 +355,8 @@ fn decode_base128(data: &[u8]) -> Option<(u32, usize)> {
         if byte & 0x80 == 0 {
             break;
         }
-        if i > 5 {
-            return None; // Too long for u32.
+        if i >= 5 {
+            return None; // 5 base-128 bytes = 35 bits, overflows u32.
         }
     }
     Some((value, i))
@@ -379,8 +386,8 @@ fn encode_integer(buf: &mut Vec<u8>, value: i32) {
 
 /// Decode a BER-encoded integer.
 fn decode_integer(data: &[u8]) -> Option<i32> {
-    if data.is_empty() {
-        return None;
+    if data.is_empty() || data.len() > 4 {
+        return None; // Empty or too large for i32.
     }
 
     let mut value: i32 = if data[0] & 0x80 != 0 { -1 } else { 0 };
@@ -435,17 +442,22 @@ fn build_get_next_request(community: &str, request_id: i32, oid: &Oid) -> Vec<u8
 fn build_request(pdu_tag: u8, community: &str, request_id: i32, oid: &Oid) -> Vec<u8> {
     // Build the variable binding: SEQUENCE { OID, NULL }.
     let oid_encoded = oid.encode();
+
+    // Build OID TLV and NULL TLV into a temp buffer first so the
+    // SEQUENCE length accounts for multi-byte BER length fields.
+    let mut oid_tlv = Vec::new();
+    oid_tlv.push(TAG_OID);
+    encode_length(&mut oid_tlv, oid_encoded.len());
+    oid_tlv.extend_from_slice(&oid_encoded);
+
+    let null_tlv: [u8; 2] = [TAG_NULL, 0x00];
+
     let mut varbind = Vec::new();
     varbind.push(TAG_SEQUENCE);
-    let vb_content_len = 2 + oid_encoded.len() + 2; // OID TLV + NULL TLV.
+    let vb_content_len = oid_tlv.len().saturating_add(null_tlv.len());
     encode_length(&mut varbind, vb_content_len);
-    // OID.
-    varbind.push(TAG_OID);
-    encode_length(&mut varbind, oid_encoded.len());
-    varbind.extend_from_slice(&oid_encoded);
-    // NULL value.
-    varbind.push(TAG_NULL);
-    varbind.push(0x00);
+    varbind.extend_from_slice(&oid_tlv);
+    varbind.extend_from_slice(&null_tlv);
 
     // Variable bindings list: SEQUENCE { varbind }.
     let mut varbind_list = Vec::new();

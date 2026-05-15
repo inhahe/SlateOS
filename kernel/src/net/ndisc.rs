@@ -101,6 +101,10 @@ pub fn host_count(mask: Ipv4Addr) -> u32 {
         return 0; // /31 or /32 — no usable host range.
     }
     // Host count = 2^host_bits - 2 (exclude network and broadcast).
+    // Guard against host_bits >= 32 (/0 mask): 1u32 << 32 panics.
+    if host_bits >= 32 {
+        return u32::MAX; // ~4 billion hosts; capped by MAX_SCAN_SIZE later.
+    }
     (1u32 << host_bits).saturating_sub(2)
 }
 
@@ -154,11 +158,25 @@ pub fn scan_subnet() -> KernelResult<ScanResult> {
     scan_range(net, mask)
 }
 
+/// RAII guard that clears the SCANNING flag on drop.
+///
+/// Prevents the SCANNING flag from being permanently locked if the
+/// scan function exits early (future `?` additions, or panics).
+struct ScanGuard;
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        SCANNING.store(false, Ordering::Relaxed);
+    }
+}
+
 /// ARP scan a specific IP range.
 pub fn scan_range(net: Ipv4Addr, mask: Ipv4Addr) -> KernelResult<ScanResult> {
     if SCANNING.swap(true, Ordering::Relaxed) {
         return Err(KernelError::DeviceBusy);
     }
+    // Guard clears SCANNING on any exit path (normal, error, or panic).
+    let _guard = ScanGuard;
 
     TOTAL_SCANS.fetch_add(1, Ordering::Relaxed);
 
@@ -177,28 +195,28 @@ pub fn scan_range(net: Ipv4Addr, mask: Ipv4Addr) -> KernelResult<ScanResult> {
     }
 
     // Collect discovered hosts from ARP cache.
-    let (arp_entries, arp_count) = super::arp::cache_entries();
+    // Iterate the slice directly rather than trusting the separate count —
+    // avoids silent truncation if count > entries.len() due to a race.
+    let (arp_entries, _arp_count) = super::arp::cache_entries();
     let now = crate::hrtimer::now_ns();
 
     let mut discovered = Vec::new();
-    for i in 0..arp_count {
-        if let Some(entry) = arp_entries.get(i) {
-            // Try reverse DNS.
-            let hostname = super::dns::reverse_resolve(entry.ip)
-                .unwrap_or_default();
+    for entry in &arp_entries {
+        // Try reverse DNS.
+        let hostname = super::dns::reverse_resolve(entry.ip)
+            .unwrap_or_default();
 
-            discovered.push(Host {
-                ip: entry.ip,
-                mac: format!("{}", entry.mac),
-                hostname,
-                last_seen_ns: now,
-            });
-        }
+        discovered.push(Host {
+            ip: entry.ip,
+            mac: format!("{}", entry.mac),
+            hostname,
+            last_seen_ns: now,
+        });
     }
 
     let responding = discovered.len() as u32;
     TOTAL_DISCOVERED.fetch_add(responding as u64, Ordering::Relaxed);
-    SCANNING.store(false, Ordering::Relaxed);
+    // _guard drops here, clearing SCANNING.
 
     Ok(ScanResult {
         hosts: discovered,
@@ -397,6 +415,10 @@ pub fn self_test() -> KernelResult<()> {
         // /8 large network.
         let mask8 = Ipv4Addr::new(255, 0, 0, 0);
         assert!(host_count(mask8) == 16_777_214, "/8 host count");
+
+        // /0 mask — previously panicked with `1u32 << 32`.
+        let mask0 = Ipv4Addr::new(0, 0, 0, 0);
+        assert!(host_count(mask0) == u32::MAX, "/0 host count");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[ndisc]   test 9 (edge cases) PASSED");

@@ -127,8 +127,14 @@ fn parse_tlv(data: &[u8]) -> Option<(Tlv<'_>, usize)> {
 }
 
 /// Encode a TLV header (type + length) into 2 bytes.
+///
+/// The LLDP TLV format packs type (7 bits, max 127) and length
+/// (9 bits, max 511) into a 2-byte header.  Values beyond 511
+/// are silently truncated by the bit mask — callers must ensure
+/// `length <= 511`.
 #[allow(clippy::arithmetic_side_effects)]
 fn encode_tlv_header(tlv_type: u8, length: usize) -> [u8; 2] {
+    debug_assert!(length <= 511, "LLDP TLV length exceeds 9-bit maximum ({})", length);
     let header = ((tlv_type as u16) << 9) | (length as u16 & 0x01FF);
     header.to_be_bytes()
 }
@@ -304,12 +310,19 @@ pub fn process_frame(src_mac: &MacAddress, payload: &[u8]) -> KernelResult<()> {
             }
             TLV_MGMT_ADDR => {
                 // Management Address TLV:
-                // Byte 0: addr string length (including subtype)
+                // Byte 0: addr string length (= 1 subtype + N addr bytes)
                 // Byte 1: addr subtype (1=IPv4, 2=IPv6)
-                // Bytes 2+: address
+                // Bytes 2..2+N-1: address bytes
                 if tlv.value.len() >= 6 {
-                    let addr_subtype = *tlv.value.get(1).unwrap_or(&0);
-                    if addr_subtype == 1 && tlv.value.len() >= 6 {
+                    let addr_str_len = tlv.value[0] as usize;
+                    let addr_subtype = tlv.value[1];
+                    // Validate: addr_str_len must be 5 for IPv4
+                    // (1 subtype byte + 4 address bytes), and the TLV
+                    // must actually contain that many bytes.
+                    if addr_subtype == 1
+                        && addr_str_len >= 5
+                        && tlv.value.len() >= 1 + addr_str_len
+                    {
                         // IPv4.
                         neighbor.mgmt_ip = Ipv4Addr([
                             tlv.value[2], tlv.value[3],

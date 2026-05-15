@@ -265,7 +265,10 @@ impl<'a> ElfFile<'a> {
         }
 
         // Check program header entry size.
-        if header.e_phentsize != 0
+        // Reject e_phentsize < ELF64_PHDR_SIZE when program headers exist.
+        // A zero e_phentsize with e_phnum > 0 would cause all headers to
+        // be read from the same offset, producing silently wrong results.
+        if header.e_phnum > 0
             && (header.e_phentsize as usize) < ELF64_PHDR_SIZE
         {
             return Err(KernelError::InvalidExecutable);
@@ -322,7 +325,9 @@ impl<'a> ElfFile<'a> {
         }
 
         let offset = (self.header.e_phoff as usize)
-            + index * (self.header.e_phentsize as usize);
+            .checked_add(
+                index.checked_mul(self.header.e_phentsize as usize)?
+            )?;
 
         // Bounds check: the program header table was validated in parse(),
         // but be defensive.
@@ -595,7 +600,13 @@ unsafe fn load_one_segment(
         // SAFETY: pml4_phys is valid (caller invariant), phys_frame is
         // freshly allocated and exclusively ours, virt is in user space.
         unsafe {
-            page_table::map_frame(pml4_phys, virt, phys_frame, page_flags)?;
+            if let Err(e) = page_table::map_frame(pml4_phys, virt, phys_frame, page_flags) {
+                // Free the frame we just allocated — it was never mapped,
+                // so destroying the address space won't find it.
+                // SAFETY: phys_frame was just allocated and never shared.
+                let _ = frame::free_frame(phys_frame);
+                return Err(e);
+            }
         }
 
         current_vaddr = current_vaddr
@@ -636,7 +647,10 @@ fn copy_segment_data_to_frame(
     let byte_count = (overlap_end - overlap_start) as usize;
 
     // Offset into the file.
-    let file_offset = seg.file_offset + (overlap_start - seg.vaddr);
+    let file_offset = match seg.file_offset.checked_add(overlap_start.saturating_sub(seg.vaddr)) {
+        Some(v) => v,
+        None => return, // Overflow — skip (validation already caught bad segments).
+    };
 
     // Offset into the frame.
     let frame_offset = (overlap_start - frame_vaddr) as usize;
@@ -1605,6 +1619,7 @@ pub fn self_test() -> KernelResult<()> {
     test_bss_segment()?;
     test_segment_flags()?;
     test_entry_point()?;
+    test_zero_phentsize()?;
 
     Ok(())
 }
@@ -1841,5 +1856,29 @@ fn test_entry_point() -> KernelResult<()> {
     }
 
     serial_println!("[elf]   Entry point: OK");
+    Ok(())
+}
+
+/// Test 10: Reject e_phentsize == 0 when program headers exist.
+///
+/// A zero e_phentsize with e_phnum > 0 would cause all program headers
+/// to be read from the same offset, producing silently wrong results.
+fn test_zero_phentsize() -> KernelResult<()> {
+    let mut data = build_test_elf();
+    // Set e_phentsize to 0 (offset 54 in ELF header).
+    write_u16(&mut data, 54, 0);
+
+    match ElfFile::parse(&data) {
+        Err(KernelError::InvalidExecutable) => {}
+        other => {
+            serial_println!(
+                "[elf]   FAIL: zero e_phentsize should fail: {:?}",
+                other.map(|_| ()),
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[elf]   Reject zero e_phentsize: OK");
     Ok(())
 }

@@ -30,9 +30,10 @@
 //!   termios flags, `posix_openpt`, `grantpt`, `unlockpt`, `ptsname`,
 //!   `ptsname_r`
 //! - **Process**: `_exit`, `getpid`, `getppid`, `posix_spawn`,
-//!   `posix_spawnp`, `execve`, `execvp`, `execv`, `vfork`, `waitpid`,
-//!   `sleep`, `nanosleep`, `getpgrp`, `setpgid`, `setsid`, `getsid`,
-//!   `pidfd_open`, `pidfd_send_signal`, `pidfd_getfd`
+//!   `posix_spawnp`, `execve`, `execvp`, `execv`, `fexecve`, `vfork`,
+//!   `waitpid`, `sleep`, `nanosleep`, `getpgrp`, `setpgid`, `setsid`,
+//!   `getsid`, `pidfd_open`, `pidfd_send_signal`, `pidfd_getfd`,
+//!   `issetugid`, `posix_spawn_file_actions_addchdir_np`
 //! - **Memory**: `mmap`, `munmap`, `mprotect`, `mmap64`, `mremap`,
 //!   `mlock`/`mlock2`/`munlock`/`mlockall`/`munlockall`, `msync`, `madvise`,
 //!   `posix_madvise`, `shm_open`/`shm_unlink`, `memfd_create`

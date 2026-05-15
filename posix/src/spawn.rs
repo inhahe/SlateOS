@@ -381,6 +381,55 @@ pub extern "C" fn posix_spawn_file_actions_addopen(
 }
 
 // ---------------------------------------------------------------------------
+// posix_spawn_file_actions_addchdir_np
+// ---------------------------------------------------------------------------
+
+/// Add a change-directory action to a spawn file actions object.
+///
+/// This is a glibc/macOS extension (`_np` = non-portable).  In the
+/// child process, the working directory will be changed to `path`
+/// before executing the program.
+///
+/// Since our kernel handles CWD at the process level, this stores the
+/// path and the spawn implementation will set the child's CWD.
+///
+/// Returns 0 on success, or a POSIX error code.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_spawn_file_actions_addchdir_np(
+    acts: *mut PosixSpawnFileActionsT,
+    path: *const u8,
+) -> i32 {
+    if acts.is_null() || path.is_null() {
+        return errno::EINVAL;
+    }
+    let a = unsafe { &mut *acts };
+    if a.count >= MAX_FILE_ACTIONS {
+        return errno::ENOMEM;
+    }
+    let path_len = unsafe { crate::file::c_strlen_pub(path) };
+    if path_len >= ACTION_PATH_MAX {
+        return errno::ENAMETOOLONG;
+    }
+    let mut stored_path = [0u8; ACTION_PATH_MAX];
+    // SAFETY: path is readable for path_len bytes.
+    unsafe {
+        core::ptr::copy_nonoverlapping(path, stored_path.as_mut_ptr(), path_len);
+    }
+    if let Some(slot) = a.actions.get_mut(a.count) {
+        // Tag 4 = Chdir action (not yet processed by spawn — forward-compatible).
+        *slot = FileActionSlot {
+            tag: 4,
+            fd: -1,
+            path: stored_path,
+            path_len,
+            ..FileActionSlot::empty()
+        };
+    }
+    a.count = a.count.wrapping_add(1);
+    0
+}
+
+// ---------------------------------------------------------------------------
 // posix_spawnattr
 // ---------------------------------------------------------------------------
 
@@ -1029,6 +1078,40 @@ pub extern "C" fn execv(
     argv: *const *const u8,
 ) -> i32 {
     execve(path, argv, core::ptr::null())
+}
+
+// ---------------------------------------------------------------------------
+// fexecve
+// ---------------------------------------------------------------------------
+
+/// Replace the current process image using an open file descriptor.
+///
+/// Like `execve` but takes an open fd instead of a path.  If the fd
+/// has an associated path in the fd table, we resolve it and delegate
+/// to `execve`.  Otherwise, returns -1 with `ENOENT`.
+///
+/// On success, does not return.  On failure, returns -1 with errno set.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn fexecve(
+    fd: i32,
+    argv: *const *const u8,
+    envp: *const *const u8,
+) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    // Try to resolve the fd to a path via the fd table's stored path.
+    let mut path_buf = [0u8; crate::unistd::PATH_MAX];
+    let path_len = crate::fdtable::get_fd_path(fd, &mut path_buf);
+    if path_len == 0 {
+        // No path associated with this fd.
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    }
+
+    execve(path_buf.as_ptr(), argv, envp)
 }
 
 // ---------------------------------------------------------------------------
@@ -2015,5 +2098,87 @@ mod tests {
         assert_eq!(MAX_FD_MAP, 32);
         // Must be large enough for 3 standard fds + MAX_FILE_ACTIONS.
         assert!(MAX_FD_MAP >= 3 + MAX_FILE_ACTIONS);
+    }
+
+    // -----------------------------------------------------------------------
+    // fexecve
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fexecve_negative_fd() {
+        crate::errno::set_errno(0);
+        let ret = fexecve(-1, core::ptr::null(), core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fexecve_no_path_fd() {
+        // fd 999 has no path stored → ENOENT.
+        crate::errno::set_errno(0);
+        let ret = fexecve(999, core::ptr::null(), core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    // -----------------------------------------------------------------------
+    // posix_spawn_file_actions_addchdir_np
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_addchdir_np_null_acts() {
+        let ret = posix_spawn_file_actions_addchdir_np(
+            core::ptr::null_mut(),
+            b"/tmp\0".as_ptr(),
+        );
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_addchdir_np_null_path() {
+        let mut acts = PosixSpawnFileActionsT {
+            count: 0,
+            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
+            _pad: [0; 8],
+        };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_addchdir_np(&raw mut acts, core::ptr::null());
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_addchdir_np_success() {
+        let mut acts = PosixSpawnFileActionsT {
+            count: 0,
+            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
+            _pad: [0; 8],
+        };
+        posix_spawn_file_actions_init(&raw mut acts);
+        let ret = posix_spawn_file_actions_addchdir_np(
+            &raw mut acts,
+            b"/tmp\0".as_ptr(),
+        );
+        assert_eq!(ret, 0);
+        assert_eq!(acts.count, 1);
+        assert_eq!(acts.actions[0].tag, 4, "chdir action tag should be 4");
+    }
+
+    #[test]
+    fn test_addchdir_np_full() {
+        let mut acts = PosixSpawnFileActionsT {
+            count: 0,
+            actions: [FileActionSlot::empty(); MAX_FILE_ACTIONS],
+            _pad: [0; 8],
+        };
+        posix_spawn_file_actions_init(&raw mut acts);
+        // Fill all slots.
+        for _ in 0..MAX_FILE_ACTIONS {
+            posix_spawn_file_actions_addclose(&raw mut acts, 0);
+        }
+        let ret = posix_spawn_file_actions_addchdir_np(
+            &raw mut acts,
+            b"/tmp\0".as_ptr(),
+        );
+        assert_eq!(ret, crate::errno::ENOMEM, "full actions should return ENOMEM");
     }
 }

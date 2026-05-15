@@ -644,6 +644,18 @@ pub extern "C" fn setgroups(_size: usize, _list: *const GidT) -> i32 {
     0
 }
 
+/// Check if the process is running setuid or setgid.
+///
+/// Returns 1 if the process was started with elevated privileges
+/// (real uid != effective uid, or real gid != effective gid), 0
+/// otherwise.  Since our OS is single-user and always runs as root,
+/// this always returns 0.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn issetugid() -> i32 {
+    // Single-user OS: uid/gid are always 0/0.
+    0
+}
+
 // ---------------------------------------------------------------------------
 // Hostname storage
 // ---------------------------------------------------------------------------
@@ -3058,4 +3070,40 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
+    // ------------------------------------------------------------------
+    // daemon
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_daemon_nochdir_noclose() {
+        // daemon(1, 1) skips both chdir and close — essentially a no-op
+        // except for setsid.
+        let ret = daemon(1, 1);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_daemon_noclose_only() {
+        // daemon(0, 1) attempts chdir("/") which may succeed or fail
+        // on the test host.  Either way, should not crash.
+        let _ret = daemon(0, 1);
+    }
+
+    // ------------------------------------------------------------------
+    // issetugid
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_issetugid_always_zero() {
+        // Single-user OS: process never runs with elevated privileges.
+        assert_eq!(issetugid(), 0);
+    }
+
+    #[test]
+    fn test_issetugid_consistent() {
+        // Multiple calls should return the same value.
+        let a = issetugid();
+        let b = issetugid();
+        assert_eq!(a, b);
+    }
 }

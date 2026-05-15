@@ -187,6 +187,41 @@ static DHCP_STATE: Mutex<DhcpState> = Mutex::new(DhcpState::Idle);
 static PENDING_OFFER: Mutex<Option<DhcpOffer>> = Mutex::new(None);
 static CURRENT_LEASE: Mutex<DhcpLease> = Mutex::new(DhcpLease::empty());
 
+/// Renewal retry state for exponential backoff (RFC 2131 §4.4.5).
+///
+/// Tracks the timestamp of the last renewal/rebind attempt and a retry
+/// counter for exponential backoff.  Initial retry interval is 4 seconds,
+/// doubling each attempt (4s, 8s, 16s, 32s, ...).
+struct RenewalRetry {
+    /// Nanosecond timestamp of the last renewal/rebind REQUEST sent.
+    last_attempt_ns: u64,
+    /// Number of retries since entering the current renewal state.
+    retries: u32,
+}
+
+impl RenewalRetry {
+    const fn new() -> Self {
+        Self { last_attempt_ns: 0, retries: 0 }
+    }
+
+    /// Reset retry state (e.g., when transitioning to a new renewal phase).
+    fn reset(&mut self) {
+        self.last_attempt_ns = 0;
+        self.retries = 0;
+    }
+
+    /// Compute the current retry interval in nanoseconds.
+    ///
+    /// Starts at 4 seconds, doubles each retry, capped at 64 seconds.
+    fn interval_ns(&self) -> u64 {
+        let base_secs: u64 = 4;
+        let secs = base_secs.saturating_mul(1u64.checked_shl(self.retries).unwrap_or(u64::MAX));
+        secs.min(64).saturating_mul(1_000_000_000)
+    }
+}
+
+static RENEWAL_RETRY: Mutex<RenewalRetry> = Mutex::new(RenewalRetry::new());
+
 // ---------------------------------------------------------------------------
 // DHCP packet building
 // ---------------------------------------------------------------------------
@@ -520,6 +555,12 @@ pub fn tick_renewal() {
                 let our_ip = lease.client_ip;
                 let server = lease.server_ip;
                 drop(lease);
+                // Reset retry state for the new renewal phase.
+                let mut retry = RENEWAL_RETRY.lock();
+                retry.reset();
+                retry.last_attempt_ns = crate::hrtimer::now_ns();
+                retry.retries = 1;
+                drop(retry);
                 crate::serial_println!(
                     "[dhcp] T1 expired ({}s elapsed) — initiating renewal",
                     elapsed_secs
@@ -528,37 +569,60 @@ pub fn tick_renewal() {
             }
         }
         DhcpState::Renewing => {
-            // Check if T2 has passed → escalate to rebinding.
+            let now = crate::hrtimer::now_ns();
             let lease = CURRENT_LEASE.lock();
             if lease.obtained_ns == 0 {
                 return;
             }
-            let elapsed_ns = crate::hrtimer::now_ns().saturating_sub(lease.obtained_ns);
+            let elapsed_ns = now.saturating_sub(lease.obtained_ns);
             let elapsed_secs = elapsed_ns / 1_000_000_000;
             let t2 = lease.rebinding_time_secs as u64;
 
             if elapsed_secs >= t2 {
+                // T2 expired — escalate to rebinding (broadcast).
                 let our_ip = lease.client_ip;
                 drop(lease);
+                RENEWAL_RETRY.lock().reset();
                 crate::serial_println!(
                     "[dhcp] T2 expired ({}s elapsed) — escalating to rebind",
                     elapsed_secs
                 );
                 let _ = send_rebind(our_ip);
+            } else {
+                // Still within T1..T2 — retransmit renewal REQUEST
+                // with exponential backoff (RFC 2131 §4.4.5).
+                let our_ip = lease.client_ip;
+                let server = lease.server_ip;
+                drop(lease);
+
+                let mut retry = RENEWAL_RETRY.lock();
+                let since_last = now.saturating_sub(retry.last_attempt_ns);
+                if since_last >= retry.interval_ns() {
+                    retry.last_attempt_ns = now;
+                    retry.retries = retry.retries.saturating_add(1);
+                    let attempt = retry.retries;
+                    drop(retry);
+                    crate::serial_println!(
+                        "[dhcp] RENEW retransmit #{} to {} for {}",
+                        attempt, server, our_ip
+                    );
+                    let _ = send_renew(our_ip, server);
+                }
             }
         }
         DhcpState::Rebinding => {
-            // Check if lease has expired → release IP and go idle.
+            let now = crate::hrtimer::now_ns();
             let lease = CURRENT_LEASE.lock();
             if lease.obtained_ns == 0 {
                 return;
             }
-            let elapsed_ns = crate::hrtimer::now_ns().saturating_sub(lease.obtained_ns);
+            let elapsed_ns = now.saturating_sub(lease.obtained_ns);
             let elapsed_secs = elapsed_ns / 1_000_000_000;
             let total = lease.lease_time_secs as u64;
 
             if elapsed_secs >= total {
                 drop(lease);
+                RENEWAL_RETRY.lock().reset();
                 crate::serial_println!(
                     "[dhcp] Lease expired ({}s) — releasing IP, returning to idle",
                     total
@@ -574,6 +638,23 @@ pub fn tick_renewal() {
                 super::arp::flush_cache();
                 *DHCP_STATE.lock() = DhcpState::Idle;
                 *CURRENT_LEASE.lock() = DhcpLease::empty();
+            } else {
+                // Retransmit broadcast REQUEST with exponential backoff.
+                let our_ip = lease.client_ip;
+                drop(lease);
+
+                let mut retry = RENEWAL_RETRY.lock();
+                let since_last = now.saturating_sub(retry.last_attempt_ns);
+                if since_last >= retry.interval_ns() {
+                    retry.last_attempt_ns = now;
+                    retry.retries = retry.retries.saturating_add(1);
+                    let attempt = retry.retries;
+                    drop(retry);
+                    crate::serial_println!(
+                        "[dhcp] REBIND retransmit #{} for {}", attempt, our_ip
+                    );
+                    let _ = send_rebind(our_ip);
+                }
             }
         }
         _ => {} // Idle, Discovering, Requesting — nothing to do.
@@ -784,6 +865,9 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
             super::arp::flush_cache();
 
             *DHCP_STATE.lock() = DhcpState::Bound;
+
+            // Reset renewal retry state on successful lease/renewal.
+            RENEWAL_RETRY.lock().reset();
 
             // Store lease details.
             let mut lease = CURRENT_LEASE.lock();

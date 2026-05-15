@@ -79,6 +79,7 @@ const MAX_FRAGMENT_PAYLOAD: usize = MTU - IPV4_HEADER_SIZE;
 // ---------------------------------------------------------------------------
 
 /// A parsed IPv4 packet header.
+#[allow(dead_code)] // Spec-defined fields.
 pub struct Ipv4Packet<'a> {
     /// IP version (should be 4).
     pub version: u8,
@@ -225,6 +226,7 @@ impl<'a> Ipv4Packet<'a> {
 /// 20-byte header).
 ///
 /// Computes the IP header checksum.
+#[allow(dead_code)] // Public API.
 pub fn build_packet(
     src: Ipv4Addr,
     dst: Ipv4Addr,

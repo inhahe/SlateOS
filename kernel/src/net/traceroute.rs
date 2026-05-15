@@ -119,6 +119,7 @@ pub struct TraceResult {
 // ---------------------------------------------------------------------------
 
 /// Check if a traceroute is currently running.
+#[allow(dead_code)] // Public API.
 pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Relaxed)
 }

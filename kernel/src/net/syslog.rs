@@ -61,6 +61,7 @@ const DEFAULT_PORT: u16 = 514;
 const RING_BUFFER_SIZE: usize = 64;
 
 /// Maximum syslog message length (bytes).
+#[allow(dead_code)] // Protocol constant.
 const MAX_MSG_LEN: usize = 1024;
 
 /// Syslog version (RFC 5424).

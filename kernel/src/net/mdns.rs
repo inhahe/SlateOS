@@ -71,6 +71,7 @@ const MAX_CACHE_ENTRIES: usize = 32;
 const MAX_SERVICES: usize = 8;
 
 /// Maximum DNS name length.
+#[allow(dead_code)] // Protocol constant.
 const MAX_NAME_LEN: usize = 255;
 
 /// Default TTL for our announcements (seconds).
@@ -114,6 +115,7 @@ pub enum RecordType {
 }
 
 impl RecordType {
+    #[allow(dead_code)] // Public API.
     fn to_u16(self) -> u16 {
         match self {
             Self::A => TYPE_A,
@@ -166,7 +168,14 @@ pub enum RecordData {
     /// PTR record: target name.
     Name(String),
     /// SRV record: priority, weight, port, target host.
-    Srv { priority: u16, weight: u16, port: u16, target: String },
+    Srv {
+        #[allow(dead_code)] // Spec-defined field.
+        priority: u16,
+        #[allow(dead_code)] // Spec-defined field.
+        weight: u16,
+        port: u16,
+        target: String,
+    },
     /// TXT record: key=value pairs.
     Txt(Vec<String>),
 }

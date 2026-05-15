@@ -202,6 +202,7 @@ struct TraceProbe {
     /// Timestamp when sent (ns).
     sent_ns: u64,
     /// TTL (hop number) used for this probe.
+    #[allow(dead_code)] // Spec-defined field.
     ttl: u8,
     /// Set when a reply (Time Exceeded or Echo Reply) is received.
     reply_received: bool,

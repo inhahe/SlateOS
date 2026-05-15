@@ -123,6 +123,7 @@ enum DhcpState {
 }
 
 /// Pending DHCP offer data.
+#[allow(dead_code)] // Spec-defined fields.
 struct DhcpOffer {
     /// Offered IP address.
     ip: Ipv4Addr,

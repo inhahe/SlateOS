@@ -839,6 +839,7 @@ pub fn ns_remove_rule(ns_id: u32, rule_idx: usize) -> KernelResult<()> {
 }
 
 /// Clear all rules for a namespace.
+#[allow(dead_code)] // Public API.
 pub fn ns_clear_rules(ns_id: u32) {
     let idx = ns_id as usize;
     if idx == 0 {
@@ -857,6 +858,7 @@ pub fn ns_clear_rules(ns_id: u32) {
 }
 
 /// Clear all connection tracking entries for a namespace.
+#[allow(dead_code)] // Public API.
 pub fn ns_clear_conntrack(ns_id: u32) {
     let idx = ns_id as usize;
     if idx == 0 {
@@ -907,6 +909,7 @@ pub fn ns_stats(ns_id: u32) -> (u64, u64) {
 }
 
 /// Reset statistics for a namespace.
+#[allow(dead_code)] // Public API.
 pub fn ns_reset_stats(ns_id: u32) {
     let idx = ns_id as usize;
     if idx == 0 {

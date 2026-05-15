@@ -117,20 +117,26 @@ pub struct Elf64Ehdr {
     /// Byte offset of program header table in the file.
     pub e_phoff: u64,
     /// Byte offset of section header table in the file.
+    #[allow(dead_code)] // ELF spec field — not yet used by the loader.
     pub e_shoff: u64,
     /// Processor-specific flags (0 for x86_64).
+    #[allow(dead_code)] // ELF spec field — always 0 for x86_64.
     pub e_flags: u32,
     /// Size of this header (should be 64 for ELF64).
+    #[allow(dead_code)] // ELF spec field — validated implicitly.
     pub e_ehsize: u16,
     /// Size of each program header entry.
     pub e_phentsize: u16,
     /// Number of program header entries.
     pub e_phnum: u16,
     /// Size of each section header entry.
+    #[allow(dead_code)] // ELF spec field — section headers not yet parsed.
     pub e_shentsize: u16,
     /// Number of section header entries.
+    #[allow(dead_code)] // ELF spec field — section headers not yet parsed.
     pub e_shnum: u16,
     /// Section header string table index.
+    #[allow(dead_code)] // ELF spec field — section headers not yet parsed.
     pub e_shstrndx: u16,
 }
 
@@ -146,6 +152,7 @@ pub struct Elf64Phdr {
     /// Virtual address where this segment should be loaded.
     pub p_vaddr: u64,
     /// Physical address (ignored on systems with virtual memory).
+    #[allow(dead_code)] // ELF spec field — unused on virtual memory systems.
     pub p_paddr: u64,
     /// Number of bytes of segment data in the file.
     pub p_filesz: u64,
@@ -153,6 +160,7 @@ pub struct Elf64Phdr {
     /// The difference (`p_memsz - p_filesz`) is BSS (zero-filled).
     pub p_memsz: u64,
     /// Alignment requirement (0 or 1 = no alignment, else power of 2).
+    #[allow(dead_code)] // ELF spec field — alignment enforced by frame size.
     pub p_align: u64,
 }
 
@@ -170,6 +178,7 @@ pub struct LoadableSegment {
     /// Offset into the ELF file where segment data starts.
     pub file_offset: u64,
     /// Read permission.
+    #[allow(dead_code)] // Public API — all mapped pages are readable via PRESENT.
     pub readable: bool,
     /// Write permission.
     pub writable: bool,
@@ -405,6 +414,7 @@ impl<'a> ElfFile<'a> {
     ///
     /// Returns the slice `[p_offset .. p_offset + p_filesz]`.
     /// Returns `None` if the range is out of bounds.
+    #[allow(dead_code)] // Public API — useful for callers inspecting raw segment data.
     #[must_use]
     pub fn segment_data(&self, phdr: &Elf64Phdr) -> Option<&'a [u8]> {
         let start = phdr.p_offset as usize;
@@ -413,6 +423,7 @@ impl<'a> ElfFile<'a> {
     }
 
     /// Get the total size of the raw ELF data.
+    #[allow(dead_code)] // Public API — useful for diagnostics and validation.
     #[must_use]
     pub fn file_size(&self) -> usize {
         self.data.len()

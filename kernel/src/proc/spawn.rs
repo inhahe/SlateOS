@@ -105,8 +105,10 @@ pub mod fd_handle_type {
     /// for pipe handles before this type is fully functional.
     pub const PIPE: u8 = 1;
     /// TCP socket handle.
+    #[allow(dead_code)] // Protocol constant — used when net stack is integrated.
     pub const TCP_SOCKET: u8 = 2;
     /// UDP socket handle.
+    #[allow(dead_code)] // Protocol constant — used when net stack is integrated.
     pub const UDP_SOCKET: u8 = 3;
     /// Console I/O (stdin/stdout/stderr virtual handle).
     pub const CONSOLE: u8 = 4;
@@ -258,6 +260,7 @@ impl<'a> SpawnOptions<'a> {
     }
 
     /// Set the parent process.
+    #[allow(dead_code)] // Public builder API — callers use SpawnOptions::new() + chaining.
     #[must_use]
     pub fn parent(mut self, pid: ProcessId) -> Self {
         self.parent = pid;
@@ -265,6 +268,7 @@ impl<'a> SpawnOptions<'a> {
     }
 
     /// Set the initial thread priority.
+    #[allow(dead_code)] // Public builder API — callers use SpawnOptions::new() + chaining.
     #[must_use]
     pub fn priority(mut self, priority: u8) -> Self {
         self.priority = priority;

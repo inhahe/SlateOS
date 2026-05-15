@@ -47,12 +47,14 @@ const SNMP_PORT: u16 = 161;
 const DEFAULT_COMMUNITY: &str = "public";
 
 /// Maximum response size.
+#[allow(dead_code)] // Protocol constant.
 const MAX_RESPONSE_SIZE: usize = 4096;
 
 /// Timeout in poll iterations for a response.
 const RESPONSE_TIMEOUT_POLLS: u32 = 200;
 
 /// Maximum OIDs per walk.
+#[allow(dead_code)] // Protocol constant.
 const MAX_WALK_OIDS: usize = 256;
 
 // ---------------------------------------------------------------------------
@@ -76,16 +78,21 @@ const TAG_GET_REQUEST: u8 = 0xA0;
 /// GetNextRequest PDU tag.
 const TAG_GET_NEXT_REQUEST: u8 = 0xA1;
 /// GetResponse PDU tag.
+#[allow(dead_code)] // Protocol constant.
 const TAG_GET_RESPONSE: u8 = 0xA2;
 
 // SNMP application types.
 /// Counter32 tag.
+#[allow(dead_code)] // Protocol constant.
 const TAG_COUNTER32: u8 = 0x41;
 /// Gauge32 / Unsigned32 tag.
+#[allow(dead_code)] // Protocol constant.
 const TAG_GAUGE32: u8 = 0x42;
 /// TimeTicks tag.
+#[allow(dead_code)] // Protocol constant.
 const TAG_TIMETICKS: u8 = 0x43;
 /// Counter64 tag.
+#[allow(dead_code)] // Protocol constant.
 const TAG_COUNTER64: u8 = 0x46;
 
 // ---------------------------------------------------------------------------
@@ -385,6 +392,7 @@ fn encode_integer(buf: &mut Vec<u8>, value: i32) {
 }
 
 /// Decode a BER-encoded integer.
+#[allow(dead_code)] // Protocol decoder.
 fn decode_integer(data: &[u8]) -> Option<i32> {
     if data.is_empty() || data.len() > 4 {
         return None; // Empty or too large for i32.
@@ -398,6 +406,7 @@ fn decode_integer(data: &[u8]) -> Option<i32> {
 }
 
 /// Decode an unsigned integer from BER bytes.
+#[allow(dead_code)] // Protocol decoder.
 fn decode_unsigned(data: &[u8]) -> Option<u32> {
     if data.is_empty() || data.len() > 5 {
         return None;
@@ -413,6 +422,7 @@ fn decode_unsigned(data: &[u8]) -> Option<u32> {
 }
 
 /// Decode a 64-bit unsigned integer from BER bytes.
+#[allow(dead_code)] // Protocol decoder.
 fn decode_unsigned64(data: &[u8]) -> Option<u64> {
     if data.is_empty() || data.len() > 9 {
         return None;
@@ -503,6 +513,7 @@ fn build_request(pdu_tag: u8, community: &str, request_id: i32, oid: &Oid) -> Ve
 
 /// Parsed SNMP response.
 #[derive(Debug)]
+#[allow(dead_code)] // Public API.
 struct SnmpResponse {
     #[allow(dead_code)]
     request_id: i32,
@@ -513,6 +524,7 @@ struct SnmpResponse {
 }
 
 /// Parse an SNMP response message.
+#[allow(dead_code)] // Public API.
 fn parse_response(data: &[u8]) -> Option<SnmpResponse> {
     // Outer SEQUENCE.
     if data.first().copied()? != TAG_SEQUENCE {

@@ -233,6 +233,7 @@ struct CapturedPacket {
     /// Timestamp: microseconds within the second.
     ts_usec: u32,
     /// Direction: true = RX (received), false = TX (sent).
+    #[allow(dead_code)] // Spec-defined field.
     is_rx: bool,
 }
 

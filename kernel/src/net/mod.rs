@@ -173,6 +173,7 @@ pub fn send_frame(frame: &[u8]) -> KernelResult<()> {
 }
 
 /// Self-test: verify network interface is configured.
+#[allow(dead_code)] // Public API.
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[net] Running network self-test...");
 

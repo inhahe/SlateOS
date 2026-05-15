@@ -262,6 +262,7 @@ pub fn ns_ip(ns_id: crate::netns::NetNsId) -> Ipv4Addr {
 ///
 /// For the root namespace, checks the physical NIC.  For child
 /// namespaces, checks the per-namespace interface state.
+#[allow(dead_code)] // Public API.
 pub fn ns_is_up(ns_id: crate::netns::NetNsId) -> bool {
     if ns_id == crate::netns::ROOT_NS {
         return is_up();

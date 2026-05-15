@@ -198,6 +198,7 @@ const NAGLE_DEFAULT: bool = true;
 const INITIAL_CWND_SEGS: u32 = 4;
 
 /// Minimum congestion window (1 segment).
+#[allow(dead_code)] // Protocol constant.
 const MIN_CWND_SEGS: u32 = 1;
 
 // ---------------------------------------------------------------------------
@@ -260,6 +261,7 @@ const TCP_ECE: u8 = 0x40;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcpState {
     Closed,
+    #[allow(dead_code)] // TCP state machine variant.
     Listen,
     SynSent,
     SynReceived,
@@ -2312,6 +2314,7 @@ pub fn get_nodelay(handle: usize) -> KernelResult<bool> {
 #[derive(Debug, Clone)]
 pub struct TcpConnectionInfo {
     /// Connection table index.
+    #[allow(dead_code)] // Public API.
     pub handle: usize,
     /// Current TCP state.
     pub state: TcpState,
@@ -2427,6 +2430,7 @@ pub fn all_connections() -> Vec<TcpConnectionInfo> {
 #[derive(Debug, Clone, Copy)]
 pub struct TcpListenerInfo {
     /// Listener table index.
+    #[allow(dead_code)] // Public API.
     pub handle: usize,
     /// Local port being listened on.
     pub port: u16,

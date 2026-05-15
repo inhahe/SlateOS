@@ -187,6 +187,7 @@ impl Neighbor {
         }
     }
 
+    #[allow(dead_code)] // Public API.
     fn is_empty(&self) -> bool {
         self.ttl == 0 && self.last_seen_ns == 0
     }
@@ -522,6 +523,7 @@ pub fn disable() {
 }
 
 /// Check if LLDP TX is enabled.
+#[allow(dead_code)] // Public API.
 pub fn is_enabled() -> bool {
     TX_ENABLED.load(Ordering::Relaxed)
 }

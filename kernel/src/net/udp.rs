@@ -684,6 +684,7 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
 #[derive(Debug, Clone, Copy)]
 pub struct UdpSocketInfo {
     /// Slot index (handle).
+    #[allow(dead_code)] // Public API.
     pub handle: usize,
     /// Bound local port.
     pub local_port: u16,

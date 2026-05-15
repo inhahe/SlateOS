@@ -83,6 +83,7 @@ impl ProcessCredentials {
     }
 
     /// Create credentials for a specific user/group.
+    #[allow(dead_code)] // Public API — used when login/user management is implemented.
     #[must_use]
     pub fn new(uid: u32, gid: u32) -> Self {
         Self {

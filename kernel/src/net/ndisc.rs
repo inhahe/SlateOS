@@ -36,6 +36,7 @@ use super::interface::Ipv4Addr;
 // ---------------------------------------------------------------------------
 
 /// Maximum hosts tracked.
+#[allow(dead_code)] // Protocol constant.
 const MAX_HOSTS: usize = 256;
 
 /// Poll iterations per ARP probe (wait time for reply).
@@ -58,6 +59,7 @@ pub struct Host {
     /// Hostname (from DNS reverse lookup, if available).
     pub hostname: String,
     /// Last seen timestamp (ns).
+    #[allow(dead_code)] // Spec-defined field.
     pub last_seen_ns: u64,
 }
 

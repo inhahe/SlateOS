@@ -1250,6 +1250,20 @@ mod tests {
         unsafe { cfmakeraw(&raw mut t); }
         assert_eq!(t.c_cflag & PARENB, 0, "PARENB should be cleared in raw mode");
     }
+
+    // -- tcsendbreak / tcdrain --
+
+    #[test]
+    fn test_tcsendbreak_invalid_fd() {
+        assert_eq!(tcsendbreak(9999, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tcdrain_invalid_fd() {
+        assert_eq!(tcdrain(9999), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
 }
 
 // ---------------------------------------------------------------------------

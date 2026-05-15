@@ -2648,4 +2648,311 @@ mod tests {
     fn atfork_with_handlers_returns_zero() {
         assert_eq!(pthread_atfork(Some(dummy_fork_handler), Some(dummy_fork_handler), Some(dummy_fork_handler)), 0);
     }
+
+    // =======================================================================
+    // pthread_self
+    // =======================================================================
+
+    #[test]
+    fn self_returns_thread_id() {
+        // In test mode SYS_TASK_ID returns 0, which is a valid thread ID.
+        let id = pthread_self();
+        // The call should not crash and should return a consistent value.
+        assert_eq!(id, pthread_self());
+    }
+
+    // =======================================================================
+    // Mutex lock / trylock / unlock
+    // =======================================================================
+
+    #[test]
+    fn mutex_lock_unlock_normal() {
+        #[allow(clippy::declare_interior_mutable_const)]
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        assert_eq!(unsafe { pthread_mutex_lock(&mut m) }, 0);
+        assert_eq!(unsafe { pthread_mutex_unlock(&mut m) }, 0);
+    }
+
+    #[test]
+    fn mutex_trylock_uncontended() {
+        #[allow(clippy::declare_interior_mutable_const)]
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        assert_eq!(unsafe { pthread_mutex_trylock(&mut m) }, 0);
+        assert_eq!(unsafe { pthread_mutex_unlock(&mut m) }, 0);
+    }
+
+    #[test]
+    fn mutex_trylock_locked_returns_ebusy() {
+        #[allow(clippy::declare_interior_mutable_const)]
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        // Lock it first.
+        assert_eq!(unsafe { pthread_mutex_lock(&mut m) }, 0);
+        // Trylock on already-locked mutex from "different thread" perspective:
+        // Since SYS_TASK_ID returns 0 and the owner is also 0, the normal
+        // mutex type doesn't check ownership on trylock — it just sees
+        // locked.state != 0. The CAS from 0→1 fails because state is already 1.
+        // For a non-recursive, non-errorchecking mutex: EBUSY.
+        // But owner == self_id for normal mutex doesn't matter, so the CAS
+        // just fails with EBUSY.
+        assert_eq!(unsafe { pthread_mutex_trylock(&mut m) }, errno::EBUSY);
+        assert_eq!(unsafe { pthread_mutex_unlock(&mut m) }, 0);
+    }
+
+    #[test]
+    fn mutex_lock_null_returns_einval() {
+        assert_eq!(unsafe { pthread_mutex_lock(core::ptr::null_mut()) }, errno::EINVAL);
+    }
+
+    #[test]
+    fn mutex_trylock_null_returns_einval() {
+        assert_eq!(unsafe { pthread_mutex_trylock(core::ptr::null_mut()) }, errno::EINVAL);
+    }
+
+    #[test]
+    fn mutex_unlock_null_returns_einval() {
+        assert_eq!(unsafe { pthread_mutex_unlock(core::ptr::null_mut()) }, errno::EINVAL);
+    }
+
+    #[test]
+    fn mutex_recursive_lock_twice() {
+        let mut m = PthreadMutexT {
+            locked: AtomicI32::new(0),
+            kind: AtomicI32::new(PTHREAD_MUTEX_RECURSIVE),
+            owner: AtomicI32::new(0),
+            count: AtomicI32::new(0),
+            _pad: [0; 24],
+        };
+        // First lock.
+        assert_eq!(unsafe { pthread_mutex_lock(&mut m) }, 0);
+        // Second lock (recursive) — should succeed.
+        assert_eq!(unsafe { pthread_mutex_lock(&mut m) }, 0);
+        // First unlock decrements count.
+        assert_eq!(unsafe { pthread_mutex_unlock(&mut m) }, 0);
+        // Lock is still held (count was 2, now 1).
+        assert_eq!(m.locked.load(core::sync::atomic::Ordering::Relaxed), 1);
+        // Second unlock releases.
+        assert_eq!(unsafe { pthread_mutex_unlock(&mut m) }, 0);
+        assert_eq!(m.locked.load(core::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn mutex_errorcheck_double_lock_returns_edeadlk() {
+        let mut m = PthreadMutexT {
+            locked: AtomicI32::new(0),
+            kind: AtomicI32::new(PTHREAD_MUTEX_ERRORCHECK),
+            owner: AtomicI32::new(0),
+            count: AtomicI32::new(0),
+            _pad: [0; 24],
+        };
+        // First lock succeeds.
+        assert_eq!(unsafe { pthread_mutex_lock(&mut m) }, 0);
+        // Second lock from same thread: EDEADLK.
+        assert_eq!(unsafe { pthread_mutex_lock(&mut m) }, errno::EDEADLK);
+        // Unlock.
+        assert_eq!(unsafe { pthread_mutex_unlock(&mut m) }, 0);
+    }
+
+    // =======================================================================
+    // pthread_once
+    // =======================================================================
+
+    static mut ONCE_COUNTER: i32 = 0;
+
+    extern "C" fn once_increment() {
+        // SAFETY: single-threaded tests.
+        unsafe { *core::ptr::addr_of_mut!(ONCE_COUNTER) += 1; }
+    }
+
+    #[test]
+    fn once_calls_init_exactly_once() {
+        let mut once = PTHREAD_ONCE_INIT;
+        unsafe { *core::ptr::addr_of_mut!(ONCE_COUNTER) = 0; }
+        assert_eq!(unsafe { pthread_once(&mut once, once_increment) }, 0);
+        assert_eq!(unsafe { *core::ptr::addr_of!(ONCE_COUNTER) }, 1);
+        // Second call should not invoke init again.
+        assert_eq!(unsafe { pthread_once(&mut once, once_increment) }, 0);
+        assert_eq!(unsafe { *core::ptr::addr_of!(ONCE_COUNTER) }, 1);
+    }
+
+    #[test]
+    fn once_null_returns_einval() {
+        assert_eq!(unsafe { pthread_once(core::ptr::null_mut(), once_increment) }, errno::EINVAL);
+    }
+
+    // =======================================================================
+    // Thread-specific data (TSD)
+    // =======================================================================
+
+    #[test]
+    fn tsd_create_set_get() {
+        let mut key: PthreadKeyT = 0;
+        assert_eq!(unsafe { pthread_key_create(&mut key, None) }, 0);
+
+        let val = 42u8;
+        assert_eq!(unsafe { pthread_setspecific(key, core::ptr::addr_of!(val) as *mut u8) }, 0);
+
+        let got = unsafe { pthread_getspecific(key) };
+        assert_eq!(got, core::ptr::addr_of!(val) as *mut u8);
+    }
+
+    #[test]
+    fn tsd_key_create_null_returns_einval() {
+        assert_eq!(unsafe { pthread_key_create(core::ptr::null_mut(), None) }, errno::EINVAL);
+    }
+
+    #[test]
+    fn tsd_key_delete_returns_zero() {
+        assert_eq!(pthread_key_delete(0), 0);
+    }
+
+    #[test]
+    fn tsd_getspecific_invalid_key() {
+        // Key beyond MAX_KEYS should return null.
+        let got = unsafe { pthread_getspecific(9999) };
+        assert!(got.is_null());
+    }
+
+    #[test]
+    fn tsd_setspecific_invalid_key() {
+        let ret = unsafe { pthread_setspecific(9999, core::ptr::null_mut()) };
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    // =======================================================================
+    // Spinlock operations
+    // =======================================================================
+
+    #[test]
+    fn spin_lock_unlock() {
+        let mut lock = AtomicI32::new(0);
+        assert_eq!(pthread_spin_lock(&mut lock), 0);
+        assert_eq!(lock.load(core::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(pthread_spin_unlock(&mut lock), 0);
+        assert_eq!(lock.load(core::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn spin_trylock_uncontended() {
+        let mut lock = AtomicI32::new(0);
+        assert_eq!(pthread_spin_trylock(&mut lock), 0);
+        assert_eq!(lock.load(core::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(pthread_spin_unlock(&mut lock), 0);
+    }
+
+    #[test]
+    fn spin_trylock_locked_returns_ebusy() {
+        let mut lock = AtomicI32::new(0);
+        assert_eq!(pthread_spin_lock(&mut lock), 0);
+        assert_eq!(pthread_spin_trylock(&mut lock), errno::EBUSY);
+        assert_eq!(pthread_spin_unlock(&mut lock), 0);
+    }
+
+    #[test]
+    fn spin_lock_null_returns_einval() {
+        assert_eq!(pthread_spin_lock(core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    // =======================================================================
+    // RW lock operations
+    // =======================================================================
+
+    #[test]
+    fn rwlock_rdlock_tryrdlock() {
+        let mut rw = PthreadRwlockT { state: AtomicI32::new(0), _pad: [0; 52] };
+        // Read-lock.
+        assert_eq!(pthread_rwlock_rdlock(&mut rw), 0);
+        // Another read-lock should succeed (multiple readers).
+        assert_eq!(pthread_rwlock_tryrdlock(&mut rw), 0);
+        // State should be 2 (two readers).
+        assert_eq!(rw.state.load(core::sync::atomic::Ordering::Relaxed), 2);
+        // Unlock twice.
+        assert_eq!(pthread_rwlock_unlock(&mut rw), 0);
+        assert_eq!(pthread_rwlock_unlock(&mut rw), 0);
+        assert_eq!(rw.state.load(core::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rwlock_wrlock_trywrlock() {
+        let mut rw = PthreadRwlockT { state: AtomicI32::new(0), _pad: [0; 52] };
+        // Write-lock.
+        assert_eq!(pthread_rwlock_wrlock(&mut rw), 0);
+        assert_eq!(rw.state.load(core::sync::atomic::Ordering::Relaxed), -1);
+        // Try write-lock again — should fail.
+        assert_eq!(pthread_rwlock_trywrlock(&mut rw), errno::EBUSY);
+        // Try read-lock — should fail (writer holds lock).
+        assert_eq!(pthread_rwlock_tryrdlock(&mut rw), errno::EBUSY);
+        // Unlock.
+        assert_eq!(pthread_rwlock_unlock(&mut rw), 0);
+        assert_eq!(rw.state.load(core::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn rwlock_null_returns_einval() {
+        assert_eq!(pthread_rwlock_rdlock(core::ptr::null_mut()), errno::EINVAL);
+        assert_eq!(pthread_rwlock_wrlock(core::ptr::null_mut()), errno::EINVAL);
+        assert_eq!(pthread_rwlock_tryrdlock(core::ptr::null_mut()), errno::EINVAL);
+        assert_eq!(pthread_rwlock_trywrlock(core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    // =======================================================================
+    // Condition variable signal/broadcast
+    // =======================================================================
+
+    #[test]
+    fn cond_signal_increments_generation() {
+        let mut cond = PthreadCondT { generation: AtomicI32::new(0), _pad: [0; 44] };
+        let gen_before = cond.generation.load(core::sync::atomic::Ordering::Relaxed);
+        assert_eq!(pthread_cond_signal(&mut cond), 0);
+        let gen_after = cond.generation.load(core::sync::atomic::Ordering::Relaxed);
+        assert_eq!(gen_after, gen_before + 1);
+    }
+
+    #[test]
+    fn cond_broadcast_increments_generation() {
+        let mut cond = PthreadCondT { generation: AtomicI32::new(0), _pad: [0; 44] };
+        assert_eq!(pthread_cond_broadcast(&mut cond), 0);
+        assert_eq!(cond.generation.load(core::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn cond_signal_null_returns_einval() {
+        assert_eq!(pthread_cond_signal(core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    #[test]
+    fn cond_broadcast_null_returns_einval() {
+        assert_eq!(pthread_cond_broadcast(core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    #[test]
+    fn cond_wait_null_returns_einval() {
+        #[allow(clippy::declare_interior_mutable_const)]
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        assert_eq!(pthread_cond_wait(core::ptr::null_mut(), &mut m), errno::EINVAL);
+        let mut c = PthreadCondT { generation: AtomicI32::new(0), _pad: [0; 44] };
+        assert_eq!(pthread_cond_wait(&mut c, core::ptr::null_mut()), errno::EINVAL);
+    }
+
+    #[test]
+    fn cond_timedwait_null_returns_einval() {
+        #[allow(clippy::declare_interior_mutable_const)]
+        let mut m = PTHREAD_MUTEX_INITIALIZER;
+        let mut c = PthreadCondT { generation: AtomicI32::new(0), _pad: [0; 44] };
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        // Null cond.
+        assert_eq!(pthread_cond_timedwait(core::ptr::null_mut(), &mut m, &ts), errno::EINVAL);
+        // Null mutex.
+        assert_eq!(pthread_cond_timedwait(&mut c, core::ptr::null_mut(), &ts), errno::EINVAL);
+        // Null abstime.
+        assert_eq!(pthread_cond_timedwait(&mut c, &mut m, core::ptr::null()), errno::EINVAL);
+    }
+
+    // =======================================================================
+    // sched_yield
+    // =======================================================================
+
+    #[test]
+    fn sched_yield_returns_zero() {
+        assert_eq!(sched_yield(), 0);
+    }
 }

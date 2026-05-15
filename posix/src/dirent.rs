@@ -1121,4 +1121,51 @@ mod tests {
             "Buffer capacity must be 256 * 264 = 67584 bytes"
         );
     }
+
+    // -- LP64 aliases --
+
+    #[test]
+    fn test_readdir64_null_returns_null() {
+        let result = readdir64(core::ptr::null_mut());
+        assert!(result.is_null());
+    }
+
+    #[test]
+    fn test_readdir_r64_null_dirp() {
+        let mut entry = Dirent {
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
+            d_name: [0; 256],
+        };
+        let mut result: *mut Dirent = core::ptr::null_mut();
+        let ret = unsafe { readdir_r64(core::ptr::null_mut(), &mut entry, &mut result) };
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_readdir_r64_null_entry() {
+        let mut result: *mut Dirent = core::ptr::null_mut();
+        let ret = unsafe { readdir_r64(core::ptr::null_mut(), core::ptr::null_mut(), &mut result) };
+        assert_eq!(ret, crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_scandir64_null_dirname() {
+        let mut namelist: *mut *mut Dirent = core::ptr::null_mut();
+        let ret = scandir64(core::ptr::null(), &mut namelist, None, None);
+        assert_eq!(ret, -1);
+    }
+
+    #[test]
+    fn test_scandir64_null_namelist() {
+        let ret = scandir64(
+            b"/tmp\0".as_ptr(),
+            core::ptr::null_mut(),
+            None,
+            None,
+        );
+        assert_eq!(ret, -1);
+    }
 }

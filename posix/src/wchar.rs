@@ -3716,4 +3716,541 @@ mod tests {
         // Should return empty string.
         assert_eq!(unsafe { *s }, 0);
     }
+
+    // -- wmemcpy --
+
+    #[test]
+    fn test_wmemcpy_basic() {
+        let src: [WcharT; 4] = [0x41, 0x42, 0x43, 0x44]; // ABCD
+        let mut dst: [WcharT; 4] = [0; 4];
+        let ret = unsafe { wmemcpy(dst.as_mut_ptr(), src.as_ptr(), 4) };
+        assert_eq!(ret, dst.as_mut_ptr());
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn test_wmemcpy_zero_length() {
+        let src: [WcharT; 2] = [0x41, 0x42];
+        let mut dst: [WcharT; 2] = [0; 2];
+        let ret = unsafe { wmemcpy(dst.as_mut_ptr(), src.as_ptr(), 0) };
+        assert_eq!(ret, dst.as_mut_ptr());
+        assert_eq!(dst, [0, 0]); // unchanged
+    }
+
+    #[test]
+    fn test_wmemcpy_unicode() {
+        let src: [WcharT; 3] = [0x1F600, 0x2764, 0x1F4A9]; // 😀❤💩
+        let mut dst: [WcharT; 3] = [0; 3];
+        unsafe { wmemcpy(dst.as_mut_ptr(), src.as_ptr(), 3) };
+        assert_eq!(dst, src);
+    }
+
+    // -- wmemset --
+
+    #[test]
+    fn test_wmemset_basic() {
+        let mut buf: [WcharT; 4] = [0; 4];
+        let ret = unsafe { wmemset(buf.as_mut_ptr(), 0x58, 4) }; // 'X'
+        assert_eq!(ret, buf.as_mut_ptr());
+        assert_eq!(buf, [0x58, 0x58, 0x58, 0x58]);
+    }
+
+    #[test]
+    fn test_wmemset_zero_length() {
+        let mut buf: [WcharT; 2] = [0x41, 0x42];
+        unsafe { wmemset(buf.as_mut_ptr(), 0x58, 0) };
+        assert_eq!(buf, [0x41, 0x42]); // unchanged
+    }
+
+    #[test]
+    fn test_wmemset_unicode_value() {
+        let mut buf: [WcharT; 3] = [0; 3];
+        unsafe { wmemset(buf.as_mut_ptr(), 0x1F600, 3) }; // 😀
+        assert_eq!(buf, [0x1F600, 0x1F600, 0x1F600]);
+    }
+
+    // -- wmemcmp --
+
+    #[test]
+    fn test_wmemcmp_equal() {
+        let a: [WcharT; 3] = [0x41, 0x42, 0x43];
+        let b: [WcharT; 3] = [0x41, 0x42, 0x43];
+        assert_eq!(unsafe { wmemcmp(a.as_ptr(), b.as_ptr(), 3) }, 0);
+    }
+
+    #[test]
+    fn test_wmemcmp_less() {
+        let a: [WcharT; 3] = [0x41, 0x42, 0x43];
+        let b: [WcharT; 3] = [0x41, 0x42, 0x44];
+        assert!(unsafe { wmemcmp(a.as_ptr(), b.as_ptr(), 3) } < 0);
+    }
+
+    #[test]
+    fn test_wmemcmp_greater() {
+        let a: [WcharT; 3] = [0x41, 0x42, 0x45];
+        let b: [WcharT; 3] = [0x41, 0x42, 0x43];
+        assert!(unsafe { wmemcmp(a.as_ptr(), b.as_ptr(), 3) } > 0);
+    }
+
+    #[test]
+    fn test_wmemcmp_zero_length() {
+        let a: [WcharT; 2] = [0x41, 0x42];
+        let b: [WcharT; 2] = [0x43, 0x44];
+        assert_eq!(unsafe { wmemcmp(a.as_ptr(), b.as_ptr(), 0) }, 0);
+    }
+
+    // -- wmemchr --
+
+    #[test]
+    fn test_wmemchr_found() {
+        let data: [WcharT; 4] = [0x41, 0x42, 0x43, 0x44];
+        let ret = unsafe { wmemchr(data.as_ptr(), 0x43, 4) };
+        assert!(!ret.is_null());
+        assert_eq!(ret, unsafe { data.as_ptr().add(2) });
+    }
+
+    #[test]
+    fn test_wmemchr_not_found() {
+        let data: [WcharT; 3] = [0x41, 0x42, 0x43];
+        let ret = unsafe { wmemchr(data.as_ptr(), 0x58, 3) };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_wmemchr_zero_length() {
+        let data: [WcharT; 3] = [0x41, 0x42, 0x43];
+        let ret = unsafe { wmemchr(data.as_ptr(), 0x41, 0) };
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_wmemchr_first_element() {
+        let data: [WcharT; 3] = [0x58, 0x41, 0x42];
+        let ret = unsafe { wmemchr(data.as_ptr(), 0x58, 3) };
+        assert_eq!(ret, data.as_ptr());
+    }
+
+    // -- wmemmove --
+
+    #[test]
+    fn test_wmemmove_no_overlap() {
+        let src: [WcharT; 3] = [0x41, 0x42, 0x43];
+        let mut dst: [WcharT; 3] = [0; 3];
+        let ret = unsafe { wmemmove(dst.as_mut_ptr(), src.as_ptr(), 3) };
+        assert_eq!(ret, dst.as_mut_ptr());
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn test_wmemmove_overlap_forward() {
+        let mut buf: [WcharT; 5] = [1, 2, 3, 4, 5];
+        // Move [1,2,3] to position [1..4], overlapping.
+        unsafe { wmemmove(buf.as_mut_ptr().add(1), buf.as_ptr(), 3) };
+        assert_eq!(buf, [1, 1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn test_wmemmove_overlap_backward() {
+        let mut buf: [WcharT; 5] = [1, 2, 3, 4, 5];
+        // Move [2,3,4] to position [0..3], overlapping.
+        unsafe { wmemmove(buf.as_mut_ptr(), buf.as_ptr().add(1), 3) };
+        assert_eq!(buf, [2, 3, 4, 4, 5]);
+    }
+
+    #[test]
+    fn test_wmemmove_zero_length() {
+        let mut buf: [WcharT; 3] = [1, 2, 3];
+        unsafe { wmemmove(buf.as_mut_ptr(), buf.as_ptr().add(1), 0) };
+        assert_eq!(buf, [1, 2, 3]); // unchanged
+    }
+
+    #[test]
+    fn test_wmemmove_same_pointer() {
+        let mut buf: [WcharT; 3] = [0x41, 0x42, 0x43];
+        unsafe { wmemmove(buf.as_mut_ptr(), buf.as_ptr(), 3) };
+        assert_eq!(buf, [0x41, 0x42, 0x43]); // unchanged
+    }
+
+    // -- wmempcpy --
+
+    #[test]
+    fn test_wmempcpy_returns_past_end() {
+        let src: [WcharT; 3] = [0x41, 0x42, 0x43];
+        let mut dst: [WcharT; 3] = [0; 3];
+        let ret = unsafe { wmempcpy(dst.as_mut_ptr(), src.as_ptr(), 3) };
+        // Should return pointer past the last element written.
+        assert_eq!(ret, unsafe { dst.as_mut_ptr().add(3) });
+        assert_eq!(dst, src);
+    }
+
+    #[test]
+    fn test_wmempcpy_zero_length() {
+        let src: [WcharT; 2] = [0x41, 0x42];
+        let mut dst: [WcharT; 2] = [0; 2];
+        let ret = unsafe { wmempcpy(dst.as_mut_ptr(), src.as_ptr(), 0) };
+        assert_eq!(ret, dst.as_mut_ptr()); // base pointer (0 advance)
+        assert_eq!(dst, [0, 0]); // unchanged
+    }
+
+    // -- wcscat --
+
+    #[test]
+    fn test_wcscat_basic() {
+        let mut buf: [WcharT; 8] = [0; 8];
+        buf[0] = 0x41; // 'A'
+        buf[1] = 0x42; // 'B'
+        buf[2] = 0;
+        let src: [WcharT; 4] = [0x43, 0x44, 0x45, 0]; // "CDE"
+        let ret = unsafe { wcscat(buf.as_mut_ptr(), src.as_ptr()) };
+        assert_eq!(ret, buf.as_mut_ptr());
+        assert_eq!(&buf[..6], &[0x41, 0x42, 0x43, 0x44, 0x45, 0]);
+    }
+
+    #[test]
+    fn test_wcscat_empty_src() {
+        let mut buf: [WcharT; 4] = [0x41, 0x42, 0, 0];
+        let src: [WcharT; 1] = [0]; // empty
+        unsafe { wcscat(buf.as_mut_ptr(), src.as_ptr()) };
+        assert_eq!(&buf[..3], &[0x41, 0x42, 0]);
+    }
+
+    // -- wcsncpy --
+
+    #[test]
+    fn test_wcsncpy_basic() {
+        let src: [WcharT; 4] = [0x41, 0x42, 0x43, 0]; // "ABC"
+        let mut dst: [WcharT; 5] = [0x99; 5];
+        let ret = unsafe { wcsncpy(dst.as_mut_ptr(), src.as_ptr(), 5) };
+        assert_eq!(ret, dst.as_mut_ptr());
+        // Should copy "ABC\0" then pad with null.
+        assert_eq!(dst, [0x41, 0x42, 0x43, 0, 0]);
+    }
+
+    #[test]
+    fn test_wcsncpy_truncation() {
+        let src: [WcharT; 6] = [0x41, 0x42, 0x43, 0x44, 0x45, 0]; // "ABCDE"
+        let mut dst: [WcharT; 3] = [0; 3];
+        unsafe { wcsncpy(dst.as_mut_ptr(), src.as_ptr(), 3) };
+        // Copies exactly 3 chars, no null terminator.
+        assert_eq!(dst, [0x41, 0x42, 0x43]);
+    }
+
+    #[test]
+    fn test_wcsncpy_zero_n() {
+        let src: [WcharT; 2] = [0x41, 0];
+        let mut dst: [WcharT; 2] = [0x99, 0x99];
+        unsafe { wcsncpy(dst.as_mut_ptr(), src.as_ptr(), 0) };
+        assert_eq!(dst, [0x99, 0x99]); // unchanged
+    }
+
+    // -- wcscoll / wcscoll_l --
+
+    #[test]
+    fn test_wcscoll_equal() {
+        let a: [WcharT; 4] = [0x41, 0x42, 0x43, 0];
+        let b: [WcharT; 4] = [0x41, 0x42, 0x43, 0];
+        assert_eq!(unsafe { wcscoll(a.as_ptr(), b.as_ptr()) }, 0);
+    }
+
+    #[test]
+    fn test_wcscoll_less() {
+        let a: [WcharT; 2] = [0x41, 0]; // "A"
+        let b: [WcharT; 2] = [0x42, 0]; // "B"
+        assert!(unsafe { wcscoll(a.as_ptr(), b.as_ptr()) } < 0);
+    }
+
+    #[test]
+    fn test_wcscoll_l_delegates() {
+        let a: [WcharT; 3] = [0x58, 0x59, 0];
+        let b: [WcharT; 3] = [0x58, 0x59, 0];
+        assert_eq!(unsafe { wcscoll_l(a.as_ptr(), b.as_ptr(), 0) }, 0);
+    }
+
+    // -- wcsxfrm / wcsxfrm_l --
+
+    #[test]
+    fn test_wcsxfrm_basic() {
+        let src: [WcharT; 4] = [0x41, 0x42, 0x43, 0]; // "ABC"
+        let mut dst: [WcharT; 8] = [0; 8];
+        let len = unsafe { wcsxfrm(dst.as_mut_ptr(), src.as_ptr(), 8) };
+        assert_eq!(len, 3); // length of src
+        assert_eq!(&dst[..4], &[0x41, 0x42, 0x43, 0]);
+    }
+
+    #[test]
+    fn test_wcsxfrm_zero_n() {
+        let src: [WcharT; 3] = [0x41, 0x42, 0];
+        let len = unsafe { wcsxfrm(core::ptr::null_mut(), src.as_ptr(), 0) };
+        assert_eq!(len, 2); // Returns length without writing.
+    }
+
+    #[test]
+    fn test_wcsxfrm_l_delegates() {
+        let src: [WcharT; 3] = [0x41, 0x42, 0];
+        let len = unsafe { wcsxfrm_l(core::ptr::null_mut(), src.as_ptr(), 0, 0) };
+        assert_eq!(len, 2);
+    }
+
+    // -- mbrtowc --
+    // Each test uses its own MbstateT to avoid polluting shared global state.
+
+    #[test]
+    fn test_mbrtowc_ascii() {
+        let mut wc: WcharT = 0;
+        let mut state = MbstateT::new();
+        let ret = unsafe { mbrtowc(&mut wc, b"A".as_ptr(), 1, &mut state) };
+        assert_eq!(ret, 1);
+        assert_eq!(wc, 0x41);
+    }
+
+    #[test]
+    fn test_mbrtowc_null_byte() {
+        let mut wc: WcharT = 0x99;
+        let mut state = MbstateT::new();
+        let ret = unsafe { mbrtowc(&mut wc, b"\0".as_ptr(), 1, &mut state) };
+        assert_eq!(ret, 0);
+        assert_eq!(wc, 0);
+    }
+
+    #[test]
+    fn test_mbrtowc_two_byte_utf8() {
+        let mut wc: WcharT = 0;
+        let mut state = MbstateT::new();
+        // é = U+00E9 = 0xC3 0xA9
+        let ret = unsafe { mbrtowc(&mut wc, b"\xC3\xA9".as_ptr(), 2, &mut state) };
+        assert_eq!(ret, 2);
+        assert_eq!(wc, 0xE9);
+    }
+
+    #[test]
+    fn test_mbrtowc_three_byte_utf8() {
+        let mut wc: WcharT = 0;
+        let mut state = MbstateT::new();
+        // ❤ = U+2764 = 0xE2 0x9D 0xA4
+        let ret = unsafe { mbrtowc(&mut wc, b"\xE2\x9D\xA4".as_ptr(), 3, &mut state) };
+        assert_eq!(ret, 3);
+        assert_eq!(wc, 0x2764);
+    }
+
+    #[test]
+    fn test_mbrtowc_four_byte_utf8() {
+        let mut wc: WcharT = 0;
+        let mut state = MbstateT::new();
+        // 😀 = U+1F600 = 0xF0 0x9F 0x98 0x80
+        let ret = unsafe { mbrtowc(&mut wc, b"\xF0\x9F\x98\x80".as_ptr(), 4, &mut state) };
+        assert_eq!(ret, 4);
+        assert_eq!(wc, 0x1F600);
+    }
+
+    #[test]
+    fn test_mbrtowc_incomplete() {
+        let mut wc: WcharT = 0;
+        let mut state = MbstateT::new();
+        // Only 1 byte of a 2-byte sequence.
+        let ret = unsafe { mbrtowc(&mut wc, b"\xC3".as_ptr(), 1, &mut state) };
+        // -2 (incomplete sequence)
+        assert_eq!(ret, usize::MAX.wrapping_sub(1));
+    }
+
+    #[test]
+    fn test_mbrtowc_null_s_resets_state() {
+        let mut state = MbstateT::new();
+        let ret = unsafe { mbrtowc(core::ptr::null_mut(), core::ptr::null(), 0, &mut state) };
+        assert_eq!(ret, 0);
+    }
+
+    // -- wcrtomb --
+
+    #[test]
+    fn test_wcrtomb_ascii() {
+        let mut buf = [0u8; 4];
+        let ret = unsafe { wcrtomb(buf.as_mut_ptr(), 0x41, core::ptr::null_mut()) };
+        assert_eq!(ret, 1);
+        assert_eq!(buf[0], b'A');
+    }
+
+    #[test]
+    fn test_wcrtomb_two_byte() {
+        let mut buf = [0u8; 4];
+        // é = U+00E9
+        let ret = unsafe { wcrtomb(buf.as_mut_ptr(), 0xE9, core::ptr::null_mut()) };
+        assert_eq!(ret, 2);
+        assert_eq!(&buf[..2], b"\xC3\xA9");
+    }
+
+    #[test]
+    fn test_wcrtomb_four_byte() {
+        let mut buf = [0u8; 4];
+        // 😀 = U+1F600
+        let ret = unsafe { wcrtomb(buf.as_mut_ptr(), 0x1F600, core::ptr::null_mut()) };
+        assert_eq!(ret, 4);
+        assert_eq!(&buf, b"\xF0\x9F\x98\x80");
+    }
+
+    #[test]
+    fn test_wcrtomb_null_s_returns_one() {
+        let ret = unsafe { wcrtomb(core::ptr::null_mut(), 0x41, core::ptr::null_mut()) };
+        assert_eq!(ret, 1); // Reset to initial state.
+    }
+
+    #[test]
+    fn test_wcrtomb_invalid_negative() {
+        let mut buf = [0u8; 4];
+        let ret = unsafe { wcrtomb(buf.as_mut_ptr(), -1, core::ptr::null_mut()) };
+        assert_eq!(ret, usize::MAX); // EILSEQ
+    }
+
+    // -- mbrlen --
+
+    #[test]
+    fn test_mbrlen_ascii() {
+        let mut state = MbstateT::new();
+        let ret = unsafe { mbrlen(b"A".as_ptr(), 1, &mut state) };
+        assert_eq!(ret, 1);
+    }
+
+    #[test]
+    fn test_mbrlen_multibyte() {
+        let mut state = MbstateT::new();
+        // é = 0xC3 0xA9
+        let ret = unsafe { mbrlen(b"\xC3\xA9".as_ptr(), 2, &mut state) };
+        assert_eq!(ret, 2);
+    }
+
+    #[test]
+    fn test_mbrlen_null_byte() {
+        let mut state = MbstateT::new();
+        let ret = unsafe { mbrlen(b"\0".as_ptr(), 1, &mut state) };
+        assert_eq!(ret, 0);
+    }
+
+    // -- mbsrtowcs --
+
+    #[test]
+    fn test_mbsrtowcs_basic() {
+        let input = b"ABC\0";
+        let mut src: *const u8 = input.as_ptr();
+        let mut dst: [WcharT; 4] = [0; 4];
+        let mut state = MbstateT::new();
+        let ret = unsafe { mbsrtowcs(dst.as_mut_ptr(), &mut src, 4, &mut state) };
+        assert_eq!(ret, 3);
+        assert_eq!(&dst[..4], &[0x41, 0x42, 0x43, 0]);
+        assert!(src.is_null()); // Entire string consumed.
+    }
+
+    #[test]
+    fn test_mbsrtowcs_utf8() {
+        // "é" (U+00E9) = 0xC3 0xA9
+        let input = b"\xC3\xA9\0";
+        let mut src: *const u8 = input.as_ptr();
+        let mut dst: [WcharT; 4] = [0; 4];
+        let mut state = MbstateT::new();
+        let ret = unsafe { mbsrtowcs(dst.as_mut_ptr(), &mut src, 4, &mut state) };
+        assert_eq!(ret, 1);
+        assert_eq!(dst[0], 0xE9);
+    }
+
+    // -- wcsrtombs --
+
+    #[test]
+    fn test_wcsrtombs_basic() {
+        let input: [WcharT; 4] = [0x41, 0x42, 0x43, 0]; // "ABC"
+        let mut src: *const WcharT = input.as_ptr();
+        let mut dst = [0u8; 8];
+        let mut state = MbstateT::new();
+        let ret = unsafe { wcsrtombs(dst.as_mut_ptr(), &mut src, 8, &mut state) };
+        assert_eq!(ret, 3);
+        assert_eq!(&dst[..4], b"ABC\0");
+        assert!(src.is_null()); // Entire string consumed.
+    }
+
+    #[test]
+    fn test_wcsrtombs_utf8() {
+        let input: [WcharT; 2] = [0xE9, 0]; // "é"
+        let mut src: *const WcharT = input.as_ptr();
+        let mut dst = [0u8; 8];
+        let mut state = MbstateT::new();
+        let ret = unsafe { wcsrtombs(dst.as_mut_ptr(), &mut src, 8, &mut state) };
+        assert_eq!(ret, 2);
+        assert_eq!(&dst[..2], b"\xC3\xA9");
+    }
+
+    // -- wcstof --
+
+    #[test]
+    fn test_wcstof_basic() {
+        let s: [WcharT; 5] = [0x33, 0x2E, 0x31, 0x34, 0]; // "3.14"
+        let mut end: *const WcharT = core::ptr::null();
+        let val = unsafe { wcstof(s.as_ptr(), &mut end) };
+        let diff = (val - 3.14_f32).abs();
+        assert!(diff < 0.001);
+    }
+
+    // -- wcstoll --
+
+    #[test]
+    fn test_wcstoll_basic() {
+        let s: [WcharT; 4] = [0x31, 0x32, 0x33, 0]; // "123"
+        let val = unsafe { wcstoll(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(val, 123);
+    }
+
+    #[test]
+    fn test_wcstoll_negative() {
+        let s: [WcharT; 5] = [0x2D, 0x34, 0x32, 0, 0]; // "-42"
+        let val = unsafe { wcstoll(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(val, -42);
+    }
+
+    // -- wcstoull --
+
+    #[test]
+    fn test_wcstoull_basic() {
+        let s: [WcharT; 4] = [0x39, 0x39, 0x39, 0]; // "999"
+        let val = unsafe { wcstoull(s.as_ptr(), core::ptr::null_mut(), 10) };
+        assert_eq!(val, 999);
+    }
+
+    #[test]
+    fn test_wcstoull_hex() {
+        let s: [WcharT; 5] = [0x30, 0x78, 0x46, 0x46, 0]; // "0xFF"
+        let val = unsafe { wcstoull(s.as_ptr(), core::ptr::null_mut(), 0) };
+        assert_eq!(val, 255);
+    }
+
+    // -- wcsdup --
+
+    #[test]
+    fn test_wcsdup_null() {
+        let ret = unsafe { wcsdup(core::ptr::null()) };
+        assert!(ret.is_null());
+    }
+
+    // -- mbsnrtowcs --
+
+    #[test]
+    fn test_mbsnrtowcs_byte_limited() {
+        let input = b"ABCDEF\0";
+        let mut src: *const u8 = input.as_ptr();
+        let mut dst: [WcharT; 8] = [0; 8];
+        let mut state = MbstateT::new();
+        // Limit to 3 bytes.
+        let ret = unsafe { mbsnrtowcs(dst.as_mut_ptr(), &mut src, 3, 8, &mut state) };
+        assert_eq!(ret, 3);
+        assert_eq!(&dst[..3], &[0x41, 0x42, 0x43]);
+    }
+
+    // -- wcsnrtombs --
+
+    #[test]
+    fn test_wcsnrtombs_wchar_limited() {
+        let input: [WcharT; 6] = [0x41, 0x42, 0x43, 0x44, 0x45, 0]; // "ABCDE"
+        let mut src: *const WcharT = input.as_ptr();
+        let mut dst = [0u8; 16];
+        let mut state = MbstateT::new();
+        // Limit to 3 wide chars.
+        let ret = unsafe { wcsnrtombs(dst.as_mut_ptr(), &mut src, 3, 16, &mut state) };
+        assert_eq!(ret, 3);
+        assert_eq!(&dst[..3], b"ABC");
+    }
 }

@@ -6557,6 +6557,237 @@ mod tests {
         freeaddrinfo(core::ptr::null_mut());
     }
 
+    // -- ntohl / ntohs --
+
+    #[test]
+    fn test_ntohl_identity_on_be() {
+        // ntohl(htonl(x)) == x for all x.
+        let x: u32 = 0x12345678;
+        assert_eq!(ntohl(htonl(x)), x);
+    }
+
+    #[test]
+    fn test_ntohs_identity_on_be() {
+        let x: u16 = 0x1234;
+        assert_eq!(ntohs(htons(x)), x);
+    }
+
+    #[test]
+    fn test_ntohl_zero() {
+        assert_eq!(ntohl(0), 0);
+    }
+
+    #[test]
+    fn test_ntohs_zero() {
+        assert_eq!(ntohs(0), 0);
+    }
+
+    #[test]
+    fn test_ntohl_max() {
+        assert_eq!(ntohl(htonl(u32::MAX)), u32::MAX);
+    }
+
+    #[test]
+    fn test_ntohs_max() {
+        assert_eq!(ntohs(htons(u16::MAX)), u16::MAX);
+    }
+
+    // -- __h_errno_location --
+
+    #[test]
+    fn test_h_errno_location_not_null() {
+        let loc = __h_errno_location();
+        assert!(!loc.is_null());
+    }
+
+    // -- getprotobyname --
+
+    #[test]
+    fn test_getprotobyname_tcp() {
+        let p = unsafe { getprotobyname(b"tcp\0".as_ptr()) };
+        assert!(!p.is_null());
+        assert_eq!(unsafe { (*p).p_proto }, 6);
+    }
+
+    #[test]
+    fn test_getprotobyname_udp() {
+        let p = unsafe { getprotobyname(b"udp\0".as_ptr()) };
+        assert!(!p.is_null());
+        assert_eq!(unsafe { (*p).p_proto }, 17);
+    }
+
+    #[test]
+    fn test_getprotobyname_icmp() {
+        let p = unsafe { getprotobyname(b"icmp\0".as_ptr()) };
+        assert!(!p.is_null());
+        assert_eq!(unsafe { (*p).p_proto }, 1);
+    }
+
+    #[test]
+    fn test_getprotobyname_case_insensitive() {
+        let p = unsafe { getprotobyname(b"TCP\0".as_ptr()) };
+        assert!(!p.is_null());
+        assert_eq!(unsafe { (*p).p_proto }, 6);
+    }
+
+    #[test]
+    fn test_getprotobyname_null() {
+        let p = unsafe { getprotobyname(core::ptr::null()) };
+        assert!(p.is_null());
+    }
+
+    #[test]
+    fn test_getprotobyname_unknown() {
+        let p = unsafe { getprotobyname(b"nonexistent\0".as_ptr()) };
+        assert!(p.is_null());
+    }
+
+    #[test]
+    fn test_getprotobyname_alias() {
+        // "TCP" is an alias for "tcp"
+        let p = unsafe { getprotobyname(b"TCP\0".as_ptr()) };
+        assert!(!p.is_null());
+        assert_eq!(unsafe { (*p).p_proto }, 6);
+    }
+
+    // -- getprotobynumber --
+
+    #[test]
+    fn test_getprotobynumber_tcp() {
+        let p = getprotobynumber(6);
+        assert!(!p.is_null());
+        let name = unsafe { c_str_to_slice((*p).p_name) };
+        assert_eq!(name, b"tcp");
+    }
+
+    #[test]
+    fn test_getprotobynumber_udp() {
+        let p = getprotobynumber(17);
+        assert!(!p.is_null());
+        let name = unsafe { c_str_to_slice((*p).p_name) };
+        assert_eq!(name, b"udp");
+    }
+
+    #[test]
+    fn test_getprotobynumber_unknown() {
+        let p = getprotobynumber(999);
+        assert!(p.is_null());
+    }
+
+    #[test]
+    fn test_getprotobynumber_zero_is_ip() {
+        let p = getprotobynumber(0);
+        assert!(!p.is_null());
+        let name = unsafe { c_str_to_slice((*p).p_name) };
+        assert_eq!(name, b"ip");
+    }
+
+    // -- getservbyname --
+
+    #[test]
+    fn test_getservbyname_http() {
+        let p = unsafe { getservbyname(b"http\0".as_ptr(), core::ptr::null()) };
+        assert!(!p.is_null());
+        // http = port 80, stored in network byte order.
+        assert_eq!(unsafe { u16::from_be((*p).s_port as u16) }, 80);
+    }
+
+    #[test]
+    fn test_getservbyname_ssh() {
+        let p = unsafe { getservbyname(b"ssh\0".as_ptr(), core::ptr::null()) };
+        assert!(!p.is_null());
+        assert_eq!(unsafe { u16::from_be((*p).s_port as u16) }, 22);
+    }
+
+    #[test]
+    fn test_getservbyname_null_name() {
+        let p = unsafe { getservbyname(core::ptr::null(), core::ptr::null()) };
+        assert!(p.is_null());
+    }
+
+    #[test]
+    fn test_getservbyname_unknown() {
+        let p = unsafe { getservbyname(b"nonexistent\0".as_ptr(), core::ptr::null()) };
+        assert!(p.is_null());
+    }
+
+    // -- getservbyport --
+
+    #[test]
+    fn test_getservbyport_80() {
+        let port_be = 80_u16.to_be() as i32;
+        let p = unsafe { getservbyport(port_be, core::ptr::null()) };
+        assert!(!p.is_null());
+        let name = unsafe { c_str_to_slice((*p).s_name) };
+        assert_eq!(name, b"http");
+    }
+
+    #[test]
+    fn test_getservbyport_22() {
+        let port_be = 22_u16.to_be() as i32;
+        let p = unsafe { getservbyport(port_be, core::ptr::null()) };
+        assert!(!p.is_null());
+        let name = unsafe { c_str_to_slice((*p).s_name) };
+        assert_eq!(name, b"ssh");
+    }
+
+    #[test]
+    fn test_getservbyport_unknown() {
+        let port_be = 65534_u16.to_be() as i32;
+        let p = unsafe { getservbyport(port_be, core::ptr::null()) };
+        assert!(p.is_null());
+    }
+
+    // -- shutdown with invalid how --
+
+    #[test]
+    fn test_shutdown_invalid_how() {
+        let ret = shutdown(9999, 99); // Invalid how value
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- if_nametoindex / if_indextoname --
+
+    #[test]
+    fn test_if_nametoindex_eth0() {
+        let idx = unsafe { if_nametoindex(b"eth0\0".as_ptr()) };
+        assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn test_if_nametoindex_lo() {
+        let idx = unsafe { if_nametoindex(b"lo\0".as_ptr()) };
+        assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn test_if_nametoindex_unknown() {
+        let idx = unsafe { if_nametoindex(b"nonexist99\0".as_ptr()) };
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn test_if_nametoindex_null() {
+        let idx = unsafe { if_nametoindex(core::ptr::null()) };
+        assert_eq!(idx, 0);
+    }
+
+    #[test]
+    fn test_if_indextoname_eth0() {
+        let mut buf = [0u8; 16];
+        let ret = unsafe { if_indextoname(1, buf.as_mut_ptr()) };
+        assert!(!ret.is_null());
+        assert_eq!(&buf[..4], b"eth0");
+    }
+
+    #[test]
+    fn test_if_indextoname_unknown() {
+        let mut buf = [0u8; 16];
+        let ret = unsafe { if_indextoname(999, buf.as_mut_ptr()) };
+        assert!(ret.is_null());
+    }
+
     // -- Helper --
 
     /// Read a null-terminated C string into a byte slice.

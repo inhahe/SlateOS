@@ -3924,6 +3924,155 @@ mod tests {
         let offset = ret as usize - dest.as_ptr() as usize;
         assert_eq!(offset, 2);
     }
+
+    // -- strtok (non-reentrant) --
+
+    #[test]
+    fn test_strtok_basic() {
+        let mut buf = *b"hello,world\0";
+        let tok1 = unsafe { strtok(buf.as_mut_ptr(), b",\0".as_ptr()) };
+        assert!(!tok1.is_null());
+        assert_eq!(unsafe { *tok1 }, b'h');
+        let tok2 = unsafe { strtok(core::ptr::null_mut(), b",\0".as_ptr()) };
+        assert!(!tok2.is_null());
+        assert_eq!(unsafe { *tok2 }, b'w');
+        let tok3 = unsafe { strtok(core::ptr::null_mut(), b",\0".as_ptr()) };
+        assert!(tok3.is_null());
+    }
+
+    #[test]
+    fn test_strtok_no_delimiters() {
+        let mut buf = *b"single\0";
+        let tok = unsafe { strtok(buf.as_mut_ptr(), b",\0".as_ptr()) };
+        assert!(!tok.is_null());
+        assert_eq!(unsafe { *tok }, b's');
+        let tok2 = unsafe { strtok(core::ptr::null_mut(), b",\0".as_ptr()) };
+        assert!(tok2.is_null());
+    }
+
+    #[test]
+    fn test_strtok_all_delimiters() {
+        let mut buf = *b",,,\0";
+        let tok = unsafe { strtok(buf.as_mut_ptr(), b",\0".as_ptr()) };
+        assert!(tok.is_null());
+    }
+
+    // -- strdup --
+    // Note: strdup/strndup allocate via malloc which uses mmap syscalls.
+    // Only null-pointer handling can be tested without kernel support.
+
+    #[test]
+    fn test_strdup_null() {
+        let dup = unsafe { strdup(core::ptr::null()) };
+        assert!(dup.is_null());
+    }
+
+    // -- strndup --
+
+    #[test]
+    fn test_strndup_null() {
+        let dup = unsafe { strndup(core::ptr::null(), 10) };
+        assert!(dup.is_null());
+    }
+
+    // -- strcoll_l --
+
+    #[test]
+    fn test_strcoll_l_equal() {
+        let a = b"abc\0";
+        let b_str = b"abc\0";
+        assert_eq!(unsafe { strcoll_l(a.as_ptr(), b_str.as_ptr(), 0) }, 0);
+    }
+
+    #[test]
+    fn test_strcoll_l_ordering() {
+        let a = b"abc\0";
+        let b_str = b"abd\0";
+        assert!(unsafe { strcoll_l(a.as_ptr(), b_str.as_ptr(), 0) } < 0);
+    }
+
+    // -- strxfrm_l --
+
+    #[test]
+    fn test_strxfrm_l_basic() {
+        let src = b"hello\0";
+        let mut dst = [0u8; 16];
+        let len = unsafe { strxfrm_l(dst.as_mut_ptr(), src.as_ptr(), 16, 0) };
+        assert_eq!(len, 5);
+        assert_eq!(&dst[..6], b"hello\0");
+    }
+
+    // -- strerror_l --
+
+    #[test]
+    fn test_strerror_l_known_code() {
+        let msg = strerror_l(2, 0); // ENOENT
+        assert!(!msg.is_null());
+        // Should be "No such file or directory"
+        assert_eq!(unsafe { *msg }, b'N');
+    }
+
+    #[test]
+    fn test_strerror_l_matches_strerror() {
+        let msg1 = strerror(13); // EACCES
+        let msg2 = strerror_l(13, 0);
+        assert_eq!(msg1, msg2);
+    }
+
+    // -- __xpg_strerror_r --
+
+    #[test]
+    fn test_xpg_strerror_r_success() {
+        let mut buf = [0u8; 64];
+        let ret = unsafe { __xpg_strerror_r(0, buf.as_mut_ptr(), 64) };
+        assert_eq!(ret, 0);
+        // Should contain "Success".
+        assert_eq!(buf[0], b'S');
+    }
+
+    #[test]
+    fn test_xpg_strerror_r_truncation() {
+        let mut buf = [0u8; 4];
+        let ret = unsafe { __xpg_strerror_r(2, buf.as_mut_ptr(), 4) };
+        assert_eq!(ret, crate::errno::ERANGE);
+    }
+
+    // -- __strncpy_chk --
+
+    #[test]
+    fn test_strncpy_chk_delegates() {
+        let src = b"test\0";
+        let mut dst = [0u8; 8];
+        let ret = unsafe { __strncpy_chk(dst.as_mut_ptr(), src.as_ptr(), 8, 8) };
+        assert_eq!(ret, dst.as_mut_ptr());
+        assert_eq!(&dst[..5], b"test\0");
+    }
+
+    // -- __strncat_chk --
+
+    #[test]
+    fn test_strncat_chk_delegates() {
+        let mut buf = [0u8; 16];
+        buf[0] = b'A';
+        buf[1] = 0;
+        let src = b"BCD\0";
+        let ret = unsafe { __strncat_chk(buf.as_mut_ptr(), src.as_ptr(), 3, 16) };
+        assert_eq!(&buf[..5], b"ABCD\0");
+        assert_eq!(ret, buf.as_mut_ptr());
+    }
+
+    // -- __stpncpy_chk --
+
+    #[test]
+    fn test_stpncpy_chk_delegates() {
+        let src = b"ab\0";
+        let mut dst = [0u8; 4];
+        let ret = unsafe { __stpncpy_chk(dst.as_mut_ptr(), src.as_ptr(), 4, 4) };
+        assert_eq!(&dst[..3], b"ab\0");
+        // stpncpy returns pointer to first NUL within n.
+        let offset = ret as usize - dst.as_ptr() as usize;
+        assert_eq!(offset, 2);
+    }
 }
 
 // ===========================================================================

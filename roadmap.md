@@ -1102,6 +1102,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] POSIX poll/select accuracy: check_readiness() queries kernel for TCP/UDP/listener state instead of always reporting ready
   - [x] Error code translation fix: translate_net_error() now matches actual KernelError discriminant values (-4=WouldBlock→EAGAIN, -6=TimedOut→ETIMEDOUT, etc.) instead of fictional numbering
   - [x] Non-blocking TCP connect: connect_start() sends SYN and returns handle in SYN_SENT state; SYS_TCP_CONNECT arg2 bit 0 = non-blocking; POSIX connect() returns EINPROGRESS when O_NONBLOCK set; SYN retransmission with exponential backoff; SYN_SENT 30s timeout cleanup
+  - [x] IPv6 basic support (RFC 8200): Ipv6Addr type (128-bit, Display with RFC 5952 compression), packet parsing/building (40-byte fixed header), extension header traversal (Hop-by-Hop/Routing/Fragment/Destination), EtherType 0x86DD dispatch in Ethernet layer, link-local address from MAC (modified EUI-64), solicited-node multicast, multicast MAC mapping (RFC 2464: 33:33 prefix), IPv6 pseudo-header transport checksum (compute + verify), 11 self-tests
+  - [x] ICMPv6 (RFC 4443/4861): Echo Request/Reply (ping6), NDP Neighbor Solicitation/Advertisement, neighbor cache (32 entries, LRU eviction), Source/Target Link-Layer Address option parsing, checksum via IPv6 pseudo-header, 8 self-tests
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close, abort, peer_addr (SYS_TCP_CONNECT through SYS_TCP_PEER_ADDR)

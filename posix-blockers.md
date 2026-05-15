@@ -1,6 +1,6 @@
 # Posix Zone — Blocked Work Items
 
-The posix zone is fully audited and tested (2744 tests, all pass).
+The posix zone is fully audited and tested (2755 tests, all pass).
 All remaining implementation work is blocked on kernel features
 built by other zones. Here's exactly what's needed:
 
@@ -145,3 +145,13 @@ CLK_TCK, etc.) but programs like `ps`, `top`, `free` need /proc.
 - Eliminated all hardcoded constant drift: `OPEN_MAX`, `RLIMIT_NOFILE`,
   `HOST_NAME_MAX`, `DEFAULT_NAMEMAX`, pathconf values all reference
   their source definitions (`fdtable::MAX_FDS`, `limits::*`)
+- Added 6 `CLOCK_*` constants (`CLOCK_PROCESS_CPUTIME_ID`,
+  `CLOCK_THREAD_CPUTIME_ID`, `CLOCK_MONOTONIC_RAW`,
+  `CLOCK_REALTIME_COARSE`, `CLOCK_MONOTONIC_COARSE`, `CLOCK_BOOTTIME`)
+  accepted by clock_gettime/clock_getres/clock_nanosleep
+- Added `MAP_ANON`, `MAP_GROWSDOWN`, `MAP_POPULATE`, `MAP_NORESERVE`,
+  `MAP_NONBLOCK`, `MAP_FIXED_NOREPLACE`, `MCL_CURRENT`/`MCL_FUTURE`/
+  `MCL_ONFAULT` memory management constants
+- Added 6 `_SC_*` sysconf constants (`GETPW_R_SIZE_MAX`,
+  `GETGR_R_SIZE_MAX`, `SYMLOOP_MAX`, `STREAM_MAX`, `TTY_NAME_MAX`,
+  `RE_DUP_MAX`) with proper return values

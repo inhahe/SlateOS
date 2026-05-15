@@ -198,3 +198,113 @@ impl BlockReader {
         &self.device
     }
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Block I/O helper tests — validates constructor checks and
+/// derived field calculations.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[ext4-io] Running self-test...");
+
+    test_new_valid_block_sizes()?;
+    test_new_invalid_block_sizes()?;
+    test_sectors_per_block()?;
+
+    crate::serial_println!("[ext4-io] Self-test PASSED (3 tests)");
+    Ok(())
+}
+
+/// Test that valid block sizes are accepted.
+fn test_new_valid_block_sizes() -> KernelResult<()> {
+    // 1024 is the minimum valid block size (matches sector size constraint
+    // only if SECTOR_SIZE <= 1024).
+    for &bs in &[1024u32, 2048, 4096, 8192, 16384, 32768, 65536] {
+        if bs < SECTOR_SIZE as u32 {
+            continue; // skip sizes below sector size
+        }
+        match BlockReader::new("test_dev", bs) {
+            Ok(reader) => {
+                if reader.block_size() != bs {
+                    crate::serial_println!(
+                        "[ext4-io]   FAIL: block_size() = {} for input {}",
+                        reader.block_size(), bs
+                    );
+                    return Err(KernelError::InternalError);
+                }
+                if reader.device() != "test_dev" {
+                    crate::serial_println!("[ext4-io]   FAIL: device() wrong");
+                    return Err(KernelError::InternalError);
+                }
+            }
+            Err(e) => {
+                crate::serial_println!(
+                    "[ext4-io]   FAIL: BlockReader::new({}) = {:?}", bs, e
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
+    crate::serial_println!("[ext4-io]   valid block sizes: OK");
+    Ok(())
+}
+
+/// Test that invalid block sizes are rejected.
+fn test_new_invalid_block_sizes() -> KernelResult<()> {
+    // Zero.
+    if BlockReader::new("dev", 0).is_ok() {
+        crate::serial_println!("[ext4-io]   FAIL: accepted block_size=0");
+        return Err(KernelError::InternalError);
+    }
+
+    // Non-power-of-two.
+    if BlockReader::new("dev", 3000).is_ok() {
+        crate::serial_println!("[ext4-io]   FAIL: accepted block_size=3000");
+        return Err(KernelError::InternalError);
+    }
+
+    // Below sector size (256 < 512).
+    if BlockReader::new("dev", 256).is_ok() {
+        crate::serial_println!("[ext4-io]   FAIL: accepted block_size=256");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-io]   invalid block sizes: OK");
+    Ok(())
+}
+
+/// Test sectors_per_block calculation.
+fn test_sectors_per_block() -> KernelResult<()> {
+    let reader_4k = BlockReader::new("dev", 4096)?;
+    // 4096 / 512 = 8 sectors per block.
+    if reader_4k.sectors_per_block != 8 {
+        crate::serial_println!(
+            "[ext4-io]   FAIL: sectors_per_block(4096) = {}",
+            reader_4k.sectors_per_block
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let reader_1k = BlockReader::new("dev", 1024)?;
+    if reader_1k.sectors_per_block != 2 {
+        crate::serial_println!(
+            "[ext4-io]   FAIL: sectors_per_block(1024) = {}",
+            reader_1k.sectors_per_block
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let reader_16k = BlockReader::new("dev", 16384)?;
+    if reader_16k.sectors_per_block != 32 {
+        crate::serial_println!(
+            "[ext4-io]   FAIL: sectors_per_block(16384) = {}",
+            reader_16k.sectors_per_block
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-io]   sectors_per_block: OK");
+    Ok(())
+}

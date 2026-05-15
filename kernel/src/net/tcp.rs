@@ -4023,51 +4023,132 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         }
 
         TcpState::FinWait1 => {
+            // RFC 793 §3.5: In FIN_WAIT_1 we have sent our FIN but
+            // the peer may still be sending data.  We must continue
+            // accepting data, processing ACKs (including for our
+            // in-flight data and FIN), and handling the peer's FIN.
+
+            // --- ACK processing ---
             if flags & TCP_ACK != 0 {
-                conn.snd_una = ack;
-                if flags & TCP_FIN != 0 {
-                    // Simultaneous close: FIN+ACK.
-                    conn.rcv_nxt = seq.wrapping_add(1);
+                let old_una = conn.snd_una;
+                if ack.wrapping_sub(conn.snd_una)
+                    <= conn.snd_nxt.wrapping_sub(conn.snd_una)
+                {
+                    conn.snd_una = ack;
+                }
+                let bytes_acked = conn.snd_una.wrapping_sub(old_una);
+                if bytes_acked > 0 {
+                    conn.dup_ack_count = 0;
+                    tx_buffer_trim(conn, bytes_acked);
+                    if conn.ts_ok {
+                        if let Some((_tsval, tsecr)) = seg_opts.timestamp {
+                            try_rtt_sample_ts(conn, tsecr);
+                        }
+                    } else {
+                        try_rtt_sample(conn, ack);
+                    }
+                    on_ack_congestion(conn, bytes_acked);
+                }
+            }
+
+            // --- Incoming data ---
+            // The peer hasn't sent FIN yet (or it's in this same
+            // segment after the payload).  Buffer data just like
+            // Established so the application can read it.
+            if !payload.is_empty() {
+                if seq == conn.rcv_nxt {
+                    let can_accept = if conn.local_read_closed {
+                        payload.len()
+                    } else {
+                        MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len())
+                    };
+                    let accept = payload.len().min(can_accept);
+                    if accept > 0 && !conn.local_read_closed {
+                        conn.rx_buffer.extend_from_slice(&payload[..accept]);
+                    }
+                    conn.rcv_nxt = conn.rcv_nxt.wrapping_add(accept as u32);
+                    ooo_deliver(conn);
+                    sack_advance(conn);
+                } else if conn.sack_ok && seq_lt(conn.rcv_nxt, seq) {
+                    let right = seq.wrapping_add(payload.len() as u32);
+                    sack_insert(conn, seq, right);
+                    ooo_store(conn, seq, payload);
+                }
+            }
+
+            // --- FIN processing ---
+            // FIN's implicit seq occupies one byte *after* any payload.
+            // By this point rcv_nxt has been advanced past the payload
+            // (if any), so FIN seq == rcv_nxt is the correct check.
+            if flags & TCP_FIN != 0 && seq.wrapping_add(payload.len() as u32) == conn.rcv_nxt {
+                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(1);
+                conn.remote_closed = true;
+
+                // Determine next state:
+                // - If our FIN has been ACKed (snd_una == snd_nxt after
+                //   FIN), go to TIME_WAIT (simultaneous close path).
+                // - Otherwise, go to Closing (FIN received, our FIN
+                //   not yet ACKed — rare "simultaneous close" case per
+                //   RFC 793 Fig. 13).
+                if conn.snd_una == conn.snd_nxt {
                     conn.state = TcpState::TimeWait;
-                    conn.remote_closed = true;
-
-                    let local_port = conn.local_port;
-                    let remote_ip = conn.remote_ip;
-                    let remote_port = conn.remote_port;
-                    let snd_nxt = conn.snd_nxt;
-                    let rcv_nxt = conn.rcv_nxt;
-
-                    drop(conns);
-                    let _ = send_segment(
-                        local_port, remote_ip, remote_port,
-                        snd_nxt, rcv_nxt, TCP_ACK, &[],
-                    );
                 } else {
+                    // Our FIN hasn't been ACKed yet.  Go to TimeWait
+                    // as a simplification (RFC allows Closing state
+                    // but TIME_WAIT is safe — we'll still ACK the
+                    // peer's FIN retransmits during the 2MSL wait).
+                    conn.state = TcpState::TimeWait;
+                }
+            } else if flags & TCP_FIN == 0 {
+                // No FIN in this segment.  Check if our FIN has been
+                // ACKed (transition to FIN_WAIT_2).
+                if conn.snd_una == conn.snd_nxt {
                     conn.state = TcpState::FinWait2;
-                    // Stamp activity so FIN_WAIT_2 timeout starts from now.
                     conn.last_activity_ns = crate::hrtimer::now_ns();
                 }
             }
+
+            // Send ACK for data and/or FIN.
+            let _ = send_ack_with_sack(conn);
+            conn.last_activity_ns = crate::hrtimer::now_ns();
         }
 
         TcpState::FinWait2 => {
-            if flags & TCP_FIN != 0 {
-                conn.rcv_nxt = seq.wrapping_add(1);
+            // RFC 793 §3.5: Our FIN has been ACKed.  We're still
+            // receiving data from the peer until they send their FIN.
+
+            // --- Incoming data ---
+            if !payload.is_empty() {
+                conn.last_activity_ns = crate::hrtimer::now_ns();
+                if seq == conn.rcv_nxt {
+                    let can_accept = if conn.local_read_closed {
+                        payload.len()
+                    } else {
+                        MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len())
+                    };
+                    let accept = payload.len().min(can_accept);
+                    if accept > 0 && !conn.local_read_closed {
+                        conn.rx_buffer.extend_from_slice(&payload[..accept]);
+                    }
+                    conn.rcv_nxt = conn.rcv_nxt.wrapping_add(accept as u32);
+                    ooo_deliver(conn);
+                    sack_advance(conn);
+                } else if conn.sack_ok && seq_lt(conn.rcv_nxt, seq) {
+                    let right = seq.wrapping_add(payload.len() as u32);
+                    sack_insert(conn, seq, right);
+                    ooo_store(conn, seq, payload);
+                }
+            }
+
+            // --- FIN processing ---
+            if flags & TCP_FIN != 0 && seq.wrapping_add(payload.len() as u32) == conn.rcv_nxt {
+                conn.rcv_nxt = conn.rcv_nxt.wrapping_add(1);
                 conn.state = TcpState::TimeWait;
                 conn.remote_closed = true;
-
-                let local_port = conn.local_port;
-                let remote_ip = conn.remote_ip;
-                let remote_port = conn.remote_port;
-                let snd_nxt = conn.snd_nxt;
-                let rcv_nxt = conn.rcv_nxt;
-
-                drop(conns);
-                let _ = send_segment(
-                    local_port, remote_ip, remote_port,
-                    snd_nxt, rcv_nxt, TCP_ACK, &[],
-                );
             }
+
+            // Send ACK for data and/or FIN.
+            let _ = send_ack_with_sack(conn);
         }
 
         TcpState::LastAck => {

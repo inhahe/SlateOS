@@ -2,7 +2,7 @@ Posix/net zone work — all remaining items are blocked:
 epoll → needs kernel event notification (kernel-ipc zone)
 signal handling shim → needs kernel-side signal delivery (kernel-ipc zone)
 /proc, /sys equivalents → needs kernel support
-popen/pclose → needs fd inheritance in spawn (kernel-process zone)
+popen/pclose → DONE: SYS_PROCESS_SPAWN_EX (517) + SYS_PROCESS_GET_INITIAL_FDS (518) implemented
 Per-namespace ARP → blocked on veth pairs
 Wire process→container→net_ns → cross-zone (kernel-process + kernel-ipc)
 

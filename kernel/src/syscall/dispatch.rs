@@ -67,7 +67,7 @@ use super::number::{
     SYS_MMAP, SYS_MUNMAP, SYS_PROCESS_ID,
     SYS_NOTIFY_READY, SYS_PROCESS_IS_READY,
     SYS_PROCESS_CRASH_INFO,
-    SYS_PROCESS_GET_INITIAL_FDS,
+    SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_INITIAL_FDS,
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX,
     SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
     SYS_SET_EXCEPTION_HANDLER,
@@ -351,6 +351,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_IS_READY as usize] = Some(handlers::sys_process_is_ready);
     handlers[SYS_PROCESS_SPAWN_EX as usize] = Some(handlers::sys_process_spawn_ex);
     handlers[SYS_PROCESS_GET_INITIAL_FDS as usize] = Some(handlers::sys_process_get_initial_fds);
+    handlers[SYS_PROCESS_GET_ARGS as usize] = Some(handlers::sys_process_get_args);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);

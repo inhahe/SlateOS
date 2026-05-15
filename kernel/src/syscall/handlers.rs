@@ -2239,45 +2239,61 @@ pub fn sys_process_spawn(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_PROCESS_SPAWN_EX` — spawn a new process with fd inheritance.
+/// `SYS_PROCESS_SPAWN_EX` — spawn a new process with extended options.
 ///
-/// Like `sys_process_spawn` but additionally accepts a file descriptor
-/// map that specifies which kernel handles the child should inherit.
+/// Accepts a pointer to a `SpawnExArgs` struct that bundles all spawn
+/// parameters: ELF data, process name, fd map, argv, and envp.
 ///
-/// `arg0`: pointer to ELF data.
-/// `arg1`: ELF data length.
-/// `arg2`: pointer to name string.
-/// `arg3`: name length.
-/// `arg4`: pointer to `FdMapEntry` array (null = no fd inheritance).
-/// `arg5`: number of `FdMapEntry` entries.
+/// `arg0`: pointer to `SpawnExArgs` struct in user memory.
+///
+/// Returns: process ID on success, negative error on failure.
 pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
-    use crate::proc::spawn::{FdMapEntry, SpawnOptions, spawn_process};
+    use crate::proc::spawn::{FdMapEntry, SpawnExArgs, SpawnOptions, spawn_process};
 
-    let elf_ptr = args.arg0 as usize;
-    let elf_len = args.arg1 as usize;
-    let name_ptr = args.arg2 as usize;
-    let name_len = args.arg3 as usize;
-    let fd_map_ptr = args.arg4 as usize;
-    let fd_map_count = args.arg5 as usize;
+    let args_ptr = args.arg0 as usize;
+
+    // Validate the args struct pointer.
+    let struct_size = core::mem::size_of::<SpawnExArgs>();
+    if args_ptr == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, struct_size) {
+        return SyscallResult::err(e);
+    }
+
+    // SAFETY: Validated above — args_ptr points to mapped user memory.
+    let spawn_args: SpawnExArgs = unsafe { *(args_ptr as *const SpawnExArgs) };
+
+    let elf_ptr = spawn_args.elf_ptr as usize;
+    let elf_len = spawn_args.elf_len as usize;
+    let name_ptr = spawn_args.name_ptr as usize;
+    let name_len = spawn_args.name_len as usize;
+    let fd_map_ptr = spawn_args.fd_map_ptr as usize;
+    let fd_map_count = spawn_args.fd_map_count as usize;
+    let argv_ptr = spawn_args.argv_ptr as usize;
+    let argv_len = spawn_args.argv_len as usize;
+    let argc = spawn_args.argc as usize;
+    let envp_ptr = spawn_args.envp_ptr as usize;
+    let envp_len = spawn_args.envp_len as usize;
+    let envc = spawn_args.envc as usize;
 
     if elf_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
     // Validate ELF data pointer.
-    if let Err(e) = crate::mm::user::validate_user_read(args.arg0, elf_len) {
+    if let Err(e) = crate::mm::user::validate_user_read(spawn_args.elf_ptr, elf_len) {
         return SyscallResult::err(e);
     }
 
     // Validate name pointer (if provided).
     if name_len > 0 && name_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg2, name_len) {
+        if let Err(e) = crate::mm::user::validate_user_read(spawn_args.name_ptr, name_len) {
             return SyscallResult::err(e);
         }
     }
 
     // Validate fd map pointer (if provided).
-    // Cap at 256 entries — no reasonable process needs more fds inherited.
     if fd_map_count > 256 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
@@ -2285,7 +2301,27 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         .checked_mul(core::mem::size_of::<FdMapEntry>())
         .unwrap_or(usize::MAX);
     if fd_map_count > 0 && fd_map_ptr != 0 {
-        if let Err(e) = crate::mm::user::validate_user_read(args.arg4, fd_map_byte_len) {
+        if let Err(e) = crate::mm::user::validate_user_read(spawn_args.fd_map_ptr, fd_map_byte_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // Validate argv pointer (if provided).
+    if argv_len > 256 * 1024 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if argv_len > 0 && argv_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(spawn_args.argv_ptr, argv_len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    // Validate envp pointer (if provided).
+    if envp_len > 256 * 1024 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if envp_len > 0 && envp_ptr != 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(spawn_args.envp_ptr, envp_len) {
             return SyscallResult::err(e);
         }
     }
@@ -2297,7 +2333,6 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
 
     // Read the name.
     let name = if name_len > 0 && name_ptr != 0 {
-        // SAFETY: Validated above.
         let name_bytes = unsafe {
             core::slice::from_raw_parts(name_ptr as *const u8, name_len)
         };
@@ -2307,12 +2342,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
     };
 
     // Read the fd map entries.
-    //
-    // Convert from the userspace FdMapEntry array to a Vec of (fd, handle)
-    // pairs that SpawnOptions expects.
     let fd_pairs: alloc::vec::Vec<(i32, u64)> = if fd_map_count > 0 && fd_map_ptr != 0 {
-        // SAFETY: Validated above — fd_map_ptr points to mapped user memory
-        // of at least fd_map_count * size_of::<FdMapEntry>() bytes.
         let entries = unsafe {
             core::slice::from_raw_parts(fd_map_ptr as *const FdMapEntry, fd_map_count)
         };
@@ -2321,7 +2351,30 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         alloc::vec::Vec::new()
     };
 
-    let options = SpawnOptions::new(name).fd_map(&fd_pairs);
+    // Parse packed argv strings (null-terminated, concatenated).
+    let argv_slices: alloc::vec::Vec<&[u8]> = if argc > 0 && argv_len > 0 && argv_ptr != 0 {
+        let data = unsafe {
+            core::slice::from_raw_parts(argv_ptr as *const u8, argv_len)
+        };
+        parse_packed_strings(data, argc)
+    } else {
+        alloc::vec::Vec::new()
+    };
+
+    // Parse packed envp strings.
+    let envp_slices: alloc::vec::Vec<&[u8]> = if envc > 0 && envp_len > 0 && envp_ptr != 0 {
+        let data = unsafe {
+            core::slice::from_raw_parts(envp_ptr as *const u8, envp_len)
+        };
+        parse_packed_strings(data, envc)
+    } else {
+        alloc::vec::Vec::new()
+    };
+
+    let options = SpawnOptions::new(name)
+        .fd_map(&fd_pairs)
+        .argv(&argv_slices)
+        .envp(&envp_slices);
 
     match spawn_process(elf_data, &options) {
         Ok(result) => {
@@ -2330,6 +2383,28 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         }
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// Parse packed null-terminated strings from a data buffer.
+///
+/// Returns up to `max_count` strings, splitting on null bytes.
+fn parse_packed_strings(data: &[u8], max_count: usize) -> alloc::vec::Vec<&[u8]> {
+    let mut result = alloc::vec::Vec::with_capacity(max_count);
+    let mut start = 0;
+    for (i, &b) in data.iter().enumerate() {
+        if b == 0 {
+            result.push(&data[start..i]);
+            start = i + 1;
+            if result.len() >= max_count {
+                break;
+            }
+        }
+    }
+    // If the last string isn't null-terminated, include it.
+    if start < data.len() && result.len() < max_count {
+        result.push(&data[start..]);
+    }
+    result
 }
 
 /// `SYS_PROCESS_GET_INITIAL_FDS` — retrieve inherited fd mappings.
@@ -2401,6 +2476,103 @@ pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
 
     #[allow(clippy::cast_possible_wrap)]
     SyscallResult::ok(count as i64)
+}
+
+/// `SYS_PROCESS_GET_ARGS` — retrieve initial argv/envp.
+///
+/// Called by the child during startup to read argv and envp data
+/// that the parent passed via `SYS_PROCESS_SPAWN_EX`.
+///
+/// `arg0`: pointer to output buffer.
+/// `arg1`: output buffer capacity (bytes).
+///
+/// Output format: `SpawnArgsHeader` (16 bytes) + packed argv strings
+/// + packed envp strings.  Each string is null-terminated.
+///
+/// Returns: total bytes needed.  0 if no args were set.
+pub fn sys_process_get_args(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::spawn::SpawnArgsHeader;
+    use crate::proc::pcb;
+
+    let out_ptr = args.arg0 as usize;
+    let out_cap = args.arg1 as usize;
+
+    let pid = match caller_pid() {
+        Some(p) => p,
+        None => return SyscallResult::ok(0),
+    };
+
+    let (argv, envp) = pcb::take_initial_args(pid);
+
+    if argv.is_empty() && envp.is_empty() {
+        return SyscallResult::ok(0);
+    }
+
+    // Calculate total sizes.
+    let argv_data_len: usize = argv.iter().map(|a| a.len().wrapping_add(1)).sum();
+    let envp_data_len: usize = envp.iter().map(|e| e.len().wrapping_add(1)).sum();
+    let header_size = core::mem::size_of::<SpawnArgsHeader>();
+    let total_needed = header_size
+        .saturating_add(argv_data_len)
+        .saturating_add(envp_data_len);
+
+    // If the caller's buffer is too small, put the data back and
+    // return the required size so they can retry.
+    if out_cap < total_needed || out_ptr == 0 {
+        if let Err(_e) = pcb::set_initial_args(pid, argv, envp) {
+            // Shouldn't happen — we just took these from the same PID.
+        }
+        #[allow(clippy::cast_possible_wrap)]
+        return SyscallResult::ok(total_needed as i64);
+    }
+
+    // Validate output buffer.
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg0, total_needed) {
+        if let Err(_e) = pcb::set_initial_args(pid, argv, envp) {}
+        return SyscallResult::err(e);
+    }
+
+    // Write the header.
+    // SAFETY: Validated above — out_ptr is writable user memory.
+    let header_ptr = out_ptr as *mut SpawnArgsHeader;
+    unsafe {
+        (*header_ptr) = SpawnArgsHeader {
+            #[allow(clippy::cast_possible_truncation)]
+            argc: argv.len() as u32,
+            #[allow(clippy::cast_possible_truncation)]
+            envc: envp.len() as u32,
+            #[allow(clippy::cast_possible_truncation)]
+            argv_data_len: argv_data_len as u32,
+            #[allow(clippy::cast_possible_truncation)]
+            envp_data_len: envp_data_len as u32,
+        };
+    }
+
+    // Write packed argv strings.
+    let mut offset = out_ptr.wrapping_add(header_size);
+    for arg in &argv {
+        let dst = offset as *mut u8;
+        // SAFETY: Within validated buffer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(arg.as_ptr(), dst, arg.len());
+            *dst.add(arg.len()) = 0; // Null terminator.
+        }
+        offset = offset.wrapping_add(arg.len().wrapping_add(1));
+    }
+
+    // Write packed envp strings.
+    for env in &envp {
+        let dst = offset as *mut u8;
+        // SAFETY: Within validated buffer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(env.as_ptr(), dst, env.len());
+            *dst.add(env.len()) = 0; // Null terminator.
+        }
+        offset = offset.wrapping_add(env.len().wrapping_add(1));
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(total_needed as i64)
 }
 
 /// `SYS_PROCESS_WAIT` — wait for a child process to exit.

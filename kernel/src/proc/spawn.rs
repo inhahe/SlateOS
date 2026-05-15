@@ -106,6 +106,42 @@ pub struct FdMapEntry {
     pub handle: u64,
 }
 
+/// Extended spawn arguments passed from userspace via `SYS_PROCESS_SPAWN_EX`.
+///
+/// A single pointer to this struct is passed in `arg0`.  All pointer
+/// fields point to userspace memory that must be validated before reading.
+///
+/// Layout must match the userspace definition exactly (C ABI).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SpawnExArgs {
+    /// Pointer to ELF data in memory.
+    pub elf_ptr: u64,
+    /// Length of ELF data in bytes.
+    pub elf_len: u64,
+    /// Pointer to process name string (UTF-8).
+    pub name_ptr: u64,
+    /// Length of name string in bytes.
+    pub name_len: u64,
+    /// Pointer to `FdMapEntry` array (0 = no fd inheritance).
+    pub fd_map_ptr: u64,
+    /// Number of `FdMapEntry` entries.
+    pub fd_map_count: u64,
+    /// Pointer to packed null-terminated argv string data.
+    /// The strings are concatenated with null bytes between them.
+    pub argv_ptr: u64,
+    /// Total byte length of the packed argv data.
+    pub argv_len: u64,
+    /// Number of arguments (number of strings in argv_ptr).
+    pub argc: u64,
+    /// Pointer to packed null-terminated envp string data.
+    pub envp_ptr: u64,
+    /// Total byte length of the packed envp data.
+    pub envp_len: u64,
+    /// Number of environment variables.
+    pub envc: u64,
+}
+
 /// Result of a successful process spawn.
 #[derive(Debug, Clone, Copy)]
 pub struct SpawnResult {
@@ -152,6 +188,23 @@ pub struct SpawnOptions<'a> {
     ///
     /// An empty slice means no fd inheritance (the default).
     pub fd_map: &'a [(i32, u64)],
+    /// Command-line arguments for the child process.
+    ///
+    /// Each element is one argument as a byte slice (no null terminator
+    /// needed — the kernel adds them when storing).  The child reads
+    /// these via `SYS_PROCESS_GET_ARGS` during startup.
+    ///
+    /// An empty slice means no arguments (the default).  argv[0] is
+    /// conventionally the program name.
+    pub argv: &'a [&'a [u8]],
+    /// Environment variables for the child process.
+    ///
+    /// Each element is one `KEY=value` pair as a byte slice (no null
+    /// terminator needed).  The child reads these via
+    /// `SYS_PROCESS_GET_ARGS` during startup.
+    ///
+    /// An empty slice means no environment (the default).
+    pub envp: &'a [&'a [u8]],
 }
 
 impl<'a> SpawnOptions<'a> {
@@ -164,6 +217,8 @@ impl<'a> SpawnOptions<'a> {
             priority: DEFAULT_PRIORITY,
             capabilities: &[],
             fd_map: &[],
+            argv: &[],
+            envp: &[],
         }
     }
 
@@ -191,6 +246,38 @@ impl<'a> SpawnOptions<'a> {
         self.fd_map = map;
         self
     }
+
+    /// Set the command-line arguments for the child.
+    #[must_use]
+    pub fn argv(mut self, args: &'a [&'a [u8]]) -> Self {
+        self.argv = args;
+        self
+    }
+
+    /// Set the environment variables for the child.
+    #[must_use]
+    pub fn envp(mut self, env: &'a [&'a [u8]]) -> Self {
+        self.envp = env;
+        self
+    }
+}
+
+/// Header for the `SYS_PROCESS_GET_ARGS` output buffer.
+///
+/// Placed at the start of the output buffer, followed by packed
+/// null-terminated argv strings, then packed null-terminated envp
+/// strings.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct SpawnArgsHeader {
+    /// Number of argv entries.
+    pub argc: u32,
+    /// Number of envp entries.
+    pub envc: u32,
+    /// Total bytes of packed argv data (including null terminators).
+    pub argv_data_len: u32,
+    /// Total bytes of packed envp data (including null terminators).
+    pub envp_data_len: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +462,34 @@ pub fn spawn_process(
             }
         }
         pcb::set_initial_fds(pid, initial_fds);
+    }
+
+    // Step 5e: Store argv and envp in the child's PCB.
+    //
+    // The child's POSIX layer reads these via SYS_PROCESS_GET_ARGS
+    // during its init sequence.  The data is stored in kernel heap
+    // and freed when the child reads it (or when the process dies).
+    if !options.argv.is_empty() || !options.envp.is_empty() {
+        let argv_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> = options.argv
+            .iter()
+            .map(|a| a.to_vec())
+            .collect();
+        let envp_vecs: alloc::vec::Vec<alloc::vec::Vec<u8>> = options.envp
+            .iter()
+            .map(|e| e.to_vec())
+            .collect();
+        if let Err(e) = pcb::set_initial_args(pid, argv_vecs, envp_vecs) {
+            serial_println!(
+                "[spawn] Failed to set initial args for process {}: {:?}",
+                pid, e,
+            );
+            // Non-fatal for now — process can still run without args.
+        } else {
+            serial_println!(
+                "[spawn] Stored {} argv, {} envp entries for process {}",
+                options.argv.len(), options.envp.len(), pid,
+            );
+        }
     }
 
     // Step 6: Create the entry info struct (heap-allocated, freed by
@@ -702,6 +817,11 @@ pub fn self_test() -> KernelResult<()> {
     test_spawn_with_empty_fd_map()?;
     test_spawn_fd_map_invalid_handle()?;
     test_take_initial_fds_one_shot()?;
+    test_spawn_args_header_layout()?;
+    test_spawn_with_argv()?;
+    test_spawn_with_argv_envp()?;
+    test_spawn_args_one_shot()?;
+    test_spawn_ex_args_layout()?;
 
     Ok(())
 }
@@ -777,6 +897,8 @@ fn test_spawn_with_capabilities() -> KernelResult<()> {
         priority: DEFAULT_PRIORITY,
         capabilities: &caps,
         fd_map: &[],
+        argv: &[],
+        envp: &[],
     };
 
     let result = spawn_process(&elf_data, &options)?;
@@ -1446,5 +1568,185 @@ fn test_take_initial_fds_one_shot() -> KernelResult<()> {
     let _ = crate::fs::Vfs::remove("/test_fd_oneshot.tmp");
 
     serial_println!("[spawn]   take_initial_fds is one-shot: OK");
+    Ok(())
+}
+
+/// Test: SpawnArgsHeader has the correct size for C ABI.
+fn test_spawn_args_header_layout() -> KernelResult<()> {
+    let size = core::mem::size_of::<SpawnArgsHeader>();
+    if size != 16 {
+        serial_println!(
+            "[spawn]   FAIL: SpawnArgsHeader size should be 16, got {}",
+            size
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let header = SpawnArgsHeader {
+        argc: 3,
+        envc: 2,
+        argv_data_len: 100,
+        envp_data_len: 50,
+    };
+    if header.argc != 3 || header.envc != 2 || header.argv_data_len != 100 || header.envp_data_len != 50 {
+        serial_println!("[spawn]   FAIL: SpawnArgsHeader field values wrong");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[spawn]   SpawnArgsHeader layout (size={}): OK", size);
+    Ok(())
+}
+
+/// Test: Spawn a process with argv — args stored in child PCB.
+fn test_spawn_with_argv() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+
+    let args: &[&[u8]] = &[b"myprogram", b"--flag", b"value"];
+    let options = SpawnOptions::new("spawn-test-argv").argv(args);
+
+    let result = spawn_process(&elf_data, &options)?;
+
+    // Check that the child's PCB has the args.
+    let (argv, envp) = pcb::take_initial_args(result.pid);
+    if argv.len() != 3 {
+        serial_println!(
+            "[spawn]   FAIL: expected 3 argv entries, got {}",
+            argv.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !envp.is_empty() {
+        serial_println!(
+            "[spawn]   FAIL: expected 0 envp entries, got {}",
+            envp.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if argv[0] != b"myprogram" || argv[1] != b"--flag" || argv[2] != b"value" {
+        serial_println!("[spawn]   FAIL: argv content mismatch");
+        return Err(KernelError::InternalError);
+    }
+
+    // Clean up.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    serial_println!("[spawn]   Spawn with argv (3 args): OK");
+    Ok(())
+}
+
+/// Test: Spawn with both argv and envp.
+fn test_spawn_with_argv_envp() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+
+    let args: &[&[u8]] = &[b"/bin/ls", b"-la"];
+    let env: &[&[u8]] = &[b"PATH=/bin:/usr/bin", b"HOME=/root", b"LANG=en_US.UTF-8"];
+    let options = SpawnOptions::new("spawn-test-argv-envp")
+        .argv(args)
+        .envp(env);
+
+    let result = spawn_process(&elf_data, &options)?;
+
+    let (argv, envp) = pcb::take_initial_args(result.pid);
+    if argv.len() != 2 {
+        serial_println!(
+            "[spawn]   FAIL: expected 2 argv, got {}",
+            argv.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+    if envp.len() != 3 {
+        serial_println!(
+            "[spawn]   FAIL: expected 3 envp, got {}",
+            envp.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+    if argv[0] != b"/bin/ls" || argv[1] != b"-la" {
+        serial_println!("[spawn]   FAIL: argv content mismatch");
+        return Err(KernelError::InternalError);
+    }
+    if envp[0] != b"PATH=/bin:/usr/bin" || envp[1] != b"HOME=/root" || envp[2] != b"LANG=en_US.UTF-8" {
+        serial_println!("[spawn]   FAIL: envp content mismatch");
+        return Err(KernelError::InternalError);
+    }
+
+    // Clean up.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    serial_println!("[spawn]   Spawn with argv + envp: OK");
+    Ok(())
+}
+
+/// Test: take_initial_args is one-shot.
+fn test_spawn_args_one_shot() -> KernelResult<()> {
+    let elf_data = elf::build_test_elf_public();
+
+    let args: &[&[u8]] = &[b"test"];
+    let options = SpawnOptions::new("spawn-test-args-oneshot").argv(args);
+
+    let result = spawn_process(&elf_data, &options)?;
+
+    // First take: should get the args.
+    let (argv, _envp) = pcb::take_initial_args(result.pid);
+    if argv.len() != 1 {
+        serial_println!(
+            "[spawn]   FAIL: first take expected 1 arg, got {}",
+            argv.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Second take: should get empty.
+    let (argv2, envp2) = pcb::take_initial_args(result.pid);
+    if !argv2.is_empty() || !envp2.is_empty() {
+        serial_println!(
+            "[spawn]   FAIL: second take should be empty, got {} argv, {} envp",
+            argv2.len(), envp2.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Clean up.
+    crate::sched::yield_now();
+    crate::sched::yield_now();
+    crate::sched::reap_dead_tasks();
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    serial_println!("[spawn]   take_initial_args is one-shot: OK");
+    Ok(())
+}
+
+/// Test: SpawnExArgs struct has correct layout for C ABI.
+fn test_spawn_ex_args_layout() -> KernelResult<()> {
+    let size = core::mem::size_of::<SpawnExArgs>();
+    // 12 fields × 8 bytes = 96 bytes.
+    if size != 96 {
+        serial_println!(
+            "[spawn]   FAIL: SpawnExArgs size should be 96, got {}",
+            size
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    let align = core::mem::align_of::<SpawnExArgs>();
+    if align < 8 {
+        serial_println!(
+            "[spawn]   FAIL: SpawnExArgs alignment should be ≥8, got {}",
+            align
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[spawn]   SpawnExArgs layout (size={}, align={}): OK", size, align);
     Ok(())
 }

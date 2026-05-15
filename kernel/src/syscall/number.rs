@@ -1247,23 +1247,24 @@ pub const SYS_THREAD_SET_PRIORITY: u64 = 515;
 /// exit_code < 0, indicating a crash).
 pub const SYS_PROCESS_CRASH_INFO: u64 = 516;
 
-/// Spawn a new process with file descriptor inheritance.
+/// Spawn a new process with extended options (fd inheritance, argv, envp).
 ///
-/// Like `SYS_PROCESS_SPAWN` (500), but additionally accepts a file
-/// descriptor map that specifies which kernel handles the child should
-/// inherit.  The kernel duplicates each parent handle and stores the
-/// mappings in the child's PCB.
+/// `arg0`: pointer to a `SpawnExArgs` struct in user memory.
 ///
-/// `arg0`: pointer to ELF data in memory.
-/// `arg1`: ELF data length.
-/// `arg2`: pointer to name string (UTF-8).
-/// `arg3`: name length.
-/// `arg4`: pointer to `FdMapEntry` array (may be null if count is 0).
-/// `arg5`: number of `FdMapEntry` entries.
+/// The `SpawnExArgs` struct bundles all spawn parameters:
+/// - ELF data pointer and length
+/// - Process name
+/// - FdMapEntry array (for fd inheritance)
+/// - Packed null-terminated argv strings + count
+/// - Packed null-terminated envp strings + count
 ///
-/// Each `FdMapEntry` is `{ fd: i32, _pad: i32, handle: u64 }` (16 bytes,
-/// C repr).  `fd` is the POSIX fd number in the child; `handle` is the
-/// kernel file handle in the parent to duplicate.
+/// Fd inheritance: each `FdMapEntry` is `{ fd: i32, _pad: i32,
+/// handle: u64 }` (16 bytes, C repr).  The kernel duplicates the
+/// parent's `handle` and stores it in the child's PCB.
+///
+/// argv/envp: packed null-terminated strings (e.g., `"ls\0-la\0"`).
+/// The kernel stores them in the child's PCB.  The child reads them
+/// via `SYS_PROCESS_GET_ARGS` (519).
 ///
 /// Returns: process ID on success, negative error on failure.
 pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
@@ -1279,6 +1280,24 @@ pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
 /// Returns: number of entries written on success, or negative error.
 /// The entries are consumed (one-shot) — subsequent calls return 0.
 pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
+
+/// Retrieve initial argv/envp for the current process.
+///
+/// Called by the child process's POSIX layer during startup to read
+/// the command-line arguments and environment variables that the
+/// parent passed via `SYS_PROCESS_SPAWN_EX`.
+///
+/// `arg0`: pointer to output buffer.
+/// `arg1`: output buffer capacity (bytes).
+///
+/// The output buffer receives a `SpawnArgsHeader` (16 bytes) followed
+/// by packed null-terminated argv strings, then packed null-terminated
+/// envp strings.
+///
+/// Returns: total bytes needed (may exceed capacity — caller should
+/// realloc and retry).  0 if no args were set.  The data is consumed
+/// (one-shot) — subsequent calls return 0.
+pub const SYS_PROCESS_GET_ARGS: u64 = 519;
 
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)

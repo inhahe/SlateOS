@@ -227,6 +227,19 @@ pub struct Process {
     /// reads them (e.g., a non-POSIX process), they are cleaned up when
     /// the process is reaped.
     pub initial_fds: Vec<(i32, u64)>,
+    /// Initial command-line arguments for the child process.
+    ///
+    /// Each element is one argument as a byte string (NOT null-terminated
+    /// in storage — the null terminators are added when copying out).
+    /// Set by `SYS_PROCESS_SPAWN_EX` when the parent passes argv data.
+    /// The child's POSIX layer reads this via `SYS_PROCESS_GET_ARGS`
+    /// during startup and clears it (one-shot).
+    pub initial_argv: Vec<Vec<u8>>,
+    /// Initial environment variables for the child process.
+    ///
+    /// Same format as `initial_argv` — each element is one `KEY=value`
+    /// byte string.
+    pub initial_envp: Vec<Vec<u8>>,
 }
 
 impl Process {
@@ -248,6 +261,8 @@ impl Process {
             ipc_handles: Vec::new(),
             crash_info: None,
             initial_fds: Vec::new(),
+            initial_argv: Vec::new(),
+            initial_envp: Vec::new(),
         }
     }
 }
@@ -1079,6 +1094,57 @@ pub fn take_initial_fds(pid: ProcessId) -> Vec<(i32, u64)> {
         core::mem::take(&mut proc.initial_fds)
     } else {
         Vec::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Initial argv/envp (for argument passing across spawn)
+// ---------------------------------------------------------------------------
+
+/// Maximum total bytes of argv + envp data per process (256 KiB).
+///
+/// Prevents a parent from allocating unbounded kernel heap for a child
+/// that may never read the data.
+const MAX_ARGS_BYTES: usize = 256 * 1024;
+
+/// Store initial arguments and environment in a child process's PCB.
+///
+/// Called by `spawn_process()` when the parent passes argv/envp data.
+/// Returns `Err(InvalidArgument)` if the total data exceeds `MAX_ARGS_BYTES`.
+pub fn set_initial_args(
+    pid: ProcessId,
+    argv: Vec<Vec<u8>>,
+    envp: Vec<Vec<u8>>,
+) -> KernelResult<()> {
+    // Check total size.
+    let total: usize = argv.iter().map(|a| a.len()).sum::<usize>()
+        + envp.iter().map(|e| e.len()).sum::<usize>();
+    if total > MAX_ARGS_BYTES {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        proc.initial_argv = argv;
+        proc.initial_envp = envp;
+        Ok(())
+    } else {
+        Err(KernelError::NoSuchProcess)
+    }
+}
+
+/// Take (move out) the initial argv/envp from a process's PCB.
+///
+/// Returns `(argv, envp)` and clears them in the PCB.  One-shot:
+/// subsequent calls return empty vecs.
+pub fn take_initial_args(pid: ProcessId) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&pid) {
+        let argv = core::mem::take(&mut proc.initial_argv);
+        let envp = core::mem::take(&mut proc.initial_envp);
+        (argv, envp)
+    } else {
+        (Vec::new(), Vec::new())
     }
 }
 

@@ -622,28 +622,141 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
     crate::syslog!("init.shutdown", Info,
         "System shutdown initiated: {}", reason.label());
 
-    // Phase 1: Send stop signal to all services.
-    // In a real implementation, this would iterate services in reverse
-    // dependency order and send stop signals via IPC.
+    let grace_ns = STATE.lock().config.shutdown_grace_ns;
+
+    // Phase 1: Stop services in reverse dependency order.
+    //
+    // Services at higher dependency levels (which depend on lower-level
+    // services) are stopped first, then lower levels.  This ensures a
+    // service is stopped only after its dependents have exited.
     crate::syslog!("init.shutdown", Info, "Stopping services...");
 
-    // Phase 2: Wait for grace period.
-    // In a real implementation, this would be an async wait.
-    // Services that haven't exited after the grace period get force-killed.
+    let levels = crate::svcstart::start_levels();
+    let mut clean_exits: u32 = 0;
+    let mut force_kills: u32 = 0;
 
-    // Phase 3: Flush logs one final time.
+    // Iterate levels in reverse: highest dependency level first.
+    for level in levels.iter().rev() {
+        for &(svc_id, ref name) in level {
+            // Check if the service is running before trying to stop it.
+            if let Ok(info) = crate::fs::servicemgr::get_service(svc_id) {
+                if info.state == crate::fs::servicemgr::ServiceState::Running
+                    || info.state == crate::fs::servicemgr::ServiceState::Starting
+                {
+                    crate::syslog!("init.shutdown", Info,
+                        "Stopping service '{}' (id {})", name, svc_id);
+                    let _ = crate::fs::servicemgr::stop_service(svc_id);
+                    clean_exits = clean_exits.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    // Also stop any services not in the start graph (manually started).
+    let all_services = crate::fs::servicemgr::list_services();
+    for svc in &all_services {
+        if svc.state == crate::fs::servicemgr::ServiceState::Running
+            || svc.state == crate::fs::servicemgr::ServiceState::Starting
+        {
+            crate::syslog!("init.shutdown", Info,
+                "Stopping remaining service '{}' (id {})", svc.name, svc.id);
+            let _ = crate::fs::servicemgr::stop_service(svc.id);
+            clean_exits = clean_exits.saturating_add(1);
+        }
+    }
+
+    crate::syslog!("init.shutdown", Info,
+        "Services stopped: {} clean exits", clean_exits);
+
+    // Phase 2: Reap any remaining orphans.
+    //
+    // Give orphaned processes a chance to exit by running reap cycles.
+    // After the grace period, any remaining zombies are force-reaped.
+    let reap_start = crate::hpet::elapsed_ns();
+    let deadline = reap_start.saturating_add(grace_ns);
+    let mut reap_passes: u32 = 0;
+    loop {
+        let remaining = orphan_count();
+        if remaining == 0 { break; }
+
+        let now_ns = crate::hpet::elapsed_ns();
+        if now_ns >= deadline { break; }
+
+        // Do a reap pass (similar to tick's orphan logic).
+        let pending: Vec<u32>;
+        {
+            let state = STATE.lock();
+            pending = state.orphans.iter()
+                .filter(|o| !o.reaped)
+                .map(|o| o.pid)
+                .collect();
+        }
+
+        let mut reaped_pids = Vec::new();
+        for &opid in &pending {
+            match crate::proc::pcb::try_reap(
+                INIT_PID as crate::proc::pcb::ProcessId,
+                opid as crate::proc::pcb::ProcessId,
+            ) {
+                Ok(Some(_)) => { reaped_pids.push(opid); }
+                Ok(None) => {}
+                Err(_) => { reaped_pids.push(opid); }
+            }
+        }
+
+        if !reaped_pids.is_empty() {
+            let mut state = STATE.lock();
+            for &rpid in &reaped_pids {
+                if let Some(orphan) = state.orphans.iter_mut().find(|o| o.pid == rpid) {
+                    orphan.reaped = true;
+                }
+            }
+            let count = reaped_pids.len() as u64;
+            state.orphans.retain(|o| !o.reaped);
+            #[allow(clippy::arithmetic_side_effects)]
+            { state.total_reaped += count; }
+        }
+
+        reap_passes = reap_passes.saturating_add(1);
+    }
+
+    // Force-reap anything still in the orphan list.
+    {
+        let mut state = STATE.lock();
+        let remaining = state.orphans.len();
+        if remaining > 0 {
+            crate::syslog!("init.shutdown", Warning,
+                "Force-clearing {} remaining orphans", remaining);
+            force_kills = remaining as u32;
+        }
+        #[allow(clippy::arithmetic_side_effects)]
+        { state.total_reaped += remaining as u64; }
+        state.orphans.clear();
+    }
+
+    crate::syslog!("init.shutdown", Info,
+        "Orphan cleanup: {} passes, {} force-killed", reap_passes, force_kills);
+
+    // Phase 3: Sync filesystems and flush caches.
+    crate::syslog!("init.shutdown", Info, "Syncing filesystems...");
+    let _ = crate::fs::vfs::Vfs::sync();
+
+    // Phase 4: Flush logs one final time.
     crate::syslog!("init.shutdown", Info, "Flushing logs...");
     let _ = crate::logpersist::flush();
 
-    // Phase 4: Mark as halted.
+    // Phase 5: Mark as halted with shutdown statistics.
     {
         let mut state = STATE.lock();
         state.system_state = SystemState::Halted;
+        state.shutdown_clean_exits = clean_exits;
+        state.shutdown_force_kills = force_kills;
     }
 
     let shutdown_ms = crate::hpet::elapsed_ns().saturating_sub(now) / 1_000_000;
     crate::syslog!("init.shutdown", Info,
-        "Shutdown complete in {} ms (reason: {})", shutdown_ms, reason.label());
+        "Shutdown complete in {} ms (reason: {}, {} clean, {} forced)",
+        shutdown_ms, reason.label(), clean_exits, force_kills);
 
     Ok(())
 }

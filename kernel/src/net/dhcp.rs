@@ -821,18 +821,64 @@ pub fn process_dhcp_response(data: &[u8]) -> KernelResult<()> {
         Some(DHCP_ACK) if state == DhcpState::Requesting
             || state == DhcpState::Renewing
             || state == DhcpState::Rebinding => {
+            // During renewal/rebinding, verify the ACK is for the IP we
+            // currently hold.  A spoofed ACK for a different IP could
+            // silently reassign our address.
+            if (state == DhcpState::Renewing || state == DhcpState::Rebinding)
+                && !offered_ip.is_unspecified()
+            {
+                let current = CURRENT_LEASE.lock().client_ip;
+                if !current.is_unspecified() && offered_ip != current {
+                    crate::serial_println!(
+                        "[dhcp] ACK IP {} doesn't match current lease {} — ignoring",
+                        offered_ip, current,
+                    );
+                    return Ok(());
+                }
+            }
+
+            // Reject obviously invalid offered IPs.
+            if offered_ip.is_unspecified()
+                || offered_ip.is_broadcast()
+                || offered_ip.is_multicast()
+                || offered_ip.0[0] == 127
+            {
+                crate::serial_println!(
+                    "[dhcp] ACK offered invalid IP {} — ignoring", offered_ip,
+                );
+                return Ok(());
+            }
+
             // Compute default T1/T2 if server didn't provide them.
-            let t1 = if renewal_time > 0 {
+            // lease_time == 0 means "infinite lease" — no renewal needed.
+            let mut t1 = if renewal_time > 0 {
                 renewal_time
-            } else {
+            } else if lease_time > 0 {
                 lease_time / 2 // 50% of lease (RFC 2131 default).
-            };
-            let t2 = if rebinding_time > 0 {
-                rebinding_time
             } else {
+                0 // Infinite lease — tick_renewal() skips when T1/lease == 0.
+            };
+            let mut t2 = if rebinding_time > 0 {
+                rebinding_time
+            } else if lease_time > 0 {
                 // 87.5% of lease (RFC 2131 default).
                 lease_time.saturating_mul(7) / 8
+            } else {
+                0
             };
+
+            // Sanitize: enforce T1 ≤ T2 ≤ lease_time (RFC 2131 §4.4.5).
+            // A misconfigured or malicious server could send values that
+            // violate this ordering, causing premature lease expiry or
+            // renewal storms.
+            if lease_time > 0 {
+                if t2 > lease_time {
+                    t2 = lease_time.saturating_mul(7) / 8;
+                }
+                if t1 > t2 {
+                    t1 = t2 / 2;
+                }
+            }
 
             crate::serial_println!(
                 "[dhcp] ACK: IP {} mask {} gw {} dns {} lease={}s T1={}s T2={}s",

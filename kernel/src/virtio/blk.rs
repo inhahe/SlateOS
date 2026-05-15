@@ -306,6 +306,9 @@ impl VirtioBlkDevice {
 
     /// Check the DMA status byte after a completed request.
     fn check_status(&self, op: &str, sector: u64) -> KernelResult<()> {
+        // SAFETY: dma_virt points to an exclusively-owned 16 KiB frame.
+        // DMA_STATUS_OFFSET (4608) is well within 16384.  Volatile read
+        // because the device writes this byte asynchronously via DMA.
         let status = unsafe {
             core::ptr::read_volatile(self.dma_virt.add(DMA_STATUS_OFFSET))
         };
@@ -332,6 +335,9 @@ impl VirtioBlkDevice {
         }
 
         // Write the request header into the DMA frame.
+        // SAFETY: dma_virt is the start of an exclusively-owned 16 KiB frame.
+        // VirtioBlkReqHeader is 16 bytes at offset 0, well within bounds.
+        // Volatile because the device reads this via DMA.
         let header_ptr = self.dma_virt as *mut VirtioBlkReqHeader;
         unsafe {
             core::ptr::write_volatile(header_ptr, VirtioBlkReqHeader {
@@ -341,7 +347,9 @@ impl VirtioBlkDevice {
             });
         }
 
-        // Clear the status byte.
+        // SAFETY: DMA_STATUS_OFFSET (4608) < 16384.  Writing 0xFF as a
+        // sentinel so we can distinguish "device hasn't written yet" from
+        // a real status value (0 = OK, 1 = error, 2 = unsupported).
         unsafe {
             core::ptr::write_volatile(self.dma_virt.add(DMA_STATUS_OFFSET), 0xFF);
         }
@@ -370,6 +378,9 @@ impl VirtioBlkDevice {
         self.check_status("Read", sector)?;
 
         // Copy data from DMA buffer to caller's buffer.
+        // SAFETY: DMA_DATA_OFFSET (512) + SECTOR_SIZE (512) = 1024 < 16384.
+        // The device has written exactly SECTOR_SIZE bytes at this offset
+        // (verified by check_status above).  buf is a valid &mut [u8; 512].
         unsafe {
             core::ptr::copy_nonoverlapping(
                 self.dma_virt.add(DMA_DATA_OFFSET),
@@ -389,7 +400,10 @@ impl VirtioBlkDevice {
             return Err(KernelError::InvalidArgument);
         }
 
-        // Write the request header.
+        // SAFETY: Same DMA frame layout as read_sector — dma_virt is the
+        // start of an exclusively-owned 16 KiB frame.  Header at offset 0
+        // (16 bytes), data at offset 512 (512 bytes), status at offset 4608
+        // (1 byte) — all well within the 16384-byte frame.
         let header_ptr = self.dma_virt as *mut VirtioBlkReqHeader;
         unsafe {
             core::ptr::write_volatile(header_ptr, VirtioBlkReqHeader {
@@ -399,7 +413,7 @@ impl VirtioBlkDevice {
             });
         }
 
-        // Copy data to the DMA buffer.
+        // Copy caller's data into the DMA buffer for the device to read.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 buf.as_ptr(),
@@ -408,7 +422,7 @@ impl VirtioBlkDevice {
             );
         }
 
-        // Clear status.
+        // Sentinel status byte (device will overwrite with 0 on success).
         unsafe {
             core::ptr::write_volatile(self.dma_virt.add(DMA_STATUS_OFFSET), 0xFF);
         }

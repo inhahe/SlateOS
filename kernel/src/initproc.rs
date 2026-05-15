@@ -645,8 +645,17 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
                 {
                     crate::syslog!("init.shutdown", Info,
                         "Stopping service '{}' (id {})", name, svc_id);
-                    let _ = crate::fs::servicemgr::stop_service(svc_id);
-                    clean_exits = clean_exits.saturating_add(1);
+                    match crate::fs::servicemgr::stop_service(svc_id) {
+                        Ok(()) => {
+                            clean_exits = clean_exits.saturating_add(1);
+                        }
+                        Err(e) => {
+                            crate::syslog!("init.shutdown", Warning,
+                                "Failed to stop service '{}' (id {}): {:?}",
+                                name, svc_id, e);
+                            force_kills = force_kills.saturating_add(1);
+                        }
+                    }
                 }
             }
         }
@@ -660,8 +669,17 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
         {
             crate::syslog!("init.shutdown", Info,
                 "Stopping remaining service '{}' (id {})", svc.name, svc.id);
-            let _ = crate::fs::servicemgr::stop_service(svc.id);
-            clean_exits = clean_exits.saturating_add(1);
+            match crate::fs::servicemgr::stop_service(svc.id) {
+                Ok(()) => {
+                    clean_exits = clean_exits.saturating_add(1);
+                }
+                Err(e) => {
+                    crate::syslog!("init.shutdown", Warning,
+                        "Failed to stop remaining service '{}' (id {}): {:?}",
+                        svc.name, svc.id, e);
+                    force_kills = force_kills.saturating_add(1);
+                }
+            }
         }
     }
 
@@ -739,11 +757,18 @@ pub fn shutdown(reason: ShutdownReason) -> KernelResult<()> {
 
     // Phase 3: Sync filesystems and flush caches.
     crate::syslog!("init.shutdown", Info, "Syncing filesystems...");
-    let _ = crate::fs::vfs::Vfs::sync();
+    if let Err(e) = crate::fs::vfs::Vfs::sync() {
+        // Filesystem sync failure during shutdown may indicate data loss.
+        crate::syslog!("init.shutdown", Error,
+            "Filesystem sync failed: {:?} — data may not be persisted", e);
+    }
 
     // Phase 4: Flush logs one final time.
     crate::syslog!("init.shutdown", Info, "Flushing logs...");
-    let _ = crate::logpersist::flush();
+    if let Err(e) = crate::logpersist::flush() {
+        // Log loss during shutdown is unfortunate but not fatal.
+        crate::serial_println!("[init] WARNING: final log flush failed: {:?}", e);
+    }
 
     // Phase 5: Mark as halted with shutdown statistics.
     {

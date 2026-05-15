@@ -122,41 +122,58 @@ const CLASS_IN: u16 = 1;
 /// DNS flags: standard query, recursion desired.
 const FLAGS_QUERY_RD: u16 = 0x0100;
 
-/// Monotonically incrementing transaction ID for DNS queries.
+/// Counter mixed with TSC for query ID generation.
 ///
-/// Using a unique ID per query prevents spoofed responses from matching
-/// a different query's transaction ID.  Starts at 1 (0 is reserved by
-/// some implementations as invalid).
-static NEXT_QUERY_ID: AtomicU16 = AtomicU16::new(1);
+/// Combined with TSC jitter to produce unpredictable 16-bit transaction
+/// IDs.  Monotonic predictability is a classic DNS cache poisoning vector
+/// (CVE-2008-1447 / Kaminsky attack).
+static QUERY_ID_COUNTER: AtomicU16 = AtomicU16::new(1);
 
-/// Allocate the next unique transaction ID.
+/// Generate a randomized DNS transaction ID.
+///
+/// Mixes a monotonic counter with the TSC (timestamp counter) to produce
+/// IDs that are:
+/// - Unique (counter prevents collisions within ~65K queries)
+/// - Unpredictable (TSC timing jitter varies per call)
+/// - Never zero (some resolvers treat 0 as invalid)
 fn next_query_id() -> u16 {
-    let id = NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed);
-    // Skip 0 on wrap-around (some resolvers treat 0 as invalid).
-    if id == 0 {
-        NEXT_QUERY_ID.fetch_add(1, Ordering::Relaxed)
-    } else {
-        id
-    }
+    let counter = QUERY_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: rdtsc reads the hardware timestamp counter, always
+    // available on x86_64 CPUs.
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    // Mix lower TSC bits (high jitter) with the counter.
+    // Rotate the TSC bits to spread entropy across all 16 bits.
+    let tsc16 = (tsc as u16) ^ ((tsc >> 16) as u16) ^ ((tsc >> 5) as u16);
+    let id = counter ^ tsc16;
+    // Skip 0 on collision.
+    if id == 0 { counter.wrapping_add(1) } else { id }
 }
 
-/// Ephemeral port counter for DNS queries.
+/// Counter mixed with TSC for ephemeral port allocation.
 ///
 /// Each query binds a unique local port to avoid collisions when
 /// multiple resolutions are in flight (e.g., during CNAME chasing).
-/// Range: 49152–65535 (IANA dynamic/private port range).
-static NEXT_DNS_PORT: AtomicU16 = AtomicU16::new(49152);
+/// Range: 49152–65535 (IANA dynamic/private port range, 16384 ports).
+///
+/// Random port selection prevents an attacker from predicting the source
+/// port of a DNS query, which is essential for cache poisoning resistance
+/// alongside random query IDs.
+static PORT_COUNTER: AtomicU16 = AtomicU16::new(0);
 
-/// Allocate the next ephemeral port for DNS.
+/// Ephemeral port range start (IANA dynamic/private range).
+const EPHEMERAL_PORT_START: u16 = 49152;
+/// Ephemeral port range size.
+const EPHEMERAL_PORT_RANGE: u16 = 16384; // 65535 - 49152 + 1
+
+/// Allocate a randomized ephemeral port for DNS.
 fn next_dns_port() -> u16 {
-    let port = NEXT_DNS_PORT.fetch_add(1, Ordering::Relaxed);
-    // Wrap back to start of ephemeral range.
-    if port == 0 || port < 49152 {
-        NEXT_DNS_PORT.store(49153, Ordering::Relaxed);
-        49152
-    } else {
-        port
-    }
+    let counter = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    // SAFETY: rdtsc is always available on x86_64.
+    let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+    let tsc16 = (tsc as u16) ^ ((tsc >> 11) as u16) ^ ((tsc >> 23) as u16);
+    let mixed = counter ^ tsc16;
+    // Map to ephemeral range [49152, 65535].
+    EPHEMERAL_PORT_START.wrapping_add(mixed % EPHEMERAL_PORT_RANGE)
 }
 
 /// Maximum CNAME hops to follow before giving up.

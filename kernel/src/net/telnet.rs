@@ -350,6 +350,7 @@ fn accept_connections(state: &mut TelnetState) {
                 match send_welcome(handle) {
                     Ok(n) => {
                         session.bytes_tx = session.bytes_tx.saturating_add(n as u64);
+                        TOTAL_BYTES_TX.fetch_add(n as u64, Ordering::Relaxed);
                     }
                     Err(_) => {
                         // Failed to send welcome — close immediately.
@@ -414,7 +415,20 @@ fn process_sessions(state: &mut TelnetState) {
                         }
                         session.line_buf.clear();
                     } else if byte == b'\n' {
-                        // LF after CR — ignore (already handled on CR).
+                        // LF — after CR this is a no-op (line_buf was cleared).
+                        // For bare-LF clients (no preceding CR), treat as line
+                        // terminator so commands aren't silently dropped.
+                        if !session.line_buf.is_empty() {
+                            if let Ok(line) = core::str::from_utf8(&session.line_buf) {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    lines_to_execute.push(String::from(trimmed));
+                                } else {
+                                    lines_to_execute.push(String::new());
+                                }
+                            }
+                            session.line_buf.clear();
+                        }
                     } else if byte == 0 {
                         // NUL after CR — ignore.
                     } else if byte == 127 || byte == 8 {
@@ -486,6 +500,7 @@ fn process_sessions(state: &mut TelnetState) {
                 // Empty line — just send prompt.
                 let n = send_bytes(tcp_handle, b"neo$ ");
                 session.bytes_tx = session.bytes_tx.saturating_add(n as u64);
+                TOTAL_BYTES_TX.fetch_add(n as u64, Ordering::Relaxed);
                 continue;
             }
 
@@ -507,8 +522,10 @@ fn process_sessions(state: &mut TelnetState) {
                 let n = send_line(tcp_handle,
                     "Reboot/shutdown not permitted via telnet.\r\n");
                 session.bytes_tx = session.bytes_tx.saturating_add(n as u64);
+                TOTAL_BYTES_TX.fetch_add(n as u64, Ordering::Relaxed);
                 let n2 = send_bytes(tcp_handle, b"neo$ ");
                 session.bytes_tx = session.bytes_tx.saturating_add(n2 as u64);
+                TOTAL_BYTES_TX.fetch_add(n2 as u64, Ordering::Relaxed);
                 continue;
             }
 
@@ -527,18 +544,10 @@ fn process_sessions(state: &mut TelnetState) {
             n = n.saturating_add(send_bytes(tcp_handle, b"neo$ "));
 
             session.bytes_tx = session.bytes_tx.saturating_add(n as u64);
+            TOTAL_BYTES_TX.fetch_add(n as u64, Ordering::Relaxed);
             session.commands_run = session.commands_run.saturating_add(1);
             TOTAL_COMMANDS.fetch_add(1, Ordering::Relaxed);
         }
-
-        // Update global TX counter.
-        TOTAL_BYTES_TX.store(
-            state.sessions.iter()
-                .filter(|s| s.active)
-                .map(|s| s.bytes_tx)
-                .sum(),
-            Ordering::Relaxed,
-        );
     }
 }
 

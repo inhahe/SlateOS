@@ -1246,8 +1246,8 @@ pub fn procfs_content() -> String {
     out.push_str(&format!("  Successful (2xx):  {}\n", s.successful));
     out.push_str(&format!("  Failed:            {}\n", s.failed));
     out.push_str(&format!("  Redirects followed:{}\n", s.redirects_followed));
-    out.push_str(&format!("Bytes sent:          {}\n", s.bytes_received));
-    out.push_str(&format!("Bytes received:      {}\n", s.bytes_sent));
+    out.push_str(&format!("Bytes sent:          {}\n", s.bytes_sent));
+    out.push_str(&format!("Bytes received:      {}\n", s.bytes_received));
 
     out
 }

@@ -370,7 +370,15 @@ pub fn list_directory(
     } else {
         format!("LIST {}", path)
     };
-    let list_reply = ftp_command(&session, &list_cmd)?;
+    let list_reply = match ftp_command(&session, &list_cmd) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = super::tcp::close(data_handle);
+            ERRORS.fetch_add(1, Ordering::Relaxed);
+            ftp_close(session);
+            return Err(e);
+        }
+    };
     if !list_reply.is_transfer_starting() && !list_reply.is_success() {
         let _ = super::tcp::close(data_handle);
         ERRORS.fetch_add(1, Ordering::Relaxed);
@@ -462,7 +470,15 @@ pub fn download_file(
 
     // Send RETR command.
     let retr_cmd = format!("RETR {}", remote_path);
-    let retr_reply = ftp_command(&session, &retr_cmd)?;
+    let retr_reply = match ftp_command(&session, &retr_cmd) {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = super::tcp::close(data_handle);
+            ERRORS.fetch_add(1, Ordering::Relaxed);
+            ftp_close(session);
+            return Err(e);
+        }
+    };
     if !retr_reply.is_transfer_starting() {
         let _ = super::tcp::close(data_handle);
         ERRORS.fetch_add(1, Ordering::Relaxed);

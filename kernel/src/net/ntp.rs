@@ -70,7 +70,8 @@ const NTP_PACKET_SIZE: usize = 48;
 const NTP_VERSION: u8 = 4;
 
 /// Client mode (3).
-#[allow(dead_code)] // Used in packet spec documentation.
+#[allow(dead_code)] // Referenced in documentation.
+const MODE_CLIENT: u8 = 3;
 
 /// Server mode (4).
 const MODE_SERVER: u8 = 4;
@@ -519,15 +520,25 @@ fn validate_response(resp: &NtpResponse, our_origin: &NtpTimestamp) -> KernelRes
 /// Convert a wall-clock instant to an NTP timestamp.
 ///
 /// Uses the timekeeping module's realtime clock (Unix epoch nanoseconds)
-/// to produce an NTP epoch timestamp.  The `_kernel_ns` parameter is
-/// the monotonic timestamp at the moment we want to express; we use it
-/// to compute the delta from "now" and adjust the realtime clock.
-fn wall_clock_to_ntp(_kernel_ns: u64) -> NtpTimestamp {
+/// to produce an NTP epoch timestamp.  The `kernel_ns` parameter is
+/// the monotonic timestamp at the moment we want to express; we adjust
+/// the realtime clock by the delta between now and `kernel_ns` so that
+/// T1/T4 timestamps reflect the actual send/receive instants.
+fn wall_clock_to_ntp(kernel_ns: u64) -> NtpTimestamp {
     // clock_realtime() returns nanoseconds since Unix epoch.
+    let now_mono = crate::hrtimer::now_ns();
     let realtime_ns = crate::timekeeping::clock_realtime();
-    let unix_secs = realtime_ns / 1_000_000_000;
+    // Adjust: if kernel_ns was captured before now, subtract the
+    // elapsed time so we reconstruct the realtime at that instant.
+    let adjusted = if kernel_ns <= now_mono {
+        realtime_ns.saturating_sub(now_mono.saturating_sub(kernel_ns))
+    } else {
+        // kernel_ns is in the future (shouldn't happen, but be safe).
+        realtime_ns.saturating_add(kernel_ns.saturating_sub(now_mono))
+    };
+    let unix_secs = adjusted / 1_000_000_000;
     let ntp_secs = unix_secs.saturating_add(NTP_UNIX_OFFSET);
-    let remainder_ns = realtime_ns % 1_000_000_000;
+    let remainder_ns = adjusted % 1_000_000_000;
 
     NtpTimestamp {
         seconds: ntp_secs as u32,

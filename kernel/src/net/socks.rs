@@ -337,13 +337,24 @@ pub fn connect_domain(
         alloc::vec![SOCKS_VERSION, 2, AUTH_NONE, AUTH_USERPASS]
     };
 
-    super::tcp::send(handle, &greeting)?;
+    if let Err(e) = super::tcp::send(handle, &greeting) {
+        let _ = super::tcp::close(handle);
+        ERRORS.fetch_add(1, Ordering::Relaxed);
+        return Err(e);
+    }
 
     for _ in 0..REPLY_TIMEOUT_POLLS {
         super::poll();
     }
 
-    let auth_reply = super::tcp::read_up_to(handle, MAX_REPLY_SIZE)?;
+    let auth_reply = match super::tcp::read_up_to(handle, MAX_REPLY_SIZE) {
+        Ok(data) => data,
+        Err(e) => {
+            let _ = super::tcp::close(handle);
+            ERRORS.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
+    };
     if auth_reply.len() < 2 || auth_reply[0] != SOCKS_VERSION {
         let _ = super::tcp::close(handle);
         ERRORS.fetch_add(1, Ordering::Relaxed);
@@ -360,9 +371,20 @@ pub fn connect_domain(
         auth_msg.push(pass.len().min(255) as u8);
         auth_msg.extend_from_slice(&pass.as_bytes()[..pass.len().min(255)]);
 
-        super::tcp::send(handle, &auth_msg)?;
+        if let Err(e) = super::tcp::send(handle, &auth_msg) {
+            let _ = super::tcp::close(handle);
+            ERRORS.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
         for _ in 0..REPLY_TIMEOUT_POLLS { super::poll(); }
-        let auth_resp = super::tcp::read_up_to(handle, MAX_REPLY_SIZE)?;
+        let auth_resp = match super::tcp::read_up_to(handle, MAX_REPLY_SIZE) {
+            Ok(data) => data,
+            Err(e) => {
+                let _ = super::tcp::close(handle);
+                ERRORS.fetch_add(1, Ordering::Relaxed);
+                return Err(e);
+            }
+        };
         if auth_resp.len() < 2 || auth_resp[1] != 0x00 {
             let _ = super::tcp::close(handle);
             ERRORS.fetch_add(1, Ordering::Relaxed);
@@ -386,11 +408,22 @@ pub fn connect_domain(
     connect_req.extend_from_slice(&domain_bytes[..domain_len]);
     connect_req.extend_from_slice(&target_port.to_be_bytes());
 
-    super::tcp::send(handle, &connect_req)?;
+    if let Err(e) = super::tcp::send(handle, &connect_req) {
+        let _ = super::tcp::close(handle);
+        ERRORS.fetch_add(1, Ordering::Relaxed);
+        return Err(e);
+    }
 
     for _ in 0..REPLY_TIMEOUT_POLLS { super::poll(); }
 
-    let reply = super::tcp::read_up_to(handle, MAX_REPLY_SIZE)?;
+    let reply = match super::tcp::read_up_to(handle, MAX_REPLY_SIZE) {
+        Ok(data) => data,
+        Err(e) => {
+            let _ = super::tcp::close(handle);
+            ERRORS.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
+    };
     if reply.len() < 4 {
         let _ = super::tcp::close(handle);
         ERRORS.fetch_add(1, Ordering::Relaxed);

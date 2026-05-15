@@ -578,6 +578,25 @@ static mut HOSTNAME_BUF: [u8; HOST_NAME_MAX + 1] = {
 /// Length of the current hostname (excluding null terminator).
 static mut HOSTNAME_LEN: usize = 9; // "localhost".len()
 
+/// Domain name buffer (including null terminator space).
+///
+/// Initialized to "(none)" — can be changed via `setdomainname()`.
+/// SAFETY: single-process, no concurrency — direct access is safe.
+static mut DOMAIN_BUF: [u8; HOST_NAME_MAX + 1] = {
+    let mut buf = [0u8; HOST_NAME_MAX + 1];
+    // "(none)" = 6 bytes.
+    buf[0] = b'(';
+    buf[1] = b'n';
+    buf[2] = b'o';
+    buf[3] = b'n';
+    buf[4] = b'e';
+    buf[5] = b')';
+    buf
+};
+
+/// Length of the current domain name (excluding null terminator).
+static mut DOMAIN_LEN: usize = 6; // "(none)".len()
+
 /// Get the hostname.
 ///
 /// Copies the stored hostname into `name` (null-terminated).
@@ -620,36 +639,74 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
 
 /// Get the domain name of the host.
 ///
-/// Stub: returns "(none)" (no NIS/YP domain configured).
+/// Copies the stored domain name into `name` (null-terminated).
+/// Defaults to "(none)" until changed via `setdomainname()`.
+///
+/// Returns 0 on success, -1 on error (EINVAL if buffer too small).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
     if name.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    let domain = b"(none)\0";
-    if len < domain.len() {
+
+    // SAFETY: single-address-space, no concurrent writes during read.
+    let (domain_ptr, dlen) = unsafe {
+        (&raw const DOMAIN_BUF, DOMAIN_LEN)
+    };
+    let needed = dlen.wrapping_add(1); // +null
+    if len < needed {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    let mut i: usize = 0;
-    while i < domain.len() {
-        if let Some(&b) = domain.get(i) {
-            // SAFETY: i < domain.len() <= len, name is valid for len bytes.
-            unsafe { *name.add(i) = b; }
+
+    let mut idx: usize = 0;
+    while idx < dlen {
+        // SAFETY: idx < dlen <= HOST_NAME_MAX, DOMAIN_BUF is HOST_NAME_MAX+1
+        // bytes, and name buffer has at least `needed` bytes.
+        unsafe {
+            let byte = *domain_ptr.cast::<u8>().add(idx);
+            *name.add(idx) = byte;
         }
-        i = i.wrapping_add(1);
+        idx = idx.wrapping_add(1);
     }
+    // SAFETY: dlen < len (checked above).
+    unsafe { *name.add(dlen) = 0; }
     0
 }
 
 /// Set the domain name of the host.
 ///
-/// Stub: always returns -1 with EPERM (requires root, not implemented).
+/// Stores `name[..len]` as the new domain name.  Subsequent calls to
+/// `getdomainname()` will return the new value.
+///
+/// Returns 0 on success, -1 on error (EINVAL if too long, EFAULT if null).
+///
+/// Note: On a real multi-user system this would require `CAP_SYS_ADMIN`.
+/// We're single-user so any process can set the domain name.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setdomainname(_name: *const u8, _len: usize) -> i32 {
-    errno::set_errno(errno::EPERM);
-    -1
+pub extern "C" fn setdomainname(name: *const u8, len: usize) -> i32 {
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if len > HOST_NAME_MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // SAFETY: single-address-space, no concurrent access.
+    unsafe {
+        let buf_ptr = (&raw mut DOMAIN_BUF).cast::<u8>();
+        let mut idx = 0;
+        while idx < len {
+            *buf_ptr.add(idx) = *name.add(idx);
+            idx = idx.wrapping_add(1);
+        }
+        *buf_ptr.add(len) = 0;
+        DOMAIN_LEN = len;
+    }
+    0
 }
 
 /// Get the maximum number of open file descriptors.
@@ -1773,5 +1830,113 @@ mod tests {
         assert_eq!(_PC_CHOWN_RESTRICTED, 6);
         assert_eq!(_PC_NO_TRUNC, 7);
         assert_eq!(_PC_VDISABLE, 8);
+    }
+
+    // ------------------------------------------------------------------
+    // gethostname / sethostname
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_gethostname_default() {
+        let mut buf = [0u8; 256];
+        assert_eq!(gethostname(buf.as_mut_ptr(), buf.len()), 0);
+        // Default is "localhost" (unless changed by a prior test).
+        // Just verify it returns a non-empty string.
+        assert_ne!(buf[0], 0, "hostname should be non-empty");
+    }
+
+    #[test]
+    fn test_gethostname_null() {
+        assert_eq!(gethostname(core::ptr::null_mut(), 10), -1);
+    }
+
+    #[test]
+    fn test_sethostname_roundtrip() {
+        // Save the original hostname.
+        let mut orig = [0u8; 256];
+        gethostname(orig.as_mut_ptr(), orig.len());
+        let orig_len = unsafe { crate::string::strlen(orig.as_ptr()) };
+
+        // Set a new hostname.
+        let new_name = b"test-host";
+        assert_eq!(sethostname(new_name.as_ptr(), new_name.len()), 0);
+
+        // Verify it was set.
+        let mut buf = [0u8; 256];
+        assert_eq!(gethostname(buf.as_mut_ptr(), buf.len()), 0);
+        assert_eq!(&buf[..new_name.len()], new_name);
+
+        // Restore the original.
+        sethostname(orig.as_ptr(), orig_len);
+    }
+
+    #[test]
+    fn test_sethostname_null() {
+        assert_eq!(sethostname(core::ptr::null(), 5), -1);
+    }
+
+    #[test]
+    fn test_sethostname_too_long() {
+        let long_name = [b'a'; 256]; // HOST_NAME_MAX = 255
+        assert_eq!(sethostname(long_name.as_ptr(), 256), -1);
+    }
+
+    // ------------------------------------------------------------------
+    // getdomainname / setdomainname
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_getdomainname_default() {
+        let mut buf = [0u8; 256];
+        assert_eq!(getdomainname(buf.as_mut_ptr(), buf.len()), 0);
+        // Default is "(none)".
+        assert_eq!(&buf[..6], b"(none)");
+    }
+
+    #[test]
+    fn test_getdomainname_null() {
+        assert_eq!(getdomainname(core::ptr::null_mut(), 10), -1);
+    }
+
+    #[test]
+    fn test_setdomainname_roundtrip() {
+        // Save the original.
+        let mut orig = [0u8; 256];
+        getdomainname(orig.as_mut_ptr(), orig.len());
+        let orig_len = unsafe { crate::string::strlen(orig.as_ptr()) };
+
+        // Set a new domain.
+        let new_domain = b"example.com";
+        assert_eq!(setdomainname(new_domain.as_ptr(), new_domain.len()), 0);
+
+        // Verify it was set.
+        let mut buf = [0u8; 256];
+        assert_eq!(getdomainname(buf.as_mut_ptr(), buf.len()), 0);
+        assert_eq!(&buf[..new_domain.len()], new_domain);
+
+        // Restore the original.
+        setdomainname(orig.as_ptr(), orig_len);
+    }
+
+    #[test]
+    fn test_setdomainname_null() {
+        assert_eq!(setdomainname(core::ptr::null(), 5), -1);
+    }
+
+    #[test]
+    fn test_setdomainname_too_long() {
+        let long_name = [b'a'; 256]; // HOST_NAME_MAX = 255
+        assert_eq!(setdomainname(long_name.as_ptr(), 256), -1);
+    }
+
+    #[test]
+    fn test_getdomainname_buffer_too_small() {
+        // "(none)" + null = 7 bytes. Buffer of 5 is too small.
+        // Reset to known state first.
+        let default = b"(none)";
+        setdomainname(default.as_ptr(), default.len());
+
+        let mut buf = [0u8; 5];
+        assert_eq!(getdomainname(buf.as_mut_ptr(), buf.len()), -1);
     }
 }

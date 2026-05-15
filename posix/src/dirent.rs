@@ -11,7 +11,10 @@
 //! ## Limitations
 //!
 //! - Maximum 256 entries per directory (kernel buffer limit).
-//! - `dirfd` returns -1 (entire directory is buffered at opendir time).
+//! - `dirfd` returns -1 for `opendir()`-created streams (no fd kept).
+//!   For `fdopendir()`-created streams, returns the original fd.
+//! - `fdopendir()` relies on path-at-open tracking and may use a stale
+//!   path if the directory was renamed after the fd was opened.
 
 use crate::errno;
 use crate::syscall::*;
@@ -66,6 +69,11 @@ pub struct Dir {
     pos: usize,
     /// Scratch space for the dirent we return.
     current: Dirent,
+    /// File descriptor owned by this Dir (from `fdopendir`).
+    ///
+    /// When >= 0, `closedir()` will close this fd.  Set to -1 for
+    /// directories opened via `opendir()` (which don't own an fd).
+    owned_fd: i32,
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +190,13 @@ pub extern "C" fn closedir(dirp: *mut Dir) -> i32 {
         return -1;
     }
 
+    // If this Dir owns an fd (from fdopendir), close it.
+    // SAFETY: dirp is valid (checked above).
+    let owned_fd = unsafe { (*dirp).owned_fd };
+    if owned_fd >= 0 {
+        crate::file::close(owned_fd);
+    }
+
     free_dir(dirp);
     0
 }
@@ -225,13 +240,15 @@ pub extern "C" fn seekdir(dirp: *mut Dir, loc: i64) {
 
 /// Get the file descriptor associated with a directory stream.
 ///
-/// Stub: returns -1 since our Dir doesn't keep an open fd (the entire
-/// listing is buffered at opendir time).
+/// Returns the fd if the Dir was created via `fdopendir()`, or -1
+/// if it was created via `opendir()` (which doesn't retain an fd).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn dirfd(_dirp: *mut Dir) -> i32 {
-    // Our implementation reads the full directory at open time and
-    // doesn't hold an open fd.  Return -1 (invalid fd).
-    -1
+pub extern "C" fn dirfd(dirp: *mut Dir) -> i32 {
+    if dirp.is_null() {
+        return -1;
+    }
+    // SAFETY: dirp is valid (caller contract).
+    unsafe { (*dirp).owned_fd }
 }
 
 /// Compare two directory entries alphabetically by name.
@@ -510,17 +527,66 @@ pub extern "C" fn readdir_r(
 
 /// Open a directory stream from a file descriptor.
 ///
-/// This is a stub that always returns NULL with ENOSYS, because our
-/// Dir implementation buffers the entire directory at open time using
-/// `SYS_FS_LIST_DIR` with a path (not an fd).  Supporting fd-based
-/// directory streams would require kernel support for listing a
-/// directory by fd.
+/// Uses the path stored at open time (via `fdtable::get_fd_path()`)
+/// to issue `SYS_FS_LIST_DIR`, then buffers the results.  The Dir
+/// takes ownership of `fd` — `closedir()` will close it.
+///
+/// **Limitation:** the stored path may be stale if the directory was
+/// renamed after the fd was opened.  Real kernels resolve the fd
+/// directly; we rely on path-string tracking.
+///
+/// # Errors
+///
+/// - `EBADF` — `fd` is not a valid open file descriptor.
+/// - `ENOTDIR` — `fd` does not refer to a directory (no stored path).
+/// - `EMFILE` — directory pool exhausted.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fdopendir(_fd: i32) -> *mut Dir {
-    // Our kernel's SYS_FS_LIST_DIR takes a path, not an fd.
-    // Without fd-to-path resolution support, we can't implement this.
-    errno::set_errno(errno::ENOSYS);
-    core::ptr::null_mut()
+pub extern "C" fn fdopendir(fd: i32) -> *mut Dir {
+    // Verify the fd is valid.
+    if crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return core::ptr::null_mut();
+    }
+
+    // Look up the stored path for this fd.
+    let mut path_buf = [0u8; crate::unistd::PATH_MAX];
+    let path_len = crate::fdtable::get_fd_path(fd, &mut path_buf);
+    if path_len == 0 {
+        // No path stored — fd is a pipe, socket, or not opened via our open().
+        errno::set_errno(errno::ENOTDIR);
+        return core::ptr::null_mut();
+    }
+
+    // Allocate a Dir from the static pool.
+    let dir_ptr = alloc_dir();
+    if dir_ptr.is_null() {
+        errno::set_errno(errno::EMFILE);
+        return core::ptr::null_mut();
+    }
+
+    // SAFETY: alloc_dir returned a valid, exclusively-owned Dir pointer.
+    let dir = unsafe { &mut *dir_ptr };
+
+    // Issue SYS_FS_LIST_DIR with the stored path.
+    let ret = syscall3(
+        SYS_FS_LIST_DIR,
+        path_buf.as_ptr() as u64,
+        path_len as u64,
+        dir.buf.as_mut_ptr() as u64,
+    );
+
+    if ret < 0 {
+        free_dir(dir_ptr);
+        let _ = errno::translate(ret);
+        return core::ptr::null_mut();
+    }
+
+    dir.count = ret as usize;
+    dir.pos = 0;
+    // Take ownership of the fd — closedir() will close it.
+    dir.owned_fd = fd;
+
+    dir_ptr
 }
 
 // ---------------------------------------------------------------------------
@@ -556,6 +622,7 @@ impl DirSlot {
                 d_type: 0,
                 d_name: [0u8; 256],
             },
+            owned_fd: -1,
         },
     };
 }

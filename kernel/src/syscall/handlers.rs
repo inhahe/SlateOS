@@ -2588,10 +2588,10 @@ pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::pcb;
 
     let child_pid = args.arg0;
-    // The parent PID — for now, use 0 (kernel) as the "current process".
-    // TODO: get actual current process ID from the calling task's
-    // process association.
-    let parent_pid = 0;
+    // Resolve the calling process's PID so try_reap can verify the
+    // parent–child relationship.  Falls back to 0 (kernel) for bare
+    // kernel tasks, which matches processes spawned with parent=0.
+    let parent_pid = caller_pid().unwrap_or(0);
 
     // Try to reap immediately.
     match pcb::try_reap(parent_pid, child_pid) {
@@ -2633,8 +2633,8 @@ pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::pcb;
 
     let child_pid = args.arg0;
-    // Parent PID: use 0 (kernel) for now — same as sys_process_wait.
-    let parent_pid = 0;
+    // Resolve calling process PID for parent–child verification.
+    let parent_pid = caller_pid().unwrap_or(0);
 
     match pcb::try_reap(parent_pid, child_pid) {
         Ok(Some(info)) => {

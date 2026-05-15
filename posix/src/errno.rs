@@ -106,9 +106,10 @@ pub const EHOSTUNREACH: i32 = 113; // No route to host
 pub const EALREADY: i32 = 114;     // Operation already in progress
 pub const EINPROGRESS: i32 = 115;  // Operation now in progress
 pub const ECANCELED: i32 = 125;    // Operation canceled
-pub const EKEYEXPIRED: i32 = 126;  // Key has expired
-pub const EKEYREVOKED: i32 = 127;  // Key has been revoked
-pub const EKEYREJECTED: i32 = 128; // Key was rejected by service
+pub const ENOKEY: i32 = 126;       // Required key not available
+pub const EKEYEXPIRED: i32 = 127;  // Key has expired
+pub const EKEYREVOKED: i32 = 128;  // Key has been revoked
+pub const EKEYREJECTED: i32 = 129; // Key was rejected by service
 pub const EDEADLOCK: i32 = EDEADLK; // Alias for EDEADLK
 pub const ENOMEDIUM: i32 = 123;    // No medium found
 pub const EMEDIUMTYPE: i32 = 124;  // Wrong medium type
@@ -463,9 +464,10 @@ mod tests {
         assert_eq!(EREMOTEIO, 121);
         assert_eq!(EDQUOT, 122);
         assert_eq!(EMEDIUMTYPE, 124);
-        assert_eq!(EKEYEXPIRED, 126);
-        assert_eq!(EKEYREVOKED, 127);
-        assert_eq!(EKEYREJECTED, 128);
+        assert_eq!(ENOKEY, 126);
+        assert_eq!(EKEYEXPIRED, 127);
+        assert_eq!(EKEYREVOKED, 128);
+        assert_eq!(EKEYREJECTED, 129);
     }
 
     #[test]
@@ -493,7 +495,7 @@ mod tests {
             ESHUTDOWN, ETOOMANYREFS, ETIMEDOUT, ECONNREFUSED,
             EHOSTDOWN, EHOSTUNREACH, EALREADY, EINPROGRESS, ESTALE,
             EUCLEAN, ENOTNAM, ENAVAIL, EISNAM, EREMOTEIO, EDQUOT,
-            ENOMEDIUM, EMEDIUMTYPE, ECANCELED, EKEYEXPIRED,
+            ENOMEDIUM, EMEDIUMTYPE, ECANCELED, ENOKEY, EKEYEXPIRED,
             EKEYREVOKED, EKEYREJECTED, EOWNERDEAD, ENOTRECOVERABLE,
         ];
         for i in 0..vals.len() {

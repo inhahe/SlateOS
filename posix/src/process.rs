@@ -580,6 +580,45 @@ pub extern "C" fn reboot(_cmd: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// pidfd — Linux process file descriptor (5.3+)
+// ---------------------------------------------------------------------------
+
+/// Flags for `pidfd_open`.
+pub const PIDFD_NONBLOCK: u32 = 0o4000;
+
+/// Obtain a file descriptor that refers to a process.
+///
+/// Stub: returns -1 with ENOSYS.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pidfd_open(_pid: PidT, _flags: u32) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Send a signal to a process referred to by a pidfd.
+///
+/// Stub: returns -1 with ENOSYS.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pidfd_send_signal(
+    _pidfd: i32,
+    _sig: i32,
+    _info: *const core::ffi::c_void,
+    _flags: u32,
+) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Retrieve a duplicate of another process's file descriptor via pidfd.
+///
+/// Stub: returns -1 with ENOSYS.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pidfd_getfd(_pidfd: i32, _targetfd: i32, _flags: u32) -> i32 {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1238,5 +1277,40 @@ mod tests {
     fn test_reboot_cad_constants() {
         assert_ne!(LINUX_REBOOT_CMD_CAD_ON, LINUX_REBOOT_CMD_CAD_OFF);
         assert_eq!(LINUX_REBOOT_CMD_CAD_OFF, 0);
+    }
+
+    // -- pidfd stubs --
+
+    #[test]
+    fn test_pidfd_open_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_open(1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pidfd_open_with_flags() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_open(1, PIDFD_NONBLOCK), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pidfd_send_signal_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_send_signal(3, 9, core::ptr::null(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pidfd_getfd_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_getfd(3, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pidfd_nonblock_constant() {
+        assert_ne!(PIDFD_NONBLOCK, 0);
     }
 }

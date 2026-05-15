@@ -282,4 +282,75 @@ mod tests {
         assert_eq!(lio_listio(LIO_NOWAIT, core::ptr::null(), 0, core::ptr::null_mut()), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
+
+    // -- aio_read doesn't crash with zero struct --
+
+    #[test]
+    fn test_aio_read_with_zeroed_aiocb() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        errno::set_errno(0);
+        assert_eq!(aio_read(&raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_aio_write_with_zeroed_aiocb() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        errno::set_errno(0);
+        assert_eq!(aio_write(&raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_aio_error_with_zeroed_aiocb() {
+        let cb: Aiocb = unsafe { core::mem::zeroed() };
+        assert_eq!(aio_error(&cb), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_aio_return_with_zeroed_aiocb() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        errno::set_errno(0);
+        assert_eq!(aio_return(&raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_aio_cancel_with_aiocb() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        assert_eq!(aio_cancel(0, &raw mut cb), AIO_ALLDONE);
+    }
+
+    #[test]
+    fn test_aio_fsync_with_aiocb() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(1, &raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- aio_suspend with count > 0 --
+
+    #[test]
+    fn test_aio_suspend_nent_positive() {
+        errno::set_errno(0);
+        assert_eq!(aio_suspend(core::ptr::null(), 5, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- aio_cancel with negative fd --
+
+    #[test]
+    fn test_aio_cancel_negative_fd() {
+        assert_eq!(aio_cancel(-1, core::ptr::null_mut()), AIO_ALLDONE);
+    }
+
+    // -- AIO_* constants are distinct --
+
+    #[test]
+    fn test_aio_result_constants_distinct() {
+        assert_ne!(AIO_CANCELED, AIO_NOTCANCELED);
+        assert_ne!(AIO_CANCELED, AIO_ALLDONE);
+        assert_ne!(AIO_NOTCANCELED, AIO_ALLDONE);
+    }
 }

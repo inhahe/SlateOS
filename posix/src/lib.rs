@@ -16,7 +16,7 @@
 //!   `chown`, `fchown`, `lchown`, `umask`, `truncate`, `ftruncate`,
 //!   `fsync`, `fdatasync`, `link`, `symlink`, `readlink`, `utimes`,
 //!   `futimes`, `utimensat`, `futimens`, `sendfile`, `sendfile64`,
-//!   `fallocate`, `mknod`, `mkfifo`
+//!   `fallocate`, `splice`, `tee`, `vmsplice`, `mknod`, `mkfifo`
 //! - **Sockets**: `socket`, `connect`, `bind`, `listen`, `accept`,
 //!   `send`, `recv`, `sendto`, `recvfrom`, `shutdown`, `setsockopt`,
 //!   `getsockopt`, `getpeername`, `getsockname`, `getaddrinfo`,
@@ -31,7 +31,8 @@
 //!   `ptsname_r`
 //! - **Process**: `_exit`, `getpid`, `getppid`, `posix_spawn`,
 //!   `posix_spawnp`, `execve`, `execvp`, `execv`, `vfork`, `waitpid`,
-//!   `sleep`, `nanosleep`, `getpgrp`, `setpgid`, `setsid`, `getsid`
+//!   `sleep`, `nanosleep`, `getpgrp`, `setpgid`, `setsid`, `getsid`,
+//!   `pidfd_open`, `pidfd_send_signal`, `pidfd_getfd`
 //! - **Memory**: `mmap`, `munmap`, `mprotect`, `mmap64`, `mremap`,
 //!   `mlock`/`mlock2`/`munlock`/`mlockall`/`munlockall`, `msync`, `madvise`,
 //!   `posix_madvise`, `shm_open`/`shm_unlink`, `memfd_create`

@@ -329,4 +329,44 @@ mod tests {
     fn test_mq_getattr_null_attr() {
         assert_eq!(mq_getattr(0, core::ptr::null_mut()), -1);
     }
+
+    // -- mq_setattr with null pointers --
+
+    #[test]
+    fn test_mq_setattr_null_new() {
+        assert_eq!(mq_setattr(0, core::ptr::null(), core::ptr::null_mut()), -1);
+    }
+
+    // -- mq_close with various descriptors --
+
+    #[test]
+    fn test_mq_close_negative_fd() {
+        assert_eq!(mq_close(-1), -1);
+    }
+
+    // -- mq_timedsend/timedreceive set errno --
+
+    #[test]
+    fn test_mq_timedsend_sets_errno() {
+        crate::errno::set_errno(0);
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = mq_timedsend(0, b"x\0".as_ptr(), 1, 0, &raw const ts);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mq_timedreceive_sets_errno() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 8];
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = mq_timedreceive(0, buf.as_mut_ptr(), 8, core::ptr::null_mut(), &raw const ts);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- MqAttr alignment --
+
+    #[test]
+    fn test_mq_attr_alignment() {
+        assert!(core::mem::align_of::<MqAttr>() >= 8);
+    }
 }

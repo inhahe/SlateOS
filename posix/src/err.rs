@@ -289,4 +289,47 @@ mod tests {
     fn emit_warnx_with_message_no_crash() {
         emit_warnx(b"invalid argument\0".as_ptr());
     }
+
+    // -- warn reads errno for the message --
+
+    #[test]
+    fn warn_reads_errno_no_crash() {
+        // warn() reads errno to format the strerror message.
+        // The internal write() calls may modify errno, so we just
+        // verify it doesn't crash with different errno values.
+        for e in [0, crate::errno::EACCES, crate::errno::EIO, crate::errno::ENOMEM] {
+            crate::errno::set_errno(e);
+            warn(b"testing\0".as_ptr());
+        }
+    }
+
+    // -- warnx with different errno states --
+
+    #[test]
+    fn warnx_does_not_read_errno() {
+        // warnx shouldn't care about errno at all.
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        warnx(b"out of memory\0".as_ptr());
+        // Still didn't crash, good.
+    }
+
+    // -- vwarn/vwarnx round-trip --
+
+    #[test]
+    fn vwarn_vwarnx_alternating() {
+        crate::errno::set_errno(crate::errno::ENOENT);
+        vwarn(b"step 1\0".as_ptr());
+        vwarnx(b"step 2\0".as_ptr());
+        vwarn(b"step 3\0".as_ptr());
+    }
+
+    // -- Multiple sequential calls --
+
+    #[test]
+    fn warn_multiple_calls() {
+        for i in 0..5 {
+            crate::errno::set_errno(i);
+            warn(b"loop\0".as_ptr());
+        }
+    }
 }

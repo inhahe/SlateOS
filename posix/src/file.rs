@@ -2105,6 +2105,74 @@ pub extern "C" fn fallocate(fd: Fd, mode: i32, offset: OffT, len: OffT) -> i32 {
     -1
 }
 
+/// `posix_fallocate64` — LP64 alias for `posix_fallocate`.
+///
+/// On 64-bit systems (LP64), `off_t` is already 64-bit, so
+/// `posix_fallocate64` is identical to `posix_fallocate`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn posix_fallocate64(fd: Fd, offset: OffT, len: OffT) -> i32 {
+    posix_fallocate(fd, offset, len)
+}
+
+// ---------------------------------------------------------------------------
+// splice / tee / vmsplice — zero-copy I/O (Linux)
+// ---------------------------------------------------------------------------
+
+/// Flags for `splice`, `tee`, `vmsplice`.
+pub const SPLICE_F_MOVE: u32 = 1;
+/// Don't block on I/O.
+pub const SPLICE_F_NONBLOCK: u32 = 2;
+/// Expect more data.
+pub const SPLICE_F_MORE: u32 = 4;
+/// Gift pages to the pipe (vmsplice only).
+pub const SPLICE_F_GIFT: u32 = 8;
+
+/// Move data between two file descriptors via a pipe.
+///
+/// Stub: returns -1 with ENOSYS.  A real implementation would use
+/// kernel-level zero-copy page transfer between a pipe and a
+/// file/socket descriptor.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn splice(
+    _fd_in: Fd,
+    _off_in: *mut i64,
+    _fd_out: Fd,
+    _off_out: *mut i64,
+    _len: usize,
+    _flags: u32,
+) -> isize {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Duplicate pipe content without consuming it.
+///
+/// Stub: returns -1 with ENOSYS.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn tee(
+    _fd_in: Fd,
+    _fd_out: Fd,
+    _len: usize,
+    _flags: u32,
+) -> isize {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
+/// Splice user pages into a pipe.
+///
+/// Stub: returns -1 with ENOSYS.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn vmsplice(
+    _fd: Fd,
+    _iov: *const Iovec,
+    _nr_segs: u64,
+    _flags: u32,
+) -> isize {
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
+
 // ---------------------------------------------------------------------------
 // flock — advisory file locking
 // ---------------------------------------------------------------------------
@@ -3974,6 +4042,70 @@ mod tests {
         let result = sendfile64(1, 0, &raw mut off, 0);
         assert_eq!(result, 0);
         assert_eq!(off, 200);
+    }
+
+    // -- posix_fallocate64 (LP64 alias) --
+
+    #[test]
+    fn test_posix_fallocate64_invalid_offset() {
+        assert_eq!(posix_fallocate64(0, -1, 4096), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_posix_fallocate64_invalid_len() {
+        assert_eq!(posix_fallocate64(0, 0, 0), crate::errno::EINVAL);
+    }
+
+    // -- splice stubs --
+
+    #[test]
+    fn test_splice_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(splice(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 4096, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_splice_with_flags() {
+        crate::errno::set_errno(0);
+        assert_eq!(splice(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 4096,
+            SPLICE_F_MOVE | SPLICE_F_NONBLOCK), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_tee_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(tee(0, 1, 4096, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_vmsplice_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(vmsplice(0, core::ptr::null(), 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- SPLICE_F_* constants --
+
+    #[test]
+    fn test_splice_flag_constants() {
+        assert_eq!(SPLICE_F_MOVE, 1);
+        assert_eq!(SPLICE_F_NONBLOCK, 2);
+        assert_eq!(SPLICE_F_MORE, 4);
+        assert_eq!(SPLICE_F_GIFT, 8);
+    }
+
+    #[test]
+    fn test_splice_flags_no_collision() {
+        let all = [SPLICE_F_MOVE, SPLICE_F_NONBLOCK, SPLICE_F_MORE, SPLICE_F_GIFT];
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                assert_eq!(all[i] & all[j], 0,
+                    "SPLICE_F flags {i} and {j} collide");
+            }
+        }
     }
 
     // -- renameat with AT_FDCWD both sides --

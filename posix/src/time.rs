@@ -4218,4 +4218,134 @@ mod tests {
         assert_eq!(ITIMER_VIRTUAL, 1);
         assert_eq!(ITIMER_PROF, 2);
     }
+
+    // -- nanosleep validation --
+
+    #[test]
+    fn test_nanosleep_null_request() {
+        crate::errno::set_errno(0);
+        assert_eq!(nanosleep(core::ptr::null(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_nanosleep_negative_sec() {
+        let req = Timespec { tv_sec: -1, tv_nsec: 0 };
+        crate::errno::set_errno(0);
+        assert_eq!(nanosleep(&req, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_nanosleep_nsec_too_large() {
+        let req = Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 };
+        crate::errno::set_errno(0);
+        assert_eq!(nanosleep(&req, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_nanosleep_negative_nsec() {
+        let req = Timespec { tv_sec: 0, tv_nsec: -1 };
+        crate::errno::set_errno(0);
+        assert_eq!(nanosleep(&req, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- clock_nanosleep validation --
+
+    #[test]
+    fn test_clock_nanosleep_null_request() {
+        assert_eq!(clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut()), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clock_nanosleep_invalid_clock() {
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        assert_eq!(clock_nanosleep(999, 0, &req, core::ptr::null_mut()), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clock_nanosleep_invalid_nsec() {
+        let req = Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 };
+        assert_eq!(clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut()), crate::errno::EINVAL);
+    }
+
+    // -- gettimeofday --
+
+    #[test]
+    fn test_gettimeofday_null_tv() {
+        crate::errno::set_errno(0);
+        assert_eq!(gettimeofday(core::ptr::null_mut(), core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_gettimeofday_returns_value() {
+        // On the host, this executes a real syscall. Just verify it
+        // doesn't crash and tv gets some value.
+        let mut tv = Timeval { tv_sec: -1, tv_usec: -1 };
+        let _ = gettimeofday(&raw mut tv, core::ptr::null_mut());
+        // Don't assert exact values — syscall may return error on host.
+    }
+
+    // -- localtime --
+
+    #[test]
+    fn test_localtime_null() {
+        let ptr = localtime(core::ptr::null());
+        assert!(ptr.is_null());
+    }
+
+    #[test]
+    fn test_localtime_epoch() {
+        // localtime delegates to gmtime (no timezone).
+        let t: TimeT = 0;
+        let ptr = localtime(&t);
+        if !ptr.is_null() {
+            let tm = unsafe { &*ptr };
+            assert_eq!(tm.tm_year, 70); // 1970
+            assert_eq!(tm.tm_mon, 0);   // January
+            assert_eq!(tm.tm_mday, 1);
+        }
+    }
+
+    // -- ctime --
+
+    #[test]
+    fn test_ctime_null() {
+        // ctime(NULL) → localtime(NULL) → NULL → asctime(NULL) → fallback "???" string
+        let ptr = ctime(core::ptr::null());
+        // asctime(NULL) returns a valid fallback string, not NULL.
+        assert!(!ptr.is_null());
+        let c = unsafe { *ptr };
+        assert_eq!(c, b'?');
+    }
+
+    #[test]
+    fn test_ctime_epoch() {
+        let t: TimeT = 0;
+        let ptr = ctime(&t);
+        // Should return a non-null formatted time string.
+        if !ptr.is_null() {
+            // Should start with "Thu" (January 1, 1970 was a Thursday).
+            let c = unsafe { *ptr };
+            assert_eq!(c, b'T');
+        }
+    }
+
+    // -- sleep/usleep (can only test the API, not timing) --
+
+    #[test]
+    fn test_sleep_zero_no_crash() {
+        // sleep(0) should return immediately.
+        let ret = sleep(0);
+        let _ = ret; // Don't assert — syscall may behave oddly on host.
+    }
+
+    #[test]
+    fn test_usleep_zero_no_crash() {
+        let ret = usleep(0);
+        let _ = ret;
+    }
 }

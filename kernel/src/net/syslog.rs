@@ -391,28 +391,32 @@ fn parse_message(data: &[u8], source_ip: Ipv4Addr) -> Option<SyslogMessage> {
     // Simple approach: split on spaces, extract what we can.
     let parts: Vec<&str> = rest.splitn(5, ' ').collect();
 
+    // Build owned strings for each field.  The minimal-format branch
+    // produces a `String` from `join()`, so we convert everything to
+    // owned `String` to avoid a lifetime workaround (previous code used
+    // `.leak()` which leaked memory on every received message).
     let (hostname, app_name, message) = if parts.len() >= 4 {
         // Likely RFC 5424 or structured format.
         let hostname = parts.get(2).copied().unwrap_or("-");
         let app_name = parts.get(3).copied().unwrap_or("-");
         let msg = parts.get(4).copied().unwrap_or("");
-        (hostname, app_name, msg)
+        (String::from(hostname), String::from(app_name), String::from(msg))
     } else if parts.len() >= 2 {
         // Minimal format.
         let hostname = parts.get(0).copied().unwrap_or("-");
         let msg = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
-        (hostname, "-", msg.leak() as &str) // static lifetime workaround
+        (String::from(hostname), String::from("-"), msg)
     } else {
-        ("-", "-", rest)
+        (String::from("-"), String::from("-"), String::from(rest))
     };
 
     Some(SyslogMessage {
         priority: pri,
         facility,
         severity,
-        hostname: String::from(hostname),
-        app_name: String::from(app_name),
-        message: String::from(message),
+        hostname,
+        app_name,
+        message,
         source_ip,
         received_at_ns: now,
     })

@@ -28,6 +28,14 @@ pub static SCHAR_MAX: i32 = 127;
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static UCHAR_MAX: i32 = 255;
 
+/// Minimum value of a `char` (signed on x86_64 Linux).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static CHAR_MIN: i32 = -128;
+
+/// Maximum value of a `char` (signed on x86_64 Linux).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static CHAR_MAX: i32 = 127;
+
 /// Minimum value of a short.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static SHRT_MIN: i16 = i16::MIN;
@@ -193,6 +201,109 @@ pub static PATH_MAX: i32 = 4096;
 pub static MB_LEN_MAX: i32 = 4;
 
 // ---------------------------------------------------------------------------
+// Additional POSIX / system limits
+// ---------------------------------------------------------------------------
+
+/// Maximum number of symbolic links to traverse during resolution.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static SYMLOOP_MAX: i32 = 40;
+
+/// Maximum number of bytes in a symbolic link target.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static SYMLINK_MAX: i32 = 255;
+
+/// Maximum number of timer expiration overruns.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static DELAYTIMER_MAX: i32 = i32::MAX;
+
+/// Maximum value a semaphore may have.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static SEM_VALUE_MAX: i32 = i32::MAX;
+
+/// Maximum number of POSIX message queues per process.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static MQ_OPEN_MAX: i32 = 8;
+
+/// Maximum message priority for POSIX message queues.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static MQ_PRIO_MAX: i32 = 32768;
+
+/// Maximum number of repeated occurrences of a regex.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static RE_DUP_MAX: i32 = 255;
+
+/// Maximum number of weights for collation (LC_COLLATE).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static COLL_WEIGHTS_MAX: i32 = 2;
+
+/// Maximum nesting of `(...)` in `expr`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static EXPR_NEST_MAX: i32 = 32;
+
+/// Maximum number of simultaneous timers per process.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static TIMER_MAX: i32 = 256;
+
+/// Number of links a single page can contain.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static LINK_MAX: i32 = 127;
+
+// -- bc utility limits --
+
+/// bc — maximum ibase/obase.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static BC_BASE_MAX: i32 = 99;
+
+/// bc — maximum array size.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static BC_DIM_MAX: i32 = 2048;
+
+/// bc — maximum scale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static BC_SCALE_MAX: i32 = 99;
+
+/// bc — maximum string length.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static BC_STRING_MAX: i32 = 1000;
+
+// -- POSIX minimum values for new limits --
+
+/// POSIX minimum: maximum semaphore value.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_SEM_VALUE_MAX: i32 = 32767;
+
+/// POSIX minimum: maximum number of timers.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_TIMER_MAX: i32 = 32;
+
+/// POSIX minimum: maximum number of thread-specific data keys.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_THREAD_KEYS_MAX: i32 = 128;
+
+/// POSIX minimum: number of destructor iterations.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_THREAD_DESTRUCTOR_ITERATIONS: i32 = 4;
+
+/// POSIX minimum: maximum symlink loop count.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_SYMLOOP_MAX: i32 = 8;
+
+/// POSIX minimum: maximum symlink target length.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_SYMLINK_MAX: i32 = 255;
+
+/// POSIX minimum: maximum hard links to a file.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[allow(non_upper_case_globals)]
+pub static _POSIX_LINK_MAX: i32 = 8;
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -315,5 +426,68 @@ mod tests {
     #[test]
     fn test_mb_len_max() {
         assert_eq!(MB_LEN_MAX, 4); // UTF-8
+    }
+
+    // -- char limits (signed on x86_64) --
+
+    #[test]
+    fn test_char_range() {
+        assert_eq!(CHAR_MIN, -128);
+        assert_eq!(CHAR_MAX, 127);
+        // CHAR_MIN/MAX must match SCHAR_MIN/MAX on platforms where char is signed.
+        assert_eq!(CHAR_MIN, SCHAR_MIN);
+        assert_eq!(CHAR_MAX, SCHAR_MAX);
+    }
+
+    // -- Additional POSIX limits --
+
+    #[test]
+    fn test_symlink_limits() {
+        assert_eq!(SYMLOOP_MAX, 40);
+        assert_eq!(SYMLINK_MAX, 255);
+        assert!(SYMLOOP_MAX >= _POSIX_SYMLOOP_MAX);
+        assert!(SYMLINK_MAX >= _POSIX_SYMLINK_MAX);
+    }
+
+    #[test]
+    fn test_timer_and_semaphore_limits() {
+        assert_eq!(DELAYTIMER_MAX, i32::MAX);
+        assert_eq!(SEM_VALUE_MAX, i32::MAX);
+        assert_eq!(TIMER_MAX, 256);
+        assert!(SEM_VALUE_MAX >= _POSIX_SEM_VALUE_MAX);
+        assert!(TIMER_MAX >= _POSIX_TIMER_MAX);
+    }
+
+    #[test]
+    fn test_mq_limits() {
+        assert_eq!(MQ_OPEN_MAX, 8);
+        assert_eq!(MQ_PRIO_MAX, 32768);
+    }
+
+    #[test]
+    fn test_regex_and_collation_limits() {
+        assert_eq!(RE_DUP_MAX, 255);
+        assert_eq!(COLL_WEIGHTS_MAX, 2);
+        assert_eq!(EXPR_NEST_MAX, 32);
+    }
+
+    #[test]
+    fn test_bc_limits() {
+        assert_eq!(BC_BASE_MAX, 99);
+        assert_eq!(BC_DIM_MAX, 2048);
+        assert_eq!(BC_SCALE_MAX, 99);
+        assert_eq!(BC_STRING_MAX, 1000);
+    }
+
+    #[test]
+    fn test_link_max() {
+        assert_eq!(LINK_MAX, 127);
+        assert!(LINK_MAX >= _POSIX_LINK_MAX);
+    }
+
+    #[test]
+    fn test_posix_thread_minimums() {
+        assert_eq!(_POSIX_THREAD_KEYS_MAX, 128);
+        assert_eq!(_POSIX_THREAD_DESTRUCTOR_ITERATIONS, 4);
     }
 }

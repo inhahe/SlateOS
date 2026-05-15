@@ -282,3 +282,151 @@ pub fn syscall6(
     }
     ret
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Syscall numbers are non-zero --
+
+    #[test]
+    fn syscall_numbers_nonzero() {
+        // Syscall number 0 is reserved (invalid).
+        let all_numbers = [
+            SYS_EXIT, SYS_TASK_ID, SYS_PROCESS_ID,
+            SYS_CLOCK_MONOTONIC, SYS_SLEEP,
+            SYS_CONSOLE_WRITE, SYS_CONSOLE_READ_CHAR,
+            SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT,
+            SYS_SCHED_SET_PROFILE,
+            SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT, SYS_PROCESS_EXEC,
+            SYS_PROCESS_TRY_WAIT,
+            SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
+            SYS_FS_READ_FILE, SYS_FS_WRITE_FILE, SYS_FS_DELETE,
+            SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_RMDIR,
+            SYS_FS_STAT, SYS_FS_LINK, SYS_FS_STATVFS,
+            SYS_FS_OPEN, SYS_FS_CLOSE, SYS_FS_READ, SYS_FS_WRITE,
+            SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
+            SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
+            SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
+            SYS_PIPE_CREATE, SYS_PIPE_WRITE, SYS_PIPE_READ,
+            SYS_PIPE_TRY_WRITE, SYS_PIPE_TRY_READ, SYS_PIPE_CLOSE,
+            SYS_PIPE_POLL, SYS_PIPE_READABLE_BYTES,
+            SYS_TCP_CONNECT, SYS_TCP_SEND, SYS_TCP_RECV, SYS_TCP_CLOSE,
+            SYS_TCP_BIND, SYS_TCP_ACCEPT, SYS_TCP_CLOSE_LISTENER,
+            SYS_TCP_ABORT, SYS_TCP_PEER_ADDR,
+            SYS_UDP_BIND, SYS_UDP_SEND, SYS_UDP_RECV, SYS_UDP_CLOSE,
+            SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_CONNECT,
+            SYS_UDP_LOCAL_PORT,
+            SYS_DNS_RESOLVE, SYS_DNS_REVERSE_RESOLVE, SYS_NET_STAT,
+            SYS_ICMP_PING, SYS_ICMP_PING_WAIT,
+            SYS_TCP_LIST, SYS_TCP_LISTENER_LIST,
+            SYS_NET_IF_INFO, SYS_ARP_TABLE, SYS_DNS_CACHE_STATS,
+            SYS_TCP_POLL_STATUS, SYS_TCP_LISTENER_READY,
+            SYS_UDP_RX_READY, SYS_UDP_RX_FRONT_BYTES,
+            SYS_TCP_SHUTDOWN, SYS_TCP_INFO, SYS_TCP_SET_NODELAY,
+            SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS,
+            SYS_TCP_LAST_ERROR, SYS_TCP_LOCAL_PORT,
+        ];
+        for &nr in &all_numbers {
+            assert_ne!(nr, 0, "syscall number must not be zero");
+        }
+    }
+
+    // -- All syscall numbers are unique --
+
+    #[test]
+    fn syscall_numbers_unique() {
+        let all_numbers: &[u64] = &[
+            SYS_EXIT, SYS_TASK_ID, SYS_PROCESS_ID,
+            SYS_CLOCK_MONOTONIC, SYS_SLEEP,
+            SYS_CONSOLE_WRITE, SYS_CONSOLE_READ_CHAR,
+            SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT,
+            SYS_SCHED_SET_PROFILE,
+            SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT, SYS_PROCESS_EXEC,
+            SYS_PROCESS_TRY_WAIT,
+            SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
+            SYS_FS_READ_FILE, SYS_FS_WRITE_FILE, SYS_FS_DELETE,
+            SYS_FS_LIST_DIR, SYS_FS_MKDIR, SYS_FS_RMDIR,
+            SYS_FS_STAT, SYS_FS_LINK, SYS_FS_STATVFS,
+            SYS_FS_OPEN, SYS_FS_CLOSE, SYS_FS_READ, SYS_FS_WRITE,
+            SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
+            SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
+            SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
+            SYS_PIPE_CREATE, SYS_PIPE_WRITE, SYS_PIPE_READ,
+            SYS_PIPE_TRY_WRITE, SYS_PIPE_TRY_READ, SYS_PIPE_CLOSE,
+            SYS_PIPE_POLL, SYS_PIPE_READABLE_BYTES,
+            SYS_TCP_CONNECT, SYS_TCP_SEND, SYS_TCP_RECV, SYS_TCP_CLOSE,
+            SYS_TCP_BIND, SYS_TCP_ACCEPT, SYS_TCP_CLOSE_LISTENER,
+            SYS_TCP_ABORT, SYS_TCP_PEER_ADDR,
+            SYS_UDP_BIND, SYS_UDP_SEND, SYS_UDP_RECV, SYS_UDP_CLOSE,
+            SYS_UDP_MCAST_JOIN, SYS_UDP_MCAST_LEAVE, SYS_UDP_CONNECT,
+            SYS_UDP_LOCAL_PORT,
+            SYS_DNS_RESOLVE, SYS_DNS_REVERSE_RESOLVE, SYS_NET_STAT,
+            SYS_ICMP_PING, SYS_ICMP_PING_WAIT,
+            SYS_TCP_LIST, SYS_TCP_LISTENER_LIST,
+            SYS_NET_IF_INFO, SYS_ARP_TABLE, SYS_DNS_CACHE_STATS,
+            SYS_TCP_POLL_STATUS, SYS_TCP_LISTENER_READY,
+            SYS_UDP_RX_READY, SYS_UDP_RX_FRONT_BYTES,
+            SYS_TCP_SHUTDOWN, SYS_TCP_INFO, SYS_TCP_SET_NODELAY,
+            SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS,
+            SYS_TCP_LAST_ERROR, SYS_TCP_LOCAL_PORT,
+        ];
+        for i in 0..all_numbers.len() {
+            for j in (i + 1)..all_numbers.len() {
+                assert_ne!(
+                    all_numbers[i], all_numbers[j],
+                    "syscall numbers at indices {i} and {j} must be distinct (both = {})",
+                    all_numbers[i]
+                );
+            }
+        }
+    }
+
+    // -- Syscall number ranges match zone allocation --
+
+    #[test]
+    fn syscall_ranges_by_zone() {
+        // kernel-core: 0-199
+        assert!(SYS_EXIT <= 199);
+        assert!(SYS_TASK_ID <= 199);
+        assert!(SYS_PROCESS_ID <= 199);
+        assert!(SYS_CLOCK_MONOTONIC <= 199);
+        assert!(SYS_SLEEP <= 199);
+        assert!(SYS_CONSOLE_WRITE <= 199);
+        assert!(SYS_CONSOLE_READ_CHAR <= 199);
+        assert!(SYS_MMAP <= 199);
+        assert!(SYS_MUNMAP <= 199);
+        assert!(SYS_MPROTECT <= 199);
+        assert!(SYS_SCHED_SET_PROFILE <= 199);
+
+        // kernel-ipc: 200-399
+        assert!((200..400).contains(&SYS_PIPE_CREATE));
+        assert!((200..400).contains(&SYS_PIPE_WRITE));
+        assert!((200..400).contains(&SYS_PIPE_READ));
+        assert!((200..400).contains(&SYS_PIPE_CLOSE));
+
+        // kernel-process: 500-599
+        assert!((500..600).contains(&SYS_PROCESS_SPAWN));
+        assert!((500..600).contains(&SYS_PROCESS_WAIT));
+        assert!((500..600).contains(&SYS_PROCESS_EXEC));
+        assert!((500..600).contains(&SYS_THREAD_CREATE));
+        assert!((500..600).contains(&SYS_THREAD_EXIT));
+        assert!((500..600).contains(&SYS_THREAD_JOIN));
+
+        // fs: 600-799
+        assert!((600..800).contains(&SYS_FS_READ_FILE));
+        assert!((600..800).contains(&SYS_FS_WRITE_FILE));
+        assert!((600..800).contains(&SYS_FS_OPEN));
+        assert!((600..800).contains(&SYS_FS_CLOSE));
+        assert!((600..800).contains(&SYS_FS_DUP));
+
+        // net: 800-999
+        assert!((800..1000).contains(&SYS_TCP_CONNECT));
+        assert!((800..1000).contains(&SYS_UDP_BIND));
+        assert!((800..1000).contains(&SYS_DNS_RESOLVE));
+    }
+}

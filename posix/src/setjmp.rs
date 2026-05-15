@@ -124,3 +124,60 @@ global_asm!(
 
 /// `sigjmp_buf` — same as `jmp_buf` since we don't save signal masks.
 pub type SigjmpBuf = JmpBuf;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jmp_buf_size_is_64_bytes() {
+        // 8 registers × 8 bytes each = 64 bytes.
+        assert_eq!(
+            core::mem::size_of::<JmpBuf>(),
+            64,
+            "jmp_buf must be exactly 64 bytes (8 × u64)"
+        );
+    }
+
+    #[test]
+    fn jmp_buf_alignment_is_u64() {
+        assert_eq!(
+            core::mem::align_of::<JmpBuf>(),
+            core::mem::align_of::<u64>(),
+            "jmp_buf alignment must match u64"
+        );
+    }
+
+    #[test]
+    fn sigjmp_buf_is_same_as_jmp_buf() {
+        assert_eq!(
+            core::mem::size_of::<SigjmpBuf>(),
+            core::mem::size_of::<JmpBuf>(),
+            "SigjmpBuf must be same size as JmpBuf"
+        );
+        assert_eq!(
+            core::mem::align_of::<SigjmpBuf>(),
+            core::mem::align_of::<JmpBuf>(),
+            "SigjmpBuf must have same alignment as JmpBuf"
+        );
+    }
+
+    #[test]
+    fn jmp_buf_holds_8_registers() {
+        // Each slot stores one u64 register value.
+        let buf: JmpBuf = [0u64; 8];
+        assert_eq!(buf.len(), 8);
+    }
+
+    #[test]
+    fn jmp_buf_initializes_to_zero() {
+        let buf: JmpBuf = [0u64; 8];
+        for &val in &buf {
+            assert_eq!(val, 0);
+        }
+    }
+}

@@ -293,6 +293,12 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 - [x] Hardware exception → language-level exception (SEH-style, not Unix signals)
 - [x] Structured shutdown via IPC message, not Unix signals
 - [x] Process credential / capability management
+- [x] File descriptor inheritance across spawn (SYS_PROCESS_SPAWN_EX / SYS_PROCESS_GET_INITIAL_FDS)
+  - [x] FdMapEntry ABI struct (16 bytes, repr(C)) for parent→child fd passing
+  - [x] SpawnOptions.fd_map: parent kernel handles duped into child PCB
+  - [x] PCB initial_fds: one-shot retrieval by child's POSIX layer
+  - [x] Cleanup of unclaimed handles on process death (no handle leaks)
+  - [x] 5 tests: layout, fd_map spawn, empty map, invalid handle, one-shot semantics
 
 ---
 
@@ -1270,7 +1276,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] INET_ADDRSTRLEN/INET6_ADDRSTRLEN/INADDR_BROADCAST/INADDR_NONE constants
   - [x] sched_getaffinity/sched_setaffinity: CPU affinity stubs (single-CPU mask), CpuSetT struct
   - [x] mkostemp: mkstemp with additional open flags (flags accepted, not enforced)
-  - [x] posix_spawn_file_actions: init/destroy/addclose/adddup2/addopen with storage (16 actions max, paths stored inline); posix_spawnattr: init/destroy/setflags/getflags/setpgroup/getpgroup with storage (actions recorded but not yet applied — blocked on kernel fd inheritance)
+  - [x] posix_spawn_file_actions: init/destroy/addclose/adddup2/addopen with storage (16 actions max, paths stored inline); posix_spawnattr: init/destroy/setflags/getflags/setpgroup/getpgroup with storage (kernel fd inheritance now available via SYS_PROCESS_SPAWN_EX — posix layer can apply actions)
   - [x] scandir: filter + sort, malloc'd array of malloc'd Dirent*, insertion sort, full OOM rollback
   - [x] setsockopt/getsockopt: SO_REUSEADDR, SO_KEEPALIVE, TCP_NODELAY, SO_RCVBUF/SO_SNDBUF, SO_BROADCAST, SO_LINGER, SO_REUSEPORT, SO_RCVTIMEO, SO_SNDTIMEO stored per-socket; values returned consistently by getsockopt
   - [x] pseudo-terminal stubs: posix_openpt (ENOSYS), grantpt/unlockpt (succeed), ptsname/ptsname_r (null/ENOSYS)

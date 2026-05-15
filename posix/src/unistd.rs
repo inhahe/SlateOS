@@ -1108,6 +1108,71 @@ pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
     resolved_path
 }
 
+/// Resolve a pathname to an absolute path (GNU extension).
+///
+/// Equivalent to `realpath(path, NULL)` — allocates a buffer via `malloc`
+/// and writes the resolved path into it.  The caller must `free()` the
+/// returned pointer.
+///
+/// Returns a `malloc`'d null-terminated string on success, or null on
+/// error with errno set.
+///
+/// # Safety
+///
+/// `path` must be a valid null-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn canonicalize_file_name(path: *const u8) -> *mut u8 {
+    if path.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return core::ptr::null_mut();
+    }
+
+    // Use a stack buffer for resolution, then copy to a malloc'd buffer.
+    let mut resolved = [0u8; PATH_MAX];
+    let Some(resolved_len) = (unsafe { resolve_path(path, &mut resolved) }) else {
+        if unsafe { *path } == 0 {
+            errno::set_errno(errno::ENOENT);
+        } else {
+            errno::set_errno(errno::ENAMETOOLONG);
+        }
+        return core::ptr::null_mut();
+    };
+
+    // Verify the path exists (like realpath).
+    let mut stat_buf = core::mem::MaybeUninit::<crate::stat::Stat>::zeroed();
+    let ret = syscall3(
+        SYS_FS_STAT,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
+        stat_buf.as_mut_ptr() as u64,
+    );
+
+    if ret < 0 {
+        let _ = errno::translate(ret);
+        return core::ptr::null_mut();
+    }
+
+    // Allocate buffer for the resolved path (+1 for null terminator).
+    let buf = crate::malloc::malloc(resolved_len.wrapping_add(1));
+    if buf.is_null() {
+        errno::set_errno(errno::ENOMEM);
+        return core::ptr::null_mut();
+    }
+
+    // Copy the resolved path and null-terminate.
+    // SAFETY: buf is valid for resolved_len+1 bytes; resolved is valid.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            resolved.as_ptr(),
+            buf,
+            resolved_len,
+        );
+        *buf.add(resolved_len) = 0;
+    }
+
+    buf
+}
+
 // ---------------------------------------------------------------------------
 // sync / sethostname / chroot
 // ---------------------------------------------------------------------------
@@ -2226,4 +2291,50 @@ mod tests {
         assert_eq!(_POSIX_SAVED_IDS, 1);
         assert_eq!(_POSIX_JOB_CONTROL, 1);
     }
+
+    // ------------------------------------------------------------------
+    // realpath — null argument handling
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_realpath_null_path() {
+        let mut buf = [0u8; PATH_MAX];
+        let ret = realpath(core::ptr::null(), buf.as_mut_ptr());
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_realpath_null_resolved() {
+        let ret = realpath(b"/tmp\0".as_ptr(), core::ptr::null_mut());
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_realpath_empty_path() {
+        let mut buf = [0u8; PATH_MAX];
+        let ret = realpath(b"\0".as_ptr(), buf.as_mut_ptr());
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    // ------------------------------------------------------------------
+    // canonicalize_file_name — null argument handling
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_canonicalize_file_name_null() {
+        let ret = canonicalize_file_name(core::ptr::null());
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_canonicalize_file_name_empty_path() {
+        let ret = canonicalize_file_name(b"\0".as_ptr());
+        assert!(ret.is_null());
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
 }

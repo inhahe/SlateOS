@@ -1,8 +1,8 @@
 //! C dynamic memory allocation.
 //!
 //! Implements `malloc`, `free`, `calloc`, `realloc`, `posix_memalign`,
-//! `aligned_alloc`, `valloc`, `memalign`, `malloc_usable_size` using
-//! mmap/munmap as the backing allocator.
+//! `aligned_alloc`, `valloc`, `pvalloc`, `memalign`, `malloc_usable_size`
+//! using mmap/munmap as the backing allocator.
 //!
 //! ## Design
 //!
@@ -395,6 +395,32 @@ fn aligned_alloc_impl(alignment: usize, size: usize) -> *mut u8 {
     aligned_user as *mut u8
 }
 
+/// Allocate page-aligned memory rounded up to a page-size multiple.
+///
+/// Like `valloc`, but rounds `size` up to the next multiple of the
+/// system page size before allocating.  This ensures the entire
+/// returned region consists of whole pages.
+///
+/// The returned pointer can be passed to `free()`.
+///
+/// This is a GNU/BSD extension — not standardised by POSIX.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pvalloc(size: usize) -> *mut u8 {
+    if size == 0 {
+        return core::ptr::null_mut();
+    }
+    const PAGE_SIZE: usize = 16384;
+    // Round up to the next page-size multiple.
+    let rounded = match size.checked_add(PAGE_SIZE.wrapping_sub(1)) {
+        Some(v) => v & !PAGE_SIZE.wrapping_sub(1),
+        None => {
+            crate::errno::set_errno(crate::errno::ENOMEM);
+            return core::ptr::null_mut();
+        }
+    };
+    aligned_alloc_impl(PAGE_SIZE, rounded)
+}
+
 // ---------------------------------------------------------------------------
 // glibc internal aliases
 // ---------------------------------------------------------------------------
@@ -649,5 +675,29 @@ mod tests {
     fn header_size_is_16() {
         // Must be 16 for ABI compliance (16-byte aligned user pointers).
         assert_eq!(HEADER_SIZE, 16);
+    }
+
+    // -----------------------------------------------------------------------
+    // pvalloc
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pvalloc_zero_size() {
+        let ptr = pvalloc(0);
+        assert!(ptr.is_null(), "pvalloc(0) should return NULL");
+    }
+
+    #[test]
+    fn pvalloc_overflow() {
+        // size close to usize::MAX should fail gracefully.
+        let ptr = pvalloc(usize::MAX);
+        assert!(ptr.is_null(), "pvalloc(MAX) should return NULL");
+    }
+
+    #[test]
+    fn pvalloc_near_overflow() {
+        // size + PAGE_SIZE - 1 would overflow.
+        let ptr = pvalloc(usize::MAX - 100);
+        assert!(ptr.is_null(), "pvalloc(MAX-100) should return NULL");
     }
 }

@@ -75,6 +75,8 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
         if flags & fcntl::O_CLOEXEC != 0 {
             let _ = fdtable::set_fd_flags(fd_num, fdtable::FD_CLOEXEC);
         }
+        // Store the resolved absolute path for fchdir() / *at() dirfd.
+        fdtable::store_fd_path(fd_num, resolved.as_ptr(), resolved_len);
         fd_num
     } else {
         // Fd table full — close the kernel handle.
@@ -92,6 +94,9 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn close(fd: Fd) -> i32 {
+    // Clear stored path before closing the fd entry.
+    fdtable::clear_fd_path(fd);
+
     let Some(entry) = fdtable::close_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -645,6 +650,7 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
             if let Some(fd) = fdtable::alloc_fd_with_flags(
                 HandleKind::File, ret as u64, src_status,
             ) {
+                fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
                 let _ = syscall1(SYS_FS_CLOSE, ret as u64);
@@ -657,6 +663,7 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
             if let Some(fd) = fdtable::alloc_fd_with_flags(
                 HandleKind::Console, entry.handle, src_status,
             ) {
+                fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
                 errno::set_errno(errno::EMFILE);
@@ -670,6 +677,7 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
             if let Some(fd) = fdtable::alloc_fd_with_flags(
                 HandleKind::Pipe, entry.handle, src_status,
             ) {
+                fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
                 errno::set_errno(errno::EMFILE);
@@ -684,6 +692,7 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
                 // Copy socket metadata so getpeername/getsockname
                 // works on the dup'd fd too.
                 crate::socket::copy_meta(oldfd, new_fd);
+                fdtable::copy_fd_path(oldfd, new_fd);
                 new_fd
             } else {
                 errno::set_errno(errno::EMFILE);
@@ -779,6 +788,9 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         }
         _ => {}
     }
+
+    // Copy the stored path so fchdir/dirfd works on the dup'd fd.
+    fdtable::copy_fd_path(oldfd, newfd);
 
     newfd
 }
@@ -1365,11 +1377,13 @@ pub extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, _flags: i32) -> i32 {
-    if dirfd != AT_FDCWD && !is_absolute_path(path) {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+    if dirfd == AT_FDCWD || is_absolute_path(path) {
+        return access(path, mode);
     }
-    access(path, mode)
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_dirfd_path(dirfd, path, &mut full);
+    if len == 0 { return -1; }
+    access(full.as_ptr(), mode)
 }
 
 // ---------------------------------------------------------------------------
@@ -1378,8 +1392,15 @@ pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, _flags: i32)
 //
 // These delegate to the non-*at version when dirfd == AT_FDCWD (-100) or
 // when the path is absolute (POSIX: dirfd is ignored for absolute paths).
-// Other dirfd values with relative paths return ENOSYS until we implement
-// fchdir() or kernel-level *at() support.
+//
+// When dirfd is a real fd and path is relative, we resolve the absolute
+// path by looking up the stored path for dirfd (set at open time) and
+// concatenating: dir_path + "/" + relative_path.  The result is passed
+// to the non-*at function which does its own resolve_path / normalization.
+//
+// **Limitation:** the stored dirfd path may be stale if the directory was
+// renamed after opening.  Real kernels use dentry-based resolution that
+// follows renames; our path-string approach doesn't.
 
 /// Returns `true` if the C-string `path` starts with `b'/'` (absolute).
 ///
@@ -1390,6 +1411,107 @@ fn is_absolute_path(path: *const u8) -> bool {
     // We only read the first byte (if non-null), which is always safe for
     // a valid C-string (it's either the first character or the null terminator).
     !path.is_null() && unsafe { *path } == b'/'
+}
+
+/// Build an absolute path from a dirfd's stored path and a relative path.
+///
+/// Concatenates `dir_path[..dir_len] + "/" + rel_path` (C-string) into
+/// `out`, null-terminated.  Returns the total length (excluding null),
+/// or 0 if the result would exceed `PATH_MAX`.
+///
+/// Callers pass a dirfd path obtained from [`fdtable::get_fd_path()`]
+/// and the user-supplied relative path from the `*at()` call.
+fn build_at_path(
+    dir_path: &[u8],
+    dir_len: usize,
+    rel_path: *const u8,
+    out: &mut [u8; crate::unistd::PATH_MAX],
+) -> usize {
+    if rel_path.is_null() {
+        return 0;
+    }
+    // SAFETY: rel_path is a valid C string (caller contract from POSIX).
+    let rel_len = unsafe { crate::string::strlen(rel_path) };
+
+    // Need: dir_len + 1 (slash) + rel_len + 1 (null) <= PATH_MAX.
+    let total = dir_len.wrapping_add(1).wrapping_add(rel_len);
+    if total >= crate::unistd::PATH_MAX {
+        return 0;
+    }
+
+    // Copy dir_path.
+    let mut pos = 0;
+    while pos < dir_len {
+        if let (Some(&src), Some(dst)) = (dir_path.get(pos), out.get_mut(pos)) {
+            *dst = src;
+        }
+        pos = pos.wrapping_add(1);
+    }
+
+    // Append separator (skip if dir_path already ends with '/').
+    let needs_slash = dir_len > 0
+        && dir_path.get(dir_len.wrapping_sub(1)).copied() != Some(b'/');
+    if needs_slash {
+        if let Some(dst) = out.get_mut(pos) {
+            *dst = b'/';
+        }
+        pos = pos.wrapping_add(1);
+    }
+
+    // Copy relative path.
+    // SAFETY: rel_path is valid for rel_len bytes (strlen just measured it).
+    let mut i = 0;
+    while i < rel_len {
+        if let Some(dst) = out.get_mut(pos) {
+            *dst = unsafe { *rel_path.add(i) };
+        }
+        pos = pos.wrapping_add(1);
+        i = i.wrapping_add(1);
+    }
+
+    // Null-terminate.
+    if let Some(dst) = out.get_mut(pos) {
+        *dst = 0;
+    }
+
+    pos
+}
+
+/// Resolve a dirfd + relative path into an absolute path.
+///
+/// Only called when `dirfd != AT_FDCWD` and `path` is relative.
+/// Looks up the stored path for `dirfd` and builds
+/// `dir_path + "/" + rel_path` in `out`.
+///
+/// Returns the total length (excluding null), or 0 on error with
+/// errno set (`EBADF`, `ENOTDIR`, or `ENAMETOOLONG`).
+fn resolve_dirfd_path(
+    dirfd: i32,
+    path: *const u8,
+    out: &mut [u8; crate::unistd::PATH_MAX],
+) -> usize {
+    // Verify the dirfd is valid.
+    if crate::fdtable::get_fd(dirfd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return 0;
+    }
+
+    // Look up the stored path for dirfd.
+    let mut dir_path = [0u8; crate::unistd::PATH_MAX];
+    let dir_len = crate::fdtable::get_fd_path(dirfd, &mut dir_path);
+    if dir_len == 0 {
+        // dirfd has no stored path — not a directory fd, or opened
+        // outside our open() (e.g., a pipe or socket).
+        errno::set_errno(errno::ENOTDIR);
+        return 0;
+    }
+
+    let total = build_at_path(&dir_path, dir_len, path, out);
+    if total == 0 {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return 0;
+    }
+    total
 }
 
 /// AT_FDCWD: use the current working directory.
@@ -1408,11 +1530,13 @@ pub const AT_EACCESS: i32 = 0x200;
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -> Fd {
-    if dirfd != AT_FDCWD && !is_absolute_path(path) {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+    if dirfd == AT_FDCWD || is_absolute_path(path) {
+        return open(path, flags, mode);
     }
-    open(path, flags, mode)
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_dirfd_path(dirfd, path, &mut full);
+    if len == 0 { return -1; }
+    open(full.as_ptr(), flags, mode)
 }
 
 /// Get file status relative to a directory fd.
@@ -1422,15 +1546,13 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
 /// not follow symlinks).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i32) -> i32 {
-    if dirfd != AT_FDCWD && !is_absolute_path(path) {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+    if dirfd == AT_FDCWD || is_absolute_path(path) {
+        return if flags & AT_SYMLINK_NOFOLLOW != 0 { lstat(path, buf) } else { stat(path, buf) };
     }
-    if flags & AT_SYMLINK_NOFOLLOW != 0 {
-        lstat(path, buf)
-    } else {
-        stat(path, buf)
-    }
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_dirfd_path(dirfd, path, &mut full);
+    if len == 0 { return -1; }
+    if flags & AT_SYMLINK_NOFOLLOW != 0 { lstat(full.as_ptr(), buf) } else { stat(full.as_ptr(), buf) }
 }
 
 /// Remove a file or directory relative to a directory fd.
@@ -1441,15 +1563,13 @@ pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i3
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
-    if dirfd != AT_FDCWD && !is_absolute_path(path) {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+    if dirfd == AT_FDCWD || is_absolute_path(path) {
+        return if flags & AT_REMOVEDIR != 0 { rmdir(path) } else { unlink(path) };
     }
-    if flags & AT_REMOVEDIR != 0 {
-        rmdir(path)
-    } else {
-        unlink(path)
-    }
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_dirfd_path(dirfd, path, &mut full);
+    if len == 0 { return -1; }
+    if flags & AT_REMOVEDIR != 0 { rmdir(full.as_ptr()) } else { unlink(full.as_ptr()) }
 }
 
 /// Rename a file relative to directory fds.
@@ -1462,13 +1582,32 @@ pub extern "C" fn renameat(
     newdirfd: i32,
     newpath: *const u8,
 ) -> i32 {
-    let old_needs_dirfd = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
-    let new_needs_dirfd = newdirfd != AT_FDCWD && !is_absolute_path(newpath);
-    if old_needs_dirfd || new_needs_dirfd {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+    // Resolve each path independently — each dirfd is ignored for
+    // absolute paths (POSIX).
+    let old_needs_resolve = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
+    let new_needs_resolve = newdirfd != AT_FDCWD && !is_absolute_path(newpath);
+
+    let old_ptr;
+    let mut old_full = [0u8; crate::unistd::PATH_MAX];
+    if old_needs_resolve {
+        let len = resolve_dirfd_path(olddirfd, oldpath, &mut old_full);
+        if len == 0 { return -1; }
+        old_ptr = old_full.as_ptr();
+    } else {
+        old_ptr = oldpath;
     }
-    rename(oldpath, newpath)
+
+    let new_ptr;
+    let mut new_full = [0u8; crate::unistd::PATH_MAX];
+    if new_needs_resolve {
+        let len = resolve_dirfd_path(newdirfd, newpath, &mut new_full);
+        if len == 0 { return -1; }
+        new_ptr = new_full.as_ptr();
+    } else {
+        new_ptr = newpath;
+    }
+
+    rename(old_ptr, new_ptr)
 }
 
 /// Rename a file with flags (Linux extension).
@@ -1497,11 +1636,13 @@ pub extern "C" fn renameat2(
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
-    if dirfd != AT_FDCWD && !is_absolute_path(path) {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+    if dirfd == AT_FDCWD || is_absolute_path(path) {
+        return mkdir(path, mode);
     }
-    mkdir(path, mode)
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_dirfd_path(dirfd, path, &mut full);
+    if len == 0 { return -1; }
+    mkdir(full.as_ptr(), mode)
 }
 
 /// Read a symbolic link relative to a directory fd.
@@ -1514,11 +1655,13 @@ pub extern "C" fn readlinkat(
     buf: *mut u8,
     bufsiz: SizeT,
 ) -> SsizeT {
-    if dirfd != AT_FDCWD && !is_absolute_path(path) {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+    if dirfd == AT_FDCWD || is_absolute_path(path) {
+        return readlink(path, buf, bufsiz);
     }
-    readlink(path, buf, bufsiz)
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_dirfd_path(dirfd, path, &mut full);
+    if len == 0 { return -1; }
+    readlink(full.as_ptr(), buf, bufsiz)
 }
 
 /// Create a symbolic link relative to a directory fd.
@@ -1528,11 +1671,13 @@ pub extern "C" fn readlinkat(
 /// doesn't affect whether we need `newdirfd`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u8) -> i32 {
-    if newdirfd != AT_FDCWD && !is_absolute_path(linkpath) {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+    if newdirfd == AT_FDCWD || is_absolute_path(linkpath) {
+        return symlink(target, linkpath);
     }
-    symlink(target, linkpath)
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_dirfd_path(newdirfd, linkpath, &mut full);
+    if len == 0 { return -1; }
+    symlink(target, full.as_ptr())
 }
 
 /// Create a hard link relative to directory fds.
@@ -1546,13 +1691,30 @@ pub extern "C" fn linkat(
     newpath: *const u8,
     _flags: i32,
 ) -> i32 {
-    let old_needs_dirfd = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
-    let new_needs_dirfd = newdirfd != AT_FDCWD && !is_absolute_path(newpath);
-    if old_needs_dirfd || new_needs_dirfd {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+    let old_needs_resolve = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
+    let new_needs_resolve = newdirfd != AT_FDCWD && !is_absolute_path(newpath);
+
+    let old_ptr;
+    let mut old_full = [0u8; crate::unistd::PATH_MAX];
+    if old_needs_resolve {
+        let len = resolve_dirfd_path(olddirfd, oldpath, &mut old_full);
+        if len == 0 { return -1; }
+        old_ptr = old_full.as_ptr();
+    } else {
+        old_ptr = oldpath;
     }
-    link(oldpath, newpath)
+
+    let new_ptr;
+    let mut new_full = [0u8; crate::unistd::PATH_MAX];
+    if new_needs_resolve {
+        let len = resolve_dirfd_path(newdirfd, newpath, &mut new_full);
+        if len == 0 { return -1; }
+        new_ptr = new_full.as_ptr();
+    } else {
+        new_ptr = newpath;
+    }
+
+    link(old_ptr, new_ptr)
 }
 
 /// Change file mode bits relative to a directory fd.
@@ -1562,11 +1724,13 @@ pub extern "C" fn linkat(
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, _flags: i32) -> i32 {
-    if dirfd != AT_FDCWD && !is_absolute_path(path) {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+    if dirfd == AT_FDCWD || is_absolute_path(path) {
+        return chmod(path, mode);
     }
-    chmod(path, mode)
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_dirfd_path(dirfd, path, &mut full);
+    if len == 0 { return -1; }
+    chmod(full.as_ptr(), mode)
 }
 
 /// Change file owner/group relative to a directory fd.
@@ -1582,11 +1746,13 @@ pub extern "C" fn fchownat(
     group: GidT,
     _flags: i32,
 ) -> i32 {
-    if dirfd != AT_FDCWD && !is_absolute_path(path) {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+    if dirfd == AT_FDCWD || is_absolute_path(path) {
+        return chown(path, owner, group);
     }
-    chown(path, owner, group)
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_dirfd_path(dirfd, path, &mut full);
+    if len == 0 { return -1; }
+    chown(full.as_ptr(), owner, group)
 }
 
 // ---------------------------------------------------------------------------
@@ -2348,5 +2514,94 @@ mod tests {
         // iterations — it should cap at MAX_FDS.
         let _ = close_range(200, u32::MAX, 0);
         // If this returns in reasonable time, the cap works.
+    }
+
+    // -- build_at_path --
+
+    #[test]
+    fn test_build_at_path_basic() {
+        let dir = b"/home/user";
+        let rel = b"docs/file.txt\0";
+        let mut out = [0u8; crate::unistd::PATH_MAX];
+        let len = build_at_path(dir, dir.len(), rel.as_ptr(), &mut out);
+        assert_eq!(&out[..len], b"/home/user/docs/file.txt");
+        assert_eq!(out[len], 0); // Null-terminated.
+    }
+
+    #[test]
+    fn test_build_at_path_dir_trailing_slash() {
+        let dir = b"/tmp/";
+        let rel = b"test.txt\0";
+        let mut out = [0u8; crate::unistd::PATH_MAX];
+        let len = build_at_path(dir, dir.len(), rel.as_ptr(), &mut out);
+        // Should NOT double the slash: /tmp//test.txt → /tmp/test.txt
+        assert_eq!(&out[..len], b"/tmp/test.txt");
+    }
+
+    #[test]
+    fn test_build_at_path_empty_rel() {
+        let dir = b"/home";
+        let rel = b"\0";
+        let mut out = [0u8; crate::unistd::PATH_MAX];
+        let len = build_at_path(dir, dir.len(), rel.as_ptr(), &mut out);
+        // Empty relative path → just dir + "/".
+        assert_eq!(&out[..len], b"/home/");
+    }
+
+    #[test]
+    fn test_build_at_path_null_rel() {
+        let dir = b"/home";
+        let mut out = [0u8; crate::unistd::PATH_MAX];
+        let len = build_at_path(dir, dir.len(), core::ptr::null(), &mut out);
+        assert_eq!(len, 0);
+    }
+
+    #[test]
+    fn test_build_at_path_overflow() {
+        // dir_len + rel_len exceeds PATH_MAX.
+        let dir = [b'a'; 4000];
+        let mut rel = [b'b'; 200];
+        rel[199] = 0; // null-terminate
+        let mut out = [0u8; crate::unistd::PATH_MAX];
+        let len = build_at_path(&dir, dir.len(), rel.as_ptr(), &mut out);
+        assert_eq!(len, 0, "should return 0 when result exceeds PATH_MAX");
+    }
+
+    #[test]
+    fn test_build_at_path_dotdot_relative() {
+        let dir = b"/home/user/project";
+        let rel = b"../other\0";
+        let mut out = [0u8; crate::unistd::PATH_MAX];
+        let len = build_at_path(dir, dir.len(), rel.as_ptr(), &mut out);
+        // build_at_path just concatenates — normalization happens later
+        // in resolve_path when open() is called.
+        assert_eq!(&out[..len], b"/home/user/project/../other");
+    }
+
+    // -- is_absolute_path --
+
+    #[test]
+    fn test_is_absolute_path_yes() {
+        assert!(is_absolute_path(b"/foo\0".as_ptr()));
+        assert!(is_absolute_path(b"/\0".as_ptr()));
+    }
+
+    #[test]
+    fn test_is_absolute_path_no() {
+        assert!(!is_absolute_path(b"foo\0".as_ptr()));
+        assert!(!is_absolute_path(b".\0".as_ptr()));
+        assert!(!is_absolute_path(b"\0".as_ptr()));  // Empty string.
+    }
+
+    #[test]
+    fn test_is_absolute_path_null() {
+        assert!(!is_absolute_path(core::ptr::null()));
+    }
+
+    // -- AT_FDCWD constant --
+
+    #[test]
+    fn test_at_fdcwd_value() {
+        assert_eq!(AT_FDCWD, -100);
     }
 }

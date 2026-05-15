@@ -103,7 +103,8 @@
 //!   `if_indextoname`, `ppoll`, `putenv`, `strcasestr`,
 //!   `explicit_bzero`, `strtoimax`/`strtoumax`, `getrandom`,
 //!   `getentropy`, `clock_nanosleep`, `clock_settime`,
-//!   `fchdir`, `getdomainname`/`setdomainname`, `getdtablesize`
+//!   `fchdir` (via path tracking), `getdomainname`/`setdomainname`,
+//!   `getdtablesize`
 //! - **Dynamic Linking** (stubs): `dlopen`, `dlsym`, `dlclose`, `dlerror`,
 //!   `dladdr`, `dl_iterate_phdr`, `__tls_get_addr`
 //! - **Directories**: `opendir`, `closedir`, `readdir`, `rewinddir`,

@@ -410,15 +410,45 @@ pub extern "C" fn chdir(path: *const u8) -> i32 {
 
 /// Change working directory by file descriptor.
 ///
-/// Stub: returns -1 with ENOSYS.  Our CWD tracking uses path strings,
-/// and we don't have a kernel-level fd-to-path resolution mechanism.
-/// Implementing this properly would require either:
-/// - A kernel syscall to resolve an fd back to its path, or
-/// - Tracking the path that was used when each fd was opened.
+/// Looks up the absolute path stored at open time for `fd` (see
+/// [`crate::fdtable::store_fd_path`]) and delegates to [`chdir()`].
+///
+/// This works because `open()` records the resolved path for every fd.
+/// If the fd has no stored path (e.g., a pipe or socket), returns
+/// `ENOTDIR`.  If the stored path is no longer a valid directory
+/// (e.g., it was renamed or removed), `chdir()` will report the error.
+///
+/// **Limitation:** if the directory is renamed after the fd is opened,
+/// the stored path becomes stale.  Real kernels track the dentry
+/// directly and follow renames; we track the path string instead.
+///
+/// # Errors
+///
+/// - `EBADF` — `fd` is not a valid open file descriptor.
+/// - `ENOTDIR` — `fd` does not refer to a directory (or has no path).
+/// - Other errors from `chdir()` (e.g., `ENOENT` if the path is stale).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fchdir(_fd: Fd) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn fchdir(fd: Fd) -> i32 {
+    // Verify the fd is valid.
+    if crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    // Look up the stored path.
+    let mut path_buf = [0u8; PATH_MAX];
+    let path_len = crate::fdtable::get_fd_path(fd, &mut path_buf);
+    if path_len == 0 {
+        // No path stored — fd is a pipe, socket, or was not opened
+        // through our open() (e.g., stdin/stdout/stderr console fds).
+        errno::set_errno(errno::ENOTDIR);
+        return -1;
+    }
+
+    // Delegate to chdir, which verifies the path is a directory and
+    // updates the CWD.  path_buf is already null-terminated by
+    // get_fd_path.
+    chdir(path_buf.as_ptr())
 }
 
 // isatty() is defined in ioctl.rs — it checks the fd table's HandleKind

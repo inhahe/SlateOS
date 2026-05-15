@@ -32,6 +32,20 @@
 //! the kernel close is skipped.  This O(256) scan is negligible
 //! since `close()` is not a hot path.
 //!
+//! ## Per-fd Path Tracking
+//!
+//! A parallel path table stores the resolved absolute path used to
+//! open each fd.  This enables `fchdir()` (change CWD by fd) and the
+//! `*at()` family (`openat`, `fstatat`, etc.) to resolve relative
+//! paths against a directory fd without a kernel-level fd-to-path
+//! syscall.
+//!
+//! **Limitation:** if a file/directory is renamed after opening, the
+//! stored path becomes stale.  Real kernels track the dentry directly
+//! and follow renames; our approach doesn't.  This is acceptable for
+//! POSIX compatibility — most programs that use `fchdir`/`openat` do
+//! so immediately after opening the directory.
+//!
 //! ## Thread Safety
 //!
 //! Uses `static mut` with single-threaded access.  When threading is
@@ -341,6 +355,189 @@ pub fn is_handle_referenced(kind: HandleKind, handle: u64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Per-fd path storage (for fchdir / *at dirfd resolution)
+// ---------------------------------------------------------------------------
+
+/// Maximum path bytes stored per fd (matches POSIX `PATH_MAX`).
+///
+/// Total static memory: `MAX_FDS × FD_PATH_MAX` = 256 × 4096 = 1 MiB
+/// in .bss (zeroed at load, no binary size impact).  Acceptable for a
+/// desktop OS process.
+const FD_PATH_MAX: usize = 4096;
+
+/// Per-fd path buffer table.
+///
+/// Each slot stores a null-terminated absolute path string when a path
+/// is recorded for that fd.  The path is set by [`store_fd_path()`]
+/// (called from `open()`) and cleared by [`clear_fd_path()`] (called
+/// from `close()`).
+static mut FD_PATH_TABLE: [[u8; FD_PATH_MAX]; MAX_FDS] = [[0u8; FD_PATH_MAX]; MAX_FDS];
+
+/// Length of the stored path for each fd (0 = no path stored).
+///
+/// The length does NOT include the null terminator — it is the number
+/// of path bytes.  Maximum storable length is `FD_PATH_MAX - 1` = 4095.
+static mut FD_PATH_LENS: [u16; MAX_FDS] = [0u16; MAX_FDS];
+
+/// Get a mutable pointer to the path table.
+#[inline]
+fn path_table_ptr() -> *mut [[u8; FD_PATH_MAX]; MAX_FDS] {
+    core::ptr::addr_of_mut!(FD_PATH_TABLE)
+}
+
+/// Get a mutable pointer to the path length table.
+#[inline]
+fn path_lens_ptr() -> *mut [u16; MAX_FDS] {
+    core::ptr::addr_of_mut!(FD_PATH_LENS)
+}
+
+/// Store the resolved absolute path associated with an fd.
+///
+/// Copies `path[..len]` bytes into the fd's path slot and adds a null
+/// terminator.  If `len >= FD_PATH_MAX` (path too long for the buffer),
+/// the path is silently not stored — `fchdir`/`*at` will fall back to
+/// `ENOSYS` or `EBADF` for that fd.
+///
+/// Called by `open()` and friends after successfully allocating an fd.
+///
+/// # Safety contract
+///
+/// `path` must be valid for reading `len` bytes (guaranteed when the
+/// caller passes a resolved path buffer from the stack).
+pub fn store_fd_path(fd: i32, path: *const u8, len: usize) {
+    if fd < 0 || fd as usize >= MAX_FDS || path.is_null() || len >= FD_PATH_MAX {
+        return;
+    }
+    let idx = fd as usize;
+    // SAFETY: Single-threaded access.  `idx < MAX_FDS` checked above.
+    // `path` is valid for `len` bytes (caller contract).
+    unsafe {
+        let table = &mut *path_table_ptr();
+        let lens = &mut *path_lens_ptr();
+        if let Some(slot) = table.get_mut(idx) {
+            let mut i = 0;
+            while i < len {
+                if let Some(dst) = slot.get_mut(i) {
+                    *dst = *path.add(i);
+                }
+                i = i.wrapping_add(1);
+            }
+            // Null-terminate.
+            if let Some(term) = slot.get_mut(len) {
+                *term = 0;
+            }
+        }
+        if let Some(len_slot) = lens.get_mut(idx) {
+            *len_slot = len as u16;
+        }
+    }
+}
+
+/// Copy the stored path for an fd into `out`, null-terminated.
+///
+/// Returns the path length (excluding null terminator), or 0 if no
+/// path is stored, the fd is invalid, or `out` is too small.
+///
+/// On success, `out[..return_value]` contains the path bytes and
+/// `out[return_value]` is `b'\0'`.
+pub fn get_fd_path(fd: i32, out: &mut [u8]) -> usize {
+    if fd < 0 || fd as usize >= MAX_FDS || out.is_empty() {
+        return 0;
+    }
+    let idx = fd as usize;
+    // SAFETY: Single-threaded access.  `idx < MAX_FDS` checked above.
+    unsafe {
+        let lens = &*path_lens_ptr();
+        let len = match lens.get(idx) {
+            Some(&l) => l as usize,
+            None => return 0,
+        };
+        if len == 0 || len >= out.len() {
+            return 0; // No path stored or output buffer too small.
+        }
+        let table = &*path_table_ptr();
+        if let Some(slot) = table.get(idx) {
+            let mut i = 0;
+            while i < len {
+                if let (Some(&src), Some(dst)) = (slot.get(i), out.get_mut(i)) {
+                    *dst = src;
+                }
+                i = i.wrapping_add(1);
+            }
+            if let Some(term) = out.get_mut(len) {
+                *term = 0;
+            }
+        }
+        len
+    }
+}
+
+/// Clear the stored path for an fd.
+///
+/// Called from `close()`.  Sets the path length to 0 (the buffer
+/// contents don't need to be zeroed — length 0 means "no path").
+pub fn clear_fd_path(fd: i32) {
+    if fd < 0 || fd as usize >= MAX_FDS {
+        return;
+    }
+    let idx = fd as usize;
+    // SAFETY: Single-threaded access.
+    unsafe {
+        let lens = &mut *path_lens_ptr();
+        if let Some(len_slot) = lens.get_mut(idx) {
+            *len_slot = 0;
+        }
+    }
+}
+
+/// Copy the stored path from one fd to another.
+///
+/// Called from `dup()`, `dup2()`, etc. so the duplicate fd also
+/// knows the path of the resource it refers to.
+pub fn copy_fd_path(src_fd: i32, dst_fd: i32) {
+    if src_fd < 0 || src_fd as usize >= MAX_FDS
+        || dst_fd < 0 || dst_fd as usize >= MAX_FDS
+    {
+        return;
+    }
+    let src_idx = src_fd as usize;
+    let dst_idx = dst_fd as usize;
+    // SAFETY: Single-threaded access.  Both indices < MAX_FDS.
+    unsafe {
+        let lens = &mut *path_lens_ptr();
+        let src_len = match lens.get(src_idx) {
+            Some(&l) => l,
+            None => return,
+        };
+        if let Some(dst_len) = lens.get_mut(dst_idx) {
+            *dst_len = src_len;
+        }
+        if src_len == 0 {
+            return; // Nothing to copy.
+        }
+        let table = &mut *path_table_ptr();
+        // Copy byte-by-byte to avoid aliasing issues when src == dst
+        // (though that case is harmless, the code handles it correctly).
+        let len = src_len as usize;
+        let mut i = 0;
+        while i < len {
+            let byte = match table.get(src_idx).and_then(|s| s.get(i)) {
+                Some(&b) => b,
+                None => break,
+            };
+            if let Some(dst_slot) = table.get_mut(dst_idx).and_then(|s| s.get_mut(i)) {
+                *dst_slot = byte;
+            }
+            i = i.wrapping_add(1);
+        }
+        // Null-terminate the destination.
+        if let Some(dst_slot) = table.get_mut(dst_idx).and_then(|s| s.get_mut(len)) {
+            *dst_slot = 0;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -609,5 +806,168 @@ mod tests {
     fn test_setfl_mask_excludes_access_mode() {
         // Access mode bits (low 2 bits) must NOT be in the changeable mask.
         assert_eq!(SETFL_MASK & 0x3, 0, "O_ACCMODE must not be changeable");
+    }
+
+    // -- fd path storage --
+
+    #[test]
+    fn test_store_and_get_fd_path() {
+        let fd = alloc_fd(HandleKind::File, 200).unwrap();
+        clear_fd_path(fd); // Clean slate (fd numbers reused across tests).
+        let path = b"/home/user/docs";
+        store_fd_path(fd, path.as_ptr(), path.len());
+
+        let mut buf = [0u8; FD_PATH_MAX];
+        let len = get_fd_path(fd, &mut buf);
+        assert_eq!(len, path.len());
+        assert_eq!(&buf[..len], path);
+        // Should be null-terminated.
+        assert_eq!(buf[len], 0);
+
+        clear_fd_path(fd);
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_clear_fd_path() {
+        let fd = alloc_fd(HandleKind::File, 201).unwrap();
+        clear_fd_path(fd);
+        let path = b"/tmp/test";
+        store_fd_path(fd, path.as_ptr(), path.len());
+
+        // Verify it's stored.
+        let mut buf = [0u8; FD_PATH_MAX];
+        assert_ne!(get_fd_path(fd, &mut buf), 0);
+
+        // Clear and verify.
+        clear_fd_path(fd);
+        assert_eq!(get_fd_path(fd, &mut buf), 0);
+
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_copy_fd_path() {
+        let fd1 = alloc_fd(HandleKind::File, 202).unwrap();
+        let fd2 = alloc_fd(HandleKind::File, 203).unwrap();
+        clear_fd_path(fd1);
+        clear_fd_path(fd2);
+        let path = b"/var/log/messages";
+        store_fd_path(fd1, path.as_ptr(), path.len());
+
+        copy_fd_path(fd1, fd2);
+
+        let mut buf = [0u8; FD_PATH_MAX];
+        let len = get_fd_path(fd2, &mut buf);
+        assert_eq!(len, path.len());
+        assert_eq!(&buf[..len], path);
+
+        clear_fd_path(fd1);
+        clear_fd_path(fd2);
+        let _ = close_fd(fd1);
+        let _ = close_fd(fd2);
+    }
+
+    #[test]
+    fn test_get_fd_path_no_path_stored() {
+        let fd = alloc_fd(HandleKind::File, 204).unwrap();
+        clear_fd_path(fd); // Ensure clean — fd numbers reused.
+        let mut buf = [0u8; FD_PATH_MAX];
+        assert_eq!(get_fd_path(fd, &mut buf), 0);
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_get_fd_path_invalid_fd() {
+        let mut buf = [0u8; FD_PATH_MAX];
+        assert_eq!(get_fd_path(-1, &mut buf), 0);
+        assert_eq!(get_fd_path(999, &mut buf), 0);
+    }
+
+    #[test]
+    fn test_store_fd_path_null_pointer() {
+        let fd = alloc_fd(HandleKind::File, 205).unwrap();
+        clear_fd_path(fd);
+        store_fd_path(fd, core::ptr::null(), 10);
+        // Should not crash; path should not be stored.
+        let mut buf = [0u8; FD_PATH_MAX];
+        assert_eq!(get_fd_path(fd, &mut buf), 0);
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_store_fd_path_too_long() {
+        let fd = alloc_fd(HandleKind::File, 206).unwrap();
+        clear_fd_path(fd);
+        // Attempt to store a path that's exactly FD_PATH_MAX bytes
+        // (no room for null terminator).
+        let long_path = [b'a'; FD_PATH_MAX];
+        store_fd_path(fd, long_path.as_ptr(), FD_PATH_MAX);
+        // Should be silently rejected.
+        let mut buf = [0u8; FD_PATH_MAX];
+        assert_eq!(get_fd_path(fd, &mut buf), 0);
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_get_fd_path_small_output_buffer() {
+        let fd = alloc_fd(HandleKind::File, 207).unwrap();
+        clear_fd_path(fd);
+        let path = b"/a/long/path/here";
+        store_fd_path(fd, path.as_ptr(), path.len());
+
+        // Buffer too small to hold path + null terminator.
+        let mut small_buf = [0u8; 5];
+        let len = get_fd_path(fd, &mut small_buf);
+        assert_eq!(len, 0, "should return 0 when buffer is too small");
+
+        clear_fd_path(fd);
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_fd_path_overwrite() {
+        let fd = alloc_fd(HandleKind::File, 208).unwrap();
+        clear_fd_path(fd);
+        let path1 = b"/first/path";
+        let path2 = b"/second";
+        store_fd_path(fd, path1.as_ptr(), path1.len());
+        store_fd_path(fd, path2.as_ptr(), path2.len());
+
+        let mut buf = [0u8; FD_PATH_MAX];
+        let len = get_fd_path(fd, &mut buf);
+        assert_eq!(len, path2.len());
+        assert_eq!(&buf[..len], path2.as_slice());
+
+        clear_fd_path(fd);
+        let _ = close_fd(fd);
+    }
+
+    #[test]
+    fn test_copy_fd_path_no_source_path() {
+        let fd1 = alloc_fd(HandleKind::File, 209).unwrap();
+        let fd2 = alloc_fd(HandleKind::File, 210).unwrap();
+        clear_fd_path(fd1);
+        clear_fd_path(fd2);
+        // fd1 has no path stored.
+        copy_fd_path(fd1, fd2);
+        // fd2 should also have no path.
+        let mut buf = [0u8; FD_PATH_MAX];
+        assert_eq!(get_fd_path(fd2, &mut buf), 0);
+
+        let _ = close_fd(fd1);
+        let _ = close_fd(fd2);
+    }
+
+    #[test]
+    fn test_clear_fd_path_invalid_fd() {
+        // Should not crash.
+        clear_fd_path(-1);
+        clear_fd_path(999);
+    }
+
+    #[test]
+    fn test_fd_path_constant() {
+        assert_eq!(FD_PATH_MAX, 4096);
     }
 }

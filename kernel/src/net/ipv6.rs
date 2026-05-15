@@ -552,13 +552,16 @@ pub fn multicast_mac(ip: &Ipv6Addr) -> MacAddress {
 pub fn process_ipv6(data: &[u8]) -> KernelResult<()> {
     let packet = Ipv6Packet::parse(data)?;
 
-    // Check if the packet is addressed to us.
+    // Check if the packet is addressed to us (link-local, SLAAC global,
+    // multicast, or loopback).
     let our_mac = interface::mac();
     let our_link_local = Ipv6Addr::from_mac_link_local(&our_mac);
 
     let is_for_us = packet.dst == our_link_local
         || packet.dst.is_multicast()
-        || packet.dst == Ipv6Addr::LOOPBACK;
+        || packet.dst == Ipv6Addr::LOOPBACK
+        || super::icmpv6::slaac_global_addr()
+            .map_or(false, |ga| ga == packet.dst);
 
     if !is_for_us {
         return Ok(());
@@ -566,9 +569,8 @@ pub fn process_ipv6(data: &[u8]) -> KernelResult<()> {
 
     match packet.upper_protocol {
         NH_ICMPV6 => super::icmpv6::process_icmpv6(&packet),
-        // TCP and UDP over IPv6 — future work.
-        // NH_TCP => { ... }
-        // NH_UDP => { ... }
+        NH_UDP => super::udp::process_udp_v6(&packet),
+        // TCP over IPv6 — future work (requires dual-stack socket refactor).
         _ => {
             // Unknown upper-layer protocol — silently drop.
             Ok(())

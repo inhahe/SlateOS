@@ -35,6 +35,7 @@ use crate::error::{KernelError, KernelResult};
 
 use super::interface::Ipv4Addr;
 use super::ipv4::{self, Ipv4Packet, PROTO_UDP};
+use super::ipv6::{self, Ipv6Addr, Ipv6Packet};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -64,11 +65,27 @@ const MAX_GLOBAL_GROUPS: usize = 32;
 // UDP socket
 // ---------------------------------------------------------------------------
 
-/// A received UDP datagram.
+/// A received UDP datagram (IPv4 source).
 #[derive(Debug, Clone)]
 pub struct Datagram {
-    /// Source IP address.
+    /// Source IPv4 address.
     pub src_ip: Ipv4Addr,
+    /// Source port.
+    pub src_port: u16,
+    /// Payload data.
+    pub data: Vec<u8>,
+}
+
+/// A received UDP datagram from an IPv6 source.
+///
+/// Separate from [`Datagram`] because IPv6 and IPv4 are distinct address
+/// families with different address sizes (16 vs 4 bytes).  Keeping them
+/// separate avoids forcing all existing IPv4 callers to handle a type
+/// they'll never encounter, mirroring BSD's `sockaddr_in`/`sockaddr_in6`.
+#[derive(Debug, Clone)]
+pub struct DatagramV6 {
+    /// Source IPv6 address.
+    pub src_ip: Ipv6Addr,
     /// Source port.
     pub src_port: u16,
     /// Payload data.
@@ -86,8 +103,10 @@ struct UdpSocket {
     peer_ip: Ipv4Addr,
     /// Connected peer port (0 = not connected / unfiltered).
     peer_port: u16,
-    /// Received datagrams waiting to be read.
+    /// Received IPv4 datagrams waiting to be read.
     rx_queue: VecDeque<Datagram>,
+    /// Received IPv6 datagrams waiting to be read.
+    rx_queue_v6: VecDeque<DatagramV6>,
     /// Multicast groups this socket has joined.
     /// Each entry is a multicast IPv4 address (224.0.0.0/4).
     mcast_groups: [Ipv4Addr; MAX_GROUPS_PER_SOCKET],
@@ -103,6 +122,7 @@ impl UdpSocket {
             peer_ip: Ipv4Addr::UNSPECIFIED,
             peer_port: 0,
             rx_queue: VecDeque::new(),
+            rx_queue_v6: VecDeque::new(),
             mcast_groups: [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET],
             mcast_count: 0,
         }
@@ -253,6 +273,7 @@ pub fn bind(port: u16) -> KernelResult<usize> {
             sock.active = true;
             sock.port = effective_port;
             sock.rx_queue.clear();
+            sock.rx_queue_v6.clear();
             return Ok(i);
         }
     }
@@ -288,6 +309,7 @@ pub fn close(handle: usize) {
             sock.peer_ip = Ipv4Addr::UNSPECIFIED;
             sock.peer_port = 0;
             sock.rx_queue.clear();
+            sock.rx_queue_v6.clear();
             sock.mcast_groups = [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET];
             sock.mcast_count = 0;
         }
@@ -677,6 +699,194 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// IPv6 UDP processing
+// ---------------------------------------------------------------------------
+
+/// Process an incoming UDP datagram extracted from an IPv6 packet.
+///
+/// Verifies the mandatory IPv6 UDP checksum (RFC 8200 §8.1), parses
+/// ports and length, and delivers to any socket bound to the destination
+/// port.  Unlike IPv4 UDP, a checksum of zero is invalid for IPv6.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
+    let data = ip_packet.payload;
+    if data.len() < UDP_HEADER_SIZE {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // For UDP over IPv6, checksum is mandatory (RFC 8200 §8.1).
+    // A transmitted checksum of zero means "no checksum" in IPv4 but is
+    // illegal over IPv6 — drop the datagram.
+    let raw_cksum = u16::from_be_bytes([data[6], data[7]]);
+    if raw_cksum == 0 {
+        crate::serial_println!(
+            "[udp] Dropped IPv6 datagram from {} — zero checksum (invalid over IPv6)",
+            ip_packet.src
+        );
+        return Ok(());
+    }
+
+    // Verify UDP checksum using the IPv6 pseudo-header.
+    if !ipv6::verify_transport_checksum(
+        &ip_packet.src, &ip_packet.dst, ipv6::NH_UDP, data,
+    ) {
+        crate::serial_println!(
+            "[udp] Dropped IPv6 datagram from {} — bad checksum",
+            ip_packet.src
+        );
+        return Ok(());
+    }
+
+    let src_port = u16::from_be_bytes([data[0], data[1]]);
+    let dst_port = u16::from_be_bytes([data[2], data[3]]);
+    let udp_length = u16::from_be_bytes([data[4], data[5]]) as usize;
+
+    // Use the UDP Length field to determine actual payload size,
+    // stripping any link-layer padding (same logic as IPv4 path).
+    let payload_end = if udp_length >= UDP_HEADER_SIZE && udp_length <= data.len() {
+        udp_length
+    } else if udp_length < UDP_HEADER_SIZE {
+        crate::serial_println!(
+            "[udp] Dropped IPv6 datagram from {} — malformed length {}",
+            ip_packet.src, udp_length
+        );
+        return Ok(());
+    } else {
+        // Length exceeds payload (truncated?) — use what we have.
+        data.len()
+    };
+
+    let payload = &data[UDP_HEADER_SIZE..payload_end];
+
+    // DHCPv6 (port 546 = client, port 547 = server) is future work.
+    // No special dispatch for now.
+
+    // Deliver to bound socket(s).
+    // IPv6 multicast group membership (MLD) is not yet implemented,
+    // so multicast fan-out is not supported — deliver to first match.
+    let mut sockets = SOCKETS.lock();
+    let mut delivered = false;
+    for sock in sockets.iter_mut() {
+        if !sock.active || sock.port != dst_port {
+            continue;
+        }
+
+        if sock.rx_queue_v6.len() < MAX_QUEUED {
+            sock.rx_queue_v6.push_back(DatagramV6 {
+                src_ip: ip_packet.src,
+                src_port,
+                data: Vec::from(payload),
+            });
+        }
+        // else: queue full, drop silently (UDP is unreliable).
+
+        delivered = true;
+        break;
+    }
+
+    if !delivered {
+        // No socket bound.  Ideally we'd send ICMPv6 Destination
+        // Unreachable (port unreachable), but that's not implemented yet.
+        // Silently drop — correct behavior for multicast/broadcast too.
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 UDP socket API
+// ---------------------------------------------------------------------------
+
+/// Receive an IPv6 datagram from a bound socket.
+///
+/// Returns `None` if no IPv6 datagrams are queued.  IPv6 datagrams
+/// are stored in a separate queue from IPv4 datagrams; callers that
+/// want both must call both [`recv`] and `recv_v6`.
+#[allow(dead_code)] // Public API for future IPv6 consumers.
+pub fn recv_v6(handle: usize) -> Option<DatagramV6> {
+    let mut sockets = SOCKETS.lock();
+    let sock = sockets.get_mut(handle)?;
+    if !sock.active {
+        return None;
+    }
+    sock.rx_queue_v6.pop_front()
+}
+
+/// Peek at the next IPv6 datagram without removing it from the queue.
+#[allow(dead_code)] // Public API for future IPv6 consumers.
+pub fn peek_v6(handle: usize) -> Option<DatagramV6> {
+    let sockets = SOCKETS.lock();
+    let sock = sockets.get(handle)?;
+    if !sock.active {
+        return None;
+    }
+    sock.rx_queue_v6.front().cloned()
+}
+
+/// Check whether a UDP socket has IPv6 datagrams ready to receive.
+#[allow(dead_code)] // Public API for future IPv6 consumers.
+pub fn rx_ready_v6(handle: usize) -> usize {
+    let sockets = SOCKETS.lock();
+    match sockets.get(handle) {
+        Some(sock) if sock.active => sock.rx_queue_v6.len(),
+        _ => 0,
+    }
+}
+
+/// Send a UDP datagram over IPv6.
+///
+/// Computes a mandatory UDP checksum over the IPv6 pseudo-header +
+/// segment (RFC 8200 §8.1).  Uses the SLAAC global address as source
+/// for non-link-local destinations, falling back to the link-local
+/// address derived from the interface MAC.
+#[allow(dead_code)] // Public API for future IPv6 senders.
+#[allow(clippy::arithmetic_side_effects)]
+pub fn send_v6(src_port: u16, dst_ip: Ipv6Addr, dst_port: u16, data: &[u8]) -> KernelResult<()> {
+    let our_mac = super::interface::mac();
+
+    // Use SLAAC global address for non-link-local destinations,
+    // fall back to the link-local address.
+    let src_ip = if dst_ip.is_link_local() {
+        Ipv6Addr::from_mac_link_local(&our_mac)
+    } else {
+        super::icmpv6::slaac_global_addr()
+            .unwrap_or_else(|| Ipv6Addr::from_mac_link_local(&our_mac))
+    };
+
+    let udp_len = UDP_HEADER_SIZE + data.len();
+
+    // UDP Length field is 16 bits.
+    if udp_len > u16::MAX as usize {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let mut udp_packet = Vec::with_capacity(udp_len);
+
+    // Source port.
+    udp_packet.extend_from_slice(&src_port.to_be_bytes());
+    // Destination port.
+    udp_packet.extend_from_slice(&dst_port.to_be_bytes());
+    // Length (header + data).
+    udp_packet.extend_from_slice(&(udp_len as u16).to_be_bytes());
+    // Checksum placeholder (zeroed for computation).
+    udp_packet.extend_from_slice(&0u16.to_be_bytes());
+    // Payload.
+    udp_packet.extend_from_slice(data);
+
+    // Compute checksum using the IPv6 pseudo-header.
+    // For UDP over IPv6, a computed checksum of 0 is transmitted as
+    // 0xFFFF (handled inside compute_transport_checksum).
+    let cksum = ipv6::compute_transport_checksum(
+        &src_ip, &dst_ip, ipv6::NH_UDP, &udp_packet,
+    );
+    udp_packet[6] = (cksum >> 8) as u8;
+    udp_packet[7] = cksum as u8;
+
+    // Send as an IPv6 packet.
+    ipv6::send_raw(src_ip, dst_ip, ipv6::NH_UDP, 64, &udp_packet)
+}
+
+// ---------------------------------------------------------------------------
 // UDP socket diagnostics
 // ---------------------------------------------------------------------------
 
@@ -688,8 +898,10 @@ pub struct UdpSocketInfo {
     pub handle: usize,
     /// Bound local port.
     pub local_port: u16,
-    /// Number of datagrams queued for receive.
+    /// Number of IPv4 datagrams queued for receive.
     pub rx_queue_len: usize,
+    /// Number of IPv6 datagrams queued for receive.
+    pub rx_queue_v6_len: usize,
     /// Number of multicast groups joined.
     pub mcast_groups: u8,
 }
@@ -703,6 +915,7 @@ pub fn all_sockets() -> ([UdpSocketInfo; MAX_SOCKETS], usize) {
         handle: 0,
         local_port: 0,
         rx_queue_len: 0,
+        rx_queue_v6_len: 0,
         mcast_groups: 0,
     }; MAX_SOCKETS];
     let mut count: usize = 0;
@@ -714,6 +927,7 @@ pub fn all_sockets() -> ([UdpSocketInfo; MAX_SOCKETS], usize) {
                     handle: i,
                     local_port: sock.port,
                     rx_queue_len: sock.rx_queue.len(),
+                    rx_queue_v6_len: sock.rx_queue_v6.len(),
                     mcast_groups: sock.mcast_count,
                 };
                 count = count.wrapping_add(1);
@@ -729,7 +943,8 @@ pub fn all_sockets() -> ([UdpSocketInfo; MAX_SOCKETS], usize) {
 // ---------------------------------------------------------------------------
 
 /// UDP unit tests — exercises socket bind/close, ephemeral port allocation,
-/// multicast group management, and socket state queries.
+/// multicast group management, socket state queries, and IPv6 datagram
+/// processing.
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[udp] Running UDP self-test...");
 
@@ -739,8 +954,10 @@ pub fn self_test() -> KernelResult<()> {
     test_multicast_join_leave()?;
     test_rx_ready_empty()?;
     test_connected_mode()?;
+    test_v6_recv_empty()?;
+    test_v6_process_and_deliver()?;
 
-    crate::serial_println!("[udp] UDP self-test PASSED (6 tests)");
+    crate::serial_println!("[udp] UDP self-test PASSED (8 tests)");
     Ok(())
 }
 
@@ -954,5 +1171,128 @@ fn test_connected_mode() -> KernelResult<()> {
 
     close(handle);
     crate::serial_println!("[udp]   connected mode: OK");
+    Ok(())
+}
+
+/// Test that recv_v6 on an empty socket returns None.
+fn test_v6_recv_empty() -> KernelResult<()> {
+    let handle = bind(55560)?;
+
+    // IPv6 queue should be empty.
+    if rx_ready_v6(handle) != 0 {
+        crate::serial_println!("[udp]   FAIL: rx_ready_v6 non-zero on new socket");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    if recv_v6(handle).is_some() {
+        crate::serial_println!("[udp]   FAIL: recv_v6 returned data on empty socket");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    if peek_v6(handle).is_some() {
+        crate::serial_println!("[udp]   FAIL: peek_v6 returned data on empty socket");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    // Invalid handle.
+    if rx_ready_v6(99) != 0 {
+        crate::serial_println!("[udp]   FAIL: rx_ready_v6 for invalid handle != 0");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    close(handle);
+    crate::serial_println!("[udp]   v6 recv empty: OK");
+    Ok(())
+}
+
+/// Test process_udp_v6 delivery: build a valid IPv6 UDP packet and verify
+/// that process_udp_v6 delivers it to a bound socket.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_v6_process_and_deliver() -> KernelResult<()> {
+    let dst_port: u16 = 55561;
+    let handle = bind(dst_port)?;
+
+    // Build a fake IPv6 + UDP packet.
+    let src = Ipv6Addr([0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    let dst = Ipv6Addr([0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+    let payload = b"hello ipv6 udp";
+    let src_port: u16 = 12345;
+
+    // Build UDP segment: src_port(2) + dst_port(2) + length(2) + cksum(2) + data.
+    let udp_len = UDP_HEADER_SIZE + payload.len();
+    let mut udp_seg = Vec::with_capacity(udp_len);
+    udp_seg.extend_from_slice(&src_port.to_be_bytes());
+    udp_seg.extend_from_slice(&dst_port.to_be_bytes());
+    udp_seg.extend_from_slice(&(udp_len as u16).to_be_bytes());
+    udp_seg.extend_from_slice(&0u16.to_be_bytes()); // Checksum placeholder.
+    udp_seg.extend_from_slice(payload);
+
+    // Compute IPv6 UDP checksum.
+    let cksum = ipv6::compute_transport_checksum(&src, &dst, ipv6::NH_UDP, &udp_seg);
+    udp_seg[6] = (cksum >> 8) as u8;
+    udp_seg[7] = cksum as u8;
+
+    // Wrap in an IPv6 packet.
+    let ip_pkt = ipv6::build_packet(src, dst, ipv6::NH_UDP, 64, &udp_seg);
+    let parsed = Ipv6Packet::parse(&ip_pkt)?;
+
+    // Process — should deliver to our socket.
+    process_udp_v6(&parsed)?;
+
+    // Verify delivery.
+    if rx_ready_v6(handle) != 1 {
+        crate::serial_println!(
+            "[udp]   FAIL: rx_ready_v6 = {}, expected 1",
+            rx_ready_v6(handle)
+        );
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    let dgram = recv_v6(handle);
+    match dgram {
+        Some(ref dg) => {
+            if dg.src_ip != src {
+                crate::serial_println!("[udp]   FAIL: v6 datagram src mismatch");
+                close(handle);
+                return Err(KernelError::InternalError);
+            }
+            if dg.src_port != src_port {
+                crate::serial_println!(
+                    "[udp]   FAIL: v6 datagram src_port = {}, expected {}",
+                    dg.src_port, src_port
+                );
+                close(handle);
+                return Err(KernelError::InternalError);
+            }
+            if dg.data.as_slice() != payload {
+                crate::serial_println!(
+                    "[udp]   FAIL: v6 datagram payload len = {}, expected {}",
+                    dg.data.len(), payload.len()
+                );
+                close(handle);
+                return Err(KernelError::InternalError);
+            }
+        }
+        None => {
+            crate::serial_println!("[udp]   FAIL: recv_v6 returned None after delivery");
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // IPv4 queue should still be empty.
+    if rx_ready(handle) != 0 {
+        crate::serial_println!("[udp]   FAIL: IPv4 queue non-empty after v6 delivery");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    close(handle);
+    crate::serial_println!("[udp]   v6 process + deliver: OK");
     Ok(())
 }

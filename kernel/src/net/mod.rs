@@ -261,8 +261,9 @@ pub fn self_test() -> KernelResult<()> {
     for i in 0..udp_count {
         if let Some(sock) = udp_socks.get(i) {
             crate::serial_println!(
-                "[net]     port {} (rx_queue={}, mcast_groups={})",
-                sock.local_port, sock.rx_queue_len, sock.mcast_groups,
+                "[net]     port {} (rx_v4={}, rx_v6={}, mcast_groups={})",
+                sock.local_port, sock.rx_queue_len, sock.rx_queue_v6_len,
+                sock.mcast_groups,
             );
         }
     }

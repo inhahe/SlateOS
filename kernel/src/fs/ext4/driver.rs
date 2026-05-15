@@ -5320,3 +5320,494 @@ fn write_dir_entry_raw(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Tests for ext4 driver utility functions: dcache, extent cache,
+/// xattr key helpers, inode block helpers, extent search, and
+/// directory entry parsing.
+pub fn self_test() -> KernelResult<()> {
+    crate::serial_println!("[ext4-driver] Running self-test...");
+
+    test_dcache_basic()?;
+    test_dcache_lru_eviction()?;
+    test_extent_cache()?;
+    test_xattr_key_roundtrip()?;
+    test_inode_blocks_48()?;
+    test_find_in_leaf_extents()?;
+    test_parse_dir_entries()?;
+    test_write_dir_entry_raw()?;
+    test_blank_inode()?;
+
+    crate::serial_println!("[ext4-driver] Self-test PASSED (9 tests)");
+    Ok(())
+}
+
+/// Test Ext4Dcache: insert, lookup, miss, invalidate.
+fn test_dcache_basic() -> KernelResult<()> {
+    let mut dcache = Ext4Dcache::new();
+
+    // Initially empty — lookup should miss.
+    if dcache.lookup(2, "hello.txt").is_some() {
+        crate::serial_println!("[ext4-driver]   FAIL: dcache should be empty");
+        return Err(KernelError::InternalError);
+    }
+
+    // Insert and lookup.
+    dcache.insert(2, "hello.txt", 100, 1);
+    match dcache.lookup(2, "hello.txt") {
+        Some((100, 1)) => {}
+        other => {
+            crate::serial_println!(
+                "[ext4-driver]   FAIL: dcache lookup = {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Different dir inode → miss.
+    if dcache.lookup(3, "hello.txt").is_some() {
+        crate::serial_println!("[ext4-driver]   FAIL: dcache matched wrong dir");
+        return Err(KernelError::InternalError);
+    }
+
+    // Invalidate entry.
+    dcache.invalidate_entry(2, "hello.txt");
+    if dcache.lookup(2, "hello.txt").is_some() {
+        crate::serial_println!("[ext4-driver]   FAIL: dcache not invalidated");
+        return Err(KernelError::InternalError);
+    }
+
+    // Stats check.
+    let (hits, misses, _valid) = dcache.stats();
+    // We had 1 hit (second lookup of hello.txt) and 3 misses
+    // (initial, different dir, after invalidate).
+    if hits != 1 || misses != 3 {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: dcache stats hits={}, misses={}",
+            hits, misses
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-driver]   dcache basic: OK");
+    Ok(())
+}
+
+/// Test Ext4Dcache LRU eviction: fill all slots, insert one more,
+/// verify the least-recently-used entry was evicted.
+fn test_dcache_lru_eviction() -> KernelResult<()> {
+    use alloc::format;
+
+    let mut dcache = Ext4Dcache::new();
+
+    // Fill all 512 slots.
+    for i in 0..EXT4_DCACHE_SIZE {
+        dcache.insert(2, &format!("file{}", i), i as u32, 1);
+    }
+
+    // Access file1 to make it recently used.
+    let _ = dcache.lookup(2, "file1");
+
+    // Insert one more — should evict file0 (LRU, inserted first, never re-accessed).
+    dcache.insert(2, "newfile", 999, 1);
+
+    // file0 should be evicted.
+    if dcache.lookup(2, "file0").is_some() {
+        crate::serial_println!("[ext4-driver]   FAIL: file0 should be evicted");
+        return Err(KernelError::InternalError);
+    }
+
+    // file1 should still be there (was re-accessed).
+    if dcache.lookup(2, "file1").is_none() {
+        crate::serial_println!("[ext4-driver]   FAIL: file1 should survive eviction");
+        return Err(KernelError::InternalError);
+    }
+
+    // newfile should be there.
+    match dcache.lookup(2, "newfile") {
+        Some((999, 1)) => {}
+        other => {
+            crate::serial_println!(
+                "[ext4-driver]   FAIL: newfile lookup = {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[ext4-driver]   dcache LRU eviction: OK");
+    Ok(())
+}
+
+/// Test ExtentCache: insert, lookup hit, lookup miss, invalidate.
+fn test_extent_cache() -> KernelResult<()> {
+    let cache = ExtentCache::new();
+
+    // Miss on empty cache.
+    if cache.lookup(100, 0).is_some() {
+        crate::serial_println!("[ext4-driver]   FAIL: extent cache should be empty");
+        return Err(KernelError::InternalError);
+    }
+
+    // Insert: inode 100, logical blocks 0-9 → physical blocks 1000-1009.
+    cache.insert(100, 0, 1000, 10);
+
+    // Lookup logical block 0 → physical 1000.
+    match cache.lookup(100, 0) {
+        Some(1000) => {}
+        other => {
+            crate::serial_println!(
+                "[ext4-driver]   FAIL: extent lookup(0) = {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Lookup logical block 5 → physical 1005.
+    match cache.lookup(100, 5) {
+        Some(1005) => {}
+        other => {
+            crate::serial_println!(
+                "[ext4-driver]   FAIL: extent lookup(5) = {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Logical block 10 is beyond the extent → miss.
+    if cache.lookup(100, 10).is_some() {
+        crate::serial_println!("[ext4-driver]   FAIL: extent lookup(10) should miss");
+        return Err(KernelError::InternalError);
+    }
+
+    // Different inode → miss.
+    if cache.lookup(101, 0).is_some() {
+        crate::serial_println!("[ext4-driver]   FAIL: wrong inode should miss");
+        return Err(KernelError::InternalError);
+    }
+
+    // Invalidate inode 100.
+    cache.invalidate_inode(100);
+    if cache.lookup(100, 0).is_some() {
+        crate::serial_println!("[ext4-driver]   FAIL: extent not invalidated");
+        return Err(KernelError::InternalError);
+    }
+
+    // Stats.
+    let (hits, misses, valid) = cache.stats();
+    if hits != 2 || valid != 0 {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: extent stats hits={}, valid={}", hits, valid
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-driver]   extent cache: OK");
+    Ok(())
+}
+
+/// Test xattr_full_key and xattr_split_key roundtrips.
+fn test_xattr_key_roundtrip() -> KernelResult<()> {
+    use super::ondisk::xattr_index;
+
+    // user namespace.
+    let full = xattr_full_key(xattr_index::USER, "myattr");
+    if full != "user.myattr" {
+        crate::serial_println!("[ext4-driver]   FAIL: user key = '{}'", full);
+        return Err(KernelError::InternalError);
+    }
+    let (idx, bare) = xattr_split_key("user.myattr");
+    if idx != xattr_index::USER || bare != "myattr" {
+        crate::serial_println!("[ext4-driver]   FAIL: split user key");
+        return Err(KernelError::InternalError);
+    }
+
+    // trusted namespace.
+    let full = xattr_full_key(xattr_index::TRUSTED, "overlay.opaque");
+    if full != "trusted.overlay.opaque" {
+        crate::serial_println!("[ext4-driver]   FAIL: trusted key = '{}'", full);
+        return Err(KernelError::InternalError);
+    }
+    let (idx, bare) = xattr_split_key("trusted.overlay.opaque");
+    if idx != xattr_index::TRUSTED || bare != "overlay.opaque" {
+        crate::serial_println!("[ext4-driver]   FAIL: split trusted key");
+        return Err(KernelError::InternalError);
+    }
+
+    // security namespace.
+    let full = xattr_full_key(xattr_index::SECURITY, "selinux");
+    if full != "security.selinux" {
+        crate::serial_println!("[ext4-driver]   FAIL: security key = '{}'", full);
+        return Err(KernelError::InternalError);
+    }
+
+    // Unknown namespace → raw name.
+    let full = xattr_full_key(99, "weird");
+    if full != "weird" {
+        crate::serial_println!("[ext4-driver]   FAIL: unknown key = '{}'", full);
+        return Err(KernelError::InternalError);
+    }
+    let (idx, bare) = xattr_split_key("noprefix");
+    if idx != xattr_index::NONE || bare != "noprefix" {
+        crate::serial_println!("[ext4-driver]   FAIL: split unknown key");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-driver]   xattr key roundtrip: OK");
+    Ok(())
+}
+
+/// Test inode_block_sectors and set_inode_blocks_48.
+fn test_inode_blocks_48() -> KernelResult<()> {
+    let mut inode = blank_inode();
+
+    // Set 48-bit sector count: 0x0001_0000_1234.
+    set_inode_blocks_48(&mut inode, 0x0001_0000_1234);
+
+    // Verify lo field.
+    if inode.i_blocks_lo != 0x0000_1234 {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: i_blocks_lo = {:#x}", inode.i_blocks_lo
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Verify hi bytes in i_osd2[0..2].
+    let hi = u16::from_le_bytes([
+        *inode.i_osd2.get(0).unwrap_or(&0),
+        *inode.i_osd2.get(1).unwrap_or(&0),
+    ]);
+    if hi != 0x0001 {
+        crate::serial_println!("[ext4-driver]   FAIL: hi = {:#x}", hi);
+        return Err(KernelError::InternalError);
+    }
+
+    // Read back — should match (non-HUGE_FILE mode: raw value is sectors).
+    let sectors = inode_block_sectors(&inode, 4096);
+    if sectors != 0x0001_0000_1234 {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: read back sectors = {:#x}", sectors
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // HUGE_FILE flag: raw is in fs blocks → multiply by block_size/512.
+    inode.i_flags |= super::ondisk::inode_flags::HUGE_FILE;
+    inode.i_blocks_lo = 100;
+    if let Some(b) = inode.i_osd2.get_mut(0) { *b = 0; }
+    if let Some(b) = inode.i_osd2.get_mut(1) { *b = 0; }
+    // block_size=4096, sectors_per_block=8.
+    let sectors = inode_block_sectors(&inode, 4096);
+    if sectors != 800 {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: HUGE_FILE sectors = {}", sectors
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-driver]   inode blocks 48-bit: OK");
+    Ok(())
+}
+
+/// Test find_in_leaf_extents binary search.
+fn test_find_in_leaf_extents() -> KernelResult<()> {
+    // (logical_start, physical_start, length)
+    let extents: &[(u64, u64, u64)] = &[
+        (0, 1000, 10),    // logical 0-9  → physical 1000-1009
+        (20, 2000, 5),    // logical 20-24 → physical 2000-2004
+        (100, 5000, 50),  // logical 100-149 → physical 5000-5049
+    ];
+
+    // Hit in first extent.
+    match find_in_leaf_extents(extents, 0) {
+        Some(1000) => {}
+        other => {
+            crate::serial_println!(
+                "[ext4-driver]   FAIL: extent(0) = {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    match find_in_leaf_extents(extents, 9) {
+        Some(1009) => {}
+        other => {
+            crate::serial_println!(
+                "[ext4-driver]   FAIL: extent(9) = {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Hole between extents (block 10-19).
+    if find_in_leaf_extents(extents, 10).is_some() {
+        crate::serial_println!("[ext4-driver]   FAIL: block 10 should be hole");
+        return Err(KernelError::InternalError);
+    }
+
+    // Hit in second extent.
+    match find_in_leaf_extents(extents, 22) {
+        Some(2002) => {}
+        other => {
+            crate::serial_println!(
+                "[ext4-driver]   FAIL: extent(22) = {:?}", other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Beyond last extent.
+    if find_in_leaf_extents(extents, 150).is_some() {
+        crate::serial_println!("[ext4-driver]   FAIL: block 150 should be hole");
+        return Err(KernelError::InternalError);
+    }
+
+    // Empty extent list.
+    if find_in_leaf_extents(&[], 0).is_some() {
+        crate::serial_println!("[ext4-driver]   FAIL: empty extents should miss");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-driver]   find_in_leaf_extents: OK");
+    Ok(())
+}
+
+/// Test parse_dir_entries with a synthetic directory block.
+fn test_parse_dir_entries() -> KernelResult<()> {
+    let mut block = [0u8; 128];
+
+    // Entry 1: inode=2, rec_len=12, name_len=1, type=DIR, name="."
+    write_dir_entry_raw(&mut block, 0, 2, b".", 2, 12);
+    // Entry 2: inode=2, rec_len=16, name_len=2, type=DIR, name=".."
+    write_dir_entry_raw(&mut block, 12, 2, b"..", 2, 16);
+    // Entry 3: inode=100, rec_len=100, name_len=9, type=REG, name="hello.txt"
+    write_dir_entry_raw(&mut block, 28, 100, b"hello.txt", 1, 100);
+
+    let entries = parse_dir_entries(&block)?;
+
+    if entries.len() != 3 {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: parse_dir_entries returned {} entries",
+            entries.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Check "."
+    let (ino, ft, ref name) = entries[0];
+    if ino != 2 || ft != 2 || name != "." {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: entry 0 = ({}, {}, '{}')", ino, ft, name
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Check ".."
+    let (ino, ft, ref name) = entries[1];
+    if ino != 2 || ft != 2 || name != ".." {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: entry 1 = ({}, {}, '{}')", ino, ft, name
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Check "hello.txt"
+    let (ino, ft, ref name) = entries[2];
+    if ino != 100 || ft != 1 || name != "hello.txt" {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: entry 2 = ({}, {}, '{}')", ino, ft, name
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Deleted entry (inode=0) should be skipped.
+    let mut block2 = [0u8; 64];
+    write_dir_entry_raw(&mut block2, 0, 0, b"deleted", 1, 32);
+    write_dir_entry_raw(&mut block2, 32, 50, b"alive", 1, 32);
+    let entries = parse_dir_entries(&block2)?;
+    if entries.len() != 1 || entries[0].0 != 50 {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: deleted entry not skipped, got {} entries",
+            entries.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-driver]   parse_dir_entries: OK");
+    Ok(())
+}
+
+/// Test write_dir_entry_raw encodes fields correctly.
+fn test_write_dir_entry_raw() -> KernelResult<()> {
+    let mut buf = [0u8; 32];
+
+    write_dir_entry_raw(&mut buf, 0, 12345, b"test", 1, 16);
+
+    // inode at offset 0: 12345 LE.
+    let ino = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if ino != 12345 {
+        crate::serial_println!("[ext4-driver]   FAIL: wrote inode = {}", ino);
+        return Err(KernelError::InternalError);
+    }
+
+    // rec_len at offset 4: 16 LE.
+    let rec_len = u16::from_le_bytes([buf[4], buf[5]]);
+    if rec_len != 16 {
+        crate::serial_println!("[ext4-driver]   FAIL: wrote rec_len = {}", rec_len);
+        return Err(KernelError::InternalError);
+    }
+
+    // name_len at offset 6: 4.
+    if buf[6] != 4 {
+        crate::serial_println!("[ext4-driver]   FAIL: wrote name_len = {}", buf[6]);
+        return Err(KernelError::InternalError);
+    }
+
+    // file_type at offset 7: 1.
+    if buf[7] != 1 {
+        crate::serial_println!("[ext4-driver]   FAIL: wrote file_type = {}", buf[7]);
+        return Err(KernelError::InternalError);
+    }
+
+    // name at offset 8: "test".
+    let name = &buf[8..12];
+    if name != b"test" {
+        crate::serial_println!("[ext4-driver]   FAIL: wrote name bytes");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-driver]   write_dir_entry_raw: OK");
+    Ok(())
+}
+
+/// Test blank_inode creates a properly zeroed inode.
+fn test_blank_inode() -> KernelResult<()> {
+    let inode = blank_inode();
+
+    if inode.i_mode != 0 || inode.i_size_lo != 0 || inode.i_flags != 0 {
+        crate::serial_println!("[ext4-driver]   FAIL: blank inode not zeroed");
+        return Err(KernelError::InternalError);
+    }
+    if inode.i_blocks_lo != 0 || inode.i_links_count != 0 {
+        crate::serial_println!("[ext4-driver]   FAIL: blank inode fields not zero");
+        return Err(KernelError::InternalError);
+    }
+
+    // inode_block_as_bytes should work on a blank inode.
+    let bytes = inode_block_as_bytes(&inode);
+    if bytes.len() != 60 {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: i_block bytes len = {}", bytes.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+    if bytes.iter().any(|&b| b != 0) {
+        crate::serial_println!("[ext4-driver]   FAIL: i_block bytes not zeroed");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ext4-driver]   blank_inode: OK");
+    Ok(())
+}

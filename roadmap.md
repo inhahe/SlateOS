@@ -1142,6 +1142,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Wake-on-LAN magic packet sender (UDP port 9, 6×0xFF + 16×MAC)
   - [x] Packet capture (pcap format, ring buffer, BPF-like filters, Wireshark-compatible export)
   - [x] Traceroute (ICMP echo with increasing TTL, Time Exceeded correlation, per-hop RTT)
+  - [x] Traceroute6 (ICMPv6 echo with increasing hop-limit, Time Exceeded correlation, SLAAC-aware source selection, DNS AAAA fallback)
   - [x] IGMP multicast group management (IGMPv2 RFC 2236, membership reports, query responses, report suppression)
   - [x] LLDP neighbor discovery (IEEE 802.1AB, TLV parsing, neighbor table, periodic advertisements)
   - [x] Netstat unified network status (TCP/UDP/listeners, interface stats, routing, protocol summary)

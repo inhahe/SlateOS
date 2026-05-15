@@ -39,6 +39,10 @@ pub const DT_UNKNOWN: u8 = 0;
 pub const DT_REG: u8 = 1;  // Regular file.
 pub const DT_DIR: u8 = 2;  // Directory.
 pub const DT_LNK: u8 = 3;  // Symbolic link.
+pub const DT_CHR: u8 = 4;  // Character device.
+pub const DT_BLK: u8 = 5;  // Block device.
+pub const DT_FIFO: u8 = 6; // Named pipe (FIFO).
+pub const DT_SOCK: u8 = 7; // Socket.
 
 /// POSIX directory entry.
 #[repr(C)]
@@ -720,11 +724,15 @@ mod tests {
         assert_eq!(DT_REG, 1);
         assert_eq!(DT_DIR, 2);
         assert_eq!(DT_LNK, 3);
+        assert_eq!(DT_CHR, 4);
+        assert_eq!(DT_BLK, 5);
+        assert_eq!(DT_FIFO, 6);
+        assert_eq!(DT_SOCK, 7);
     }
 
     #[test]
     fn test_dt_types_distinct() {
-        let types = [DT_UNKNOWN, DT_REG, DT_DIR, DT_LNK];
+        let types = [DT_UNKNOWN, DT_REG, DT_DIR, DT_LNK, DT_CHR, DT_BLK, DT_FIFO, DT_SOCK];
         for (i, &a) in types.iter().enumerate() {
             for &b in &types[i + 1..] {
                 assert_ne!(a, b);

@@ -171,8 +171,6 @@ pub struct Rtl8139Device {
     tx_buf_virt: [u64; NUM_TX_DESC],
     /// Which TX descriptor to use next (0-3).
     tx_cur: usize,
-    /// HHDM offset for phys→virt translation.
-    hhdm_offset: u64,
     /// Physical frame backing the RX buffer.
     _rx_frame: Option<PhysFrame>,
     /// Physical frame backing the TX buffers.
@@ -345,7 +343,6 @@ pub fn init(hhdm_offset: u64) {
         tx_buf_phys,
         tx_buf_virt,
         tx_cur: 0,
-        hhdm_offset,
         _rx_frame: Some(rx_frame),
         _tx_frame: Some(tx_frame),
     };

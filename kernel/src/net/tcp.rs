@@ -3674,6 +3674,56 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         return Ok(());
     }
 
+    // Receive window validation (RFC 793 §3.3).
+    //
+    // For states with a defined receive window (Established and later),
+    // check that the segment's sequence number falls within the acceptable
+    // window [rcv_nxt, rcv_nxt + rcv_wnd).  This rejects stale/replayed
+    // segments and prevents unbounded OOO buffer growth from far-future
+    // sequence numbers.
+    //
+    // Skip for SynSent (receive window not yet established — we're waiting
+    // for SYN-ACK) and SynReceived (handshake still in progress).
+    if conn.state != TcpState::SynSent && conn.state != TcpState::SynReceived {
+        let seg_len = payload.len() as u32
+            + if flags & TCP_SYN != 0 { 1 } else { 0 }
+            + if flags & TCP_FIN != 0 { 1 } else { 0 };
+        let rcv_wnd = (advertised_window(conn) as u32) << (conn.rcv_wnd_scale as u32);
+        let acceptable = if rcv_wnd == 0 {
+            // Zero window: only accept zero-length segment at exactly rcv_nxt.
+            seg_len == 0 && seq == conn.rcv_nxt
+        } else if seg_len == 0 {
+            // Empty segment: rcv_nxt <= seq < rcv_nxt + rcv_wnd.
+            let delta = seq.wrapping_sub(conn.rcv_nxt);
+            delta < rcv_wnd
+        } else {
+            // Data segment: first or last byte must fall within the window.
+            let start_delta = seq.wrapping_sub(conn.rcv_nxt);
+            let end_seq = seq.wrapping_add(seg_len.saturating_sub(1));
+            let end_delta = end_seq.wrapping_sub(conn.rcv_nxt);
+            start_delta < rcv_wnd || end_delta < rcv_wnd
+        };
+
+        if !acceptable {
+            // Out-of-window segment — drop and send ACK (RFC 793 §3.3).
+            let lp = conn.local_port;
+            let ri = conn.remote_ip;
+            let rp = conn.remote_port;
+            let sn = conn.snd_nxt;
+            let rn = conn.rcv_nxt;
+            let w = advertised_window(conn);
+            let ie = if conn.ecn_ok { ipv4::ECN_ECT0 } else { 0 };
+            let ts_ok_local = conn.ts_ok;
+            let ts_recent_local = conn.ts_recent;
+            drop(conns);
+            let _ = send_data_with_ts(
+                lp, ri, rp, sn, rn, TCP_ACK, w, &[], ie,
+                ts_ok_local, ts_recent_local,
+            );
+            return Ok(());
+        }
+    }
+
     match conn.state {
         TcpState::SynSent => {
             // Expecting SYN-ACK.

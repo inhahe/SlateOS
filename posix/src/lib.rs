@@ -358,3 +358,8 @@ pub mod sys_vfs;
 pub mod netinet_in;
 pub mod netinet_tcp;
 pub mod linux_if_ether;
+pub mod linux_sched;
+pub mod sys_capability;
+pub mod sys_mman_ext;
+pub mod sys_prctl_caps;
+pub mod sys_ttydefaults;

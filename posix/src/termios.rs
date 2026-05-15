@@ -241,48 +241,13 @@ pub use crate::ioctl::tcflow;
 pub use crate::ioctl::tcflush;
 
 // ---------------------------------------------------------------------------
-// cfgetispeed / cfgetospeed / cfsetispeed / cfsetospeed
+// Speed query/set (re-exports from ioctl)
 // ---------------------------------------------------------------------------
 
-/// Get input baud rate from termios.
-///
-/// Returns the input speed stored in the termios structure.  Our
-/// implementation stores the same speed for input and output.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cfgetispeed(termios_p: *const Termios) -> u32 {
-    if termios_p.is_null() {
-        return 0;
-    }
-    // SAFETY: Caller guarantees pointer is valid.
-    let t = unsafe { &*termios_p };
-    t.c_cflag & 0o10017 // CBAUD mask (speed bits)
-}
-
-/// Get output baud rate from termios.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cfgetospeed(termios_p: *const Termios) -> u32 {
-    // Same as input in our implementation.
-    cfgetispeed(termios_p)
-}
-
-/// Set input baud rate in termios.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cfsetispeed(termios_p: *mut Termios, speed: u32) -> i32 {
-    if termios_p.is_null() {
-        return -1;
-    }
-    // SAFETY: Caller guarantees pointer is valid.
-    let t = unsafe { &mut *termios_p };
-    t.c_cflag = (t.c_cflag & !0o10017) | (speed & 0o10017);
-    0
-}
-
-/// Set output baud rate in termios.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn cfsetospeed(termios_p: *mut Termios, speed: u32) -> i32 {
-    // Same as input in our implementation.
-    cfsetispeed(termios_p, speed)
-}
+pub use crate::ioctl::cfgetispeed;
+pub use crate::ioctl::cfgetospeed;
+pub use crate::ioctl::cfsetispeed;
+pub use crate::ioctl::cfsetospeed;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -352,12 +317,12 @@ mod tests {
 
     #[test]
     fn test_cfgetispeed_null() {
-        assert_eq!(cfgetispeed(core::ptr::null()), 0);
+        assert_eq!(unsafe { cfgetispeed(core::ptr::null()) }, 0);
     }
 
     #[test]
     fn test_cfsetispeed_null() {
-        assert_eq!(cfsetispeed(core::ptr::null_mut(), B9600), -1);
+        assert_eq!(unsafe { cfsetispeed(core::ptr::null_mut(), B9600) }, -1);
     }
 
     #[test]
@@ -372,8 +337,10 @@ mod tests {
             c_ispeed: 0,
             c_ospeed: 0,
         };
-        assert_eq!(cfsetispeed(&mut t, B9600), 0);
-        assert_eq!(cfgetispeed(&t), B9600);
+        unsafe {
+            assert_eq!(cfsetispeed(&mut t, B9600), 0);
+            assert_eq!(cfgetispeed(&t), B9600);
+        }
     }
 
     #[test]
@@ -388,8 +355,10 @@ mod tests {
             c_ispeed: 0,
             c_ospeed: 0,
         };
-        assert_eq!(cfsetospeed(&mut t, B115200), 0);
-        assert_eq!(cfgetospeed(&t), B115200);
+        unsafe {
+            assert_eq!(cfsetospeed(&mut t, B115200), 0);
+            assert_eq!(cfgetospeed(&t), B115200);
+        }
     }
 
     #[test]

@@ -269,13 +269,21 @@ Remaining net improvements (diminishing returns):
   dups handles into child PCB → child retrieves at startup.
   Open file_actions: DONE.  Parent opens files via raw SYS_FS_OPEN,
   records handles in fd_map, closes parent copies after spawn.
-  NOTE: kernel's sys_process_get_initial_fds currently stores (fd, handle)
-  pairs without handle_type.  The child gets handle_type=FILE for all
-  entries.  This means pipes/sockets inherited via fd_map won't have the
-  correct HandleKind in the child.  Needs kernel-side fix to store
-  (fd, handle_type, handle) triples in PCB.initial_fds.
+  FIXED: PCB.initial_fds now stores (fd, handle_type, handle) triples.
+  spawn.rs preserves handle_type through dup, pcb.rs stores the triple,
+  and sys_process_get_initial_fds returns the real handle_type instead
+  of hardcoding FILE.  Cleanup in destroy_process_resources is now
+  type-aware (skips close for CONSOLE and PIPE handles).
 
 ## Judgment Calls
+
+- Cross-zone edit: handlers.rs (kernel-ipc zone) was minimally edited as
+  part of the initial_fds handle_type fix.  The PCB type changed from
+  Vec<(i32, u64)> to Vec<(i32, u8, u64)>, which required updating the
+  destructuring in sys_process_get_initial_fds to match.  The handler
+  now uses the stored handle_type instead of hardcoding FILE.  This was
+  necessary to maintain compilation — the change is mechanical (3 lines).
+  osb: please review if you disagree with this approach.
 
 - boot-test.ps1 and the copy-to-ESP step: Limine loads the kernel from
   esp/boot/kernel (per limine.conf kernel_path: boot():/boot/kernel).  The

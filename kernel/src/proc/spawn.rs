@@ -512,16 +512,16 @@ pub fn spawn_process(
                         "[spawn] fd {} → handle {} (type={}, duped from {})",
                         fd_num, child_handle, handle_type, parent_handle,
                     );
-                    initial_fds.push((fd_num, child_handle));
+                    initial_fds.push((fd_num, handle_type, child_handle));
                 }
                 Err(e) => {
                     // Close any FILE handles we already duped — don't leak.
-                    // (Pipe/console handles are pass-through, not duped.)
-                    for &(_fd, h) in &initial_fds {
-                        // Only close if it looks like a file handle (not
-                        // a pipe or console).  For now we close everything
-                        // since only FILE type goes through dup.
-                        let _ = crate::fs::handle::close(h);
+                    // Pipe handles are pass-through (not duped), and
+                    // console handles are virtual — only close FILE types.
+                    for &(_fd, ht, h) in &initial_fds {
+                        if ht == fd_handle_type::FILE {
+                            let _ = crate::fs::handle::close(h);
+                        }
                     }
                     serial_println!(
                         "[spawn] Failed to dup handle {} (type={}) for fd {}: {:?}",
@@ -1542,19 +1542,29 @@ fn test_spawn_with_fd_map() -> KernelResult<()> {
             child_fds.len()
         );
         // Clean up.
-        for &(_fd, h) in &child_fds {
-            let _ = handle::close(h);
+        for &(_fd, ht, h) in &child_fds {
+            if ht == fd_handle_type::FILE {
+                let _ = handle::close(h);
+            }
         }
         let _ = handle::close(parent_handle);
         let _ = crate::fs::Vfs::remove("/test_fd_map_spawn.tmp");
         return Err(KernelError::InternalError);
     }
 
-    let (fd_num, child_handle) = child_fds[0];
+    let (fd_num, child_ht, child_handle) = child_fds[0];
     if fd_num != 1 {
         serial_println!(
             "[spawn]   FAIL: expected fd 1, got {}",
             fd_num
+        );
+    }
+
+    // handle_type should be preserved through the spawn.
+    if child_ht != fd_handle_type::FILE {
+        serial_println!(
+            "[spawn]   FAIL: expected handle_type FILE ({}), got {}",
+            fd_handle_type::FILE, child_ht
         );
     }
 
@@ -1609,8 +1619,10 @@ fn test_spawn_with_empty_fd_map() -> KernelResult<()> {
             fds.len()
         );
         // Clean up leaked handles.
-        for &(_fd, h) in &fds {
-            let _ = crate::fs::handle::close(h);
+        for &(_fd, ht, h) in &fds {
+            if ht == fd_handle_type::FILE {
+                let _ = crate::fs::handle::close(h);
+            }
         }
         return Err(KernelError::InternalError);
     }
@@ -1697,8 +1709,10 @@ fn test_take_initial_fds_one_shot() -> KernelResult<()> {
     }
 
     // Close the duped handle.
-    for &(_fd, h) in &fds {
-        let _ = handle::close(h);
+    for &(_fd, ht, h) in &fds {
+        if ht == fd_handle_type::FILE {
+            let _ = handle::close(h);
+        }
     }
 
     // Second take: should get 0 entries (already consumed).
@@ -1708,8 +1722,10 @@ fn test_take_initial_fds_one_shot() -> KernelResult<()> {
             "[spawn]   FAIL: second take expected 0 fds, got {}",
             fds2.len()
         );
-        for &(_fd, h) in &fds2 {
-            let _ = handle::close(h);
+        for &(_fd, ht, h) in &fds2 {
+            if ht == fd_handle_type::FILE {
+                let _ = handle::close(h);
+            }
         }
         return Err(KernelError::InternalError);
     }

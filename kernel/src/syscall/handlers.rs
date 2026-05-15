@@ -2456,11 +2456,11 @@ pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
             core::slice::from_raw_parts_mut(out_ptr as *mut FdMapEntry, count)
         };
 
-        for (i, &(fd, handle)) in fds.iter().take(count).enumerate() {
+        for (i, &(fd, handle_type, handle)) in fds.iter().take(count).enumerate() {
             if let Some(entry) = out_slice.get_mut(i) {
                 *entry = FdMapEntry {
                     fd,
-                    handle_type: crate::proc::spawn::fd_handle_type::FILE,
+                    handle_type,
                     _pad: [0; 3],
                     handle,
                 };
@@ -2470,7 +2470,7 @@ pub fn sys_process_get_initial_fds(args: &SyscallArgs) -> SyscallResult {
         // If we couldn't deliver all entries (output buffer too small),
         // put the remaining ones back.
         if count < fds.len() {
-            let remaining: alloc::vec::Vec<(i32, u64)> = fds[count..].to_vec();
+            let remaining: alloc::vec::Vec<(i32, u8, u64)> = fds[count..].to_vec();
             pcb::set_initial_fds(pid, remaining);
         }
     }

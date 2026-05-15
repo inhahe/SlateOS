@@ -175,3 +175,181 @@ pub fn remove_handler(pid: ProcessId) {
     let mut handlers = EXCEPTION_HANDLERS.lock();
     handlers.remove(&pid);
 }
+
+// ---------------------------------------------------------------------------
+// Self-test
+// ---------------------------------------------------------------------------
+
+/// Exception handling self-tests — ABI stability and registry operations.
+pub fn self_test() -> crate::error::KernelResult<()> {
+    serial_println!("[exception] Running self-test...");
+
+    test_exception_code_abi()?;
+    test_exception_context_size()?;
+    test_exception_context_alignment()?;
+    test_set_and_get_handler()?;
+    test_remove_handler_works()?;
+    test_set_zero_unregisters()?;
+    test_get_handler_unregistered()?;
+
+    serial_println!("[exception] Self-test PASSED (7 tests)");
+    Ok(())
+}
+
+/// Verify exception code enum values are ABI-stable.
+///
+/// These values are part of the userspace ABI — they must never change.
+fn test_exception_code_abi() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let expected: &[(ExceptionCode, u64)] = &[
+        (ExceptionCode::DivideError, 1),
+        (ExceptionCode::Overflow, 2),
+        (ExceptionCode::BoundRangeExceeded, 3),
+        (ExceptionCode::InvalidOpcode, 4),
+        (ExceptionCode::SegmentNotPresent, 5),
+        (ExceptionCode::StackSegmentFault, 6),
+        (ExceptionCode::GeneralProtectionFault, 7),
+        (ExceptionCode::AccessViolation, 8),
+        (ExceptionCode::FloatingPointError, 9),
+        (ExceptionCode::AlignmentCheck, 10),
+        (ExceptionCode::SimdFloatingPoint, 11),
+    ];
+
+    for &(code, val) in expected {
+        if code as u64 != val {
+            serial_println!(
+                "[exception]   FAIL: {:?} = {} (expected {})",
+                code, code as u64, val
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[exception]   exception code ABI values: OK");
+    Ok(())
+}
+
+/// Verify ExceptionContext struct size matches the constant.
+///
+/// The struct has 20 u64 fields (repr(C), no padding) → 160 bytes.
+fn test_exception_context_size() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    // 20 fields × 8 bytes = 160.
+    let expected = 20 * core::mem::size_of::<u64>();
+    if EXCEPTION_CONTEXT_SIZE != expected {
+        serial_println!(
+            "[exception]   FAIL: EXCEPTION_CONTEXT_SIZE = {} (expected {})",
+            EXCEPTION_CONTEXT_SIZE, expected
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Also verify the constant matches the actual struct size.
+    if EXCEPTION_CONTEXT_SIZE != core::mem::size_of::<ExceptionContext>() {
+        serial_println!("[exception]   FAIL: constant != size_of::<ExceptionContext>()");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[exception]   exception context size ({}B): OK", EXCEPTION_CONTEXT_SIZE);
+    Ok(())
+}
+
+/// Verify ExceptionContext has natural alignment (no unexpected padding).
+fn test_exception_context_alignment() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    // repr(C) struct of all u64 → alignment should be 8 (align of u64).
+    let align = core::mem::align_of::<ExceptionContext>();
+    if align != core::mem::align_of::<u64>() {
+        serial_println!(
+            "[exception]   FAIL: alignment = {} (expected {})",
+            align, core::mem::align_of::<u64>()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[exception]   exception context alignment: OK");
+    Ok(())
+}
+
+/// Set a handler, then retrieve it and verify the value matches.
+fn test_set_and_get_handler() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    // Use a PID unlikely to collide with real processes.
+    let test_pid: ProcessId = 0xFFFF_DEAD_0001;
+    let handler_addr: u64 = 0x4000_1000;
+
+    set_handler(test_pid, handler_addr);
+
+    let got = get_handler(test_pid);
+    // Clean up before asserting (avoid leaking on failure).
+    remove_handler(test_pid);
+
+    if got != Some(handler_addr) {
+        serial_println!(
+            "[exception]   FAIL: get_handler = {:?} (expected Some({:#x}))",
+            got, handler_addr
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[exception]   set/get handler: OK");
+    Ok(())
+}
+
+/// Register a handler, then remove it and verify it's gone.
+fn test_remove_handler_works() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let test_pid: ProcessId = 0xFFFF_DEAD_0002;
+    let handler_addr: u64 = 0x4000_2000;
+
+    set_handler(test_pid, handler_addr);
+    remove_handler(test_pid);
+
+    if get_handler(test_pid).is_some() {
+        serial_println!("[exception]   FAIL: handler still present after remove");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[exception]   remove handler: OK");
+    Ok(())
+}
+
+/// Setting handler address to 0 should unregister it.
+fn test_set_zero_unregisters() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let test_pid: ProcessId = 0xFFFF_DEAD_0003;
+    let handler_addr: u64 = 0x4000_3000;
+
+    set_handler(test_pid, handler_addr);
+    // Setting to 0 should remove the registration.
+    set_handler(test_pid, 0);
+
+    if get_handler(test_pid).is_some() {
+        serial_println!("[exception]   FAIL: handler still present after set(0)");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[exception]   set zero unregisters: OK");
+    Ok(())
+}
+
+/// Querying a handler for a PID that was never registered returns None.
+fn test_get_handler_unregistered() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+
+    let test_pid: ProcessId = 0xFFFF_DEAD_9999;
+
+    if get_handler(test_pid).is_some() {
+        serial_println!("[exception]   FAIL: unregistered PID returned Some");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!("[exception]   get unregistered handler: OK");
+    Ok(())
+}

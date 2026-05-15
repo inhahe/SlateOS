@@ -60,6 +60,8 @@ pub fn self_test() -> KernelResult<()> {
     thread::self_test()?;
     serial_println!("[proc] Running process spawn self-test...");
     spawn::self_test()?;
+    serial_println!("[proc] Running exception handling self-test...");
+    exception::self_test()?;
 
     serial_println!("[proc] Process management self-test PASSED");
     Ok(())

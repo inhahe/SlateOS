@@ -2423,8 +2423,95 @@ pub const SYS_TCP_LOCAL_PORT: u64 = 854;
 /// corresponding dispatch table.  Version 1 is the initial set.
 pub const CURRENT_VERSION: u32 = 1;
 
+// ---------------------------------------------------------------------------
+// DRM/GPU syscalls (1000–1099)
+// ---------------------------------------------------------------------------
+
+/// Open a DRM device.
+///
+/// `arg0`: device index (0 = primary display device).
+/// Returns: device handle (positive), or negative error.
+pub const SYS_DRM_OPEN: u64 = 1000;
+
+/// Close a DRM device handle.
+///
+/// `arg0`: device handle.
+pub const SYS_DRM_CLOSE: u64 = 1001;
+
+/// Get display dimensions (width, height) of a DRM device.
+///
+/// `arg0`: device handle.
+/// Returns: `width | (height << 32)`.
+pub const SYS_DRM_DISPLAY_SIZE: u64 = 1002;
+
+/// Allocate a GEM (GPU) buffer object.
+///
+/// `arg0`: device handle.
+/// `arg1`: width in pixels.
+/// `arg2`: height in pixels.
+/// `arg3`: pixel format (DRM fourcc u32, e.g., 0x34325258 for XRGB8888).
+/// Returns: GEM handle (positive), or negative error.
+pub const SYS_DRM_GEM_CREATE: u64 = 1010;
+
+/// Free a GEM buffer object.
+///
+/// `arg0`: device handle.
+/// `arg1`: GEM handle.
+/// Returns: 0 on success, negative error.
+pub const SYS_DRM_GEM_DESTROY: u64 = 1011;
+
+/// Map a GEM buffer into the calling process's address space.
+///
+/// Creates a contiguous virtual mapping of the (potentially non-contiguous)
+/// GEM backing frames.  The returned pointer is valid until `SYS_DRM_GEM_DESTROY`.
+///
+/// `arg0`: device handle.
+/// `arg1`: GEM handle.
+/// Returns: userspace virtual address, or negative error.
+pub const SYS_DRM_GEM_MMAP: u64 = 1012;
+
+/// Create a DRM framebuffer from a GEM handle.
+///
+/// `arg0`: device handle.
+/// `arg1`: GEM handle.
+/// `arg2`: `width | (height << 32)`.
+/// `arg3`: `pitch | (format_fourcc << 32)`.
+/// Returns: framebuffer object ID (positive), or negative error.
+pub const SYS_DRM_FB_CREATE: u64 = 1020;
+
+/// Destroy a DRM framebuffer.
+///
+/// `arg0`: device handle.
+/// `arg1`: framebuffer object ID.
+/// Returns: 0 on success, negative error.
+pub const SYS_DRM_FB_DESTROY: u64 = 1021;
+
+/// Page flip: display a framebuffer on a CRTC.
+///
+/// `arg0`: device handle.
+/// `arg1`: CRTC object ID.
+/// `arg2`: framebuffer object ID.
+/// Returns: 0 on success, negative error.
+pub const SYS_DRM_PAGE_FLIP: u64 = 1030;
+
+/// Flush a dirty sub-region of a framebuffer to the display.
+///
+/// For paravirtualized GPUs, this triggers a host-side transfer.
+/// For direct-scanout hardware, this may be a no-op.
+///
+/// `arg0`: device handle.
+/// `arg1`: framebuffer object ID.
+/// `arg2`: `x | (y << 32)`.
+/// `arg3`: `w | (h << 32)`.
+/// Returns: 0 on success, negative error.
+pub const SYS_DRM_FLUSH_REGION: u64 = 1031;
+
+// ---------------------------------------------------------------------------
+// Version info
+// ---------------------------------------------------------------------------
+
 /// Maximum supported syscall number.
 ///
 /// The dispatch table is a flat array of this size for O(1) lookup.
 /// Sparse — most entries are `None`.
-pub const MAX_SYSCALL_NR: usize = 1000;
+pub const MAX_SYSCALL_NR: usize = 1100;

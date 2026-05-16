@@ -47,6 +47,7 @@ pub mod gem;
 pub mod mode;
 pub mod plane;
 pub mod property;
+pub mod syscall;
 
 extern crate alloc;
 

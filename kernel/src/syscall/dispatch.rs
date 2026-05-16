@@ -99,9 +99,14 @@ use super::number::{
     SYS_TCP_SHUTDOWN, SYS_TCP_INFO,
     SYS_TCP_SET_NODELAY, SYS_TCP_SET_KEEPALIVE, SYS_TCP_SET_KEEPALIVE_PARAMS,
     SYS_TCP_LAST_ERROR, SYS_TCP_LOCAL_PORT,
+    SYS_DRM_OPEN, SYS_DRM_CLOSE, SYS_DRM_DISPLAY_SIZE,
+    SYS_DRM_GEM_CREATE, SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP,
+    SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY,
+    SYS_DRM_PAGE_FLIP, SYS_DRM_FLUSH_REGION,
     SYS_YIELD,
 };
 use super::handlers;
+use crate::drm::syscall as drm_handlers;
 
 // ---------------------------------------------------------------------------
 // Syscall argument and result types
@@ -461,6 +466,18 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_TCP_SET_KEEPALIVE_PARAMS as usize] = Some(handlers::sys_tcp_set_keepalive_params);
     handlers[SYS_TCP_LAST_ERROR as usize] = Some(handlers::sys_tcp_last_error);
     handlers[SYS_TCP_LOCAL_PORT as usize] = Some(handlers::sys_tcp_local_port);
+
+    // DRM/GPU (1000–1099).
+    handlers[SYS_DRM_OPEN as usize] = Some(drm_handlers::sys_drm_open);
+    handlers[SYS_DRM_CLOSE as usize] = Some(drm_handlers::sys_drm_close);
+    handlers[SYS_DRM_DISPLAY_SIZE as usize] = Some(drm_handlers::sys_drm_display_size);
+    handlers[SYS_DRM_GEM_CREATE as usize] = Some(drm_handlers::sys_drm_gem_create);
+    handlers[SYS_DRM_GEM_DESTROY as usize] = Some(drm_handlers::sys_drm_gem_destroy);
+    handlers[SYS_DRM_GEM_MMAP as usize] = Some(drm_handlers::sys_drm_gem_mmap);
+    handlers[SYS_DRM_FB_CREATE as usize] = Some(drm_handlers::sys_drm_fb_create);
+    handlers[SYS_DRM_FB_DESTROY as usize] = Some(drm_handlers::sys_drm_fb_destroy);
+    handlers[SYS_DRM_PAGE_FLIP as usize] = Some(drm_handlers::sys_drm_page_flip);
+    handlers[SYS_DRM_FLUSH_REGION as usize] = Some(drm_handlers::sys_drm_flush_region);
 
     SyscallTable {
         handlers,

@@ -889,7 +889,7 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
 /// `0x0000_0060_0000_0000..0x0000_0070_0000_0000` (256 GiB region).
 /// This is a temporary solution — a proper VMA (virtual memory area)
 /// tracker will replace this.
-fn mmap_alloc_vaddr(size: u64) -> u64 {
+pub(crate) fn mmap_alloc_vaddr(size: u64) -> u64 {
     use core::sync::atomic::{AtomicU64, Ordering};
 
     /// Base of the mmap region in user address space.

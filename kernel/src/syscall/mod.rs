@@ -26,7 +26,7 @@
 
 pub mod dispatch;
 pub mod entry;
-mod handlers;
+pub(crate) mod handlers;
 pub mod number;
 pub mod profile;
 pub mod trace;

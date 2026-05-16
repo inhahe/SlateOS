@@ -11,7 +11,7 @@ param(
     [switch]$NoBuild,
     [switch]$Test,
     [int]$Timeout = 45,
-    [int]$Memory = 256,
+    [int]$Memory = 512,
     [int]$Smp = 2
 )
 

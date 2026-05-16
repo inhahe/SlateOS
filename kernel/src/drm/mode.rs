@@ -79,6 +79,28 @@ impl PixelFormat {
     pub const fn has_alpha(self) -> bool {
         matches!(self, Self::Argb8888 | Self::Abgr8888)
     }
+
+    /// Convert from raw fourcc value to pixel format.
+    ///
+    /// Returns `None` for unrecognized formats.  The raw values match
+    /// the `#[repr(u32)]` discriminants (DRM/Linux fourcc codes).
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0x3432_3258 => Some(Self::Xrgb8888),
+            0x3432_5241 => Some(Self::Argb8888),
+            0x3432_4258 => Some(Self::Xbgr8888),
+            0x3432_4241 => Some(Self::Abgr8888),
+            0x3631_4752 => Some(Self::Rgb565),
+            _ => None,
+        }
+    }
+
+    /// Get the raw fourcc value.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self as u32
+    }
 }
 
 // ---------------------------------------------------------------------------

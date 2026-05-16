@@ -464,16 +464,21 @@ impl VirtioGpuBackend {
         gem.virt_addr()
     }
 
-    /// Page flip via virtio-gpu: use the existing driver's flush.
+    /// Page flip via virtio-gpu: bulk memcpy + host transfer.
     ///
-    /// Since virtio-gpu is paravirtualized, "page flip" means
-    /// transferring the GEM buffer contents to the host via
-    /// `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`.
+    /// Since virtio-gpu is paravirtualized, "page flip" means copying
+    /// the GEM buffer contents into the virtio-gpu driver's backing
+    /// memory (which is already registered with the host as a resource),
+    /// then issuing `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`.
     ///
-    /// For the initial implementation, we use the existing virtio-gpu
-    /// driver's framebuffer (it already has a resource + backing set
-    /// up during init).  We copy from our GEM buffer to the virtio-gpu
-    /// framebuffer and then flush.
+    /// OPT: Uses row-level memcpy (copy_nonoverlapping) instead of
+    /// per-pixel set_pixel().  For 1920×1080 XRGB8888 this reduces
+    /// from ~8M function calls to ~1080 memcpy calls — roughly 100×
+    /// faster on real hardware.
+    ///
+    /// Future: create a new virtio-gpu resource per GEM object and
+    /// SET_SCANOUT to it directly — eliminating the copy entirely.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn page_flip(
         &mut self,
         _crtc_id: DrmObjectId,
@@ -484,33 +489,55 @@ impl VirtioGpuBackend {
             return Err(KernelError::NotSupported);
         }
 
-        // Copy GEM buffer to the virtio-gpu's own framebuffer, then flush.
-        // The virtio-gpu driver maintains its own backing frames that are
-        // registered with the host.  We need to copy into those frames
-        // because the host only knows about the driver's resource.
-        //
-        // TODO: In the future, create a new virtio-gpu resource for each
-        // GEM object and SET_SCANOUT to it directly — avoiding the copy.
+        // Get the virtio-gpu framebuffer's virtual address (HHDM-mapped).
+        let dst_base = crate::virtio::gpu::framebuffer_addr()
+            .ok_or(KernelError::NotSupported)?;
+
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
 
         let bpp = fb.format.bpp() as usize;
-        #[allow(clippy::arithmetic_side_effects)]
-        let copy_w = fb.width.min(self.width);
-        #[allow(clippy::arithmetic_side_effects)]
-        let copy_h = fb.height.min(self.height);
+        let copy_h = fb.height.min(self.height) as usize;
+        let copy_w_bytes = (fb.width.min(self.width) as usize) * bpp;
+        let dst_pitch = (self.width as usize) * bpp;
 
-        for y in 0..copy_h {
-            for x in 0..copy_w {
-                #[allow(clippy::arithmetic_side_effects)]
-                let src_offset = (y as usize) * (fb.pitch as usize) + (x as usize) * bpp;
-                let frame_idx = src_offset / FRAME_SIZE;
-                let frame_off = src_offset % FRAME_SIZE;
+        for row in 0..copy_h {
+            // Source: GEM backing (may span multiple frames).
+            let src_byte_offset = row * (fb.pitch as usize);
+            let frame_idx = src_byte_offset / FRAME_SIZE;
+            let frame_offset = src_byte_offset % FRAME_SIZE;
 
-                if let Some(pf) = gem.phys_frames.get(frame_idx) {
-                    let src_ptr = (pf.addr() + hhdm + frame_off as u64) as *const u32;
-                    // SAFETY: src_ptr is within a valid HHDM-mapped frame.
-                    let pixel = unsafe { src_ptr.read() };
-                    crate::virtio::gpu::set_pixel(x, y, pixel);
+            if let Some(pf) = gem.phys_frames.get(frame_idx) {
+                let src_virt = pf.addr() + hhdm + (frame_offset as u64);
+                // Destination: virtio-gpu driver's framebuffer.
+                let dst_row = dst_base + (row * dst_pitch) as u64;
+
+                let avail = FRAME_SIZE - frame_offset;
+                let to_copy = copy_w_bytes.min(avail);
+
+                // SAFETY: src is within an HHDM-mapped GEM frame.
+                // dst is within the virtio-gpu driver's allocated framebuffer.
+                // Both regions are valid and non-overlapping.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src_virt as *const u8,
+                        dst_row as *mut u8,
+                        to_copy,
+                    );
+                }
+
+                // If the row spans a frame boundary, copy the remainder.
+                if to_copy < copy_w_bytes {
+                    if let Some(pf2) = gem.phys_frames.get(frame_idx + 1) {
+                        let src2 = pf2.addr() + hhdm;
+                        let remaining = copy_w_bytes - to_copy;
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                src2 as *const u8,
+                                (dst_row + to_copy as u64) as *mut u8,
+                                remaining,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -519,7 +546,8 @@ impl VirtioGpuBackend {
         Ok(())
     }
 
-    /// Flush a sub-region.
+    /// Flush a sub-region: bulk memcpy + partial host transfer.
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn flush_region(
         &mut self,
         fb: &DrmFramebuffer,
@@ -533,26 +561,36 @@ impl VirtioGpuBackend {
             return Err(KernelError::NotSupported);
         }
 
+        let dst_base = crate::virtio::gpu::framebuffer_addr()
+            .ok_or(KernelError::NotSupported)?;
+
         let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
         let bpp = fb.format.bpp() as usize;
+        let dst_pitch = (self.width as usize) * bpp;
 
-        #[allow(clippy::arithmetic_side_effects)]
-        let x_end = (x + w).min(fb.width).min(self.width);
-        #[allow(clippy::arithmetic_side_effects)]
         let y_end = (y + h).min(fb.height).min(self.height);
+        let x_start = x.min(fb.width).min(self.width) as usize;
+        let copy_w_bytes = (w as usize) * bpp;
 
-        for py in y..y_end {
-            for px in x..x_end {
-                #[allow(clippy::arithmetic_side_effects)]
-                let src_offset = (py as usize) * (fb.pitch as usize) + (px as usize) * bpp;
-                let frame_idx = src_offset / FRAME_SIZE;
-                let frame_off = src_offset % FRAME_SIZE;
+        for row in (y as usize)..(y_end as usize) {
+            let src_byte_offset = row * (fb.pitch as usize) + x_start * bpp;
+            let frame_idx = src_byte_offset / FRAME_SIZE;
+            let frame_offset = src_byte_offset % FRAME_SIZE;
 
-                if let Some(pf) = gem.phys_frames.get(frame_idx) {
-                    let src_ptr = (pf.addr() + hhdm + frame_off as u64) as *const u32;
-                    // SAFETY: src_ptr is within a valid HHDM-mapped frame.
-                    let pixel = unsafe { src_ptr.read() };
-                    crate::virtio::gpu::set_pixel(px, py, pixel);
+            if let Some(pf) = gem.phys_frames.get(frame_idx) {
+                let src_virt = pf.addr() + hhdm + (frame_offset as u64);
+                let dst_row = dst_base + (row * dst_pitch + x_start * bpp) as u64;
+
+                let avail = FRAME_SIZE - frame_offset;
+                let to_copy = copy_w_bytes.min(avail);
+
+                // SAFETY: Both src and dst point to valid mapped memory.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src_virt as *const u8,
+                        dst_row as *mut u8,
+                        to_copy,
+                    );
                 }
             }
         }

@@ -14,9 +14,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::{self, FRAME_SIZE};
+use crate::mm::frame::{FRAME_SIZE};
 use crate::mm::page_table;
-use crate::serial_println;
 
 use super::connector::{ConnectorStatus, ConnectorType, DrmConnector};
 use super::crtc::DrmCrtc;

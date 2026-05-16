@@ -1,34 +1,42 @@
-//! Software compositor and window manager.
+//! Software compositor and window manager with DRM/KMS display backend.
 //!
-//! A minimal software-rendered compositor that manages windows on the
-//! framebuffer.  This serves as the foundation for the GUI desktop until
-//! GPU-accelerated rendering is available.
+//! Renders windows to a GEM-backed scanout buffer, then uses DRM page flip
+//! to display the result.  Falls back to direct framebuffer writes (`fb.rs`)
+//! when DRM buffers are not available.
+//!
+//! ## Rendering Pipeline (DRM path)
+//!
+//! 1. `start()` allocates two GEM-backed scanout buffers (double-buffering).
+//! 2. `compose()` renders desktop + windows + cursor to the back buffer.
+//! 3. DRM `page_flip` copies the back buffer to the display hardware.
+//! 4. Front/back buffer indices are swapped.
+//!
+//! ## Rendering Pipeline (fb fallback)
+//!
+//! When DRM buffers are unavailable (allocation failure, no DRM device),
+//! the compositor renders directly to the Limine framebuffer via `fb.rs`.
+//! The XOR cursor from `fb.rs` is used in this mode.
+//!
+//! ## Lock Ordering
+//!
+//! `COMPOSITOR` → `SCANOUT` → DRM device registry.  Never reversed.
 //!
 //! ## Architecture
 //!
 //! Windows are stored in a z-ordered list (back to front).  Each window has
 //! an off-screen pixel buffer.  The compositor blits windows to the
-//! framebuffer on demand, handling overlapping correctly.  A simple title bar
-//! with close/minimize buttons allows basic interaction.
-//!
-//! ## Input dispatch
-//!
-//! Mouse events are dispatched to the topmost window under the cursor.
-//! Clicks on the title bar initiate window dragging.  The compositor
-//! consumes mouse events from the PS/2 mouse ring buffer.
-//!
-//! ## Rendering model
-//!
-//! Damage-tracked: only redraws regions that changed.  In the simple case,
-//! the entire framebuffer is recomposed when any window moves or content
-//! changes.  Future optimization: dirty rectangles.
+//! scanout buffer on demand, handling overlapping correctly.  A simple
+//! title bar with close/minimize buttons allows basic interaction.
 
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
+use crate::drm::{self, DrmObjectId};
+use crate::drm::mode::PixelFormat;
 use crate::fb;
+use crate::mm::frame::FRAME_SIZE;
 use crate::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -42,13 +50,334 @@ const BORDER_WIDTH: u32 = 1;
 /// Maximum number of windows.
 const MAX_WINDOWS: usize = 32;
 
-// Colors (BGRA format via fb::rgb).
+// Colors (BGRA format: 0xAARRGGBB in little-endian u32).
 const COLOR_TITLE_BAR_ACTIVE: u32 = 0xFF_33_66_99; // Steel blue
 const COLOR_TITLE_BAR_INACTIVE: u32 = 0xFF_55_55_55; // Gray
 const COLOR_TITLE_TEXT: u32 = 0xFF_FF_FF_FF; // White
 const COLOR_BORDER: u32 = 0xFF_44_44_44; // Dark gray
 const COLOR_CLOSE_BTN: u32 = 0xFF_CC_33_33; // Red
 const COLOR_DESKTOP_BG: u32 = 0xFF_1A_1A_2E; // Dark navy
+const COLOR_CURSOR_OUTLINE: u32 = 0xFF_00_00_00; // Black
+const COLOR_CURSOR_FILL: u32 = 0xFF_FF_FF_FF; // White
+
+// ---------------------------------------------------------------------------
+// Mouse cursor bitmap (12x19, same as fb.rs)
+// ---------------------------------------------------------------------------
+
+/// 0 = transparent, 1 = outline (black), 2 = fill (white).
+#[allow(dead_code)]
+const CURSOR_WIDTH: u32 = 12;
+#[allow(dead_code)]
+const CURSOR_HEIGHT: u32 = 19;
+#[rustfmt::skip]
+static CURSOR_BITMAP: [[u8; 12]; 19] = [
+    [1,0,0,0,0,0,0,0,0,0,0,0],
+    [1,1,0,0,0,0,0,0,0,0,0,0],
+    [1,2,1,0,0,0,0,0,0,0,0,0],
+    [1,2,2,1,0,0,0,0,0,0,0,0],
+    [1,2,2,2,1,0,0,0,0,0,0,0],
+    [1,2,2,2,2,1,0,0,0,0,0,0],
+    [1,2,2,2,2,2,1,0,0,0,0,0],
+    [1,2,2,2,2,2,2,1,0,0,0,0],
+    [1,2,2,2,2,2,2,2,1,0,0,0],
+    [1,2,2,2,2,2,2,2,2,1,0,0],
+    [1,2,2,2,2,2,2,2,2,2,1,0],
+    [1,2,2,2,2,2,2,2,2,2,2,1],
+    [1,2,2,2,2,2,1,1,1,1,1,1],
+    [1,2,2,2,2,2,1,0,0,0,0,0],
+    [1,2,2,1,2,2,1,0,0,0,0,0],
+    [1,2,1,0,1,2,2,1,0,0,0,0],
+    [1,1,0,0,1,2,2,1,0,0,0,0],
+    [1,0,0,0,0,1,2,1,0,0,0,0],
+    [0,0,0,0,0,1,1,1,0,0,0,0],
+];
+
+// ---------------------------------------------------------------------------
+// Scanout buffer — GPU-backed pixel buffer for compositing
+// ---------------------------------------------------------------------------
+
+/// A GEM-backed pixel buffer that can be page-flipped to the display.
+///
+/// Holds pre-computed HHDM virtual addresses for each backing frame so
+/// that pixel writes do not require taking the DRM lock.  Only
+/// `page_flip()` needs the DRM lock (briefly, for the copy to HW).
+///
+/// ## Frame Boundary Handling
+///
+/// GEM buffers are backed by non-contiguous 16 KiB physical frames.
+/// A scanline may span two frames if `row_offset + pitch > FRAME_SIZE`.
+/// All write methods handle this transparently.
+///
+/// ## Safety Invariant
+///
+/// `frame_addrs[i]` is a valid HHDM-mapped virtual address for the
+/// duration of the buffer's lifetime.  Addresses become invalid after
+/// `destroy()` frees the underlying GEM object.
+struct ScanoutBuffer {
+    /// Pre-computed virtual addresses of each backing frame.
+    frame_addrs: Vec<u64>,
+    /// Width in pixels.
+    width: u32,
+    /// Height in pixels.
+    height: u32,
+    /// Bytes per row (64-byte aligned).
+    pitch: u32,
+    /// GEM buffer handle (for cleanup).
+    gem_handle: u32,
+    /// DRM framebuffer ID (for page_flip).
+    fb_id: DrmObjectId,
+    /// CRTC ID for page_flip.
+    crtc_id: DrmObjectId,
+}
+
+impl ScanoutBuffer {
+    /// Allocate a DRM-backed scanout buffer.
+    ///
+    /// Creates a GEM object and DRM framebuffer through the primary DRM
+    /// device.  Extracts and caches frame virtual addresses for fast
+    /// pixel access without holding the DRM lock.
+    fn new(width: u32, height: u32) -> Result<Self, crate::error::KernelError> {
+        let (gem_handle, fb_id, crtc_id, frame_addrs, pitch) = drm::with_primary_mut(|dev| {
+            let handle = dev.gem_create(width, height, PixelFormat::Xrgb8888)?;
+            let p = dev.gem_pitch(handle)?;
+            let fid = dev.fb_create(handle, width, height, p, PixelFormat::Xrgb8888)?;
+            let addrs = dev.gem_frame_addrs(handle)?;
+            let cid = dev.first_crtc_id()
+                .ok_or(crate::error::KernelError::NotFound)?;
+            Ok((handle, fid, cid, addrs, p))
+        })?;
+
+        Ok(Self {
+            frame_addrs,
+            width,
+            height,
+            pitch,
+            gem_handle,
+            fb_id,
+            crtc_id,
+        })
+    }
+
+    /// Write a single pixel at (x, y).
+    ///
+    /// Bounds-checked; out-of-bounds writes are silently ignored.
+    ///
+    /// ## Safety Argument
+    ///
+    /// Because pitch is 64-byte aligned and pixels are 4 bytes, a single
+    /// u32 write never crosses a frame boundary.  The byte offset is
+    /// always 4-aligned, so `frame_off + 4 <= FRAME_SIZE` (16380+4=16384).
+    #[allow(clippy::arithmetic_side_effects)]
+    fn write_pixel(&self, x: u32, y: u32, color: u32) {
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        let byte_off = (y as usize) * (self.pitch as usize) + (x as usize) * 4;
+        let frame_idx = byte_off / FRAME_SIZE;
+        let frame_off = byte_off % FRAME_SIZE;
+        if let Some(&addr) = self.frame_addrs.get(frame_idx) {
+            // SAFETY: addr is a valid HHDM-mapped address for a GEM-owned
+            // frame.  frame_off is 4-aligned and frame_off+4 <= FRAME_SIZE
+            // (see safety argument in doc comment).  The buffer is alive
+            // (destroy() hasn't been called).
+            unsafe {
+                core::ptr::write_volatile((addr + frame_off as u64) as *mut u32, color);
+            }
+        }
+    }
+
+    /// Fill a rectangle with a solid color.
+    ///
+    /// Coordinates are clipped to the buffer bounds.  Uses per-row
+    /// frame tracking for efficiency: only recomputes frame index on
+    /// frame boundary crossings (rare: ~1 per 4096 pixels at 32bpp).
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_sign_loss)]
+    fn fill_rect(&self, x: i32, y: i32, w: u32, h: u32, color: u32) {
+        let x0 = x.max(0) as u32;
+        let y0 = y.max(0) as u32;
+        let x1 = ((x as i64 + w as i64).min(self.width as i64).max(0)) as u32;
+        let y1 = ((y as i64 + h as i64).min(self.height as i64).max(0)) as u32;
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+
+        for row in y0..y1 {
+            let row_byte_start = (row as usize) * (self.pitch as usize) + (x0 as usize) * 4;
+            let mut frame_idx = row_byte_start / FRAME_SIZE;
+            let mut frame_off = row_byte_start % FRAME_SIZE;
+            let mut frame_addr = match self.frame_addrs.get(frame_idx) {
+                Some(&a) => a,
+                None => continue,
+            };
+
+            for _ in x0..x1 {
+                // SAFETY: frame_addr + frame_off is within a valid GEM frame.
+                // frame_off is 4-aligned, so frame_off+4 <= FRAME_SIZE.
+                unsafe {
+                    core::ptr::write_volatile(
+                        (frame_addr + frame_off as u64) as *mut u32,
+                        color,
+                    );
+                }
+                frame_off += 4;
+                if frame_off >= FRAME_SIZE {
+                    frame_off = 0;
+                    frame_idx += 1;
+                    frame_addr = match self.frame_addrs.get(frame_idx) {
+                        Some(&a) => a,
+                        None => break,
+                    };
+                }
+            }
+        }
+    }
+
+    /// Draw a 1-pixel rectangle outline.
+    #[allow(clippy::cast_possible_wrap)]
+    fn draw_rect(&self, x: i32, y: i32, w: u32, h: u32, color: u32) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        // Top edge.
+        self.fill_rect(x, y, w, 1, color);
+        if h > 1 {
+            // Bottom edge.
+            self.fill_rect(x, y + (h as i32 - 1), w, 1, color);
+        }
+        if h > 2 {
+            // Left and right edges (excluding corners).
+            self.fill_rect(x, y + 1, 1, h - 2, color);
+            self.fill_rect(x + (w as i32 - 1), y + 1, 1, h - 2, color);
+        }
+    }
+
+    /// Draw a line using Bresenham's algorithm.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    fn draw_line(&self, x0: i32, y0: i32, x1: i32, y1: i32, color: u32) {
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx: i32 = if x0 < x1 { 1 } else { -1 };
+        let sy: i32 = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        let mut cx = x0;
+        let mut cy = y0;
+
+        loop {
+            if cx >= 0 && cy >= 0 {
+                self.write_pixel(cx as u32, cy as u32, color);
+            }
+            if cx == x1 && cy == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                if cx == x1 {
+                    break;
+                }
+                err += dy;
+                cx += sx;
+            }
+            if e2 <= dx {
+                if cy == y1 {
+                    break;
+                }
+                err += dx;
+                cy += sy;
+            }
+        }
+    }
+
+    /// Blit a rectangular region from a pixel buffer to this scanout buffer.
+    ///
+    /// `src` is a row-major array of BGRA u32 pixels with stride `src_w`.
+    /// Pixels with alpha < 128 are treated as transparent.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_sign_loss)]
+    fn blit(&self, src: &[u32], src_w: u32, dst_x: i32, dst_y: i32, w: u32, h: u32) {
+        // Compute clipped source/destination regions.
+        let src_x0 = if dst_x < 0 { (-dst_x) as u32 } else { 0 };
+        let src_y0 = if dst_y < 0 { (-dst_y) as u32 } else { 0 };
+        let dst_x0 = dst_x.max(0) as u32;
+        let dst_y0 = dst_y.max(0) as u32;
+        let clip_w = w.saturating_sub(src_x0)
+            .min(self.width.saturating_sub(dst_x0));
+        let clip_h = h.saturating_sub(src_y0)
+            .min(self.height.saturating_sub(dst_y0));
+        if clip_w == 0 || clip_h == 0 {
+            return;
+        }
+
+        for row in 0..clip_h {
+            let src_row = src_y0 + row;
+            let dst_row = dst_y0 + row;
+
+            let row_byte_start =
+                (dst_row as usize) * (self.pitch as usize) + (dst_x0 as usize) * 4;
+            let mut frame_idx = row_byte_start / FRAME_SIZE;
+            let mut frame_off = row_byte_start % FRAME_SIZE;
+            let mut frame_addr = match self.frame_addrs.get(frame_idx) {
+                Some(&a) => a,
+                None => continue,
+            };
+
+            for col in 0..clip_w {
+                let src_col = src_x0 + col;
+                let src_idx = (src_row * src_w + src_col) as usize;
+                let pixel = match src.get(src_idx) {
+                    Some(&p) => p,
+                    None => {
+                        // Advance frame offset even if source is OOB.
+                        frame_off += 4;
+                        if frame_off >= FRAME_SIZE {
+                            frame_off = 0;
+                            frame_idx += 1;
+                            if let Some(&a) = self.frame_addrs.get(frame_idx) {
+                                frame_addr = a;
+                            }
+                        }
+                        continue;
+                    }
+                };
+
+                let alpha = pixel >> 24;
+                if alpha >= 128 {
+                    // SAFETY: frame_addr + frame_off is within a valid GEM frame.
+                    unsafe {
+                        core::ptr::write_volatile(
+                            (frame_addr + frame_off as u64) as *mut u32,
+                            pixel | 0xFF00_0000,
+                        );
+                    }
+                }
+
+                frame_off += 4;
+                if frame_off >= FRAME_SIZE {
+                    frame_off = 0;
+                    frame_idx += 1;
+                    frame_addr = match self.frame_addrs.get(frame_idx) {
+                        Some(&a) => a,
+                        None => break,
+                    };
+                }
+            }
+        }
+    }
+
+    /// Page-flip this buffer to the display via DRM.
+    fn flip(&self) -> Result<(), crate::error::KernelError> {
+        drm::with_primary_mut(|dev| {
+            dev.page_flip(self.crtc_id, self.fb_id)
+        })
+    }
+
+    /// Free the GEM object and DRM framebuffer.
+    fn destroy(&self) {
+        let _ = drm::with_primary_mut(|dev| {
+            // Destroy framebuffer first (references the GEM handle).
+            let _ = dev.fb_destroy(self.fb_id);
+            dev.gem_destroy(self.gem_handle)
+        });
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Window
@@ -150,7 +479,7 @@ impl Window {
 // Compositor state
 // ---------------------------------------------------------------------------
 
-/// The compositor managing all windows.
+/// Window management state (protected by COMPOSITOR lock).
 struct CompositorState {
     /// Windows in z-order (index 0 = back, last = front/focused).
     windows: Vec<Window>,
@@ -176,17 +505,150 @@ impl CompositorState {
     }
 }
 
+/// Double-buffer state for DRM-backed rendering (separate lock from windows).
+struct ScanoutState {
+    /// Two scanout buffers for double-buffering (Some when DRM is active).
+    buffers: Option<(ScanoutBuffer, ScanoutBuffer)>,
+    /// Which buffer is the back buffer (0 or 1).
+    back_idx: usize,
+    /// Cached display width.
+    display_w: u32,
+    /// Cached display height.
+    display_h: u32,
+}
+
+impl ScanoutState {
+    const fn new() -> Self {
+        Self {
+            buffers: None,
+            back_idx: 0,
+            display_w: 0,
+            display_h: 0,
+        }
+    }
+}
+
 static COMPOSITOR: Mutex<CompositorState> = Mutex::new(CompositorState::new());
+static SCANOUT: Mutex<ScanoutState> = Mutex::new(ScanoutState::new());
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Whether the DRM rendering path is active (vs fb fallback).
+static DRM_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+// ---------------------------------------------------------------------------
+// Cursor position tracking
+// ---------------------------------------------------------------------------
+
+/// Cursor X position (compositor-managed, independent of fb.rs).
+static CURSOR_X: AtomicI32 = AtomicI32::new(0);
+/// Cursor Y position (compositor-managed, independent of fb.rs).
+static CURSOR_Y: AtomicI32 = AtomicI32::new(0);
+
+/// Get the current compositor cursor position.
+fn cursor_pos() -> (i32, i32) {
+    (CURSOR_X.load(Ordering::Relaxed), CURSOR_Y.load(Ordering::Relaxed))
+}
+
+/// Update cursor position from mouse delta.
+///
+/// PS/2 convention: positive dy = up, but screen Y increases downward,
+/// so we subtract dy.
+fn update_cursor(dx: i16, dy: i16) {
+    let (max_x, max_y) = display_dimensions();
+    let old_x = CURSOR_X.load(Ordering::Relaxed);
+    let old_y = CURSOR_Y.load(Ordering::Relaxed);
+    let new_x = (old_x + dx as i32).clamp(0, max_x.saturating_sub(1) as i32);
+    let new_y = (old_y - dy as i32).clamp(0, max_y.saturating_sub(1) as i32);
+    CURSOR_X.store(new_x, Ordering::Release);
+    CURSOR_Y.store(new_y, Ordering::Release);
+}
+
+/// Get display dimensions from DRM or fb.
+fn display_dimensions() -> (u32, u32) {
+    if DRM_ACTIVE.load(Ordering::Acquire) {
+        let scanout = SCANOUT.lock();
+        (scanout.display_w, scanout.display_h)
+    } else {
+        fb::dimensions()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DRM buffer management
+// ---------------------------------------------------------------------------
+
+/// Allocate double-buffered scanout buffers via DRM.
+///
+/// Returns true on success.  On failure, the compositor will use the
+/// fb.rs fallback path.
+fn init_drm_buffers() -> bool {
+    // Query display size from DRM.
+    let (w, h) = match drm::with_primary(|dev| Ok(dev.display_size())) {
+        Ok((w, h)) if w > 0 && h > 0 => (w, h),
+        _ => return false,
+    };
+
+    // Allocate two scanout buffers.
+    let buf0 = match ScanoutBuffer::new(w, h) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::serial_println!(
+                "[compositor] DRM buffer 0 alloc failed: {:?}, using fb fallback",
+                e
+            );
+            return false;
+        }
+    };
+    let buf1 = match ScanoutBuffer::new(w, h) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::serial_println!(
+                "[compositor] DRM buffer 1 alloc failed: {:?}, using fb fallback",
+                e
+            );
+            buf0.destroy();
+            return false;
+        }
+    };
+
+    let mut scanout = SCANOUT.lock();
+    scanout.buffers = Some((buf0, buf1));
+    scanout.back_idx = 0;
+    scanout.display_w = w;
+    scanout.display_h = h;
+
+    crate::serial_println!("[compositor] DRM double-buffer allocated ({}x{})", w, h);
+    true
+}
+
+/// Free DRM scanout buffers.
+fn free_drm_buffers() {
+    let mut scanout = SCANOUT.lock();
+    if let Some((b0, b1)) = scanout.buffers.take() {
+        b0.destroy();
+        b1.destroy();
+    }
+    scanout.display_w = 0;
+    scanout.display_h = 0;
+}
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Start the compositor (draw desktop background, show cursor).
+/// Start the compositor.
+///
+/// Tries DRM-backed rendering first; falls back to fb.rs if DRM buffers
+/// cannot be allocated.
 pub fn start() {
-    if !fb::is_initialized() {
-        crate::serial_println!("[compositor] Cannot start: framebuffer not available");
+    // Try DRM path first.
+    let drm_ok = if drm::device_count() > 0 {
+        init_drm_buffers()
+    } else {
+        false
+    };
+
+    if !drm_ok && !fb::is_initialized() {
+        crate::serial_println!("[compositor] Cannot start: no display available");
         return;
     }
 
@@ -196,22 +658,54 @@ pub fn start() {
     drop(state);
 
     ACTIVE.store(true, Ordering::Release);
+    DRM_ACTIVE.store(drm_ok, Ordering::Release);
+
+    // Initialize cursor position to center of screen.
+    let (w, h) = if drm_ok {
+        let s = SCANOUT.lock();
+        (s.display_w, s.display_h)
+    } else {
+        fb::dimensions()
+    };
+    #[allow(clippy::cast_possible_wrap)]
+    {
+        CURSOR_X.store((w / 2) as i32, Ordering::Release);
+        CURSOR_Y.store((h / 2) as i32, Ordering::Release);
+    }
 
     // Draw initial desktop.
     compose();
-    fb::show_cursor();
 
-    crate::serial_println!("[compositor] Started");
+    // In fb fallback mode, show the XOR cursor.
+    if !drm_ok {
+        fb::show_cursor();
+    }
+
+    crate::serial_println!(
+        "[compositor] Started ({})",
+        if drm_ok { "DRM double-buffered" } else { "fb fallback" }
+    );
 }
 
 /// Stop the compositor and return to text console.
 pub fn stop() {
     ACTIVE.store(false, Ordering::Release);
-    fb::hide_cursor();
+
+    let was_drm = DRM_ACTIVE.load(Ordering::Acquire);
+    DRM_ACTIVE.store(false, Ordering::Release);
+
+    if !was_drm {
+        fb::hide_cursor();
+    }
 
     let mut state = COMPOSITOR.lock();
     state.running = false;
     drop(state);
+
+    // Free DRM buffers.
+    if was_drm {
+        free_drm_buffers();
+    }
 
     // Restore text console.
     crate::console::clear();
@@ -285,45 +779,65 @@ pub fn window_count() -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Rendering
+// Rendering — DRM path
 // ---------------------------------------------------------------------------
 
-/// Compose all windows to the framebuffer.
-///
-/// Draws the desktop background, then each window from back to front.
-pub fn compose() {
-    let state = COMPOSITOR.lock();
-    if !state.running {
-        return;
-    }
+/// Compose all windows to the back scanout buffer and page-flip.
+fn compose_drm(state: &CompositorState) {
+    let mut scanout = SCANOUT.lock();
+    let (display_w, display_h) = (scanout.display_w, scanout.display_h);
+    let back_idx = scanout.back_idx;
 
-    // Draw desktop background.
-    let (fb_w, fb_h) = fb::dimensions();
-    fb::fill_rect(0, 0, fb_w, fb_h, COLOR_DESKTOP_BG);
+    let back = match scanout.buffers {
+        Some(ref bufs) => {
+            if back_idx == 0 { &bufs.0 } else { &bufs.1 }
+        }
+        None => return,
+    };
+
+    // Desktop background.
+    back.fill_rect(0, 0, display_w, display_h, COLOR_DESKTOP_BG);
 
     // Draw each visible window from back to front.
+    let window_count = state.windows.len();
     for (idx, window) in state.windows.iter().enumerate() {
         if !window.visible || window.minimized {
             continue;
         }
-        let is_focused = idx == state.windows.len() - 1;
-        draw_window(window, is_focused);
+        let is_focused = idx == window_count.saturating_sub(1);
+        draw_window_drm(back, window, is_focused);
     }
+
+    // Draw mouse cursor on top of everything.
+    let (cx, cy) = cursor_pos();
+    draw_cursor_drm(back, cx, cy);
+
+    // Page-flip the back buffer to the display.
+    if let Err(e) = back.flip() {
+        crate::serial_println!("[compositor] page_flip failed: {:?}", e);
+    }
+
+    // Swap front/back.
+    scanout.back_idx = 1 - back_idx;
 }
 
-/// Draw a single window (border + title bar + client area).
-fn draw_window(window: &Window, focused: bool) {
+/// Draw a single window to the DRM scanout buffer.
+fn draw_window_drm(buf: &ScanoutBuffer, window: &Window, focused: bool) {
     let x = window.x;
     let y = window.y;
     let tw = window.total_width();
     let th = window.total_height();
 
     // Border.
-    fb::draw_rect(x, y, tw, th, COLOR_BORDER);
+    buf.draw_rect(x, y, tw, th, COLOR_BORDER);
 
     // Title bar background.
-    let title_color = if focused { COLOR_TITLE_BAR_ACTIVE } else { COLOR_TITLE_BAR_INACTIVE };
-    fb::fill_rect(
+    let title_color = if focused {
+        COLOR_TITLE_BAR_ACTIVE
+    } else {
+        COLOR_TITLE_BAR_INACTIVE
+    };
+    buf.fill_rect(
         x + BORDER_WIDTH as i32,
         y + BORDER_WIDTH as i32,
         window.width,
@@ -331,8 +845,9 @@ fn draw_window(window: &Window, focused: bool) {
         title_color,
     );
 
-    // Title text (simplified: just draw characters using set_pixel).
-    draw_title_text(
+    // Title text.
+    draw_title_text_drm(
+        buf,
         x + BORDER_WIDTH as i32 + 4,
         y + BORDER_WIDTH as i32 + 4,
         &window.title,
@@ -342,29 +857,145 @@ fn draw_window(window: &Window, focused: bool) {
     // Close button (small red square in top-right).
     let close_x = x + tw as i32 - BORDER_WIDTH as i32 - 18;
     let close_y = y + BORDER_WIDTH as i32 + 4;
-    fb::fill_rect(close_x, close_y, 14, 14, COLOR_CLOSE_BTN);
+    buf.fill_rect(close_x, close_y, 14, 14, COLOR_CLOSE_BTN);
     // Draw X in the close button.
-    fb::draw_line(close_x + 3, close_y + 3, close_x + 11, close_y + 11, COLOR_TITLE_TEXT);
-    fb::draw_line(close_x + 11, close_y + 3, close_x + 3, close_y + 11, COLOR_TITLE_TEXT);
+    buf.draw_line(close_x + 3, close_y + 3, close_x + 11, close_y + 11, COLOR_TITLE_TEXT);
+    buf.draw_line(close_x + 11, close_y + 3, close_x + 3, close_y + 11, COLOR_TITLE_TEXT);
 
     // Client area: blit the window's pixel buffer.
     let client_x = window.client_x();
     let client_y = window.client_y();
-    fb::blit(&window.pixels, window.width, client_x, client_y, window.width, window.height);
+    buf.blit(
+        &window.pixels,
+        window.width,
+        client_x,
+        client_y,
+        window.width,
+        window.height,
+    );
 }
 
-/// Draw title text using the kernel's bitmap font.
-///
-/// Simple glyph rendering at pixel level (8x16 font scaled to title bar).
-fn draw_title_text(x: i32, y: i32, text: &str, color: u32) {
+/// Draw title text to a DRM scanout buffer using the kernel's bitmap font.
+fn draw_title_text_drm(buf: &ScanoutBuffer, x: i32, y: i32, text: &str, color: u32) {
     let mut cx = x;
     for ch in text.bytes().take(32) {
-        // Only render printable ASCII.
         if ch < 0x20 || ch > 0x7E {
             continue;
         }
         let glyph = crate::font::glyph(ch);
-        // Draw at half height (8 pixel rows, skip every other row for fitting).
+        for (row_idx, &glyph_row) in glyph.iter().enumerate().step_by(2) {
+            for col in 0..8u32 {
+                let bit = (glyph_row >> (7 - col)) & 1;
+                if bit != 0 {
+                    #[allow(clippy::cast_possible_truncation)]
+                    buf.write_pixel(
+                        (cx + col as i32) as u32,
+                        (y + row_idx as i32 / 2) as u32,
+                        color,
+                    );
+                }
+            }
+        }
+        cx += 8;
+    }
+}
+
+/// Draw the mouse cursor sprite to a DRM scanout buffer.
+fn draw_cursor_drm(buf: &ScanoutBuffer, cx: i32, cy: i32) {
+    for (row_idx, row) in CURSOR_BITMAP.iter().enumerate() {
+        for (col_idx, &pixel) in row.iter().enumerate() {
+            if pixel == 0 {
+                continue; // Transparent.
+            }
+            let px = cx + col_idx as i32;
+            let py = cy + row_idx as i32;
+            if px < 0 || py < 0 {
+                continue;
+            }
+            let color = if pixel == 1 {
+                COLOR_CURSOR_OUTLINE
+            } else {
+                COLOR_CURSOR_FILL
+            };
+            buf.write_pixel(px as u32, py as u32, color);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering — fb fallback path
+// ---------------------------------------------------------------------------
+
+/// Compose all windows directly to the framebuffer (fb.rs).
+fn compose_fb(state: &CompositorState) {
+    let (fb_w, fb_h) = fb::dimensions();
+    fb::fill_rect(0, 0, fb_w, fb_h, COLOR_DESKTOP_BG);
+
+    let window_count = state.windows.len();
+    for (idx, window) in state.windows.iter().enumerate() {
+        if !window.visible || window.minimized {
+            continue;
+        }
+        let is_focused = idx == window_count.saturating_sub(1);
+        draw_window_fb(window, is_focused);
+    }
+}
+
+/// Draw a single window to the framebuffer (fb.rs path).
+fn draw_window_fb(window: &Window, focused: bool) {
+    let x = window.x;
+    let y = window.y;
+    let tw = window.total_width();
+    let th = window.total_height();
+
+    fb::draw_rect(x, y, tw, th, COLOR_BORDER);
+
+    let title_color = if focused {
+        COLOR_TITLE_BAR_ACTIVE
+    } else {
+        COLOR_TITLE_BAR_INACTIVE
+    };
+    fb::fill_rect(
+        x + BORDER_WIDTH as i32,
+        y + BORDER_WIDTH as i32,
+        window.width,
+        TITLE_BAR_HEIGHT - BORDER_WIDTH,
+        title_color,
+    );
+
+    draw_title_text_fb(
+        x + BORDER_WIDTH as i32 + 4,
+        y + BORDER_WIDTH as i32 + 4,
+        &window.title,
+        COLOR_TITLE_TEXT,
+    );
+
+    let close_x = x + tw as i32 - BORDER_WIDTH as i32 - 18;
+    let close_y = y + BORDER_WIDTH as i32 + 4;
+    fb::fill_rect(close_x, close_y, 14, 14, COLOR_CLOSE_BTN);
+    fb::draw_line(close_x + 3, close_y + 3, close_x + 11, close_y + 11, COLOR_TITLE_TEXT);
+    fb::draw_line(close_x + 11, close_y + 3, close_x + 3, close_y + 11, COLOR_TITLE_TEXT);
+
+    let client_x = window.client_x();
+    let client_y = window.client_y();
+    fb::blit(
+        &window.pixels,
+        window.width,
+        client_x,
+        client_y,
+        window.width,
+        window.height,
+    );
+}
+
+/// Draw title text to the framebuffer (fb.rs path).
+fn draw_title_text_fb(x: i32, y: i32, text: &str, color: u32) {
+    let mut cx = x;
+    for ch in text.bytes().take(32) {
+        if ch < 0x20 || ch > 0x7E {
+            continue;
+        }
+        let glyph = crate::font::glyph(ch);
         for (row_idx, &glyph_row) in glyph.iter().enumerate().step_by(2) {
             for col in 0..8u32 {
                 let bit = (glyph_row >> (7 - col)) & 1;
@@ -378,7 +1009,27 @@ fn draw_title_text(x: i32, y: i32, text: &str, color: u32) {
                 }
             }
         }
-        cx += 8; // Character width.
+        cx += 8;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering — dispatch
+// ---------------------------------------------------------------------------
+
+/// Compose all windows to the display.
+///
+/// Dispatches to the DRM or fb path based on which is active.
+pub fn compose() {
+    let state = COMPOSITOR.lock();
+    if !state.running {
+        return;
+    }
+
+    if DRM_ACTIVE.load(Ordering::Acquire) {
+        compose_drm(&state);
+    } else {
+        compose_fb(&state);
     }
 }
 
@@ -391,15 +1042,24 @@ fn draw_title_text(x: i32, y: i32, text: &str, color: u32) {
 /// Call this in a loop (e.g., from a kshell "desktop" command or a
 /// dedicated compositor task).
 pub fn process_input() {
-    while let Some(ev) = crate::mouse::try_read_event() {
-        // Move cursor.
-        fb::move_cursor(ev.dx, ev.dy);
+    let drm = DRM_ACTIVE.load(Ordering::Acquire);
+    let mut any_moved = false;
 
-        let (cx, cy) = fb::cursor_pos();
+    while let Some(ev) = crate::mouse::try_read_event() {
+        // Update compositor cursor position.
+        update_cursor(ev.dx, ev.dy);
+        any_moved = true;
+
+        // In fb fallback mode, also update the XOR cursor.
+        if !drm {
+            fb::move_cursor(ev.dx, ev.dy);
+        }
+
+        let (cx, cy) = cursor_pos();
 
         if ev.buttons & 1 != 0 {
             // Left button pressed.
-            handle_left_click(cx as i32, cy as i32);
+            handle_left_click(cx, cy);
         } else {
             // Button released — stop dragging.
             let mut state = COMPOSITOR.lock();
@@ -413,11 +1073,18 @@ pub fn process_input() {
         let mut state = COMPOSITOR.lock();
         if let Some((wid, off_x, off_y)) = state.dragging {
             if let Some(w) = state.windows.iter_mut().find(|w| w.id == wid) {
-                w.x = cx as i32 - off_x;
-                w.y = cy as i32 - off_y;
+                w.x = cx - off_x;
+                w.y = cy - off_y;
                 state.dirty = true;
             }
         }
+    }
+
+    // In DRM mode, any mouse movement triggers a recompose (cursor is
+    // rendered in the composition buffer, not via XOR overlay).
+    if drm && any_moved {
+        let mut state = COMPOSITOR.lock();
+        state.dirty = true;
     }
 
     // Recompose if dirty.
@@ -453,7 +1120,6 @@ fn handle_left_click(sx: i32, sy: i32) {
             let close_x = wx + ww - BORDER_WIDTH as i32 - 18;
             let close_y = wy + BORDER_WIDTH as i32 + 4;
             if sx >= close_x && sx < close_x + 14 && sy >= close_y && sy < close_y + 14 {
-                // Close the window.
                 let id = window.id;
                 drop(state);
                 close_window(id);
@@ -489,8 +1155,8 @@ fn handle_left_click(sx: i32, sy: i32) {
 
 /// Run a compositor demo: create some windows and process input briefly.
 pub fn demo() {
-    if !fb::is_initialized() {
-        crate::console_println!("Compositor demo requires framebuffer");
+    if !fb::is_initialized() && drm::device_count() == 0 {
+        crate::console_println!("Compositor demo requires a display (fb or DRM)");
         return;
     }
 

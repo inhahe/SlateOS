@@ -368,6 +368,36 @@ impl DrmDevice {
             .map(|m| (m.hdisplay, m.vdisplay))
             .unwrap_or((0, 0))
     }
+
+    /// Return the HHDM-mapped virtual addresses of a GEM object's backing frames.
+    ///
+    /// This allows callers to hold the addresses past the DRM lock scope
+    /// and perform direct pixel writes without holding any DRM lock.
+    /// Addresses remain valid as long as the GEM object is not destroyed.
+    pub fn gem_frame_addrs(&self, handle: u32) -> KernelResult<Vec<u64>> {
+        use crate::mm::page_table;
+
+        let gem = self.gem_objects.iter().find(|g| g.handle == handle)
+            .ok_or(KernelError::NotFound)?;
+        let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+        let addrs: Vec<u64> = gem.phys_frames.iter()
+            .map(|pf| pf.addr() + hhdm)
+            .collect();
+        Ok(addrs)
+    }
+
+    /// Get the pitch (bytes per row) of a GEM object.
+    pub fn gem_pitch(&self, handle: u32) -> KernelResult<u32> {
+        let gem = self.gem_objects.iter().find(|g| g.handle == handle)
+            .ok_or(KernelError::NotFound)?;
+        Ok(gem.pitch)
+    }
+
+    /// Look up the first CRTC's object ID.
+    #[must_use]
+    pub fn first_crtc_id(&self) -> Option<DrmObjectId> {
+        self.crtcs.first().map(|c| c.id)
+    }
 }
 
 // ---------------------------------------------------------------------------

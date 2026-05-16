@@ -75,6 +75,7 @@ mod cputime;
 mod crypto;
 mod devhotplug;
 mod devpower;
+mod drm;
 mod drvmon;
 mod error;
 mod eventlog;
@@ -723,6 +724,11 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = virtio::gpu::init(boot_info.hhdm_offset) {
         serial_println!("[virtio-gpu] Init: {:?} (non-fatal)", e);
     }
+
+    // DRM/KMS subsystem: abstracts display hardware for the compositor.
+    // Must come after both fb::init() and virtio-gpu init so that both
+    // backends are available.
+    drm::init();
 
     console::boot_step_update(console::BootStatus::Ok, "PCI & device drivers");
 
@@ -1432,6 +1438,11 @@ extern "C" fn kmain() -> ! {
     // Framebuffer graphics self-test.
     if let Err(e) = fb::self_test() {
         serial_println!("[fb] Self-test failed: {} (non-fatal)", e);
+    }
+
+    // DRM/KMS subsystem self-test.
+    if let Err(e) = drm::self_test() {
+        serial_println!("[drm] Self-test failed: {:?} (non-fatal)", e);
     }
 
     // Console VT100/ANSI escape sequence self-test.

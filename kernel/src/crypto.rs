@@ -846,15 +846,30 @@ pub fn poly1305(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
     h[3] = (h[3] & nmask) | (g[3] & mask);
     h[4] = (h[4] & nmask) | (g[4] & mask);
 
-    // Reassemble into 4 × 32-bit words and add s.
+    // Reassemble 26-bit limbs into 4 × 32-bit words, then add s.
+    //
+    // Following the reference (poly1305-donna): convert to 32-bit words
+    // first, masking each to 32 bits, then add s with a carry chain.
+    // Combining both steps into one (as in some optimized versions)
+    // is error-prone because the carry from word N already contains the
+    // upper limb bits that word N+1 also references, causing double-counting.
+    #[allow(clippy::cast_possible_truncation)]
+    let h0w = ((h[0]      ) | (h[1] << 26)) as u32;  // bits  0-31
+    #[allow(clippy::cast_possible_truncation)]
+    let h1w = ((h[1] >> 6 ) | (h[2] << 20)) as u32;  // bits 32-63
+    #[allow(clippy::cast_possible_truncation)]
+    let h2w = ((h[2] >> 12) | (h[3] << 14)) as u32;  // bits 64-95
+    #[allow(clippy::cast_possible_truncation)]
+    let h3w = ((h[3] >> 18) | (h[4] << 8 )) as u32;  // bits 96-127
+
     let mut f: u64;
-    f = ((h[0] as u64) | ((h[1] as u64) << 26)).wrapping_add(s[0] as u64);
+    f = (h0w as u64).wrapping_add(s[0] as u64);
     let tag0 = f as u32;
-    f = (f >> 32).wrapping_add(((h[1] >> 6) as u64) | ((h[2] as u64) << 20)).wrapping_add(s[1] as u64);
+    f = (f >> 32).wrapping_add(h1w as u64).wrapping_add(s[1] as u64);
     let tag1 = f as u32;
-    f = (f >> 32).wrapping_add(((h[2] >> 12) as u64) | ((h[3] as u64) << 14)).wrapping_add(s[2] as u64);
+    f = (f >> 32).wrapping_add(h2w as u64).wrapping_add(s[2] as u64);
     let tag2 = f as u32;
-    f = (f >> 32).wrapping_add(((h[3] >> 18) as u64) | ((h[4] as u64) << 8)).wrapping_add(s[3] as u64);
+    f = (f >> 32).wrapping_add(h3w as u64).wrapping_add(s[3] as u64);
     let tag3 = f as u32;
 
     let mut tag = [0u8; 16];
@@ -1233,16 +1248,22 @@ impl Fe25519 {
         h[4] = h[4].wrapping_add(carry);                     h[4] &= 0x7FFFFFFFFFFFF;
 
         // Pack 5 × 51-bit limbs into 32 bytes (little-endian).
+        // Uses overlapping 8-byte writes at offsets matching from_bytes reads.
+        // Each write produces the correct bits for its byte range; later writes
+        // overwrite the tail bytes of earlier writes.  Verified as the exact
+        // inverse of from_bytes (load offsets 0,6,12,19,24 with shifts 0,3,6,1,12).
         let mut out = [0u8; 32];
         let val = h[0] | (h[1] << 51);
         store_le_u64(&mut out, 0, val);
-        let val = (h[1] >> 13) | (h[2] << 38);
+        let val = (h[0] >> 48) | (h[1] << 3) | (h[2] << 54);
         store_le_u64(&mut out, 6, val);
-        let val = (h[2] >> 26) | (h[3] << 25);
-        store_le_u64(&mut out, 13, val);
-        let val = (h[3] >> 39) | (h[4] << 12);
+        let val = (h[1] >> 45) | (h[2] << 6) | (h[3] << 57);
+        store_le_u64(&mut out, 12, val);
+        let val = (h[2] >> 50) | (h[3] << 1) | (h[4] << 52);
         store_le_u64(&mut out, 19, val);
-        out[31] &= 0x7F; // Clear top bit.
+        let val = (h[3] >> 39) | (h[4] << 12);
+        store_le_u64(&mut out, 24, val);
+        out[31] &= 0x7F; // Clear top bit (bit 255 is always 0 for Curve25519).
         out
     }
 

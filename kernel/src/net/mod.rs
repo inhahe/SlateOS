@@ -52,6 +52,7 @@ pub mod tls;
 pub mod udp;
 pub mod pcap;
 pub mod qos;
+pub mod nat;
 pub mod traceroute;
 pub mod upnp;
 pub mod veth;
@@ -125,6 +126,7 @@ pub fn poll() {
         syslog::tick();
         telnet::tick();
         tftp::tick();
+        nat::tick();
     }
 }
 

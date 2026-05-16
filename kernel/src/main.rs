@@ -1336,6 +1336,12 @@ extern "C" fn kmain() -> ! {
         serial_println!("[WARN] Per-namespace ARP self-test failed: {:?}", e);
     }
 
+    // Step 22e⅞++++p8d: NAT/masquerade self-test.
+    // Source NAT for container traffic traversing namespace boundaries.
+    if let Err(e) = net::nat::self_test() {
+        serial_println!("[WARN] NAT self-test failed: {:?}", e);
+    }
+
     // Step 22e⅞++++p9: Container lifecycle manager init + self-test.
     // Unified container abstraction tying PID/user/network namespaces + cgroup
     // into a single lifecycle with create/start/stop/delete state machine.

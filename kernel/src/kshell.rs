@@ -65548,6 +65548,13 @@ fn parse_ipv4(s: &str) -> Option<crate::net::interface::Ipv4Addr> {
     Some(crate::net::interface::Ipv4Addr::new(a, b, c, d))
 }
 
+/// Parse an IPv4 address from a dotted-quad string into raw octets.
+/// Returns `[a, b, c, d]` on success, suitable for container config fields.
+fn parse_ipv4_octets(s: &str) -> Option<[u8; 4]> {
+    let ip = parse_ipv4(s)?;
+    Some(ip.0)
+}
+
 fn cmd_irq() {
     crate::console_println!("IRQ interrupt counts:");
     let mut any = false;
@@ -66402,32 +66409,56 @@ fn cmd_container(args: &str) {
             }
         }
         "create" => {
-            // container create <name> [cpu%] [mem_frames] [uid_inner:uid_outer:count]
+            // container create <name> [options...]
+            // Options: cpu=<N> mem=<N> uid=<inner:outer:count> net=<ip>[/<mask>][,gw=<ip>][,dns=<ip>]
             let name = parts.get(1).unwrap_or(&"unnamed");
             let mut cfg = container::ContainerConfig::new(name);
 
-            // Optional CPU limit.
-            if let Some(cpu_str) = parts.get(2) {
-                if let Ok(cpu) = cpu_str.parse::<u64>() {
-                    cfg.cpu_quota = cpu;
-                }
-            }
-            // Optional memory limit.
-            if let Some(mem_str) = parts.get(3) {
-                if let Ok(mem) = mem_str.parse::<u64>() {
-                    cfg.mem_limit = mem;
-                }
-            }
-            // Optional UID mapping (inner:outer:count).
-            if let Some(uid_str) = parts.get(4) {
-                let uid_parts: alloc::vec::Vec<&str> = uid_str.split(':').collect();
-                if uid_parts.len() == 3 {
-                    if let (Ok(inner), Ok(outer), Ok(count)) = (
-                        uid_parts[0].parse::<u32>(),
-                        uid_parts[1].parse::<u32>(),
-                        uid_parts[2].parse::<u32>(),
-                    ) {
-                        cfg = cfg.uid_map(inner, outer, count);
+            // Parse key=value options from remaining args.
+            for &arg in parts.iter().skip(2) {
+                if let Some(val) = arg.strip_prefix("cpu=") {
+                    if let Ok(cpu) = val.parse::<u64>() {
+                        cfg.cpu_quota = cpu;
+                    }
+                } else if let Some(val) = arg.strip_prefix("mem=") {
+                    if let Ok(mem) = val.parse::<u64>() {
+                        cfg.mem_limit = mem;
+                    }
+                } else if let Some(val) = arg.strip_prefix("uid=") {
+                    let uid_parts: alloc::vec::Vec<&str> = val.split(':').collect();
+                    if uid_parts.len() == 3 {
+                        if let (Ok(inner), Ok(outer), Ok(count)) = (
+                            uid_parts[0].parse::<u32>(),
+                            uid_parts[1].parse::<u32>(),
+                            uid_parts[2].parse::<u32>(),
+                        ) {
+                            cfg = cfg.uid_map(inner, outer, count);
+                        }
+                    }
+                } else if let Some(val) = arg.strip_prefix("net=") {
+                    // net=10.88.0.2 or net=10.88.0.2,gw=10.88.0.1,dns=8.8.8.8
+                    let net_parts: alloc::vec::Vec<&str> = val.split(',').collect();
+                    if let Some(ip) = parse_ipv4_octets(net_parts.first().copied().unwrap_or("")) {
+                        cfg.net_ip = Some(ip);
+                        cfg.net_mask = Some([255, 255, 255, 0]); // default /24
+                        for &part in net_parts.iter().skip(1) {
+                            if let Some(gw) = part.strip_prefix("gw=") {
+                                cfg.net_gateway = parse_ipv4_octets(gw);
+                            } else if let Some(dns) = part.strip_prefix("dns=") {
+                                cfg.net_dns = parse_ipv4_octets(dns);
+                            }
+                        }
+                    }
+                } else {
+                    // Legacy positional: arg2=cpu, arg3=mem, arg4=uid
+                    if parts.get(2) == Some(&arg) {
+                        if let Ok(cpu) = arg.parse::<u64>() {
+                            cfg.cpu_quota = cpu;
+                        }
+                    } else if parts.get(3) == Some(&arg) {
+                        if let Ok(mem) = arg.parse::<u64>() {
+                            cfg.mem_limit = mem;
+                        }
                     }
                 }
             }
@@ -66506,6 +66537,9 @@ fn cmd_container(args: &str) {
             if let Some(s) = crate::userns::stats(ci.user_ns) {
                 crate::console_println!("  UID maps:   {}", s.uid_map_count);
                 crate::console_println!("  GID maps:   {}", s.gid_map_count);
+            }
+            if let Some(pair_id) = ci.veth_pair {
+                crate::console_println!("  Veth pair:  {} (host A <-> container B)", pair_id);
             }
             if let Some(s) = crate::netns::stats(ci.net_ns) {
                 if s.iface_up {

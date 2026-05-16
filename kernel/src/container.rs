@@ -166,6 +166,24 @@ impl ContainerConfig {
         self.io_bytes_limit = bytes;
         self
     }
+
+    /// Configure network with IPv4 address and optional mask/gateway/DNS.
+    ///
+    /// When set, a veth pair is automatically created connecting the
+    /// container to the host namespace.
+    pub fn network(
+        mut self,
+        ip: [u8; 4],
+        mask: Option<[u8; 4]>,
+        gateway: Option<[u8; 4]>,
+        dns: Option<[u8; 4]>,
+    ) -> Self {
+        self.net_ip = Some(ip);
+        self.net_mask = mask;
+        self.net_gateway = gateway;
+        self.net_dns = dns;
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------

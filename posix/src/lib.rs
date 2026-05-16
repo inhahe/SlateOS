@@ -400,3 +400,7 @@ pub mod linux_can;
 pub mod sys_fsuid;
 pub mod sys_io;
 pub mod linux_dm_ioctl;
+pub mod linux_i2c;
+pub mod linux_spi;
+pub mod linux_cdrom;
+pub mod linux_hdreg;

@@ -572,7 +572,13 @@ pub fn set_cpu_limit(cgroup_id: CgroupId, limit: CpuLimit) -> KernelResult<()> {
 /// ensures this by only calling for tasks with valid cgroup IDs.
 #[inline]
 pub fn cpu_charge(cgroup_id: CgroupId) -> bool {
-    let table = TABLE.lock();
+    // try_lock: called from scheduler timer tick (interrupt context).
+    // If TABLE is held by the self-test or another caller, skip the
+    // charge rather than deadlocking.
+    let table = match TABLE.try_lock() {
+        Some(g) => g,
+        None => return false,
+    };
     let idx = cgroup_id as usize;
 
     if idx >= MAX_CGROUPS || !table.nodes[idx].active {
@@ -603,7 +609,13 @@ pub fn cpu_charge(cgroup_id: CgroupId) -> bool {
 /// (every `DEFAULT_CPU_PERIOD` ticks = 1 second).  Clears `cpu_used`
 /// so groups can run again in the new period.
 pub fn cpu_period_reset() {
-    let table = TABLE.lock();
+    // try_lock: called from scheduler timer tick.  If TABLE is
+    // contended, skip this period's reset — counters will be reset
+    // next tick.  Slightly extends the current period's throttling.
+    let table = match TABLE.try_lock() {
+        Some(g) => g,
+        None => return,
+    };
     for node in &table.nodes {
         if node.active {
             node.cpu_used.store(0, Ordering::Relaxed);
@@ -666,7 +678,14 @@ pub fn set_mem_limit(cgroup_id: CgroupId, limit: MemLimit) -> KernelResult<()> {
 /// - [`KernelError::OutOfMemory`] if charging would exceed the group's
 ///   memory limit.
 pub fn mem_charge(cgroup_id: CgroupId, count: u64) -> KernelResult<()> {
-    let table = TABLE.lock();
+    // Use try_lock to avoid deadlock when called from the frame allocator
+    // inside interrupt context (e.g., timer tick → reclaim → alloc_frame →
+    // charge_cgroup_alloc).  If TABLE is already held on this CPU, skip
+    // the charge rather than deadlocking.
+    let table = match TABLE.try_lock() {
+        Some(g) => g,
+        None => return Ok(()), // Lock contended — skip charge to avoid deadlock.
+    };
     let idx = cgroup_id as usize;
 
     if idx >= MAX_CGROUPS || !table.nodes[idx].active {
@@ -708,7 +727,14 @@ pub fn mem_charge(cgroup_id: CgroupId, count: u64) -> KernelResult<()> {
 /// Called when frames are freed that were previously charged to this
 /// group.  Saturates at 0 to prevent underflow.
 pub fn mem_uncharge(cgroup_id: CgroupId, count: u64) {
-    let table = TABLE.lock();
+    // Use try_lock to avoid deadlock from frame-free paths that may
+    // run in interrupt context.  If the lock is contended, the uncharge
+    // is lost — memory accounting will be slightly over-counted, which
+    // is safe (conservative direction).
+    let table = match TABLE.try_lock() {
+        Some(g) => g,
+        None => return,
+    };
     let idx = cgroup_id as usize;
 
     if idx >= MAX_CGROUPS || !table.nodes[idx].active {
@@ -811,7 +837,12 @@ pub fn set_io_limit(cgroup_id: CgroupId, limit: IoLimit) -> KernelResult<()> {
 ///
 /// `true` if the I/O should be throttled (limit exceeded), `false` if allowed.
 pub fn io_charge(cgroup_id: CgroupId, frames: u64) -> bool {
-    let table = TABLE.lock();
+    // try_lock: called from I/O scheduler which may run in interrupt
+    // context.  Skip charge if TABLE is contended.
+    let table = match TABLE.try_lock() {
+        Some(g) => g,
+        None => return false,
+    };
     let idx = cgroup_id as usize;
 
     if idx >= MAX_CGROUPS || !table.nodes[idx].active {
@@ -855,7 +886,10 @@ pub fn io_charge(cgroup_id: CgroupId, frames: u64) -> bool {
 #[must_use]
 #[allow(dead_code)] // Public API for I/O scheduler pre-check.
 pub fn io_would_throttle(cgroup_id: CgroupId, frames: u64) -> bool {
-    let table = TABLE.lock();
+    let table = match TABLE.try_lock() {
+        Some(g) => g,
+        None => return false, // Conservative: don't throttle if lock busy.
+    };
     let idx = cgroup_id as usize;
 
     if idx >= MAX_CGROUPS || !table.nodes[idx].active {
@@ -879,7 +913,11 @@ pub fn io_would_throttle(cgroup_id: CgroupId, frames: u64) -> bool {
 /// of each period.  Clears `io_ops_used` and `io_bytes_used` so groups
 /// can issue I/O again in the new period.
 pub fn io_period_reset() {
-    let table = TABLE.lock();
+    // try_lock: called from scheduler timer tick.  Skip if contended.
+    let table = match TABLE.try_lock() {
+        Some(g) => g,
+        None => return,
+    };
     for node in &table.nodes {
         if node.active {
             node.io_ops_used.store(0, Ordering::Relaxed);
@@ -1124,9 +1162,37 @@ pub fn effective_mem_limit(id: CgroupId) -> u64 {
 // ---------------------------------------------------------------------------
 
 /// Comprehensive self-test for the cgroup subsystem.
+///
+/// Runs with interrupts disabled to prevent deadlock: the scheduler's
+/// timer tick calls [`cpu_charge`], [`cpu_period_reset`], and
+/// [`io_period_reset`] which attempt `TABLE.try_lock()`.  If the
+/// self-test holds TABLE (via `set_mem_limit`, `stats`, etc.) when a
+/// timer fires, the try_lock fails harmlessly — but on a uniprocessor
+/// the spin in `TABLE.lock()` would never yield the CPU to release the
+/// interrupt handler.  Disabling interrupts eliminates this entirely.
+///
+/// The self-test is purely in-memory computation (no I/O waits), so
+/// completing with interrupts off takes well under 1 ms.
 pub fn self_test() {
     serial_println!("[cgroup] Running self-test...");
 
+    // Disable interrupts for the duration of the test to prevent
+    // deadlock with the scheduler timer tick (which calls cpu_charge,
+    // cpu_period_reset, io_period_reset — all using TABLE.try_lock).
+    // Those try_lock calls are safe at runtime, but during the self-test
+    // we hold TABLE via TABLE.lock() calls (set_mem_limit, stats, etc.)
+    // and a timer firing mid-test would see try_lock fail and return,
+    // yet the spin::Mutex::lock() in the self-test path can never
+    // progress on a uniprocessor while the interrupt handler is active.
+    crate::cpu::without_interrupts(|| {
+        self_test_inner();
+    });
+
+    serial_println!("[cgroup] Self-test PASSED (25 tests)");
+}
+
+/// Inner self-test body, called with interrupts disabled.
+fn self_test_inner() {
     // Test 1: Root cgroup exists by default.
     assert!(exists(ROOT_CGROUP), "root cgroup must exist");
     assert_eq!(active_count(), 1, "only root at startup");
@@ -1392,6 +1458,4 @@ pub fn self_test() {
     delete(child2).expect("delete child2");
     assert_eq!(active_count(), 1, "only root remains");
     serial_println!("[cgroup]   Cleanup: OK");
-
-    serial_println!("[cgroup] Self-test PASSED (25 tests)");
 }

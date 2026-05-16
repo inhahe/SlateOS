@@ -64891,6 +64891,61 @@ fn cmd_firewall(args: &str) {
             let (allowed6, denied6) = firewall::stats6();
             crate::console_println!("IPv6 — Allowed: {}  Denied: {}", allowed6, denied6);
         }
+        "rules" | "list" | "ls" => {
+            let (rule_stats, count) = firewall::rule_stats();
+            if count == 0 {
+                crate::console_println!("No IPv4 rules configured");
+            } else {
+                crate::console_println!("=== IPv4 Firewall Rules ({}) ===", count);
+                crate::console_println!("{:<4} {:<6} {:<5} {:<6} {:<20} {:<6} {:<6} {}",
+                    "Idx", "Action", "Dir", "Proto", "Source", "Port", "Prio", "Matches");
+                for rs in rule_stats.iter().take(count) {
+                    let src = core::str::from_utf8(&rs.source[..rs.source_len as usize])
+                        .unwrap_or("?");
+                    let port_str = if rs.dst_port == 0 {
+                        alloc::string::String::from("any")
+                    } else {
+                        alloc::format!("{}", rs.dst_port)
+                    };
+                    crate::console_println!("{:<4} {:<6} {:<5} {:<6} {:<20} {:<6} {:<6} {}",
+                        rs.index, rs.action, rs.direction, rs.protocol,
+                        src, port_str, rs.priority, rs.matches);
+                }
+            }
+        }
+        "rules6" | "list6" | "ls6" => {
+            let (rule_stats, count) = firewall::rule6_stats();
+            if count == 0 {
+                crate::console_println!("No IPv6 rules configured");
+            } else {
+                crate::console_println!("=== IPv6 Firewall Rules ({}) ===", count);
+                crate::console_println!("{:<4} {:<6} {:<5} {:<8} {:<42} {:<6} {:<6} {}",
+                    "Idx", "Action", "Dir", "Proto", "Source", "Port", "Prio", "Matches");
+                for rs in rule_stats.iter().take(count) {
+                    let src = core::str::from_utf8(&rs.source[..rs.source_len as usize])
+                        .unwrap_or("?");
+                    let port_str = if rs.dst_port == 0 {
+                        alloc::string::String::from("any")
+                    } else {
+                        alloc::format!("{}", rs.dst_port)
+                    };
+                    // For IPv6 rules, "icmp" actually means "icmpv6".
+                    let proto = if rs.protocol == firewall::Protocol::Icmp {
+                        "icmpv6"
+                    } else {
+                        match rs.protocol {
+                            firewall::Protocol::Any => "any",
+                            firewall::Protocol::Tcp => "tcp",
+                            firewall::Protocol::Udp => "udp",
+                            firewall::Protocol::Icmp => "icmpv6",
+                        }
+                    };
+                    crate::console_println!("{:<4} {:<6} {:<5} {:<8} {:<42} {:<6} {:<6} {}",
+                        rs.index, rs.action, rs.direction, proto,
+                        src, port_str, rs.priority, rs.matches);
+                }
+            }
+        }
         "conntrack" | "ct" => {
             let count = firewall::conntrack_count();
             let count6 = firewall::conntrack6_count();
@@ -64905,7 +64960,7 @@ fn cmd_firewall(args: &str) {
         }
         _ => {
             crate::console_println!("Usage: fw [on|off|on6|off6|policy|policy6|allow|deny|allow6|deny6|");
-            crate::console_println!("          remove|remove6|clear|clear6|stats|conntrack|reset]");
+            crate::console_println!("          remove|remove6|clear|clear6|rules|rules6|stats|conntrack|reset]");
         }
     }
 }

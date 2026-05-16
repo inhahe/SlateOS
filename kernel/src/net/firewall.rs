@@ -502,17 +502,22 @@ pub fn rule_stats() -> ([RuleStats; MAX_RULES], usize) {
     let mut out = [RuleStats::EMPTY; MAX_RULES];
     let mut count = 0;
 
-    for rule in rules.iter() {
+    for (i, rule) in rules.iter().enumerate() {
         if !rule.active {
             continue;
         }
         if count < MAX_RULES {
+            let (src_buf, src_len) = format_v4_source(rule.src_ip, rule.src_prefix);
             out[count] = RuleStats {
+                index: i,
                 priority: rule.priority,
                 protocol: rule.protocol,
                 action: rule.action,
                 direction: rule.direction,
-                match_count: rule.match_count,
+                dst_port: rule.dst_port,
+                source: src_buf,
+                source_len: src_len,
+                matches: rule.match_count,
             };
             count += 1;
         }
@@ -535,10 +540,12 @@ pub fn rule_stats() -> ([RuleStats; MAX_RULES], usize) {
     (out, count)
 }
 
-/// Per-rule statistics entry.
+/// Per-rule statistics entry with display-ready string fields.
 #[allow(dead_code)] // Public API — used by shell commands.
 #[derive(Clone, Copy)]
 pub struct RuleStats {
+    /// Original index in the rule table.
+    pub index: usize,
     /// Rule priority.
     pub priority: u16,
     /// Protocol selector.
@@ -547,18 +554,117 @@ pub struct RuleStats {
     pub action: Action,
     /// Direction.
     pub direction: Direction,
+    /// Destination port (0 = any).
+    pub dst_port: u16,
+    /// Source IP/prefix as a short display string.
+    /// Uses a fixed-size buffer to avoid heap allocation.
+    pub source: [u8; 48],
+    /// Length of valid bytes in `source`.
+    pub source_len: u8,
     /// Number of packets matched.
-    pub match_count: u64,
+    #[allow(dead_code)]
+    pub matches: u64,
 }
 
 impl RuleStats {
     const EMPTY: Self = Self {
+        index: 0,
         priority: 0,
         protocol: Protocol::Any,
         action: Action::Allow,
         direction: Direction::Both,
-        match_count: 0,
+        dst_port: 0,
+        source: [0; 48],
+        source_len: 0,
+        matches: 0,
     };
+}
+
+impl core::fmt::Display for Protocol {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Protocol::Any => write!(f, "any"),
+            Protocol::Tcp => write!(f, "tcp"),
+            Protocol::Udp => write!(f, "udp"),
+            Protocol::Icmp => write!(f, "icmp"),
+        }
+    }
+}
+
+impl core::fmt::Display for Action {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Action::Allow => write!(f, "allow"),
+            Action::Deny => write!(f, "deny"),
+        }
+    }
+}
+
+impl core::fmt::Display for Direction {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Direction::In => write!(f, "in"),
+            Direction::Out => write!(f, "out"),
+            Direction::Both => write!(f, "both"),
+        }
+    }
+}
+
+/// Format an IPv4 source IP/prefix into a display buffer.
+fn format_v4_source(ip: Ipv4Addr, prefix: u8) -> ([u8; 48], u8) {
+    use core::fmt::Write;
+
+    let mut buf = [0u8; 48];
+    let mut writer = FixedBufWriter { buf: &mut buf, pos: 0 };
+    if ip == Ipv4Addr::UNSPECIFIED && prefix == 0 {
+        let _ = write!(writer, "any");
+    } else if prefix >= 32 || prefix == 0 {
+        let _ = write!(writer, "{}", ip);
+    } else {
+        let _ = write!(writer, "{}/{}", ip, prefix);
+    }
+    let len = writer.pos.min(48) as u8;
+    (buf, len)
+}
+
+/// Format an IPv6 source IP/prefix into a display buffer.
+fn format_v6_source(ip: Ipv6Addr, prefix: u8) -> ([u8; 48], u8) {
+    use core::fmt::Write;
+
+    let mut buf = [0u8; 48];
+    let mut writer = FixedBufWriter { buf: &mut buf, pos: 0 };
+    if ip == Ipv6Addr::UNSPECIFIED && prefix == 0 {
+        let _ = write!(writer, "any");
+    } else if prefix >= 128 || prefix == 0 {
+        let _ = write!(writer, "{}", ip);
+    } else {
+        let _ = write!(writer, "{}/{}", ip, prefix);
+    }
+    let len = writer.pos.min(48) as u8;
+    (buf, len)
+}
+
+/// Helper: write into a fixed-size byte buffer.
+struct FixedBufWriter<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> core::fmt::Write for FixedBufWriter<'a> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let bytes = s.as_bytes();
+        let space = self.buf.len().saturating_sub(self.pos);
+        let n = bytes.len().min(space);
+        self.buf[self.pos..self.pos + n].copy_from_slice(&bytes[..n]);
+        self.pos += n;
+        Ok(())
+    }
+}
+
+impl core::fmt::Display for RuleStats {
+    fn fmt(&self, _f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        Ok(()) // Display handled by kshell directly via field access.
+    }
 }
 
 /// Reset all per-rule match counters to zero.
@@ -1500,17 +1606,22 @@ pub fn rule6_stats() -> ([RuleStats; MAX_RULES6], usize) {
     let mut out = [RuleStats::EMPTY; MAX_RULES6];
     let mut count = 0;
 
-    for rule in rules.iter() {
+    for (i, rule) in rules.iter().enumerate() {
         if !rule.active {
             continue;
         }
         if count < MAX_RULES6 {
+            let (src_buf, src_len) = format_v6_source(rule.src_ip, rule.src_prefix);
             out[count] = RuleStats {
+                index: i,
                 priority: rule.priority,
                 protocol: rule.protocol,
                 action: rule.action,
                 direction: rule.direction,
-                match_count: rule.match_count,
+                dst_port: rule.dst_port,
+                source: src_buf,
+                source_len: src_len,
+                matches: rule.match_count,
             };
             count += 1;
         }
@@ -1851,6 +1962,137 @@ fn ip6_matches(packet_ip: Ipv6Addr, rule_ip: Ipv6Addr, prefix_len: u8) -> bool {
     let mask = u128::MAX.checked_shl(shift).unwrap_or(0);
 
     (pkt & mask) == (rule & mask)
+}
+
+// ---------------------------------------------------------------------------
+// Procfs content
+// ---------------------------------------------------------------------------
+
+/// Generate text content for `/proc/firewall`.
+///
+/// Reports global IPv4 and IPv6 firewall state: enabled/disabled,
+/// default policy, rule and conntrack counts, packet counters, and
+/// per-namespace summary.
+pub fn procfs_content() -> alloc::string::String {
+    use alloc::format;
+    use alloc::string::String;
+
+    let mut out = String::new();
+
+    // --- IPv4 global state ---
+    let enabled = is_enabled();
+    let policy = default_policy();
+    let (allowed, denied) = stats();
+    let rule_ct = rule_count();
+    let ct_ct = conntrack_count();
+
+    out.push_str("=== IPv4 Firewall ===\n");
+    out.push_str(&format!("enabled: {}\n", enabled));
+    out.push_str(&format!("default_policy: {:?}\n", policy));
+    out.push_str(&format!("rules: {}/{}\n", rule_ct, MAX_RULES));
+    out.push_str(&format!("conntrack: {}/{}\n", ct_ct, MAX_CONNTRACK));
+    out.push_str(&format!("packets_allowed: {}\n", allowed));
+    out.push_str(&format!("packets_denied: {}\n", denied));
+
+    // List active IPv4 rules.
+    {
+        let rules = RULES.lock();
+        for (i, rule) in rules.iter().enumerate() {
+            if !rule.active {
+                continue;
+            }
+            let dir = match rule.direction {
+                Direction::In => "in",
+                Direction::Out => "out",
+                Direction::Both => "both",
+            };
+            let act = match rule.action {
+                Action::Allow => "allow",
+                Action::Deny => "deny",
+            };
+            let proto = match rule.protocol {
+                Protocol::Any => "any",
+                Protocol::Tcp => "tcp",
+                Protocol::Udp => "udp",
+                Protocol::Icmp => "icmp",
+            };
+            out.push_str(&format!(
+                "  rule[{}]: {} {} proto={} src={}/{} dport={} prio={} matches={}\n",
+                i, act, dir, proto, rule.src_ip, rule.src_prefix,
+                rule.dst_port, rule.priority, rule.match_count,
+            ));
+        }
+    }
+
+    // --- IPv6 global state ---
+    let enabled6 = is_enabled6();
+    let policy6 = default_policy6();
+    let (allowed6, denied6) = stats6();
+    let rule6_ct = rule6_count();
+    let ct6_ct = conntrack6_count();
+
+    out.push_str("\n=== IPv6 Firewall ===\n");
+    out.push_str(&format!("enabled: {}\n", enabled6));
+    out.push_str(&format!("default_policy: {:?}\n", policy6));
+    out.push_str(&format!("rules: {}/{}\n", rule6_ct, MAX_RULES6));
+    out.push_str(&format!("conntrack: {}/{}\n", ct6_ct, MAX_CONNTRACK6));
+    out.push_str(&format!("packets_allowed: {}\n", allowed6));
+    out.push_str(&format!("packets_denied: {}\n", denied6));
+
+    // List active IPv6 rules.
+    {
+        let rules = RULES6.lock();
+        for (i, rule) in rules.iter().enumerate() {
+            if !rule.active {
+                continue;
+            }
+            let dir = match rule.direction {
+                Direction::In => "in",
+                Direction::Out => "out",
+                Direction::Both => "both",
+            };
+            let act = match rule.action {
+                Action::Allow => "allow",
+                Action::Deny => "deny",
+            };
+            let proto = match rule.protocol {
+                Protocol::Any => "any",
+                Protocol::Tcp => "tcp",
+                Protocol::Udp => "udp",
+                Protocol::Icmp => "icmpv6",
+            };
+            out.push_str(&format!(
+                "  rule[{}]: {} {} proto={} src={}/{} dport={} prio={} matches={}\n",
+                i, act, dir, proto, rule.src_ip, rule.src_prefix,
+                rule.dst_port, rule.priority, rule.match_count,
+            ));
+        }
+    }
+
+    // --- Per-namespace summary ---
+    {
+        let ns_table = NS_FIREWALLS.lock();
+        let active_count = ns_table.iter().filter(|ns| ns.active).count();
+        if active_count > 0 {
+            out.push_str(&format!("\n=== Namespace Firewalls ({} active) ===\n", active_count));
+            for (i, ns) in ns_table.iter().enumerate() {
+                if !ns.active {
+                    continue;
+                }
+                let ns_rules = ns.rules.iter().filter(|r| r.active).count();
+                let ns_ct = ns.conntrack.iter().filter(|c| c.active).count();
+                out.push_str(&format!(
+                    "  ns[{}]: enabled={} policy={:?} rules={}/{} conntrack={}/{} allowed={} denied={}\n",
+                    i, ns.enabled, ns.policy,
+                    ns_rules, MAX_NS_RULES,
+                    ns_ct, MAX_NS_CONNTRACK,
+                    ns.allowed, ns.denied,
+                ));
+            }
+        }
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------

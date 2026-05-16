@@ -1684,7 +1684,11 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
       - [x] ipv4.rs: send_ns() with per-namespace source IP + route_lookup()
       - [x] netns.rs: is_initialized() for boot-order safety
       - [x] ARP/firewall doc notes (global/shared, per-namespace ARP is future)
-      - [-] Per-namespace ARP cache (veth pairs now implemented; ARP cache split remaining)
+      - [x] Per-namespace ARP cache (16 entries per namespace, independent of global cache)
+        - [x] ns_init/ns_destroy lifecycle management per namespace
+        - [x] ns_lookup/ns_insert/ns_flush with root→global delegation
+        - [x] ns_cache_entries/ns_entry_count diagnostics
+        - [x] 3 self-tests: namespace isolation, root delegation, lifecycle
       - [x] Virtual Ethernet (veth) pairs: connected virtual links between namespaces
         - [x] VethPair with two VethEnd endpoints, per-end MAC/ns/queue/stats
         - [x] Frame loopback: TX on end A → RX on end B (and vice versa)

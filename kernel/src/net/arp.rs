@@ -12,17 +12,16 @@
 //! an ARP request.  The target replies with its MAC.  We also respond
 //! to ARP requests for our own IP.
 //!
-//! ## Namespace note
+//! ## Namespace support
 //!
-//! The ARP cache is global — shared across all network namespaces.
-//! This is correct for the current design where all namespaces share
-//! a single physical NIC (so the same MAC↔IP mappings apply to all).
-//! When virtual ethernet (veth) pairs are implemented, each namespace
-//! will need its own ARP cache for its virtual interface's LAN segment.
+//! The global ARP cache serves the root namespace (physical NIC LAN).
+//! Per-namespace ARP caches provide isolated MAC resolution for child
+//! namespaces connected via veth pairs.  Each namespace has its own
+//! 16-entry cache, operating independently of the global cache.
 //!
-//! Note: per-namespace firewall rules are already implemented in
-//! `net::firewall` (see `ns_*` functions).  Per-namespace ARP is the
-//! remaining piece for full network namespace isolation.
+//! Use `ns_lookup()` / `ns_insert()` / `ns_resolve()` for namespace-
+//! aware ARP operations.  For the root namespace (ID 0), these
+//! delegate to the global cache.
 
 use spin::Mutex;
 
@@ -367,6 +366,265 @@ pub fn send_gratuitous() -> KernelResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Per-namespace ARP cache
+// ---------------------------------------------------------------------------
+
+/// Maximum per-namespace ARP cache entries.
+///
+/// Smaller than the global cache — containers typically have fewer
+/// neighbors (often just the host-side veth peer + gateway).
+const NS_ARP_CACHE_SIZE: usize = 16;
+
+/// Maximum number of namespace ARP caches.
+///
+/// Matches `netns::MAX_NAMESPACES`.  Slot 0 is unused (root namespace
+/// uses the global `ARP_CACHE`).
+const NS_ARP_MAX: usize = 64;
+
+/// Per-namespace ARP cache slot.
+struct NsArpCache {
+    /// Whether this namespace slot has an active ARP cache.
+    active: bool,
+    /// The cache entries.
+    entries: [ArpEntry; NS_ARP_CACHE_SIZE],
+}
+
+impl NsArpCache {
+    const fn empty() -> Self {
+        Self {
+            active: false,
+            entries: [ArpEntry {
+                ip: Ipv4Addr::UNSPECIFIED,
+                mac: MacAddress([0; 6]),
+                valid: false,
+                updated_ns: 0,
+            }; NS_ARP_CACHE_SIZE],
+        }
+    }
+}
+
+/// Per-namespace ARP cache table.
+static NS_ARP: Mutex<[NsArpCache; NS_ARP_MAX]> = Mutex::new(
+    [const { NsArpCache::empty() }; NS_ARP_MAX]
+);
+
+/// Initialize the per-namespace ARP cache for a namespace.
+///
+/// Called when a namespace creates a veth endpoint or when the
+/// container networking stack sets up a namespace.  Idempotent —
+/// calling on an already-initialized namespace is a no-op.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] if `ns_id` is the root namespace
+///   (root uses the global cache) or out of range.
+pub fn ns_init(ns_id: crate::netns::NetNsId) -> KernelResult<()> {
+    if ns_id == crate::netns::ROOT_NS {
+        return Err(KernelError::InvalidArgument);
+    }
+    let idx = ns_id as usize;
+    let mut table = NS_ARP.lock();
+    let cache = table.get_mut(idx).ok_or(KernelError::InvalidArgument)?;
+    if !cache.active {
+        cache.active = true;
+        for entry in cache.entries.iter_mut() {
+            entry.valid = false;
+        }
+    }
+    Ok(())
+}
+
+/// Destroy the per-namespace ARP cache for a namespace.
+///
+/// Invalidates all entries.  Called during namespace teardown.
+pub fn ns_destroy(ns_id: crate::netns::NetNsId) {
+    let idx = ns_id as usize;
+    let mut table = NS_ARP.lock();
+    if let Some(cache) = table.get_mut(idx) {
+        cache.active = false;
+        for entry in cache.entries.iter_mut() {
+            entry.valid = false;
+        }
+    }
+}
+
+/// Look up a MAC address in a namespace's ARP cache.
+///
+/// For the root namespace, delegates to the global cache.
+/// Returns `None` if not found, expired, or namespace has no cache.
+pub fn ns_lookup(ns_id: crate::netns::NetNsId, ip: Ipv4Addr) -> Option<MacAddress> {
+    if ns_id == crate::netns::ROOT_NS {
+        return lookup(ip);
+    }
+
+    let now = crate::hrtimer::now_ns();
+    let idx = ns_id as usize;
+    let table = NS_ARP.lock();
+    let cache = table.get(idx)?;
+    if !cache.active {
+        return None;
+    }
+
+    for entry in cache.entries.iter() {
+        if entry.ip == ip && entry.is_fresh(now) {
+            return Some(entry.mac);
+        }
+    }
+    None
+}
+
+/// Insert or update an entry in a namespace's ARP cache.
+///
+/// For the root namespace, delegates to the global cache.
+/// Silently ignores if the namespace has no ARP cache initialized.
+pub fn ns_insert(ns_id: crate::netns::NetNsId, ip: Ipv4Addr, mac: MacAddress) {
+    if ns_id == crate::netns::ROOT_NS {
+        cache_insert(ip, mac);
+        return;
+    }
+
+    // Reject broadcast, multicast, and loopback IPs.
+    if ip.is_multicast() || ip.is_broadcast() || ip.0[0] == 127 {
+        return;
+    }
+
+    let now = crate::hrtimer::now_ns();
+    let idx = ns_id as usize;
+    let mut table = NS_ARP.lock();
+    let Some(cache) = table.get_mut(idx) else { return };
+    if !cache.active {
+        return;
+    }
+
+    // Check if already present — update.
+    for entry in cache.entries.iter_mut() {
+        if entry.valid && entry.ip == ip {
+            entry.mac = mac;
+            entry.updated_ns = now;
+            return;
+        }
+    }
+
+    // Find an empty or expired slot.
+    for entry in cache.entries.iter_mut() {
+        if !entry.is_fresh(now) {
+            *entry = ArpEntry { ip, mac, valid: true, updated_ns: now };
+            return;
+        }
+    }
+
+    // Cache full — evict the oldest.
+    let mut oldest_idx = 0;
+    let mut oldest_time = u64::MAX;
+    for (i, entry) in cache.entries.iter().enumerate() {
+        if entry.updated_ns < oldest_time {
+            oldest_time = entry.updated_ns;
+            oldest_idx = i;
+        }
+    }
+    if let Some(slot) = cache.entries.get_mut(oldest_idx) {
+        *slot = ArpEntry { ip, mac, valid: true, updated_ns: now };
+    }
+}
+
+/// Flush all entries in a namespace's ARP cache.
+///
+/// For the root namespace, delegates to the global flush.
+pub fn ns_flush(ns_id: crate::netns::NetNsId) {
+    if ns_id == crate::netns::ROOT_NS {
+        flush_cache();
+        return;
+    }
+
+    let idx = ns_id as usize;
+    let mut table = NS_ARP.lock();
+    if let Some(cache) = table.get_mut(idx) {
+        if cache.active {
+            for entry in cache.entries.iter_mut() {
+                entry.valid = false;
+            }
+        }
+    }
+}
+
+/// Get a snapshot of a namespace's ARP cache entries.
+///
+/// For the root namespace, delegates to the global `cache_entries()`.
+pub fn ns_cache_entries(
+    ns_id: crate::netns::NetNsId,
+) -> ([ArpCacheEntry; NS_ARP_CACHE_SIZE], usize) {
+    let empty = [ArpCacheEntry {
+        ip: Ipv4Addr::UNSPECIFIED,
+        mac: MacAddress([0; 6]),
+        ttl_secs: 0,
+    }; NS_ARP_CACHE_SIZE];
+
+    if ns_id == crate::netns::ROOT_NS {
+        // Convert global cache entries to the smaller array.
+        let (global, global_count) = cache_entries();
+        let mut out = empty;
+        let copy_count = global_count.min(NS_ARP_CACHE_SIZE);
+        for i in 0..copy_count {
+            if let Some(src) = global.get(i) {
+                if let Some(dst) = out.get_mut(i) {
+                    *dst = *src;
+                }
+            }
+        }
+        return (out, copy_count);
+    }
+
+    let now = crate::hrtimer::now_ns();
+    let idx = ns_id as usize;
+    let table = NS_ARP.lock();
+    let Some(cache) = table.get(idx) else {
+        return (empty, 0);
+    };
+    if !cache.active {
+        return (empty, 0);
+    }
+
+    let mut out = empty;
+    let mut count: usize = 0;
+
+    for entry in cache.entries.iter() {
+        if entry.is_fresh(now) {
+            let age_ns = now.saturating_sub(entry.updated_ns);
+            let remaining_ns = ARP_ENTRY_LIFETIME_NS.saturating_sub(age_ns);
+            if let Some(slot) = out.get_mut(count) {
+                *slot = ArpCacheEntry {
+                    ip: entry.ip,
+                    mac: entry.mac,
+                    ttl_secs: remaining_ns / 1_000_000_000,
+                };
+                count = count.wrapping_add(1);
+            }
+        }
+    }
+
+    (out, count)
+}
+
+/// Count entries in a namespace's ARP cache.
+#[must_use]
+pub fn ns_entry_count(ns_id: crate::netns::NetNsId) -> usize {
+    if ns_id == crate::netns::ROOT_NS {
+        let (_, count) = cache_entries();
+        return count;
+    }
+
+    let now = crate::hrtimer::now_ns();
+    let idx = ns_id as usize;
+    let table = NS_ARP.lock();
+    let Some(cache) = table.get(idx) else { return 0 };
+    if !cache.active {
+        return 0;
+    }
+
+    cache.entries.iter().filter(|e| e.is_fresh(now)).count()
+}
+
+// ---------------------------------------------------------------------------
 // ARP cache diagnostics
 // ---------------------------------------------------------------------------
 
@@ -443,6 +701,9 @@ pub fn self_test() -> KernelResult<()> {
     test_cache_insert_lookup()?;
     test_cache_reject_multicast()?;
     test_cache_flush()?;
+
+    // Per-namespace ARP tests run separately via ns_self_test()
+    // because they require netns::init() which runs later in boot.
 
     crate::serial_println!("[arp] ARP self-test PASSED");
     Ok(())
@@ -608,5 +869,194 @@ fn test_cache_flush() -> KernelResult<()> {
     }
 
     crate::serial_println!("[arp]   cache flush: OK");
+    Ok(())
+}
+
+/// Self-test for per-namespace ARP cache.
+///
+/// Must be called after `netns::init()`.  Exercises namespace isolation,
+/// root delegation, and cache lifecycle.
+pub fn ns_self_test() -> KernelResult<()> {
+    crate::serial_println!("[arp-ns] Running per-namespace ARP self-test...");
+
+    test_ns_arp_isolation()?;
+    test_ns_arp_root_delegates()?;
+    test_ns_arp_lifecycle()?;
+
+    crate::serial_println!("[arp-ns] Per-namespace ARP self-test PASSED (3 tests)");
+    Ok(())
+}
+
+/// Test that two namespaces have isolated ARP caches.
+fn test_ns_arp_isolation() -> KernelResult<()> {
+    // Create two child namespaces.
+    let ns1 = crate::netns::create()?;
+    let ns2 = crate::netns::create()?;
+
+    // Initialize per-namespace ARP caches.
+    ns_init(ns1)?;
+    ns_init(ns2)?;
+
+    let ip = Ipv4Addr([10, 0, 0, 5]);
+    let mac1 = MacAddress([0xAA, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    let mac2 = MacAddress([0xBB, 0x66, 0x77, 0x88, 0x99, 0xAA]);
+
+    // Insert different MACs for the same IP into each namespace.
+    ns_insert(ns1, ip, mac1);
+    ns_insert(ns2, ip, mac2);
+
+    // Each namespace should see its own MAC.
+    let found1 = ns_lookup(ns1, ip);
+    let found2 = ns_lookup(ns2, ip);
+
+    match (found1, found2) {
+        (Some(f1), Some(f2)) if f1.0 == mac1.0 && f2.0 == mac2.0 => {}
+        _ => {
+            crate::serial_println!(
+                "[arp]   FAIL: ns isolation: ns1={:?} ns2={:?}",
+                found1.map(|m| m.0), found2.map(|m| m.0)
+            );
+            ns_destroy(ns1);
+            ns_destroy(ns2);
+            crate::netns::delete(ns1)?;
+            crate::netns::delete(ns2)?;
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Flush ns1 — ns2 should be unaffected.
+    ns_flush(ns1);
+    if ns_lookup(ns1, ip).is_some() {
+        crate::serial_println!("[arp]   FAIL: ns1 not flushed");
+        ns_destroy(ns1);
+        ns_destroy(ns2);
+        crate::netns::delete(ns1)?;
+        crate::netns::delete(ns2)?;
+        return Err(KernelError::InternalError);
+    }
+    if ns_lookup(ns2, ip).is_none() {
+        crate::serial_println!("[arp]   FAIL: ns2 affected by ns1 flush");
+        ns_destroy(ns1);
+        ns_destroy(ns2);
+        crate::netns::delete(ns1)?;
+        crate::netns::delete(ns2)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // Entry count check.
+    if ns_entry_count(ns1) != 0 {
+        crate::serial_println!("[arp]   FAIL: ns1 count should be 0");
+        ns_destroy(ns1);
+        ns_destroy(ns2);
+        crate::netns::delete(ns1)?;
+        crate::netns::delete(ns2)?;
+        return Err(KernelError::InternalError);
+    }
+    if ns_entry_count(ns2) != 1 {
+        crate::serial_println!("[arp]   FAIL: ns2 count should be 1");
+        ns_destroy(ns1);
+        ns_destroy(ns2);
+        crate::netns::delete(ns1)?;
+        crate::netns::delete(ns2)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // Cleanup.
+    ns_destroy(ns1);
+    ns_destroy(ns2);
+    crate::netns::delete(ns1)?;
+    crate::netns::delete(ns2)?;
+
+    crate::serial_println!("[arp]   ns ARP isolation: OK");
+    Ok(())
+}
+
+/// Test that root namespace operations delegate to the global cache.
+fn test_ns_arp_root_delegates() -> KernelResult<()> {
+    flush_cache();
+
+    let ip = Ipv4Addr([172, 16, 0, 99]);
+    let mac = MacAddress([0xCC, 0xDD, 0xEE, 0x11, 0x22, 0x33]);
+
+    // Insert via ns_insert for root.
+    ns_insert(crate::netns::ROOT_NS, ip, mac);
+
+    // Should be visible via both ns_lookup (root) and global lookup.
+    match ns_lookup(crate::netns::ROOT_NS, ip) {
+        Some(f) if f.0 == mac.0 => {}
+        other => {
+            crate::serial_println!("[arp]   FAIL: root ns_lookup: {:?}", other.map(|m| m.0));
+            flush_cache();
+            return Err(KernelError::InternalError);
+        }
+    }
+    match lookup(ip) {
+        Some(f) if f.0 == mac.0 => {}
+        other => {
+            crate::serial_println!("[arp]   FAIL: root global lookup: {:?}", other.map(|m| m.0));
+            flush_cache();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // ns_init for root should fail.
+    if ns_init(crate::netns::ROOT_NS).is_ok() {
+        crate::serial_println!("[arp]   FAIL: ns_init(root) should fail");
+        flush_cache();
+        return Err(KernelError::InternalError);
+    }
+
+    flush_cache();
+    crate::serial_println!("[arp]   ns ARP root delegation: OK");
+    Ok(())
+}
+
+/// Test ARP cache lifecycle: init, use, destroy, verify gone.
+fn test_ns_arp_lifecycle() -> KernelResult<()> {
+    let ns = crate::netns::create()?;
+    ns_init(ns)?;
+
+    let ip = Ipv4Addr([192, 168, 100, 1]);
+    let mac = MacAddress([0x02, 0xFE, 0x0A, 0x00, 0x00, 0x01]);
+
+    ns_insert(ns, ip, mac);
+    if ns_lookup(ns, ip).is_none() {
+        crate::serial_println!("[arp]   FAIL: entry not found after insert");
+        ns_destroy(ns);
+        crate::netns::delete(ns)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // Destroy the ARP cache.
+    ns_destroy(ns);
+
+    // Lookup should return None now.
+    if ns_lookup(ns, ip).is_some() {
+        crate::serial_println!("[arp]   FAIL: entry found after destroy");
+        crate::netns::delete(ns)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // ns_cache_entries should return empty.
+    let (_, count) = ns_cache_entries(ns);
+    if count != 0 {
+        crate::serial_println!("[arp]   FAIL: entries after destroy: {}", count);
+        crate::netns::delete(ns)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // Re-init should work (reuse slot).
+    ns_init(ns)?;
+    ns_insert(ns, ip, mac);
+    if ns_lookup(ns, ip).is_none() {
+        crate::serial_println!("[arp]   FAIL: entry not found after re-init");
+        ns_destroy(ns);
+        crate::netns::delete(ns)?;
+        return Err(KernelError::InternalError);
+    }
+
+    ns_destroy(ns);
+    crate::netns::delete(ns)?;
+    crate::serial_println!("[arp]   ns ARP lifecycle: OK");
     Ok(())
 }

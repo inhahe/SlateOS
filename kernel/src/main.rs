@@ -1328,6 +1328,12 @@ extern "C" fn kmain() -> ! {
         serial_println!("[WARN] Veth self-test failed: {:?}", e);
     }
 
+    // Step 22e⅞++++p8c: Per-namespace ARP cache self-test.
+    // Isolated MAC resolution per namespace — requires netns::init().
+    if let Err(e) = net::arp::ns_self_test() {
+        serial_println!("[WARN] Per-namespace ARP self-test failed: {:?}", e);
+    }
+
     // Step 22e⅞++++p9: Container lifecycle manager init + self-test.
     // Unified container abstraction tying PID/user/network namespaces + cgroup
     // into a single lifecycle with create/start/stop/delete state machine.

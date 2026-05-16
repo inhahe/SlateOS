@@ -16,7 +16,7 @@ popen/pclose → DONE: Full implementation using posix_spawnp + pipe + fd_map.
   Pipe close from one process will close for both.  Need readers/writers u32 counters
   in Pipe struct instead of read_closed/write_closed booleans, plus pipe::dup(handle)
   that increments the appropriate counter.
-Per-namespace ARP → blocked on veth pairs
+Per-namespace ARP → DONE (veth pairs + per-namespace ARP cache with 3 self-tests)
 Wire process→container→net_ns → cross-zone (kernel-process + kernel-ipc)
 
 Net improvements (not blocked, could still do):
@@ -193,8 +193,10 @@ Remaining net improvements (diminishing returns):
   Per-namespace firewall rules: DONE (commit 8f1ec5a).  16 rules + 32
   conntrack entries per namespace, ns_init/ns_enable/ns_add_rule API,
   ipv4::send_ns() uses check_outbound_ns().  3 self-tests.
-  Remaining work: per-namespace ARP cache (blocked on veth pairs),
-  and wiring process→container→net_ns lookup into socket-layer callers
+  Per-namespace ARP cache: DONE. 16-entry per-NS cache with ns_init/
+  ns_destroy/ns_lookup/ns_insert/ns_flush/ns_cache_entries API.  Root NS
+  delegates to global cache.  3 self-tests (isolation, delegation, lifecycle).
+  Remaining: wiring process→container→net_ns lookup into socket-layer callers
   (requires changes in kernel-process zone for PCB net_ns field and
   kernel-ipc zone for syscall handler changes — cross-zone work).
 

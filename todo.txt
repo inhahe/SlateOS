@@ -70,14 +70,26 @@ Remaining net improvements (diminishing returns):
   `BTreeMap<TaskId, Task>` to `BTreeMap<TaskId, Box<Task>>` so tasks have
   stable heap addresses independent of BTree node layout.
 
-- kchannel multi-task self-test crash: The kchannel self-test's multi-task
-  test (spawns task 67 for cross-task send/recv) triggers a recursive
-  kernel page fault at 0xffffffff80354d40 → 0xffffffff803b1ed0 with
-  "not-present, read, kernel" error.  The fault handler itself faults,
-  consuming stack until the task is dead.  This is in the kernel-ipc zone.
-  Blocks BOOT_OK from being reached (crash happens before boot-complete).
-  All tests before kchannel pass (DRM, EDID, hotplug, all sync primitives).
-  Likely a stack overflow in the spawned task or an unmapped kernel text page.
+- kchannel multi-task self-test crash (BINARY-LAYOUT-DEPENDENT):
+  The kchannel self-test's multi-task test triggers a recursive kernel
+  page fault at a kernel text address with "not-present, read, kernel"
+  error.  Bisection confirmed: adding ~1,768 bytes of code anywhere in
+  the kernel (e.g., a serial_println! in hotplug::enable()) shifts the
+  binary layout past a critical page boundary, causing a kernel text page
+  to become "not-present" during the kchannel test.  The fault handler
+  itself faults on the same unmapped text, consuming stack until death.
+  ROOT CAUSE: protect module's harden_kernel_sections() (kernel-core zone,
+  kernel/src/mm/protect.rs ~line 488) doesn't correctly cover all kernel
+  text pages at certain binary sizes.  The ELF section boundaries used to
+  set page permissions leave gaps when the kernel grows past certain
+  size thresholds.
+  WORKAROUND: Keep hotplug::enable() minimal (no serial_println).
+  FIX NEEDED (kernel-core zone): harden_kernel_sections() must compute
+  kernel text boundaries from the actual loaded ELF sections (or linker
+  symbols like __text_start/__text_end) and ensure ALL pages in the
+  range are mapped present+executable.  Currently some pages at the end
+  of the text section get marked not-present when the section spans a
+  page boundary that the hardening logic doesn't account for.
 
 - Debug kernel binary too large for Limine: The debug build (~9MB) causes
   Limine to panic "High memory allocator: Out of memory" with 128M QEMU.

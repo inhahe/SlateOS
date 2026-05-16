@@ -222,7 +222,6 @@ impl NotifierState {
 /// Called during DRM initialization after all backends are registered.
 pub fn enable() {
     ENABLED.store(true, Ordering::Release);
-    serial_println!("[drm-hp] Hotplug detection enabled");
 }
 
 /// Disable hotplug detection.

@@ -1439,7 +1439,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Migrate compositor from direct fb.rs to DRM API (double-buffered page flip)
   - [x] DRM syscalls (1000-1099 range) for userspace GPU access
   - [x] EDID parsing for real hardware mode detection
-  - [ ] Hotplug detection framework
+  - [x] Hotplug detection framework
 - [ ] Vulkan loader and basic GPU command submission
 - [ ] OpenGL via Mesa (port Mesa's Vulkan and OpenGL drivers)
 - [ ] 2D drawing library: Vello (Rust-native, GPU compute shaders) + HarfBuzz via FFI for complex text shaping

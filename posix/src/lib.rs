@@ -447,3 +447,8 @@ pub mod linux_tipc;
 pub mod linux_pkt_sched;
 pub mod linux_if_bridge;
 pub mod linux_capability;
+pub mod linux_gpio;
+pub mod linux_dma_buf;
+pub mod linux_drm;
+pub mod linux_kvm;
+pub mod linux_fuse;

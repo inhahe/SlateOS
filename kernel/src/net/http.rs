@@ -1,8 +1,9 @@
-//! HTTP/1.1 client implementation.
+//! HTTP/1.1 client implementation (dual-stack IPv4/IPv6).
 //!
 //! Provides a minimal but functional HTTP client built on top of the kernel's
 //! TCP stack and DNS resolver.  Supports the most common operations needed
 //! by OS services (package manager, update checks, API calls, UPnP SOAP).
+//! Automatically falls back to IPv6 (AAAA) when IPv4 (A) DNS resolution fails.
 //!
 //! ## Features
 //!
@@ -48,7 +49,7 @@ use alloc::vec::Vec;
 use alloc::format;
 
 use crate::error::{KernelError, KernelResult};
-use super::interface::Ipv4Addr;
+use super::interface::{IpAddr, Ipv4Addr};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -534,18 +535,40 @@ fn execute_request(req: Request, redirect_count: u8) -> KernelResult<Response> {
     Ok(resp)
 }
 
-/// Resolve a hostname to an IPv4 address.
+/// Resolve a hostname to an IP address (IPv4 preferred, IPv6 fallback).
 ///
-/// First checks if the host is already a dotted-decimal IP address,
-/// then falls back to DNS resolution.
-fn resolve_host(host: &str) -> KernelResult<Ipv4Addr> {
-    // Try parsing as a dotted-decimal IP first.
+/// Resolution order:
+/// 1. Parse as dotted-decimal IPv4 (e.g., "192.168.1.1").
+/// 2. Parse as IPv6 literal (e.g., "fe80::1").
+/// 3. DNS A record (IPv4).
+/// 4. DNS AAAA record (IPv6) if A record resolution fails.
+fn resolve_host(host: &str) -> KernelResult<IpAddr> {
+    // Try parsing as a dotted-decimal IPv4 first.
     if let Some(ip) = parse_ipv4(host) {
-        return Ok(ip);
+        return Ok(IpAddr::V4(ip));
     }
 
-    // DNS resolution.
-    super::dns::resolve(host)
+    // Try parsing as an IPv6 literal.
+    if let Some(v6) = super::ipv6::Ipv6Addr::parse(host) {
+        return Ok(IpAddr::V6(v6));
+    }
+
+    // DNS A record (IPv4) — preferred for compatibility.
+    if let Ok(v4) = super::dns::resolve(host) {
+        return Ok(IpAddr::V4(v4));
+    }
+
+    // DNS AAAA record (IPv6) — fallback when no A record.
+    match super::dns::resolve6(host) {
+        Ok(v6) => Ok(IpAddr::V6(v6)),
+        Err(e) => {
+            crate::serial_println!(
+                "[http] DNS resolution failed for '{}' (both A and AAAA)",
+                host
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Parse a dotted-decimal IPv4 string (e.g., "192.168.1.1").

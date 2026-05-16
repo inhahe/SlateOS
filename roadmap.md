@@ -325,7 +325,7 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
     - [x] try_reap returns ExitInfo (exit_code + optional CrashInfo)
     - [x] SYS_PROCESS_CRASH_INFO (516) syscall for crash diagnostics
     - [x] Init service manager already has auto-restart with exponential backoff
-- [-] IOMMU setup and sandboxing (detect disabled IOMMU, prompt user)
+- [x] IOMMU setup and sandboxing (detect disabled IOMMU, prompt user)
   - [x] Detect Intel VT-d via ACPI DMAR table (parse DRHD entries)
   - [x] Detect AMD-Vi via ACPI IVRS table (basic presence)
   - [x] Report IOMMU availability, vendor, and hardware unit count

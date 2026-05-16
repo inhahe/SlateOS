@@ -300,7 +300,7 @@ pub struct SendResult {
 /// RCPT TO, DATA, QUIT.
 #[allow(dead_code)] // Public API.
 pub fn send_email(
-    server: Ipv4Addr,
+    server: super::interface::IpAddr,
     port: u16,
     message: &EmailMessage,
 ) -> KernelResult<SendResult> {

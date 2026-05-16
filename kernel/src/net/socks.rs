@@ -7,7 +7,7 @@
 //!
 //! - SOCKS5 CONNECT method (TCP proxy)
 //! - No-auth and username/password auth (RFC 1929)
-//! - IPv4 address and domain name target types
+//! - IPv4, IPv6, and domain name target types (dual-stack)
 //! - Connection statistics
 //!
 //! ## Usage
@@ -34,7 +34,8 @@ use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
-use super::interface::Ipv4Addr;
+use super::interface::{IpAddr, Ipv4Addr};
+use super::ipv6::Ipv6Addr;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -66,7 +67,6 @@ const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
 
 /// Address type: IPv6.
-#[allow(dead_code)] // Public API.
 const ATYP_IPV6: u8 = 0x04;
 
 /// Timeout for proxy connection (poll iterations).
@@ -119,8 +119,8 @@ pub fn reply_description(code: u8) -> &'static str {
 pub struct SocksResult {
     /// TCP handle to the proxy (can be used for data transfer).
     pub handle: usize,
-    /// Bound address returned by proxy (may be 0.0.0.0).
-    pub bound_addr: Ipv4Addr,
+    /// Bound address returned by proxy (may be unspecified).
+    pub bound_addr: IpAddr,
     /// Bound port returned by proxy.
     pub bound_port: u16,
     /// Whether connection was successful.
@@ -139,9 +139,9 @@ pub struct SocksResult {
 /// and returns a handle that can be used for data transfer.
 #[allow(dead_code)] // Public API.
 pub fn connect(
-    proxy_ip: Ipv4Addr,
+    proxy_ip: IpAddr,
     proxy_port: u16,
-    target_ip: Ipv4Addr,
+    target_ip: IpAddr,
     target_port: u16,
     user: &str,
     pass: &str,
@@ -151,7 +151,7 @@ pub fn connect(
     let port = if proxy_port == 0 { SOCKS_PORT } else { proxy_port };
 
     // Connect to proxy.
-    let handle = super::tcp::connect(proxy_ip.into(), port)?;
+    let handle = super::tcp::connect(proxy_ip, port)?;
     for _ in 0..CONNECT_TIMEOUT_POLLS {
         super::poll();
     }
@@ -239,12 +239,21 @@ pub fn connect(
     }
 
     // Step 3: Send CONNECT request.
-    let mut connect_req = Vec::with_capacity(10);
+    // IPv4 request = 10 bytes, IPv6 = 22 bytes.
+    let mut connect_req = Vec::with_capacity(22);
     connect_req.push(SOCKS_VERSION);   // Version.
     connect_req.push(CMD_CONNECT);     // Command.
     connect_req.push(0x00);            // Reserved.
-    connect_req.push(ATYP_IPV4);      // Address type.
-    connect_req.extend_from_slice(&target_ip.0); // Target IP.
+    match target_ip {
+        IpAddr::V4(v4) => {
+            connect_req.push(ATYP_IPV4);
+            connect_req.extend_from_slice(&v4.0);
+        }
+        IpAddr::V6(v6) => {
+            connect_req.push(ATYP_IPV6);
+            connect_req.extend_from_slice(&v6.0);
+        }
+    }
     connect_req.extend_from_slice(&target_port.to_be_bytes()); // Target port.
 
     if let Err(e) = super::tcp::send(handle, &connect_req) {
@@ -268,7 +277,8 @@ pub fn connect(
     };
 
     // Parse CONNECT reply: [VER][REP][RSV][ATYP][BND.ADDR][BND.PORT]
-    if connect_reply.len() < 10 {
+    // Minimum: 4 header bytes + depends on ATYP.
+    if connect_reply.len() < 4 {
         let _ = super::tcp::close(handle);
         ERRORS.fetch_add(1, Ordering::Relaxed);
         return Err(KernelError::InvalidArgument);
@@ -277,21 +287,26 @@ pub fn connect(
     let reply_code = connect_reply[1];
     let success = reply_code == 0x00;
 
-    let bound_addr = if connect_reply[3] == ATYP_IPV4 && connect_reply.len() >= 10 {
-        Ipv4Addr::new(
-            connect_reply[4],
-            connect_reply[5],
-            connect_reply[6],
-            connect_reply[7],
-        )
-    } else {
-        Ipv4Addr::UNSPECIFIED
-    };
-
-    let bound_port = if connect_reply.len() >= 10 {
-        u16::from_be_bytes([connect_reply[8], connect_reply[9]])
-    } else {
-        0
+    // Parse bound address and port based on ATYP.
+    let (bound_addr, bound_port) = match connect_reply[3] {
+        ATYP_IPV4 if connect_reply.len() >= 10 => {
+            let addr = IpAddr::V4(Ipv4Addr::new(
+                connect_reply[4],
+                connect_reply[5],
+                connect_reply[6],
+                connect_reply[7],
+            ));
+            let port = u16::from_be_bytes([connect_reply[8], connect_reply[9]]);
+            (addr, port)
+        }
+        ATYP_IPV6 if connect_reply.len() >= 22 => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&connect_reply[4..20]);
+            let addr = IpAddr::V6(Ipv6Addr::from_bytes(octets));
+            let port = u16::from_be_bytes([connect_reply[20], connect_reply[21]]);
+            (addr, port)
+        }
+        _ => (IpAddr::UNSPECIFIED_V4, 0),
     };
 
     if success {
@@ -313,7 +328,7 @@ pub fn connect(
 /// Connect to a target by domain name through a SOCKS5 proxy.
 #[allow(dead_code)] // Public API.
 pub fn connect_domain(
-    proxy_ip: Ipv4Addr,
+    proxy_ip: IpAddr,
     proxy_port: u16,
     domain: &str,
     target_port: u16,
@@ -325,7 +340,7 @@ pub fn connect_domain(
     let port = if proxy_port == 0 { SOCKS_PORT } else { proxy_port };
 
     // Connect to proxy.
-    let handle = super::tcp::connect(proxy_ip.into(), port)?;
+    let handle = super::tcp::connect(proxy_ip, port)?;
     for _ in 0..CONNECT_TIMEOUT_POLLS {
         super::poll();
     }
@@ -442,7 +457,7 @@ pub fn connect_domain(
 
     Ok(SocksResult {
         handle,
-        bound_addr: Ipv4Addr::UNSPECIFIED,
+        bound_addr: IpAddr::UNSPECIFIED_V4,
         bound_port: 0,
         success,
         reply_code,
@@ -538,7 +553,7 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("[socks]   test 2 (greeting format) PASSED");
     }
 
-    // --- Test 3: CONNECT request format ---
+    // --- Test 3: CONNECT request format (IPv4) ---
     {
         let target_ip = Ipv4Addr::new(192, 168, 1, 1);
         let target_port: u16 = 8080;
@@ -560,7 +575,34 @@ pub fn self_test() -> KernelResult<()> {
         assert!(req[9] == 0x90, "port low");
 
         passed = passed.saturating_add(1);
-        crate::serial_println!("[socks]   test 3 (CONNECT request) PASSED");
+        crate::serial_println!("[socks]   test 3 (CONNECT request IPv4) PASSED");
+    }
+
+    // --- Test 3b: CONNECT request format (IPv6) ---
+    {
+        // fd00::1 = [0xfd, 0x00, 0, 0, ..., 0, 0x01]
+        let mut octets = [0u8; 16];
+        octets[0] = 0xfd;
+        octets[15] = 0x01;
+        let target_port: u16 = 443;
+
+        let mut req = Vec::new();
+        req.push(SOCKS_VERSION);
+        req.push(CMD_CONNECT);
+        req.push(0x00);
+        req.push(ATYP_IPV6);
+        req.extend_from_slice(&octets);
+        req.extend_from_slice(&target_port.to_be_bytes());
+
+        assert!(req.len() == 22, "ipv6 request length");
+        assert!(req[3] == ATYP_IPV6, "ipv6 atyp");
+        assert!(req[4] == 0xfd, "ipv6 first byte");
+        assert!(req[19] == 0x01, "ipv6 last byte");
+        assert!(req[20] == 0x01, "port high 443");
+        assert!(req[21] == 0xBB, "port low 443");
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[socks]   test 3b (CONNECT request IPv6) PASSED");
     }
 
     // --- Test 4: Domain CONNECT request ---
@@ -608,7 +650,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         let result = SocksResult {
             handle: 42,
-            bound_addr: Ipv4Addr::new(10, 0, 0, 1),
+            bound_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             bound_port: 9999,
             success: true,
             reply_code: 0x00,
@@ -630,6 +672,7 @@ pub fn self_test() -> KernelResult<()> {
         assert!(CMD_CONNECT == 1, "connect cmd");
         assert!(ATYP_IPV4 == 1, "ipv4 atyp");
         assert!(ATYP_DOMAIN == 3, "domain atyp");
+        assert!(ATYP_IPV6 == 4, "ipv6 atyp");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[socks]   test 7 (constants) PASSED");

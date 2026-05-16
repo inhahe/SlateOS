@@ -36497,7 +36497,7 @@ fn cmd_socks(args: &str) {
             if let Some(target_ip) = parse_ipv4(target_str) {
                 shell_println!("Connecting via SOCKS5 proxy {}:{}...", proxy_ip, proxy_port);
                 shell_println!("Target: {}:{}", target_ip, target_port);
-                match crate::net::socks::connect(proxy_ip, proxy_port, target_ip, target_port, user, pass) {
+                match crate::net::socks::connect(proxy_ip.into(), proxy_port, target_ip.into(), target_port, user, pass) {
                     Ok(result) => {
                         if result.success {
                             shell_println!("Connected! Handle: {}", result.handle);
@@ -36514,7 +36514,7 @@ fn cmd_socks(args: &str) {
             } else {
                 shell_println!("Connecting via SOCKS5 proxy {}:{}...", proxy_ip, proxy_port);
                 shell_println!("Target: {}:{} (domain)", target_str, target_port);
-                match crate::net::socks::connect_domain(proxy_ip, proxy_port, target_str, target_port, user, pass) {
+                match crate::net::socks::connect_domain(proxy_ip.into(), proxy_port, target_str, target_port, user, pass) {
                     Ok(result) => {
                         if result.success {
                             shell_println!("Connected! Handle: {}", result.handle);
@@ -36885,7 +36885,7 @@ fn cmd_smtp(args: &str) {
 
             let msg = crate::net::smtp::EmailMessage::new(from, to, subject, &body);
             shell_println!("Sending to {} via {}...", to, ip);
-            match crate::net::smtp::send_email(ip, 0, &msg) {
+            match crate::net::smtp::send_email(ip.into(), 0, &msg) {
                 Ok(result) => {
                     shell_println!("Banner: {}", result.banner);
                     if result.accepted {
@@ -36969,7 +36969,7 @@ fn cmd_ftp(args: &str) {
             };
 
             shell_println!("Connecting to {}...", ip);
-            match crate::net::ftp::connect_and_login(ip, user, pass) {
+            match crate::net::ftp::connect_and_login(ip.into(), user, pass) {
                 Ok(result) => {
                     shell_println!("Banner: {}", result.banner);
                     if result.login_ok {
@@ -37006,7 +37006,7 @@ fn cmd_ftp(args: &str) {
             };
 
             shell_println!("Listing {}:{}...", ip, if path.is_empty() { "/" } else { path });
-            match crate::net::ftp::list_directory(ip, path, user, pass) {
+            match crate::net::ftp::list_directory(ip.into(), path, user, pass) {
                 Ok(listing) => {
                     for line in listing.lines() {
                         shell_println!("  {}", line);
@@ -37040,7 +37040,7 @@ fn cmd_ftp(args: &str) {
             };
 
             shell_println!("Downloading {}:{}...", ip, remote_path);
-            match crate::net::ftp::download_file(ip, remote_path, user, pass) {
+            match crate::net::ftp::download_file(ip.into(), remote_path, user, pass) {
                 Ok(data) => {
                     shell_println!("Downloaded {} bytes", data.len());
                     // Try to show as text.

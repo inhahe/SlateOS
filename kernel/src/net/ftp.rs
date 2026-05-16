@@ -185,7 +185,7 @@ struct FtpSession {
 }
 
 /// Connect to an FTP server and read the welcome banner.
-fn ftp_connect(host: Ipv4Addr) -> KernelResult<(FtpSession, FtpReply)> {
+fn ftp_connect(host: super::interface::IpAddr) -> KernelResult<(FtpSession, FtpReply)> {
     CONNECTIONS.fetch_add(1, Ordering::Relaxed);
 
     let handle = super::tcp::connect(host.into(), FTP_PORT)?;
@@ -256,7 +256,7 @@ pub struct FtpConnectResult {
 /// Connect to an FTP server, login, and return the session info.
 #[allow(dead_code)] // Public API.
 pub fn connect_and_login(
-    host: Ipv4Addr,
+    host: super::interface::IpAddr,
     user: &str,
     pass: &str,
 ) -> KernelResult<FtpConnectResult> {
@@ -314,7 +314,7 @@ pub fn connect_and_login(
 /// the directory listing from the data connection.
 #[allow(dead_code)] // Public API.
 pub fn list_directory(
-    host: Ipv4Addr,
+    host: super::interface::IpAddr,
     path: &str,
     user: &str,
     pass: &str,
@@ -418,7 +418,7 @@ pub fn list_directory(
 /// Returns the raw file contents as bytes.
 #[allow(dead_code)] // Public API.
 pub fn download_file(
-    host: Ipv4Addr,
+    host: super::interface::IpAddr,
     remote_path: &str,
     user: &str,
     pass: &str,

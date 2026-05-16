@@ -20,6 +20,7 @@
 pub mod arp;
 pub mod bridge;
 pub mod dhcp;
+pub mod dhcpd;
 pub mod dhcpv6;
 pub mod dns;
 pub mod ethernet;
@@ -319,6 +320,7 @@ pub fn self_test() -> KernelResult<()> {
 
     httpd::self_test()?;
     websocket::self_test()?;
+    dhcpd::self_test()?;
 
     crate::serial_println!("[net] Network self-test PASSED");
     Ok(())

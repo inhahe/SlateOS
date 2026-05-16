@@ -1165,6 +1165,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Ethernet bridging (MAC learning FDB, STP port states, flooding) and link aggregation (active-backup, round-robin, XOR-hash bonding)
   - [x] HTTP/1.1 server (httpd): GET/HEAD file serving from VFS, directory listing with HTML, MIME type detection (~30 extensions), percent-decoding, path normalization with traversal prevention, configurable document root and port; `httpd` kshell command (start/stop/status/root); integrated into net::poll() tick loop; 8 self-tests
   - [x] WebSocket (RFC 6455): server-side upgrade from HTTP, SHA-1 handshake key derivation, frame parsing (text/binary/close/ping/pong, masked + unmasked), frame building (server never masks), configurable message handler callback with default echo handler, integrated into httpd (auto-detects Upgrade requests); `ws` kshell command; 12 self-tests
+  - [x] DHCP server (dhcpd, RFC 2131): IP pool management (add/remove pools, /24 subnets, configurable range), lease tracking with expiry (MAC→IP bindings, 1hr default), DHCP message parsing (DISCOVER/REQUEST/RELEASE with options 50/51/53/54), response building (OFFER/ACK/NAK with subnet mask/router/DNS/lease-time options), process_request() for UDP port 67 integration; `dhcpd` kshell command (start/stop/status/leases/test); 10 self-tests
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 
 ### 2.5 POSIX compatibility layer

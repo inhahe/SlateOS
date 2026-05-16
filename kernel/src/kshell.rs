@@ -3664,6 +3664,7 @@ const COMMANDS: &[&str] = &[
     "httpc", "curl",
     "httpd",
     "ws", "websocket",
+    "dhcpd",
     "ntp", "ntpdate",
     "mdns", "dnssd",
     "telnetd", "telnet",
@@ -4880,6 +4881,7 @@ fn dispatch(line: &str) {
         "httpc" | "curl" => cmd_httpc(args),
         "httpd" => cmd_httpd(args),
         "ws" | "websocket" => cmd_ws(args),
+        "dhcpd" => cmd_dhcpd(args),
         "ntp" | "ntpdate" => cmd_ntp(args),
         "mdns" | "dnssd" => cmd_mdns(args),
         "telnetd" | "telnet" => cmd_telnetd(args),
@@ -34759,6 +34761,74 @@ fn cmd_ws(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'ws help'.", sub);
+        }
+    }
+}
+
+/// `dhcpd` — DHCP server management.
+fn cmd_dhcpd(args: &str) {
+    use crate::net::dhcpd;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("dhcpd — DHCP server for container IP assignment");
+            shell_println!("  status       Show server state, pools, leases");
+            shell_println!("  start        Enable server with default pool");
+            shell_println!("  stop         Disable server");
+            shell_println!("  leases       List active leases");
+            shell_println!("  test         Run self-tests");
+        }
+        "status" => {
+            let enabled = dhcpd::is_enabled();
+            let pools = dhcpd::pool_count();
+            let leases = dhcpd::lease_count();
+            shell_println!("DHCP Server");
+            shell_println!("  Enabled:  {}", enabled);
+            shell_println!("  Pools:    {}", pools);
+            shell_println!("  Leases:   {}", leases);
+        }
+        "start" => {
+            if dhcpd::pool_count() == 0 {
+                match dhcpd::add_default_pool() {
+                    Ok(idx) => shell_println!("Added default pool (index {})", idx),
+                    Err(e) => {
+                        shell_println!("Failed to add default pool: {:?}", e);
+                        return;
+                    }
+                }
+            }
+            dhcpd::enable();
+            shell_println!("DHCP server started");
+        }
+        "stop" => {
+            dhcpd::disable();
+            shell_println!("DHCP server stopped");
+        }
+        "leases" => {
+            let (list, count) = dhcpd::lease_list();
+            if count == 0 {
+                shell_println!("No active leases");
+            } else {
+                shell_println!("Active leases:");
+                for i in 0..count {
+                    let (mac, ip, _expires) = list[i];
+                    shell_println!(
+                        "  {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} → {}.{}.{}.{}",
+                        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                        ip[0], ip[1], ip[2], ip[3],
+                    );
+                }
+            }
+        }
+        "test" => {
+            match dhcpd::self_test() {
+                Ok(()) => shell_println!("DHCP server self-test: PASSED"),
+                Err(e) => shell_println!("DHCP server self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'dhcpd help'.", sub);
         }
     }
 }
@@ -69676,7 +69746,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "dhcpv6" | "dhcp6" | "ping" | "ping6" | "udp6" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "httpd" | "ws" | "websocket" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond" | "nat"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "httpd" | "ws" | "websocket" | "dhcpd" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond" | "nat"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "oci" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

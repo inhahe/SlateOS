@@ -395,3 +395,8 @@ pub mod linux_serial;
 pub mod linux_netfilter;
 pub mod linux_bpf;
 pub mod linux_audit;
+pub mod linux_netfilter_ipv4;
+pub mod linux_can;
+pub mod sys_fsuid;
+pub mod sys_io;
+pub mod linux_dm_ioctl;

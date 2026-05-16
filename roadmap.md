@@ -1133,12 +1133,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Per-rule match counters: each rule tracks packet match count; rule_stats() returns sorted diagnostics; reset_rule_counters() clears counters
 - [x] Network diagnostic tools and protocols:
   - [x] HTTP/1.1 client (GET/HEAD requests, header parsing, redirect following, chunked transfer)
-  - [x] NTP client (RFC 5905 time synchronization, round-trip delay compensation, periodic sync)
+  - [x] NTP client (RFC 5905 time synchronization, round-trip delay compensation, periodic sync, IPv6 fallback via AAAA+UDPv6, sync_now_v6 forced IPv6 mode, `ntp sync6` command)
   - [x] UPnP IGD / NAT-PMP port forwarding (SSDP discovery, SOAP control, automatic NAT traversal)
   - [x] mDNS / DNS-SD zero-config service discovery (RFC 6762/6763, multicast DNS, service registration/browsing)
   - [x] Telnet server (RFC 854, remote kshell access, IAC negotiation, max 4 sessions, command blocking)
   - [x] TFTP client and server (RFC 1350, stop-and-wait ACK, 4 concurrent transfers, VFS integration)
-  - [x] Network syslog client/receiver (RFC 5424/3164, remote log forwarding, ring buffer, severity/facility)
+  - [x] Network syslog client/receiver (RFC 5424/3164, remote log forwarding, ring buffer, severity/facility, IPv6 forwarding via set_remote_server_v6, IPv6 message reception, `netsyslog forward6` command)
   - [x] Wake-on-LAN magic packet sender (UDP port 9, 6×0xFF + 16×MAC)
   - [x] Packet capture (pcap format, ring buffer, BPF-like filters, Wireshark-compatible export)
   - [x] Traceroute (ICMP echo with increasing TTL, Time Exceeded correlation, per-hop RTT)

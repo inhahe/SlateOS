@@ -2506,6 +2506,88 @@ pub const SYS_DRM_PAGE_FLIP: u64 = 1030;
 /// Returns: 0 on success, negative error.
 pub const SYS_DRM_FLUSH_REGION: u64 = 1031;
 
+/// Get connector status and info.
+///
+/// Returns connection status, connector type, and mode count
+/// packed into a single u64.
+///
+/// `arg0`: device handle.
+/// `arg1`: connector index (0-based within the device's connector list).
+/// Returns: `status | (type << 8) | (mode_count << 16) | (connector_id << 32)`.
+///   status: 0=disconnected, 1=connected, 2=unknown.
+///   type: ConnectorType discriminant.
+///   mode_count: number of supported modes.
+///   connector_id: DrmObjectId raw value.
+pub const SYS_DRM_CONNECTOR_STATUS: u64 = 1040;
+
+/// Get a display mode's resolution and refresh rate.
+///
+/// `arg0`: device handle.
+/// `arg1`: connector index.
+/// `arg2`: mode index (within the connector's mode list).
+/// Returns: `hdisplay | (vdisplay << 16) | (vrefresh << 32)`.
+pub const SYS_DRM_MODE_GET: u64 = 1041;
+
+/// Get CRTC info.
+///
+/// `arg0`: device handle.
+/// `arg1`: CRTC index (0-based within the device's CRTC list).
+/// Returns: `crtc_id | (active << 32) | (has_mode << 33)`.
+pub const SYS_DRM_CRTC_INFO: u64 = 1042;
+
+/// Set cursor image on a CRTC.
+///
+/// `arg0`: device handle.
+/// `arg1`: CRTC object ID.
+/// `arg2`: GEM handle for cursor image (0 = hide cursor).
+/// `arg3`: `width | (height << 16) | (hot_x << 32) | (hot_y << 48)`.
+/// Returns: 0 on success, negative error.
+pub const SYS_DRM_CURSOR_SET: u64 = 1050;
+
+/// Move cursor position on a CRTC.
+///
+/// `arg0`: device handle.
+/// `arg1`: CRTC object ID.
+/// `arg2`: `x` (signed, as i32 in low 32 bits).
+/// `arg3`: `y` (signed, as i32 in low 32 bits).
+/// Returns: 0 on success, negative error.
+pub const SYS_DRM_CURSOR_MOVE: u64 = 1051;
+
+/// Atomic modesetting commit.
+///
+/// Applies a batch of display state changes atomically.
+/// The state description is a serialized buffer in userspace memory.
+///
+/// `arg0`: device handle.
+/// `arg1`: pointer to serialized AtomicState buffer.
+/// `arg2`: buffer length in bytes.
+/// `arg3`: flags (bit 0 = test_only).
+/// Returns: 0 on success, negative error.
+///
+/// Buffer format (little-endian):
+///   [0..4]  u32  number of CRTC changes (N_crtc)
+///   [4..8]  u32  number of plane changes (N_plane)
+///   [8..12] u32  number of connector changes (N_conn)
+///   Then N_crtc × 12 bytes each:
+///     [+0..4]  u32  CRTC ID
+///     [+4..8]  u32  flags: bit 0 = set_active, bit 1 = active_value,
+///                          bit 2 = set_mode, bit 3 = disable_mode
+///     [+8..12] u32  mode: hdisplay | (vdisplay << 16) when set_mode && !disable_mode
+///   Then N_plane × 28 bytes each:
+///     [+0..4]   u32  plane ID
+///     [+4..8]   u32  flags: bit 0 = set_fb, bit 1 = set_crtc,
+///                           bit 2 = set_src, bit 3 = set_dst
+///     [+8..12]  u32  FB ID (or 0 to disable)
+///     [+12..16] u32  CRTC ID (or 0 to unbind)
+///     [+16..20] u32  src_x | (src_y << 16)
+///     [+20..24] u32  src_w | (src_h << 16)
+///     [+24..28] u32  dst_x | (dst_y << 16)  (packed as i16+i16)
+///     [+28..32] u32  dst_w | (dst_h << 16)
+///   Then N_conn × 8 bytes each:
+///     [+0..4]  u32  connector ID
+///     [+4..8]  u32  CRTC ID (or 0xFFFFFFFF to unbind)
+pub const SYS_DRM_ATOMIC_COMMIT: u64 = 1060;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

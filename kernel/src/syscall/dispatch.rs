@@ -103,6 +103,9 @@ use super::number::{
     SYS_DRM_GEM_CREATE, SYS_DRM_GEM_DESTROY, SYS_DRM_GEM_MMAP,
     SYS_DRM_FB_CREATE, SYS_DRM_FB_DESTROY,
     SYS_DRM_PAGE_FLIP, SYS_DRM_FLUSH_REGION,
+    SYS_DRM_CONNECTOR_STATUS, SYS_DRM_MODE_GET, SYS_DRM_CRTC_INFO,
+    SYS_DRM_CURSOR_SET, SYS_DRM_CURSOR_MOVE,
+    SYS_DRM_ATOMIC_COMMIT,
     SYS_YIELD,
 };
 use super::handlers;
@@ -478,6 +481,12 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_DRM_FB_DESTROY as usize] = Some(drm_handlers::sys_drm_fb_destroy);
     handlers[SYS_DRM_PAGE_FLIP as usize] = Some(drm_handlers::sys_drm_page_flip);
     handlers[SYS_DRM_FLUSH_REGION as usize] = Some(drm_handlers::sys_drm_flush_region);
+    handlers[SYS_DRM_CONNECTOR_STATUS as usize] = Some(drm_handlers::sys_drm_connector_status);
+    handlers[SYS_DRM_MODE_GET as usize] = Some(drm_handlers::sys_drm_mode_get);
+    handlers[SYS_DRM_CRTC_INFO as usize] = Some(drm_handlers::sys_drm_crtc_info);
+    handlers[SYS_DRM_CURSOR_SET as usize] = Some(drm_handlers::sys_drm_cursor_set);
+    handlers[SYS_DRM_CURSOR_MOVE as usize] = Some(drm_handlers::sys_drm_cursor_move);
+    handlers[SYS_DRM_ATOMIC_COMMIT as usize] = Some(drm_handlers::sys_drm_atomic_commit);
 
     SyscallTable {
         handlers,

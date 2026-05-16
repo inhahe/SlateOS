@@ -1296,45 +1296,15 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Generate 32 random bytes for key material.
+/// Generate 32 cryptographically secure random bytes for key material.
 ///
-/// Uses rdtsc + a simple hash to generate entropy.  This is NOT
-/// cryptographically secure — a real implementation would use a CSPRNG
-/// seeded from hardware RNG (RDRAND/RDSEED).
-///
-/// For initial bring-up, this provides enough randomness to complete
-/// the TLS handshake.  CSPRNG integration is future work.
+/// Uses the kernel's ChaCha20-based CSPRNG (seeded from RDRAND/RDSEED
+/// hardware RNG + interrupt timing jitter).  This provides sufficient
+/// entropy for TLS key generation and nonces.
 fn generate_random_bytes() -> [u8; 32] {
-    let mut entropy = [0u8; 64];
-
-    // Mix multiple rdtsc readings with different timing gaps.
-    for i in 0u64..8 {
-        let tsc = read_tsc();
-        let mixed = tsc.wrapping_mul(6364136223846793005).wrapping_add(i);
-        let bytes = mixed.to_le_bytes();
-        for (j, &b) in bytes.iter().enumerate() {
-            let idx = (i as usize * 8 + j) % 64;
-            entropy[idx] ^= b;
-        }
-    }
-
-    // Hash with SHA-256 for uniform distribution.
-    crypto::sha256(&entropy)
-}
-
-/// Read the TSC (Time Stamp Counter).
-fn read_tsc() -> u64 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // SAFETY: rdtsc is always available on x86_64.
-        unsafe {
-            core::arch::x86_64::_rdtsc()
-        }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        0
-    }
+    let mut buf = [0u8; 32];
+    crate::rng::fill(&mut buf);
+    buf
 }
 
 // ===========================================================================

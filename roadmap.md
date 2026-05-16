@@ -1436,7 +1436,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] VirtioGpuBackend: paravirtualized GPU (enumerate, gem_create/destroy/mmap, page_flip via virtio-gpu driver)
   - [x] Enum dispatch for hot-path performance (no dyn Trait overhead)
   - [x] Self-tests (6 tests: device registration, enumeration, GEM lifecycle, FB lifecycle, display size, format utils)
-  - [ ] Migrate compositor from direct fb.rs to DRM API (double-buffered page flip)
+  - [x] Migrate compositor from direct fb.rs to DRM API (double-buffered page flip)
   - [ ] DRM syscalls (1000-1099 range) for userspace GPU access
   - [ ] EDID parsing for real hardware mode detection
   - [ ] Hotplug detection framework

@@ -415,3 +415,8 @@ pub mod linux_io_uring;
 pub mod linux_ip;
 pub mod linux_udp;
 pub mod linux_icmp;
+pub mod linux_stat;
+pub mod linux_xattr;
+pub mod linux_ipc;
+pub mod linux_fiemap;
+pub mod linux_pidfd;

@@ -1437,7 +1437,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Enum dispatch for hot-path performance (no dyn Trait overhead)
   - [x] Self-tests (6 tests: device registration, enumeration, GEM lifecycle, FB lifecycle, display size, format utils)
   - [x] Migrate compositor from direct fb.rs to DRM API (double-buffered page flip)
-  - [ ] DRM syscalls (1000-1099 range) for userspace GPU access
+  - [x] DRM syscalls (1000-1099 range) for userspace GPU access
   - [ ] EDID parsing for real hardware mode detection
   - [ ] Hotplug detection framework
 - [ ] Vulkan loader and basic GPU command submission

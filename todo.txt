@@ -70,6 +70,15 @@ Remaining net improvements (diminishing returns):
   `BTreeMap<TaskId, Task>` to `BTreeMap<TaskId, Box<Task>>` so tasks have
   stable heap addresses independent of BTree node layout.
 
+- kchannel multi-task self-test crash: The kchannel self-test's multi-task
+  test (spawns task 67 for cross-task send/recv) triggers a recursive
+  kernel page fault at 0xffffffff80354d40 → 0xffffffff803b1ed0 with
+  "not-present, read, kernel" error.  The fault handler itself faults,
+  consuming stack until the task is dead.  This is in the kernel-ipc zone.
+  Blocks BOOT_OK from being reached (crash happens before boot-complete).
+  All tests before kchannel pass (DRM, EDID, hotplug, all sync primitives).
+  Likely a stack overflow in the spawned task or an unmapped kernel text page.
+
 - Debug kernel binary too large for Limine: The debug build (~9MB) causes
   Limine to panic "High memory allocator: Out of memory" with 128M QEMU.
   Workaround: use release builds for boot testing, or increase QEMU memory

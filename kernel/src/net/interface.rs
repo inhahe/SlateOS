@@ -85,6 +85,102 @@ impl fmt::Display for Ipv4Addr {
 }
 
 // ---------------------------------------------------------------------------
+// Dual-stack IP address
+// ---------------------------------------------------------------------------
+
+/// A dual-stack IP address (IPv4 or IPv6).
+///
+/// Used by protocol implementations that support both address families
+/// (e.g., TCP, UDP sockets).  Allows a single connection structure to
+/// hold either address type without duplication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpAddr {
+    /// An IPv4 address.
+    V4(Ipv4Addr),
+    /// An IPv6 address.
+    V6(super::ipv6::Ipv6Addr),
+}
+
+impl IpAddr {
+    /// The unspecified IPv4 address (0.0.0.0).
+    pub const UNSPECIFIED_V4: Self = Self::V4(Ipv4Addr::UNSPECIFIED);
+
+    /// The unspecified IPv6 address (::).
+    pub const UNSPECIFIED_V6: Self = Self::V6(super::ipv6::Ipv6Addr::UNSPECIFIED);
+
+    /// Check if this is an IPv4 address.
+    pub fn is_v4(self) -> bool {
+        matches!(self, Self::V4(_))
+    }
+
+    /// Check if this is an IPv6 address.
+    pub fn is_v6(self) -> bool {
+        matches!(self, Self::V6(_))
+    }
+
+    /// Get the IPv4 address, if this is IPv4.
+    pub fn as_v4(self) -> Option<Ipv4Addr> {
+        match self {
+            Self::V4(a) => Some(a),
+            Self::V6(_) => None,
+        }
+    }
+
+    /// Get the IPv6 address, if this is IPv6.
+    pub fn as_v6(self) -> Option<super::ipv6::Ipv6Addr> {
+        match self {
+            Self::V4(_) => None,
+            Self::V6(a) => Some(a),
+        }
+    }
+
+    /// Check if this is the unspecified address (for either family).
+    pub fn is_unspecified(self) -> bool {
+        match self {
+            Self::V4(a) => a.is_unspecified(),
+            Self::V6(a) => a.is_unspecified(),
+        }
+    }
+
+    /// Check if this is a multicast address (for either family).
+    pub fn is_multicast(self) -> bool {
+        match self {
+            Self::V4(a) => a.is_multicast(),
+            Self::V6(a) => a.is_multicast(),
+        }
+    }
+
+    /// Check if this is a loopback address.
+    pub fn is_loopback(self) -> bool {
+        match self {
+            Self::V4(a) => a.0 == [127, 0, 0, 1],
+            Self::V6(a) => a.is_loopback(),
+        }
+    }
+}
+
+impl From<Ipv4Addr> for IpAddr {
+    fn from(v4: Ipv4Addr) -> Self {
+        Self::V4(v4)
+    }
+}
+
+impl From<super::ipv6::Ipv6Addr> for IpAddr {
+    fn from(v6: super::ipv6::Ipv6Addr) -> Self {
+        Self::V6(v6)
+    }
+}
+
+impl fmt::Display for IpAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::V4(a) => write!(f, "{}", a),
+            Self::V6(a) => write!(f, "{}", a),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Network interface state
 // ---------------------------------------------------------------------------
 

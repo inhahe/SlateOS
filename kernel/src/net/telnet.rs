@@ -94,7 +94,7 @@ struct Session {
     /// Whether we're in the middle of an IAC sequence.
     iac_state: IacState,
     /// Remote IP (for logging).
-    remote_ip: super::interface::Ipv4Addr,
+    remote_ip: super::interface::IpAddr,
     /// Remote port.
     remote_port: u16,
     /// Whether this session slot is active.
@@ -130,7 +130,7 @@ impl Session {
             tcp_handle: 0,
             line_buf: Vec::new(),
             iac_state: IacState::Normal,
-            remote_ip: super::interface::Ipv4Addr([0, 0, 0, 0]),
+            remote_ip: super::interface::IpAddr::V4(super::interface::Ipv4Addr([0, 0, 0, 0])),
             remote_port: 0,
             active: false,
             bytes_rx: 0,
@@ -326,7 +326,7 @@ fn accept_connections(state: &mut TelnetState) {
                 let info = super::tcp::connection_info(handle);
                 let (remote_ip, remote_port) = match info {
                     Some(ci) => (ci.remote_ip, ci.remote_port),
-                    None => (super::interface::Ipv4Addr([0, 0, 0, 0]), 0),
+                    None => (super::interface::IpAddr::V4(super::interface::Ipv4Addr([0, 0, 0, 0])), 0),
                 };
 
                 crate::serial_println!(
@@ -664,7 +664,7 @@ pub struct TelnetStats {
 #[derive(Debug)]
 pub struct SessionInfo {
     pub index: usize,
-    pub remote_ip: super::interface::Ipv4Addr,
+    pub remote_ip: super::interface::IpAddr,
     pub remote_port: u16,
     pub commands_run: u64,
     pub bytes_tx: u64,

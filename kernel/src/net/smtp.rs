@@ -309,7 +309,7 @@ pub fn send_email(
     let smtp_port = if port == 0 { SMTP_PORT } else { port };
 
     // Connect.
-    let handle = super::tcp::connect(server, smtp_port)?;
+    let handle = super::tcp::connect(server.into(), smtp_port)?;
 
     for _ in 0..CONNECT_TIMEOUT_POLLS {
         super::poll();

@@ -353,7 +353,7 @@ pub const IPV6_HEADER_SIZE: usize = 40;
 
 /// Default hop limit for outgoing packets.
 #[allow(dead_code)] // Used by send() which is a public API.
-const DEFAULT_HOP_LIMIT: u8 = 64;
+pub const DEFAULT_HOP_LIMIT: u8 = 64;
 
 /// EtherType for IPv6.
 pub const ETHERTYPE_IPV6: u16 = 0x86DD;
@@ -801,7 +801,7 @@ fn dispatch_upper_layer(
     match protocol {
         NH_ICMPV6 => super::icmpv6::process_icmpv6(&fake_packet),
         NH_UDP => super::udp::process_udp_v6(&fake_packet),
-        // TCP over IPv6 — future work (requires dual-stack socket refactor).
+        NH_TCP => super::tcp::process_tcp_v6(&fake_packet),
         _ => {
             // Unknown upper-layer protocol — silently drop.
             Ok(())

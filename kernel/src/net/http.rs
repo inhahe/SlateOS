@@ -482,7 +482,7 @@ fn execute_request(req: Request, redirect_count: u8) -> KernelResult<Response> {
     );
 
     // Connect to the remote server.
-    let handle = super::tcp::connect(ip, req.url.port)?;
+    let handle = super::tcp::connect(ip.into(), req.url.port)?;
 
     // Build and send the HTTP request.
     let raw_request = req.build();

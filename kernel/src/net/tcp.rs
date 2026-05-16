@@ -1,9 +1,24 @@
-//! TCP (Transmission Control Protocol) implementation.
+//! TCP (Transmission Control Protocol) implementation — dual-stack IPv4/IPv6.
 //!
-//! Supports both client and server operation:
+//! Supports both client and server operation over either IPv4 or IPv6:
 //!
 //! - **Client**: `connect()` performs a 3-way handshake to a remote server.
 //! - **Server**: `bind()` + `listen()` + `accept()` implements passive open.
+//!
+//! ## Dual-stack architecture
+//!
+//! Connections store the remote address as `IpAddr` (IPv4 or IPv6).
+//! The shared TCP state machine (`process_tcp_common`) handles both
+//! address families identically.  Address-family-specific logic is
+//! confined to:
+//!
+//! - **Checksum**: IPv4 pseudo-header (12 bytes) vs IPv6 pseudo-header
+//!   (40 bytes) — dispatched by `tcp_checksum_ip()`.
+//! - **Send path**: `ip_send_tcp()` dispatches to `ipv4::send_ecn()` or
+//!   `ipv6::send_raw()` based on the destination address type.
+//! - **Receive path**: `process_tcp()` (IPv4 entry) and
+//!   `process_tcp_v6()` (IPv6 entry) verify the appropriate checksum
+//!   and delegate to `process_tcp_common()`.
 //!
 //! ## State machine
 //!
@@ -108,8 +123,9 @@ use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 
-use super::interface::{self, Ipv4Addr};
+use super::interface::{self, IpAddr, Ipv4Addr};
 use super::ipv4::{self, Ipv4Packet, PROTO_TCP};
+use super::ipv6::{self, Ipv6Addr, Ipv6Packet};
 
 // ---------------------------------------------------------------------------
 // TCP constants
@@ -285,8 +301,8 @@ struct TcpConnection {
     state: TcpState,
     /// Local port.
     local_port: u16,
-    /// Remote IP.
-    remote_ip: Ipv4Addr,
+    /// Remote IP (IPv4 or IPv6).
+    remote_ip: IpAddr,
     /// Remote port.
     remote_port: u16,
     /// Send sequence variables.
@@ -511,7 +527,7 @@ impl TcpConnection {
             active: false,
             state: TcpState::Closed,
             local_port: 0,
-            remote_ip: Ipv4Addr::UNSPECIFIED,
+            remote_ip: IpAddr::UNSPECIFIED_V4,
             remote_port: 0,
             snd_una: 0,
             snd_nxt: 0,
@@ -633,7 +649,7 @@ const EPHEMERAL_TCP_END: u16 = 65000;
 #[allow(clippy::arithmetic_side_effects)]
 fn alloc_port_for(
     conns: &[TcpConnection; MAX_CONNECTIONS],
-    remote_ip: Ipv4Addr,
+    remote_ip: IpAddr,
     remote_port: u16,
 ) -> KernelResult<u16> {
     let mut port_guard = NEXT_PORT.lock();
@@ -696,8 +712,8 @@ fn build_segment(
     flags: u8,
     window: u16,
     payload: &[u8],
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
 ) -> Vec<u8> {
     let header_words: u8 = 5; // 20 bytes, no options.
     let total_len = TCP_HEADER_SIZE + payload.len();
@@ -725,8 +741,8 @@ fn build_segment(
     // Payload.
     seg.extend_from_slice(payload);
 
-    // Compute TCP checksum (includes pseudo-header).
-    let checksum = tcp_checksum(&seg, src_ip, dst_ip);
+    // Compute TCP checksum (includes IPv4 or IPv6 pseudo-header).
+    let checksum = tcp_checksum_ip(&seg, src_ip, dst_ip);
     seg[checksum_offset] = (checksum >> 8) as u8;
     seg[checksum_offset + 1] = checksum as u8;
 
@@ -747,8 +763,8 @@ fn build_segment_with_options(
     window: u16,
     options: &[u8],
     payload: &[u8],
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
 ) -> Vec<u8> {
     // Pad options to 4-byte boundary.
     let opt_padded = (options.len() + 3) & !3;
@@ -778,7 +794,7 @@ fn build_segment_with_options(
     // Payload.
     seg.extend_from_slice(payload);
 
-    let checksum = tcp_checksum(&seg, src_ip, dst_ip);
+    let checksum = tcp_checksum_ip(&seg, src_ip, dst_ip);
     seg[checksum_offset] = (checksum >> 8) as u8;
     seg[checksum_offset + 1] = checksum as u8;
 
@@ -820,6 +836,64 @@ fn tcp_checksum(segment: &[u8], src_ip: Ipv4Addr, dst_ip: Ipv4Addr) -> u16 {
     }
 
     !sum as u16
+}
+
+/// Compute TCP checksum including the IPv6 pseudo-header (RFC 8200 §8.1).
+///
+/// The IPv6 pseudo-header is 40 bytes: source address (16), destination
+/// address (16), upper-layer packet length (4, u32), zero (3) + next
+/// header (1).
+#[allow(clippy::arithmetic_side_effects)]
+fn tcp_checksum_v6(segment: &[u8], src_ip: &Ipv6Addr, dst_ip: &Ipv6Addr) -> u16 {
+    let mut sum: u32 = 0;
+
+    // Pseudo-header: source address (16 bytes).
+    for i in 0..8 {
+        let word = u16::from_be_bytes([src_ip.0[i * 2], src_ip.0[i * 2 + 1]]);
+        sum = sum.wrapping_add(u32::from(word));
+    }
+    // Pseudo-header: destination address (16 bytes).
+    for i in 0..8 {
+        let word = u16::from_be_bytes([dst_ip.0[i * 2], dst_ip.0[i * 2 + 1]]);
+        sum = sum.wrapping_add(u32::from(word));
+    }
+    // Pseudo-header: upper-layer packet length (32 bits).
+    let seg_len = segment.len() as u32;
+    sum = sum.wrapping_add(seg_len >> 16);
+    sum = sum.wrapping_add(seg_len & 0xFFFF);
+    // Pseudo-header: zero (3 bytes) + next header = 6 (TCP).
+    sum = sum.wrapping_add(6);
+
+    // TCP segment.
+    let mut i = 0;
+    while i + 1 < segment.len() {
+        let word = u16::from_be_bytes([segment[i], segment[i + 1]]);
+        sum = sum.wrapping_add(u32::from(word));
+        i += 2;
+    }
+    if i < segment.len() {
+        sum = sum.wrapping_add(u32::from(segment[i]) << 8);
+    }
+
+    // Fold.
+    while sum > 0xFFFF {
+        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
+    }
+
+    !sum as u16
+}
+
+/// Compute TCP checksum with the appropriate pseudo-header for the
+/// address family.  Dispatches to [`tcp_checksum`] (IPv4) or
+/// [`tcp_checksum_v6`] (IPv6).
+fn tcp_checksum_ip(segment: &[u8], src: IpAddr, dst: IpAddr) -> u16 {
+    match (src, dst) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => tcp_checksum(segment, s, d),
+        (IpAddr::V6(ref s), IpAddr::V6(ref d)) => tcp_checksum_v6(segment, s, d),
+        // Mismatched address families should never happen; return 0
+        // which will cause checksum validation to fail.
+        _ => 0,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -958,8 +1032,8 @@ fn build_segment_with_syn_options(
     flags: u8,
     window: u16,
     payload: &[u8],
-    src_ip: Ipv4Addr,
-    dst_ip: Ipv4Addr,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
     wscale: u8,
     tsval: u32,
     tsecr: u32,
@@ -1019,8 +1093,8 @@ fn build_segment_with_syn_options(
     // Payload (usually empty for SYN/SYN-ACK).
     seg.extend_from_slice(payload);
 
-    // Compute TCP checksum.
-    let checksum = tcp_checksum(&seg, src_ip, dst_ip);
+    // Compute TCP checksum (IPv4 or IPv6 pseudo-header).
+    let checksum = tcp_checksum_ip(&seg, src_ip, dst_ip);
     seg[checksum_offset] = (checksum >> 8) as u8;
     seg[checksum_offset + 1] = checksum as u8;
 
@@ -1028,13 +1102,49 @@ fn build_segment_with_syn_options(
 }
 
 // ---------------------------------------------------------------------------
-// TCP segment sending
+// TCP segment sending (dual-stack dispatch)
 // ---------------------------------------------------------------------------
+
+/// Determine the local IP address to use for a connection based on the
+/// remote address family.
+///
+/// IPv4 remotes use the interface's configured IPv4 address; IPv6 remotes
+/// use the link-local address derived from the NIC's MAC address.
+fn local_ip_for(remote: IpAddr) -> IpAddr {
+    match remote {
+        IpAddr::V4(_) => IpAddr::V4(interface::ip()),
+        IpAddr::V6(_) => {
+            let mac = interface::mac();
+            IpAddr::V6(Ipv6Addr::from_mac_link_local(&mac))
+        }
+    }
+}
+
+/// Send a built TCP segment via the appropriate IP layer.
+///
+/// Dispatches to IPv4 or IPv6 based on the destination address family.
+/// `ip_ecn` is the ECN codepoint for the IP header (0 = not-ECT,
+/// 2 = ECT(0)).  IPv6 carries ECN in the traffic class field.
+fn ip_send_tcp(dst: IpAddr, segment: &[u8], ip_ecn: u8) -> KernelResult<()> {
+    match dst {
+        IpAddr::V4(v4) => ipv4::send_ecn(v4, PROTO_TCP, segment, ip_ecn),
+        IpAddr::V6(v6) => {
+            // IPv6 sends via send_raw with link-local source.
+            // ECN is carried in the traffic class byte; for now we use
+            // the low 2 bits (same encoding as IPv4 ECN field).
+            let src = {
+                let mac = interface::mac();
+                Ipv6Addr::from_mac_link_local(&mac)
+            };
+            ipv6::send_raw(src, v6, PROTO_TCP, ipv6::DEFAULT_HOP_LIMIT, segment)
+        }
+    }
+}
 
 /// Send a TCP segment via IP, advertising the given receive window.
 fn send_segment_with_window(
     local_port: u16,
-    remote_ip: Ipv4Addr,
+    remote_ip: IpAddr,
     remote_port: u16,
     seq: u32,
     ack: u32,
@@ -1043,7 +1153,7 @@ fn send_segment_with_window(
     payload: &[u8],
     ip_ecn: u8,
 ) -> KernelResult<()> {
-    let local_ip = interface::ip();
+    let local_ip = local_ip_for(remote_ip);
     let seg = build_segment(
         local_port, remote_port,
         seq, ack, flags,
@@ -1052,7 +1162,7 @@ fn send_segment_with_window(
         local_ip, remote_ip,
     );
 
-    ipv4::send_ecn(remote_ip, PROTO_TCP, &seg, ip_ecn)
+    ip_send_tcp(remote_ip, &seg, ip_ecn)
 }
 
 /// Send a TCP segment via IP, advertising the default receive window.
@@ -1061,7 +1171,7 @@ fn send_segment_with_window(
 /// where we don't have a connection context to compute a dynamic window.
 fn send_segment(
     local_port: u16,
-    remote_ip: Ipv4Addr,
+    remote_ip: IpAddr,
     remote_port: u16,
     seq: u32,
     ack: u32,
@@ -1081,7 +1191,7 @@ fn send_segment(
 /// (0 for the initial SYN since we haven't received one yet).
 fn send_syn_segment(
     local_port: u16,
-    remote_ip: Ipv4Addr,
+    remote_ip: IpAddr,
     remote_port: u16,
     seq: u32,
     ack: u32,
@@ -1091,7 +1201,7 @@ fn send_syn_segment(
     tsval: u32,
     tsecr: u32,
 ) -> KernelResult<()> {
-    let local_ip = interface::ip();
+    let local_ip = local_ip_for(remote_ip);
     let seg = build_segment_with_syn_options(
         local_port, remote_port,
         seq, ack, flags,
@@ -1103,7 +1213,7 @@ fn send_syn_segment(
         tsecr,
     );
 
-    ipv4::send(remote_ip, PROTO_TCP, &seg)
+    ip_send_tcp(remote_ip, &seg, 0)
 }
 
 /// Send a data segment with optional Timestamp option.
@@ -1114,7 +1224,7 @@ fn send_syn_segment(
 /// are not active, this delegates to `send_segment_with_window()`.
 fn send_data_with_ts(
     local_port: u16,
-    remote_ip: Ipv4Addr,
+    remote_ip: IpAddr,
     remote_port: u16,
     seq: u32,
     ack: u32,
@@ -1136,14 +1246,14 @@ fn send_data_with_ts(
         ts_opt[4..8].copy_from_slice(&tsval.to_be_bytes());
         ts_opt[8..12].copy_from_slice(&ts_recent.to_be_bytes());
 
-        let local_ip = interface::ip();
+        let local_ip = local_ip_for(remote_ip);
         let seg = build_segment_with_options(
             local_port, remote_port,
             seq, ack, flags, window,
             &ts_opt, payload,
             local_ip, remote_ip,
         );
-        ipv4::send_ecn(remote_ip, PROTO_TCP, &seg, ip_ecn)
+        ip_send_tcp(remote_ip, &seg, ip_ecn)
     } else {
         send_segment_with_window(
             local_port, remote_ip, remote_port,
@@ -1177,7 +1287,7 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
     if conn.ts_ok {
         let (opts, opts_len) = build_ts_and_sack_options(conn);
         if opts_len > 0 {
-            let local_ip = interface::ip();
+            let local_ip = local_ip_for(conn.remote_ip);
             let seg = build_segment_with_options(
                 conn.local_port, conn.remote_port,
                 conn.snd_nxt, conn.rcv_nxt,
@@ -1187,7 +1297,7 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
                 &[],
                 local_ip, conn.remote_ip,
             );
-            return ipv4::send_ecn(conn.remote_ip, PROTO_TCP, &seg, ip_ecn);
+            return ip_send_tcp(conn.remote_ip, &seg, ip_ecn);
         }
     }
 
@@ -1195,7 +1305,7 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
     let (sack_opt, sack_len) = build_sack_option(conn);
 
     if sack_len > 0 {
-        let local_ip = interface::ip();
+        let local_ip = local_ip_for(conn.remote_ip);
         let seg = build_segment_with_options(
             conn.local_port, conn.remote_port,
             conn.snd_nxt, conn.rcv_nxt,
@@ -1205,7 +1315,7 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
             &[],
             local_ip, conn.remote_ip,
         );
-        ipv4::send_ecn(conn.remote_ip, PROTO_TCP, &seg, ip_ecn)
+        ip_send_tcp(conn.remote_ip, &seg, ip_ecn)
     } else {
         send_segment_with_window(
             conn.local_port, conn.remote_ip, conn.remote_port,
@@ -1224,7 +1334,7 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
 /// Performs the 3-way handshake (SYN → SYN-ACK → ACK).
 /// Returns a connection handle on success.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
+pub fn connect(remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
     let isn = generate_isn();
 
     // Find a free slot. If all slots are occupied, try to recycle the
@@ -1407,7 +1517,7 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
 /// expected "in progress" signal, not an error.  The caller should map
 /// this to EINPROGRESS at the POSIX layer.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn connect_start(remote_ip: Ipv4Addr, remote_port: u16) -> KernelResult<usize> {
+pub fn connect_start(remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
     let isn = generate_isn();
 
     // Find a free slot (same recycling logic as connect()).
@@ -1739,7 +1849,7 @@ fn tx_buffer_trim(conn: &mut TcpConnection, bytes_acked: u32) {
 /// (sequence `snd_una`).
 #[allow(clippy::arithmetic_side_effects)]
 /// Retransmit info tuple.
-type RetxInfo = (u16, Ipv4Addr, u16, u32, u32, u16, [u8; 1460], usize, bool, u32);
+type RetxInfo = (u16, IpAddr, u16, u32, u32, u16, [u8; 1460], usize, bool, u32);
 
 fn retransmit_from_buffer(conn: &TcpConnection) -> Option<RetxInfo> {
     let retx_len = conn.tx_buffer.len().min(effective_mss(conn));
@@ -2321,8 +2431,8 @@ pub struct TcpConnectionInfo {
     pub state: TcpState,
     /// Local port.
     pub local_port: u16,
-    /// Remote IP address.
-    pub remote_ip: Ipv4Addr,
+    /// Remote IP address (IPv4 or IPv6).
+    pub remote_ip: IpAddr,
     /// Remote port.
     pub remote_port: u16,
     /// Smoothed RTT in nanoseconds (0 if not yet measured).
@@ -2911,7 +3021,7 @@ pub fn abort(handle: usize) -> KernelResult<()> {
 /// Get the peer (remote) address and port for a connection.
 ///
 /// Returns `(ip, port)` if the handle is valid and active.
-pub fn peer_addr(handle: usize) -> Option<(Ipv4Addr, u16)> {
+pub fn peer_addr(handle: usize) -> Option<(IpAddr, u16)> {
     let conns = CONNECTIONS.lock();
     let conn = conns.get(handle)?;
     if !conn.active {
@@ -3244,7 +3354,7 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
     // Collect connection metadata for RST, then deactivate.
     struct RstInfo {
         local_port: u16,
-        remote_ip: Ipv4Addr,
+        remote_ip: IpAddr,
         remote_port: u16,
         seq: u32,
         ack: u32,
@@ -3304,7 +3414,7 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
 /// detect ECN negotiation (RFC 3168 §6.1.1: ECE+CWR in SYN).
 #[allow(clippy::arithmetic_side_effects)]
 fn handle_incoming_syn(
-    remote_ip: Ipv4Addr,
+    remote_ip: IpAddr,
     remote_port: u16,
     local_port: u16,
     remote_seq: u32,
@@ -3523,10 +3633,13 @@ fn enqueue_to_listener(local_port: u16, conn_handle: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// TCP segment processing (called from IPv4 layer)
+// TCP segment processing (dual-stack: IPv4 and IPv6 entry points)
 // ---------------------------------------------------------------------------
 
-/// Process an incoming TCP segment.
+/// Process an incoming TCP segment received via IPv4.
+///
+/// Verifies the IPv4 pseudo-header checksum, wraps the source address
+/// in `IpAddr::V4`, and delegates to the shared TCP state machine.
 #[allow(clippy::arithmetic_side_effects)]
 pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     let data = ip_packet.payload;
@@ -3534,7 +3647,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         return Ok(());
     }
 
-    // Verify TCP checksum (pseudo-header + segment).
+    // Verify TCP checksum (IPv4 pseudo-header + segment).
     if !ipv4::verify_transport_checksum(
         ip_packet.src, ip_packet.dst, PROTO_TCP, data,
     ) {
@@ -3545,6 +3658,54 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         return Ok(());
     }
 
+    let remote_addr = IpAddr::V4(ip_packet.src);
+    let ip_ecn_ce = ip_packet.ecn == ipv4::ECN_CE;
+
+    process_tcp_common(remote_addr, data, ip_ecn_ce)
+}
+
+/// Process an incoming TCP segment received via IPv6.
+///
+/// Verifies the IPv6 pseudo-header checksum, wraps the source address
+/// in `IpAddr::V6`, and delegates to the shared TCP state machine.
+///
+/// ECN is extracted from the IPv6 traffic class field (low 2 bits,
+/// same encoding as IPv4).
+#[allow(clippy::arithmetic_side_effects)]
+pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
+    let data = ip_packet.payload;
+    if data.len() < TCP_HEADER_SIZE {
+        return Ok(());
+    }
+
+    // Verify TCP checksum (IPv6 pseudo-header + segment).
+    if !ipv6::verify_transport_checksum(
+        &ip_packet.src, &ip_packet.dst, PROTO_TCP, data,
+    ) {
+        crate::serial_println!(
+            "[tcp] Dropped IPv6 segment from {} — bad checksum",
+            ip_packet.src
+        );
+        return Ok(());
+    }
+
+    let remote_addr = IpAddr::V6(ip_packet.src);
+    // IPv6 traffic class carries ECN in bits 0-1 (same encoding as IPv4).
+    let ip_ecn_ce = (ip_packet.traffic_class & 0x03) == ipv4::ECN_CE;
+
+    process_tcp_common(remote_addr, data, ip_ecn_ce)
+}
+
+/// Shared TCP segment processing for both IPv4 and IPv6.
+///
+/// The caller has already verified the transport checksum and extracted
+/// the remote address and ECN congestion-experienced flag.
+///
+/// `remote_addr` — sender's IP (IpAddr::V4 or V6).
+/// `data` — raw TCP segment bytes (header + options + payload).
+/// `ip_ecn_ce` — true if the IP header indicated Congestion Experienced.
+#[allow(clippy::arithmetic_side_effects)]
+fn process_tcp_common(remote_addr: IpAddr, data: &[u8], ip_ecn_ce: bool) -> KernelResult<()> {
     let src_port = u16::from_be_bytes([data[0], data[1]]);
     let dst_port = u16::from_be_bytes([data[2], data[3]]);
     let seq = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
@@ -3571,7 +3732,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     let conn_idx = conns.iter().position(|c| {
         c.active
             && c.local_port == dst_port
-            && c.remote_ip == ip_packet.src
+            && c.remote_ip == remote_addr
             && c.remote_port == src_port
     });
 
@@ -3581,7 +3742,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 && flags & TCP_RST == 0 {
             drop(conns);
             return handle_incoming_syn(
-                ip_packet.src, src_port, dst_port, seq, window,
+                remote_addr, src_port, dst_port, seq, window,
                 option_bytes, flags,
             );
         }
@@ -3592,7 +3753,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
             let rst_seq = if flags & TCP_ACK != 0 { ack } else { 0 };
             let rst_ack = seq.wrapping_add(payload.len() as u32);
             let _ = send_segment(
-                dst_port, ip_packet.src, src_port,
+                dst_port, remote_addr, src_port,
                 rst_seq, rst_ack, TCP_RST | TCP_ACK, &[],
             );
         }
@@ -3676,7 +3837,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     // ECN: if the IP header has CE (Congestion Experienced) set and
     // ECN was negotiated, remember that we need to echo ECE in our
     // next ACK so the sender knows to reduce its congestion window.
-    if conn.ecn_ok && ip_packet.ecn == ipv4::ECN_CE {
+    if conn.ecn_ok && ip_ecn_ce {
         conn.ecn_ce_pending = true;
     }
 
@@ -3841,7 +4002,7 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
 
                 crate::serial_println!(
                     "[tcp] 3-way handshake complete for {}:{} → port {}",
-                    ip_packet.src, src_port, local_port
+                    remote_addr, src_port, local_port
                 );
             } else if flags & TCP_RST != 0 {
                 conn.last_error = TCP_ERR_REFUSED;
@@ -4958,8 +5119,8 @@ pub fn tick_retransmit() {
 /// segments fit without fragmentation.  This is the sender-side PMTUD
 /// adjustment.
 pub fn icmp_error(
-    orig_src_ip: Ipv4Addr,
-    orig_dst_ip: Ipv4Addr,
+    orig_src_ip: Ipv4Addr,  // IPv4-specific (called from ICMP handler)
+    orig_dst_ip: Ipv4Addr,  // IPv4-specific (called from ICMP handler)
     orig_tcp_hdr: &[u8],
     icmp_type: u8,
     icmp_code: u8,
@@ -4982,9 +5143,10 @@ pub fn icmp_error(
 
         // Match: the *original* packet was from us (local_port = src_port)
         // to the remote (remote_ip = dst_ip, remote_port = dst_port).
+        // Wrap in IpAddr::V4 since icmp_error is IPv4-specific.
         if conn.local_port != src_port
             || conn.remote_port != dst_port
-            || conn.remote_ip != orig_dst_ip
+            || conn.remote_ip != IpAddr::V4(orig_dst_ip)
         {
             continue;
         }
@@ -5073,8 +5235,10 @@ pub fn self_test() -> KernelResult<()> {
     test_parse_tcp_options()?;
     test_sack_blocks()?;
     test_seq_lt()?;
+    test_ipv6_checksum()?;
+    test_dual_stack_ip_addr()?;
 
-    crate::serial_println!("[tcp] TCP self-test PASSED");
+    crate::serial_println!("[tcp] TCP self-test PASSED (8 tests)");
     Ok(())
 }
 
@@ -5360,5 +5524,107 @@ fn test_seq_lt() -> KernelResult<()> {
     }
 
     crate::serial_println!("[tcp]   seq_lt modular comparison: OK");
+    Ok(())
+}
+
+/// Test 7: IPv6 TCP checksum computation.
+///
+/// Validates the TCP checksum with IPv6 pseudo-header by computing a
+/// checksum over a known segment and verifying it with the IPv6
+/// transport checksum verifier.
+fn test_ipv6_checksum() -> KernelResult<()> {
+    let src = Ipv6Addr([
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+        0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x01,
+    ]);
+    let dst = Ipv6Addr([
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+        0x02, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x00, 0x02,
+    ]);
+
+    // Build a minimal SYN segment using our builder with IPv6 addresses.
+    let seg = build_segment(
+        12345, 80,
+        1000, 0,
+        TCP_SYN, 65535,
+        &[],
+        IpAddr::V6(src), IpAddr::V6(dst),
+    );
+
+    // The checksum should already be embedded in the segment.
+    // Verify it using the IPv6 transport checksum verifier.
+    if !ipv6::verify_transport_checksum(&src, &dst, PROTO_TCP, &seg) {
+        crate::serial_println!("[tcp]   FAIL: IPv6 TCP checksum verification failed");
+        return Err(KernelError::InternalError);
+    }
+
+    // Corrupt one byte and verify that the checksum now fails.
+    let mut corrupted = seg.clone();
+    corrupted[0] ^= 0xFF;
+    if ipv6::verify_transport_checksum(&src, &dst, PROTO_TCP, &corrupted) {
+        crate::serial_println!("[tcp]   FAIL: corrupted segment passed IPv6 checksum");
+        return Err(KernelError::InternalError);
+    }
+
+    // Also verify that tcp_checksum_ip dispatches correctly for both families.
+    let v4_src = Ipv4Addr::new(10, 0, 0, 1);
+    let v4_dst = Ipv4Addr::new(10, 0, 0, 2);
+    let v4_seg = build_segment(
+        12345, 80, 1000, 0, TCP_SYN, 65535, &[],
+        IpAddr::V4(v4_src), IpAddr::V4(v4_dst),
+    );
+    if !ipv4::verify_transport_checksum(v4_src, v4_dst, PROTO_TCP, &v4_seg) {
+        crate::serial_println!("[tcp]   FAIL: IPv4 TCP checksum via dual-stack builder failed");
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[tcp]   IPv6 TCP checksum: OK");
+    Ok(())
+}
+
+/// Test 8: dual-stack IpAddr in connection matching.
+///
+/// Validates that IPv4 and IPv6 connections with the same port numbers
+/// are distinguished by address family (IpAddr::V4 != IpAddr::V6).
+fn test_dual_stack_ip_addr() -> KernelResult<()> {
+    let v4 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let v6 = IpAddr::V6(Ipv6Addr([
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 1,
+    ]));
+
+    // Different address families must not be equal.
+    if v4 == v6 {
+        crate::serial_println!("[tcp]   FAIL: IPv4 == IPv6 with same port would collide");
+        return Err(KernelError::InternalError);
+    }
+
+    // Same family, different addresses.
+    let v4b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    if v4 == v4b {
+        crate::serial_println!("[tcp]   FAIL: different IPv4 addresses compared equal");
+        return Err(KernelError::InternalError);
+    }
+
+    // Same address roundtrips through IpAddr.
+    let orig = Ipv4Addr::new(192, 168, 1, 1);
+    let wrapped: IpAddr = orig.into();
+    if wrapped.as_v4() != Some(orig) {
+        crate::serial_println!("[tcp]   FAIL: IpAddr::V4 roundtrip failed");
+        return Err(KernelError::InternalError);
+    }
+    if wrapped.as_v6().is_some() {
+        crate::serial_println!("[tcp]   FAIL: V4 address reported as V6");
+        return Err(KernelError::InternalError);
+    }
+
+    // Display format.
+    let v4_display = alloc::format!("{}", IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
+    if v4_display != "1.2.3.4" {
+        crate::serial_println!("[tcp]   FAIL: IpAddr::V4 display = '{}'", v4_display);
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[tcp]   Dual-stack IpAddr: OK");
     Ok(())
 }

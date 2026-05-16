@@ -65415,7 +65415,7 @@ fn cmd_wget(args: &str) {
     crate::console_println!("Connecting to {}:{}...", ip, port);
 
     // Open TCP connection.
-    let conn = match crate::net::tcp::connect(ip, port) {
+    let conn = match crate::net::tcp::connect(ip.into(), port) {
         Ok(c) => c,
         Err(e) => {
             crate::console_println!("Connection failed: {:?}", e);

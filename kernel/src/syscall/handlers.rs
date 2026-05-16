@@ -5636,7 +5636,7 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
 
     if (flags & CONNECT_NONBLOCK) != 0 {
         // Non-blocking connect: return handle immediately in SYN_SENT.
-        match crate::net::tcp::connect_start(ip, port) {
+        match crate::net::tcp::connect_start(ip.into(), port) {
             Ok(handle) => {
                 #[allow(clippy::cast_possible_wrap)]
                 SyscallResult::ok(handle as i64)
@@ -5645,7 +5645,7 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
         }
     } else {
         // Blocking connect (original behavior).
-        match crate::net::tcp::connect(ip, port) {
+        match crate::net::tcp::connect(ip.into(), port) {
             Ok(handle) => {
                 #[allow(clippy::cast_possible_wrap)]
                 SyscallResult::ok(handle as i64)
@@ -5857,9 +5857,14 @@ pub fn sys_tcp_peer_addr(args: &SyscallArgs) -> SyscallResult {
 
     match crate::net::tcp::peer_addr(handle) {
         Some((ip, port)) => {
+            // This syscall only supports IPv4 (4 bytes IP + 2 bytes port = 6 bytes).
+            let v4 = match ip.as_v4() {
+                Some(v4) => v4,
+                None => return SyscallResult::err(KernelError::NotSupported),
+            };
             // SAFETY: out_ptr validated for 6 bytes above.
             unsafe {
-                core::ptr::copy_nonoverlapping(ip.0.as_ptr(), out_ptr, 4);
+                core::ptr::copy_nonoverlapping(v4.0.as_ptr(), out_ptr, 4);
                 let port_bytes = port.to_be_bytes();
                 core::ptr::copy_nonoverlapping(port_bytes.as_ptr(), out_ptr.add(4), 2);
             }
@@ -7316,11 +7321,22 @@ pub fn sys_tcp_list(args: &SyscallArgs) -> SyscallResult {
         record[4] = lport_be[0];
         record[5] = lport_be[1];
 
-        // [6..10] remote IP.
-        record[6] = conn.remote_ip.0[0];
-        record[7] = conn.remote_ip.0[1];
-        record[8] = conn.remote_ip.0[2];
-        record[9] = conn.remote_ip.0[3];
+        // [6..10] remote IP (IPv4 only — write zeroes for IPv6 connections).
+        match conn.remote_ip.as_v4() {
+            Some(v4) => {
+                record[6] = v4.0[0];
+                record[7] = v4.0[1];
+                record[8] = v4.0[2];
+                record[9] = v4.0[3];
+            }
+            None => {
+                // IPv6 not representable in this 4-byte field; use 0.0.0.0.
+                record[6] = 0;
+                record[7] = 0;
+                record[8] = 0;
+                record[9] = 0;
+            }
+        }
 
         // [10..12] remote port (network order).
         let rport_be = conn.remote_port.to_be_bytes();

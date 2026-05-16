@@ -117,7 +117,7 @@ pub fn tcp_client_test(host: Ipv4Addr, port: u16, duration_polls: u32) -> Kernel
     let polls = if duration_polls == 0 { DEFAULT_TEST_POLLS } else { duration_polls };
 
     // Connect to server.
-    let handle = super::tcp::connect(host, port)?;
+    let handle = super::tcp::connect(host.into(), port)?;
 
     // Wait for connection to establish.
     for _ in 0..CONNECT_TIMEOUT_POLLS {

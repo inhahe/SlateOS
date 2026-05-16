@@ -28,7 +28,7 @@ use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
-use super::interface::Ipv4Addr;
+use super::interface::{IpAddr, Ipv4Addr};
 use super::ipv6::Ipv6Addr;
 
 // ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ static BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 pub fn tcp_connect(host: Ipv4Addr, port: u16) -> KernelResult<(usize, Vec<u8>)> {
     TCP_CONNECTS.fetch_add(1, Ordering::Relaxed);
 
-    let handle = super::tcp::connect(host, port)?;
+    let handle = super::tcp::connect(host.into(), port)?;
 
     // Wait for connection to establish.
     for _ in 0..CONNECT_TIMEOUT_POLLS {
@@ -119,7 +119,7 @@ pub fn tcp_close(handle: usize) {
 /// Listen on a TCP port and accept one connection.
 ///
 /// Returns the accepted connection handle and any initial data received.
-pub fn tcp_listen(port: u16) -> KernelResult<(usize, Ipv4Addr, u16)> {
+pub fn tcp_listen(port: u16) -> KernelResult<(usize, IpAddr, u16)> {
     TCP_LISTENS.fetch_add(1, Ordering::Relaxed);
 
     let listener = super::tcp::bind(port)?;
@@ -133,7 +133,7 @@ pub fn tcp_listen(port: u16) -> KernelResult<(usize, Ipv4Addr, u16)> {
                 Ok(conn_handle) => {
                     // Get peer address.
                     let peer = super::tcp::peer_addr(conn_handle)
-                        .unwrap_or((Ipv4Addr::UNSPECIFIED, 0));
+                        .unwrap_or((IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
                     let _ = super::tcp::close_listener(listener);
                     return Ok((conn_handle, peer.0, peer.1));
                 }
@@ -255,7 +255,7 @@ pub fn scan_ports(host: Ipv4Addr, start: u16, end: u16) -> Vec<PortScanResult> {
 /// succeeds within a short timeout.
 fn check_port_open(host: Ipv4Addr, port: u16) -> bool {
     // Try to connect.
-    let handle = match super::tcp::connect(host, port) {
+    let handle = match super::tcp::connect(host.into(), port) {
         Ok(h) => h,
         Err(_) => return false,
     };

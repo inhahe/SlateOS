@@ -62,6 +62,7 @@ use spin::Mutex;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 
+use self::atomic::CursorState;
 use self::connector::DrmConnector;
 use self::crtc::DrmCrtc;
 use self::encoder::DrmEncoder;
@@ -134,6 +135,12 @@ pub struct DrmDevice {
     framebuffers: Vec<DrmFramebuffer>,
     /// Active GEM buffer objects.
     gem_objects: Vec<GemObject>,
+    /// Per-CRTC cursor state.
+    ///
+    /// Indexed in parallel with `crtcs` — `cursor_states[i]` is the
+    /// cursor for `crtcs[i]`.  Populated in `enumerate()` alongside
+    /// the CRTC list.
+    cursor_states: Vec<CursorState>,
 }
 
 /// Backend enum — avoids `dyn Trait` overhead on the hot path.
@@ -161,6 +168,7 @@ impl DrmDevice {
             encoders: Vec::new(),
             framebuffers: Vec::new(),
             gem_objects: Vec::new(),
+            cursor_states: Vec::new(),
         }
     }
 
@@ -192,10 +200,15 @@ impl DrmDevice {
             DrmBackend::Limine(b) => b.enumerate(&alloc_fn)?,
             DrmBackend::VirtioGpu(b) => b.enumerate(&alloc_fn)?,
         };
+        // One cursor state per CRTC.
+        let cursor_count = crtcs.len();
         self.connectors = connectors;
         self.crtcs = crtcs;
         self.planes = planes;
         self.encoders = encoders;
+        self.cursor_states = (0..cursor_count)
+            .map(|_| CursorState::new())
+            .collect();
         Ok(())
     }
 
@@ -400,6 +413,95 @@ impl DrmDevice {
     #[must_use]
     pub fn first_crtc_id(&self) -> Option<DrmObjectId> {
         self.crtcs.first().map(|c| c.id)
+    }
+
+    // --- Mutable accessors (for atomic commit) ---
+
+    /// Mutable reference to a CRTC by ID.
+    pub fn crtc_mut(&mut self, id: DrmObjectId) -> Option<&mut DrmCrtc> {
+        self.crtcs.iter_mut().find(|c| c.id == id)
+    }
+
+    /// Mutable reference to a plane by ID.
+    pub fn plane_mut(&mut self, id: DrmObjectId) -> Option<&mut DrmPlane> {
+        self.planes.iter_mut().find(|p| p.id == id)
+    }
+
+    /// Mutable reference to a connector by ID.
+    pub fn connector_mut(&mut self, id: DrmObjectId) -> Option<&mut DrmConnector> {
+        self.connectors.iter_mut().find(|c| c.id == id)
+    }
+
+    /// Mutable reference to an encoder by ID.
+    pub fn encoder_mut(&mut self, id: DrmObjectId) -> Option<&mut DrmEncoder> {
+        self.encoders.iter_mut().find(|e| e.id == id)
+    }
+
+    // --- Cursor operations ---
+
+    /// Set the cursor image for a CRTC.
+    ///
+    /// `gem_handle` is a GEM buffer containing the ARGB cursor pixels
+    /// (typically 64×64).  Pass `gem_handle = 0` to hide the cursor.
+    ///
+    /// Cursor updates are separate from atomic commit because cursor
+    /// moves happen at mouse input frequency (1000 Hz+), far too fast
+    /// for the atomic commit path.
+    pub fn cursor_set(
+        &mut self,
+        crtc_id: DrmObjectId,
+        gem_handle: u32,
+        width: u32,
+        height: u32,
+        hot_x: u32,
+        hot_y: u32,
+    ) -> KernelResult<()> {
+        let crtc_idx = self.crtcs.iter().position(|c| c.id == crtc_id)
+            .ok_or(KernelError::NotFound)?;
+
+        // Validate GEM handle if non-zero.
+        if gem_handle != 0 && !self.gem_objects.iter().any(|g| g.handle == gem_handle) {
+            return Err(KernelError::NotFound);
+        }
+
+        let cs = self.cursor_states.get_mut(crtc_idx)
+            .ok_or(KernelError::NotFound)?;
+        cs.gem_handle = gem_handle;
+        cs.width = width;
+        cs.height = height;
+        cs.hot_x = hot_x;
+        cs.hot_y = hot_y;
+        cs.visible = gem_handle != 0;
+
+        Ok(())
+    }
+
+    /// Move the cursor position for a CRTC.
+    ///
+    /// This is the hottest path in the cursor subsystem — called on
+    /// every mouse movement event.  No locks beyond the device lock.
+    pub fn cursor_move(
+        &mut self,
+        crtc_id: DrmObjectId,
+        x: i32,
+        y: i32,
+    ) -> KernelResult<()> {
+        let crtc_idx = self.crtcs.iter().position(|c| c.id == crtc_id)
+            .ok_or(KernelError::NotFound)?;
+
+        let cs = self.cursor_states.get_mut(crtc_idx)
+            .ok_or(KernelError::NotFound)?;
+        cs.x = x;
+        cs.y = y;
+
+        Ok(())
+    }
+
+    /// Get the cursor state for a CRTC.
+    #[must_use]
+    pub fn cursor_state(&self, crtc_id: DrmObjectId) -> Option<&CursorState> {
+        let idx = self.crtcs.iter().position(|c| c.id == crtc_id)?;
+        self.cursor_states.get(idx)
     }
 }
 
@@ -641,6 +743,60 @@ pub fn self_test() -> KernelResult<()> {
 
     // 8. Hotplug detection framework.
     hotplug::self_test()?;
+
+    // 9. Atomic modesetting.
+    atomic::self_test()?;
+
+    // 10. Cursor operations.
+    with_primary_mut(|dev| {
+        let crtc_id = dev.first_crtc_id()
+            .ok_or(KernelError::InternalError)?;
+
+        // Cursor should start invisible.
+        let cs = dev.cursor_state(crtc_id)
+            .ok_or(KernelError::InternalError)?;
+        if cs.visible {
+            serial_println!("[drm]   FAIL: cursor visible at init");
+            return Err(KernelError::InternalError);
+        }
+
+        // Create a small GEM buffer for cursor.
+        let handle = dev.gem_create(64, 64, PixelFormat::Argb8888)?;
+
+        // Set cursor.
+        dev.cursor_set(crtc_id, handle, 64, 64, 0, 0)?;
+        let cs = dev.cursor_state(crtc_id)
+            .ok_or(KernelError::InternalError)?;
+        if !cs.visible || cs.gem_handle != handle {
+            serial_println!("[drm]   FAIL: cursor_set didn't work");
+            dev.gem_destroy(handle)?;
+            return Err(KernelError::InternalError);
+        }
+
+        // Move cursor.
+        dev.cursor_move(crtc_id, 100, 200)?;
+        let cs = dev.cursor_state(crtc_id)
+            .ok_or(KernelError::InternalError)?;
+        if cs.x != 100 || cs.y != 200 {
+            serial_println!("[drm]   FAIL: cursor_move didn't update position");
+            dev.gem_destroy(handle)?;
+            return Err(KernelError::InternalError);
+        }
+
+        // Hide cursor.
+        dev.cursor_set(crtc_id, 0, 0, 0, 0, 0)?;
+        let cs = dev.cursor_state(crtc_id)
+            .ok_or(KernelError::InternalError)?;
+        if cs.visible {
+            serial_println!("[drm]   FAIL: cursor still visible after hide");
+            dev.gem_destroy(handle)?;
+            return Err(KernelError::InternalError);
+        }
+
+        dev.gem_destroy(handle)?;
+        serial_println!("[drm]   Cursor operations: OK");
+        Ok(())
+    })?;
 
     serial_println!("[drm] Self-test PASSED");
     Ok(())

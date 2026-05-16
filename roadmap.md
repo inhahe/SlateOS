@@ -1760,7 +1760,11 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
       - [x] scfilter::check(task_id, nr) called after bounds check, before handler lookup
       - [x] Denied syscalls return PermissionDenied without invoking handler
       - [x] current_task_id() used for caller identification
-  - [ ] OCI-compatible container image format parsing
+  - [x] OCI-compatible container image format parsing
+    - [x] json.rs: minimal recursive-descent JSON parser (no_std, no floats, 8 self-tests)
+    - [x] oci.rs: OCI Image Spec v1.0 parser (index, manifest, config, digest verification)
+    - [x] Layer extraction via tar + gunzip + overlayfs infrastructure
+    - [x] kshell `oci` command: inspect, layers, test
   - [ ] Port Docker (or equivalent container runtime)
 
 ### 5.6 Additional software

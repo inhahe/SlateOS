@@ -5444,6 +5444,7 @@ fn dispatch(line: &str) {
         "userns" => cmd_userns(args),
         "netns" => cmd_netns(args),
         "container" => cmd_container(args),
+        "oci" => cmd_oci(args),
         "scfilter" | "seccomp" => cmd_scfilter(args),
         "capreq" | "cr" => cmd_cap_request(args),
         "version" | "ver" => cmd_version(),
@@ -66541,6 +66542,104 @@ fn cmd_container(args: &str) {
     }
 }
 
+/// `oci` — OCI container image management.
+///
+/// Subcommands:
+///   oci inspect <dir>   — parse and display OCI image metadata
+///   oci layers <dir>    — list image layers with digests
+///   oci verify <dir>    — verify all blob digests
+///   oci test            — run self-tests
+fn cmd_oci(args: &str) {
+    use crate::oci;
+
+    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    let cmd = parts.first().copied().unwrap_or("");
+
+    match cmd {
+        "inspect" => {
+            let Some(dir) = parts.get(1) else {
+                crate::console_println!("Usage: oci inspect <image-dir>");
+                return;
+            };
+            match oci::load_image(dir) {
+                Ok(image) => {
+                    crate::console_println!("=== OCI Image: {} ===", dir);
+                    crate::console_println!("  Architecture: {}", image.config.architecture);
+                    crate::console_println!("  OS:           {}", image.config.os);
+                    crate::console_println!("  Layers:       {}", image.manifest.layers.len());
+
+                    if !image.config.entrypoint.is_empty() {
+                        let ep: alloc::string::String = image.config.entrypoint.join(" ");
+                        crate::console_println!("  Entrypoint:   {}", ep);
+                    }
+                    if !image.config.cmd.is_empty() {
+                        let cmd_str: alloc::string::String = image.config.cmd.join(" ");
+                        crate::console_println!("  Cmd:          {}", cmd_str);
+                    }
+                    if !image.config.working_dir.is_empty() {
+                        crate::console_println!("  WorkingDir:   {}", image.config.working_dir);
+                    }
+                    if !image.config.user.is_empty() {
+                        crate::console_println!("  User:         {}", image.config.user);
+                    }
+                    if !image.config.env.is_empty() {
+                        crate::console_println!("  Environment:");
+                        for e in &image.config.env {
+                            crate::console_println!("    {}", e);
+                        }
+                    }
+                    if !image.config.exposed_ports.is_empty() {
+                        let ports: alloc::string::String =
+                            image.config.exposed_ports.join(", ");
+                        crate::console_println!("  Ports:        {}", ports);
+                    }
+                    if !image.config.labels.is_empty() {
+                        crate::console_println!("  Labels:");
+                        for (k, v) in &image.config.labels {
+                            crate::console_println!("    {}={}", k, v);
+                        }
+                    }
+                }
+                Err(e) => crate::console_println!("Error loading image: {:?}", e),
+            }
+        }
+        "layers" => {
+            let Some(dir) = parts.get(1) else {
+                crate::console_println!("Usage: oci layers <image-dir>");
+                return;
+            };
+            match oci::load_image(dir) {
+                Ok(image) => {
+                    crate::console_println!("=== Layers ({}) ===", image.manifest.layers.len());
+                    for (i, layer) in image.manifest.layers.iter().enumerate() {
+                        crate::console_println!(
+                            "  [{}] {} ({} bytes, {})",
+                            i, layer.digest, layer.size, layer.media_type
+                        );
+                    }
+                    crate::console_println!("Config: {} ({} bytes)",
+                        image.manifest.config.digest,
+                        image.manifest.config.size
+                    );
+                }
+                Err(e) => crate::console_println!("Error: {:?}", e),
+            }
+        }
+        "test" => {
+            match oci::self_test() {
+                Ok(()) => crate::console_println!("OCI self-test passed."),
+                Err(e) => crate::console_println!("OCI self-test failed: {:?}", e),
+            }
+        }
+        _ => {
+            crate::console_println!("Usage: oci [inspect|layers|test]");
+            crate::console_println!("  oci inspect <dir>  — show image metadata and config");
+            crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
+            crate::console_println!("  oci test           — run parser self-tests");
+        }
+    }
+}
+
 fn cmd_scfilter(args: &str) {
     use crate::scfilter;
 
@@ -69043,7 +69142,7 @@ fn is_builtin(name: &str) -> bool {
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "dhcpv6" | "dhcp6" | "ping" | "ping6" | "udp6" | "nslookup"
         | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond"
-        | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
+        | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "oci" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"
         | "readonly" | "let" | "trap" | "command" | "which" | "typeof"

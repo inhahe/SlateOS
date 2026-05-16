@@ -96,7 +96,31 @@ fi
 echo "=== Staging boot files ==="
 mkdir -p "$ESP_DIR/EFI/BOOT" "$ESP_DIR/boot"
 cp "$PROJECT_ROOT/limine/BOOTX64.EFI" "$ESP_DIR/EFI/BOOT/BOOTX64.EFI"
-cp "$KERNEL_BIN" "$ESP_DIR/boot/kernel"
+
+# Strip debug symbols — the unstripped debug binary can exceed 150 MiB,
+# which blows past what Limine can load in 256-512 MiB of RAM.  Stripping
+# brings it down to ~30 MiB.  We try llvm-strip (ships with rustup) first,
+# falling back to a plain copy if no strip tool is found.
+LLVM_STRIP=""
+for candidate in \
+    "$HOME/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/llvm-strip.exe" \
+    "$(rustup which llvm-strip 2>/dev/null)" \
+    "llvm-strip" \
+    "strip"; do
+    if [ -n "$candidate" ] && command -v "$candidate" &>/dev/null || [ -f "$candidate" ]; then
+        LLVM_STRIP="$candidate"
+        break
+    fi
+done
+
+if [ -n "$LLVM_STRIP" ]; then
+    echo "Stripping kernel binary with $LLVM_STRIP..."
+    "$LLVM_STRIP" "$KERNEL_BIN" -o "$ESP_DIR/boot/kernel"
+else
+    echo "WARNING: No strip tool found, copying unstripped kernel."
+    cp "$KERNEL_BIN" "$ESP_DIR/boot/kernel"
+fi
+
 cp "$PROJECT_ROOT/limine.conf" "$ESP_DIR/limine.conf"
 
 # Step 3: Create a small swap disk image (16 MiB) for disk-backed swap testing.
@@ -120,7 +144,7 @@ OVMF_WIN="$(to_win_path "$OVMF")"
     -serial "file:$SERIAL_FILE_WIN" \
     -display none \
     -no-reboot \
-    -m 256M \
+    -m 512M \
     -machine q35 &
 QEMU_PID=$!
 

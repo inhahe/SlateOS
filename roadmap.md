@@ -1440,6 +1440,11 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] DRM syscalls (1000-1099 range) for userspace GPU access
   - [x] EDID parsing for real hardware mode detection
   - [x] Hotplug detection framework
+  - [x] Atomic modesetting check + commit (atomic_check validates objects/modes/bindings, atomic_commit applies state, test_only dry-run mode)
+  - [x] Cursor plane support (per-CRTC cursor state, cursor_set/cursor_move, GEM-backed cursor image, hot spot)
+  - [x] Display query syscalls (connector status, mode enumeration, CRTC info)
+  - [x] Cursor syscalls (SYS_DRM_CURSOR_SET, SYS_DRM_CURSOR_MOVE)
+  - [x] Atomic commit syscall (SYS_DRM_ATOMIC_COMMIT with serialized state buffer)
 - [ ] Vulkan loader and basic GPU command submission
 - [ ] OpenGL via Mesa (port Mesa's Vulkan and OpenGL drivers)
 - [ ] 2D drawing library: Vello (Rust-native, GPU compute shaders) + HarfBuzz via FFI for complex text shaping

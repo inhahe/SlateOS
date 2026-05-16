@@ -124,28 +124,76 @@ impl WaitQueue {
 
     /// Block until a condition is true.
     ///
-    /// Calls `condition()` before sleeping — if it's already true,
-    /// returns immediately without blocking.  After each wakeup,
-    /// re-checks the condition to handle spurious wakeups.
+    /// Registers as a waiter *before* checking the condition, which
+    /// prevents lost wakeups.  The sequence is:
     ///
-    /// This is the preferred wait API because it handles the
-    /// check-then-sleep race correctly: the condition is checked
-    /// *before* registering as a waiter, avoiding missed wakeups.
+    /// 1. Register in the waiter list.
+    /// 2. Check the condition.
+    /// 3. If true → unregister and return.
+    /// 4. If false → `block_current()`.  Any concurrent `wake_one()`
+    ///    between steps 1 and 4 is caught by the `pending_wake` flag
+    ///    in the scheduler (see `block_current()`).
+    /// 5. After waking, re-check the condition (handles spurious wakeups).
+    ///
+    /// Must NOT be called from ISR or softirq context.
     pub fn wait_until<F>(&self, condition: F)
     where
         F: Fn() -> bool,
     {
-        // Fast path: condition already satisfied.
+        // Fast path: condition already satisfied (no registration needed).
         if condition() {
             return;
         }
 
+        let task_id = super::current_task_id();
+
         loop {
-            self.wait();
+            // Register as a waiter BEFORE checking the condition.
+            // This ensures that if the condition becomes true between
+            // our check and blocking, wake_one() will find us and
+            // either wake us (if already Blocked) or set pending_wake
+            // (if still Running).
+            loop {
+                let mut guard = self.waiters.lock();
+                if let Some(slot) = guard.iter_mut().find(|s| **s == 0) {
+                    *slot = task_id;
+                    drop(guard);
+                    break;
+                }
+                // All slots full — yield and retry.
+                drop(guard);
+                super::yield_now();
+            }
+
+            // Re-check condition now that we're registered.
+            if condition() {
+                // Condition met — unregister and return.
+                let mut guard = self.waiters.lock();
+                if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
+                    *slot = 0;
+                }
+                return;
+            }
+
+            // Condition not met — block.  If wake_one() fired between
+            // registration and here, pending_wake is set and
+            // block_current() returns immediately.
+            super::block_current();
+
+            // Woken up — remove from waiter list (wake_one may have
+            // already cleared our slot, but clear defensively).
+            {
+                let mut guard = self.waiters.lock();
+                if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
+                    *slot = 0;
+                }
+            }
+
+            // Re-check condition.
             if condition() {
                 return;
             }
-            // Spurious wakeup — go back to sleep.
+            // Spurious wakeup — loop back, re-register, re-check.
         }
     }
 
@@ -167,11 +215,10 @@ impl WaitQueue {
 
         let deadline = crate::apic::tick_count().saturating_add(timeout_ticks);
 
-        loop {
-            // Register as a waiter and block, but with a timeout via
-            // sleep_until_tick instead of indefinite blocking.
-            let task_id = super::current_task_id();
+        let task_id = super::current_task_id();
 
+        loop {
+            // Register as a waiter BEFORE checking, same as wait_until.
             {
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == 0) {
@@ -187,7 +234,18 @@ impl WaitQueue {
                 }
             }
 
-            // Sleep with timeout.
+            // Re-check condition now that we're registered.
+            if condition() {
+                let mut guard = self.waiters.lock();
+                if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
+                    *slot = 0;
+                }
+                return true;
+            }
+
+            // Sleep with timeout.  If wake_one() fired between
+            // registration and here, pending_wake ensures
+            // block_current() returns immediately.
             super::sleep_until_tick(deadline);
 
             // Remove ourselves from the waiter list (we may have been
@@ -237,10 +295,10 @@ impl WaitQueue {
         }
 
         let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
+        let task_id = super::current_task_id();
 
         loop {
-            let task_id = super::current_task_id();
-
+            // Register as waiter BEFORE checking condition.
             {
                 let mut guard = self.waiters.lock();
                 if let Some(slot) = guard.iter_mut().find(|s| **s == 0) {
@@ -254,6 +312,15 @@ impl WaitQueue {
                     }
                     continue;
                 }
+            }
+
+            // Re-check condition after registration.
+            if condition() {
+                let mut guard = self.waiters.lock();
+                if let Some(slot) = guard.iter_mut().find(|s| **s == task_id) {
+                    *slot = 0;
+                }
+                return true;
             }
 
             // Compute remaining time and sleep with hrtimer precision.

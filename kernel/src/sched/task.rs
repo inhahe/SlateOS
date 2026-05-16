@@ -267,6 +267,22 @@ pub struct Task {
     pub name_len: usize,
     /// Current scheduling state.
     pub state: TaskState,
+    /// Pending wakeup flag — prevents lost wakeups.
+    ///
+    /// Set to `true` by [`wake()`](super::wake) when the target task is
+    /// not yet in `Blocked` state (e.g., still `Running` between
+    /// registering as a waiter and calling `block_current()`).
+    /// [`block_current()`](super::block_current) checks this flag before
+    /// actually blocking: if set, it clears it and returns immediately
+    /// instead of going to sleep.
+    ///
+    /// This solves the classic lost-wakeup race where a timer preemption
+    /// between registering in a wait queue and blocking allows a waker
+    /// to see the task as Running, remove it from the queue, and call
+    /// `wake()` which fails — leaving the task permanently stuck.
+    ///
+    /// Always accessed under the `SCHED` lock, so no atomics needed.
+    pub pending_wake: bool,
     /// Base priority level (0 = highest, 31 = lowest).
     ///
     /// This is the user-assigned priority.  The effective scheduling
@@ -540,6 +556,7 @@ impl Task {
     #[inline]
     pub fn mark_ready(&mut self, current_tick: u64) {
         self.state = TaskState::Ready;
+        self.pending_wake = false; // Clear stale flag on actual transition.
         self.ready_since_tick = current_tick;
     }
 
@@ -643,6 +660,7 @@ impl Task {
             name,
             name_len: tag.len(),
             state: TaskState::Running,
+            pending_wake: false,
             priority: IDLE_PRIORITY,
             context: Context::empty(),
             stack_phys: 0,
@@ -711,6 +729,7 @@ impl Task {
             name,
             name_len: idx_str,
             state: TaskState::Running,
+            pending_wake: false,
             priority: IDLE_PRIORITY,
             context: Context::empty(),
             stack_phys: 0,
@@ -828,6 +847,7 @@ impl Task {
             name,
             name_len: copy_len,
             state: TaskState::Ready,
+            pending_wake: false,
             priority,
             context,
             stack_phys,

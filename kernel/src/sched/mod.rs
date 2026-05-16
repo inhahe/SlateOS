@@ -949,24 +949,39 @@ pub fn spawn_with_affinity(
         return Err(KernelError::InvalidArgument);
     }
 
-    let mut new_task = Task::new_kernel(name, priority, entry, arg, pml4_phys)?;
-    new_task.cpu_affinity = affinity_mask;
-    new_task.ready_since_tick = crate::apic::tick_count();
-    let id = new_task.id;
-    let prio = new_task.priority;
-    let target_cpu = choose_cpu_for_task(&new_task);
-    new_task.last_cpu = target_cpu;
+    // Disable interrupts for the entire task-creation + SCHED-insertion
+    // critical section.  Task::new_kernel() allocates a kernel stack
+    // (holding the kstack ALLOCATOR spinlock) and physical frames
+    // (holding the frame ALLOCATOR spinlock).  If a timer interrupt
+    // preempts us while either lock is held and the next scheduled task
+    // tries to allocate, it deadlocks on that same spinlock.  This was
+    // the root cause of the kchannel test-5 Heisenbug: the timer fired
+    // during kstack allocation inside spawn(), preempted to the consumer
+    // task, which itself needed to allocate on its first context-switch
+    // path (or a subsequent spawn), hitting the held lock.
+    let (id, prio, target_cpu) = cpu::without_interrupts(|| {
+        let mut new_task = Task::new_kernel(name, priority, entry, arg, pml4_phys)?;
+        new_task.cpu_affinity = affinity_mask;
+        new_task.ready_since_tick = crate::apic::tick_count();
+        let id = new_task.id;
+        let prio = new_task.priority;
+        let target_cpu = choose_cpu_for_task(&new_task);
+        new_task.last_cpu = target_cpu;
 
-    let mut state = SCHED.lock();
-    if !state.initialized {
-        return Err(KernelError::NotSupported);
-    }
+        let mut state = SCHED.lock();
+        if !state.initialized {
+            return Err(KernelError::NotSupported);
+        }
+        state.tasks.insert(id, Box::new(new_task));
+        PER_CPU_SCHED.enqueue(id, prio, target_cpu);
+        drop(state); // Release lock before re-enabling interrupts.
 
-    state.tasks.insert(id, Box::new(new_task));
-    PER_CPU_SCHED.enqueue(id, prio, target_cpu);
-    drop(state); // Release lock before IPI to minimize hold time.
+        Ok((id, prio, target_cpu))
+    })?;
 
     // Wake the target CPU if it's idle (remote CPUs may be in HLT).
+    // Done outside without_interrupts — signal_cpu sends an IPI which
+    // is fine with interrupts enabled.
     signal_cpu(target_cpu);
 
     TASKS_SPAWNED.fetch_add(1, Ordering::Relaxed);
@@ -1092,6 +1107,14 @@ pub fn block_current() {
     {
         let mut state = SCHED.lock();
         if let Some(task) = state.tasks.get_mut(&current_id) {
+            // Check for pending wake: if someone called wake() on us
+            // between registering in a wait queue and now, the pending
+            // flag is set.  Consume it and don't actually block — this
+            // prevents the lost-wakeup race (see wake() comments).
+            if task.pending_wake {
+                task.pending_wake = false;
+                return;
+            }
             // Record burst length for interactive task detection.
             task.record_block();
             task.state = TaskState::Blocked;
@@ -1113,17 +1136,26 @@ pub fn wake(task_id: TaskId) -> bool {
     let target_cpu;
     {
         let mut state = SCHED.lock();
-        if let Some(task) = state.tasks.get_mut(&task_id)
-            && task.state == TaskState::Blocked
-        {
-            task.mark_ready(crate::apic::tick_count());
-            // Reset burst counter for the new wake cycle.
-            task.burst_ticks = 0;
-            let prio = task.effective_priority();
-            // Respect CPU affinity when choosing the target CPU.
-            target_cpu = choose_cpu_for_task(task);
-            task.last_cpu = target_cpu;
-            PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
+        if let Some(task) = state.tasks.get_mut(&task_id) {
+            if task.state == TaskState::Blocked {
+                task.mark_ready(crate::apic::tick_count());
+                // Reset burst counter for the new wake cycle.
+                task.burst_ticks = 0;
+                let prio = task.effective_priority();
+                // Respect CPU affinity when choosing the target CPU.
+                target_cpu = choose_cpu_for_task(task);
+                task.last_cpu = target_cpu;
+                PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
+            } else {
+                // Task is not Blocked (still Running or Ready).  Set the
+                // pending-wake flag so block_current() won't actually
+                // block.  This prevents the lost-wakeup race where a
+                // timer preemption between registering in a wait queue
+                // and calling block_current() lets a waker find the task
+                // as Running and lose the wake signal.
+                task.pending_wake = true;
+                return false;
+            }
         } else {
             return false;
         }
@@ -1149,18 +1181,21 @@ pub fn wake(task_id: TaskId) -> bool {
 /// retry on the next tick if this fails.
 pub fn try_wake(task_id: TaskId) -> bool {
     if let Some(mut state) = SCHED.try_lock() {
-        if let Some(task) = state.tasks.get_mut(&task_id)
-            && task.state == TaskState::Blocked
-        {
-            task.mark_ready(crate::apic::tick_count());
-            task.burst_ticks = 0;
-            let prio = task.effective_priority();
-            let target_cpu = choose_cpu_for_task(task);
-            task.last_cpu = target_cpu;
-            PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
-            drop(state);
-            signal_cpu(target_cpu);
-            return true;
+        if let Some(task) = state.tasks.get_mut(&task_id) {
+            if task.state == TaskState::Blocked {
+                task.mark_ready(crate::apic::tick_count());
+                task.burst_ticks = 0;
+                let prio = task.effective_priority();
+                let target_cpu = choose_cpu_for_task(task);
+                task.last_cpu = target_cpu;
+                PER_CPU_SCHED.enqueue(task_id, prio, target_cpu);
+                drop(state);
+                signal_cpu(target_cpu);
+                return true;
+            } else {
+                // Same pending-wake logic as wake() — see comment there.
+                task.pending_wake = true;
+            }
         }
     }
     false

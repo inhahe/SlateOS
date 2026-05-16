@@ -1136,7 +1136,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Self-test: disabled passthrough, default DROP, rule matching, IP prefix, connection tracking
   - [x] Per-rule match counters: each rule tracks packet match count; rule_stats() returns sorted diagnostics; reset_rule_counters() clears counters
 - [x] Network diagnostic tools and protocols:
-  - [x] HTTP/1.1 client (GET/HEAD requests, header parsing, redirect following, chunked transfer)
+  - [x] HTTP/1.1 client (GET/HEAD requests, header parsing, redirect following, chunked transfer, dual-stack resolve with A→AAAA fallback)
   - [x] NTP client (RFC 5905 time synchronization, round-trip delay compensation, periodic sync, IPv6 fallback via AAAA+UDPv6, sync_now_v6 forced IPv6 mode, `ntp sync6` command)
   - [x] UPnP IGD / NAT-PMP port forwarding (SSDP discovery, SOAP control, automatic NAT traversal)
   - [x] mDNS / DNS-SD zero-config service discovery (RFC 6762/6763, dual-stack IPv4 224.0.0.251 + IPv6 ff02::fb multicast, AAAA record support, service announcements include both A+AAAA additional records, `mdns resolve6` command)
@@ -1156,11 +1156,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Netcat (nc) TCP/UDP swiss army knife (connect, listen, send, port scan, service lookup, IPv6 UDP send/dual-stack listen via `nc udp6/udplisten`)
   - [x] iperf network bandwidth measurement (TCP/UDP throughput, jitter, packet loss, UDP6 via udp_client_test_v6, `iperf udp6` command)
   - [x] SNMP v1/v2c client (ASN.1/BER encoding, GET/GET-NEXT/WALK, OID database, IPv6 via get_v6/walk_v6, `snmp get6/walk6/sysinfo6`)
-  - [x] FTP client (RFC 959, PASV mode, LIST, RETR, reply code parsing)
-  - [x] SMTP client (RFC 5321, EHLO, MAIL FROM/RCPT TO/DATA, dot stuffing)
+  - [x] FTP client (RFC 959, PASV mode, LIST, RETR, reply code parsing, dual-stack IpAddr)
+  - [x] SMTP client (RFC 5321, EHLO, MAIL FROM/RCPT TO/DATA, dot stuffing, dual-stack IpAddr)
   - [x] 802.1Q VLAN support (tag/untag frames, VLAN interface management, PCP priority)
   - [x] QoS traffic classification (DSCP, port/protocol rules, token bucket rate limiting)
-  - [x] SOCKS5 proxy client (RFC 1928, CONNECT, no-auth/userpass, IPv4/domain targets)
+  - [x] SOCKS5 proxy client (RFC 1928, CONNECT, no-auth/userpass, IPv4/IPv6/domain targets, dual-stack proxy+target)
   - [x] Ethernet bridging (MAC learning FDB, STP port states, flooding) and link aggregation (active-backup, round-robin, XOR-hash bonding)
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 

@@ -1018,6 +1018,9 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = crypto::self_test_crc32c() {
         serial_println!("WARNING: CRC32C self-test failed: {:?}", e);
     }
+    if let Err(e) = crypto::self_test_tls_crypto() {
+        serial_println!("WARNING: TLS crypto self-test failed: {:?}", e);
+    }
 
     console::boot_step_update(console::BootStatus::Ok, "Storage & filesystems");
 

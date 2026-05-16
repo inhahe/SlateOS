@@ -66855,6 +66855,195 @@ fn cmd_oci(args: &str) {
                 Err(e) => crate::console_println!("Error: {:?}", e),
             }
         }
+        "run" | "create" => {
+            // oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]
+            //
+            // Loads an OCI image, extracts all layers into a merged rootfs
+            // directory, creates a container with the image's configuration,
+            // and reports the container ID for subsequent exec/stop/delete.
+            let Some(dir) = parts.get(1) else {
+                crate::console_println!("Usage: oci run <image-dir> [--name NAME] [--net IP[,gw=..,dns=..]]");
+                return;
+            };
+
+            // Parse optional flags.
+            let mut name: Option<&str> = None;
+            let mut net_ip: Option<[u8; 4]> = None;
+            let mut net_gw: Option<[u8; 4]> = None;
+            let mut net_dns: Option<[u8; 4]> = None;
+            let mut i = 2;
+            while i < parts.len() {
+                match parts[i] {
+                    "--name" | "-n" => {
+                        if let Some(&n) = parts.get(i.saturating_add(1)) {
+                            name = Some(n);
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
+                    "--net" => {
+                        if let Some(&net_str) = parts.get(i.saturating_add(1)) {
+                            let net_parts: alloc::vec::Vec<&str> = net_str.split(',').collect();
+                            if let Some(ip) = parse_ipv4_octets(net_parts.first().copied().unwrap_or("")) {
+                                net_ip = Some(ip);
+                                for &part in net_parts.iter().skip(1) {
+                                    if let Some(gw) = part.strip_prefix("gw=") {
+                                        net_gw = parse_ipv4_octets(gw);
+                                    } else if let Some(dns) = part.strip_prefix("dns=") {
+                                        net_dns = parse_ipv4_octets(dns);
+                                    }
+                                }
+                            }
+                            i = i.saturating_add(2);
+                        } else {
+                            i = i.saturating_add(1);
+                        }
+                    }
+                    _ => { i = i.saturating_add(1); }
+                }
+            }
+
+            // Step 1: Load OCI image metadata.
+            crate::console_println!("[oci] Loading image from {}...", dir);
+            let image = match oci::load_image(dir) {
+                Ok(img) => img,
+                Err(e) => {
+                    crate::console_println!("[oci] Failed to load image: {:?}", e);
+                    return;
+                }
+            };
+
+            let image_name = name.unwrap_or_else(|| {
+                // Try to derive name from directory path.
+                dir.rsplit('/').next().unwrap_or("oci-container")
+            });
+
+            crate::console_println!(
+                "[oci] Image: {} ({}), {} layers",
+                image.config.architecture,
+                image.config.os,
+                image.manifest.layers.len()
+            );
+
+            // Step 2: Create rootfs directory and extract layers.
+            let rootfs_base = alloc::format!("/tmp/oci-{}", image_name);
+            let rootfs_lower = alloc::format!("{}/lower", rootfs_base);
+            let rootfs_upper = alloc::format!("{}/upper", rootfs_base);
+
+            // Create directory structure.
+            if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_base) {
+                // May already exist — ignore AlreadyExists.
+                if !matches!(e, crate::error::KernelError::AlreadyExists) {
+                    crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_base, e);
+                    return;
+                }
+            }
+            if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_lower) {
+                if !matches!(e, crate::error::KernelError::AlreadyExists) {
+                    crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_lower, e);
+                    return;
+                }
+            }
+            if let Err(e) = crate::fs::vfs::Vfs::mkdir(&rootfs_upper) {
+                if !matches!(e, crate::error::KernelError::AlreadyExists) {
+                    crate::console_println!("[oci] Failed to create {}: {:?}", rootfs_upper, e);
+                    return;
+                }
+            }
+
+            // Extract each layer into the lower directory (merged — last layer wins).
+            let mut total_files: u64 = 0;
+            for (idx, layer) in image.manifest.layers.iter().enumerate() {
+                crate::console_println!(
+                    "[oci] Extracting layer {}/{} ({} bytes)...",
+                    idx.saturating_add(1),
+                    image.manifest.layers.len(),
+                    layer.size
+                );
+                match oci::extract_layer(dir, layer, &rootfs_lower) {
+                    Ok(count) => {
+                        total_files = total_files.saturating_add(count);
+                        crate::console_println!(
+                            "[oci]   Layer {}: {} files extracted",
+                            idx.saturating_add(1),
+                            count
+                        );
+                    }
+                    Err(e) => {
+                        crate::console_println!(
+                            "[oci] Failed to extract layer {}: {:?}",
+                            idx.saturating_add(1),
+                            e
+                        );
+                        return;
+                    }
+                }
+            }
+            crate::console_println!("[oci] Rootfs: {} total files in {}", total_files, rootfs_lower);
+
+            // Step 3: Create overlay filesystem.
+            let overlay_name = alloc::format!("oci-{}", image_name);
+            match crate::fs::overlay::create(&overlay_name, &rootfs_lower, &rootfs_upper) {
+                Ok(ov_id) => {
+                    crate::console_println!("[oci] Overlay created (id={}): lower={}, upper={}", ov_id, rootfs_lower, rootfs_upper);
+                }
+                Err(e) => {
+                    crate::console_println!("[oci] Overlay creation failed: {:?} (continuing without overlay)", e);
+                }
+            }
+
+            // Step 4: Create container.
+            let mut cfg = crate::container::ContainerConfig::new(image_name);
+            cfg.net_ip = net_ip;
+            cfg.net_gateway = net_gw;
+            cfg.net_dns = net_dns;
+            if net_ip.is_some() {
+                cfg.net_mask = Some([255, 255, 255, 0]); // default /24
+            }
+
+            match crate::container::create(&cfg) {
+                Ok(ct_id) => {
+                    // Start the container.
+                    let _ = crate::container::start(ct_id);
+
+                    crate::console_println!();
+                    crate::console_println!("=== Container Created ===");
+                    crate::console_println!("  Container ID: {}", ct_id);
+                    crate::console_println!("  Name:         {}", image_name);
+                    crate::console_println!("  Rootfs:       {}", rootfs_lower);
+
+                    // Show image runtime config.
+                    let command = image.config.command();
+                    if !command.is_empty() {
+                        let cmd_str: alloc::string::String = command.join(" ");
+                        crate::console_println!("  Command:      {}", cmd_str);
+                    }
+                    if !image.config.working_dir.is_empty() {
+                        crate::console_println!("  WorkingDir:   {}", image.config.working_dir);
+                    }
+                    if !image.config.env.is_empty() {
+                        crate::console_println!("  Environment:");
+                        for e in &image.config.env {
+                            crate::console_println!("    {}", e);
+                        }
+                    }
+
+                    if let Some(ns) = crate::container::namespace_ids(ct_id) {
+                        crate::console_println!("  PID NS:       {}", ns.0);
+                        crate::console_println!("  User NS:      {}", ns.1);
+                        crate::console_println!("  Net NS:       {}", ns.2);
+                    }
+
+                    crate::console_println!();
+                    crate::console_println!("Use 'container exec {}' to run commands in this container.", ct_id);
+                    crate::console_println!("Use 'container stop {}' then 'container delete {}' to clean up.", ct_id, ct_id);
+                }
+                Err(e) => {
+                    crate::console_println!("[oci] Container creation failed: {:?}", e);
+                }
+            }
+        }
         "test" => {
             match oci::self_test() {
                 Ok(()) => crate::console_println!("OCI self-test passed."),
@@ -66862,9 +67051,11 @@ fn cmd_oci(args: &str) {
             }
         }
         _ => {
-            crate::console_println!("Usage: oci [inspect|layers|test]");
+            crate::console_println!("Usage: oci [inspect|layers|run|test]");
             crate::console_println!("  oci inspect <dir>  — show image metadata and config");
             crate::console_println!("  oci layers <dir>   — list layer digests and sizes");
+            crate::console_println!("  oci run <dir> [--name NAME] [--net IP[,gw=..,dns=..]]");
+            crate::console_println!("                     — create container from OCI image");
             crate::console_println!("  oci test           — run parser self-tests");
         }
     }

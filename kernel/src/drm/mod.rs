@@ -45,6 +45,7 @@ pub mod edid;
 pub mod encoder;
 pub mod framebuffer;
 pub mod gem;
+pub mod hotplug;
 pub mod mode;
 pub mod plane;
 pub mod property;
@@ -539,6 +540,9 @@ pub fn init() {
         }
     }
 
+    // Enable hotplug detection now that all backends are registered.
+    hotplug::enable();
+
     serial_println!("[drm] DRM subsystem initialized ({} devices)", device_count());
 }
 
@@ -634,6 +638,9 @@ pub fn self_test() -> KernelResult<()> {
 
     // 7. EDID parser.
     edid::self_test()?;
+
+    // 8. Hotplug detection framework.
+    hotplug::self_test()?;
 
     serial_println!("[drm] Self-test PASSED");
     Ok(())

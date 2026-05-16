@@ -390,3 +390,8 @@ pub mod linux_loop;
 pub mod linux_watchdog;
 pub mod linux_kd;
 pub mod linux_fb;
+pub mod linux_vt;
+pub mod linux_serial;
+pub mod linux_netfilter;
+pub mod linux_bpf;
+pub mod linux_audit;

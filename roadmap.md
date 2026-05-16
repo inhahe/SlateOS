@@ -1075,6 +1075,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TCP Nagle buffer: small writes buffered internally (nagle_buf) instead of returning WouldBlock; flushed when ACK acknowledges all outstanding data or buffer fills MSS
   - [x] TCP zero window probing (persist timer, RFC 1122 §4.2.2.17): when peer advertises zero receive window, periodic probes with exponential backoff (500ms→60s) prevent permanent connection deadlock from lost window-update ACKs
   - [x] IPv4 fragmentation reassembly (RFC 791 §3.2): new frag module with 8 concurrent reassembly contexts, 30s timeout, bitmap-based block tracking, out-of-order and overlapping fragment support, oldest-eviction; Ipv4Packet now exposes identification/MF/offset; process_ipv4 routes fragments to reassembly and dispatches complete datagrams
+  - [x] IPv6 fragmentation reassembly (RFC 8200 §4.5): separate IPv6 reassembly table (8 entries, 60s timeout per RFC), 32-bit identification, Fragment header parsing via parse_fragment_header(), Ipv6Packet exposes fragment_info field, process_ipv6 routes fragments to reassembly and dispatches reassembled datagrams, atomic fragment detection (RFC 6946), firewall runs on reassembled data not individual fragments; 7 IPv6 frag self-tests + 2 IPv6 parser self-tests
   - [x] TCP ECN (Explicit Congestion Notification, RFC 3168): full handshake negotiation (client SYN ECE+CWR, server SYN-ACK ECE); CE detection → ECE echo in ACKs; sender cwnd reduction on ECE + CWR in data segments; IP header ECT(0) marking for ECN-negotiated connections; ipv4::send_ecn()/send_ns_ecn() infrastructure
   - [x] TCP peer MSS honoring (RFC 793 §3.1): store peer's advertised MSS from SYN/SYN-ACK; effective_mss() returns min(our MSS, peer MSS); all outgoing data chunking, Nagle thresholds, retransmit sizes, and congestion control calculations use effective MSS
   - [x] Path MTU Discovery (RFC 1191): ICMP "Fragmentation Needed" (type 3, code 4) carries next-hop MTU; icmp_error() reduces peer_mss to MTU-40; future segments automatically use reduced MSS via effective_mss()
@@ -1142,7 +1143,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] TFTP client and server (RFC 1350, stop-and-wait ACK, 4 concurrent transfers, VFS integration, IPv6 client via get_v6/put_v6, `tftp get6`/`put6` commands)
   - [x] Network syslog client/receiver (RFC 5424/3164, remote log forwarding, ring buffer, severity/facility, IPv6 forwarding via set_remote_server_v6, IPv6 message reception, `netsyslog forward6` command)
   - [x] Wake-on-LAN magic packet sender (UDP port 9, 6×0xFF + 16×MAC)
-  - [x] Packet capture (pcap format, ring buffer, BPF-like filters, Wireshark-compatible export)
+  - [x] Packet capture (pcap format, ring buffer, BPF-like filters, Wireshark-compatible export, IPv6/ICMPv6 filter presets, dual-stack TCP/UDP filters)
+  - [x] IPv6 neighbor discovery scanning: scan_link_v6() pings ff02::1 all-nodes multicast, probe_host_v6() targeted NS+ping6, hosts_v6() cache enumeration; `ndisc scan6/probe6/hosts6` kshell commands; NeighborInfo public API from ICMPv6 neighbor cache
   - [x] Traceroute (ICMP echo with increasing TTL, Time Exceeded correlation, per-hop RTT)
   - [x] Traceroute6 (ICMPv6 echo with increasing hop-limit, Time Exceeded correlation, SLAAC-aware source selection, DNS AAAA fallback)
   - [x] IGMP multicast group management (IGMPv2 RFC 2236, membership reports, query responses, report suppression, auto-wired to UDP join/leave)

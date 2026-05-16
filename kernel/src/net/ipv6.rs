@@ -28,10 +28,11 @@
 //!
 //! ## Design note
 //!
-//! This is a minimal IPv6 implementation to support basic connectivity
-//! (ping6, neighbor discovery).  Extension header processing skips
-//! known extension headers to find the upper-layer payload.  Full
-//! IPv6 fragmentation and routing headers are future work.
+//! This implementation supports basic connectivity (ping6, neighbor
+//! discovery, UDP, SLAAC) with full extension header processing.
+//! Fragment extension headers are parsed and routed to the reassembly
+//! module (`frag.rs`) per RFC 8200 §4.5.  Atomic fragments (RFC 6946)
+//! are detected and processed without reassembly overhead.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -384,11 +385,23 @@ pub struct Ipv6Packet<'a> {
     ///
     /// This is the "final" next-header value (TCP, UDP, ICMPv6, etc.).
     /// If the packet has no extension headers, this equals `next_header`.
+    /// For fragmented packets, this is the Fragment header's Next Header
+    /// (i.e., the protocol of the fragmentable part).
     pub upper_protocol: u8,
     /// Upper-layer payload (after all extension headers).
+    /// For fragmented packets, this is the fragment data (after the
+    /// Fragment header), NOT the reassembled datagram.
     pub payload: &'a [u8],
     /// Raw header bytes (for error generation).
     pub raw_header: &'a [u8],
+    /// Fragment header info, if the packet contains a Fragment extension
+    /// header.  `None` for unfragmented packets.
+    ///
+    /// Fields: (fragment_offset_units, more_fragments, identification)
+    /// - `fragment_offset_units`: 13-bit offset in 8-byte units.
+    /// - `more_fragments`: M flag (true = more fragments follow).
+    /// - `identification`: 32-bit datagram identifier.
+    pub fragment_info: Option<(u16, bool, u32)>,
 }
 
 impl<'a> Ipv6Packet<'a> {
@@ -437,7 +450,7 @@ impl<'a> Ipv6Packet<'a> {
         };
 
         // Skip extension headers to find the upper-layer payload.
-        let (upper_protocol, upper_payload) = skip_extension_headers(next_header, full_payload);
+        let ext = skip_extension_headers(next_header, full_payload);
 
         Ok(Self {
             version,
@@ -448,11 +461,22 @@ impl<'a> Ipv6Packet<'a> {
             hop_limit,
             src: Ipv6Addr(src),
             dst: Ipv6Addr(dst),
-            upper_protocol,
-            payload: upper_payload,
+            upper_protocol: ext.upper_protocol,
+            payload: ext.payload,
             raw_header: &data[..IPV6_HEADER_SIZE],
+            fragment_info: ext.fragment_info,
         })
     }
+}
+
+/// Result of extension header traversal.
+struct ExtHeaderResult<'a> {
+    /// Final upper-layer protocol number.
+    upper_protocol: u8,
+    /// Payload after all extension headers.
+    payload: &'a [u8],
+    /// Fragment header info, if present.
+    fragment_info: Option<(u16, bool, u32)>,
 }
 
 /// Skip known IPv6 extension headers to find the upper-layer payload.
@@ -461,40 +485,64 @@ impl<'a> Ipv6Packet<'a> {
 /// each have a "Next Header" field (first byte) and a "Header Extension
 /// Length" field (second byte, in 8-octet units excluding the first 8).
 ///
-/// Fragment headers are fixed at 8 bytes (no length field).
-///
-/// Returns (final_next_header, upper_layer_payload_slice).
+/// Fragment headers are fixed at 8 bytes (no length field).  When a
+/// Fragment header is encountered, its fields are extracted and stored
+/// so the caller can route the packet to reassembly.
 #[allow(clippy::arithmetic_side_effects)]
-fn skip_extension_headers<'a>(mut nh: u8, mut data: &'a [u8]) -> (u8, &'a [u8]) {
+fn skip_extension_headers<'a>(mut nh: u8, mut data: &'a [u8]) -> ExtHeaderResult<'a> {
+    let mut frag_info: Option<(u16, bool, u32)> = None;
+
     loop {
         match nh {
             NH_HOP_BY_HOP | NH_ROUTING | NH_DESTINATION => {
                 // These have: next_header (1 byte) + hdr_ext_len (1 byte) + data.
                 // Total length = (hdr_ext_len + 1) * 8 bytes.
                 if data.len() < 2 {
-                    return (nh, data);
+                    return ExtHeaderResult {
+                        upper_protocol: nh,
+                        payload: data,
+                        fragment_info: frag_info,
+                    };
                 }
                 let next = data[0];
                 let hdr_ext_len = data[1] as usize;
                 let total = (hdr_ext_len + 1) * 8;
                 if data.len() < total {
-                    return (nh, data);
+                    return ExtHeaderResult {
+                        upper_protocol: nh,
+                        payload: data,
+                        fragment_info: frag_info,
+                    };
                 }
                 nh = next;
                 data = &data[total..];
             }
             NH_FRAGMENT => {
                 // Fragment header is always 8 bytes.
-                if data.len() < 8 {
-                    return (nh, data);
+                // Parse fragment fields using the shared parser.
+                match super::frag::parse_fragment_header(data) {
+                    Some((next_hdr, offset, more, id)) => {
+                        frag_info = Some((offset, more, id));
+                        nh = next_hdr;
+                        data = &data[8..];
+                    }
+                    None => {
+                        // Truncated fragment header — return what we have.
+                        return ExtHeaderResult {
+                            upper_protocol: nh,
+                            payload: data,
+                            fragment_info: frag_info,
+                        };
+                    }
                 }
-                let next = data[0];
-                nh = next;
-                data = &data[8..];
             }
             _ => {
                 // Not a known extension header — this is the upper-layer protocol.
-                return (nh, data);
+                return ExtHeaderResult {
+                    upper_protocol: nh,
+                    payload: data,
+                    fragment_info: frag_info,
+                };
             }
         }
     }
@@ -674,7 +722,10 @@ pub fn multicast_mac(ip: &Ipv6Addr) -> MacAddress {
 
 /// Process an incoming IPv6 packet.
 ///
-/// Dispatches to ICMPv6, TCP, or UDP based on the upper-layer protocol.
+/// If the packet contains a Fragment extension header, it is routed to
+/// the reassembly module.  When all fragments have arrived, the
+/// reassembled datagram is dispatched to the appropriate transport handler.
+/// Unfragmented packets are dispatched directly.
 pub fn process_ipv6(data: &[u8]) -> KernelResult<()> {
     let packet = Ipv6Packet::parse(data)?;
 
@@ -693,20 +744,110 @@ pub fn process_ipv6(data: &[u8]) -> KernelResult<()> {
         return Ok(());
     }
 
+    // If the packet is a fragment, route to reassembly.
+    if let Some((frag_offset, more_fragments, identification)) = packet.fragment_info {
+        // An "atomic fragment" has offset=0 and M=0 — it is not actually
+        // fragmented (RFC 6946).  Process it directly.
+        if frag_offset == 0 && !more_fragments {
+            // Fall through to normal dispatch below.
+        } else {
+            return process_fragment(
+                packet.src,
+                packet.dst,
+                packet.upper_protocol,
+                frag_offset,
+                more_fragments,
+                identification,
+                packet.payload,
+            );
+        }
+    }
+
     // IPv6 firewall: check inbound packet before dispatching.
     // Pass the upper-layer protocol and payload to the firewall.
     if !super::firewall::check_inbound_v6(packet.upper_protocol, packet.src, packet.payload) {
         return Ok(()); // Silently drop — firewall denied.
     }
 
-    match packet.upper_protocol {
-        NH_ICMPV6 => super::icmpv6::process_icmpv6(&packet),
-        NH_UDP => super::udp::process_udp_v6(&packet),
+    dispatch_upper_layer(packet.upper_protocol, packet.src, packet.dst, packet.payload)
+}
+
+/// Dispatch a complete (reassembled or unfragmented) datagram to the
+/// appropriate transport-layer handler.
+fn dispatch_upper_layer(
+    protocol: u8,
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    payload: &[u8],
+) -> KernelResult<()> {
+    // Build a minimal Ipv6Packet for handlers that need it.
+    // The raw_header is empty since we don't have it for reassembled
+    // datagrams, but current handlers don't use it for IPv6.
+    let fake_packet = Ipv6Packet {
+        version: 6,
+        traffic_class: 0,
+        flow_label: 0,
+        payload_length: u16::try_from(payload.len()).unwrap_or(u16::MAX),
+        next_header: protocol,
+        hop_limit: 0,
+        src,
+        dst,
+        upper_protocol: protocol,
+        payload,
+        raw_header: &[],
+        fragment_info: None,
+    };
+
+    match protocol {
+        NH_ICMPV6 => super::icmpv6::process_icmpv6(&fake_packet),
+        NH_UDP => super::udp::process_udp_v6(&fake_packet),
         // TCP over IPv6 — future work (requires dual-stack socket refactor).
         _ => {
             // Unknown upper-layer protocol — silently drop.
             Ok(())
         }
+    }
+}
+
+/// Handle a received IPv6 fragment.
+///
+/// Passes the fragment to the reassembly module.  If reassembly completes,
+/// the reassembled datagram is dispatched to the transport layer.
+fn process_fragment(
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    upper_protocol: u8,
+    fragment_offset: u16,
+    more_fragments: bool,
+    identification: u32,
+    fragment_data: &[u8],
+) -> KernelResult<()> {
+    if let Some(reassembled) = super::frag::add_fragment_v6(
+        src,
+        dst,
+        identification,
+        upper_protocol,
+        fragment_offset,
+        more_fragments,
+        fragment_data,
+    ) {
+        // Run the firewall on the reassembled datagram, not individual fragments.
+        if !super::firewall::check_inbound_v6(
+            reassembled.upper_protocol,
+            reassembled.src,
+            &reassembled.payload,
+        ) {
+            return Ok(());
+        }
+
+        dispatch_upper_layer(
+            reassembled.upper_protocol,
+            reassembled.src,
+            reassembled.dst,
+            &reassembled.payload,
+        )
+    } else {
+        Ok(())
     }
 }
 
@@ -794,11 +935,13 @@ pub fn self_test() -> KernelResult<()> {
     test_parse_too_short()?;
     test_parse_wrong_version()?;
     test_extension_header_skip()?;
+    test_fragment_header_parse()?;
+    test_atomic_fragment()?;
     test_multicast_mac_mapping()?;
     test_transport_checksum_roundtrip()?;
     test_ipv6_addr_parse()?;
 
-    crate::serial_println!("[ipv6] IPv6 self-test PASSED (12 tests)");
+    crate::serial_println!("[ipv6] IPv6 self-test PASSED (14 tests)");
     Ok(())
 }
 
@@ -1081,6 +1224,124 @@ fn test_extension_header_skip() -> KernelResult<()> {
     }
 
     crate::serial_println!("[ipv6]   extension header skip: OK");
+    Ok(())
+}
+
+/// Test that Fragment extension headers are parsed and exposed.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_fragment_header_parse() -> KernelResult<()> {
+    let src = Ipv6Addr::LOOPBACK;
+    let dst = Ipv6Addr::LOOPBACK;
+
+    let upper_payload = b"fragment data";
+
+    // Build a Fragment extension header:
+    // byte 0: Next Header = UDP (17)
+    // byte 1: Reserved = 0
+    // bytes 2-3: Fragment Offset = 0 (first fragment), Res=0, M=1
+    //   offset 0 << 3 = 0, | M=1 = 0x0001
+    // bytes 4-7: Identification = 0x12345678
+    let mut ext_and_payload = Vec::new();
+    ext_and_payload.push(NH_UDP);    // Next Header: UDP
+    ext_and_payload.push(0);          // Reserved
+    ext_and_payload.extend_from_slice(&0x0001u16.to_be_bytes()); // offset=0, M=1
+    ext_and_payload.extend_from_slice(&0x12345678u32.to_be_bytes()); // ID
+    ext_and_payload.extend_from_slice(upper_payload);
+
+    // IPv6 header's next_header = NH_FRAGMENT (44).
+    let pkt = build_packet(src, dst, NH_FRAGMENT, 64, &ext_and_payload);
+    let parsed = Ipv6Packet::parse(&pkt)?;
+
+    // upper_protocol should be UDP (from fragment header's Next Header).
+    if parsed.upper_protocol != NH_UDP {
+        crate::serial_println!(
+            "[ipv6]   FAIL: fragment upper_protocol = {}, expected {}",
+            parsed.upper_protocol, NH_UDP
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // Payload should be the data after the Fragment header.
+    if parsed.payload != upper_payload {
+        crate::serial_println!(
+            "[ipv6]   FAIL: fragment payload len = {}, expected {}",
+            parsed.payload.len(), upper_payload.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    // fragment_info should be Some with correct values.
+    match parsed.fragment_info {
+        Some((offset, more, id)) => {
+            if offset != 0 {
+                crate::serial_println!("[ipv6]   FAIL: frag offset = {}, expected 0", offset);
+                return Err(KernelError::InternalError);
+            }
+            if !more {
+                crate::serial_println!("[ipv6]   FAIL: frag M flag should be true");
+                return Err(KernelError::InternalError);
+            }
+            if id != 0x12345678 {
+                crate::serial_println!("[ipv6]   FAIL: frag id = 0x{:08X}, expected 0x12345678", id);
+                return Err(KernelError::InternalError);
+            }
+        }
+        None => {
+            crate::serial_println!("[ipv6]   FAIL: fragment_info is None");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    crate::serial_println!("[ipv6]   fragment header parse: OK");
+    Ok(())
+}
+
+/// Test that an atomic fragment (offset=0, M=0) is detected.
+#[allow(clippy::arithmetic_side_effects)]
+fn test_atomic_fragment() -> KernelResult<()> {
+    let src = Ipv6Addr::LOOPBACK;
+    let dst = Ipv6Addr::LOOPBACK;
+
+    let upper_payload = b"atomic frag";
+
+    // Fragment header: offset=0, M=0 (atomic fragment, RFC 6946).
+    let mut ext_and_payload = Vec::new();
+    ext_and_payload.push(NH_ICMPV6); // Next Header
+    ext_and_payload.push(0);          // Reserved
+    ext_and_payload.extend_from_slice(&0x0000u16.to_be_bytes()); // offset=0, M=0
+    ext_and_payload.extend_from_slice(&0x0000ABCDu32.to_be_bytes()); // ID
+    ext_and_payload.extend_from_slice(upper_payload);
+
+    let pkt = build_packet(src, dst, NH_FRAGMENT, 64, &ext_and_payload);
+    let parsed = Ipv6Packet::parse(&pkt)?;
+
+    // Should still detect the fragment header.
+    match parsed.fragment_info {
+        Some((offset, more, _id)) => {
+            if offset != 0 || more {
+                crate::serial_println!(
+                    "[ipv6]   FAIL: atomic frag: offset={}, M={}",
+                    offset, more
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        None => {
+            crate::serial_println!("[ipv6]   FAIL: atomic fragment_info is None");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Upper protocol should be ICMPv6.
+    if parsed.upper_protocol != NH_ICMPV6 {
+        crate::serial_println!(
+            "[ipv6]   FAIL: atomic frag upper = {}, expected {}",
+            parsed.upper_protocol, NH_ICMPV6
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!("[ipv6]   atomic fragment (RFC 6946): OK");
     Ok(())
 }
 

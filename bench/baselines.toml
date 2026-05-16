@@ -241,6 +241,42 @@ The real incoming-packet lookup is similar (lock + scan) but stops \
 early on match.  This worst-case full scan represents the netstat \
 query path and upper-bound for packet dispatch."""
 
+[net_veth_send]
+description = "Veth pair send: TX on end A → enqueue on end B's RX"
+target_ns   = 2000
+target_cycles = 7400
+source      = "Lock acquire + validate state + TX stats + VecDeque push + frame clone"
+notes       = """
+Dominated by Mutex lock acquisition and Vec<u8> clone (60-byte frame). \
+Linux veth send is ~150-500ns on bare metal (netperf/iperf measurements); \
+our target allows extra overhead from global lock vs per-device lock."""
+
+[net_veth_recv]
+description = "Veth pair recv: dequeue from end B's RX queue"
+target_ns   = 1500
+target_cycles = 5500
+source      = "Lock acquire + VecDeque pop_front"
+notes       = """
+Cheaper than send — no frame clone, no TX stats, just a dequeue. \
+Should be lock-dominated."""
+
+[net_veth_roundtrip]
+description = "Veth pair full round-trip: send A + recv B"
+target_ns   = 3500
+target_cycles = 13000
+source      = "Send + recv combined, two lock acquisitions"
+
+[net_ns_arp_lookup]
+description = "Per-namespace ARP cache lookup (cache hit)"
+target_ns   = 1000
+target_cycles = 3700
+source      = "Lock acquire + index into NS table + linear scan of 16-entry cache"
+notes       = """
+The per-namespace ARP cache is a fixed 16-entry array with linear \
+scan — O(16) worst case.  Lock contention is the bottleneck, not \
+the scan.  Compare to global ARP lookup which is the same algorithm \
+but with a 32-entry array."""
+
 # -------------------------------------------------------------------------
 # QEMU measurements (i7-8700K, -cpu qemu64,+rdtscp, -m 256M)
 # -------------------------------------------------------------------------

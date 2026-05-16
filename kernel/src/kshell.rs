@@ -37098,6 +37098,138 @@ fn cmd_snmp(args: &str) {
             }
         }
 
+        "get6" | "g6" => {
+            // snmp get6 <ipv6-host> <oid> [community]
+            use crate::net::ipv6::Ipv6Addr;
+            if parts.len() < 3 {
+                shell_println!("Usage: snmp get6 <ipv6-host> <oid> [community]");
+                return;
+            }
+            let host_str = parts[1];
+            let oid_str = parts[2];
+            let community = parts.get(3).copied().unwrap_or("public");
+
+            let ip6 = match Ipv6Addr::parse(host_str) {
+                Some(addr) => addr,
+                None => {
+                    // Try AAAA DNS resolution.
+                    match crate::net::dns::resolve6(host_str) {
+                        Ok(addr) => addr,
+                        Err(_) => {
+                            shell_println!("snmp: cannot resolve IPv6 host '{}'", host_str);
+                            return;
+                        }
+                    }
+                }
+            };
+
+            let oid = match crate::net::snmp::Oid::parse(oid_str) {
+                Some(o) => o,
+                None => {
+                    shell_println!("snmp: invalid OID '{}'", oid_str);
+                    return;
+                }
+            };
+
+            let name = crate::net::snmp::oid_name(oid_str);
+            if !name.is_empty() {
+                shell_println!("Querying {} ({}) via IPv6...", oid_str, name);
+            } else {
+                shell_println!("Querying {} via IPv6...", oid_str);
+            }
+
+            match crate::net::snmp::get_v6(ip6, &oid, community) {
+                Ok(vb) => {
+                    shell_println!("  {} = {}", vb.oid.to_string(), vb.value.display());
+                }
+                Err(e) => shell_println!("snmp: get failed: {:?}", e),
+            }
+        }
+
+        "walk6" | "w6" => {
+            // snmp walk6 <ipv6-host> <oid> [community]
+            use crate::net::ipv6::Ipv6Addr;
+            if parts.len() < 3 {
+                shell_println!("Usage: snmp walk6 <ipv6-host> <oid> [community]");
+                return;
+            }
+            let host_str = parts[1];
+            let oid_str = parts[2];
+            let community = parts.get(3).copied().unwrap_or("public");
+
+            let ip6 = match Ipv6Addr::parse(host_str) {
+                Some(addr) => addr,
+                None => {
+                    match crate::net::dns::resolve6(host_str) {
+                        Ok(addr) => addr,
+                        Err(_) => {
+                            shell_println!("snmp: cannot resolve IPv6 host '{}'", host_str);
+                            return;
+                        }
+                    }
+                }
+            };
+
+            let oid = match crate::net::snmp::Oid::parse(oid_str) {
+                Some(o) => o,
+                None => {
+                    shell_println!("snmp: invalid OID '{}'", oid_str);
+                    return;
+                }
+            };
+
+            shell_println!("Walking subtree {} via IPv6...", oid_str);
+            let results = crate::net::snmp::walk_v6(ip6, &oid, community);
+            if results.is_empty() {
+                shell_println!("  (no results — walk requires UDP receive support)");
+            } else {
+                for vb in &results {
+                    let name = crate::net::snmp::oid_name(&vb.oid.to_string());
+                    if !name.is_empty() {
+                        shell_println!("  {} ({}) = {}", vb.oid.to_string(), name, vb.value.display());
+                    } else {
+                        shell_println!("  {} = {}", vb.oid.to_string(), vb.value.display());
+                    }
+                }
+                shell_println!("{} entries", results.len());
+            }
+        }
+
+        "sysinfo6" | "sys6" => {
+            // snmp sysinfo6 <ipv6-host> [community]
+            use crate::net::ipv6::Ipv6Addr;
+            if parts.len() < 2 {
+                shell_println!("Usage: snmp sysinfo6 <ipv6-host> [community]");
+                return;
+            }
+            let host_str = parts[1];
+            let community = parts.get(2).copied().unwrap_or("public");
+
+            let ip6 = match Ipv6Addr::parse(host_str) {
+                Some(addr) => addr,
+                None => {
+                    match crate::net::dns::resolve6(host_str) {
+                        Ok(addr) => addr,
+                        Err(_) => {
+                            shell_println!("snmp: cannot resolve IPv6 host '{}'", host_str);
+                            return;
+                        }
+                    }
+                }
+            };
+
+            shell_println!("Querying system info from [{}] (IPv6)...", ip6);
+            let sys_oids = crate::net::snmp::system_oids();
+            for (oid_str, name) in &sys_oids {
+                if let Some(oid) = crate::net::snmp::Oid::parse(oid_str) {
+                    match crate::net::snmp::get_v6(ip6, &oid, community) {
+                        Ok(vb) => shell_println!("  {}: {}", name, vb.value.display()),
+                        Err(_) => shell_println!("  {}: (timeout)", name),
+                    }
+                }
+            }
+        }
+
         "oids" => {
             shell_println!("Well-known SNMP OIDs:");
             shell_println!("  System:");
@@ -37142,6 +37274,9 @@ fn cmd_snmp(args: &str) {
             shell_println!("  snmp get <host> <oid> [community]     — GET single OID");
             shell_println!("  snmp walk <host> <oid> [community]    — walk subtree");
             shell_println!("  snmp sysinfo <host> [community]       — query system info");
+            shell_println!("  snmp get6 <host6> <oid> [community]   — GET via IPv6");
+            shell_println!("  snmp walk6 <host6> <oid> [community]  — walk via IPv6");
+            shell_println!("  snmp sysinfo6 <host6> [community]     — sysinfo via IPv6");
             shell_println!("  snmp oids                             — list well-known OIDs");
             shell_println!("  snmp status                           — show statistics");
             shell_println!("  snmp test                             — run self-tests");

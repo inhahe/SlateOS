@@ -5,9 +5,9 @@
 //!
 //! ## Features
 //!
-//! - SNMP GET: retrieve a single OID value
-//! - SNMP GET-NEXT: walk MIB tree
-//! - SNMP WALK: iterate a subtree
+//! - SNMP GET: retrieve a single OID value (IPv4 + IPv6)
+//! - SNMP GET-NEXT: walk MIB tree (IPv4 + IPv6)
+//! - SNMP WALK: iterate a subtree (IPv4 + IPv6)
 //! - Basic ASN.1/BER encoding and decoding
 //! - Well-known OID database for common MIB values
 //! - Community string authentication (v1/v2c)
@@ -35,6 +35,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
+use super::ipv6::Ipv6Addr;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -716,6 +717,59 @@ pub fn walk(host: Ipv4Addr, root_oid: &Oid, community: &str) -> Vec<VarBind> {
 
     // In the kernel prototype, this sends GET-NEXT requests iteratively.
     // Since we can't receive UDP responses yet, return empty.
+    let _ = (host, root_oid, community);
+    Vec::new()
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 API
+// ---------------------------------------------------------------------------
+
+/// Send an SNMP GET request to an IPv6 host.
+#[allow(dead_code)] // Public API.
+pub fn get_v6(host: Ipv6Addr, oid: &Oid, community: &str) -> KernelResult<VarBind> {
+    GETS_SENT.fetch_add(1, Ordering::Relaxed);
+
+    let req_id = REQUEST_ID.fetch_add(1, Ordering::Relaxed) as i32;
+    let comm = if community.is_empty() { DEFAULT_COMMUNITY } else { community };
+    let message = build_get_request(comm, req_id, oid);
+
+    let src_port = 49152u16.saturating_add((crate::hrtimer::now_ns() % 16384) as u16);
+    super::udp::send_v6(src_port, host, SNMP_PORT, &message)?;
+
+    for _ in 0..RESPONSE_TIMEOUT_POLLS {
+        super::poll();
+    }
+
+    ERRORS_RECEIVED.fetch_add(1, Ordering::Relaxed);
+    Err(KernelError::TimedOut)
+}
+
+/// Send an SNMP GET-NEXT request to an IPv6 host.
+#[allow(dead_code)] // Public API.
+pub fn get_next_v6(host: Ipv6Addr, oid: &Oid, community: &str) -> KernelResult<VarBind> {
+    GET_NEXTS_SENT.fetch_add(1, Ordering::Relaxed);
+
+    let req_id = REQUEST_ID.fetch_add(1, Ordering::Relaxed) as i32;
+    let comm = if community.is_empty() { DEFAULT_COMMUNITY } else { community };
+    let message = build_get_next_request(comm, req_id, oid);
+
+    let src_port = 49152u16.saturating_add((crate::hrtimer::now_ns() % 16384) as u16);
+    super::udp::send_v6(src_port, host, SNMP_PORT, &message)?;
+
+    for _ in 0..RESPONSE_TIMEOUT_POLLS {
+        super::poll();
+    }
+
+    ERRORS_RECEIVED.fetch_add(1, Ordering::Relaxed);
+    Err(KernelError::TimedOut)
+}
+
+/// Walk an SNMP subtree on an IPv6 host.
+#[allow(dead_code)] // Public API.
+pub fn walk_v6(host: Ipv6Addr, root_oid: &Oid, community: &str) -> Vec<VarBind> {
+    WALKS_DONE.fetch_add(1, Ordering::Relaxed);
+
     let _ = (host, root_oid, community);
     Vec::new()
 }

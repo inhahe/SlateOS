@@ -696,6 +696,12 @@ pub fn run_all() {
     bench_net_ethernet_parse();
     bench_net_arp_lookup();
     bench_net_checksum();
+    bench_net_tcp_checksum_v4();
+    bench_net_tcp_checksum_v6();
+    bench_net_ipv6_parse();
+    bench_net_firewall_check();
+    bench_net_dns_build_query();
+    bench_net_tcp_conn_lookup();
 
     serial_println!("[bench] === Benchmarks complete ===");
 }
@@ -2130,6 +2136,246 @@ fn internet_checksum(data: &[u8]) -> u16 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
     !(sum as u16)
+}
+
+/// Benchmark TCP checksum computation (IPv4 pseudo-header).
+///
+/// Computes the TCP checksum over a typical MSS-sized segment (1460 bytes)
+/// with the IPv4 12-byte pseudo-header.  This runs on every TCP segment
+/// sent or received — it is the single most frequent checksum operation.
+fn bench_net_tcp_checksum_v4() {
+    // Build a 1460-byte TCP segment (20-byte header + 1440 payload).
+    let mut segment = [0xABu8; 1460];
+    // Minimal TCP header fields at start.
+    segment[0] = 0x1F; segment[1] = 0x90; // src port 8080
+    segment[2] = 0x00; segment[3] = 0x50; // dst port 80
+    // seq, ack, flags, window...
+    segment[12] = 0x50; // data offset 5 (20 bytes)
+    segment[13] = 0x18; // PSH|ACK
+    // Checksum field zeroed for computation.
+    segment[16] = 0; segment[17] = 0;
+
+    let src = crate::net::interface::Ipv4Addr([10, 0, 0, 1]);
+    let dst = crate::net::interface::Ipv4Addr([10, 0, 0, 2]);
+
+    let result = run("net_tcp_checksum_v4_1460b", 2000, || {
+        let _ = core::hint::black_box(tcp_checksum_bench(&segment, src, dst));
+    });
+
+    serial_println!(
+        "[bench]   net_tcp_checksum_v4_1460b: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// TCP checksum (duplicated to avoid depending on tcp module internals).
+fn tcp_checksum_bench(segment: &[u8], src: crate::net::interface::Ipv4Addr, dst: crate::net::interface::Ipv4Addr) -> u16 {
+    let len = segment.len();
+    let mut sum: u32 = 0;
+    // IPv4 pseudo-header (12 bytes).
+    sum = sum.wrapping_add(((src.0[0] as u32) << 8) | src.0[1] as u32);
+    sum = sum.wrapping_add(((src.0[2] as u32) << 8) | src.0[3] as u32);
+    sum = sum.wrapping_add(((dst.0[0] as u32) << 8) | dst.0[1] as u32);
+    sum = sum.wrapping_add(((dst.0[2] as u32) << 8) | dst.0[3] as u32);
+    sum = sum.wrapping_add(6); // protocol TCP
+    sum = sum.wrapping_add(len as u32);
+    // TCP segment.
+    let mut i = 0;
+    while i + 1 < len {
+        sum = sum.wrapping_add(((segment[i] as u32) << 8) | segment[i + 1] as u32);
+        i += 2;
+    }
+    if i < len {
+        sum = sum.wrapping_add((segment[i] as u32) << 8);
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Benchmark TCP checksum computation (IPv6 pseudo-header).
+///
+/// Same 1460-byte segment but with the 40-byte IPv6 pseudo-header
+/// (src addr 16 + dst addr 16 + length 4 + next_header 4).
+/// Compares directly against the IPv4 variant to show the overhead
+/// of the larger pseudo-header.
+fn bench_net_tcp_checksum_v6() {
+    let mut segment = [0xABu8; 1460];
+    segment[0] = 0x1F; segment[1] = 0x90;
+    segment[2] = 0x00; segment[3] = 0x50;
+    segment[12] = 0x50;
+    segment[13] = 0x18;
+    segment[16] = 0; segment[17] = 0;
+
+    // fe80::1 and fe80::2
+    let mut src = [0u8; 16];
+    src[0] = 0xfe; src[1] = 0x80; src[15] = 0x01;
+    let mut dst = [0u8; 16];
+    dst[0] = 0xfe; dst[1] = 0x80; dst[15] = 0x02;
+
+    let result = run("net_tcp_checksum_v6_1460b", 2000, || {
+        let _ = core::hint::black_box(tcp_checksum_v6_bench(&segment, &src, &dst));
+    });
+
+    serial_println!(
+        "[bench]   net_tcp_checksum_v6_1460b: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// TCP checksum with IPv6 pseudo-header (bench-local copy).
+fn tcp_checksum_v6_bench(segment: &[u8], src: &[u8; 16], dst: &[u8; 16]) -> u16 {
+    let len = segment.len();
+    let mut sum: u32 = 0;
+    // IPv6 pseudo-header: src(16) + dst(16) + length(4) + zero+NH(4).
+    let mut i = 0;
+    while i < 16 {
+        sum = sum.wrapping_add(((src[i] as u32) << 8) | src[i + 1] as u32);
+        sum = sum.wrapping_add(((dst[i] as u32) << 8) | dst[i + 1] as u32);
+        i += 2;
+    }
+    // Upper-layer packet length (u32, network order).
+    sum = sum.wrapping_add((len >> 16) as u32);
+    sum = sum.wrapping_add((len & 0xFFFF) as u32);
+    // Zero + next header (TCP = 6).
+    sum = sum.wrapping_add(6);
+    // TCP segment body.
+    i = 0;
+    while i + 1 < len {
+        sum = sum.wrapping_add(((segment[i] as u32) << 8) | segment[i + 1] as u32);
+        i += 2;
+    }
+    if i < len {
+        sum = sum.wrapping_add((segment[i] as u32) << 8);
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Benchmark IPv6 packet parsing.
+///
+/// Parses a 40-byte IPv6 fixed header.  Increasingly important as
+/// dual-stack networking means every received IPv6 packet hits this path.
+fn bench_net_ipv6_parse() {
+    use crate::net::ipv6;
+
+    // Build a minimal IPv6 packet: 40-byte header + 8-byte UDP payload.
+    let mut packet = [0u8; 48];
+    // Version (6) + traffic class + flow label.
+    packet[0] = 0x60; // version=6, TC=0, flow[0]=0
+    // Payload length = 8.
+    packet[4] = 0x00; packet[5] = 0x08;
+    // Next header = UDP (17).
+    packet[6] = 0x11;
+    // Hop limit = 64.
+    packet[7] = 0x40;
+    // Source: fe80::1
+    packet[8] = 0xfe; packet[9] = 0x80; packet[23] = 0x01;
+    // Destination: fe80::2
+    packet[24] = 0xfe; packet[25] = 0x80; packet[39] = 0x02;
+    // 8 bytes of dummy UDP payload.
+    packet[40] = 0x1F; packet[41] = 0x90; // src port
+    packet[42] = 0x00; packet[43] = 0x35; // dst port 53
+    packet[44] = 0x00; packet[45] = 0x08; // length
+    packet[46] = 0x00; packet[47] = 0x00; // checksum
+
+    let result = run("net_ipv6_parse", 2000, || {
+        let _ = core::hint::black_box(ipv6::Ipv6Packet::parse(&packet));
+    });
+
+    serial_println!(
+        "[bench]   net_ipv6_parse: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Benchmark firewall inbound packet check.
+///
+/// Checks a packet against the firewall rule table.  This runs on
+/// every received IPv4 packet when the firewall is enabled.  Measures
+/// the rule-matching loop (linear scan over rules + conntrack lookup).
+///
+/// `check_inbound(protocol, src_ip, payload)` where payload contains
+/// port numbers in the TCP/UDP header position.
+fn bench_net_firewall_check() {
+    use crate::net::firewall;
+
+    let src = crate::net::interface::Ipv4Addr([198, 51, 100, 1]);
+
+    // Build a minimal TCP payload (20-byte header) with src/dst ports.
+    let mut payload = [0u8; 20];
+    payload[0] = 0x30; payload[1] = 0x39; // src port 12345
+    payload[2] = 0x00; payload[3] = 0x50; // dst port 80
+    payload[12] = 0x50; // data offset 5
+
+    let result = run("net_firewall_inbound_check", 2000, || {
+        let _ = core::hint::black_box(
+            firewall::check_inbound(6, src, &payload)
+        );
+    });
+
+    serial_println!(
+        "[bench]   net_firewall_inbound_check: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Benchmark DNS query packet building (label encoding).
+///
+/// Constructs a DNS query packet locally, mimicking the internal
+/// `build_query_typed()` path.  This measures the label encoding
+/// (hostname → DNS wire format) plus the Vec allocation, which runs
+/// once per DNS resolution.
+fn bench_net_dns_build_query() {
+    let result = run("net_dns_build_a_query", 1000, || {
+        let _ = core::hint::black_box(build_dns_query_bench("www.example.com", 1));
+    });
+
+    serial_println!(
+        "[bench]   net_dns_build_a_query: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Build a DNS query (bench-local copy of the internal label encoder).
+fn build_dns_query_bench(name: &str, qtype: u16) -> alloc::vec::Vec<u8> {
+    let mut buf = alloc::vec::Vec::with_capacity(64);
+    // Header: ID=0x1234, flags=0x0100 (recursion desired), qdcount=1.
+    buf.extend_from_slice(&[0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    // Encode labels.
+    for label in name.split('.') {
+        let bytes = label.as_bytes();
+        let len = bytes.len().min(63);
+        buf.push(len as u8);
+        buf.extend_from_slice(&bytes[..len]);
+    }
+    buf.push(0x00); // Root label.
+    // QTYPE + QCLASS IN.
+    buf.extend_from_slice(&qtype.to_be_bytes());
+    buf.extend_from_slice(&1u16.to_be_bytes());
+    buf
+}
+
+/// Benchmark TCP connection table scan.
+///
+/// Calls `all_connections()` which locks the CONNECTIONS table and
+/// scans all 32 entries collecting active connection info.  This is
+/// the same lock+scan path that `process_tcp_common()` uses to find
+/// matching connections for incoming segments.
+fn bench_net_tcp_conn_lookup() {
+    use crate::net::tcp;
+
+    let result = run("net_tcp_conn_table_scan", 2000, || {
+        let _ = core::hint::black_box(tcp::all_connections());
+    });
+
+    serial_println!(
+        "[bench]   net_tcp_conn_table_scan: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
 }
 
 // ---------------------------------------------------------------------------

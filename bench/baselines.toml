@@ -184,6 +184,63 @@ description = "Full desktop composite at 4K resolution"
 target_ms   = 2.0
 source      = "Design target: must not miss 144Hz vsync (6.9ms budget)"
 
+[net_tcp_checksum_v4_1460b]
+description = "TCP checksum with IPv4 pseudo-header, MSS-sized segment"
+target_ns   = 2000
+target_cycles = 7400
+source      = "Estimate: ~730 16-bit additions (12 pseudo + 1460 data), branch-free loop"
+notes       = """
+This is the most frequent checksum operation — runs on every TCP \
+segment sent/received.  Linux uses hardware offload on real NICs; \
+our software path must be fast for QEMU/virtio where offload may \
+not be available."""
+
+[net_tcp_checksum_v6_1460b]
+description = "TCP checksum with IPv6 pseudo-header, MSS-sized segment"
+target_ns   = 2200
+target_cycles = 8100
+source      = "Estimate: slightly more than v4 (40-byte vs 12-byte pseudo-header)"
+notes       = """
+IPv6 pseudo-header adds 28 extra bytes (14 more 16-bit additions) \
+compared to IPv4.  Should be ~5% slower than v4 for MSS-sized segments \
+where the data dominates."""
+
+[net_ipv6_parse]
+description = "IPv6 fixed header parsing (40 bytes)"
+target_ns   = 500
+target_cycles = 1850
+source      = "Comparable to IPv4 parse — slightly more fields but fixed-size header"
+
+[net_firewall_inbound_check]
+description = "Firewall inbound rule matching (single packet)"
+target_ns   = 1000
+target_cycles = 3700
+source      = "Linear scan of up to 64 rules + conntrack lookup"
+notes       = """
+When firewall is disabled, this should be near-zero (early exit on \
+ENABLED flag).  When enabled with rules, measures the linear scan + \
+hash-based conntrack check."""
+
+[net_dns_build_a_query]
+description = "DNS A-record query packet construction"
+target_ns   = 2000
+target_cycles = 7400
+source      = "Vec allocation + label encoding for typical hostname"
+notes       = """
+Dominated by heap allocation.  Runs once per DNS resolution, not \
+per-packet, so not on the hot path.  Still useful to track for \
+regression detection."""
+
+[net_tcp_conn_table_scan]
+description = "TCP connection table full scan (32 entries)"
+target_ns   = 3000
+target_cycles = 11100
+source      = "Lock acquire + linear scan of 32 connection slots + Vec construction"
+notes       = """
+The real incoming-packet lookup is similar (lock + scan) but stops \
+early on match.  This worst-case full scan represents the netstat \
+query path and upper-bound for packet dispatch."""
+
 # -------------------------------------------------------------------------
 # QEMU measurements (i7-8700K, -cpu qemu64,+rdtscp, -m 256M)
 # -------------------------------------------------------------------------

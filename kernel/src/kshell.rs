@@ -35177,9 +35177,12 @@ fn cmd_netsyslog(args: &str) {
                 if s.receiver_enabled { "running" } else { "stopped" });
             shell_println!("  Forwarder:   {}",
                 if s.forwarder_enabled {
-                    match s.remote_server {
-                        Some((ip, port)) => alloc::format!("→ {}:{}", ip, port),
-                        None => String::from("enabled (no server)"),
+                    if let Some((ip6, port)) = s.remote_server_v6 {
+                        alloc::format!("→ [{}]:{}", ip6, port)
+                    } else if let Some((ip, port)) = s.remote_server {
+                        alloc::format!("→ {}:{}", ip, port)
+                    } else {
+                        String::from("enabled (no server)")
                     }
                 } else { String::from("disabled") });
             shell_println!("  Received:    {}", s.messages_received);
@@ -35221,6 +35224,30 @@ fn cmd_netsyslog(args: &str) {
             syslog::set_remote_server(ip, port);
             shell_println!("Forwarding logs to {}:{}", ip, port);
         }
+        "forward6" => {
+            // syslog forward6 <ipv6-addr> [port]
+            use crate::net::ipv6::Ipv6Addr;
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            if ip_str.is_empty() {
+                shell_println!("Usage: netsyslog forward6 <ipv6-addr> [port]");
+                return;
+            }
+            if ip_str == "off" || ip_str == "disable" {
+                syslog::disable_forwarding();
+                shell_println!("Log forwarding disabled");
+                return;
+            }
+            let ip = match Ipv6Addr::parse(ip_str) {
+                Some(ip) => ip,
+                None => {
+                    shell_println!("Invalid IPv6 address: {}", ip_str);
+                    return;
+                }
+            };
+            let port: u16 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(514);
+            syslog::set_remote_server_v6(ip, port);
+            shell_println!("Forwarding logs to [{}]:{}", ip, port);
+        }
         "send" => {
             // syslog send <message>
             let message = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
@@ -35240,7 +35267,7 @@ fn cmd_netsyslog(args: &str) {
                 for msg in &messages {
                     shell_println!("<{}.{}> {} [{}] {}: {}",
                         msg.facility.label(), msg.severity.label(),
-                        msg.source_ip, msg.hostname, msg.app_name, msg.message);
+                        msg.source_addr, msg.hostname, msg.app_name, msg.message);
                 }
             }
         }

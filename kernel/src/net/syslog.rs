@@ -38,7 +38,12 @@
 //! - UDP only (no TCP/TLS syslog transport).
 //! - Ring buffer holds 64 messages maximum.
 //! - No structured data elements (STRUCTURED-DATA = "-").
-//! - IPv4 only.
+//!
+//! ## IPv6 support
+//!
+//! Log forwarding can use an IPv6 remote server via
+//! `set_remote_server_v6()`.  The receiver also accepts incoming IPv6
+//! syslog messages when the receiver is running (same UDP port).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -49,6 +54,7 @@ use spin::Mutex;
 
 use crate::error::KernelResult;
 use super::interface::Ipv4Addr;
+use super::ipv6::Ipv6Addr;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -219,8 +225,11 @@ pub struct SyslogMessage {
     pub app_name: String,
     /// Message text.
     pub message: String,
-    /// Source IP (for received messages).
+    /// Source IP (for received IPv4 messages).
+    #[allow(dead_code)] // Kept for backward compat; source_addr preferred.
     pub source_ip: Ipv4Addr,
+    /// Source address as string (supports both IPv4 and IPv6).
+    pub source_addr: String,
     /// Timestamp (kernel ns) when received.
     #[allow(dead_code)] // Public API field.
     pub received_at_ns: u64,
@@ -239,8 +248,10 @@ struct SyslogState {
     ring_write: usize,
     /// Number of messages in ring (up to RING_BUFFER_SIZE).
     ring_count: usize,
-    /// Remote syslog server for forwarding.
+    /// Remote syslog server for forwarding (IPv4).
     remote_server: Option<Ipv4Addr>,
+    /// Remote syslog server for forwarding (IPv6).
+    remote_server_v6: Option<Ipv6Addr>,
     /// Remote server port.
     remote_port: u16,
     /// Our hostname for outgoing messages.
@@ -255,6 +266,7 @@ impl SyslogState {
             ring_write: 0,
             ring_count: 0,
             remote_server: None,
+            remote_server_v6: None,
             remote_port: DEFAULT_PORT,
             hostname: String::new(),
         }
@@ -421,7 +433,57 @@ fn parse_message(data: &[u8], source_ip: Ipv4Addr) -> Option<SyslogMessage> {
         hostname,
         app_name,
         message,
+        source_addr: format!("{}", source_ip),
         source_ip,
+        received_at_ns: now,
+    })
+}
+
+/// Parse an incoming IPv6 syslog message into a [`SyslogMessage`].
+///
+/// Same as [`parse_message`] but the source is an IPv6 address.
+/// The `source_ip` field is set to `UNSPECIFIED` (IPv4 0.0.0.0) since
+/// the real source is IPv6; use `source_addr` for display.
+fn parse_message_v6(data: &[u8], source_ip: Ipv6Addr) -> Option<SyslogMessage> {
+    let text = core::str::from_utf8(data).ok()?;
+    let now = crate::hrtimer::now_ns();
+
+    if !text.starts_with('<') {
+        return None;
+    }
+
+    let end_pri = text.find('>')?;
+    let pri_str = text.get(1..end_pri)?;
+    let pri: u8 = pri_str.parse().ok()?;
+    let (facility_opt, severity_opt) = decode_pri(pri);
+    let facility = facility_opt?;
+    let severity = severity_opt?;
+
+    let rest = text.get(end_pri.saturating_add(1)..)?;
+    let parts: Vec<&str> = rest.splitn(5, ' ').collect();
+
+    let (hostname, app_name, message) = if parts.len() >= 4 {
+        let hostname = parts.get(2).copied().unwrap_or("-");
+        let app_name = parts.get(3).copied().unwrap_or("-");
+        let msg = parts.get(4).copied().unwrap_or("");
+        (String::from(hostname), String::from(app_name), String::from(msg))
+    } else if parts.len() >= 2 {
+        let hostname = parts.get(0).copied().unwrap_or("-");
+        let msg = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
+        (String::from(hostname), String::from("-"), msg)
+    } else {
+        (String::from("-"), String::from("-"), String::from(rest))
+    };
+
+    Some(SyslogMessage {
+        priority: pri,
+        facility,
+        severity,
+        hostname,
+        app_name,
+        message,
+        source_addr: format!("{}", source_ip),
+        source_ip: Ipv4Addr::UNSPECIFIED,
         received_at_ns: now,
     })
 }
@@ -439,10 +501,25 @@ pub fn set_remote_server(ip: Ipv4Addr, port: u16) {
     crate::serial_println!("[syslog] Forwarding to {}:{}", ip, port);
 }
 
+/// Configure an IPv6 remote syslog server for log forwarding.
+///
+/// When both IPv4 and IPv6 servers are configured, the forwarder
+/// sends to the IPv6 server.  To use IPv4, clear the IPv6 server
+/// by calling `disable_forwarding()` and reconfiguring IPv4 only.
+pub fn set_remote_server_v6(ip: Ipv6Addr, port: u16) {
+    let mut state = STATE.lock();
+    state.remote_server_v6 = Some(ip);
+    state.remote_port = port;
+    FORWARDER_ENABLED.store(true, Ordering::Relaxed);
+    crate::serial_println!("[syslog] Forwarding to [{}]:{}", ip, port);
+}
+
 /// Disable log forwarding.
 pub fn disable_forwarding() {
     FORWARDER_ENABLED.store(false, Ordering::Relaxed);
-    STATE.lock().remote_server = None;
+    let mut state = STATE.lock();
+    state.remote_server = None;
+    state.remote_server_v6 = None;
 }
 
 /// Set the local hostname for outgoing messages.
@@ -460,10 +537,9 @@ pub fn forward(facility: Facility, severity: Severity, app_name: &str, message: 
     }
 
     let state = STATE.lock();
-    let (server_ip, server_port) = match state.remote_server {
-        Some(ip) => (ip, state.remote_port),
-        None => return,
-    };
+    let server_v4 = state.remote_server;
+    let server_v6 = state.remote_server_v6;
+    let server_port = state.remote_port;
     let hostname = if state.hostname.is_empty() {
         String::from("neo")
     } else {
@@ -471,11 +547,23 @@ pub fn forward(facility: Facility, severity: Severity, app_name: &str, message: 
     };
     drop(state);
 
+    if server_v4.is_none() && server_v6.is_none() {
+        return;
+    }
+
     let msg = build_message(facility, severity, &hostname, app_name, message);
     let data = msg.as_bytes();
 
-    // Send via UDP.  Use ephemeral port.
-    match super::udp::send(DEFAULT_PORT, server_ip, server_port, data) {
+    // Prefer IPv6 when configured, fall back to IPv4.
+    let result = if let Some(ipv6) = server_v6 {
+        super::udp::send_v6(DEFAULT_PORT, ipv6, server_port, data)
+    } else if let Some(ipv4) = server_v4 {
+        super::udp::send(DEFAULT_PORT, ipv4, server_port, data)
+    } else {
+        return;
+    };
+
+    match result {
         Ok(()) => {
             MESSAGES_FORWARDED.fetch_add(1, Ordering::Relaxed);
         }
@@ -587,16 +675,49 @@ pub fn tick() {
         None => return,
     };
 
-    // Process all pending datagrams.
+    // Process all pending IPv4 datagrams.
     while let Some(dgram) = super::udp::recv(handle) {
         let msg = parse_message(&dgram.data, dgram.src_ip);
         match msg {
             Some(m) => {
                 MESSAGES_RECEIVED.fetch_add(1, Ordering::Relaxed);
 
-                // Log to serial for visibility.
                 crate::serial_println!(
                     "[syslog] {}:{} <{}.{}> {} {} {}",
+                    dgram.src_ip, dgram.src_port,
+                    m.facility.label(), m.severity.label(),
+                    m.hostname, m.app_name, m.message
+                );
+
+                // Store in ring buffer.
+                let mut state = STATE.lock();
+                if state.ring.len() < RING_BUFFER_SIZE {
+                    state.ring.push(m);
+                    state.ring_write = state.ring.len();
+                } else {
+                    let idx = state.ring_write % RING_BUFFER_SIZE;
+                    if let Some(slot) = state.ring.get_mut(idx) {
+                        *slot = m;
+                    }
+                    state.ring_write = state.ring_write.wrapping_add(1) % RING_BUFFER_SIZE;
+                }
+                state.ring_count = state.ring_count.saturating_add(1).min(RING_BUFFER_SIZE);
+            }
+            None => {
+                PARSE_ERRORS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    // Process all pending IPv6 datagrams.
+    while let Some(dgram) = super::udp::recv_v6(handle) {
+        let msg = parse_message_v6(&dgram.data, dgram.src_ip);
+        match msg {
+            Some(m) => {
+                MESSAGES_RECEIVED.fetch_add(1, Ordering::Relaxed);
+
+                crate::serial_println!(
+                    "[syslog] [{}]:{} <{}.{}> {} {} {}",
                     dgram.src_ip, dgram.src_port,
                     m.facility.label(), m.severity.label(),
                     m.hostname, m.app_name, m.message
@@ -634,6 +755,7 @@ pub struct SyslogStats {
     pub forwarder_enabled: bool,
     pub listen_port: u16,
     pub remote_server: Option<(Ipv4Addr, u16)>,
+    pub remote_server_v6: Option<(Ipv6Addr, u16)>,
     pub messages_received: u64,
     pub messages_forwarded: u64,
     #[allow(dead_code)] // Stats field — exposed for procfs.
@@ -652,6 +774,7 @@ pub fn stats() -> SyslogStats {
         forwarder_enabled: FORWARDER_ENABLED.load(Ordering::Relaxed),
         listen_port: LISTEN_PORT.load(Ordering::Relaxed),
         remote_server: state.remote_server.map(|ip| (ip, state.remote_port)),
+        remote_server_v6: state.remote_server_v6.map(|ip| (ip, state.remote_port)),
         messages_received: MESSAGES_RECEIVED.load(Ordering::Relaxed),
         messages_forwarded: MESSAGES_FORWARDED.load(Ordering::Relaxed),
         messages_dropped: MESSAGES_DROPPED.load(Ordering::Relaxed),
@@ -680,9 +803,12 @@ pub fn procfs_content() -> String {
     out.push_str(&format!("Listen port:   {}\n", s.listen_port));
     out.push_str(&format!("Forwarder:     {}\n",
         if s.forwarder_enabled {
-            match s.remote_server {
-                Some((ip, port)) => format!("{}:{}", ip, port),
-                None => String::from("configured but no server"),
+            if let Some((ip6, port)) = s.remote_server_v6 {
+                format!("[{}]:{}", ip6, port)
+            } else if let Some((ip, port)) = s.remote_server {
+                format!("{}:{}", ip, port)
+            } else {
+                String::from("configured but no server")
             }
         } else { String::from("disabled") }));
     out.push_str(&format!("Hostname:      {}\n", s.hostname));
@@ -698,7 +824,7 @@ pub fn procfs_content() -> String {
             out.push_str(&format!(
                 "  <{}.{}> {} [{}] {}: {}\n",
                 msg.facility.label(), msg.severity.label(),
-                msg.source_ip, msg.hostname, msg.app_name, msg.message,
+                msg.source_addr, msg.hostname, msg.app_name, msg.message,
             ));
         }
     }

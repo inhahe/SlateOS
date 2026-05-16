@@ -36513,6 +36513,71 @@ fn cmd_nat(args: &str) {
                 shell_println!("Usage: nat flush <namespace_id>");
             }
         }
+        "forward" | "fwd" => {
+            // nat forward add tcp 8080 10.88.0.2 80 42
+            // nat forward del tcp 8080
+            // nat forward list
+            let fwd_sub = parts.get(1).copied().unwrap_or("list");
+            match fwd_sub {
+                "add" => {
+                    if parts.len() < 7 {
+                        shell_println!("Usage: nat forward add <tcp|udp> <host_port> <container_ip> <container_port> <ns_id>");
+                        return;
+                    }
+                    let proto = match parts.get(2).copied().unwrap_or("tcp") {
+                        "udp" => crate::net::nat::NatProto::Udp,
+                        _ => crate::net::nat::NatProto::Tcp,
+                    };
+                    let host_port = parts.get(3).and_then(|s| s.parse::<u16>().ok());
+                    let container_ip = parts.get(4).and_then(|s| parse_ipv4(s));
+                    let container_port = parts.get(5).and_then(|s| s.parse::<u16>().ok());
+                    let ns_id = parts.get(6).and_then(|s| s.parse::<u32>().ok());
+
+                    match (host_port, container_ip, container_port, ns_id) {
+                        (Some(hp), Some(cip), Some(cp), Some(ns)) => {
+                            match crate::net::nat::add_port_forward(proto, hp, cip, cp, ns) {
+                                Ok(()) => shell_println!("Port forward added: :{} → {}:{} (ns={})", hp, cip, cp, ns),
+                                Err(e) => shell_println!("Error: {:?}", e),
+                            }
+                        }
+                        _ => shell_println!("Invalid arguments. Usage: nat forward add <tcp|udp> <host_port> <ip> <port> <ns_id>"),
+                    }
+                }
+                "del" | "rm" => {
+                    if parts.len() < 4 {
+                        shell_println!("Usage: nat forward del <tcp|udp> <host_port>");
+                        return;
+                    }
+                    let proto = match parts.get(2).copied().unwrap_or("tcp") {
+                        "udp" => crate::net::nat::NatProto::Udp,
+                        _ => crate::net::nat::NatProto::Tcp,
+                    };
+                    if let Some(hp) = parts.get(3).and_then(|s| s.parse::<u16>().ok()) {
+                        match crate::net::nat::remove_port_forward(proto, hp) {
+                            Ok(()) => shell_println!("Port forward removed: :{}", hp),
+                            Err(e) => shell_println!("Error: {:?}", e),
+                        }
+                    } else {
+                        shell_println!("Invalid port");
+                    }
+                }
+                _ => {
+                    let fwds = crate::net::nat::list_port_forwards();
+                    if fwds.is_empty() {
+                        shell_println!("No active port forwards");
+                    } else {
+                        shell_println!("{:<5} {:<10} {:<20} {:<4}", "PROTO", "HOST_PORT", "CONTAINER", "NS");
+                        for (proto, hp, cip, cp, ns) in &fwds {
+                            let proto_str = match proto {
+                                crate::net::nat::NatProto::Tcp => "TCP",
+                                crate::net::nat::NatProto::Udp => "UDP",
+                            };
+                            shell_println!("{:<5} {:<10} {}:{:<12} {}", proto_str, hp, cip, cp, ns);
+                        }
+                    }
+                }
+            }
+        }
         "help" | _ => {
             shell_println!("nat — NAT/masquerade management");
             shell_println!("Usage:");
@@ -36522,6 +36587,9 @@ fn cmd_nat(args: &str) {
             shell_println!("  nat status|stats     — show statistics");
             shell_println!("  nat list|ls          — list active NAT entries");
             shell_println!("  nat flush <ns_id>    — remove entries for a namespace");
+            shell_println!("  nat forward list     — list port-forwarding rules");
+            shell_println!("  nat forward add <tcp|udp> <host_port> <ip> <port> <ns_id>");
+            shell_println!("  nat forward del <tcp|udp> <host_port>");
         }
     }
 }

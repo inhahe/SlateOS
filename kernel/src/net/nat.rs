@@ -362,6 +362,152 @@ pub fn list_entries() -> Vec<(NatProto, Ipv4Addr, u16, Ipv4Addr, u16, u16, NetNs
 }
 
 // ---------------------------------------------------------------------------
+// Port forwarding (DNAT)
+// ---------------------------------------------------------------------------
+
+/// Maximum static port-forward rules.
+const MAX_PORT_FORWARDS: usize = 32;
+
+/// A static port-forwarding rule (DNAT).
+///
+/// Maps (proto, host_port) → (container_ip, container_port, ns_id).
+/// When a packet arrives at host_port from the outside, it is forwarded
+/// to the container's IP:port within the specified namespace.
+#[derive(Debug, Clone, Copy)]
+struct PortForward {
+    active: bool,
+    proto: NatProto,
+    /// External port on the host.
+    host_port: u16,
+    /// Internal container IP to forward to.
+    container_ip: Ipv4Addr,
+    /// Internal container port to forward to.
+    container_port: u16,
+    /// Namespace ID of the target container.
+    ns_id: NetNsId,
+}
+
+/// Port forwarding table.
+static PORT_FORWARDS: Mutex<[PortForward; MAX_PORT_FORWARDS]> = Mutex::new(
+    [PortForward {
+        active: false,
+        proto: NatProto::Tcp,
+        host_port: 0,
+        container_ip: Ipv4Addr::UNSPECIFIED,
+        container_port: 0,
+        ns_id: 0,
+    }; MAX_PORT_FORWARDS]
+);
+
+/// Port-forward lookup result.
+#[derive(Debug, Clone, Copy)]
+pub struct PortForwardTarget {
+    pub container_ip: Ipv4Addr,
+    pub container_port: u16,
+    pub ns_id: NetNsId,
+}
+
+/// Add a port-forwarding rule.
+///
+/// When packets arrive at `host_port`, they will be forwarded to
+/// `container_ip:container_port` in namespace `ns_id`.
+///
+/// # Errors
+/// - `OutOfMemory` if the forwarding table is full.
+/// - `InvalidArgument` if a rule for this (proto, host_port) already exists.
+pub fn add_port_forward(
+    proto: NatProto,
+    host_port: u16,
+    container_ip: Ipv4Addr,
+    container_port: u16,
+    ns_id: NetNsId,
+) -> KernelResult<()> {
+    let mut rules = PORT_FORWARDS.lock();
+
+    // Check for duplicates.
+    let exists = rules.iter().any(|r| {
+        r.active && r.proto == proto && r.host_port == host_port
+    });
+    if exists {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Find free slot.
+    let slot = rules.iter().position(|r| !r.active)
+        .ok_or(KernelError::OutOfMemory)?;
+
+    rules[slot] = PortForward {
+        active: true,
+        proto,
+        host_port,
+        container_ip,
+        container_port,
+        ns_id,
+    };
+
+    crate::serial_println!(
+        "[nat] Port forward: {:?} :{} → {}:{} (ns={})",
+        proto, host_port, container_ip, container_port, ns_id
+    );
+
+    Ok(())
+}
+
+/// Remove a port-forwarding rule.
+pub fn remove_port_forward(proto: NatProto, host_port: u16) -> KernelResult<()> {
+    let mut rules = PORT_FORWARDS.lock();
+    let slot = rules.iter().position(|r| {
+        r.active && r.proto == proto && r.host_port == host_port
+    }).ok_or(KernelError::NotFound)?;
+    rules[slot].active = false;
+    Ok(())
+}
+
+/// Remove all port-forwarding rules for a namespace.
+///
+/// Called when a container is deleted.
+pub fn flush_port_forwards(ns_id: NetNsId) {
+    let mut rules = PORT_FORWARDS.lock();
+    for rule in rules.iter_mut() {
+        if rule.active && rule.ns_id == ns_id {
+            rule.active = false;
+        }
+    }
+}
+
+/// Look up a port-forward rule for an incoming packet.
+///
+/// Returns the container target if a rule exists for (proto, host_port).
+pub fn lookup_port_forward(proto: NatProto, host_port: u16) -> Option<PortForwardTarget> {
+    let rules = PORT_FORWARDS.lock();
+    rules.iter().find(|r| {
+        r.active && r.proto == proto && r.host_port == host_port
+    }).map(|r| PortForwardTarget {
+        container_ip: r.container_ip,
+        container_port: r.container_port,
+        ns_id: r.ns_id,
+    })
+}
+
+/// List all active port-forwarding rules (for diagnostics).
+pub fn list_port_forwards() -> Vec<(NatProto, u16, Ipv4Addr, u16, NetNsId)> {
+    let rules = PORT_FORWARDS.lock();
+    let mut result = Vec::new();
+    for rule in rules.iter() {
+        if rule.active {
+            result.push((
+                rule.proto,
+                rule.host_port,
+                rule.container_ip,
+                rule.container_port,
+                rule.ns_id,
+            ));
+        }
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
@@ -559,6 +705,90 @@ pub fn self_test() -> KernelResult<()> {
 
     // Cleanup: disable NAT.
     disable();
+
+    // Test 9: Port forwarding — add rule.
+    {
+        let result = add_port_forward(
+            NatProto::Tcp,
+            8080,
+            Ipv4Addr::new(10, 88, 0, 5),
+            80,
+            99,
+        );
+        assert!(result.is_ok(), "should add port forward");
+
+        // Duplicate should fail.
+        let dup = add_port_forward(
+            NatProto::Tcp,
+            8080,
+            Ipv4Addr::new(10, 88, 0, 6),
+            80,
+            100,
+        );
+        assert!(dup.is_err(), "duplicate host_port should fail");
+
+        passed = passed.wrapping_add(1);
+        crate::serial_println!("[nat]   Port forward add: OK");
+    }
+
+    // Test 10: Port forwarding — lookup.
+    {
+        let target = lookup_port_forward(NatProto::Tcp, 8080);
+        assert!(target.is_some(), "should find forward rule");
+        let t = target.unwrap();
+        assert_eq!(t.container_ip, Ipv4Addr::new(10, 88, 0, 5));
+        assert_eq!(t.container_port, 80);
+        assert_eq!(t.ns_id, 99);
+
+        // Wrong protocol should not match.
+        let miss = lookup_port_forward(NatProto::Udp, 8080);
+        assert!(miss.is_none(), "wrong proto should not match");
+
+        // Wrong port should not match.
+        let miss2 = lookup_port_forward(NatProto::Tcp, 9999);
+        assert!(miss2.is_none(), "wrong port should not match");
+
+        passed = passed.wrapping_add(1);
+        crate::serial_println!("[nat]   Port forward lookup: OK");
+    }
+
+    // Test 11: Port forwarding — remove.
+    {
+        let result = remove_port_forward(NatProto::Tcp, 8080);
+        assert!(result.is_ok(), "should remove forward rule");
+
+        let target = lookup_port_forward(NatProto::Tcp, 8080);
+        assert!(target.is_none(), "removed rule should not match");
+
+        // Removing again should fail.
+        let dup = remove_port_forward(NatProto::Tcp, 8080);
+        assert!(dup.is_err(), "double remove should fail");
+
+        passed = passed.wrapping_add(1);
+        crate::serial_println!("[nat]   Port forward remove: OK");
+    }
+
+    // Test 12: Port forwarding — flush by namespace.
+    {
+        let _ = add_port_forward(NatProto::Tcp, 3000, Ipv4Addr::new(10, 88, 0, 7), 3000, 55);
+        let _ = add_port_forward(NatProto::Udp, 5353, Ipv4Addr::new(10, 88, 0, 7), 53, 55);
+        let _ = add_port_forward(NatProto::Tcp, 4000, Ipv4Addr::new(10, 88, 0, 8), 4000, 66);
+
+        flush_port_forwards(55);
+
+        // ns=55 rules should be gone.
+        assert!(lookup_port_forward(NatProto::Tcp, 3000).is_none());
+        assert!(lookup_port_forward(NatProto::Udp, 5353).is_none());
+
+        // ns=66 rule should still exist.
+        assert!(lookup_port_forward(NatProto::Tcp, 4000).is_some());
+
+        // Cleanup.
+        flush_port_forwards(66);
+
+        passed = passed.wrapping_add(1);
+        crate::serial_println!("[nat]   Port forward flush: OK");
+    }
 
     crate::serial_println!("[nat] Self-test PASSED ({} tests)", passed);
     Ok(())

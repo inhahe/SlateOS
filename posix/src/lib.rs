@@ -420,3 +420,6 @@ pub mod linux_xattr;
 pub mod linux_ipc;
 pub mod linux_fiemap;
 pub mod linux_pidfd;
+pub mod linux_close_range;
+pub mod linux_kcmp;
+pub mod linux_wireless;

@@ -5636,7 +5636,7 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
 
     if (flags & CONNECT_NONBLOCK) != 0 {
         // Non-blocking connect: return handle immediately in SYN_SENT.
-        match crate::net::tcp::connect_start(ip.into(), port) {
+        match crate::net::tcp::connect_start(crate::netns::ROOT_NS, ip.into(), port) {
             Ok(handle) => {
                 #[allow(clippy::cast_possible_wrap)]
                 SyscallResult::ok(handle as i64)
@@ -5645,7 +5645,7 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
         }
     } else {
         // Blocking connect (original behavior).
-        match crate::net::tcp::connect(ip.into(), port) {
+        match crate::net::tcp::connect(crate::netns::ROOT_NS, ip.into(), port) {
             Ok(handle) => {
                 #[allow(clippy::cast_possible_wrap)]
                 SyscallResult::ok(handle as i64)
@@ -5893,7 +5893,7 @@ pub fn sys_tcp_bind(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::net::tcp::bind(port) {
+    match crate::net::tcp::bind(crate::netns::ROOT_NS, port) {
         Ok(handle) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle as i64)
@@ -5974,7 +5974,7 @@ pub fn sys_udp_bind(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::net::udp::bind(port) {
+    match crate::net::udp::bind(crate::netns::ROOT_NS, port) {
         Ok(handle) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle as i64)

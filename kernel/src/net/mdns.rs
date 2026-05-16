@@ -734,7 +734,7 @@ pub fn init() {
     }
 
     // Bind UDP socket (shared for IPv4 and IPv6).
-    match super::udp::bind(MDNS_PORT) {
+    match super::udp::bind(crate::netns::ROOT_NS, MDNS_PORT) {
         Ok(handle) => {
             state.socket_handle = Some(handle);
             // Join IPv4 mDNS multicast group (224.0.0.251).

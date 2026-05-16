@@ -1133,7 +1133,7 @@ fn dns_query_raw(
     query: &[u8],
     name: &str,
 ) -> KernelResult<Vec<u8>> {
-    let sock = super::udp::bind(local_port)?;
+    let sock = super::udp::bind(crate::netns::ROOT_NS, local_port)?;
 
     for attempt in 0..MAX_DNS_ATTEMPTS {
         // Send (or re-send) the query via the appropriate transport.

@@ -405,7 +405,7 @@ fn query_server(server_ip: Ipv4Addr) -> KernelResult<(i64, i64, u8)> {
 
     // Bind a UDP socket for the query.
     let local_port = ephemeral_port();
-    let udp_handle = super::udp::bind(local_port)?;
+    let udp_handle = super::udp::bind(crate::netns::ROOT_NS, local_port)?;
 
     // Send the NTP request.
     let send_result = super::udp::send(local_port, server_ip, NTP_PORT, &request);
@@ -489,7 +489,7 @@ fn query_server_v6(server_ip: Ipv6Addr) -> KernelResult<(i64, i64, u8)> {
 
     // Bind a UDP socket for the query (same dual-stack socket handles v6).
     let local_port = ephemeral_port();
-    let udp_handle = super::udp::bind(local_port)?;
+    let udp_handle = super::udp::bind(crate::netns::ROOT_NS, local_port)?;
 
     // Send the NTP request over IPv6.
     let send_result = super::udp::send_v6(local_port, server_ip, NTP_PORT, &request);

@@ -126,6 +126,7 @@ use crate::error::{KernelError, KernelResult};
 use super::interface::{self, IpAddr, Ipv4Addr};
 use super::ipv4::{self, Ipv4Packet, PROTO_TCP};
 use super::ipv6::{self, Ipv6Addr, Ipv6Packet};
+use crate::netns::NetNsId;
 
 // ---------------------------------------------------------------------------
 // TCP constants
@@ -297,6 +298,11 @@ pub enum TcpState {
 struct TcpConnection {
     /// Whether this slot is active.
     active: bool,
+    /// Network namespace this connection belongs to.
+    /// Connections in different namespaces are fully independent — the
+    /// same 4-tuple (local_port, remote_ip, remote_port) can exist in
+    /// multiple namespaces without conflict.
+    ns_id: NetNsId,
     /// Connection state.
     state: TcpState,
     /// Local port.
@@ -525,6 +531,7 @@ impl TcpConnection {
     const fn empty() -> Self {
         Self {
             active: false,
+            ns_id: crate::netns::ROOT_NS,
             state: TcpState::Closed,
             local_port: 0,
             remote_ip: IpAddr::UNSPECIFIED_V4,
@@ -612,6 +619,9 @@ impl PendingConnection {
 struct TcpListener {
     /// Whether this listener slot is active.
     active: bool,
+    /// Network namespace this listener belongs to.
+    /// The same port can be bound in different namespaces.
+    ns_id: NetNsId,
     /// Local port to listen on.
     port: u16,
     /// Backlog of fully-established connections waiting to be accepted.
@@ -623,6 +633,7 @@ impl TcpListener {
         const EMPTY_PENDING: PendingConnection = PendingConnection::empty();
         Self {
             active: false,
+            ns_id: crate::netns::ROOT_NS,
             port: 0,
             backlog: [EMPTY_PENDING; MAX_BACKLOG],
         }
@@ -642,13 +653,15 @@ const EPHEMERAL_TCP_START: u16 = 49200;
 const EPHEMERAL_TCP_END: u16 = 65000;
 
 /// Allocate an ephemeral port that doesn't conflict with an existing
-/// connection to the same remote endpoint (4-tuple uniqueness).
+/// connection to the same remote endpoint within the same namespace
+/// (5-tuple uniqueness: ns_id + local_port + remote_ip + remote_port).
 ///
 /// Must be called while holding the CONNECTIONS lock — the caller passes
 /// a slice of connections to check against.
 #[allow(clippy::arithmetic_side_effects)]
 fn alloc_port_for(
     conns: &[TcpConnection; MAX_CONNECTIONS],
+    ns_id: NetNsId,
     remote_ip: IpAddr,
     remote_port: u16,
 ) -> KernelResult<u16> {
@@ -657,9 +670,10 @@ fn alloc_port_for(
     let mut candidate = start;
 
     loop {
-        // Check if this candidate creates a duplicate 4-tuple.
+        // Check if this candidate creates a duplicate 5-tuple (ns + 4-tuple).
         let conflicts = conns.iter().any(|c| {
             c.active
+                && c.ns_id == ns_id
                 && c.local_port == candidate
                 && c.remote_ip == remote_ip
                 && c.remote_port == remote_port
@@ -1331,10 +1345,14 @@ fn send_ack_with_sack(conn: &TcpConnection) -> KernelResult<()> {
 
 /// Open a TCP connection to the given address and port.
 ///
+/// `ns_id` identifies the network namespace; connections in different
+/// namespaces are fully independent.  Pass `netns::ROOT_NS` for the
+/// host namespace.
+///
 /// Performs the 3-way handshake (SYN → SYN-ACK → ACK).
 /// Returns a connection handle on success.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn connect(remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
+pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
     let isn = generate_isn();
 
     // Find a free slot. If all slots are occupied, try to recycle the
@@ -1344,8 +1362,8 @@ pub fn connect(remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
         let mut conns = CONNECTIONS.lock();
 
         // Allocate a port that won't conflict with existing connections
-        // to the same remote endpoint (ensures 4-tuple uniqueness).
-        let local_port = alloc_port_for(&conns, remote_ip, remote_port)?;
+        // to the same remote endpoint within the same namespace.
+        let local_port = alloc_port_for(&conns, ns_id, remote_ip, remote_port)?;
 
         let slot = match conns.iter().position(|c| !c.active) {
             Some(idx) => idx,
@@ -1379,6 +1397,7 @@ pub fn connect(remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
 
         let conn = &mut conns[slot];
         conn.active = true;
+        conn.ns_id = ns_id;
         conn.state = TcpState::SynSent;
         conn.last_error = TCP_ERR_NONE; // Clear any stale error from recycled slot.
         conn.local_port = local_port;
@@ -1502,6 +1521,9 @@ pub fn connect(remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
 
 /// Start a TCP connection without waiting for completion (non-blocking).
 ///
+/// `ns_id` identifies the network namespace; pass `netns::ROOT_NS` for
+/// the host namespace.
+///
 /// Allocates a connection slot, sends the initial SYN, and returns the
 /// handle immediately in `SynSent` state.  The caller should use
 /// `poll_status()` to detect when the connection completes:
@@ -1517,7 +1539,7 @@ pub fn connect(remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
 /// expected "in progress" signal, not an error.  The caller should map
 /// this to EINPROGRESS at the POSIX layer.
 #[allow(clippy::arithmetic_side_effects)]
-pub fn connect_start(remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
+pub fn connect_start(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
     let isn = generate_isn();
 
     // Find a free slot (same recycling logic as connect()).
@@ -1525,8 +1547,8 @@ pub fn connect_start(remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize>
         let mut conns = CONNECTIONS.lock();
 
         // Allocate a port that won't conflict with existing connections
-        // to the same remote endpoint (ensures 4-tuple uniqueness).
-        let local_port = alloc_port_for(&conns, remote_ip, remote_port)?;
+        // to the same remote endpoint within the same namespace.
+        let local_port = alloc_port_for(&conns, ns_id, remote_ip, remote_port)?;
 
         let slot = match conns.iter().position(|c| !c.active) {
             Some(idx) => idx,
@@ -1554,6 +1576,7 @@ pub fn connect_start(remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize>
 
         let conn = &mut conns[slot];
         conn.active = true;
+        conn.ns_id = ns_id;
         conn.state = TcpState::SynSent;
         conn.last_error = TCP_ERR_NONE; // Clear any stale error from recycled slot.
         conn.local_port = local_port;
@@ -2427,6 +2450,8 @@ pub struct TcpConnectionInfo {
     /// Connection table index.
     #[allow(dead_code)] // Public API.
     pub handle: usize,
+    /// Network namespace this connection belongs to.
+    pub ns_id: NetNsId,
     /// Current TCP state.
     pub state: TcpState,
     /// Local port.
@@ -2479,6 +2504,7 @@ pub fn connection_info(handle: usize) -> Option<TcpConnectionInfo> {
     }
     Some(TcpConnectionInfo {
         handle,
+        ns_id: conn.ns_id,
         state: conn.state,
         local_port: conn.local_port,
         remote_ip: conn.remote_ip,
@@ -2512,6 +2538,7 @@ pub fn all_connections() -> Vec<TcpConnectionInfo> {
         if conn.active {
             result.push(TcpConnectionInfo {
                 handle: idx,
+                ns_id: conn.ns_id,
                 state: conn.state,
                 local_port: conn.local_port,
                 remote_ip: conn.remote_ip,
@@ -3203,7 +3230,11 @@ pub fn listener_has_pending(listener_handle: usize) -> bool {
 // Server API (bind / listen / accept)
 // ---------------------------------------------------------------------------
 
-/// Bind a TCP listener to a local port.
+/// Bind a TCP listener to a local port within a network namespace.
+///
+/// `ns_id` identifies the network namespace; pass `netns::ROOT_NS` for
+/// the host namespace.  The same port can be bound in different
+/// namespaces without conflict.
 ///
 /// Returns a listener handle that can be used with `accept()`.
 /// The listener starts accepting connections immediately.
@@ -3211,18 +3242,19 @@ pub fn listener_has_pending(listener_handle: usize) -> bool {
 /// # Errors
 ///
 /// - `InvalidArgument` — port is 0.
-/// - `AlreadyExists` — another listener is already bound to this port.
+/// - `AlreadyExists` — another listener in the same namespace is already
+///   bound to this port.
 /// - `OutOfMemory` — no free listener slots.
-pub fn bind(port: u16) -> KernelResult<usize> {
+pub fn bind(ns_id: NetNsId, port: u16) -> KernelResult<usize> {
     if port == 0 {
         return Err(KernelError::InvalidArgument);
     }
 
     let mut listeners = LISTENERS.lock();
 
-    // Check for duplicate binding.
+    // Check for duplicate binding within the same namespace.
     for listener in listeners.iter() {
-        if listener.active && listener.port == port {
+        if listener.active && listener.ns_id == ns_id && listener.port == port {
             return Err(KernelError::AlreadyExists);
         }
     }
@@ -3232,13 +3264,14 @@ pub fn bind(port: u16) -> KernelResult<usize> {
         .ok_or(KernelError::OutOfMemory)?;
 
     listeners[slot].active = true;
+    listeners[slot].ns_id = ns_id;
     listeners[slot].port = port;
     // Clear backlog.
     for pending in &mut listeners[slot].backlog {
         pending.active = false;
     }
 
-    crate::serial_println!("[tcp] Listener bound to port {}", port);
+    crate::serial_println!("[tcp] Listener bound to port {} (ns {})", port, ns_id);
     Ok(slot)
 }
 
@@ -3402,10 +3435,10 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
 
 /// Handle an incoming SYN for a listening port (passive open step 1).
 ///
-/// If a listener is bound on `dst_port`, allocate a new connection in
-/// `SynReceived` state, send SYN-ACK.  When the ACK arrives, the
-/// connection transitions to `Established` and is queued to the
-/// listener's backlog for `accept()`.
+/// If a listener is bound on `dst_port` in the specified namespace,
+/// allocate a new connection in `SynReceived` state, send SYN-ACK.
+/// When the ACK arrives, the connection transitions to `Established`
+/// and is queued to the listener's backlog for `accept()`.
 ///
 /// `option_bytes` contains the TCP options from the SYN segment (bytes
 /// 20..data_offset of the TCP header).  Used to parse window scale.
@@ -3414,6 +3447,7 @@ pub fn close_listener(listener_handle: usize) -> KernelResult<()> {
 /// detect ECN negotiation (RFC 3168 §6.1.1: ECE+CWR in SYN).
 #[allow(clippy::arithmetic_side_effects)]
 fn handle_incoming_syn(
+    ns_id: NetNsId,
     remote_ip: IpAddr,
     remote_port: u16,
     local_port: u16,
@@ -3422,10 +3456,10 @@ fn handle_incoming_syn(
     option_bytes: &[u8],
     syn_flags: u8,
 ) -> KernelResult<()> {
-    // Check if we have a listener for this port.
+    // Check if we have a listener for this port in this namespace.
     let listener_exists = {
         let listeners = LISTENERS.lock();
-        listeners.iter().any(|l| l.active && l.port == local_port)
+        listeners.iter().any(|l| l.active && l.ns_id == ns_id && l.port == local_port)
     };
 
     if !listener_exists {
@@ -3477,6 +3511,7 @@ fn handle_incoming_syn(
 
         let conn = &mut conns[slot];
         conn.active = true;
+        conn.ns_id = ns_id;
         conn.state = TcpState::SynReceived;
         conn.last_error = TCP_ERR_NONE; // Server-side connections start clean.
         conn.local_port = local_port;
@@ -3610,10 +3645,10 @@ fn handle_incoming_syn(
 }
 
 /// Place a fully-established connection into its listener's backlog.
-fn enqueue_to_listener(local_port: u16, conn_handle: usize) {
+fn enqueue_to_listener(ns_id: NetNsId, local_port: u16, conn_handle: usize) {
     let mut listeners = LISTENERS.lock();
     for listener in listeners.iter_mut() {
-        if listener.active && listener.port == local_port {
+        if listener.active && listener.ns_id == ns_id && listener.port == local_port {
             // Find a free backlog slot.
             for pending in listener.backlog.iter_mut() {
                 if !pending.active {
@@ -3661,7 +3696,9 @@ pub fn process_tcp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
     let remote_addr = IpAddr::V4(ip_packet.src);
     let ip_ecn_ce = ip_packet.ecn == ipv4::ECN_CE;
 
-    process_tcp_common(remote_addr, data, ip_ecn_ce)
+    // Packets from the physical NIC arrive in the root namespace.
+    // Veth-delivered packets will carry a namespace context.
+    process_tcp_common(crate::netns::ROOT_NS, remote_addr, data, ip_ecn_ce)
 }
 
 /// Process an incoming TCP segment received via IPv6.
@@ -3693,7 +3730,8 @@ pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
     // IPv6 traffic class carries ECN in bits 0-1 (same encoding as IPv4).
     let ip_ecn_ce = (ip_packet.traffic_class & 0x03) == ipv4::ECN_CE;
 
-    process_tcp_common(remote_addr, data, ip_ecn_ce)
+    // Packets from the physical NIC arrive in the root namespace.
+    process_tcp_common(crate::netns::ROOT_NS, remote_addr, data, ip_ecn_ce)
 }
 
 /// Shared TCP segment processing for both IPv4 and IPv6.
@@ -3701,11 +3739,13 @@ pub fn process_tcp_v6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
 /// The caller has already verified the transport checksum and extracted
 /// the remote address and ECN congestion-experienced flag.
 ///
+/// `ns_id` — network namespace this packet arrived in (ROOT_NS for
+///   physical NIC, container NS for veth-delivered packets).
 /// `remote_addr` — sender's IP (IpAddr::V4 or V6).
 /// `data` — raw TCP segment bytes (header + options + payload).
 /// `ip_ecn_ce` — true if the IP header indicated Congestion Experienced.
 #[allow(clippy::arithmetic_side_effects)]
-fn process_tcp_common(remote_addr: IpAddr, data: &[u8], ip_ecn_ce: bool) -> KernelResult<()> {
+fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_ce: bool) -> KernelResult<()> {
     let src_port = u16::from_be_bytes([data[0], data[1]]);
     let dst_port = u16::from_be_bytes([data[2], data[3]]);
     let seq = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
@@ -3727,10 +3767,11 @@ fn process_tcp_common(remote_addr: IpAddr, data: &[u8], ip_ecn_ce: bool) -> Kern
         &[]
     };
 
-    // Find matching connection.
+    // Find matching connection in this namespace.
     let mut conns = CONNECTIONS.lock();
     let conn_idx = conns.iter().position(|c| {
         c.active
+            && c.ns_id == ns_id
             && c.local_port == dst_port
             && c.remote_ip == remote_addr
             && c.remote_port == src_port
@@ -3742,7 +3783,7 @@ fn process_tcp_common(remote_addr: IpAddr, data: &[u8], ip_ecn_ce: bool) -> Kern
         if flags & TCP_SYN != 0 && flags & TCP_ACK == 0 && flags & TCP_RST == 0 {
             drop(conns);
             return handle_incoming_syn(
-                remote_addr, src_port, dst_port, seq, window,
+                ns_id, remote_addr, src_port, dst_port, seq, window,
                 option_bytes, flags,
             );
         }
@@ -3995,10 +4036,11 @@ fn process_tcp_common(remote_addr: IpAddr, data: &[u8], ip_ecn_ce: bool) -> Kern
                 conn.state = TcpState::Established;
 
                 let local_port = conn.local_port;
+                let conn_ns = conn.ns_id;
 
                 // Place this connection in the listener's backlog.
                 drop(conns);
-                enqueue_to_listener(local_port, idx);
+                enqueue_to_listener(conn_ns, local_port, idx);
 
                 crate::serial_println!(
                     "[tcp] 3-way handshake complete for {}:{} → port {}",
@@ -5237,14 +5279,15 @@ pub fn self_test() -> KernelResult<()> {
     test_seq_lt()?;
     test_ipv6_checksum()?;
     test_dual_stack_ip_addr()?;
+    test_namespace_isolation()?;
 
-    crate::serial_println!("[tcp] TCP self-test PASSED (8 tests)");
+    crate::serial_println!("[tcp] TCP self-test PASSED (9 tests)");
     Ok(())
 }
 
 /// Test 1: bind and close a listener.
 fn test_bind_close() -> KernelResult<()> {
-    let handle = bind(9999)?;
+    let handle = bind(crate::netns::ROOT_NS, 9999)?;
 
     // Verify listener is active.
     {
@@ -5272,10 +5315,10 @@ fn test_bind_close() -> KernelResult<()> {
 
 /// Test 2: binding the same port twice is rejected.
 fn test_bind_duplicate_rejected() -> KernelResult<()> {
-    let handle = bind(8888)?;
+    let handle = bind(crate::netns::ROOT_NS, 8888)?;
 
     // Try to bind the same port again — should fail.
-    match bind(8888) {
+    match bind(crate::netns::ROOT_NS, 8888) {
         Err(KernelError::AlreadyExists) => {}
         other => {
             // Best-effort cleanup — we're about to return an error anyway.
@@ -5290,7 +5333,7 @@ fn test_bind_duplicate_rejected() -> KernelResult<()> {
 
     // After close, rebind should succeed.
     close_listener(handle)?;
-    let handle2 = bind(8888)?;
+    let handle2 = bind(crate::netns::ROOT_NS, 8888)?;
     close_listener(handle2)?;
 
     crate::serial_println!("[tcp]   Duplicate bind rejected: OK");
@@ -5299,7 +5342,7 @@ fn test_bind_duplicate_rejected() -> KernelResult<()> {
 
 /// Test 3: try_accept on empty backlog returns WouldBlock.
 fn test_try_accept_empty() -> KernelResult<()> {
-    let handle = bind(7777)?;
+    let handle = bind(crate::netns::ROOT_NS, 7777)?;
 
     match try_accept(handle) {
         Err(KernelError::WouldBlock) => {}
@@ -5626,5 +5669,37 @@ fn test_dual_stack_ip_addr() -> KernelResult<()> {
     }
 
     crate::serial_println!("[tcp]   Dual-stack IpAddr: OK");
+    Ok(())
+}
+
+/// Test 9: namespace isolation — same port can be bound in different namespaces.
+fn test_namespace_isolation() -> KernelResult<()> {
+    let ns0 = crate::netns::ROOT_NS;
+    let ns1: NetNsId = 42; // Fake non-root namespace (doesn't need to exist in netns table).
+
+    // Bind port 6666 in namespace 0.
+    let h0 = bind(ns0, 6666)?;
+
+    // Same port in a different namespace should succeed.
+    let h1 = bind(ns1, 6666)?;
+
+    // Duplicate in the same namespace should still be rejected.
+    match bind(ns0, 6666) {
+        Err(KernelError::AlreadyExists) => {}
+        other => {
+            close_listener(h0).ok();
+            close_listener(h1).ok();
+            crate::serial_println!(
+                "[tcp]   FAIL: duplicate bind in same NS returned {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close_listener(h0)?;
+    close_listener(h1)?;
+
+    crate::serial_println!("[tcp]   Namespace isolation: OK");
     Ok(())
 }

@@ -64538,7 +64538,7 @@ fn cmd_udp6(args: &str) {
                 .parse()
                 .unwrap_or(5000);
 
-            let handle = match crate::net::udp::bind(port) {
+            let handle = match crate::net::udp::bind(crate::netns::ROOT_NS, port) {
                 Ok(h) => h,
                 Err(e) => {
                     crate::console_println!("Bind port {} failed: {:?}", port, e);
@@ -65436,7 +65436,7 @@ fn cmd_wget(args: &str) {
     crate::console_println!("Connecting to {}:{}...", ip, port);
 
     // Open TCP connection.
-    let conn = match crate::net::tcp::connect(ip.into(), port) {
+    let conn = match crate::net::tcp::connect(crate::netns::ROOT_NS, ip.into(), port) {
         Ok(c) => c,
         Err(e) => {
             crate::console_println!("Connection failed: {:?}", e);

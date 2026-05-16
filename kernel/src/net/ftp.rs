@@ -188,7 +188,7 @@ struct FtpSession {
 fn ftp_connect(host: super::interface::IpAddr) -> KernelResult<(FtpSession, FtpReply)> {
     CONNECTIONS.fetch_add(1, Ordering::Relaxed);
 
-    let handle = super::tcp::connect(host.into(), FTP_PORT)?;
+    let handle = super::tcp::connect(crate::netns::ROOT_NS, host.into(), FTP_PORT)?;
 
     // Wait for connection and welcome banner.
     for _ in 0..CONNECT_TIMEOUT_POLLS {
@@ -359,7 +359,7 @@ pub fn list_directory(
     };
 
     // Open data connection.
-    let data_handle = super::tcp::connect(data_ip.into(), data_port)?;
+    let data_handle = super::tcp::connect(crate::netns::ROOT_NS, data_ip.into(), data_port)?;
     for _ in 0..CONNECT_TIMEOUT_POLLS {
         super::poll();
     }
@@ -463,7 +463,7 @@ pub fn download_file(
     };
 
     // Open data connection.
-    let data_handle = super::tcp::connect(data_ip.into(), data_port)?;
+    let data_handle = super::tcp::connect(crate::netns::ROOT_NS, data_ip.into(), data_port)?;
     for _ in 0..CONNECT_TIMEOUT_POLLS {
         super::poll();
     }

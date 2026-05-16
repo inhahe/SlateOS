@@ -117,7 +117,7 @@ pub fn tcp_client_test(host: Ipv4Addr, port: u16, duration_polls: u32) -> Kernel
     let polls = if duration_polls == 0 { DEFAULT_TEST_POLLS } else { duration_polls };
 
     // Connect to server.
-    let handle = super::tcp::connect(host.into(), port)?;
+    let handle = super::tcp::connect(crate::netns::ROOT_NS, host.into(), port)?;
 
     // Wait for connection to establish.
     for _ in 0..CONNECT_TIMEOUT_POLLS {
@@ -195,7 +195,7 @@ pub fn tcp_server_test(port: u16, max_polls: u32) -> KernelResult<ThroughputResu
 
     let polls = if max_polls == 0 { 3000 } else { max_polls };
 
-    let listener = super::tcp::bind(port)?;
+    let listener = super::tcp::bind(crate::netns::ROOT_NS, port)?;
 
     // Wait for a connection.
     let mut conn_handle = None;

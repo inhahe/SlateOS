@@ -151,7 +151,7 @@ pub fn connect(
     let port = if proxy_port == 0 { SOCKS_PORT } else { proxy_port };
 
     // Connect to proxy.
-    let handle = super::tcp::connect(proxy_ip, port)?;
+    let handle = super::tcp::connect(crate::netns::ROOT_NS, proxy_ip, port)?;
     for _ in 0..CONNECT_TIMEOUT_POLLS {
         super::poll();
     }
@@ -340,7 +340,7 @@ pub fn connect_domain(
     let port = if proxy_port == 0 { SOCKS_PORT } else { proxy_port };
 
     // Connect to proxy.
-    let handle = super::tcp::connect(proxy_ip, port)?;
+    let handle = super::tcp::connect(crate::netns::ROOT_NS, proxy_ip, port)?;
     for _ in 0..CONNECT_TIMEOUT_POLLS {
         super::poll();
     }

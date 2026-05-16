@@ -238,7 +238,7 @@ fn parse_error(data: &[u8]) -> Option<(u16, String)> {
 pub fn get(server_ip: Ipv4Addr, filename: &str) -> KernelResult<Vec<u8>> {
     // Bind an ephemeral UDP port for this transfer.
     let local_port = ephemeral_port();
-    let handle = super::udp::bind(local_port)?;
+    let handle = super::udp::bind(crate::netns::ROOT_NS, local_port)?;
 
     // Send RRQ.
     let rrq = build_rrq(filename);
@@ -357,7 +357,7 @@ pub fn get(server_ip: Ipv4Addr, filename: &str) -> KernelResult<Vec<u8>> {
 /// Sends a WRQ followed by DATA blocks.
 pub fn put(server_ip: Ipv4Addr, filename: &str, data: &[u8]) -> KernelResult<()> {
     let local_port = ephemeral_port();
-    let handle = super::udp::bind(local_port)?;
+    let handle = super::udp::bind(crate::netns::ROOT_NS, local_port)?;
 
     // Send WRQ.
     let wrq = build_wrq(filename);
@@ -480,7 +480,7 @@ pub fn put(server_ip: Ipv4Addr, filename: &str, data: &[u8]) -> KernelResult<()>
 /// Same protocol as [`get`] but uses UDP over IPv6 transport.
 pub fn get_v6(server_ip: Ipv6Addr, filename: &str) -> KernelResult<Vec<u8>> {
     let local_port = ephemeral_port();
-    let handle = super::udp::bind(local_port)?;
+    let handle = super::udp::bind(crate::netns::ROOT_NS, local_port)?;
 
     // Send RRQ over IPv6.
     let rrq = build_rrq(filename);
@@ -588,7 +588,7 @@ pub fn get_v6(server_ip: Ipv6Addr, filename: &str) -> KernelResult<Vec<u8>> {
 /// Same protocol as [`put`] but uses UDP over IPv6 transport.
 pub fn put_v6(server_ip: Ipv6Addr, filename: &str, data: &[u8]) -> KernelResult<()> {
     let local_port = ephemeral_port();
-    let handle = super::udp::bind(local_port)?;
+    let handle = super::udp::bind(crate::netns::ROOT_NS, local_port)?;
 
     // Send WRQ over IPv6.
     let wrq = build_wrq(filename);
@@ -802,7 +802,7 @@ pub fn start_server(root_path: &str) -> KernelResult<()> {
         return Ok(());
     }
 
-    let handle = super::udp::bind(TFTP_PORT)?;
+    let handle = super::udp::bind(crate::netns::ROOT_NS, TFTP_PORT)?;
     let mut state = SERVER_STATE.lock();
     state.listener_handle = Some(handle);
     state.root_path = String::from(root_path);
@@ -1050,7 +1050,7 @@ fn handle_rrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16
 
     // Bind ephemeral port for this transfer.
     let local_port = ephemeral_port();
-    let sock = match super::udp::bind(local_port) {
+    let sock = match super::udp::bind(crate::netns::ROOT_NS, local_port) {
         Ok(h) => h,
         Err(_) => {
             let err = build_error(ERR_UNDEFINED, "Internal error");
@@ -1136,7 +1136,7 @@ fn handle_wrq(state: &mut TftpServerState, client_ip: Ipv4Addr, client_port: u16
     };
 
     let local_port = ephemeral_port();
-    let sock = match super::udp::bind(local_port) {
+    let sock = match super::udp::bind(crate::netns::ROOT_NS, local_port) {
         Ok(h) => h,
         Err(_) => {
             let err = build_error(ERR_UNDEFINED, "Internal error");

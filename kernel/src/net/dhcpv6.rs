@@ -422,7 +422,7 @@ fn send_dhcpv6(data: &[u8]) -> KernelResult<()> {
 /// Wait for a DHCPv6 response on the client port.
 fn recv_dhcpv6(expected_xid: u32, timeout_polls: u32) -> Option<Vec<u8>> {
     // Bind a UDP socket on the DHCPv6 client port.
-    let handle = match super::udp::bind(DHCPV6_CLIENT_PORT) {
+    let handle = match super::udp::bind(crate::netns::ROOT_NS, DHCPV6_CLIENT_PORT) {
         Ok(h) => h,
         Err(_) => return None,
     };

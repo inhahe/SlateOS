@@ -38,6 +38,7 @@ use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
 use super::ipv4::{self, Ipv4Packet, PROTO_UDP};
 use super::ipv6::{self, Ipv6Addr, Ipv6Packet};
+use crate::netns::NetNsId;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -103,6 +104,10 @@ struct UdpSocket {
     port: u16,
     /// Whether this slot is in use.
     active: bool,
+    /// Network namespace this socket belongs to.
+    /// Sockets in different namespaces are fully independent — the same
+    /// port can be bound in multiple namespaces without conflict.
+    ns_id: NetNsId,
     /// Connected peer address (0.0.0.0 = not connected / unfiltered).
     /// When set, recv/peek only return datagrams from this peer.
     peer_ip: Ipv4Addr,
@@ -129,6 +134,7 @@ impl UdpSocket {
         Self {
             port: 0,
             active: false,
+            ns_id: crate::netns::ROOT_NS,
             peer_ip: Ipv4Addr::UNSPECIFIED,
             peer_port: 0,
             rx_queue: VecDeque::new(),
@@ -334,17 +340,20 @@ fn allocate_ephemeral_port(sockets: &[UdpSocket; MAX_SOCKETS]) -> KernelResult<u
 /// Bind a UDP socket to a local port.
 ///
 /// Pass port 0 to auto-assign an ephemeral port from the IANA
-/// dynamic range (49152–65535).  Returns a socket index (handle)
-/// on success.
-pub fn bind(port: u16) -> KernelResult<usize> {
+/// dynamic range (49152–65535).  `ns_id` identifies the network
+/// namespace; pass `netns::ROOT_NS` for the host namespace.  The
+/// same port can be bound in different namespaces without conflict.
+///
+/// Returns a socket index (handle) on success.
+pub fn bind(ns_id: NetNsId, port: u16) -> KernelResult<usize> {
     let mut sockets = SOCKETS.lock();
 
     let effective_port = if port == 0 {
         allocate_ephemeral_port(&sockets)?
     } else {
-        // Check for duplicate binding.
+        // Check for duplicate binding within the same namespace.
         for sock in sockets.iter() {
-            if sock.active && sock.port == port {
+            if sock.active && sock.ns_id == ns_id && sock.port == port {
                 return Err(KernelError::AlreadyExists);
             }
         }
@@ -355,6 +364,7 @@ pub fn bind(port: u16) -> KernelResult<usize> {
     for (i, sock) in sockets.iter_mut().enumerate() {
         if !sock.active {
             sock.active = true;
+            sock.ns_id = ns_id;
             sock.port = effective_port;
             sock.rx_queue.clear();
             sock.rx_queue_v6.clear();
@@ -399,6 +409,7 @@ pub fn close(handle: usize) {
                 }
             }
             sock.active = false;
+            sock.ns_id = crate::netns::ROOT_NS;
             sock.port = 0;
             sock.peer_ip = Ipv4Addr::UNSPECIFIED;
             sock.peer_port = 0;
@@ -1182,14 +1193,15 @@ pub fn self_test() -> KernelResult<()> {
     test_connected_mode()?;
     test_v6_recv_empty()?;
     test_v6_process_and_deliver()?;
+    test_namespace_isolation()?;
 
-    crate::serial_println!("[udp] UDP self-test PASSED (9 tests)");
+    crate::serial_println!("[udp] UDP self-test PASSED (10 tests)");
     Ok(())
 }
 
 /// Test basic bind + local_port + close lifecycle.
 fn test_bind_close() -> KernelResult<()> {
-    let handle = bind(55555)?;
+    let handle = bind(crate::netns::ROOT_NS, 55555)?;
 
     // local_port should return the bound port.
     match local_port(handle) {
@@ -1220,9 +1232,9 @@ fn test_bind_close() -> KernelResult<()> {
 
 /// Test that binding to the same port twice is rejected.
 fn test_bind_duplicate() -> KernelResult<()> {
-    let h1 = bind(55556)?;
+    let h1 = bind(crate::netns::ROOT_NS, 55556)?;
 
-    match bind(55556) {
+    match bind(crate::netns::ROOT_NS, 55556) {
         Err(KernelError::AlreadyExists) => {} // Expected.
         Ok(h2) => {
             crate::serial_println!("[udp]   FAIL: duplicate bind succeeded");
@@ -1240,7 +1252,7 @@ fn test_bind_duplicate() -> KernelResult<()> {
     close(h1);
 
     // After close, the port should be available again.
-    let h2 = bind(55556)?;
+    let h2 = bind(crate::netns::ROOT_NS, 55556)?;
     close(h2);
 
     crate::serial_println!("[udp]   bind duplicate: OK (rejected)");
@@ -1249,7 +1261,7 @@ fn test_bind_duplicate() -> KernelResult<()> {
 
 /// Test ephemeral port allocation (port 0).
 fn test_ephemeral_port() -> KernelResult<()> {
-    let h1 = bind(0)?;
+    let h1 = bind(crate::netns::ROOT_NS, 0)?;
     let p1 = local_port(h1);
 
     if p1.is_none() {
@@ -1266,7 +1278,7 @@ fn test_ephemeral_port() -> KernelResult<()> {
     }
 
     // Second ephemeral should be different.
-    let h2 = bind(0)?;
+    let h2 = bind(crate::netns::ROOT_NS, 0)?;
     let p2 = local_port(h2).unwrap_or(0);
 
     if p1 == p2 {
@@ -1285,7 +1297,7 @@ fn test_ephemeral_port() -> KernelResult<()> {
 
 /// Test multicast group join, leave, and is_multicast_member.
 fn test_multicast_join_leave() -> KernelResult<()> {
-    let handle = bind(55557)?;
+    let handle = bind(crate::netns::ROOT_NS, 55557)?;
     let mcast = Ipv4Addr([224, 0, 0, 251]); // mDNS multicast
 
     // Not a member before join.
@@ -1341,7 +1353,7 @@ fn test_multicast_join_leave() -> KernelResult<()> {
 
 /// Test IPv6 multicast group join, leave, and is_multicast_member_v6.
 fn test_multicast_join_leave_v6() -> KernelResult<()> {
-    let handle = bind(55570)?;
+    let handle = bind(crate::netns::ROOT_NS, 55570)?;
 
     // ff02::fb is the mDNS IPv6 multicast address.
     let mcast_v6 = Ipv6Addr([
@@ -1406,7 +1418,7 @@ fn test_multicast_join_leave_v6() -> KernelResult<()> {
 
 /// Test rx_ready and rx_front_bytes on an empty socket.
 fn test_rx_ready_empty() -> KernelResult<()> {
-    let handle = bind(55558)?;
+    let handle = bind(crate::netns::ROOT_NS, 55558)?;
 
     if rx_ready(handle) != 0 {
         crate::serial_println!("[udp]   FAIL: rx_ready non-zero on new socket");
@@ -1441,7 +1453,7 @@ fn test_rx_ready_empty() -> KernelResult<()> {
 
 /// Test connected mode (peer filter).
 fn test_connected_mode() -> KernelResult<()> {
-    let handle = bind(55559)?;
+    let handle = bind(crate::netns::ROOT_NS, 55559)?;
     let peer_ip = Ipv4Addr([10, 0, 0, 1]);
 
     // Connect to a peer.
@@ -1467,7 +1479,7 @@ fn test_connected_mode() -> KernelResult<()> {
 
 /// Test that recv_v6 on an empty socket returns None.
 fn test_v6_recv_empty() -> KernelResult<()> {
-    let handle = bind(55560)?;
+    let handle = bind(crate::netns::ROOT_NS, 55560)?;
 
     // IPv6 queue should be empty.
     if rx_ready_v6(handle) != 0 {
@@ -1505,7 +1517,7 @@ fn test_v6_recv_empty() -> KernelResult<()> {
 #[allow(clippy::arithmetic_side_effects)]
 fn test_v6_process_and_deliver() -> KernelResult<()> {
     let dst_port: u16 = 55561;
-    let handle = bind(dst_port)?;
+    let handle = bind(crate::netns::ROOT_NS, dst_port)?;
 
     // Build a fake IPv6 + UDP packet.
     let src = Ipv6Addr([0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
@@ -1585,5 +1597,37 @@ fn test_v6_process_and_deliver() -> KernelResult<()> {
 
     close(handle);
     crate::serial_println!("[udp]   v6 process + deliver: OK");
+    Ok(())
+}
+
+/// Test 10: namespace isolation — same port can be bound in different namespaces.
+fn test_namespace_isolation() -> KernelResult<()> {
+    let ns0 = crate::netns::ROOT_NS;
+    let ns1: NetNsId = 77; // Fake non-root namespace.
+
+    // Bind port 55580 in namespace 0.
+    let h0 = bind(ns0, 55580)?;
+
+    // Same port in a different namespace should succeed.
+    let h1 = bind(ns1, 55580)?;
+
+    // Duplicate in the same namespace should still be rejected.
+    match bind(ns0, 55580) {
+        Err(KernelError::AlreadyExists) => {}
+        other => {
+            close(h0);
+            close(h1);
+            crate::serial_println!(
+                "[udp]   FAIL: duplicate bind in same NS returned {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close(h0);
+    close(h1);
+
+    crate::serial_println!("[udp]   Namespace isolation: OK");
     Ok(())
 }

@@ -6,7 +6,7 @@ Are these bugs documented? And why is "pre-ex isting failures" even a thing? Why
 Posix/net zone work — all remaining items are blocked:
 epoll → needs kernel event notification (kernel-ipc zone)
 signal handling shim → needs kernel-side signal delivery (kernel-ipc zone)
-/proc, /sys equivalents → needs kernel support
+/proc, /sys equivalents → DONE (procfs 10K+ lines mounted at /proc, sysfs at /sys)
 popen/pclose → DONE: Full implementation using posix_spawnp + pipe + fd_map.
   popen creates pipe, spawns /bin/sh -c <command> with fd_map redirection,
   returns FILE* for parent's pipe end.  pclose calls fclose + waitpid.
@@ -17,7 +17,11 @@ popen/pclose → DONE: Full implementation using posix_spawnp + pipe + fd_map.
   in Pipe struct instead of read_closed/write_closed booleans, plus pipe::dup(handle)
   that increments the appropriate counter.
 Per-namespace ARP → DONE (veth pairs + per-namespace ARP cache with 3 self-tests)
+TCP/UDP namespace-aware → DONE (ns_id field on TcpConnection/TcpListener/UdpSocket,
+  all public APIs take ns_id, lookups filter by namespace, self-tests for isolation)
 Wire process→container→net_ns → cross-zone (kernel-process + kernel-ipc)
+  Net-zone side is ready: TCP/UDP are namespace-aware.  Remaining: kernel-process
+  zone adds ns_id to PCB, syscall handlers read pcb.net_ns instead of ROOT_NS.
 
 Net improvements (not blocked, could still do):
 (DONE) TCP keepalive probes — RFC 1122, 75s idle, 10s interval, 9 probes.

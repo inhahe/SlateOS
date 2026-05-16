@@ -65,7 +65,7 @@ static BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 pub fn tcp_connect(host: Ipv4Addr, port: u16) -> KernelResult<(usize, Vec<u8>)> {
     TCP_CONNECTS.fetch_add(1, Ordering::Relaxed);
 
-    let handle = super::tcp::connect(host.into(), port)?;
+    let handle = super::tcp::connect(crate::netns::ROOT_NS, host.into(), port)?;
 
     // Wait for connection to establish.
     for _ in 0..CONNECT_TIMEOUT_POLLS {
@@ -122,7 +122,7 @@ pub fn tcp_close(handle: usize) {
 pub fn tcp_listen(port: u16) -> KernelResult<(usize, IpAddr, u16)> {
     TCP_LISTENS.fetch_add(1, Ordering::Relaxed);
 
-    let listener = super::tcp::bind(port)?;
+    let listener = super::tcp::bind(crate::netns::ROOT_NS, port)?;
 
     // Wait for a connection (long timeout — listen mode).
     for _ in 0..3000 {
@@ -177,7 +177,7 @@ pub fn udp_send_v6(dst: Ipv6Addr, port: u16, data: &[u8]) -> KernelResult<()> {
 /// Waits up to `timeout_polls` iterations for a datagram.  Returns the
 /// source address (as a string), source port, and payload.
 pub fn udp_recv_any(port: u16, timeout_polls: u32) -> KernelResult<(String, u16, Vec<u8>)> {
-    let handle = super::udp::bind(port)?;
+    let handle = super::udp::bind(crate::netns::ROOT_NS, port)?;
     let timeout = if timeout_polls == 0 { RECV_TIMEOUT_POLLS } else { timeout_polls };
 
     for _ in 0..timeout {
@@ -255,7 +255,7 @@ pub fn scan_ports(host: Ipv4Addr, start: u16, end: u16) -> Vec<PortScanResult> {
 /// succeeds within a short timeout.
 fn check_port_open(host: Ipv4Addr, port: u16) -> bool {
     // Try to connect.
-    let handle = match super::tcp::connect(host.into(), port) {
+    let handle = match super::tcp::connect(crate::netns::ROOT_NS, host.into(), port) {
         Ok(h) => h,
         Err(_) => return false,
     };

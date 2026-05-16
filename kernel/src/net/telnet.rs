@@ -193,7 +193,7 @@ pub fn init() -> KernelResult<()> {
     }
 
     let port = LISTEN_PORT.load(Ordering::Relaxed);
-    let listener = super::tcp::bind(port)?;
+    let listener = super::tcp::bind(crate::netns::ROOT_NS, port)?;
 
     let mut state = STATE.lock();
     state.listener_handle = Some(listener);

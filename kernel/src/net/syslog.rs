@@ -589,7 +589,7 @@ pub fn start_receiver() -> KernelResult<()> {
     }
 
     let port = LISTEN_PORT.load(Ordering::Relaxed);
-    let handle = super::udp::bind(port)?;
+    let handle = super::udp::bind(crate::netns::ROOT_NS, port)?;
 
     let mut state = STATE.lock();
     state.recv_handle = Some(handle);

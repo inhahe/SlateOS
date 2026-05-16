@@ -458,3 +458,8 @@ pub mod linux_quota;
 pub mod linux_sched_types;
 pub mod linux_signalfd;
 pub mod linux_timerfd;
+pub mod linux_eventfd;
+pub mod linux_inotify;
+pub mod linux_reboot;
+pub mod linux_vhost;
+pub mod linux_nvme_ioctl;

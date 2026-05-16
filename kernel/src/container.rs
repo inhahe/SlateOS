@@ -188,6 +188,11 @@ struct Container {
     net_ns: u32,
     /// Cgroup ID (from cgroup module).
     cgroup_id: u32,
+    /// Veth pair connecting this container's namespace to the host.
+    ///
+    /// End A stays in ROOT_NS (host side), end B is moved to the
+    /// container's net namespace.  `None` if no network was configured.
+    veth_pair: Option<crate::net::veth::VethPairId>,
     /// Process IDs running in this container (global PIDs).
     pids: Vec<u64>,
 }
@@ -202,6 +207,7 @@ impl Container {
             user_ns: 0,
             net_ns: 0,
             cgroup_id: 0,
+            veth_pair: None,
             pids: Vec::new(),
         }
     }
@@ -229,6 +235,8 @@ pub struct ContainerInfo {
     pub net_ns: u32,
     /// Cgroup ID.
     pub cgroup_id: u32,
+    /// Veth pair ID connecting to the host (None if no network configured).
+    pub veth_pair: Option<crate::net::veth::VethPairId>,
     /// Number of processes.
     pub nr_procs: usize,
 }
@@ -286,10 +294,44 @@ where
 // Public API: lifecycle
 // ---------------------------------------------------------------------------
 
+/// Set up a veth pair for container networking.
+///
+/// Creates a pair, moves end B to the container's namespace, and
+/// brings both ends up.  End A stays in ROOT_NS (host side).
+///
+/// On any failure, partially-created resources are cleaned up.
+fn setup_container_veth(net_ns: u32) -> KernelResult<crate::net::veth::VethPairId> {
+    use crate::net::veth::{self, VethEndId};
+
+    // Create the pair (both ends start in ROOT_NS, both down).
+    let pair_id = veth::create_pair()?;
+
+    // Move end B to the container's namespace.
+    if let Err(e) = veth::move_end(pair_id, VethEndId::B, net_ns) {
+        let _ = veth::destroy_pair(pair_id);
+        return Err(e);
+    }
+
+    // Bring up both ends.
+    if let Err(e) = veth::set_up(pair_id, VethEndId::A, true) {
+        let _ = veth::destroy_pair(pair_id);
+        return Err(e);
+    }
+    if let Err(e) = veth::set_up(pair_id, VethEndId::B, true) {
+        let _ = veth::set_up(pair_id, VethEndId::A, false); // Best-effort rollback.
+        let _ = veth::destroy_pair(pair_id);
+        return Err(e);
+    }
+
+    Ok(pair_id)
+}
+
 /// Create a new container with the given configuration.
 ///
 /// Allocates all four namespace types and a cgroup, applies
 /// configuration (UID/GID mappings, resource limits, network config).
+/// When a network IP is configured, a veth pair is automatically
+/// created connecting the container to the host.
 ///
 /// The container starts in `Created` state — call [`start`] to
 /// attach processes.
@@ -399,7 +441,17 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         );
     }
 
-    // 3d: Network interface.
+    // 3d: Network interface + veth pair.
+    //
+    // When a container has a network IP configured, we automatically
+    // create a veth pair connecting the container's namespace to the
+    // host (ROOT_NS).  End A stays in the host namespace; end B is
+    // moved to the container's namespace.  Both ends are brought up.
+    //
+    // This mirrors `ip link add veth0 type veth peer name veth1;
+    // ip link set veth1 netns <ns>; ip link set veth0 up; ip link set veth1 up`.
+    let mut veth_pair: Option<crate::net::veth::VethPairId> = None;
+
     if let Some(ip) = config.net_ip {
         let ip = crate::netns::Ipv4Addr(ip);
         let mask = config.net_mask.map(crate::netns::Ipv4Addr)
@@ -409,6 +461,25 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         let dns = config.net_dns.map(crate::netns::Ipv4Addr)
             .unwrap_or(crate::netns::Ipv4Addr::UNSPECIFIED);
         let _ = crate::netns::configure_interface(net_ns, ip, mask, gw, dns);
+
+        // Create a veth pair and wire it up.
+        match setup_container_veth(net_ns) {
+            Ok(pair_id) => {
+                veth_pair = Some(pair_id);
+                serial_println!(
+                    "[container] '{}': veth pair {} (host <-> ns {})",
+                    config.name, pair_id, net_ns
+                );
+            }
+            Err(e) => {
+                // Non-fatal: container works but without host connectivity.
+                // This can happen if all veth slots are exhausted.
+                serial_println!(
+                    "[container] '{}': veth setup failed: {:?} (no host link)",
+                    config.name, e
+                );
+            }
+        }
     }
 
     // --- Phase 4: Record the container. ---
@@ -422,6 +493,7 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
         ct.user_ns = user_ns;
         ct.net_ns = net_ns;
         ct.cgroup_id = cgroup_id;
+        ct.veth_pair = veth_pair;
         ct.pids.clear();
 
         #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
@@ -431,8 +503,8 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
     });
 
     serial_println!(
-        "[container] Created '{}' (id={}, pidns={}, userns={}, netns={}, cgroup={})",
-        config.name, slot, pid_ns, user_ns, net_ns, cgroup_id
+        "[container] Created '{}' (id={}, pidns={}, userns={}, netns={}, cgroup={}, veth={:?})",
+        config.name, slot, pid_ns, user_ns, net_ns, cgroup_id, veth_pair
     );
 
     Ok(slot as ContainerId)
@@ -506,7 +578,7 @@ pub fn mark_failed(id: ContainerId) -> KernelResult<()> {
 /// - [`KernelError::InvalidArgument`] if container is Running.
 pub fn delete(id: ContainerId) -> KernelResult<()> {
     // Extract sub-resource IDs while holding the table lock.
-    let (pid_ns, user_ns, net_ns, cgroup_id, name) = with_table(|table| {
+    let (pid_ns, user_ns, net_ns, cgroup_id, veth_pair, name) = with_table(|table| {
         let idx = id as usize;
         if idx >= MAX_CONTAINERS || !table.containers[idx].active {
             return Err(KernelError::InvalidArgument);
@@ -516,11 +588,13 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
         }
 
         let ct = &table.containers[idx];
-        let result = (ct.pid_ns, ct.user_ns, ct.net_ns, ct.cgroup_id, ct.name.clone());
+        let result = (ct.pid_ns, ct.user_ns, ct.net_ns, ct.cgroup_id,
+                      ct.veth_pair, ct.name.clone());
 
         // Mark slot as inactive.
         table.containers[idx].active = false;
         table.containers[idx].name.clear();
+        table.containers[idx].veth_pair = None;
         table.containers[idx].pids.clear();
 
         Ok(result)
@@ -529,6 +603,12 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
     // Clean up sub-resources outside the table lock (each has its own lock).
     // Ignore errors — the sub-resources may have already been cleaned up
     // if a partial failure occurred during create.
+    //
+    // Destroy veth pair first (before netns) since the endpoint lives
+    // in the namespace.
+    if let Some(pair_id) = veth_pair {
+        let _ = crate::net::veth::destroy_pair(pair_id);
+    }
     let _ = crate::cgroup::delete(cgroup_id);
     let _ = crate::netns::delete(net_ns);
     let _ = crate::userns::delete(user_ns);
@@ -617,6 +697,7 @@ pub fn info(id: ContainerId) -> Option<ContainerInfo> {
             user_ns: ct.user_ns,
             net_ns: ct.net_ns,
             cgroup_id: ct.cgroup_id,
+            veth_pair: ct.veth_pair,
             nr_procs: ct.pids.len(),
         })
     })
@@ -804,6 +885,37 @@ pub fn self_test() {
     assert_eq!(info(ct5).unwrap().name, "my-container-with-a-long-name");
     serial_println!("[container]   Container naming: OK");
 
+    // Test 15: Container with network config gets automatic veth pair.
+    {
+        let net_cfg = ContainerConfig::new("test-veth-ct")
+            .uid_map(0, 300_000, 1)
+            .gid_map(0, 300_000, 1);
+        // Set network config manually (builder doesn't have a net() method).
+        let mut net_cfg = net_cfg;
+        net_cfg.net_ip = Some([10, 88, 0, 2]);
+        net_cfg.net_mask = Some([255, 255, 255, 0]);
+        net_cfg.net_gateway = Some([10, 88, 0, 1]);
+
+        let ct_net = create(&net_cfg).expect("create networked container");
+        let ci_net = info(ct_net).unwrap();
+
+        // Should have a veth pair assigned.
+        assert!(ci_net.veth_pair.is_some(),
+            "networked container should have veth pair");
+
+        // Container without network should NOT have a veth pair.
+        let plain_cfg = ContainerConfig::new("test-no-net");
+        let ct_plain = create(&plain_cfg).expect("create plain container");
+        let ci_plain = info(ct_plain).unwrap();
+        assert!(ci_plain.veth_pair.is_none(),
+            "non-networked container should have no veth pair");
+
+        // Clean up: delete destroys the veth pair too.
+        delete(ct_net).expect("delete networked ct");
+        delete(ct_plain).expect("delete plain ct");
+    }
+    serial_println!("[container]   Veth auto-setup: OK");
+
     // Cleanup.
     stop(ct2).ok(); // may already be stopped
     stop(ct3).ok();
@@ -813,5 +925,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (14 tests)");
+    serial_println!("[container] Self-test PASSED (15 tests)");
 }

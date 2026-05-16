@@ -1748,7 +1748,17 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] State machine: Created → Running → Stopped/Failed → deleted
     - [x] Process tracking across all sub-resources
     - [x] kshell `container`/`ct` command: list/create/delete/start/stop/info/test
-    - [x] 14 self-tests
+    - [x] 15 self-tests (added veth auto-setup test)
+    - [x] Automatic veth pair creation for networked containers
+      - [x] setup_container_veth(): create pair, move end B to container NS, bring up both
+      - [x] Veth pair ID stored in Container and ContainerInfo for lifecycle tracking
+      - [x] delete() destroys veth pair before cleaning up namespaces
+  - [x] Namespace-aware TCP/UDP stacks
+    - [x] ns_id field on TcpConnection, TcpListener, UdpSocket, TcpConnectionInfo
+    - [x] All public APIs (connect, connect_start, bind) take ns_id parameter
+    - [x] 5-tuple connection lookup (ns_id + local_port + remote_ip + remote_port)
+    - [x] Same port bindable in different namespaces
+    - [x] 30+ callers updated; self-tests for namespace isolation
   - [x] Syscall filter (seccomp equivalent, kernel/src/scfilter.rs)
     - [x] Bitmap-based O(1) per-syscall check (1000-bit bitmap)
     - [x] Allow-all and deny-all modes, per-process filters

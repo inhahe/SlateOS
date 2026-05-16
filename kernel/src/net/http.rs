@@ -1,27 +1,29 @@
-//! HTTP/1.1 client implementation (dual-stack IPv4/IPv6).
+//! HTTP/1.1 and HTTPS client implementation (dual-stack IPv4/IPv6).
 //!
-//! Provides a minimal but functional HTTP client built on top of the kernel's
-//! TCP stack and DNS resolver.  Supports the most common operations needed
-//! by OS services (package manager, update checks, API calls, UPnP SOAP).
-//! Automatically falls back to IPv6 (AAAA) when IPv4 (A) DNS resolution fails.
+//! Provides a minimal but functional HTTP/HTTPS client built on top of the
+//! kernel's TCP stack, DNS resolver, and TLS 1.3 implementation.  Supports
+//! the most common operations needed by OS services (package manager, update
+//! checks, API calls, UPnP SOAP).  Automatically falls back to IPv6 (AAAA)
+//! when IPv4 (A) DNS resolution fails.
 //!
 //! ## Features
 //!
 //! - **Methods**: GET, HEAD, POST, PUT, DELETE, PATCH
-//! - **URL parsing**: `http://host[:port]/path[?query]` decomposition
+//! - **URL parsing**: `http://` and `https://` URL decomposition
+//! - **HTTPS**: TLS 1.3 with ChaCha20-Poly1305 and X25519 key exchange
 //! - **DNS resolution**: hostname → IP via the kernel DNS resolver
 //! - **Request building**: proper HTTP/1.1 request formatting with Host,
 //!   Content-Length, Content-Type, User-Agent, Connection headers
 //! - **Response parsing**: status line, headers, body extraction
 //! - **Chunked transfer encoding**: reassembles chunked responses
-//! - **Redirects**: follows 301, 302, 307, 308 up to 5 hops
+//! - **Redirects**: follows 301, 302, 307, 308 up to 5 hops (cross-scheme OK)
 //! - **Basic authentication**: Base64-encoded `Authorization` header
 //! - **Connection reuse**: optional keep-alive (default: close after request)
 //! - **Configurable timeouts**: per-request poll-cycle limits
 //!
 //! ## Limitations
 //!
-//! - HTTP only (no TLS/HTTPS — requires a TLS library, future work).
+//! - No certificate chain validation (accepts any server certificate).
 //! - No cookie jar (stateless requests).
 //! - No multipart form upload.
 //! - Response body buffered entirely in memory (no streaming).
@@ -114,33 +116,38 @@ impl Method {
 // URL parsing
 // ---------------------------------------------------------------------------
 
-/// Parsed HTTP URL components.
+/// Default HTTPS port.
+const DEFAULT_HTTPS_PORT: u16 = 443;
+
+/// Parsed HTTP/HTTPS URL components.
 #[derive(Debug, Clone)]
 pub struct Url {
     /// Hostname (e.g., "example.com").
     pub host: String,
-    /// Port number (default 80 for HTTP).
+    /// Port number (default 80 for HTTP, 443 for HTTPS).
     pub port: u16,
     /// Request path (e.g., "/api/status").
     pub path: String,
     /// Optional query string (without leading '?').
     pub query: Option<String>,
+    /// True if the URL uses HTTPS scheme.
+    pub is_https: bool,
 }
 
 impl Url {
-    /// Parse an HTTP URL string.
+    /// Parse an HTTP or HTTPS URL string.
     ///
-    /// Supports `http://host[:port][/path][?query]`.
-    /// HTTPS URLs are rejected (no TLS support).
+    /// Supports `http://host[:port][/path][?query]` and
+    /// `https://host[:port][/path][?query]`.
     pub fn parse(url: &str) -> KernelResult<Self> {
-        // Strip scheme.
-        let rest = if let Some(stripped) = url.strip_prefix("http://") {
-            stripped
-        } else if url.starts_with("https://") {
-            return Err(KernelError::NotSupported);
+        // Strip scheme and determine if HTTPS.
+        let (rest, is_https) = if let Some(stripped) = url.strip_prefix("https://") {
+            (stripped, true)
+        } else if let Some(stripped) = url.strip_prefix("http://") {
+            (stripped, false)
         } else {
-            // Assume bare URL without scheme.
-            url
+            // Assume bare URL without scheme (defaults to HTTP).
+            (url, false)
         };
 
         // Split path from authority.
@@ -164,6 +171,7 @@ impl Url {
         };
 
         // Split port from host.
+        let default_port = if is_https { DEFAULT_HTTPS_PORT } else { DEFAULT_HTTP_PORT };
         let (host, port) = match authority.rfind(':') {
             Some(idx) => {
                 let h = &authority[..idx];
@@ -171,7 +179,7 @@ impl Url {
                 let p = parse_u16(p_str).ok_or(KernelError::InvalidArgument)?;
                 (h, p)
             }
-            None => (authority, DEFAULT_HTTP_PORT),
+            None => (authority, default_port),
         };
 
         if host.is_empty() {
@@ -185,6 +193,7 @@ impl Url {
             port,
             path: path_str,
             query,
+            is_https,
         })
     }
 
@@ -467,7 +476,7 @@ pub fn delete(url: &str) -> KernelResult<Response> {
 // Request execution engine
 // ---------------------------------------------------------------------------
 
-/// Execute an HTTP request, following redirects up to `MAX_REDIRECTS`.
+/// Execute an HTTP(S) request, following redirects up to `MAX_REDIRECTS`.
 fn execute_request(req: Request, redirect_count: u8) -> KernelResult<Response> {
     if redirect_count > MAX_REDIRECTS {
         crate::serial_println!("[http] Too many redirects ({})", redirect_count);
@@ -477,29 +486,40 @@ fn execute_request(req: Request, redirect_count: u8) -> KernelResult<Response> {
     // Resolve hostname to IP.
     let ip = resolve_host(&req.url.host)?;
 
+    let scheme = if req.url.is_https { "https" } else { "http" };
     crate::serial_println!(
-        "[http] {} {} ({}:{})",
-        req.method.as_str(), req.url.request_uri(), ip, req.url.port
+        "[{}] {} {} ({}:{})",
+        scheme, req.method.as_str(), req.url.request_uri(), ip, req.url.port
     );
 
     // Connect to the remote server.
     let handle = super::tcp::connect(ip.into(), req.url.port)?;
 
-    // Build and send the HTTP request.
+    // Build the raw HTTP request bytes.
     let raw_request = req.build();
-    let send_result = super::tcp::send(handle, &raw_request);
-    if let Err(e) = send_result {
+
+    let resp = if req.url.is_https {
+        // --- HTTPS: wrap the TCP connection with TLS ---
+        let tls_session = match super::tls::tls_connect(handle, &req.url.host) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = super::tcp::close(handle);
+                return Err(e);
+            }
+        };
+        execute_https_request(tls_session, &raw_request, req.timeout_polls, req.method == Method::Head)?
+    } else {
+        // --- HTTP: plain TCP ---
+        let send_result = super::tcp::send(handle, &raw_request);
+        if let Err(e) = send_result {
+            let _ = super::tcp::close(handle);
+            return Err(e);
+        }
+
+        let response = read_response(handle, req.timeout_polls, req.method == Method::Head);
         let _ = super::tcp::close(handle);
-        return Err(e);
-    }
-
-    // Read the response.
-    let response = read_response(handle, req.timeout_polls, req.method == Method::Head);
-
-    // Always close the connection (we use Connection: close).
-    let _ = super::tcp::close(handle);
-
-    let resp = response?;
+        response?
+    };
 
     // Handle redirects.
     if req.follow_redirects && resp.is_redirect() {
@@ -533,6 +553,229 @@ fn execute_request(req: Request, redirect_count: u8) -> KernelResult<Response> {
     }
 
     Ok(resp)
+}
+
+/// Execute an HTTPS request using a TLS session.
+///
+/// Sends the raw HTTP request over TLS, then reads and parses the response.
+fn execute_https_request(
+    mut tls: super::tls::TlsSession,
+    raw_request: &[u8],
+    timeout_polls: u32,
+    head_only: bool,
+) -> KernelResult<Response> {
+    // Send the HTTP request over TLS.
+    super::tls::tls_send(&mut tls, raw_request)?;
+
+    // Read the response via TLS.
+    let response = read_tls_response(&mut tls, timeout_polls, head_only);
+
+    // Close the TLS session.
+    let _ = super::tls::tls_close(&mut tls);
+
+    response
+}
+
+/// Read an HTTP response from a TLS session.
+///
+/// Mirrors `read_response()` but reads from TLS instead of raw TCP.
+fn read_tls_response(
+    tls: &mut super::tls::TlsSession,
+    timeout_polls: u32,
+    head_only: bool,
+) -> KernelResult<Response> {
+    // Accumulate raw bytes until we find the end of headers (\r\n\r\n).
+    let mut raw = Vec::with_capacity(4096);
+    let header_end = read_tls_until_header_end(tls, timeout_polls, &mut raw)?;
+
+    // Parse status line and headers from the raw bytes.
+    let header_section = raw.get(..header_end).ok_or(KernelError::InternalError)?;
+    let (status_code, reason, headers) = parse_response_headers(header_section)?;
+
+    // For HEAD requests, there's no body.
+    if head_only {
+        return Ok(Response {
+            status_code,
+            reason,
+            headers,
+            body: Vec::new(),
+        });
+    }
+
+    // The rest of `raw` after the headers (data already read but part of body).
+    let body_start = header_end.checked_add(4).unwrap_or(header_end);
+    let already_read = if body_start < raw.len() {
+        Vec::from(raw.get(body_start..).unwrap_or(&[]))
+    } else {
+        Vec::new()
+    };
+
+    // Determine how to read the body.
+    let is_chunked = headers.iter().any(|(n, v)| {
+        n.eq_ignore_ascii_case("Transfer-Encoding") && v.contains("chunked")
+    });
+
+    let body = if is_chunked {
+        read_tls_chunked_body(tls, timeout_polls, already_read)?
+    } else {
+        let content_length = headers.iter().find_map(|(n, v)| {
+            if n.eq_ignore_ascii_case("Content-Length") {
+                parse_usize(v)
+            } else {
+                None
+            }
+        });
+        read_tls_fixed_body(tls, timeout_polls, already_read, content_length)?
+    };
+
+    Ok(Response {
+        status_code,
+        reason,
+        headers,
+        body,
+    })
+}
+
+/// Read from TLS until we find the header/body boundary (\r\n\r\n).
+fn read_tls_until_header_end(
+    tls: &mut super::tls::TlsSession,
+    timeout_polls: u32,
+    buf: &mut Vec<u8>,
+) -> KernelResult<usize> {
+    let mut polls = 0u32;
+    loop {
+        if let Some(pos) = find_header_end(buf) {
+            return Ok(pos);
+        }
+        if buf.len() > MAX_HEADER_SIZE {
+            return Err(KernelError::ResourceExhausted);
+        }
+
+        super::super::net::poll();
+        let data = super::tls::tls_recv(tls, 4096)?;
+        if !data.is_empty() {
+            buf.extend_from_slice(&data);
+            polls = 0;
+        } else {
+            polls = polls.saturating_add(1);
+            if polls >= timeout_polls {
+                return Err(KernelError::TimedOut);
+            }
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Read a fixed-length body from TLS.
+fn read_tls_fixed_body(
+    tls: &mut super::tls::TlsSession,
+    timeout_polls: u32,
+    already_read: Vec<u8>,
+    content_length: Option<usize>,
+) -> KernelResult<Vec<u8>> {
+    let mut body = already_read;
+
+    match content_length {
+        Some(expected) => {
+            if expected > MAX_BODY_SIZE {
+                return Err(KernelError::ResourceExhausted);
+            }
+            let mut polls = 0u32;
+            while body.len() < expected {
+                super::super::net::poll();
+                let remaining = expected.saturating_sub(body.len());
+                let data = super::tls::tls_recv(tls, remaining.min(8192))?;
+                if !data.is_empty() {
+                    body.extend_from_slice(&data);
+                    polls = 0;
+                } else {
+                    polls = polls.saturating_add(1);
+                    if polls >= timeout_polls {
+                        break; // Return what we have.
+                    }
+                    core::hint::spin_loop();
+                }
+            }
+        }
+        None => {
+            // No Content-Length — read until connection close or timeout.
+            let mut polls = 0u32;
+            loop {
+                super::super::net::poll();
+                let data = super::tls::tls_recv(tls, 8192)?;
+                if !data.is_empty() {
+                    body.extend_from_slice(&data);
+                    polls = 0;
+                    if body.len() > MAX_BODY_SIZE {
+                        break;
+                    }
+                } else {
+                    polls = polls.saturating_add(1);
+                    if polls >= timeout_polls {
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
+            }
+        }
+    }
+
+    Ok(body)
+}
+
+/// Read chunked-encoded body from TLS.
+fn read_tls_chunked_body(
+    tls: &mut super::tls::TlsSession,
+    timeout_polls: u32,
+    already_read: Vec<u8>,
+) -> KernelResult<Vec<u8>> {
+    let mut buf = already_read;
+    let mut body = Vec::new();
+    let mut polls = 0u32;
+
+    loop {
+        // Try to parse a chunk from buf.
+        if let Some(crlf_pos) = find_crlf(&buf) {
+            let size_str = core::str::from_utf8(buf.get(..crlf_pos).unwrap_or(&[]))
+                .unwrap_or("0");
+            let chunk_size = parse_hex_usize(size_str);
+            if chunk_size == 0 {
+                break; // Final chunk.
+            }
+
+            let data_start = crlf_pos + 2;
+            let data_end = data_start + chunk_size;
+            let after_data = data_end + 2; // Skip trailing \r\n
+
+            if buf.len() >= after_data {
+                body.extend_from_slice(buf.get(data_start..data_end).unwrap_or(&[]));
+                let remaining = Vec::from(buf.get(after_data..).unwrap_or(&[]));
+                buf = remaining;
+                polls = 0;
+
+                if body.len() > MAX_BODY_SIZE {
+                    break;
+                }
+                continue;
+            }
+        }
+
+        // Need more data.
+        super::super::net::poll();
+        let data = super::tls::tls_recv(tls, 8192)?;
+        if !data.is_empty() {
+            buf.extend_from_slice(&data);
+            polls = 0;
+        } else {
+            polls = polls.saturating_add(1);
+            if polls >= timeout_polls {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    Ok(body)
 }
 
 /// Resolve a hostname to an IP address (IPv4 preferred, IPv6 fallback).
@@ -613,31 +856,37 @@ fn parse_ipv4(s: &str) -> Option<Ipv4Addr> {
 /// Resolve a redirect Location header to an absolute URL.
 fn resolve_redirect(base: &Url, location: &str) -> String {
     if location.starts_with("http://") || location.starts_with("https://") {
-        // Absolute URL.
+        // Absolute URL — may change scheme (e.g., HTTP→HTTPS upgrade).
         String::from(location)
-    } else if location.starts_with('/') {
-        // Absolute path relative to host.
-        if base.port == DEFAULT_HTTP_PORT {
-            format!("http://{}{}", base.host, location)
-        } else {
-            format!("http://{}:{}{}", base.host, base.port, location)
-        }
     } else {
-        // Relative path — resolve against current path.
-        let base_path = match base.path.rfind('/') {
-            Some(idx) => {
-                if let Some(slice) = base.path.get(..idx.saturating_add(1)) {
-                    slice
-                } else {
-                    "/"
-                }
+        // Relative or path-absolute redirect — preserve the base scheme.
+        let scheme = if base.is_https { "https" } else { "http" };
+        let default_port = if base.is_https { DEFAULT_HTTPS_PORT } else { DEFAULT_HTTP_PORT };
+
+        if location.starts_with('/') {
+            // Absolute path relative to host.
+            if base.port == default_port {
+                format!("{}://{}{}", scheme, base.host, location)
+            } else {
+                format!("{}://{}:{}{}", scheme, base.host, base.port, location)
             }
-            None => "/",
-        };
-        if base.port == DEFAULT_HTTP_PORT {
-            format!("http://{}{}{}", base.host, base_path, location)
         } else {
-            format!("http://{}:{}{}{}", base.host, base.port, base_path, location)
+            // Relative path — resolve against current path.
+            let base_path = match base.path.rfind('/') {
+                Some(idx) => {
+                    if let Some(slice) = base.path.get(..idx.saturating_add(1)) {
+                        slice
+                    } else {
+                        "/"
+                    }
+                }
+                None => "/",
+            };
+            if base.port == default_port {
+                format!("{}://{}{}{}", scheme, base.host, base_path, location)
+            } else {
+                format!("{}://{}:{}{}{}", scheme, base.host, base.port, base_path, location)
+            }
         }
     }
 }
@@ -1319,12 +1568,25 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("[http]   test 3 (url parse bare host) PASSED");
     }
 
-    // --- Test 4: HTTPS rejection ---
+    // --- Test 4: HTTPS URL parsing ---
     {
-        let result = Url::parse("https://secure.example.com/api");
-        assert!(result.is_err(), "HTTPS should be rejected");
+        let url = Url::parse("https://secure.example.com/api")?;
+        assert!(url.is_https, "HTTPS flag set");
+        assert_eq_test(&url.host, "secure.example.com", "https host");
+        assert!(url.port == 443, "https default port");
+        assert_eq_test(&url.path, "/api", "https path");
+
+        // HTTPS with explicit port.
+        let url2 = Url::parse("https://example.com:8443/secure")?;
+        assert!(url2.is_https, "HTTPS flag with explicit port");
+        assert!(url2.port == 8443, "https explicit port");
+
+        // HTTP URL should NOT set is_https.
+        let url3 = Url::parse("http://example.com/plain")?;
+        assert!(!url3.is_https, "HTTP flag not set");
+
         passed = passed.saturating_add(1);
-        crate::serial_println!("[http]   test 4 (https rejection) PASSED");
+        crate::serial_println!("[http]   test 4 (https url parsing) PASSED");
     }
 
     // --- Test 5: Base64 encoding ---
@@ -1416,6 +1678,7 @@ pub fn self_test() -> KernelResult<()> {
             port: 80,
             path: String::from("/api/v1/resource"),
             query: None,
+            is_https: false,
         };
 
         // Absolute redirect.
@@ -1436,9 +1699,25 @@ pub fn self_test() -> KernelResult<()> {
             port: 8080,
             path: String::from("/api"),
             query: None,
+            is_https: false,
         };
         let r = resolve_redirect(&base2, "/other");
         assert_eq_test(&r, "http://example.com:8080/other", "port redirect");
+
+        // HTTPS base URL should preserve scheme in relative redirects.
+        let https_base = Url {
+            host: String::from("secure.example.com"),
+            port: 443,
+            path: String::from("/login"),
+            query: None,
+            is_https: true,
+        };
+        let r = resolve_redirect(&https_base, "/dashboard");
+        assert_eq_test(&r, "https://secure.example.com/dashboard", "https redirect");
+
+        // Cross-scheme redirect (absolute URL).
+        let r = resolve_redirect(&https_base, "http://plain.example.com/downgrade");
+        assert_eq_test(&r, "http://plain.example.com/downgrade", "cross-scheme redirect");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[http]   test 10 (redirect resolution) PASSED");

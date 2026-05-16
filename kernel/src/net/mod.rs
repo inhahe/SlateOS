@@ -48,6 +48,7 @@ pub mod tftp;
 pub mod interface;
 pub mod ipv4;
 pub mod tcp;
+pub mod tls;
 pub mod udp;
 pub mod pcap;
 pub mod qos;
@@ -302,6 +303,7 @@ pub fn self_test() -> KernelResult<()> {
     dhcp::self_test()?;
     frag::self_test()?;
     interface::self_test()?;
+    tls::self_test()?;
 
     crate::serial_println!("[net] Network self-test PASSED");
     Ok(())

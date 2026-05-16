@@ -65389,6 +65389,26 @@ fn cmd_wget(args: &str) {
     if args.is_empty() {
         crate::console_println!("Usage: wget <url>");
         crate::console_println!("  e.g., wget http://example.com/");
+        crate::console_println!("  e.g., wget https://secure.example.com/");
+        return;
+    }
+
+    // HTTPS URLs: use the HTTP module (has TLS 1.3 support).
+    if args.starts_with("https://") {
+        crate::console_println!("Fetching (HTTPS) {}...", args);
+        match crate::net::http::get(args) {
+            Ok(resp) => {
+                crate::console_println!("--- Response (HTTP {}) ---", resp.status_code);
+                let text = resp.body_text();
+                if text.is_empty() {
+                    crate::console_println!("(empty body, {} bytes raw)", resp.body.len());
+                } else {
+                    crate::console_print!("{}", text);
+                }
+                crate::console_println!("\n--- End ({} bytes) ---", resp.body.len());
+            }
+            Err(e) => crate::console_println!("HTTPS request failed: {:?}", e),
+        }
         return;
     }
 

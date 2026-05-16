@@ -1795,7 +1795,10 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] json.rs: minimal recursive-descent JSON parser (no_std, no floats, 8 self-tests)
     - [x] oci.rs: OCI Image Spec v1.0 parser (index, manifest, config, digest verification)
     - [x] Layer extraction via tar + gunzip + overlayfs infrastructure
-    - [x] kshell `oci` command: inspect, layers, test
+    - [x] kshell `oci` command: inspect, layers, run, test
+    - [x] `oci run`: full container creation from OCI image (layer extraction → overlay rootfs → container with namespace isolation)
+  - [x] Per-namespace DNS resolution: containers use their own configured DNS server (fallback to host)
+  - [x] `container exec <id> <cmd>`: run kshell commands inside a container's network namespace
   - [ ] Port Docker (or equivalent container runtime)
 
 ### 5.6 Additional software

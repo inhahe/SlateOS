@@ -39,6 +39,8 @@ pub struct TcpEntry {
     pub state: String,
     pub rx_buffered: usize,
     pub tx_buffered: usize,
+    /// Network namespace ID (0 = root/host namespace).
+    pub ns_id: u32,
 }
 
 /// A UDP socket entry for display.
@@ -49,6 +51,8 @@ pub struct UdpEntry {
     /// IPv6 receive queue length.
     pub rx_queue_v6: usize,
     pub mcast_groups: usize,
+    /// Network namespace ID (0 = root/host namespace).
+    pub ns_id: u32,
 }
 
 /// A TCP listener entry for display.
@@ -94,6 +98,7 @@ pub fn collect_tcp_connections() -> Vec<TcpEntry> {
             state: String::from(state_str(c.state)),
             rx_buffered: c.rx_buffered,
             tx_buffered: c.tx_buffered,
+            ns_id: c.ns_id,
         });
     }
     entries
@@ -126,6 +131,7 @@ pub fn collect_udp_sockets() -> Vec<UdpEntry> {
                 rx_queue: s.rx_queue_len,
                 rx_queue_v6: s.rx_queue_v6_len,
                 mcast_groups: s.mcast_groups as usize,
+                ns_id: s.ns_id,
             });
         }
     }
@@ -138,17 +144,33 @@ pub fn collect_udp_sockets() -> Vec<UdpEntry> {
 
 /// Format all TCP connections as a table.
 pub fn format_tcp_connections(entries: &[TcpEntry]) -> String {
-    let mut out = String::with_capacity(entries.len().saturating_mul(80));
-    out.push_str("Proto  Local Address          Remote Address         State        Rx     Tx\n");
-    out.push_str("─────  ─────────────────────  ─────────────────────  ───────────  ─────  ─────\n");
+    let mut out = String::with_capacity(entries.len().saturating_mul(90));
+
+    // Show NS column only if there are non-root namespace connections.
+    let has_ns = entries.iter().any(|e| e.ns_id != 0);
+
+    if has_ns {
+        out.push_str("Proto  Local Address          Remote Address         State        Rx     Tx    NS\n");
+        out.push_str("─────  ─────────────────────  ─────────────────────  ───────────  ─────  ─────  ──\n");
+    } else {
+        out.push_str("Proto  Local Address          Remote Address         State        Rx     Tx\n");
+        out.push_str("─────  ─────────────────────  ─────────────────────  ───────────  ─────  ─────\n");
+    }
 
     for e in entries {
         let local = format!("{}:{}", e.local_ip, e.local_port);
         let remote = format!("{}:{}", e.remote_ip, e.remote_port);
-        out.push_str(&format!(
-            "tcp    {:<21}  {:<21}  {:<11}  {:>5}  {:>5}\n",
-            local, remote, e.state, e.rx_buffered, e.tx_buffered
-        ));
+        if has_ns {
+            out.push_str(&format!(
+                "tcp    {:<21}  {:<21}  {:<11}  {:>5}  {:>5}  {:>2}\n",
+                local, remote, e.state, e.rx_buffered, e.tx_buffered, e.ns_id
+            ));
+        } else {
+            out.push_str(&format!(
+                "tcp    {:<21}  {:<21}  {:<11}  {:>5}  {:>5}\n",
+                local, remote, e.state, e.rx_buffered, e.tx_buffered
+            ));
+        }
     }
     out
 }
@@ -171,16 +193,31 @@ pub fn format_tcp_listeners(entries: &[ListenerEntry]) -> String {
 
 /// Format all UDP sockets as a table.
 pub fn format_udp_sockets(entries: &[UdpEntry]) -> String {
-    let mut out = String::with_capacity(entries.len().saturating_mul(80));
-    out.push_str("Proto  Local Address          Rx(v4)  Rx(v6)  Mcast\n");
-    out.push_str("─────  ─────────────────────  ──────  ──────  ─────\n");
+    let mut out = String::with_capacity(entries.len().saturating_mul(90));
+
+    let has_ns = entries.iter().any(|e| e.ns_id != 0);
+
+    if has_ns {
+        out.push_str("Proto  Local Address          Rx(v4)  Rx(v6)  Mcast  NS\n");
+        out.push_str("─────  ─────────────────────  ──────  ──────  ─────  ──\n");
+    } else {
+        out.push_str("Proto  Local Address          Rx(v4)  Rx(v6)  Mcast\n");
+        out.push_str("─────  ─────────────────────  ──────  ──────  ─────\n");
+    }
 
     for e in entries {
         let local = format!("0.0.0.0:{}", e.local_port);
-        out.push_str(&format!(
-            "udp    {:<21}  {:>6}  {:>6}  {:>5}\n",
-            local, e.rx_queue, e.rx_queue_v6, e.mcast_groups
-        ));
+        if has_ns {
+            out.push_str(&format!(
+                "udp    {:<21}  {:>6}  {:>6}  {:>5}  {:>2}\n",
+                local, e.rx_queue, e.rx_queue_v6, e.mcast_groups, e.ns_id
+            ));
+        } else {
+            out.push_str(&format!(
+                "udp    {:<21}  {:>6}  {:>6}  {:>5}\n",
+                local, e.rx_queue, e.rx_queue_v6, e.mcast_groups
+            ));
+        }
     }
     out
 }
@@ -490,6 +527,7 @@ pub fn self_test() -> KernelResult<()> {
             state: String::from("ESTABLISHED"),
             rx_buffered: 0,
             tx_buffered: 128,
+            ns_id: 0,
         }];
         let formatted = format_tcp_connections(&entries);
         assert!(formatted.contains("10.0.2.15:12345"), "local addr");
@@ -523,6 +561,7 @@ pub fn self_test() -> KernelResult<()> {
             rx_queue: 5,
             rx_queue_v6: 2,
             mcast_groups: 1,
+            ns_id: 0,
         }];
         let formatted = format_udp_sockets(&entries);
         assert!(formatted.contains("0.0.0.0:53"), "udp addr");

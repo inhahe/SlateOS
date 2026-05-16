@@ -1138,6 +1138,8 @@ pub struct UdpSocketInfo {
     pub mcast_groups: u8,
     /// Number of IPv6 multicast groups joined.
     pub mcast_groups_v6: u8,
+    /// Network namespace this socket belongs to.
+    pub ns_id: crate::netns::NetNsId,
 }
 
 /// Return a list of all active UDP sockets.
@@ -1152,6 +1154,7 @@ pub fn all_sockets() -> ([UdpSocketInfo; MAX_SOCKETS], usize) {
         rx_queue_v6_len: 0,
         mcast_groups: 0,
         mcast_groups_v6: 0,
+        ns_id: crate::netns::ROOT_NS,
     }; MAX_SOCKETS];
     let mut count: usize = 0;
 
@@ -1165,6 +1168,7 @@ pub fn all_sockets() -> ([UdpSocketInfo; MAX_SOCKETS], usize) {
                     rx_queue_v6_len: sock.rx_queue_v6.len(),
                     mcast_groups: sock.mcast_count,
                     mcast_groups_v6: sock.mcast_count_v6,
+                    ns_id: sock.ns_id,
                 };
                 count = count.wrapping_add(1);
             }

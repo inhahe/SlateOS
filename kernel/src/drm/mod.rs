@@ -41,6 +41,7 @@ pub mod atomic;
 pub mod connector;
 pub mod crtc;
 pub mod driver;
+pub mod edid;
 pub mod encoder;
 pub mod framebuffer;
 pub mod gem;
@@ -630,6 +631,9 @@ pub fn self_test() -> KernelResult<()> {
 
     // 6. PixelFormat conversion.
     mode::self_test()?;
+
+    // 7. EDID parser.
+    edid::self_test()?;
 
     serial_println!("[drm] Self-test PASSED");
     Ok(())

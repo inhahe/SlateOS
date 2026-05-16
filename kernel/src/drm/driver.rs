@@ -150,6 +150,7 @@ impl LimineBackend {
             modes: vec![mode],
             current_encoder: Some(encoder_id),
             possible_encoders: vec![encoder_id],
+            edid: None, // Limine framebuffer has no EDID.
         };
 
         let plane = DrmPlane {
@@ -397,6 +398,7 @@ impl VirtioGpuBackend {
             modes: vec![mode],
             current_encoder: Some(encoder_id),
             possible_encoders: vec![encoder_id],
+            edid: None, // virtio-gpu: could use GET_EDID in future.
         };
 
         let plane = DrmPlane {

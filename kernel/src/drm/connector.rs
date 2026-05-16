@@ -8,6 +8,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use super::DrmObjectId;
+use super::edid::EdidInfo;
 use super::mode::DrmMode;
 
 // ---------------------------------------------------------------------------
@@ -78,6 +79,12 @@ pub struct DrmConnector {
     pub current_encoder: Option<DrmObjectId>,
     /// Encoders that can drive this connector.
     pub possible_encoders: Vec<DrmObjectId>,
+    /// Parsed EDID information (if available).
+    ///
+    /// Present when the display provided valid EDID data via DDC/I2C,
+    /// virtio-gpu GET_EDID, or firmware.  `None` for virtual displays
+    /// (Limine framebuffer) or when EDID is unavailable.
+    pub edid: Option<EdidInfo>,
 }
 
 impl DrmConnector {
@@ -87,5 +94,36 @@ impl DrmConnector {
         self.modes.iter()
             .find(|m| m.flags == super::mode::DrmModeFlags::PREFERRED)
             .or_else(|| self.modes.first())
+    }
+
+    /// Update the connector's mode list and metadata from raw EDID data.
+    ///
+    /// Parses the EDID block(s), extracts supported modes, and replaces
+    /// the connector's current mode list.  Also stores the parsed EDID
+    /// info for manufacturer/monitor name queries.
+    ///
+    /// Returns the number of modes extracted, or an error if the EDID
+    /// data is malformed.
+    pub fn update_from_edid(&mut self, edid_data: &[u8]) -> crate::error::KernelResult<usize> {
+        let info = super::edid::parse(edid_data)?;
+        let mode_count = info.modes.len();
+        self.modes = info.modes.clone();
+        self.edid = Some(info);
+        if !self.modes.is_empty() {
+            self.status = ConnectorStatus::Connected;
+        }
+        Ok(mode_count)
+    }
+
+    /// Whether this connector has valid EDID data.
+    #[must_use]
+    pub fn has_edid(&self) -> bool {
+        self.edid.is_some()
+    }
+
+    /// The monitor name from EDID, or `None` if unavailable.
+    #[must_use]
+    pub fn monitor_name(&self) -> Option<&[u8]> {
+        self.edid.as_ref().map(|e| e.name_str())
     }
 }

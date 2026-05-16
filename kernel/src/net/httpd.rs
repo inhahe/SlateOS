@@ -472,6 +472,20 @@ fn handle_connection(conn_handle: usize) {
         return;
     }
 
+    // Dashboard API and HTML — intercept before VFS serving.
+    if req.path.starts_with("/api/") || req.path == "/dashboard" || req.path == "/dashboard/" {
+        if let Some((content_type, body)) = super::dashboard::handle_api_request(&req.path) {
+            let response = if req.method == "HEAD" {
+                build_head_response(200, "OK", &content_type, body.len())
+            } else {
+                build_response(200, "OK", &content_type, &body)
+            };
+            let _ = tcp::send(conn_handle, &response);
+            let _ = tcp::close(conn_handle);
+            return;
+        }
+    }
+
     // Map URI path to VFS path.
     let doc_root = *DOC_ROOT.lock();
     let vfs_path = if req.path == "/" {

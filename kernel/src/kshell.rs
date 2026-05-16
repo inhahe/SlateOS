@@ -3664,6 +3664,7 @@ const COMMANDS: &[&str] = &[
     "httpc", "curl",
     "httpd",
     "ws", "websocket",
+    "dashboard",
     "dhcpd",
     "ntp", "ntpdate",
     "mdns", "dnssd",
@@ -4881,6 +4882,7 @@ fn dispatch(line: &str) {
         "httpc" | "curl" => cmd_httpc(args),
         "httpd" => cmd_httpd(args),
         "ws" | "websocket" => cmd_ws(args),
+        "dashboard" => cmd_dashboard(args),
         "dhcpd" => cmd_dhcpd(args),
         "ntp" | "ntpdate" => cmd_ntp(args),
         "mdns" | "dnssd" => cmd_mdns(args),
@@ -34766,6 +34768,60 @@ fn cmd_ws(args: &str) {
 }
 
 /// `dhcpd` — DHCP server management.
+fn cmd_dashboard(args: &str) {
+    use crate::net::dashboard;
+    let sub = args.trim();
+    match sub {
+        "status" | "" => {
+            let data = dashboard::handle_api_request("/api/status");
+            if let Some((_ct, body)) = data {
+                if let Ok(s) = core::str::from_utf8(&body) {
+                    crate::serial_println!("{}", s);
+                }
+            }
+        }
+        "tasks" => {
+            let data = dashboard::handle_api_request("/api/tasks");
+            if let Some((_ct, body)) = data {
+                if let Ok(s) = core::str::from_utf8(&body) {
+                    crate::serial_println!("{}", s);
+                }
+            }
+        }
+        "network" | "net" => {
+            let data = dashboard::handle_api_request("/api/network");
+            if let Some((_ct, body)) = data {
+                if let Ok(s) = core::str::from_utf8(&body) {
+                    crate::serial_println!("{}", s);
+                }
+            }
+        }
+        "memory" | "mem" => {
+            let data = dashboard::handle_api_request("/api/memory");
+            if let Some((_ct, body)) = data {
+                if let Ok(s) = core::str::from_utf8(&body) {
+                    crate::serial_println!("{}", s);
+                }
+            }
+        }
+        "test" => {
+            match dashboard::self_test() {
+                Ok(()) => crate::serial_println!("[dashboard] Self-test passed."),
+                Err(e) => crate::serial_println!("[dashboard] Self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            crate::serial_println!("Usage: dashboard [status|tasks|network|memory|test]");
+            crate::serial_println!("  status   - System overview (default)");
+            crate::serial_println!("  tasks    - Task list (JSON)");
+            crate::serial_println!("  network  - Network info (JSON)");
+            crate::serial_println!("  memory   - Memory stats (JSON)");
+            crate::serial_println!("  test     - Run dashboard self-test");
+            crate::serial_println!("Web dashboard available at http://<ip>/dashboard");
+        }
+    }
+}
+
 fn cmd_dhcpd(args: &str) {
     use crate::net::dhcpd;
     let parts: Vec<&str> = args.split_whitespace().collect();
@@ -69746,7 +69802,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "dhcpv6" | "dhcp6" | "ping" | "ping6" | "udp6" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "httpd" | "ws" | "websocket" | "dhcpd" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond" | "nat"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "httpd" | "ws" | "websocket" | "dashboard" | "dhcpd" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond" | "nat"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "oci" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

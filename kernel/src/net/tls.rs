@@ -377,8 +377,8 @@ fn build_client_hello(
 
     // ClientHello body:
     //   legacy_version (2) + random (32) + legacy_session_id (1+0) +
-    //   cipher_suites (2+2) + legacy_compression (2) + extensions (2+N)
-    let body_len = 2 + 32 + 1 + 2 + 2 + 2 + extensions_len;
+    //   cipher_suites (2+2) + legacy_compression (1+1) + extensions (2+N)
+    let body_len = 2 + 32 + 1 + (2 + 2) + (1 + 1) + (2 + extensions_len);
 
     let mut hello = Vec::with_capacity(4 + body_len);
 

@@ -8,6 +8,7 @@
 //! - **ChaCha20** (RFC 8439) stream cipher
 //! - **Poly1305** (RFC 8439) one-time authenticator
 //! - **ChaCha20-Poly1305** (RFC 8439) AEAD construction (TLS 1.3 cipher)
+//! - **X25519** (RFC 7748) Diffie-Hellman key exchange over Curve25519
 //!
 //! All implementations are pure Rust, no_std compatible, and correct.
 //! Not optimized for speed (no SIMD/SHA-NI/CRC32 instructions) but
@@ -22,6 +23,7 @@
 //! - HMAC: RFC 2104 (HMAC: Keyed-Hashing for Message Authentication)
 //! - HKDF: RFC 5869 (HMAC-based Extract-and-Expand Key Derivation)
 //! - ChaCha20-Poly1305: RFC 8439 (formerly RFC 7539)
+//! - X25519: RFC 7748 (Elliptic Curves for Security)
 
 use alloc::vec::Vec;
 
@@ -1120,6 +1122,419 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
         crate::serial_println!("[crypto]   ChaCha20-Poly1305 AEAD (RFC 8439 §2.8.2): PASSED");
     }
 
+    // --- X25519 test vector (RFC 7748 §6.1) ---
+    {
+        let alice_sk: [u8; 32] = [
+            0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d,
+            0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66, 0x45,
+            0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a,
+            0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
+        ];
+        let bob_pk: [u8; 32] = [
+            0xde, 0x9e, 0xdb, 0x7d, 0x7b, 0x7d, 0xc1, 0xb4,
+            0xd3, 0x5b, 0x61, 0xc2, 0xec, 0xe4, 0x35, 0x37,
+            0x3f, 0x83, 0x43, 0xc8, 0x5b, 0x78, 0x67, 0x4d,
+            0xad, 0xfc, 0x7e, 0x14, 0x6f, 0x88, 0x2b, 0x4f,
+        ];
+        let expected_shared: [u8; 32] = [
+            0x4a, 0x5d, 0x9d, 0x5b, 0xa4, 0xce, 0x2d, 0xe1,
+            0x72, 0x8e, 0x3b, 0xf4, 0x80, 0x35, 0x0f, 0x25,
+            0xe0, 0x7e, 0x21, 0xc9, 0x47, 0xd1, 0x9e, 0x33,
+            0x76, 0xf0, 0x9b, 0x3c, 0x1e, 0x16, 0x17, 0x42,
+        ];
+        let shared = x25519(&alice_sk, &bob_pk);
+        assert!(shared == expected_shared, "X25519 shared secret");
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[crypto]   X25519 (RFC 7748 §6.1): PASSED");
+    }
+
+    // --- X25519 base point test (RFC 7748 §6.1) ---
+    {
+        // Alice's public key = x25519(alice_sk, basepoint)
+        let alice_sk: [u8; 32] = [
+            0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d,
+            0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2, 0x66, 0x45,
+            0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a,
+            0xb1, 0x77, 0xfb, 0xa5, 0x1d, 0xb9, 0x2c, 0x2a,
+        ];
+        let expected_pk: [u8; 32] = [
+            0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54,
+            0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e, 0xf7, 0x5a,
+            0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4,
+            0xeb, 0xa4, 0xa9, 0x8e, 0xaa, 0x9b, 0x4e, 0x6a,
+        ];
+        let pk = x25519_base(&alice_sk);
+        assert!(pk == expected_pk, "X25519 base point mult");
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[crypto]   X25519 base point (RFC 7748 §6.1): PASSED");
+    }
+
     crate::serial_println!("[crypto] All {} TLS crypto self-tests PASSED", passed);
     Ok(())
+}
+
+// ===========================================================================
+// X25519 Diffie-Hellman (RFC 7748)
+// ===========================================================================
+//
+// Field arithmetic in GF(2^255 - 19) using 5 × 51-bit limbs stored in u64.
+// Products use u128 intermediates.  This is the classic "donna64" approach.
+//
+// All operations are constant-time: no data-dependent branches, no
+// data-dependent memory access.  This prevents timing side channels.
+
+/// A field element in GF(2^255-19), represented as 5 × 51-bit limbs.
+#[derive(Clone, Copy)]
+struct Fe25519([u64; 5]);
+
+impl Fe25519 {
+    const ZERO: Self = Self([0; 5]);
+
+    const ONE: Self = Self([1, 0, 0, 0, 0]);
+
+    /// Load from 32 bytes (little-endian), reducing mod p.
+    fn from_bytes(s: &[u8; 32]) -> Self {
+        let mut h = [0u64; 5];
+        // Load 5 limbs at 51-bit boundaries.
+        h[0] =  load_le_u64(s, 0)        & 0x7FFFFFFFFFFFF;
+        h[1] = (load_le_u64(s, 6) >> 3)  & 0x7FFFFFFFFFFFF;
+        h[2] = (load_le_u64(s, 12) >> 6) & 0x7FFFFFFFFFFFF;
+        h[3] = (load_le_u64(s, 19) >> 1) & 0x7FFFFFFFFFFFF;
+        h[4] = (load_le_u64(s, 24) >> 12)& 0x7FFFFFFFFFFFF;
+        Self(h)
+    }
+
+    /// Serialize to 32 bytes (little-endian), fully reduced mod p.
+    fn to_bytes(self) -> [u8; 32] {
+        let mut h = self.0;
+        // Full carry chain to ensure limbs are < 2^51.
+        let mut carry: u64;
+        carry = h[0] >> 51; h[0] &= 0x7FFFFFFFFFFFF; h[1] = h[1].wrapping_add(carry);
+        carry = h[1] >> 51; h[1] &= 0x7FFFFFFFFFFFF; h[2] = h[2].wrapping_add(carry);
+        carry = h[2] >> 51; h[2] &= 0x7FFFFFFFFFFFF; h[3] = h[3].wrapping_add(carry);
+        carry = h[3] >> 51; h[3] &= 0x7FFFFFFFFFFFF; h[4] = h[4].wrapping_add(carry);
+        carry = h[4] >> 51; h[4] &= 0x7FFFFFFFFFFFF; h[0] = h[0].wrapping_add(carry.wrapping_mul(19));
+        carry = h[0] >> 51; h[0] &= 0x7FFFFFFFFFFFF; h[1] = h[1].wrapping_add(carry);
+
+        // Conditional subtract p: if h >= p, subtract p.
+        // q = (h[0] + 19) >> 51; propagate; check if h[4] overflows.
+        let mut q = (h[0].wrapping_add(19)) >> 51;
+        q = (h[1].wrapping_add(q)) >> 51;
+        q = (h[2].wrapping_add(q)) >> 51;
+        q = (h[3].wrapping_add(q)) >> 51;
+        q = (h[4].wrapping_add(q)) >> 51;
+
+        // q is 0 or 1.  If 1, h >= p, subtract p (add 19, propagate).
+        h[0] = h[0].wrapping_add(q.wrapping_mul(19));
+        carry = h[0] >> 51; h[0] &= 0x7FFFFFFFFFFFF;
+        h[1] = h[1].wrapping_add(carry); carry = h[1] >> 51; h[1] &= 0x7FFFFFFFFFFFF;
+        h[2] = h[2].wrapping_add(carry); carry = h[2] >> 51; h[2] &= 0x7FFFFFFFFFFFF;
+        h[3] = h[3].wrapping_add(carry); carry = h[3] >> 51; h[3] &= 0x7FFFFFFFFFFFF;
+        h[4] = h[4].wrapping_add(carry);                     h[4] &= 0x7FFFFFFFFFFFF;
+
+        // Pack 5 × 51-bit limbs into 32 bytes (little-endian).
+        let mut out = [0u8; 32];
+        let val = h[0] | (h[1] << 51);
+        store_le_u64(&mut out, 0, val);
+        let val = (h[1] >> 13) | (h[2] << 38);
+        store_le_u64(&mut out, 6, val);
+        let val = (h[2] >> 26) | (h[3] << 25);
+        store_le_u64(&mut out, 13, val);
+        let val = (h[3] >> 39) | (h[4] << 12);
+        store_le_u64(&mut out, 19, val);
+        out[31] &= 0x7F; // Clear top bit.
+        out
+    }
+
+    /// Field addition: a + b mod p (lazy, no reduction).
+    fn add(self, rhs: Self) -> Self {
+        Self([
+            self.0[0].wrapping_add(rhs.0[0]),
+            self.0[1].wrapping_add(rhs.0[1]),
+            self.0[2].wrapping_add(rhs.0[2]),
+            self.0[3].wrapping_add(rhs.0[3]),
+            self.0[4].wrapping_add(rhs.0[4]),
+        ])
+    }
+
+    /// Field subtraction: a - b mod p.
+    /// Adds 2p before subtracting to ensure no underflow.
+    fn sub(self, rhs: Self) -> Self {
+        // 2p in limb form: each limb is 2 * (2^51 - 1) except last is 2*(2^51-19).
+        Self([
+            self.0[0].wrapping_add(0xFFFFFFFFFFFDA).wrapping_sub(rhs.0[0]),
+            self.0[1].wrapping_add(0xFFFFFFFFFFFFE).wrapping_sub(rhs.0[1]),
+            self.0[2].wrapping_add(0xFFFFFFFFFFFFE).wrapping_sub(rhs.0[2]),
+            self.0[3].wrapping_add(0xFFFFFFFFFFFFE).wrapping_sub(rhs.0[3]),
+            self.0[4].wrapping_add(0xFFFFFFFFFFFFE).wrapping_sub(rhs.0[4]),
+        ])
+    }
+
+    /// Field multiplication: a * b mod p.
+    fn mul(self, rhs: Self) -> Self {
+        let a = self.0;
+        let b = rhs.0;
+
+        // Pre-multiply b limbs by 19 for reduction.
+        let b1_19 = b[1].wrapping_mul(19);
+        let b2_19 = b[2].wrapping_mul(19);
+        let b3_19 = b[3].wrapping_mul(19);
+        let b4_19 = b[4].wrapping_mul(19);
+
+        // Schoolbook multiplication with lazy reduction.
+        // c[i] = Σ a[j] * b[k] where (j+k) mod 5 == i,
+        // with b[k]*19 when j+k >= 5 (wrap around, * 2^255 = *19).
+        let c0 = (a[0] as u128) * (b[0] as u128)
+               + (a[1] as u128) * (b4_19 as u128)
+               + (a[2] as u128) * (b3_19 as u128)
+               + (a[3] as u128) * (b2_19 as u128)
+               + (a[4] as u128) * (b1_19 as u128);
+
+        let c1 = (a[0] as u128) * (b[1] as u128)
+               + (a[1] as u128) * (b[0]  as u128)
+               + (a[2] as u128) * (b4_19 as u128)
+               + (a[3] as u128) * (b3_19 as u128)
+               + (a[4] as u128) * (b2_19 as u128);
+
+        let c2 = (a[0] as u128) * (b[2] as u128)
+               + (a[1] as u128) * (b[1]  as u128)
+               + (a[2] as u128) * (b[0]  as u128)
+               + (a[3] as u128) * (b4_19 as u128)
+               + (a[4] as u128) * (b3_19 as u128);
+
+        let c3 = (a[0] as u128) * (b[3] as u128)
+               + (a[1] as u128) * (b[2]  as u128)
+               + (a[2] as u128) * (b[1]  as u128)
+               + (a[3] as u128) * (b[0]  as u128)
+               + (a[4] as u128) * (b4_19 as u128);
+
+        let c4 = (a[0] as u128) * (b[4] as u128)
+               + (a[1] as u128) * (b[3]  as u128)
+               + (a[2] as u128) * (b[2]  as u128)
+               + (a[3] as u128) * (b[1]  as u128)
+               + (a[4] as u128) * (b[0]  as u128);
+
+        // Carry propagation.
+        fe_carry5(c0, c1, c2, c3, c4)
+    }
+
+    /// Field squaring: a^2 mod p.
+    /// Slightly more efficient than mul(self, self) because we can
+    /// double the cross-terms.
+    fn sqr(self) -> Self {
+        let a = self.0;
+        let a0_2 = a[0].wrapping_mul(2);
+        let a1_2 = a[1].wrapping_mul(2);
+        let a2_2 = a[2].wrapping_mul(2);
+        let a3_2 = a[3].wrapping_mul(2);
+
+        let a3_19 = a[3].wrapping_mul(19);
+        let a4_19 = a[4].wrapping_mul(19);
+
+        // Cross-terms are doubled (a[i]*a[j] appears twice for i≠j).
+        // Wrapped terms (i+j >= 5) use *19 reduction.
+        let c0 = (a[0] as u128) * (a[0] as u128)
+               + (a1_2 as u128) * (a4_19 as u128)
+               + (a2_2 as u128) * (a3_19 as u128);
+
+        let c1 = (a0_2 as u128) * (a[1] as u128)
+               + (a2_2 as u128) * (a4_19 as u128)
+               + (a[3] as u128) * (a3_19 as u128);
+
+        let c2 = (a0_2 as u128) * (a[2] as u128)
+               + (a[1] as u128) * (a[1] as u128)
+               + (a3_2 as u128) * (a4_19 as u128);
+
+        let c3 = (a0_2 as u128) * (a[3] as u128)
+               + (a1_2 as u128) * (a[2] as u128)
+               + (a[4] as u128) * (a4_19 as u128);
+
+        let c4 = (a0_2 as u128) * (a[4] as u128)
+               + (a1_2 as u128) * (a[3] as u128)
+               + (a[2] as u128) * (a[2] as u128);
+
+        fe_carry5(c0, c1, c2, c3, c4)
+    }
+
+    /// Field inversion: 1/a mod p.
+    /// Uses the Fermat method: a^(p-2) mod p.
+    /// p-2 = 2^255 - 21 = special form that allows efficient chained squarings.
+    fn invert(self) -> Self {
+        // Based on the addition chain from djb's ref10 code.
+        let z2 = self.sqr();                          // z^2
+        let z9 = z2.sqr().sqr();                      // z^8
+        let z9 = z9.mul(self);                         // z^9
+        let z11 = z9.mul(z2);                          // z^11
+        let z_5_0 = z11.sqr().mul(z9);                // z^(2^5-1)
+
+        let mut t = z_5_0;
+        for _ in 0..5 { t = t.sqr(); }
+        let z_10_0 = t.mul(z_5_0);                    // z^(2^10-1)
+
+        t = z_10_0;
+        for _ in 0..10 { t = t.sqr(); }
+        let z_20_0 = t.mul(z_10_0);                   // z^(2^20-1)
+
+        t = z_20_0;
+        for _ in 0..20 { t = t.sqr(); }
+        t = t.mul(z_20_0);                             // z^(2^40-1)
+
+        for _ in 0..10 { t = t.sqr(); }
+        let z_50_0 = t.mul(z_10_0);                   // z^(2^50-1)
+
+        t = z_50_0;
+        for _ in 0..50 { t = t.sqr(); }
+        let z_100_0 = t.mul(z_50_0);                  // z^(2^100-1)
+
+        t = z_100_0;
+        for _ in 0..100 { t = t.sqr(); }
+        t = t.mul(z_100_0);                            // z^(2^200-1)
+
+        for _ in 0..50 { t = t.sqr(); }
+        t = t.mul(z_50_0);                             // z^(2^250-1)
+
+        for _ in 0..5 { t = t.sqr(); }
+        t.mul(z11)                                      // z^(2^255-21)
+    }
+
+    /// Conditional swap: if swap != 0, exchange self and other.
+    /// Constant-time.
+    fn cswap(&mut self, other: &mut Self, swap: u64) {
+        let mask = 0u64.wrapping_sub(swap); // All-ones if swap=1, zero if swap=0.
+        for i in 0..5 {
+            let t = mask & (self.0[i] ^ other.0[i]);
+            self.0[i] ^= t;
+            other.0[i] ^= t;
+        }
+    }
+}
+
+/// Carry propagation for 5 × u128 products → 5 × u64 limbs.
+fn fe_carry5(c0: u128, c1: u128, c2: u128, c3: u128, c4: u128) -> Fe25519 {
+    let mut r = [0u64; 5];
+    let carry = (c0 >> 51) as u64;
+    r[0] = (c0 as u64) & 0x7FFFFFFFFFFFF;
+    let c1 = c1 + carry as u128;
+
+    let carry = (c1 >> 51) as u64;
+    r[1] = (c1 as u64) & 0x7FFFFFFFFFFFF;
+    let c2 = c2 + carry as u128;
+
+    let carry = (c2 >> 51) as u64;
+    r[2] = (c2 as u64) & 0x7FFFFFFFFFFFF;
+    let c3 = c3 + carry as u128;
+
+    let carry = (c3 >> 51) as u64;
+    r[3] = (c3 as u64) & 0x7FFFFFFFFFFFF;
+    let c4 = c4 + carry as u128;
+
+    let carry = (c4 >> 51) as u64;
+    r[4] = (c4 as u64) & 0x7FFFFFFFFFFFF;
+    // Wrap carry: 2^255 ≡ 19 mod p.
+    r[0] = r[0].wrapping_add(carry.wrapping_mul(19));
+    // One more carry from r[0].
+    let carry = r[0] >> 51;
+    r[0] &= 0x7FFFFFFFFFFFF;
+    r[1] = r[1].wrapping_add(carry);
+
+    Fe25519(r)
+}
+
+/// Load u64 from a byte slice at the given offset (little-endian, unaligned).
+fn load_le_u64(s: &[u8], off: usize) -> u64 {
+    let end = (off + 8).min(s.len());
+    let mut buf = [0u8; 8];
+    buf[..end - off].copy_from_slice(&s[off..end]);
+    u64::from_le_bytes(buf)
+}
+
+/// Store u64 to a byte slice at the given offset (little-endian, unaligned).
+/// Overwrites 8 bytes starting at `off`.  If this would go past the slice
+/// end, only the fitting bytes are written.
+fn store_le_u64(s: &mut [u8], off: usize, val: u64) {
+    let bytes = val.to_le_bytes();
+    let end = (off + 8).min(s.len());
+    let n = end.saturating_sub(off);
+    s[off..off + n].copy_from_slice(&bytes[..n]);
+}
+
+/// The Curve25519 base point (little-endian): u = 9.
+const X25519_BASEPOINT: [u8; 32] = {
+    let mut bp = [0u8; 32];
+    bp[0] = 9;
+    bp
+};
+
+/// X25519 Diffie-Hellman function (RFC 7748 §5).
+///
+/// Computes the shared secret from a scalar (private key) and a point
+/// (peer's public key).  Both are 32 bytes.
+///
+/// The scalar is clamped per RFC 7748: bits 0-2 cleared (multiple of 8),
+/// bit 254 set (ensure high bit for constant-time Montgomery ladder),
+/// bit 255 cleared (stays in field).
+///
+/// Returns 32 bytes.  The result MUST be checked for the all-zero output
+/// (which indicates a low-order point — reject the handshake).
+pub fn x25519(scalar: &[u8; 32], point: &[u8; 32]) -> [u8; 32] {
+    // Clamp scalar per RFC 7748.
+    let mut k = *scalar;
+    k[0]  &= 248;   // Clear bottom 3 bits.
+    k[31] &= 127;   // Clear top bit.
+    k[31] |= 64;    // Set bit 254.
+
+    let u = Fe25519::from_bytes(point);
+
+    // Montgomery ladder: constant-time scalar multiplication.
+    let x_1 = u;
+    let mut x_2 = Fe25519::ONE;
+    let mut z_2 = Fe25519::ZERO;
+    let mut x_3 = u;
+    let mut z_3 = Fe25519::ONE;
+    let mut swap: u64 = 0;
+
+    // Process bits from top to bottom (bit 254 down to bit 0).
+    let mut t = 254i32;
+    while t >= 0 {
+        let byte_idx = (t >> 3) as usize;
+        let bit_idx = (t & 7) as u32;
+        let k_t = ((k[byte_idx] >> bit_idx) & 1) as u64;
+
+        swap ^= k_t;
+        x_2.cswap(&mut x_3, swap);
+        z_2.cswap(&mut z_3, swap);
+        swap = k_t;
+
+        let a = x_2.add(z_2);
+        let aa = a.sqr();
+        let b = x_2.sub(z_2);
+        let bb = b.sqr();
+        let e = aa.sub(bb);
+        let c = x_3.add(z_3);
+        let d = x_3.sub(z_3);
+        let da = d.mul(a);
+        let cb = c.mul(b);
+        x_3 = da.add(cb).sqr();
+        z_3 = da.sub(cb).sqr().mul(x_1);
+        x_2 = aa.mul(bb);
+        // a24 = 121665 for Curve25519.
+        let a24 = Fe25519([121665, 0, 0, 0, 0]);
+        z_2 = e.mul(aa.add(a24.mul(e)));
+
+        t -= 1;
+    }
+
+    x_2.cswap(&mut x_3, swap);
+    z_2.cswap(&mut z_3, swap);
+
+    // Result = x_2 * z_2^(-1).
+    let result = x_2.mul(z_2.invert());
+    result.to_bytes()
+}
+
+/// Compute X25519 public key from a private key.
+///
+/// Equivalent to `x25519(scalar, basepoint)` where basepoint = 9.
+pub fn x25519_base(scalar: &[u8; 32]) -> [u8; 32] {
+    x25519(scalar, &X25519_BASEPOINT)
 }

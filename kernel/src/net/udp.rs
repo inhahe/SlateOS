@@ -4,14 +4,16 @@
 //! Used by DHCP, DNS, and other protocols that don't need TCP's
 //! reliability guarantees.
 //!
-//! ## Multicast (RFC 1112)
+//! ## Multicast (RFC 1112, RFC 3810)
 //!
-//! UDP sockets can join multicast groups (224.0.0.0/4) via
-//! `join_group()` / `leave_group()`.  Incoming multicast datagrams are
-//! delivered to all sockets bound to the destination port that have
-//! joined the group (fan-out).  A global membership table is maintained
-//! so the IPv4 receive path can quickly accept multicast-addressed
-//! packets without scanning per-socket state.
+//! UDP sockets can join IPv4 multicast groups (224.0.0.0/4) via
+//! `join_group()` / `leave_group()` and IPv6 multicast groups (ff00::/8)
+//! via `join_group_v6()` / `leave_group_v6()`.  Incoming multicast
+//! datagrams are delivered to all sockets bound to the destination port
+//! that have joined the group (fan-out).  Separate global membership
+//! tables are maintained for IPv4 and IPv6 so the IP receive paths can
+//! quickly accept multicast-addressed packets without scanning per-socket
+//! state.
 //!
 //! ## Header format (8 bytes)
 //!
@@ -53,13 +55,16 @@ const MAX_SOCKETS: usize = 32;
 /// Maximum queued datagrams per socket.
 const MAX_QUEUED: usize = 64;
 
-/// Maximum number of multicast groups a single socket can join.
+/// Maximum number of multicast groups a single socket can join (per address family).
 const MAX_GROUPS_PER_SOCKET: usize = 8;
 
 /// Maximum number of total multicast group memberships across all sockets.
 /// Used by the IP layer to quickly check if we should accept a multicast
 /// destination address.
 const MAX_GLOBAL_GROUPS: usize = 32;
+
+/// Maximum number of total IPv6 multicast group memberships across all sockets.
+const MAX_GLOBAL_GROUPS_V6: usize = 32;
 
 // ---------------------------------------------------------------------------
 // UDP socket
@@ -110,8 +115,13 @@ struct UdpSocket {
     /// Multicast groups this socket has joined.
     /// Each entry is a multicast IPv4 address (224.0.0.0/4).
     mcast_groups: [Ipv4Addr; MAX_GROUPS_PER_SOCKET],
-    /// Number of active multicast group memberships.
+    /// Number of active IPv4 multicast group memberships.
     mcast_count: u8,
+    /// IPv6 multicast groups this socket has joined.
+    /// Each entry is a multicast IPv6 address (ff00::/8).
+    mcast_groups_v6: [Ipv6Addr; MAX_GROUPS_PER_SOCKET],
+    /// Number of active IPv6 multicast group memberships.
+    mcast_count_v6: u8,
 }
 
 impl UdpSocket {
@@ -125,6 +135,8 @@ impl UdpSocket {
             rx_queue_v6: VecDeque::new(),
             mcast_groups: [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET],
             mcast_count: 0,
+            mcast_groups_v6: [Ipv6Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET],
+            mcast_count_v6: 0,
         }
     }
 
@@ -226,6 +238,78 @@ pub fn is_multicast_member(group: Ipv4Addr) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// IPv6 multicast group management
+// ---------------------------------------------------------------------------
+
+/// IPv6 multicast group entry with refcount (mirrors `McastEntry` for IPv4).
+struct McastEntryV6 {
+    /// Multicast group address.
+    addr: Ipv6Addr,
+    /// Number of sockets that have joined this group.
+    refcount: u16,
+}
+
+impl McastEntryV6 {
+    const fn empty() -> Self {
+        Self { addr: Ipv6Addr::UNSPECIFIED, refcount: 0 }
+    }
+}
+
+/// Global IPv6 multicast group membership table.
+static MCAST_GROUPS_V6: Mutex<[McastEntryV6; MAX_GLOBAL_GROUPS_V6]> = Mutex::new({
+    const EMPTY: McastEntryV6 = McastEntryV6::empty();
+    [EMPTY; MAX_GLOBAL_GROUPS_V6]
+});
+
+/// Add a reference to an IPv6 multicast group in the global table.
+fn mcast_global_join_v6(group: Ipv6Addr) {
+    let mut groups = MCAST_GROUPS_V6.lock();
+
+    // If already present, increment refcount.
+    for entry in groups.iter_mut() {
+        if entry.refcount > 0 && entry.addr == group {
+            entry.refcount = entry.refcount.saturating_add(1);
+            return;
+        }
+    }
+
+    // Not present — find a free slot.
+    for entry in groups.iter_mut() {
+        if entry.refcount == 0 {
+            entry.addr = group;
+            entry.refcount = 1;
+            return;
+        }
+    }
+
+    // Table full — silently ignore (best effort).
+    crate::serial_println!(
+        "[udp] Warning: IPv6 multicast group table full, cannot join {}",
+        group
+    );
+}
+
+/// Remove a reference from an IPv6 multicast group in the global table.
+fn mcast_global_leave_v6(group: Ipv6Addr) {
+    let mut groups = MCAST_GROUPS_V6.lock();
+    for entry in groups.iter_mut() {
+        if entry.refcount > 0 && entry.addr == group {
+            entry.refcount = entry.refcount.saturating_sub(1);
+            return;
+        }
+    }
+}
+
+/// Check if any socket has joined the given IPv6 multicast group.
+///
+/// Called by the IPv6 receive path to decide whether to accept
+/// a packet addressed to a multicast destination.
+pub fn is_multicast_member_v6(group: Ipv6Addr) -> bool {
+    let groups = MCAST_GROUPS_V6.lock();
+    groups.iter().any(|e| e.refcount > 0 && e.addr == group)
+}
+
+// ---------------------------------------------------------------------------
 // Socket API
 // ---------------------------------------------------------------------------
 
@@ -284,24 +368,34 @@ pub fn bind(port: u16) -> KernelResult<usize> {
 
 /// Close a UDP socket.
 ///
-/// Also leaves all multicast groups the socket had joined.
+/// Also leaves all multicast groups (IPv4 and IPv6) the socket had joined.
 pub fn close(handle: usize) {
     // Collect multicast groups under the SOCKETS lock, then drop
-    // it before touching MCAST_GROUPS to maintain consistent lock
-    // ordering (join_group/leave_group drop SOCKETS before taking
-    // MCAST_GROUPS — close() must do the same).
+    // it before touching MCAST_GROUPS / MCAST_GROUPS_V6 to maintain
+    // consistent lock ordering (join_group/leave_group drop SOCKETS
+    // before taking MCAST_GROUPS — close() must do the same).
     let mut groups_to_leave: [Ipv4Addr; MAX_GROUPS_PER_SOCKET] =
         [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET];
     let mut group_count: usize = 0;
+    let mut groups_to_leave_v6: [Ipv6Addr; MAX_GROUPS_PER_SOCKET] =
+        [Ipv6Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET];
+    let mut group_count_v6: usize = 0;
 
     {
         let mut sockets = SOCKETS.lock();
         if let Some(sock) = sockets.get_mut(handle) {
-            // Snapshot multicast memberships before clearing.
+            // Snapshot IPv4 multicast memberships before clearing.
             group_count = sock.mcast_count as usize;
             for i in 0..group_count {
                 if let Some(g) = sock.mcast_groups.get(i) {
                     groups_to_leave[i] = *g;
+                }
+            }
+            // Snapshot IPv6 multicast memberships before clearing.
+            group_count_v6 = sock.mcast_count_v6 as usize;
+            for i in 0..group_count_v6 {
+                if let Some(g) = sock.mcast_groups_v6.get(i) {
+                    groups_to_leave_v6[i] = *g;
                 }
             }
             sock.active = false;
@@ -312,14 +406,22 @@ pub fn close(handle: usize) {
             sock.rx_queue_v6.clear();
             sock.mcast_groups = [Ipv4Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET];
             sock.mcast_count = 0;
+            sock.mcast_groups_v6 = [Ipv6Addr::UNSPECIFIED; MAX_GROUPS_PER_SOCKET];
+            sock.mcast_count_v6 = 0;
         }
     }
 
-    // SOCKETS lock released — now safe to take MCAST_GROUPS.
+    // SOCKETS lock released — now safe to take MCAST_GROUPS / MCAST_GROUPS_V6.
     for i in 0..group_count {
         let group = groups_to_leave[i];
         if !group.is_unspecified() {
             mcast_global_leave(group);
+        }
+    }
+    for i in 0..group_count_v6 {
+        let group = groups_to_leave_v6[i];
+        if !group.is_unspecified() {
+            mcast_global_leave_v6(group);
         }
     }
 }
@@ -410,6 +512,97 @@ pub fn leave_group(handle: usize, group: Ipv4Addr) -> KernelResult<()> {
 
     crate::serial_println!(
         "[udp] Socket {} left multicast group {}",
+        handle, group
+    );
+    Ok(())
+}
+
+/// Join an IPv6 multicast group on a UDP socket.
+///
+/// After joining, the socket will receive IPv6 datagrams sent to the
+/// multicast group address on the socket's bound port.
+///
+/// # Errors
+///
+/// - `InvalidArgument` — handle invalid, socket not active, or address
+///   is not a multicast address (ff00::/8).
+/// - `OutOfMemory` — socket has joined the maximum number of groups.
+/// - `AlreadyExists` — socket is already a member of this group.
+pub fn join_group_v6(handle: usize, group: Ipv6Addr) -> KernelResult<()> {
+    if !group.is_multicast() {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let mut sockets = SOCKETS.lock();
+    let sock = sockets.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    if !sock.active {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    // Check if already a member.
+    let count = sock.mcast_count_v6 as usize;
+    for i in 0..count {
+        if sock.mcast_groups_v6[i] == group {
+            return Err(KernelError::AlreadyExists);
+        }
+    }
+
+    // Check capacity.
+    if count >= MAX_GROUPS_PER_SOCKET {
+        return Err(KernelError::OutOfMemory);
+    }
+
+    sock.mcast_groups_v6[count] = group;
+    sock.mcast_count_v6 = sock.mcast_count_v6.saturating_add(1);
+
+    // Add to global table so the IPv6 layer accepts the multicast address.
+    drop(sockets);
+    mcast_global_join_v6(group);
+
+    crate::serial_println!(
+        "[udp] Socket {} joined IPv6 multicast group {}",
+        handle, group
+    );
+    Ok(())
+}
+
+/// Leave an IPv6 multicast group on a UDP socket.
+///
+/// # Errors
+///
+/// - `InvalidArgument` — handle invalid or socket not active.
+/// - `NotFound` — socket is not a member of this group.
+pub fn leave_group_v6(handle: usize, group: Ipv6Addr) -> KernelResult<()> {
+    let mut sockets = SOCKETS.lock();
+    let sock = sockets.get_mut(handle).ok_or(KernelError::InvalidArgument)?;
+    if !sock.active {
+        return Err(KernelError::InvalidArgument);
+    }
+
+    let count = sock.mcast_count_v6 as usize;
+    let mut found = false;
+    for i in 0..count {
+        if sock.mcast_groups_v6[i] == group {
+            // Swap-remove: move last entry here and shrink count.
+            let last = count.wrapping_sub(1);
+            sock.mcast_groups_v6[i] = sock.mcast_groups_v6[last];
+            sock.mcast_groups_v6[last] = Ipv6Addr::UNSPECIFIED;
+            sock.mcast_count_v6 = sock.mcast_count_v6.saturating_sub(1);
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        return Err(KernelError::NotFound);
+    }
+
+    // Remove from global table.
+    drop(sockets);
+    mcast_global_leave_v6(group);
+
+    crate::serial_println!(
+        "[udp] Socket {} left IPv6 multicast group {}",
         handle, group
     );
     Ok(())
@@ -761,14 +954,26 @@ pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
     // DHCPv6 (port 546 = client, port 547 = server) is future work.
     // No special dispatch for now.
 
+    let is_mcast = ip_packet.dst.is_multicast();
+
     // Deliver to bound socket(s).
-    // IPv6 multicast group membership (MLD) is not yet implemented,
-    // so multicast fan-out is not supported — deliver to first match.
+    // For unicast: deliver to the first matching socket.
+    // For multicast: deliver to ALL sockets bound to this port that have
+    //   joined the multicast group (fan-out), mirroring IPv4 behavior.
     let mut sockets = SOCKETS.lock();
     let mut delivered = false;
     for sock in sockets.iter_mut() {
         if !sock.active || sock.port != dst_port {
             continue;
+        }
+
+        // For multicast, check IPv6 group membership.
+        if is_mcast {
+            let count = sock.mcast_count_v6 as usize;
+            let is_member = (0..count).any(|i| sock.mcast_groups_v6[i] == ip_packet.dst);
+            if !is_member {
+                continue;
+            }
         }
 
         if sock.rx_queue_v6.len() < MAX_QUEUED {
@@ -781,7 +986,11 @@ pub fn process_udp_v6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
         // else: queue full, drop silently (UDP is unreliable).
 
         delivered = true;
-        break;
+
+        // Unicast: stop after first match.  Multicast: continue fan-out.
+        if !is_mcast {
+            break;
+        }
     }
 
     if !delivered {
@@ -902,8 +1111,10 @@ pub struct UdpSocketInfo {
     pub rx_queue_len: usize,
     /// Number of IPv6 datagrams queued for receive.
     pub rx_queue_v6_len: usize,
-    /// Number of multicast groups joined.
+    /// Number of IPv4 multicast groups joined.
     pub mcast_groups: u8,
+    /// Number of IPv6 multicast groups joined.
+    pub mcast_groups_v6: u8,
 }
 
 /// Return a list of all active UDP sockets.
@@ -917,6 +1128,7 @@ pub fn all_sockets() -> ([UdpSocketInfo; MAX_SOCKETS], usize) {
         rx_queue_len: 0,
         rx_queue_v6_len: 0,
         mcast_groups: 0,
+        mcast_groups_v6: 0,
     }; MAX_SOCKETS];
     let mut count: usize = 0;
 
@@ -929,6 +1141,7 @@ pub fn all_sockets() -> ([UdpSocketInfo; MAX_SOCKETS], usize) {
                     rx_queue_len: sock.rx_queue.len(),
                     rx_queue_v6_len: sock.rx_queue_v6.len(),
                     mcast_groups: sock.mcast_count,
+                    mcast_groups_v6: sock.mcast_count_v6,
                 };
                 count = count.wrapping_add(1);
             }
@@ -952,12 +1165,13 @@ pub fn self_test() -> KernelResult<()> {
     test_bind_duplicate()?;
     test_ephemeral_port()?;
     test_multicast_join_leave()?;
+    test_multicast_join_leave_v6()?;
     test_rx_ready_empty()?;
     test_connected_mode()?;
     test_v6_recv_empty()?;
     test_v6_process_and_deliver()?;
 
-    crate::serial_println!("[udp] UDP self-test PASSED (8 tests)");
+    crate::serial_println!("[udp] UDP self-test PASSED (9 tests)");
     Ok(())
 }
 
@@ -1110,6 +1324,71 @@ fn test_multicast_join_leave() -> KernelResult<()> {
     close(handle);
 
     crate::serial_println!("[udp]   multicast join/leave: OK");
+    Ok(())
+}
+
+/// Test IPv6 multicast group join, leave, and is_multicast_member_v6.
+fn test_multicast_join_leave_v6() -> KernelResult<()> {
+    let handle = bind(55570)?;
+
+    // ff02::fb is the mDNS IPv6 multicast address.
+    let mcast_v6 = Ipv6Addr([
+        0xFF, 0x02, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0xFB,
+    ]);
+
+    // Not a member before join.
+    if is_multicast_member_v6(mcast_v6) {
+        crate::serial_println!("[udp]   FAIL: v6 member before join");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    join_group_v6(handle, mcast_v6)?;
+
+    // Should be a member now.
+    if !is_multicast_member_v6(mcast_v6) {
+        crate::serial_println!("[udp]   FAIL: not v6 member after join");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    // Double-join should fail.
+    match join_group_v6(handle, mcast_v6) {
+        Err(KernelError::AlreadyExists) => {} // Expected.
+        other => {
+            crate::serial_println!("[udp]   FAIL: v6 double join: {:?}", other);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Non-multicast IPv6 address should be rejected.
+    let unicast_v6 = Ipv6Addr([
+        0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 1,
+    ]);
+    match join_group_v6(handle, unicast_v6) {
+        Err(KernelError::InvalidArgument) => {} // Expected.
+        other => {
+            crate::serial_println!("[udp]   FAIL: v6 unicast join: {:?}", other);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    leave_group_v6(handle, mcast_v6)?;
+
+    // Should no longer be a member.
+    if is_multicast_member_v6(mcast_v6) {
+        crate::serial_println!("[udp]   FAIL: still v6 member after leave");
+        close(handle);
+        return Err(KernelError::InternalError);
+    }
+
+    close(handle);
+
+    crate::serial_println!("[udp]   multicast v6 join/leave: OK");
     Ok(())
 }
 

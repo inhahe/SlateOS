@@ -34794,8 +34794,9 @@ fn cmd_mdns(args: &str) {
             let s = mdns::stats();
             shell_println!("mDNS / DNS-SD");
             shell_println!("  Initialized:  {}", s.initialized);
+            shell_println!("  IPv6:         {}", if s.ipv6_enabled { "enabled (ff02::fb)" } else { "disabled" });
             shell_println!("  Hostname:     {}.local", s.hostname);
-            shell_println!("  Cache:        {}/{}", s.cache_entries, 32);
+            shell_println!("  Cache:        {}/{}", s.cache_entries, 64);
             shell_println!("  Services:     {}/{}", s.services_registered, 8);
             shell_println!("  Queries sent: {}", s.queries_sent);
             shell_println!("  Responses:    {}", s.responses_sent);
@@ -34834,6 +34835,24 @@ fn cmd_mdns(args: &str) {
                 Err(e) => shell_println!("Failed: {:?}", e),
             }
         }
+        "resolve6" => {
+            let name = parts.get(1).copied().unwrap_or("");
+            if name.is_empty() {
+                shell_println!("Usage: mdns resolve6 <name.local>");
+                return;
+            }
+            // Append .local if not present.
+            let query = if name.ends_with(".local") {
+                String::from(name)
+            } else {
+                alloc::format!("{}.local", name)
+            };
+            shell_println!("Resolving {} (AAAA) ...", query);
+            match mdns::resolve_local_v6(&query) {
+                Ok(ip6) => shell_println!("{} -> {}", query, ip6),
+                Err(e) => shell_println!("Failed: {:?}", e),
+            }
+        }
         "browse" => {
             let svc_type = parts.get(1).copied().unwrap_or("_http._tcp");
             shell_println!("Browsing for {} services ...", svc_type);
@@ -34843,15 +34862,23 @@ fn cmd_mdns(args: &str) {
                         shell_println!("No services found");
                     } else {
                         shell_println!("{:<20} {:<20} {:<20} {:<6} {}",
-                            "Instance", "Type", "Host", "Port", "IP");
+                            "Instance", "Type", "Host", "Port", "Address");
                         for svc in &services {
                             let ip_str = match svc.ip {
                                 Some(ip) => alloc::format!("{}", ip),
                                 None => String::from("-"),
                             };
+                            let ip6_str = match svc.ip6 {
+                                Some(ip6) => alloc::format!("{}", ip6),
+                                None => String::new(),
+                            };
                             shell_println!("{:<20} {:<20} {:<20} {:<6} {}",
                                 svc.instance_name, svc.service_type,
                                 svc.hostname, svc.port, ip_str);
+                            if !ip6_str.is_empty() {
+                                shell_println!("{:<20} {:<20} {:<20} {:<6} {}",
+                                    "", "", "", "", ip6_str);
+                            }
                             if !svc.txt.is_empty() {
                                 for t in &svc.txt {
                                     shell_println!("  TXT: {}", t);
@@ -34902,6 +34929,7 @@ fn cmd_mdns(args: &str) {
                 for r in &records {
                     let data_str = match &r.data {
                         crate::net::mdns::RecordData::Address(ip) => alloc::format!("{}", ip),
+                        crate::net::mdns::RecordData::Address6(ip6) => alloc::format!("{}", ip6),
                         crate::net::mdns::RecordData::Name(n) => n.clone(),
                         crate::net::mdns::RecordData::Srv { port, target, .. } =>
                             alloc::format!("{}:{}", target, port),
@@ -34920,12 +34948,13 @@ fn cmd_mdns(args: &str) {
             }
         }
         "help" => {
-            shell_println!("mdns — mDNS / DNS-SD service discovery");
+            shell_println!("mdns — mDNS / DNS-SD service discovery (IPv4 + IPv6)");
             shell_println!("  show                Full status overview");
             shell_println!("  status              Summary statistics");
             shell_println!("  init                Initialize mDNS subsystem");
             shell_println!("  hostname [name]     Get/set local hostname");
-            shell_println!("  resolve <name>      Resolve .local hostname");
+            shell_println!("  resolve <name>      Resolve .local hostname (A record)");
+            shell_println!("  resolve6 <name>     Resolve .local hostname (AAAA record)");
             shell_println!("  browse [type]       Browse services (default: _http._tcp)");
             shell_println!("  register <inst> <type> <port> [txt=val ...]");
             shell_println!("  unregister <idx>    Remove registered service");

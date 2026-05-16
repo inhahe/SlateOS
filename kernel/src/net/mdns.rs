@@ -35,12 +35,19 @@
 //!   → mdns::tick() → process incoming queries/responses
 //! ```
 //!
+//! ## IPv6 support
+//!
+//! mDNS operates on both IPv4 (224.0.0.251) and IPv6 (ff02::fb)
+//! multicast groups simultaneously.  AAAA record queries and responses
+//! are supported for resolving `.local` names to IPv6 addresses.
+//! Service announcements include both A and AAAA additional records
+//! when an IPv6 address is available.
+//!
 //! ## Limitations
 //!
-//! - IPv4 only (no IPv6 link-local / ff02::fb).
 //! - No NSEC record support (negative responses).
 //! - No known-answer suppression in queries (RFC 6762 §7.1).
-//! - Maximum 32 cached records and 8 registered services.
+//! - Maximum 64 cached records and 8 registered services.
 //! - Single-question queries only (one question per packet).
 
 use alloc::string::String;
@@ -53,19 +60,26 @@ use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
+use super::ipv6::Ipv6Addr;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// mDNS multicast address: 224.0.0.251
+/// mDNS IPv4 multicast address: 224.0.0.251
 const MDNS_MULTICAST_IP: Ipv4Addr = Ipv4Addr([224, 0, 0, 251]);
+
+/// mDNS IPv6 multicast address: ff02::fb (RFC 6762 §11).
+const MDNS_MULTICAST_IP6: Ipv6Addr = Ipv6Addr([
+    0xFF, 0x02, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0xFB,
+]);
 
 /// mDNS port.
 const MDNS_PORT: u16 = 5353;
 
-/// Maximum cached records.
-const MAX_CACHE_ENTRIES: usize = 32;
+/// Maximum cached records (increased for dual-stack: A + AAAA for each host).
+const MAX_CACHE_ENTRIES: usize = 64;
 
 /// Maximum registered services.
 const MAX_SERVICES: usize = 8;
@@ -82,6 +96,7 @@ const CACHE_TICK_INTERVAL_NS: u64 = 10_000_000_000;
 
 // DNS record types.
 const TYPE_A: u16 = 1;
+const TYPE_AAAA: u16 = 28;
 const TYPE_PTR: u16 = 12;
 const TYPE_TXT: u16 = 16;
 const TYPE_SRV: u16 = 33;
@@ -106,6 +121,8 @@ const FLAG_QUERY: u16 = 0x0000;
 pub enum RecordType {
     /// A record (hostname → IPv4 address).
     A,
+    /// AAAA record (hostname → IPv6 address).
+    Aaaa,
     /// PTR record (service type → instance name).
     Ptr,
     /// SRV record (instance → host:port).
@@ -119,6 +136,7 @@ impl RecordType {
     fn to_u16(self) -> u16 {
         match self {
             Self::A => TYPE_A,
+            Self::Aaaa => TYPE_AAAA,
             Self::Ptr => TYPE_PTR,
             Self::Srv => TYPE_SRV,
             Self::Txt => TYPE_TXT,
@@ -128,6 +146,7 @@ impl RecordType {
     fn from_u16(v: u16) -> Option<Self> {
         match v {
             TYPE_A => Some(Self::A),
+            TYPE_AAAA => Some(Self::Aaaa),
             TYPE_PTR => Some(Self::Ptr),
             TYPE_SRV => Some(Self::Srv),
             TYPE_TXT => Some(Self::Txt),
@@ -138,6 +157,7 @@ impl RecordType {
     pub fn label(self) -> &'static str {
         match self {
             Self::A => "A",
+            Self::Aaaa => "AAAA",
             Self::Ptr => "PTR",
             Self::Srv => "SRV",
             Self::Txt => "TXT",
@@ -165,6 +185,8 @@ pub struct CacheEntry {
 pub enum RecordData {
     /// A record: IPv4 address.
     Address(Ipv4Addr),
+    /// AAAA record: IPv6 address.
+    Address6(Ipv6Addr),
     /// PTR record: target name.
     Name(String),
     /// SRV record: priority, weight, port, target host.
@@ -203,8 +225,10 @@ pub struct DiscoveredService {
     pub service_type: String,
     /// Hostname.
     pub hostname: String,
-    /// IP address (if resolved).
+    /// IPv4 address (if resolved via A record).
     pub ip: Option<Ipv4Addr>,
+    /// IPv6 address (if resolved via AAAA record).
+    pub ip6: Option<Ipv6Addr>,
     /// Port number.
     pub port: u16,
     /// TXT record metadata.
@@ -216,9 +240,12 @@ pub struct DiscoveredService {
 // ---------------------------------------------------------------------------
 
 struct MdnsState {
-    /// UDP socket handle for mDNS.
+    /// UDP socket handle for mDNS (shared for IPv4 and IPv6;
+    /// IPv4 multicast uses `join_group`, IPv6 uses `join_group_v6`).
     socket_handle: Option<usize>,
-    /// Cached records.
+    /// Whether IPv6 multicast group (ff02::fb) was joined successfully.
+    v6_joined: bool,
+    /// Cached records (A, AAAA, PTR, SRV, TXT).
     cache: Vec<CacheEntry>,
     /// Registered local services.
     services: Vec<RegisteredService>,
@@ -230,6 +257,7 @@ impl MdnsState {
     const fn new() -> Self {
         Self {
             socket_handle: None,
+            v6_joined: false,
             cache: Vec::new(),
             services: Vec::new(),
             hostname: String::new(),
@@ -308,14 +336,54 @@ fn build_response_a(name: &str, ip: Ipv4Addr, ttl: u32) -> Vec<u8> {
     pkt
 }
 
+/// Build an mDNS response packet with one AAAA answer record.
+fn build_response_aaaa(name: &str, ip6: Ipv6Addr, ttl: u32) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(80);
+
+    // DNS header: ID=0, flags=response+authoritative, 0 questions, 1 answer.
+    pkt.extend_from_slice(&[0, 0]); // Transaction ID
+    let flags = FLAG_RESPONSE;
+    pkt.push((flags >> 8) as u8);
+    pkt.push(flags as u8);
+    pkt.extend_from_slice(&[0, 0]); // QDCOUNT = 0
+    pkt.extend_from_slice(&[0, 1]); // ANCOUNT = 1
+    pkt.extend_from_slice(&[0, 0]); // NSCOUNT = 0
+    pkt.extend_from_slice(&[0, 0]); // ARCOUNT = 0
+
+    // Answer: AAAA record.
+    encode_dns_name(&mut pkt, name);
+    pkt.push((TYPE_AAAA >> 8) as u8);
+    pkt.push(TYPE_AAAA as u8);
+    pkt.push((CLASS_IN_FLUSH >> 8) as u8);
+    pkt.push(CLASS_IN_FLUSH as u8);
+    // TTL.
+    pkt.push((ttl >> 24) as u8);
+    pkt.push((ttl >> 16) as u8);
+    pkt.push((ttl >> 8) as u8);
+    pkt.push(ttl as u8);
+    // RDLENGTH = 16 (IPv6 address).
+    pkt.extend_from_slice(&[0, 16]);
+    pkt.extend_from_slice(&ip6.0);
+
+    pkt
+}
+
 /// Build an mDNS response with PTR + SRV + TXT records for a service.
-fn build_service_response(service: &RegisteredService, our_ip: Ipv4Addr, hostname: &str) -> Vec<u8> {
-    let mut pkt = Vec::with_capacity(256);
+fn build_service_response(
+    service: &RegisteredService,
+    our_ip: Ipv4Addr,
+    our_ip6: Option<Ipv6Addr>,
+    hostname: &str,
+) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(320);
     let full_instance = format!("{}.{}.local", service.instance_name, service.service_type);
     let service_type_local = format!("{}.local", service.service_type);
     let host_local = format!("{}.local", hostname);
 
-    // DNS header: response, 3 answers (PTR + SRV + TXT), 1 additional (A).
+    // Additional record count: A record always, AAAA if IPv6 available.
+    let arcount: u16 = if our_ip6.is_some() { 2 } else { 1 };
+
+    // DNS header: response, 3 answers (PTR + SRV + TXT), 1–2 additional (A + AAAA).
     pkt.extend_from_slice(&[0, 0]); // Transaction ID
     let flags = FLAG_RESPONSE;
     pkt.push((flags >> 8) as u8);
@@ -323,7 +391,8 @@ fn build_service_response(service: &RegisteredService, our_ip: Ipv4Addr, hostnam
     pkt.extend_from_slice(&[0, 0]); // QDCOUNT = 0
     pkt.extend_from_slice(&[0, 3]); // ANCOUNT = 3
     pkt.extend_from_slice(&[0, 0]); // NSCOUNT = 0
-    pkt.extend_from_slice(&[0, 1]); // ARCOUNT = 1
+    pkt.push((arcount >> 8) as u8);
+    pkt.push(arcount as u8);
 
     // Answer 1: PTR record (service_type.local → instance.service_type.local)
     encode_dns_name(&mut pkt, &service_type_local);
@@ -385,7 +454,7 @@ fn build_service_response(service: &RegisteredService, our_ip: Ipv4Addr, hostnam
     pkt.push(rdlen as u8);
     pkt.extend_from_slice(&txt_rdata);
 
-    // Additional: A record for our hostname.
+    // Additional 1: A record for our hostname.
     encode_dns_name(&mut pkt, &host_local);
     pkt.push((TYPE_A >> 8) as u8);
     pkt.push(TYPE_A as u8);
@@ -394,6 +463,18 @@ fn build_service_response(service: &RegisteredService, our_ip: Ipv4Addr, hostnam
     encode_ttl(&mut pkt, DEFAULT_TTL);
     pkt.extend_from_slice(&[0, 4]);
     pkt.extend_from_slice(&our_ip.0);
+
+    // Additional 2: AAAA record for our hostname (if IPv6 available).
+    if let Some(ip6) = our_ip6 {
+        encode_dns_name(&mut pkt, &host_local);
+        pkt.push((TYPE_AAAA >> 8) as u8);
+        pkt.push(TYPE_AAAA as u8);
+        pkt.push((CLASS_IN_FLUSH >> 8) as u8);
+        pkt.push(CLASS_IN_FLUSH as u8);
+        encode_ttl(&mut pkt, DEFAULT_TTL);
+        pkt.extend_from_slice(&[0, 16]);
+        pkt.extend_from_slice(&ip6.0);
+    }
 
     pkt
 }
@@ -572,6 +653,14 @@ fn parse_record_data(rtype: RecordType, rdata: &[u8], full_packet: &[u8]) -> Opt
                 *rdata.get(3)?,
             ])))
         }
+        RecordType::Aaaa => {
+            if rdata.len() < 16 {
+                return None;
+            }
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(rdata.get(..16)?);
+            Some(RecordData::Address6(Ipv6Addr(bytes)))
+        }
         RecordType::Ptr => {
             // PTR RDATA is a DNS name.
             // The name may contain pointers into the full packet.
@@ -636,19 +725,30 @@ fn read_u32(data: &[u8], offset: usize) -> u32 {
 
 /// Initialize the mDNS subsystem.
 ///
-/// Binds a UDP socket to port 5353 and joins the mDNS multicast group.
+/// Binds a UDP socket to port 5353 and joins both the IPv4 (224.0.0.251)
+/// and IPv6 (ff02::fb) mDNS multicast groups.
 pub fn init() {
     let mut state = STATE.lock();
     if INITIALIZED.load(Ordering::Relaxed) {
         return;
     }
 
-    // Bind UDP socket.
+    // Bind UDP socket (shared for IPv4 and IPv6).
     match super::udp::bind(MDNS_PORT) {
         Ok(handle) => {
             state.socket_handle = Some(handle);
-            // Join the mDNS multicast group.
+            // Join IPv4 mDNS multicast group (224.0.0.251).
             let _ = super::udp::join_group(handle, MDNS_MULTICAST_IP);
+            // Join IPv6 mDNS multicast group (ff02::fb).
+            match super::udp::join_group_v6(handle, MDNS_MULTICAST_IP6) {
+                Ok(()) => {
+                    state.v6_joined = true;
+                    crate::serial_println!("[mdns] Joined IPv6 multicast group {}", MDNS_MULTICAST_IP6);
+                }
+                Err(e) => {
+                    crate::serial_println!("[mdns] Failed to join IPv6 multicast: {:?}", e);
+                }
+            }
         }
         Err(e) => {
             crate::serial_println!("[mdns] Failed to bind port {}: {:?}", MDNS_PORT, e);
@@ -660,7 +760,10 @@ pub fn init() {
     state.hostname = String::from("neo");
 
     INITIALIZED.store(true, Ordering::Relaxed);
-    crate::serial_println!("[mdns] Initialized ({}:{})", MDNS_MULTICAST_IP, MDNS_PORT);
+    crate::serial_println!(
+        "[mdns] Initialized (v4={}, v6={}, port={})",
+        MDNS_MULTICAST_IP, MDNS_MULTICAST_IP6, MDNS_PORT,
+    );
 }
 
 /// Set our local hostname (used for .local resolution).
@@ -715,6 +818,54 @@ pub fn resolve_local(name: &str) -> KernelResult<Ipv4Addr> {
     Err(KernelError::TimedOut)
 }
 
+/// Resolve a `.local` hostname to an IPv6 address via mDNS (AAAA query).
+pub fn resolve_local_v6(name: &str) -> KernelResult<Ipv6Addr> {
+    // Check cache first.
+    {
+        let state = STATE.lock();
+        let now = crate::hrtimer::now_ns();
+        for entry in &state.cache {
+            if entry.name == name && entry.record_type == RecordType::Aaaa {
+                let age_secs = now.saturating_sub(entry.cached_at_ns) / 1_000_000_000;
+                if age_secs < entry.ttl as u64 {
+                    CACHE_HITS.fetch_add(1, Ordering::Relaxed);
+                    if let RecordData::Address6(ip6) = entry.data {
+                        return Ok(ip6);
+                    }
+                }
+            }
+        }
+    }
+    CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+
+    // Send AAAA query over both IPv4 and IPv6 multicast.
+    send_query(name, TYPE_AAAA)?;
+    send_query_v6(name, TYPE_AAAA)?;
+
+    // Wait for response (poll a few times).
+    for _ in 0..5000 {
+        super::poll();
+        process_incoming();
+
+        // Check cache again.
+        let state = STATE.lock();
+        for entry in &state.cache {
+            if entry.name == name && entry.record_type == RecordType::Aaaa {
+                if let RecordData::Address6(ip6) = entry.data {
+                    return Ok(ip6);
+                }
+            }
+        }
+        drop(state);
+
+        for _ in 0..5_000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    Err(KernelError::TimedOut)
+}
+
 /// Browse for services of a given type (e.g., "_http._tcp").
 ///
 /// Returns discovered service instances.  Note: discovery is async
@@ -722,8 +873,9 @@ pub fn resolve_local(name: &str) -> KernelResult<Ipv4Addr> {
 pub fn browse_services(service_type: &str) -> KernelResult<Vec<DiscoveredService>> {
     let query_name = format!("{}.local", service_type);
 
-    // Send PTR query for the service type.
+    // Send PTR query for the service type over both IPv4 and IPv6 multicast.
     send_query(&query_name, TYPE_PTR)?;
+    let _ = send_query_v6(&query_name, TYPE_PTR);
 
     // Wait for responses.
     for _ in 0..10_000 {
@@ -769,13 +921,19 @@ pub fn browse_services(service_type: &str) -> KernelResult<Vec<DiscoveredService
                     }
                 }
 
-                // Try to resolve the hostname from cache.
+                // Try to resolve the hostname from cache (A and AAAA).
+                let mut ip6 = None;
                 if !hostname.is_empty() {
                     for rec in &state.cache {
                         if rec.name == hostname {
-                            if let RecordData::Address(addr) = rec.data {
-                                ip = Some(addr);
-                                break;
+                            match rec.data {
+                                RecordData::Address(addr) => {
+                                    ip = Some(addr);
+                                }
+                                RecordData::Address6(addr6) => {
+                                    ip6 = Some(addr6);
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -791,6 +949,7 @@ pub fn browse_services(service_type: &str) -> KernelResult<Vec<DiscoveredService
                     service_type: String::from(service_type),
                     hostname,
                     ip,
+                    ip6,
                     port,
                     txt,
                 });
@@ -857,7 +1016,7 @@ pub fn unregister_service(index: usize) -> bool {
     false
 }
 
-/// Send an mDNS query.
+/// Send an mDNS query over IPv4 multicast.
 fn send_query(name: &str, rtype: u16) -> KernelResult<()> {
     let pkt = build_query(name, rtype);
     super::udp::send(MDNS_PORT, MDNS_MULTICAST_IP, MDNS_PORT, &pkt)?;
@@ -865,61 +1024,94 @@ fn send_query(name: &str, rtype: u16) -> KernelResult<()> {
     Ok(())
 }
 
-/// Process incoming mDNS packets.
+/// Send an mDNS query over IPv6 multicast (ff02::fb).
+fn send_query_v6(name: &str, rtype: u16) -> KernelResult<()> {
+    let v6_joined = STATE.lock().v6_joined;
+    if !v6_joined {
+        return Err(KernelError::NotSupported);
+    }
+    let pkt = build_query(name, rtype);
+    super::udp::send_v6(MDNS_PORT, MDNS_MULTICAST_IP6, MDNS_PORT, &pkt)?;
+    QUERIES_SENT.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Process incoming mDNS packets (both IPv4 and IPv6).
 fn process_incoming() {
-    let handle = match STATE.lock().socket_handle {
-        Some(h) => h,
-        None => return,
+    let (handle, v6_joined) = {
+        let state = STATE.lock();
+        match state.socket_handle {
+            Some(h) => (h, state.v6_joined),
+            None => return,
+        }
     };
 
+    // Process IPv4 mDNS datagrams.
     while let Some(dgram) = super::udp::recv(handle) {
         if dgram.src_port != MDNS_PORT {
             continue;
         }
+        ingest_mdns_packet(&dgram.data, false);
+    }
 
-        match parse_mdns_packet(&dgram.data) {
-            Ok(records) => {
-                let mut state = STATE.lock();
-                let now = crate::hrtimer::now_ns();
-
-                for record in records {
-                    // Update or insert into cache.
-                    let existing = state.cache.iter().position(|e| {
-                        e.name == record.name && e.record_type == record.record_type
-                    });
-
-                    if let Some(idx) = existing {
-                        if let Some(entry) = state.cache.get_mut(idx) {
-                            entry.data = record.data;
-                            entry.ttl = record.ttl;
-                            entry.cached_at_ns = now;
-                        }
-                    } else if state.cache.len() < MAX_CACHE_ENTRIES {
-                        state.cache.push(record);
-                    } else {
-                        // Evict oldest entry.
-                        let oldest = state.cache.iter().enumerate()
-                            .min_by_key(|(_, e)| e.cached_at_ns)
-                            .map(|(i, _)| i);
-                        if let Some(idx) = oldest {
-                            if let Some(entry) = state.cache.get_mut(idx) {
-                                *entry = record;
-                            }
-                        }
-                    }
-                }
-
-                // Check if any incoming query needs a response from our services.
-                drop(state);
-                handle_queries(&dgram.data);
+    // Process IPv6 mDNS datagrams.
+    if v6_joined {
+        while let Some(dgram) = super::udp::recv_v6(handle) {
+            if dgram.src_port != MDNS_PORT {
+                continue;
             }
-            Err(_) => { /* Malformed packet — ignore. */ }
+            ingest_mdns_packet(&dgram.data, true);
         }
     }
 }
 
+/// Parse an mDNS packet, update the cache, and handle any queries.
+///
+/// `from_v6` indicates whether the packet arrived over IPv6 multicast
+/// (used to decide whether to respond via IPv4 or IPv6).
+fn ingest_mdns_packet(data: &[u8], from_v6: bool) {
+    match parse_mdns_packet(data) {
+        Ok(records) => {
+            let mut state = STATE.lock();
+            let now = crate::hrtimer::now_ns();
+
+            for record in records {
+                // Update or insert into cache.
+                let existing = state.cache.iter().position(|e| {
+                    e.name == record.name && e.record_type == record.record_type
+                });
+
+                if let Some(idx) = existing {
+                    if let Some(entry) = state.cache.get_mut(idx) {
+                        entry.data = record.data;
+                        entry.ttl = record.ttl;
+                        entry.cached_at_ns = now;
+                    }
+                } else if state.cache.len() < MAX_CACHE_ENTRIES {
+                    state.cache.push(record);
+                } else {
+                    // Evict oldest entry.
+                    let oldest = state.cache.iter().enumerate()
+                        .min_by_key(|(_, e)| e.cached_at_ns)
+                        .map(|(i, _)| i);
+                    if let Some(idx) = oldest {
+                        if let Some(entry) = state.cache.get_mut(idx) {
+                            *entry = record;
+                        }
+                    }
+                }
+            }
+
+            // Check if any incoming query needs a response from our services.
+            drop(state);
+            handle_queries(data, from_v6);
+        }
+        Err(_) => { /* Malformed packet — ignore. */ }
+    }
+}
+
 /// Handle incoming mDNS queries that match our registered services.
-fn handle_queries(data: &[u8]) {
+fn handle_queries(data: &[u8], from_v6: bool) {
     if data.len() < DNS_HEADER_SIZE {
         return;
     }
@@ -945,24 +1137,38 @@ fn handle_queries(data: &[u8]) {
         let qtype = read_u16(data, offset);
         offset = offset.saturating_add(4); // Skip QTYPE + QCLASS.
 
-        respond_if_matching(&qname, qtype);
+        respond_if_matching(&qname, qtype, from_v6);
     }
 }
 
 /// Send a response if the query matches our hostname or services.
-fn respond_if_matching(qname: &str, qtype: u16) {
+///
+/// `from_v6`: if true, respond over IPv6 multicast; otherwise IPv4.
+fn respond_if_matching(qname: &str, qtype: u16, from_v6: bool) {
     let state = STATE.lock();
     let our_ip = super::interface::ip();
+    let our_mac = super::interface::mac();
+    let our_ip6 = super::icmpv6::slaac_global_addr()
+        .unwrap_or_else(|| Ipv6Addr::from_mac_link_local(&our_mac));
     let hostname = state.hostname.clone();
     let hostname_local = format!("{}.local", hostname);
 
-    // Check if querying our hostname.
+    // Check if querying our hostname (A record).
     if qtype == TYPE_A && qname.eq_ignore_ascii_case(&hostname_local) {
         let pkt = build_response_a(&hostname_local, our_ip, DEFAULT_TTL);
         drop(state);
-        let _ = super::udp::send(MDNS_PORT, MDNS_MULTICAST_IP, MDNS_PORT, &pkt);
-        RESPONSES_SENT.fetch_add(1, Ordering::Relaxed);
+        send_response(&pkt, from_v6);
         return;
+    }
+
+    // Check if querying our hostname (AAAA record).
+    if qtype == TYPE_AAAA && qname.eq_ignore_ascii_case(&hostname_local) {
+        if !our_ip6.is_unspecified() {
+            let pkt = build_response_aaaa(&hostname_local, our_ip6, DEFAULT_TTL);
+            drop(state);
+            send_response(&pkt, from_v6);
+            return;
+        }
     }
 
     // Check if querying one of our services.
@@ -973,14 +1179,24 @@ fn respond_if_matching(qname: &str, qtype: u16) {
             }
             let svc_local = format!("{}.local", svc.service_type);
             if qname.eq_ignore_ascii_case(&svc_local) {
-                let pkt = build_service_response(svc, our_ip, &hostname);
+                let ip6_for_svc = if our_ip6.is_unspecified() { None } else { Some(our_ip6) };
+                let pkt = build_service_response(svc, our_ip, ip6_for_svc, &hostname);
                 drop(state);
-                let _ = super::udp::send(MDNS_PORT, MDNS_MULTICAST_IP, MDNS_PORT, &pkt);
-                RESPONSES_SENT.fetch_add(1, Ordering::Relaxed);
+                send_response(&pkt, from_v6);
                 return;
             }
         }
     }
+}
+
+/// Send an mDNS response packet over the appropriate multicast transport.
+fn send_response(pkt: &[u8], via_v6: bool) {
+    if via_v6 {
+        let _ = super::udp::send_v6(MDNS_PORT, MDNS_MULTICAST_IP6, MDNS_PORT, pkt);
+    } else {
+        let _ = super::udp::send(MDNS_PORT, MDNS_MULTICAST_IP, MDNS_PORT, pkt);
+    }
+    RESPONSES_SENT.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Periodic tick — expire cache entries and process incoming packets.
@@ -1018,6 +1234,7 @@ fn expire_cache() {
 #[derive(Debug)]
 pub struct MdnsStats {
     pub initialized: bool,
+    pub ipv6_enabled: bool,
     pub cache_entries: usize,
     pub services_registered: usize,
     pub queries_sent: u64,
@@ -1033,6 +1250,7 @@ pub fn stats() -> MdnsStats {
     let state = STATE.lock();
     MdnsStats {
         initialized: INITIALIZED.load(Ordering::Relaxed),
+        ipv6_enabled: state.v6_joined,
         cache_entries: state.cache.len(),
         services_registered: state.services.iter().filter(|s| s.active).count(),
         queries_sent: QUERIES_SENT.load(Ordering::Relaxed),
@@ -1063,6 +1281,7 @@ pub fn procfs_content() -> String {
     out.push_str("=====================\n\n");
 
     out.push_str(&format!("Hostname:      {}.local\n", s.hostname));
+    out.push_str(&format!("IPv6:          {}\n", if s.ipv6_enabled { "enabled (ff02::fb)" } else { "disabled" }));
     out.push_str(&format!("Cache entries: {}/{}\n", s.cache_entries, MAX_CACHE_ENTRIES));
     out.push_str(&format!("Services:      {}/{}\n", s.services_registered, MAX_SERVICES));
     out.push_str(&format!("Queries sent:  {}\n", s.queries_sent));
@@ -1076,6 +1295,7 @@ pub fn procfs_content() -> String {
         for entry in &cache {
             let data_str = match &entry.data {
                 RecordData::Address(ip) => format!("{}", ip),
+                RecordData::Address6(ip6) => format!("{}", ip6),
                 RecordData::Name(n) => n.clone(),
                 RecordData::Srv { port, target, .. } => format!("{}:{}", target, port),
                 RecordData::Txt(entries) => {
@@ -1275,6 +1495,84 @@ pub fn self_test() -> KernelResult<()> {
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[mdns]   test 11 (DNS pointer decode) PASSED");
+    }
+
+    // --- Test 12: AAAA response construction ---
+    {
+        let ip6 = Ipv6Addr([
+            0xFE, 0x80, 0, 0, 0, 0, 0, 0,
+            0x52, 0x54, 0x00, 0xFF, 0xFE, 0x12, 0x34, 0x56,
+        ]);
+        let pkt = build_response_aaaa("myhost.local", ip6, 120);
+        assert!(pkt.len() >= DNS_HEADER_SIZE + 14 + 16, "AAAA response large enough");
+        // Check header: ANCOUNT = 1.
+        assert!(read_u16(&pkt, 6) == 1, "1 answer");
+        // Check flags.
+        assert!(read_u16(&pkt, 2) == 0x8400, "response flags");
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[mdns]   test 12 (AAAA response construction) PASSED");
+    }
+
+    // --- Test 13: Parse AAAA record from response ---
+    {
+        let ip6 = Ipv6Addr([
+            0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0x42,
+        ]);
+        let pkt = build_response_aaaa("test6.local", ip6, 90);
+        let records = parse_mdns_packet(&pkt)?;
+        assert!(!records.is_empty(), "should parse AAAA records");
+        let rec = &records[0];
+        assert!(rec.name == "test6.local", "AAAA record name");
+        assert!(rec.record_type == RecordType::Aaaa, "AAAA record type");
+        assert!(rec.ttl == 90, "AAAA record TTL");
+        if let RecordData::Address6(addr6) = rec.data {
+            assert!(addr6.0[0] == 0x20 && addr6.0[1] == 0x01, "parsed IPv6 prefix");
+            assert!(addr6.0[15] == 0x42, "parsed IPv6 suffix");
+        } else {
+            panic!("expected AAAA record data");
+        }
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[mdns]   test 13 (parse AAAA record) PASSED");
+    }
+
+    // --- Test 14: RecordType AAAA round-trip ---
+    {
+        assert!(RecordType::Aaaa.to_u16() == TYPE_AAAA, "AAAA to u16");
+        assert!(RecordType::from_u16(TYPE_AAAA) == Some(RecordType::Aaaa), "u16 to AAAA");
+        assert!(RecordType::Aaaa.label() == "AAAA", "AAAA label");
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[mdns]   test 14 (RecordType AAAA) PASSED");
+    }
+
+    // --- Test 15: Service response with IPv6 additional record ---
+    {
+        let svc = RegisteredService {
+            instance_name: String::from("TestSvc"),
+            service_type: String::from("_http._tcp"),
+            port: 8080,
+            txt_records: vec![String::from("path=/")],
+            active: true,
+        };
+        let ip = Ipv4Addr([10, 0, 0, 1]);
+        let ip6 = Ipv6Addr([
+            0xFE, 0x80, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 1,
+        ]);
+
+        // With IPv6: ARCOUNT should be 2.
+        let pkt_v6 = build_service_response(&svc, ip, Some(ip6), "test");
+        assert!(read_u16(&pkt_v6, 10) == 2, "ARCOUNT=2 with IPv6");
+
+        // Without IPv6: ARCOUNT should be 1.
+        let pkt_v4 = build_service_response(&svc, ip, None, "test");
+        assert!(read_u16(&pkt_v4, 10) == 1, "ARCOUNT=1 without IPv6");
+
+        passed = passed.saturating_add(1);
+        crate::serial_println!("[mdns]   test 15 (service response with IPv6) PASSED");
     }
 
     crate::serial_println!("[mdns] All {} self-tests PASSED", passed);

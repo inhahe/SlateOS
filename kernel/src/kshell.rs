@@ -66696,16 +66696,74 @@ fn cmd_container(args: &str) {
                 }
             }
         }
+        "exec" => {
+            // container exec <id> <command...>
+            // Temporarily enters the container's network namespace and executes
+            // the specified kshell command, then restores the original namespace.
+            let Some(id_str) = parts.get(1) else {
+                crate::console_println!("Usage: container exec <id> <command...>");
+                return;
+            };
+            let Ok(id) = id_str.parse::<u32>() else {
+                crate::console_println!("Invalid container ID");
+                return;
+            };
+            // Get the command to execute (everything after the ID).
+            let cmd_offset = args.find(id_str).unwrap_or(0);
+            let after_id = &args[cmd_offset..].trim_start();
+            let after_id = after_id.strip_prefix(id_str).unwrap_or("").trim_start();
+            if after_id.is_empty() {
+                crate::console_println!("Usage: container exec <id> <command...>");
+                return;
+            }
+
+            // Look up container namespace.
+            let Some((_, _, net_ns)) = container::namespace_ids(id) else {
+                crate::console_println!("Container {} not found", id);
+                return;
+            };
+
+            // Verify container is running.
+            let Some(ci) = container::info(id) else {
+                crate::console_println!("Container {} not found", id);
+                return;
+            };
+            if !matches!(ci.state, container::ContainerState::Running) {
+                crate::console_println!("Container {} is not running (state: {:?})", id, ci.state);
+                return;
+            }
+
+            // Save current namespace and switch to container's.
+            let task_id = crate::sched::current_task_id();
+            let orig_ns = crate::sched::current_task_net_ns();
+
+            if let Err(e) = crate::sched::set_task_net_ns(task_id, net_ns) {
+                crate::console_println!("Failed to enter namespace: {:?}", e);
+                return;
+            }
+
+            crate::console_println!("[exec] Entering container {} (net_ns={})", id, net_ns);
+
+            // Execute the command within the container's namespace context.
+            // This uses the normal kshell dispatch, so DNS, TCP, UDP operations
+            // will all use the container's network namespace.
+            execute(after_id);
+
+            // Restore original namespace.
+            let _ = crate::sched::set_task_net_ns(task_id, orig_ns);
+            crate::console_println!("[exec] Exited container {} namespace", id);
+        }
         "test" => {
             container::self_test();
         }
         _ => {
-            crate::console_println!("Usage: container [list|create|delete|start|stop|info|test]");
+            crate::console_println!("Usage: container [list|create|delete|start|stop|exec|info|test]");
             crate::console_println!("  container                                — list containers");
             crate::console_println!("  container create NAME [cpu%] [mem] [uid] — create container");
             crate::console_println!("  container delete ID                      — delete stopped container");
             crate::console_println!("  container start ID                       — mark as running");
             crate::console_println!("  container stop ID                        — mark as stopped");
+            crate::console_println!("  container exec ID <command>              — run command in container NS");
             crate::console_println!("  container info ID                        — detailed inspection");
             crate::console_println!("  container test                           — run self-test");
             crate::console_println!();

@@ -32,6 +32,9 @@
 //! - Linux seccomp(2), seccomp_rule_add(3)
 //! - Design spec: capability-based security + container isolation
 
+extern crate alloc;
+
+use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 use crate::error::{KernelError, KernelResult};
@@ -202,12 +205,16 @@ impl FilterTable {
     }
 }
 
-static TABLE: Mutex<Option<FilterTable>> = Mutex::new(None);
+static TABLE: Mutex<Option<Box<FilterTable>>> = Mutex::new(None);
 
 /// Initialize the syscall filter subsystem.
+///
+/// Uses heap allocation — `FilterTable` is ~19 KiB (128 entries × ~152 bytes),
+/// too large for the boot stack under debug builds.
 pub fn init() {
     let mut table = TABLE.lock();
-    *table = Some(FilterTable::new());
+    // Allocate on the heap to avoid stack overflow (FilterTable is ~19 KiB).
+    *table = Some(Box::new(FilterTable::new()));
     ENABLED.store(true, Ordering::Release);
     serial_println!("[scfilter] Initialized ({} max filters)", MAX_FILTERS);
 }

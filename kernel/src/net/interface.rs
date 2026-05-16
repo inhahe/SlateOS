@@ -382,14 +382,22 @@ pub fn ns_info(ns_id: crate::netns::NetNsId) -> InterfaceInfo {
         return info();
     }
     match crate::netns::interface_config(ns_id) {
-        Some(cfg) => InterfaceInfo {
-            up: cfg.up,
-            mac: mac(), // Physical NIC MAC — no veth pairs yet.
-            ip: from_netns_ip(cfg.ip),
-            subnet_mask: from_netns_ip(cfg.subnet_mask),
-            gateway: from_netns_ip(cfg.gateway),
-            dns: from_netns_ip(cfg.dns),
-        },
+        Some(cfg) => {
+            // Use the veth endpoint's MAC if one is assigned to this
+            // namespace; fall back to the physical NIC MAC otherwise.
+            let iface_mac = super::veth::find_endpoint_for_ns(ns_id)
+                .and_then(|(pair_id, end_id)| super::veth::mac(pair_id, end_id))
+                .map(crate::virtio::net::MacAddress)
+                .unwrap_or_else(mac);
+            InterfaceInfo {
+                up: cfg.up,
+                mac: iface_mac,
+                ip: from_netns_ip(cfg.ip),
+                subnet_mask: from_netns_ip(cfg.subnet_mask),
+                gateway: from_netns_ip(cfg.gateway),
+                dns: from_netns_ip(cfg.dns),
+            }
+        }
         None => InterfaceInfo::default(),
     }
 }

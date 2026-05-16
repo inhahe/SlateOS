@@ -1318,6 +1318,16 @@ extern "C" fn kmain() -> ! {
     netns::init();
     netns::self_test();
 
+    // Step 22e⅞++++p8b: Virtual Ethernet (veth) pairs init + self-test.
+    // Connected virtual links between namespaces — frame sent on one
+    // end appears on the peer's RX queue.  Required for container
+    // networking isolation (per-namespace ARP, independent routing).
+    // Runs after netns::init() because veth tests create child namespaces.
+    net::veth::init();
+    if let Err(e) = net::veth::self_test() {
+        serial_println!("[WARN] Veth self-test failed: {:?}", e);
+    }
+
     // Step 22e⅞++++p9: Container lifecycle manager init + self-test.
     // Unified container abstraction tying PID/user/network namespaces + cgroup
     // into a single lifecycle with create/start/stop/delete state machine.

@@ -1684,7 +1684,16 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
       - [x] ipv4.rs: send_ns() with per-namespace source IP + route_lookup()
       - [x] netns.rs: is_initialized() for boot-order safety
       - [x] ARP/firewall doc notes (global/shared, per-namespace ARP is future)
-      - [ ] Per-namespace ARP cache (requires veth pairs)
+      - [-] Per-namespace ARP cache (veth pairs now implemented; ARP cache split remaining)
+      - [x] Virtual Ethernet (veth) pairs: connected virtual links between namespaces
+        - [x] VethPair with two VethEnd endpoints, per-end MAC/ns/queue/stats
+        - [x] Frame loopback: TX on end A → RX on end B (and vice versa)
+        - [x] Bounded RX queue (256 frames) with drop counting
+        - [x] Endpoint move between namespaces (requires down state)
+        - [x] poll_all() integration with net::poll() for protocol stack injection
+        - [x] interface.rs ns_info() returns veth MAC for namespace endpoints
+        - [x] find_endpoint_for_ns() lookup for namespace → veth mapping
+        - [x] 10 self-tests: create/destroy, MAC generation, loopback, down drop, queue full, move, move-requires-down, stats, multiple pairs, bidirectional
       - [x] Per-namespace firewall rules (16 rules, 32 conntrack entries per namespace; ns_init/ns_enable/ns_add_rule/ns_check_outbound_ns/ns_check_inbound_ns API; 3 self-tests for isolation, conntrack, lifecycle)
       - [x] IPv6 firewall (Rule6/ConntrackEntry6 with independent enable/policy; check_inbound_v6/check_outbound_v6 wired into IPv6 processing; ip6_matches u128 prefix comparison; Protocol::Icmp maps to ICMPv6 for v6 rules; fw on6/off6/policy6/allow6/deny6/remove6/clear6 commands; 5 self-tests)
       - [ ] Wire process→container→net_ns into socket layer callers

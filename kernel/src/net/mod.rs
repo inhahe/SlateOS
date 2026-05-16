@@ -54,6 +54,7 @@ pub mod pcap;
 pub mod qos;
 pub mod traceroute;
 pub mod upnp;
+pub mod veth;
 pub mod vlan;
 pub mod wol;
 
@@ -99,6 +100,9 @@ pub fn poll() {
             None => break,
         }
     }
+
+    // Drain virtual ethernet (veth) pair RX queues into the protocol stack.
+    veth::poll_all();
 
     // Rate-limited periodic maintenance (TCP + DHCP).
     let now = crate::hrtimer::now_ns();
@@ -304,6 +308,9 @@ pub fn self_test() -> KernelResult<()> {
     frag::self_test()?;
     interface::self_test()?;
     tls::self_test()?;
+    // Note: veth::self_test() runs separately after veth::init() in
+    // main.rs because veth init requires the heap + netns subsystem,
+    // which initializes later in the boot sequence.
 
     crate::serial_println!("[net] Network self-test PASSED");
     Ok(())

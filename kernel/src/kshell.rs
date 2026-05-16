@@ -3662,6 +3662,7 @@ const COMMANDS: &[&str] = &[
     "pciids", "lspci",
     "upnp", "portfwd",
     "httpc", "curl",
+    "httpd",
     "ntp", "ntpdate",
     "mdns", "dnssd",
     "telnetd", "telnet",
@@ -4876,6 +4877,7 @@ fn dispatch(line: &str) {
         "pciids" | "lspci" => cmd_pciids(args),
         "upnp" | "portfwd" => cmd_upnp(args),
         "httpc" | "curl" => cmd_httpc(args),
+        "httpd" => cmd_httpd(args),
         "ntp" | "ntpdate" => cmd_ntp(args),
         "mdns" | "dnssd" => cmd_mdns(args),
         "telnetd" | "telnet" => cmd_telnetd(args),
@@ -34645,6 +34647,77 @@ fn cmd_httpc(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'httpc help'.", sub);
+        }
+    }
+}
+
+/// `httpd` — HTTP/1.1 file server (start/stop/status/root).
+fn cmd_httpd(args: &str) {
+    use crate::net::httpd;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("httpd — HTTP/1.1 file server");
+            shell_println!("  start [port]           Start the server (default: 8080)");
+            shell_println!("  stop                   Stop the server");
+            shell_println!("  status                 Show server status");
+            shell_println!("  root [path]            Get/set document root");
+            shell_println!("  test                   Run self-tests");
+            shell_println!("");
+            shell_println!("Examples:");
+            shell_println!("  httpd start            Start on port 8080");
+            shell_println!("  httpd start 80         Start on port 80");
+            shell_println!("  httpd root /www        Serve files from /www");
+            shell_println!("  httpd stop             Stop the server");
+        }
+        "start" => {
+            let port_str = parts.get(1).copied().unwrap_or("8080");
+            let port: u16 = port_str.parse().unwrap_or(0);
+            if port == 0 {
+                shell_println!("Invalid port: {}", port_str);
+                return;
+            }
+            match httpd::start(port) {
+                Ok(()) => shell_println!("HTTP server started on port {}", port),
+                Err(e) => shell_println!("Failed to start: {:?}", e),
+            }
+        }
+        "stop" => {
+            httpd::stop();
+            shell_println!("HTTP server stopped");
+        }
+        "status" | "stats" => {
+            shell_println!("HTTP Server");
+            shell_println!("  Status:       {}",
+                if httpd::is_running() { "running" } else { "stopped" }
+            );
+            shell_println!("  Port:         {}", httpd::port());
+            shell_println!("  Document root: {}", *crate::net::httpd::DOC_ROOT.lock());
+        }
+        "root" => {
+            let path = parts.get(1).copied().unwrap_or("");
+            if path.is_empty() {
+                shell_println!("Document root: {}", *crate::net::httpd::DOC_ROOT.lock());
+            } else {
+                // We need a 'static str for the doc root. Use a leak pattern
+                // since server configs are rarely changed and live for the
+                // kernel lifetime.
+                let leaked: &'static str = alloc::boxed::Box::leak(
+                    alloc::string::String::from(path).into_boxed_str(),
+                );
+                httpd::set_doc_root(leaked);
+                shell_println!("Document root set to: {}", path);
+            }
+        }
+        "test" => {
+            match httpd::self_test() {
+                Ok(()) => shell_println!("HTTPD self-test: PASSED"),
+                Err(e) => shell_println!("HTTPD self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'httpd help'.", sub);
         }
     }
 }
@@ -69562,7 +69635,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "dhcpv6" | "dhcp6" | "ping" | "ping6" | "udp6" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond" | "nat"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "httpd" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond" | "nat"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "oci" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

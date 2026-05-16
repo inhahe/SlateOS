@@ -1163,6 +1163,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] SOCKS5 proxy client (RFC 1928, CONNECT, no-auth/userpass, IPv4/IPv6/domain targets, dual-stack proxy+target)
   - [x] TLS 1.3 client (RFC 8446): ChaCha20-Poly1305 cipher suite, X25519 key exchange, HKDF-SHA256 key schedule, record layer encryption/decryption, full 1-RTT handshake (ClientHello/ServerHello/EncryptedExtensions/Certificate/CertificateVerify/Finished), per-record nonce XOR, transcript hashing; HTTPS integration in HTTP client (https:// URL support, transparent TLS wrapping, chunked/fixed body over TLS, scheme-preserving redirects); `wget https://` kshell command; 9 TLS self-tests
   - [x] Ethernet bridging (MAC learning FDB, STP port states, flooding) and link aggregation (active-backup, round-robin, XOR-hash bonding)
+  - [x] HTTP/1.1 server (httpd): GET/HEAD file serving from VFS, directory listing with HTML, MIME type detection (~30 extensions), percent-decoding, path normalization with traversal prevention, configurable document root and port; `httpd` kshell command (start/stop/status/root); integrated into net::poll() tick loop; 8 self-tests
 - [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
 
 ### 2.5 POSIX compatibility layer

@@ -27,6 +27,7 @@ pub mod firewall;
 pub mod frag;
 pub mod ftp;
 pub mod http;
+pub mod httpd;
 pub mod icmp;
 pub mod icmpv6;
 pub mod igmp;
@@ -127,6 +128,7 @@ pub fn poll() {
         telnet::tick();
         tftp::tick();
         nat::tick();
+        httpd::tick();
     }
 }
 
@@ -313,6 +315,8 @@ pub fn self_test() -> KernelResult<()> {
     // Note: veth::self_test() runs separately after veth::init() in
     // main.rs because veth init requires the heap + netns subsystem,
     // which initializes later in the boot sequence.
+
+    httpd::self_test()?;
 
     crate::serial_println!("[net] Network self-test PASSED");
     Ok(())

@@ -30,6 +30,7 @@ pub mod icmp;
 pub mod icmpv6;
 pub mod igmp;
 pub mod iperf;
+pub mod mld;
 pub mod ipv6;
 pub mod lldp;
 pub mod ndisc;
@@ -111,6 +112,7 @@ pub fn poll() {
         firewall::tick_conntrack_cleanup();
         ntp::tick();
         igmp::tick();
+        mld::tick();
         lldp::tick();
         mdns::tick();
         syslog::tick();

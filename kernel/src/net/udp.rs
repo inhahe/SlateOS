@@ -468,6 +468,9 @@ pub fn join_group(handle: usize, group: Ipv4Addr) -> KernelResult<()> {
     drop(sockets);
     mcast_global_join(group);
 
+    // Notify IGMP so the network receives our membership report.
+    super::igmp::join(group);
+
     crate::serial_println!(
         "[udp] Socket {} joined multicast group {}",
         handle, group
@@ -509,6 +512,9 @@ pub fn leave_group(handle: usize, group: Ipv4Addr) -> KernelResult<()> {
     // Remove from global table.
     drop(sockets);
     mcast_global_leave(group);
+
+    // Notify IGMP so the network receives our leave message.
+    super::igmp::leave(group);
 
     crate::serial_println!(
         "[udp] Socket {} left multicast group {}",
@@ -559,6 +565,9 @@ pub fn join_group_v6(handle: usize, group: Ipv6Addr) -> KernelResult<()> {
     drop(sockets);
     mcast_global_join_v6(group);
 
+    // Notify MLD so the network receives our listener report.
+    super::mld::join(group);
+
     crate::serial_println!(
         "[udp] Socket {} joined IPv6 multicast group {}",
         handle, group
@@ -600,6 +609,9 @@ pub fn leave_group_v6(handle: usize, group: Ipv6Addr) -> KernelResult<()> {
     // Remove from global table.
     drop(sockets);
     mcast_global_leave_v6(group);
+
+    // Notify MLD so the network receives our done message.
+    super::mld::leave(group);
 
     crate::serial_println!(
         "[udp] Socket {} left IPv6 multicast group {}",

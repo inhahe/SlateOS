@@ -3672,6 +3672,7 @@ const COMMANDS: &[&str] = &[
     "traceroute", "tracert",
     "traceroute6", "tracert6",
     "igmp",
+    "mld",
     "lldp",
     "netstat", "ss",
     "ndisc", "arpscan",
@@ -4885,6 +4886,7 @@ fn dispatch(line: &str) {
         "traceroute" | "tracert" => cmd_traceroute(args),
         "traceroute6" | "tracert6" => cmd_traceroute6(args),
         "igmp" => cmd_igmp(args),
+        "mld" => cmd_mld(args),
         "lldp" => cmd_lldp(args),
         "netstat" | "ss" => cmd_netstat(args),
         "ndisc" | "arpscan" => cmd_ndisc(args),
@@ -35867,6 +35869,82 @@ fn cmd_igmp(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand '{}'. Try 'igmp help'.", sub);
+        }
+    }
+}
+
+/// `mld` — Multicast Listener Discovery (IPv6).
+fn cmd_mld(args: &str) {
+    use crate::net::mld;
+    use crate::net::ipv6::Ipv6Addr;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("mld — Multicast Listener Discovery (IPv6)");
+            shell_println!("  mld status          Show MLD statistics");
+            shell_println!("  mld groups          List active group memberships");
+            shell_println!("  mld join <IP6>      Join an IPv6 multicast group");
+            shell_println!("  mld leave <IP6>     Leave an IPv6 multicast group");
+            shell_println!("  mld test            Run self-tests");
+        }
+        "status" | "stats" => {
+            let s = mld::stats();
+            shell_println!("MLD Statistics");
+            shell_println!("  Active groups:    {}", s.active_groups);
+            shell_println!("  Reports sent:     {}", s.reports_sent);
+            shell_println!("  Dones sent:       {}", s.dones_sent);
+            shell_println!("  Queries received: {}", s.queries_received);
+            shell_println!("  Errors:           {}", s.errors);
+        }
+        "groups" | "list" => {
+            let (groups, count) = mld::list_groups();
+            if count == 0 {
+                shell_println!("No active MLD group memberships");
+            } else {
+                shell_println!("Active MLD groups ({}):", count);
+                for info in &groups {
+                    shell_println!("  {}  ({})", info.addr, info.state);
+                }
+            }
+        }
+        "join" => {
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            match Ipv6Addr::parse(ip_str) {
+                Some(ip6) => {
+                    if !ip6.is_multicast() {
+                        shell_println!("{} is not a multicast address (ff00::/8)", ip6);
+                        return;
+                    }
+                    mld::join(ip6);
+                    shell_println!("Joined IPv6 multicast group {}", ip6);
+                }
+                None => {
+                    shell_println!("Usage: mld join <multicast-IPv6>");
+                    shell_println!("  e.g.: mld join ff02::fb");
+                }
+            }
+        }
+        "leave" => {
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            match Ipv6Addr::parse(ip_str) {
+                Some(ip6) => {
+                    mld::leave(ip6);
+                    shell_println!("Left IPv6 multicast group {}", ip6);
+                }
+                None => {
+                    shell_println!("Usage: mld leave <multicast-IPv6>");
+                }
+            }
+        }
+        "test" => {
+            match mld::self_test() {
+                Ok(()) => shell_println!("MLD self-test: PASSED"),
+                Err(e) => shell_println!("MLD self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("Unknown subcommand '{}'. Try 'mld help'.", sub);
         }
     }
 }
@@ -68759,7 +68837,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "ping6" | "udp6" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

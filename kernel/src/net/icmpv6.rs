@@ -738,6 +738,11 @@ pub fn process_icmpv6(ip_packet: &Ipv6Packet<'_>) -> KernelResult<()> {
             // Correlate with outstanding traceroute6 probes.
             match_trace6_time_exceeded(ip_packet.src, data);
         }
+        // MLD (Multicast Listener Discovery) messages.
+        // Types 130-132 (MLDv1) and 143 (MLDv2 Report).
+        130 | 131 | 132 | 143 => {
+            let _ = super::mld::process(ip_packet, data);
+        }
         _ => {
             // Unknown type — silently ignore.
         }

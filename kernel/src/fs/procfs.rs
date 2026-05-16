@@ -384,6 +384,7 @@ const ROOT_FILES: &[&str] = &[
     "pcap",
     "traceroute",
     "igmp",
+    "mld",
     "lldp",
     "netstat",
     "ndisc",
@@ -7493,6 +7494,10 @@ fn gen_igmp() -> Vec<u8> {
     crate::net::igmp::procfs_content().into_bytes()
 }
 
+fn gen_mld() -> Vec<u8> {
+    crate::net::mld::procfs_content().into_bytes()
+}
+
 fn gen_lldp() -> Vec<u8> {
     crate::net::lldp::procfs_content().into_bytes()
 }
@@ -10232,6 +10237,7 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "pcap" => Ok(gen_pcap()),
         "traceroute" => Ok(gen_traceroute()),
         "igmp" => Ok(gen_igmp()),
+        "mld" => Ok(gen_mld()),
         "lldp" => Ok(gen_lldp()),
         "netstat" => Ok(gen_netstat()),
         "ndisc" => Ok(gen_ndisc()),

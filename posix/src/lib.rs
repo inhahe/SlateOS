@@ -493,3 +493,8 @@ pub mod linux_netfilter_bridge;
 pub mod linux_if_vlan;
 pub mod linux_if_bonding;
 pub mod linux_if_macvlan;
+pub mod linux_pci;
+pub mod linux_acpi;
+pub mod linux_seg6;
+pub mod linux_if_xdp;
+pub mod linux_sysctl;

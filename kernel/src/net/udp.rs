@@ -849,6 +849,22 @@ pub fn process_udp(ip_packet: &Ipv4Packet<'_>) -> KernelResult<()> {
         return super::dhcp::process_dhcp_response(payload);
     }
 
+    // DHCP server (port 67 = DHCP server).
+    // Containers send DISCOVER/REQUEST to the broadcast address on
+    // port 67.  The dhcpd module processes the request and returns a
+    // response payload + destination IP.  We send the reply as a
+    // broadcast UDP datagram from port 67 to port 68.
+    if dst_port == 67 {
+        if let Some((response, dest_ip)) = super::dhcpd::process_request(payload) {
+            let dest = super::interface::Ipv4Addr(dest_ip);
+            // DHCP responses go from server port 67 to client port 68.
+            if let Err(e) = send(67, dest, 68, &response) {
+                crate::serial_println!("[udp] Failed to send DHCP response: {:?}", e);
+            }
+        }
+        return Ok(());
+    }
+
     let is_mcast = ip_packet.dst.is_multicast();
 
     // Deliver to bound socket(s).

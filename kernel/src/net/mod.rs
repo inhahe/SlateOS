@@ -131,6 +131,7 @@ pub fn poll() {
         tftp::tick();
         nat::tick();
         httpd::tick();
+        dhcpd::tick_expire();
     }
 }
 

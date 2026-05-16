@@ -1103,11 +1103,11 @@ impl core::fmt::Display for DnsServer {
     }
 }
 
-/// Pick the best available DNS server.
+/// Pick the best available DNS server for the root (host) namespace.
 ///
 /// Prefers IPv4 (from DHCP) since it's more widely deployed.  Falls back
 /// to IPv6 (from SLAAC RDNSS) when no IPv4 DNS server is configured.
-fn pick_dns_server() -> KernelResult<DnsServer> {
+fn pick_dns_server_root() -> KernelResult<DnsServer> {
     let v4 = interface::info().dns;
     if !v4.is_unspecified() {
         return Ok(DnsServer::V4(v4));
@@ -1116,6 +1116,38 @@ fn pick_dns_server() -> KernelResult<DnsServer> {
         return Ok(DnsServer::V6(v6));
     }
     Err(KernelError::NotSupported)
+}
+
+/// Pick the DNS server for a specific network namespace.
+///
+/// For non-root namespaces, checks the namespace's configured DNS server
+/// first.  Falls back to the root namespace DNS if the namespace has no
+/// DNS configured or the namespace is the root.
+///
+/// Safe to call before netns subsystem is initialized (falls back to root).
+fn pick_dns_server_for_ns(ns_id: crate::netns::NetNsId) -> KernelResult<DnsServer> {
+    if ns_id != crate::netns::ROOT_NS && crate::netns::is_initialized() {
+        if let Some(cfg) = crate::netns::interface_config(ns_id) {
+            let dns_bytes = cfg.dns.0;
+            // Non-zero means a DNS server is configured for this namespace.
+            if dns_bytes != [0, 0, 0, 0] {
+                let dns = Ipv4Addr::new(dns_bytes[0], dns_bytes[1], dns_bytes[2], dns_bytes[3]);
+                return Ok(DnsServer::V4(dns));
+            }
+        }
+    }
+    // Fallback to root namespace DNS.
+    pick_dns_server_root()
+}
+
+/// Pick the DNS server for the current task's network namespace.
+///
+/// Queries the calling task's net_ns and uses its configured DNS server.
+/// If the task is in the root namespace (default), or its namespace has no
+/// DNS configured, falls back to the host's DHCP/SLAAC DNS.
+fn pick_dns_server() -> KernelResult<DnsServer> {
+    let ns_id = crate::sched::current_task_net_ns();
+    pick_dns_server_for_ns(ns_id)
 }
 
 /// Send a DNS query and wait for a response with retry/backoff.
@@ -1654,8 +1686,9 @@ pub fn self_test() -> KernelResult<()> {
     test_parse_aaaa_response()?;
     test_aaaa_cache()?;
     test_ipv6_reverse_name()?;
+    test_ns_aware_dns_picker()?;
 
-    crate::serial_println!("[dns] DNS self-test PASSED (12 tests)");
+    crate::serial_println!("[dns] DNS self-test PASSED (13 tests)");
     Ok(())
 }
 
@@ -2199,5 +2232,83 @@ fn test_ipv6_reverse_name() -> KernelResult<()> {
     }
 
     crate::serial_println!("[dns]   IPv6 reverse name: OK");
+    Ok(())
+}
+
+/// Test namespace-aware DNS server selection.
+///
+/// Verifies that:
+/// - `pick_dns_server_for_ns(ROOT_NS)` falls back to root DNS.
+/// - `pick_dns_server_for_ns(nonexistent)` falls back to root DNS.
+/// - `pick_dns_server_for_ns(ns_with_dns)` returns that namespace's DNS (if netns initialized).
+fn test_ns_aware_dns_picker() -> KernelResult<()> {
+    use crate::netns;
+
+    // Root NS should always fall back to the global DNS configuration.
+    // (May be Ok or Err depending on whether DHCP ran, but must not panic.)
+    let root_direct = pick_dns_server_root();
+    let root_via_ns = pick_dns_server_for_ns(netns::ROOT_NS);
+    match (&root_direct, &root_via_ns) {
+        (Ok(DnsServer::V4(a)), Ok(DnsServer::V4(b))) => {
+            if a.0 != b.0 {
+                crate::serial_println!("[dns]   FAIL: ROOT_NS DNS mismatch");
+                return Err(KernelError::InternalError);
+            }
+        }
+        (Ok(DnsServer::V6(a)), Ok(DnsServer::V6(b))) => {
+            if a.0 != b.0 {
+                crate::serial_println!("[dns]   FAIL: ROOT_NS DNS6 mismatch");
+                return Err(KernelError::InternalError);
+            }
+        }
+        (Err(_), Err(_)) => { /* Both not configured — OK. */ }
+        _ => {
+            crate::serial_println!("[dns]   FAIL: ROOT_NS DNS type mismatch");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Non-existent namespace (when netns not initialized) should fall back to root.
+    let bad_ns_result = pick_dns_server_for_ns(255);
+    match (&root_direct, &bad_ns_result) {
+        (Ok(_), Ok(_)) | (Err(_), Err(_)) => { /* Same fallback behaviour. */ }
+        _ => {
+            crate::serial_println!("[dns]   FAIL: bad NS should fallback to root");
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Test with actual netns subsystem only if it's initialized.
+    if netns::is_initialized() {
+        if let Ok(ns_id) = netns::create() {
+            let custom_dns = netns::Ipv4Addr::new(1, 2, 3, 4);
+            let ip = netns::Ipv4Addr::new(10, 200, 0, 2);
+            let mask = netns::Ipv4Addr::new(255, 255, 255, 0);
+            let gw = netns::Ipv4Addr::new(10, 200, 0, 1);
+            let _ = netns::configure_interface(ns_id, ip, mask, gw, custom_dns);
+
+            match pick_dns_server_for_ns(ns_id) {
+                Ok(DnsServer::V4(dns_ip)) => {
+                    if dns_ip.0 != [1, 2, 3, 4] {
+                        crate::serial_println!(
+                            "[dns]   FAIL: NS DNS = {}, expected 1.2.3.4",
+                            dns_ip
+                        );
+                        let _ = netns::delete(ns_id);
+                        return Err(KernelError::InternalError);
+                    }
+                }
+                other => {
+                    crate::serial_println!("[dns]   FAIL: NS DNS picker = {:?}", other);
+                    let _ = netns::delete(ns_id);
+                    return Err(KernelError::InternalError);
+                }
+            }
+
+            let _ = netns::delete(ns_id);
+        }
+    }
+
+    crate::serial_println!("[dns]   Namespace-aware DNS picker: OK");
     Ok(())
 }

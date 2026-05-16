@@ -1110,6 +1110,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] DNS over IPv6 transport: transport-agnostic dns_query_raw() helper abstracts IPv4/IPv6 UDP send/recv; DnsServer enum + pick_dns_server() selects DHCP IPv4 (preferred) or SLAAC RDNSS IPv6 (fallback); all 4 resolver paths (A, AAAA, PTR, PTR6) refactored to use centralized helper; enables name resolution in IPv6-only networks
   - [x] Ipv6Addr::parse() — RFC 5952 string parser moved from kshell to ipv6 module; supports full/compressed/loopback/unspecified notation; is_global_unicast() helper; comprehensive parse self-test with round-trip verification
   - [x] `udp6` kshell command: send IPv6 UDP datagrams (`udp6 send <addr> <port> <msg>`) and listen for incoming (`udp6 listen <port> [timeout]`) with text/hex display
+  - [x] MLD (Multicast Listener Discovery) for IPv6: MLDv1 RFC 2710, listener reports/done, query handling (general + specific), report suppression, periodic unsolicited reports, auto-wired to UDP join_group_v6/leave_group_v6 (also wired IGMP into IPv4 join_group/leave_group), `mld` kshell command, /proc/mld, 10 self-tests
+  - [x] DHCPv6 client (RFC 8415): stateful (Solicit/Advertise/Request/Reply for address assignment with IA_NA + DUID-LL) and stateless (Information-Request for DNS/domain), option parsing (DNS servers opt 23, domain search list opt 24, IA Address, status code), lease maintenance (T1 renew/T2 rebind via tick_renewal), `dhcpv6 discover/info/status/test` kshell commands, /proc/dhcpv6, 12 self-tests
   - [ ] Move to userspace service
 - [x] Sockets API (not file descriptors — dedicated socket handles)
   - [x] TCP syscalls: connect, send, recv, close, abort, peer_addr (SYS_TCP_CONNECT through SYS_TCP_PEER_ADDR)

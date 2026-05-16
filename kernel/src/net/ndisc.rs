@@ -1,25 +1,29 @@
-//! Network discovery — ARP scan and host enumeration.
+//! Network discovery — ARP scan and IPv6 neighbor discovery.
 //!
-//! Discovers active hosts on the local subnet by sending ARP requests
-//! for all IPs in the configured subnet range.  Combines ARP cache
-//! information with optional ping probes for a comprehensive view
-//! of the local network.
+//! Discovers active hosts on the local network using:
+//! - **IPv4**: ARP requests for all IPs in the configured subnet
+//! - **IPv6**: ICMPv6 Echo Request to ff02::1 (all-nodes multicast)
+//!   and Neighbor Solicitation probes
 //!
 //! ## Usage
 //!
 //! ```text
-//! ndisc scan           — ARP scan the local subnet
-//! ndisc scan 10.0.2.0/24  — scan a specific range
-//! ndisc hosts          — show discovered hosts (from ARP cache)
-//! ndisc probe <IP>     — ARP probe + ping a specific host
+//! ndisc scan             — ARP scan the local subnet
+//! ndisc scan 10.0.2.0/24 — scan a specific range
+//! ndisc scan6            — IPv6 link-local neighbor discovery
+//! ndisc hosts            — show discovered hosts (from ARP cache)
+//! ndisc hosts6           — show IPv6 neighbors
+//! ndisc probe <IP>       — ARP probe + ping a specific host
+//! ndisc probe6 <IP6>     — NDP probe an IPv6 address
 //! ```
 //!
 //! ## Features
 //!
-//! - ARP-based host discovery (no IP required on target — works for
-//!   any device with an Ethernet interface)
+//! - ARP-based host discovery (IPv4, no IP required on target)
+//! - ICMPv6 all-nodes multicast discovery (IPv6 link-local scan)
+//! - ICMPv6 Neighbor Solicitation for targeted IPv6 probes
 //! - Subnet range calculation from interface config
-//! - Combines ARP and DNS for richer host identification
+//! - Combines ARP/NDP and DNS for richer host identification
 //! - Host table with MAC, IP, optional hostname
 
 use alloc::string::String;
@@ -30,6 +34,7 @@ use core::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
+use super::ipv6::Ipv6Addr;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -257,6 +262,143 @@ pub fn probe_host(ip: Ipv4Addr) -> KernelResult<Option<Host>> {
         }
         None => Ok(None),
     }
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 neighbor discovery
+// ---------------------------------------------------------------------------
+
+/// A discovered IPv6 host.
+#[derive(Debug, Clone)]
+pub struct HostV6 {
+    /// IPv6 address.
+    pub ip: Ipv6Addr,
+    /// MAC address (from NDP neighbor cache).
+    pub mac: String,
+    /// Hostname (from DNS reverse lookup, if available).
+    pub hostname: String,
+}
+
+/// IPv6 scan result.
+#[derive(Debug, Clone)]
+pub struct ScanResultV6 {
+    /// Hosts discovered.
+    pub hosts: Vec<HostV6>,
+    /// Number of neighbors found.
+    pub responding: u32,
+}
+
+/// Discover IPv6 hosts on the local link.
+///
+/// Sends an ICMPv6 Echo Request to ff02::1 (all-nodes link-local multicast).
+/// Every IPv6-capable host on the link should respond, and their responses
+/// populate the neighbor cache.  We then read the neighbor cache to build
+/// the host list.
+pub fn scan_link_v6() -> KernelResult<ScanResultV6> {
+    if SCANNING.swap(true, Ordering::Relaxed) {
+        return Err(KernelError::DeviceBusy);
+    }
+    let _guard = ScanGuard;
+    TOTAL_SCANS.fetch_add(1, Ordering::Relaxed);
+
+    // Send ping6 to all-nodes multicast — all IPv6 hosts should reply.
+    let _ = super::icmpv6::ping6(Ipv6Addr::ALL_NODES_LINK_LOCAL);
+    TOTAL_PROBES.fetch_add(1, Ordering::Relaxed);
+
+    // Poll to collect responses (give hosts time to reply).
+    for _ in 0..ARP_PROBE_POLLS {
+        super::poll();
+    }
+
+    // Read the neighbor cache for discovered hosts.
+    let entries = super::icmpv6::neighbor_cache_entries();
+    let mut hosts = Vec::new();
+
+    for entry in &entries {
+        // Skip our own address (compare MAC bytes directly).
+        let our_mac = super::interface::mac();
+        if entry.mac.0 == our_mac.0 {
+            continue;
+        }
+
+        // Try reverse DNS for IPv6.
+        let hostname = super::dns::reverse_resolve6(&entry.ip)
+            .unwrap_or_default();
+
+        hosts.push(HostV6 {
+            ip: entry.ip,
+            mac: format!("{}", entry.mac),
+            hostname,
+        });
+    }
+
+    let responding = hosts.len() as u32;
+    TOTAL_DISCOVERED.fetch_add(responding as u64, Ordering::Relaxed);
+
+    Ok(ScanResultV6 {
+        hosts,
+        responding,
+    })
+}
+
+/// Probe a single IPv6 address using NDP Neighbor Solicitation.
+///
+/// Returns the host information if the target responds.
+pub fn probe_host_v6(ip: Ipv6Addr) -> KernelResult<Option<HostV6>> {
+    TOTAL_PROBES.fetch_add(1, Ordering::Relaxed);
+
+    // Send Neighbor Solicitation.
+    let _ = super::icmpv6::send_neighbor_solicitation(ip);
+
+    // Also send a ping6 for extra chance of response.
+    let _ = super::icmpv6::ping6(ip);
+
+    // Poll for responses.
+    for _ in 0..ARP_PROBE_POLLS {
+        super::poll();
+    }
+
+    // Check if the target appeared in the neighbor cache.
+    match super::icmpv6::neighbor_lookup(&ip) {
+        Some(mac) => {
+            TOTAL_DISCOVERED.fetch_add(1, Ordering::Relaxed);
+
+            let hostname = super::dns::reverse_resolve6(&ip)
+                .unwrap_or_default();
+
+            Ok(Some(HostV6 {
+                ip,
+                mac: format!("{}", mac),
+                hostname,
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+/// List all known IPv6 neighbors (from the NDP cache).
+///
+/// Unlike `scan_link_v6`, this doesn't send any probes — it just reads
+/// the current neighbor cache state.
+pub fn hosts_v6() -> Vec<HostV6> {
+    let entries = super::icmpv6::neighbor_cache_entries();
+    let our_mac = super::interface::mac();
+    let mut hosts = Vec::new();
+
+    for entry in &entries {
+        if entry.mac.0 == our_mac.0 {
+            continue;
+        }
+        let hostname = super::dns::reverse_resolve6(&entry.ip)
+            .unwrap_or_default();
+        hosts.push(HostV6 {
+            ip: entry.ip,
+            mac: format!("{}", entry.mac),
+            hostname,
+        });
+    }
+
+    hosts
 }
 
 // ---------------------------------------------------------------------------

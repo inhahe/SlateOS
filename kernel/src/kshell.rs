@@ -36141,10 +36141,13 @@ fn cmd_ndisc(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "" | "help" => {
-            shell_println!("ndisc — network discovery (ARP scan)");
-            shell_println!("  ndisc scan          ARP scan local subnet");
-            shell_println!("  ndisc probe <IP>    Probe a specific host");
-            shell_println!("  ndisc hosts         Show hosts from ARP cache");
+            shell_println!("ndisc — network discovery (ARP/NDP scan)");
+            shell_println!("  ndisc scan          ARP scan local subnet (IPv4)");
+            shell_println!("  ndisc scan6         IPv6 link-local neighbor discovery");
+            shell_println!("  ndisc probe <IP>    Probe a specific host (IPv4)");
+            shell_println!("  ndisc probe6 <IP6>  NDP probe an IPv6 address");
+            shell_println!("  ndisc hosts         Show hosts from ARP cache (IPv4)");
+            shell_println!("  ndisc hosts6        Show IPv6 neighbors (NDP cache)");
             shell_println!("  ndisc subnet        Show subnet information");
             shell_println!("  ndisc status        Show scan statistics");
             shell_println!("  ndisc test          Run self-tests");
@@ -36159,6 +36162,25 @@ fn cmd_ndisc(args: &str) {
                     for host in &result.hosts {
                         let name = if host.hostname.is_empty() { "-" } else { &host.hostname };
                         shell_println!("{:<16}  {:<18}  {}", host.ip, host.mac, name);
+                    }
+                }
+                Err(e) => shell_println!("Scan failed: {:?}", e),
+            }
+        }
+        "scan6" => {
+            shell_println!("Scanning IPv6 link-local neighbors...");
+            match ndisc::scan_link_v6() {
+                Ok(result) => {
+                    if result.hosts.is_empty() {
+                        shell_println!("No IPv6 neighbors discovered");
+                    } else {
+                        shell_println!("{} IPv6 neighbor(s) found:\n", result.responding);
+                        shell_println!("{:<42}  {:<18}  {}", "IPv6 Address", "MAC Address", "Hostname");
+                        shell_println!("{:<42}  {:<18}  {}", "────────────────────────────────────────", "─────────────────", "────────");
+                        for host in &result.hosts {
+                            let name = if host.hostname.is_empty() { "-" } else { &host.hostname };
+                            shell_println!("{:<42}  {:<18}  {}", host.ip, host.mac, name);
+                        }
                     }
                 }
                 Err(e) => shell_println!("Scan failed: {:?}", e),
@@ -36184,6 +36206,30 @@ fn cmd_ndisc(args: &str) {
                 None => shell_println!("Usage: ndisc probe <IP>"),
             }
         }
+        "probe6" => {
+            use crate::net::ipv6::Ipv6Addr;
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            match Ipv6Addr::parse(ip_str) {
+                Some(ip6) => {
+                    shell_println!("Probing {} via NDP...", ip6);
+                    match ndisc::probe_host_v6(ip6) {
+                        Ok(Some(host)) => {
+                            shell_println!("  IPv6:     {}", host.ip);
+                            shell_println!("  MAC:      {}", host.mac);
+                            if !host.hostname.is_empty() {
+                                shell_println!("  Hostname: {}", host.hostname);
+                            }
+                        }
+                        Ok(None) => shell_println!("  No response from {}", ip6),
+                        Err(e) => shell_println!("  Probe failed: {:?}", e),
+                    }
+                }
+                None => {
+                    shell_println!("Usage: ndisc probe6 <IPv6>");
+                    shell_println!("  e.g.: ndisc probe6 fe80::1");
+                }
+            }
+        }
         "hosts" => {
             // Show ARP cache as host list.
             let (entries, count) = crate::net::arp::cache_entries();
@@ -36197,6 +36243,20 @@ fn cmd_ndisc(args: &str) {
                     if let Some(e) = entries.get(i) {
                         shell_println!("{:<16}  {:<18}  {}", e.ip, e.mac, e.ttl_secs);
                     }
+                }
+            }
+        }
+        "hosts6" => {
+            let hosts = ndisc::hosts_v6();
+            if hosts.is_empty() {
+                shell_println!("No IPv6 neighbors in NDP cache");
+            } else {
+                shell_println!("IPv6 Neighbors ({}):", hosts.len());
+                shell_println!("{:<42}  {:<18}  {}", "IPv6 Address", "MAC Address", "Hostname");
+                shell_println!("{:<42}  {:<18}  {}", "────────────────────────────────────────", "─────────────────", "────────");
+                for host in &hosts {
+                    let name = if host.hostname.is_empty() { "-" } else { &host.hostname };
+                    shell_println!("{:<42}  {:<18}  {}", host.ip, host.mac, name);
                 }
             }
         }

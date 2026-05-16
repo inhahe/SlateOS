@@ -458,6 +458,30 @@ pub fn neighbor_cache_count() -> usize {
     cache.iter().filter(|e| e.active).count()
 }
 
+/// A neighbor cache entry visible to other modules.
+#[derive(Debug, Clone)]
+pub struct NeighborInfo {
+    /// IPv6 address.
+    pub ip: Ipv6Addr,
+    /// Resolved MAC address.
+    pub mac: MacAddress,
+}
+
+/// Return all active entries in the neighbor cache.
+pub fn neighbor_cache_entries() -> Vec<NeighborInfo> {
+    let cache = NEIGHBOR_CACHE.lock();
+    let mut entries = Vec::new();
+    for entry in cache.iter() {
+        if entry.active {
+            entries.push(NeighborInfo {
+                ip: entry.ip,
+                mac: entry.mac,
+            });
+        }
+    }
+    entries
+}
+
 // ---------------------------------------------------------------------------
 // SLAAC — Stateless Address Autoconfiguration (RFC 4862)
 // ---------------------------------------------------------------------------

@@ -35157,6 +35157,63 @@ fn cmd_tftp(args: &str) {
                 Err(e) => shell_println!("Cannot read {}: {:?}", filename, e),
             }
         }
+        "get6" => {
+            // tftp get6 <ipv6-addr> <filename>
+            use crate::net::ipv6::Ipv6Addr;
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            let filename = parts.get(2).copied().unwrap_or("");
+            if ip_str.is_empty() || filename.is_empty() {
+                shell_println!("Usage: tftp get6 <server-ipv6> <filename>");
+                return;
+            }
+            let ip6 = match Ipv6Addr::parse(ip_str) {
+                Some(addr) => addr,
+                None => {
+                    shell_println!("Invalid IPv6 address: {}", ip_str);
+                    return;
+                }
+            };
+            shell_println!("Downloading {} from {} (IPv6) ...", filename, ip6);
+            match tftp::get_v6(ip6, filename) {
+                Ok(data) => {
+                    shell_println!("Received {} bytes", data.len());
+                    let local_path = alloc::format!("/{}", filename);
+                    match crate::fs::vfs::Vfs::write_file(&local_path, &data) {
+                        Ok(()) => shell_println!("Saved to {}", local_path),
+                        Err(e) => shell_println!("Save failed: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Download failed: {:?}", e),
+            }
+        }
+        "put6" => {
+            // tftp put6 <ipv6-addr> <filename>
+            use crate::net::ipv6::Ipv6Addr;
+            let ip_str = parts.get(1).copied().unwrap_or("");
+            let filename = parts.get(2).copied().unwrap_or("");
+            if ip_str.is_empty() || filename.is_empty() {
+                shell_println!("Usage: tftp put6 <server-ipv6> <filename>");
+                return;
+            }
+            let ip6 = match Ipv6Addr::parse(ip_str) {
+                Some(addr) => addr,
+                None => {
+                    shell_println!("Invalid IPv6 address: {}", ip_str);
+                    return;
+                }
+            };
+            let path = resolve_path(filename);
+            match crate::fs::vfs::Vfs::read_file(&path) {
+                Ok(data) => {
+                    shell_println!("Uploading {} ({} bytes) to {} (IPv6) ...", filename, data.len(), ip6);
+                    match tftp::put_v6(ip6, filename, &data) {
+                        Ok(()) => shell_println!("Upload complete"),
+                        Err(e) => shell_println!("Upload failed: {:?}", e),
+                    }
+                }
+                Err(e) => shell_println!("Cannot read {}: {:?}", filename, e),
+            }
+        }
         "serve" | "start" => {
             let root = parts.get(1).copied().unwrap_or("/");
             match tftp::start_server(root) {
@@ -35175,11 +35232,13 @@ fn cmd_tftp(args: &str) {
             }
         }
         "help" => {
-            shell_println!("tftp — Trivial File Transfer Protocol");
+            shell_println!("tftp — Trivial File Transfer Protocol (IPv4 + IPv6)");
             shell_println!("  show                Full status overview");
             shell_println!("  status              Summary statistics");
-            shell_println!("  get <ip> <file>     Download file from server");
-            shell_println!("  put <ip> <file>     Upload file to server");
+            shell_println!("  get <ip> <file>     Download file from server (IPv4)");
+            shell_println!("  put <ip> <file>     Upload file to server (IPv4)");
+            shell_println!("  get6 <ip6> <file>   Download file from server (IPv6)");
+            shell_println!("  put6 <ip6> <file>   Upload file to server (IPv6)");
             shell_println!("  serve [root]        Start TFTP server (default root: /)");
             shell_println!("  stop                Stop TFTP server");
             shell_println!("  test                Run self-tests");

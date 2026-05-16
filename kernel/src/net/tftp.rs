@@ -22,8 +22,10 @@
 //!
 //! ## Features
 //!
-//! - **Client**: read files from remote TFTP servers (`get`)
+//! - **Client**: read files from remote TFTP servers (`get` / `get_v6`)
+//! - **Client upload**: write files to remote servers (`put` / `put_v6`)
 //! - **Server**: serve files from the kernel VFS (`serve`)
+//! - **IPv6**: dual-stack client support via `get_v6` / `put_v6`
 //! - **Modes**: `octet` (binary) mode only (no `netascii`)
 //! - **Timeout**: 3-second retransmit with 5 retries
 //! - **Error handling**: TFTP error packets with standard error codes
@@ -45,6 +47,7 @@ use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
+use super::ipv6::Ipv6Addr;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -458,6 +461,233 @@ pub fn put(server_ip: Ipv4Addr, filename: &str, data: &[u8]) -> KernelResult<()>
                 let chunk = data.get(start..offset).unwrap_or(&[]);
                 let pkt = build_data(current_block, chunk);
                 let _ = super::udp::send(local_port, server_ip, server_port, &pkt);
+            }
+            last_sent_ns = now;
+        }
+
+        for _ in 0..1_000 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IPv6 client
+// ---------------------------------------------------------------------------
+
+/// Download a file from a TFTP server over IPv6.
+///
+/// Same protocol as [`get`] but uses UDP over IPv6 transport.
+pub fn get_v6(server_ip: Ipv6Addr, filename: &str) -> KernelResult<Vec<u8>> {
+    let local_port = ephemeral_port();
+    let handle = super::udp::bind(local_port)?;
+
+    // Send RRQ over IPv6.
+    let rrq = build_rrq(filename);
+    super::udp::send_v6(local_port, server_ip, TFTP_PORT, &rrq)?;
+
+    CLIENT_GETS.fetch_add(1, Ordering::Relaxed);
+
+    let mut file_data = Vec::with_capacity(BLOCK_SIZE * 16);
+    let mut expected_block: u16 = 1;
+    let mut server_port: u16 = 0; // TID: set from first DATA packet.
+    let mut retries = 0u32;
+    let mut last_sent_ns = crate::hrtimer::now_ns();
+
+    loop {
+        super::poll();
+
+        if let Some(dgram) = super::udp::recv_v6(handle) {
+            let opcode = parse_opcode(&dgram.data);
+
+            match opcode {
+                Some(OP_DATA) => {
+                    let block = parse_block_num(&dgram.data).unwrap_or(0);
+
+                    if server_port == 0 {
+                        server_port = dgram.src_port;
+                    } else if dgram.src_port != server_port {
+                        let err = build_error(ERR_UNDEFINED, "Wrong TID");
+                        let _ = super::udp::send_v6(local_port, dgram.src_ip, dgram.src_port, &err);
+                        continue;
+                    }
+
+                    if block == expected_block {
+                        if let Some(payload) = dgram.data.get(4..) {
+                            if file_data.len().saturating_add(payload.len()) > MAX_FILE_SIZE {
+                                let err = build_error(ERR_UNDEFINED, "File too large");
+                                let _ = super::udp::send_v6(local_port, server_ip, server_port, &err);
+                                super::udp::close(handle);
+                                return Err(KernelError::ResourceExhausted);
+                            }
+                            file_data.extend_from_slice(payload);
+
+                            let ack = build_ack(block);
+                            let _ = super::udp::send_v6(local_port, server_ip, server_port, &ack);
+                            last_sent_ns = crate::hrtimer::now_ns();
+                            retries = 0;
+
+                            // Short block = EOF.
+                            if payload.len() < BLOCK_SIZE {
+                                CLIENT_BYTES_RX.fetch_add(file_data.len() as u64, Ordering::Relaxed);
+                                super::udp::close(handle);
+                                return Ok(file_data);
+                            }
+
+                            expected_block = expected_block.wrapping_add(1);
+                        }
+                    } else if block < expected_block {
+                        // Duplicate — re-ACK.
+                        let ack = build_ack(block);
+                        let _ = super::udp::send_v6(local_port, server_ip, server_port, &ack);
+                    }
+                }
+                Some(OP_ERROR) => {
+                    let (code, msg) = parse_error(&dgram.data)
+                        .unwrap_or((0, String::from("Unknown error")));
+                    super::udp::close(handle);
+                    CLIENT_ERRORS.fetch_add(1, Ordering::Relaxed);
+                    crate::serial_println!("[tftp] Server error {}: {}", code, msg);
+                    return Err(match code {
+                        ERR_FILE_NOT_FOUND => KernelError::NotFound,
+                        ERR_ACCESS_VIOLATION => KernelError::PermissionDenied,
+                        _ => KernelError::InternalError,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Check for timeout.
+        let now = crate::hrtimer::now_ns();
+        if now.saturating_sub(last_sent_ns) >= RETRANSMIT_TIMEOUT_NS {
+            retries = retries.saturating_add(1);
+            if retries > MAX_RETRIES {
+                super::udp::close(handle);
+                CLIENT_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+                return Err(KernelError::TimedOut);
+            }
+
+            if expected_block == 1 && server_port == 0 {
+                let _ = super::udp::send_v6(local_port, server_ip, TFTP_PORT, &rrq);
+            } else {
+                let ack = build_ack(expected_block.wrapping_sub(1));
+                let _ = super::udp::send_v6(local_port, server_ip, server_port, &ack);
+            }
+            last_sent_ns = now;
+        }
+
+        for _ in 0..1_000 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Upload a file to a TFTP server over IPv6.
+///
+/// Same protocol as [`put`] but uses UDP over IPv6 transport.
+pub fn put_v6(server_ip: Ipv6Addr, filename: &str, data: &[u8]) -> KernelResult<()> {
+    let local_port = ephemeral_port();
+    let handle = super::udp::bind(local_port)?;
+
+    // Send WRQ over IPv6.
+    let wrq = build_wrq(filename);
+    super::udp::send_v6(local_port, server_ip, TFTP_PORT, &wrq)?;
+
+    CLIENT_PUTS.fetch_add(1, Ordering::Relaxed);
+
+    let mut server_port: u16 = 0;
+    let mut current_block: u16 = 0; // Waiting for ACK 0 (WRQ ack).
+    let mut offset: usize = 0;
+    let mut retries = 0u32;
+    let mut last_sent_ns = crate::hrtimer::now_ns();
+
+    loop {
+        super::poll();
+
+        if let Some(dgram) = super::udp::recv_v6(handle) {
+            let opcode = parse_opcode(&dgram.data);
+
+            match opcode {
+                Some(OP_ACK) => {
+                    let block = parse_block_num(&dgram.data).unwrap_or(0);
+
+                    if server_port == 0 {
+                        server_port = dgram.src_port;
+                    } else if dgram.src_port != server_port {
+                        let err = build_error(ERR_UNDEFINED, "Wrong TID");
+                        let _ = super::udp::send_v6(local_port, dgram.src_ip, dgram.src_port, &err);
+                        continue;
+                    }
+
+                    if block == current_block {
+                        current_block = current_block.wrapping_add(1);
+                        retries = 0;
+
+                        let end = offset.saturating_add(BLOCK_SIZE).min(data.len());
+                        let chunk = data.get(offset..end).unwrap_or(&[]);
+                        let pkt = build_data(current_block, chunk);
+                        let _ = super::udp::send_v6(local_port, server_ip, server_port, &pkt);
+                        last_sent_ns = crate::hrtimer::now_ns();
+
+                        let chunk_len = end.saturating_sub(offset);
+                        offset = end;
+
+                        // Last block sent (short block).
+                        if chunk_len < BLOCK_SIZE {
+                            for _ in 0..50_000 {
+                                super::poll();
+                                if let Some(ack_dgram) = super::udp::recv_v6(handle) {
+                                    if parse_opcode(&ack_dgram.data) == Some(OP_ACK)
+                                        && parse_block_num(&ack_dgram.data) == Some(current_block)
+                                    {
+                                        break;
+                                    }
+                                }
+                                for _ in 0..1_000 {
+                                    core::hint::spin_loop();
+                                }
+                            }
+                            CLIENT_BYTES_TX.fetch_add(data.len() as u64, Ordering::Relaxed);
+                            super::udp::close(handle);
+                            return Ok(());
+                        }
+                    }
+                }
+                Some(OP_ERROR) => {
+                    let (code, msg) = parse_error(&dgram.data)
+                        .unwrap_or((0, String::from("Unknown error")));
+                    super::udp::close(handle);
+                    CLIENT_ERRORS.fetch_add(1, Ordering::Relaxed);
+                    crate::serial_println!("[tftp] Server error {}: {}", code, msg);
+                    return Err(match code {
+                        ERR_FILE_NOT_FOUND => KernelError::NotFound,
+                        ERR_ACCESS_VIOLATION => KernelError::PermissionDenied,
+                        ERR_FILE_EXISTS => KernelError::InternalError,
+                        _ => KernelError::InternalError,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Timeout check.
+        let now = crate::hrtimer::now_ns();
+        if now.saturating_sub(last_sent_ns) >= RETRANSMIT_TIMEOUT_NS {
+            retries = retries.saturating_add(1);
+            if retries > MAX_RETRIES {
+                super::udp::close(handle);
+                CLIENT_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+                return Err(KernelError::TimedOut);
+            }
+
+            if current_block == 0 && server_port == 0 {
+                let _ = super::udp::send_v6(local_port, server_ip, TFTP_PORT, &wrq);
+            } else {
+                let start = offset.saturating_sub(BLOCK_SIZE).min(offset);
+                let chunk = data.get(start..offset).unwrap_or(&[]);
+                let pkt = build_data(current_block, chunk);
+                let _ = super::udp::send_v6(local_port, server_ip, server_port, &pkt);
             }
             last_sent_ns = now;
         }

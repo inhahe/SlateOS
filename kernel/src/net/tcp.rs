@@ -661,7 +661,7 @@ const EPHEMERAL_TCP_END: u16 = 65000;
 #[allow(clippy::arithmetic_side_effects)]
 fn alloc_port_for(
     conns: &[TcpConnection; MAX_CONNECTIONS],
-    ns_id: NetNsId,
+    _ns_id: NetNsId,
     remote_ip: IpAddr,
     remote_port: u16,
 ) -> KernelResult<u16> {
@@ -670,10 +670,13 @@ fn alloc_port_for(
     let mut candidate = start;
 
     loop {
-        // Check if this candidate creates a duplicate 5-tuple (ns + 4-tuple).
+        // Check globally (all namespaces) because ip_send_tcp() routes all
+        // outgoing TCP through ROOT_NS — all connections share the host's
+        // single IP on the wire.  A per-namespace check would allow two
+        // containers to allocate the same ephemeral port for the same remote,
+        // creating a 4-tuple collision on the physical network.
         let conflicts = conns.iter().any(|c| {
             c.active
-                && c.ns_id == ns_id
                 && c.local_port == candidate
                 && c.remote_ip == remote_ip
                 && c.remote_port == remote_port
@@ -3456,13 +3459,21 @@ fn handle_incoming_syn(
     option_bytes: &[u8],
     syn_flags: u8,
 ) -> KernelResult<()> {
-    // Check if we have a listener for this port in this namespace.
-    let listener_exists = {
+    // Find the listener for this port.
+    // Same ns_id logic as connection lookup: physical NIC (ROOT_NS) can
+    // reach listeners in any namespace; veth-delivered SYNs are restricted.
+    // Returns the listener's actual ns_id so accepted connections inherit
+    // the correct namespace (not ROOT_NS from the physical NIC path).
+    let listener_ns = {
         let listeners = LISTENERS.lock();
-        listeners.iter().any(|l| l.active && l.ns_id == ns_id && l.port == local_port)
+        listeners.iter().find(|l| {
+            l.active
+                && (ns_id == crate::netns::ROOT_NS || l.ns_id == ns_id)
+                && l.port == local_port
+        }).map(|l| l.ns_id)
     };
 
-    if !listener_exists {
+    let Some(effective_ns) = listener_ns else {
         // No listener — send RST.
         let rst_ack = remote_seq.wrapping_add(1);
         let _ = send_segment(
@@ -3470,7 +3481,7 @@ fn handle_incoming_syn(
             0, rst_ack, TCP_RST | TCP_ACK, &[],
         );
         return Ok(());
-    }
+    };
 
     // Parse TCP options from the SYN.
     let syn_opts = parse_tcp_options(option_bytes);
@@ -3511,7 +3522,7 @@ fn handle_incoming_syn(
 
         let conn = &mut conns[slot];
         conn.active = true;
-        conn.ns_id = ns_id;
+        conn.ns_id = effective_ns;
         conn.state = TcpState::SynReceived;
         conn.last_error = TCP_ERR_NONE; // Server-side connections start clean.
         conn.local_port = local_port;
@@ -3767,11 +3778,19 @@ fn process_tcp_common(ns_id: NetNsId, remote_addr: IpAddr, data: &[u8], ip_ecn_c
         &[]
     };
 
-    // Find matching connection in this namespace.
+    // Find matching connection.
+    //
+    // When packets arrive from the physical NIC (ns_id == ROOT_NS), we
+    // search ALL namespaces because ip_send_tcp() sends all outgoing TCP
+    // through the host's single IP regardless of the connection's namespace.
+    // Replies arrive on the host IP and must match container connections too.
+    //
+    // When packets arrive via veth (ns_id != ROOT_NS), we restrict the
+    // lookup to that specific namespace (veth traffic is namespace-isolated).
     let mut conns = CONNECTIONS.lock();
     let conn_idx = conns.iter().position(|c| {
         c.active
-            && c.ns_id == ns_id
+            && (ns_id == crate::netns::ROOT_NS || c.ns_id == ns_id)
             && c.local_port == dst_port
             && c.remote_ip == remote_addr
             && c.remote_port == src_port

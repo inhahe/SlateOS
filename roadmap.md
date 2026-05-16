@@ -1423,7 +1423,23 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [ ] NVIDIA: defer until open-source driver matures, or use Linux compat layer later
 
 ### 3.2 Graphics stack
-- [ ] DRM/KMS equivalent (kernel mode setting, GPU memory management)
+- [-] DRM/KMS equivalent (kernel mode setting, GPU memory management)
+  - [x] DRM core: object model (DrmObjectId, device registry, per-device object tables)
+  - [x] Connector, CRTC, Plane, Encoder abstractions
+  - [x] PixelFormat enum (XRGB8888, ARGB8888, XBGR8888, ABGR8888, RGB565)
+  - [x] DrmMode (resolution + timing, mode name formatting)
+  - [x] GEM buffer objects (system-RAM backed, frame allocator, zeroed on alloc)
+  - [x] Framebuffer objects (GEM-backed, format metadata)
+  - [x] Atomic modesetting data structures (AtomicState, CrtcState, PlaneState, ConnectorState)
+  - [x] Property system (typed enum for CRTC/plane/connector properties)
+  - [x] LimineBackend: bootloader framebuffer (enumerate, gem_create/destroy/mmap, page_flip, flush_region)
+  - [x] VirtioGpuBackend: paravirtualized GPU (enumerate, gem_create/destroy/mmap, page_flip via virtio-gpu driver)
+  - [x] Enum dispatch for hot-path performance (no dyn Trait overhead)
+  - [x] Self-tests (6 tests: device registration, enumeration, GEM lifecycle, FB lifecycle, display size, format utils)
+  - [ ] Migrate compositor from direct fb.rs to DRM API (double-buffered page flip)
+  - [ ] DRM syscalls (1000-1099 range) for userspace GPU access
+  - [ ] EDID parsing for real hardware mode detection
+  - [ ] Hotplug detection framework
 - [ ] Vulkan loader and basic GPU command submission
 - [ ] OpenGL via Mesa (port Mesa's Vulkan and OpenGL drivers)
 - [ ] 2D drawing library: Vello (Rust-native, GPU compute shaders) + HarfBuzz via FFI for complex text shaping

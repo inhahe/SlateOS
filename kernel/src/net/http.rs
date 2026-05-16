@@ -1257,7 +1257,7 @@ fn find_crlf(data: &[u8]) -> Option<usize> {
 /// Minimal Base64 encoder (RFC 4648).
 ///
 /// We only need encoding (for Authorization header), not decoding.
-fn base64_encode(data: &[u8]) -> String {
+pub fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

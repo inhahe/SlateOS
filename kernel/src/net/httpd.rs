@@ -92,6 +92,12 @@ pub static DOC_ROOT: spin::Mutex<&str> = spin::Mutex::new("/");
 /// Active listener handle (0 = none).
 static LISTENER: spin::Mutex<usize> = spin::Mutex::new(0);
 
+/// WebSocket message handler callback.
+///
+/// Defaults to the echo handler.  Set via `set_ws_handler()`.
+static WS_HANDLER: spin::Mutex<super::websocket::WsMessageHandler> =
+    spin::Mutex::new(super::websocket::echo_handler);
+
 // ---------------------------------------------------------------------------
 // MIME type detection
 // ---------------------------------------------------------------------------
@@ -436,6 +442,15 @@ fn handle_connection(conn_handle: usize) {
         return;
     }
 
+    // Check for WebSocket upgrade request before normal HTTP handling.
+    if super::websocket::is_upgrade_request(&request_data) {
+        let handler = WS_HANDLER.lock();
+        if let Err(e) = super::websocket::handle_upgrade(conn_handle, &request_data, *handler) {
+            serial_println!("[httpd] WebSocket upgrade failed: {:?}", e);
+        }
+        return;
+    }
+
     // Parse the HTTP request.
     let req = match parse_request(&request_data) {
         Some(r) => r,
@@ -590,6 +605,15 @@ pub fn port() -> u16 {
 /// Set the document root path.
 pub fn set_doc_root(path: &'static str) {
     *DOC_ROOT.lock() = path;
+}
+
+/// Set the WebSocket message handler callback.
+///
+/// When a client sends a WebSocket upgrade request to the HTTP server,
+/// the server will call this handler for each incoming message.
+/// Default is `echo_handler` (echoes text/binary back).
+pub fn set_ws_handler(handler: super::websocket::WsMessageHandler) {
+    *WS_HANDLER.lock() = handler;
 }
 
 /// Accept and handle pending connections (non-blocking).

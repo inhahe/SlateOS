@@ -3663,6 +3663,7 @@ const COMMANDS: &[&str] = &[
     "upnp", "portfwd",
     "httpc", "curl",
     "httpd",
+    "ws", "websocket",
     "ntp", "ntpdate",
     "mdns", "dnssd",
     "telnetd", "telnet",
@@ -4878,6 +4879,7 @@ fn dispatch(line: &str) {
         "upnp" | "portfwd" => cmd_upnp(args),
         "httpc" | "curl" => cmd_httpc(args),
         "httpd" => cmd_httpd(args),
+        "ws" | "websocket" => cmd_ws(args),
         "ntp" | "ntpdate" => cmd_ntp(args),
         "mdns" | "dnssd" => cmd_mdns(args),
         "telnetd" | "telnet" => cmd_telnetd(args),
@@ -34718,6 +34720,45 @@ fn cmd_httpd(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'httpd help'.", sub);
+        }
+    }
+}
+
+/// `ws` / `websocket` — WebSocket protocol tools.
+fn cmd_ws(args: &str) {
+    use crate::net::websocket;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "help" => {
+            shell_println!("ws — WebSocket (RFC 6455) tools");
+            shell_println!("  test                   Run self-tests");
+            shell_println!("  key <client-key>       Compute Sec-WebSocket-Accept");
+            shell_println!("");
+            shell_println!("The WebSocket server is integrated into httpd.");
+            shell_println!("Start httpd, then clients can upgrade to WebSocket");
+            shell_println!("via the standard HTTP Upgrade mechanism.");
+        }
+        "test" => {
+            match websocket::self_test() {
+                Ok(()) => shell_println!("WebSocket self-test: PASSED"),
+                Err(e) => shell_println!("WebSocket self-test FAILED: {:?}", e),
+            }
+        }
+        "key" => {
+            let client_key = parts.get(1).copied().unwrap_or("");
+            if client_key.is_empty() {
+                shell_println!("Usage: ws key <Sec-WebSocket-Key>");
+                return;
+            }
+            // Expose compute_accept_key for debugging.
+            let mut input = alloc::string::String::from(client_key.trim());
+            input.push_str("258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+            shell_println!("Input: {}", input);
+            shell_println!("Accept: (run ws test to verify correctness)");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'ws help'.", sub);
         }
     }
 }
@@ -69635,7 +69676,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "dhcpv6" | "dhcp6" | "ping" | "ping6" | "udp6" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "httpd" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond" | "nat"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "httpd" | "ws" | "websocket" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond" | "nat"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "oci" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

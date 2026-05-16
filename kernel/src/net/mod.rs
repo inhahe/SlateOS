@@ -58,6 +58,7 @@ pub mod traceroute;
 pub mod upnp;
 pub mod veth;
 pub mod vlan;
+pub mod websocket;
 pub mod wol;
 
 use alloc::vec::Vec;
@@ -317,6 +318,7 @@ pub fn self_test() -> KernelResult<()> {
     // which initializes later in the boot sequence.
 
     httpd::self_test()?;
+    websocket::self_test()?;
 
     crate::serial_println!("[net] Network self-test PASSED");
     Ok(())

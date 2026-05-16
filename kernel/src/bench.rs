@@ -703,6 +703,14 @@ pub fn run_all() {
     bench_net_dns_build_query();
     bench_net_tcp_conn_lookup();
 
+    // --- Veth and per-namespace network benchmarks ---
+    // These require veth::init() and netns::init() to have completed,
+    // which they have by the time run_all() executes during boot.
+    bench_net_veth_send();
+    bench_net_veth_recv();
+    bench_net_veth_roundtrip();
+    bench_net_ns_arp_lookup();
+
     serial_println!("[bench] === Benchmarks complete ===");
 }
 
@@ -2374,6 +2382,236 @@ fn bench_net_tcp_conn_lookup() {
 
     serial_println!(
         "[bench]   net_tcp_conn_table_scan: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Benchmark veth pair send (TX → peer RX enqueue).
+///
+/// Creates a veth pair, brings both ends up, then measures the cost of
+/// sending a minimal Ethernet frame from end A to end B.  This is the
+/// hot path for container-to-host networking: lock TABLE → validate
+/// state → record TX stats → enqueue on peer RX.
+///
+/// Between iterations we drain the peer's RX queue every 64 frames to
+/// avoid hitting the VETH_QUEUE_DEPTH limit.
+fn bench_net_veth_send() {
+    use crate::net::veth;
+
+    if !veth::is_initialized() {
+        serial_println!("[bench]   net_veth_send: SKIPPED (veth not initialized)");
+        return;
+    }
+
+    // Create a pair and bring both ends up.
+    let pair_id = match veth::create_pair() {
+        Ok(id) => id,
+        Err(_) => {
+            serial_println!("[bench]   net_veth_send: SKIPPED (could not create pair)");
+            return;
+        }
+    };
+    let _ = veth::set_up(pair_id, veth::VethEndId::A, true);
+    let _ = veth::set_up(pair_id, veth::VethEndId::B, true);
+
+    // Minimal valid Ethernet frame (14-byte header + 46-byte payload = 60 bytes).
+    let frame_template: alloc::vec::Vec<u8> = {
+        let mut f = alloc::vec![0u8; 60];
+        // Dst MAC (broadcast).
+        f[0] = 0xFF; f[1] = 0xFF; f[2] = 0xFF;
+        f[3] = 0xFF; f[4] = 0xFF; f[5] = 0xFF;
+        // Src MAC (arbitrary locally-administered).
+        f[6] = 0x02; f[7] = 0x00; f[8] = 0x00;
+        f[9] = 0x00; f[10] = 0x00; f[11] = 0x01;
+        // EtherType: IPv4 (0x0800).
+        f[12] = 0x08; f[13] = 0x00;
+        f
+    };
+
+    let mut drain_counter: u32 = 0;
+    let result = run("net_veth_send", 2000, || {
+        let frame = frame_template.clone();
+        let _ = core::hint::black_box(
+            veth::send(pair_id, veth::VethEndId::A, frame)
+        );
+        drain_counter = drain_counter.wrapping_add(1);
+        if drain_counter & 63 == 0 {
+            // Drain to keep the queue from filling up.
+            while veth::recv(pair_id, veth::VethEndId::B).is_some() {}
+        }
+    });
+
+    // Drain remaining frames.
+    while veth::recv(pair_id, veth::VethEndId::B).is_some() {}
+
+    // Cleanup.
+    let _ = veth::set_up(pair_id, veth::VethEndId::A, false);
+    let _ = veth::set_up(pair_id, veth::VethEndId::B, false);
+    let _ = veth::destroy_pair(pair_id);
+
+    serial_println!(
+        "[bench]   net_veth_send: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Benchmark veth pair recv (dequeue from RX queue).
+///
+/// Pre-fills one endpoint's RX queue with frames, then measures the
+/// cost of dequeuing them one at a time.  This is the other half of
+/// the veth data path: lock TABLE → find pair/end → pop_front.
+fn bench_net_veth_recv() {
+    use crate::net::veth;
+
+    if !veth::is_initialized() {
+        serial_println!("[bench]   net_veth_recv: SKIPPED (veth not initialized)");
+        return;
+    }
+
+    let pair_id = match veth::create_pair() {
+        Ok(id) => id,
+        Err(_) => {
+            serial_println!("[bench]   net_veth_recv: SKIPPED (could not create pair)");
+            return;
+        }
+    };
+    let _ = veth::set_up(pair_id, veth::VethEndId::A, true);
+    let _ = veth::set_up(pair_id, veth::VethEndId::B, true);
+
+    // Minimal Ethernet frame.
+    let frame_template: alloc::vec::Vec<u8> = {
+        let mut f = alloc::vec![0u8; 60];
+        f[0] = 0xFF; f[1] = 0xFF; f[2] = 0xFF;
+        f[3] = 0xFF; f[4] = 0xFF; f[5] = 0xFF;
+        f[6] = 0x02; f[12] = 0x08;
+        f
+    };
+
+    // We need to keep the queue topped up.  Strategy: pre-fill before
+    // each batch of measurements, then measure dequeue cost.
+    // The `run()` harness does warmup+measured iterations.  We pre-fill
+    // the queue before calling run and refill periodically.
+    let mut refill_counter: u32 = 0;
+    let result = run("net_veth_recv", 2000, || {
+        // Re-fill if queue is empty (checked every iteration to ensure
+        // we always have something to dequeue).
+        refill_counter = refill_counter.wrapping_add(1);
+        if refill_counter & 63 == 0 || refill_counter <= 1 {
+            // Push up to 128 frames.
+            for _ in 0..128 {
+                let frame = frame_template.clone();
+                if veth::send(pair_id, veth::VethEndId::A, frame).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = core::hint::black_box(
+            veth::recv(pair_id, veth::VethEndId::B)
+        );
+    });
+
+    // Cleanup.
+    while veth::recv(pair_id, veth::VethEndId::B).is_some() {}
+    let _ = veth::set_up(pair_id, veth::VethEndId::A, false);
+    let _ = veth::set_up(pair_id, veth::VethEndId::B, false);
+    let _ = veth::destroy_pair(pair_id);
+
+    serial_println!(
+        "[bench]   net_veth_recv: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Benchmark veth send+recv round-trip (TX on A → RX on B).
+///
+/// Measures the complete data path for a single frame traversing a
+/// veth pair: send on A enqueues on B, recv on B dequeues.  This is
+/// the full cost of a single packet crossing from one namespace to
+/// another.
+fn bench_net_veth_roundtrip() {
+    use crate::net::veth;
+
+    if !veth::is_initialized() {
+        serial_println!("[bench]   net_veth_roundtrip: SKIPPED (veth not initialized)");
+        return;
+    }
+
+    let pair_id = match veth::create_pair() {
+        Ok(id) => id,
+        Err(_) => {
+            serial_println!("[bench]   net_veth_roundtrip: SKIPPED (could not create pair)");
+            return;
+        }
+    };
+    let _ = veth::set_up(pair_id, veth::VethEndId::A, true);
+    let _ = veth::set_up(pair_id, veth::VethEndId::B, true);
+
+    let frame_template: alloc::vec::Vec<u8> = {
+        let mut f = alloc::vec![0u8; 60];
+        f[0] = 0xFF; f[1] = 0xFF; f[2] = 0xFF;
+        f[3] = 0xFF; f[4] = 0xFF; f[5] = 0xFF;
+        f[6] = 0x02; f[12] = 0x08;
+        f
+    };
+
+    let result = run("net_veth_roundtrip", 2000, || {
+        let frame = frame_template.clone();
+        let _ = veth::send(pair_id, veth::VethEndId::A, frame);
+        let _ = core::hint::black_box(
+            veth::recv(pair_id, veth::VethEndId::B)
+        );
+    });
+
+    // Cleanup.
+    let _ = veth::set_up(pair_id, veth::VethEndId::A, false);
+    let _ = veth::set_up(pair_id, veth::VethEndId::B, false);
+    let _ = veth::destroy_pair(pair_id);
+
+    serial_println!(
+        "[bench]   net_veth_roundtrip: min {}ns ({}cycles)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Benchmark per-namespace ARP cache lookup.
+///
+/// Measures the cost of looking up an IP in a non-root namespace's ARP
+/// cache.  This is the critical path for container packet forwarding:
+/// the namespace needs to resolve a destination MAC before it can send
+/// a frame on its veth endpoint.
+fn bench_net_ns_arp_lookup() {
+    use crate::net::arp;
+
+    if !crate::netns::is_initialized() {
+        serial_println!("[bench]   net_ns_arp_lookup: SKIPPED (netns not initialized)");
+        return;
+    }
+
+    // Create a temporary namespace.
+    let ns_id = match crate::netns::create() {
+        Ok(id) => id,
+        Err(_) => {
+            serial_println!("[bench]   net_ns_arp_lookup: SKIPPED (could not create ns)");
+            return;
+        }
+    };
+
+    // Initialize per-namespace ARP cache and seed it.
+    arp::ns_init(ns_id);
+    let target_ip = crate::net::interface::Ipv4Addr([10, 0, 0, 1]);
+    let target_mac = crate::virtio::net::MacAddress([0x02, 0x00, 0x00, 0x00, 0xBE, 0x01]);
+    arp::ns_insert(ns_id, target_ip, target_mac);
+
+    let result = run("net_ns_arp_lookup", 2000, || {
+        let _ = core::hint::black_box(arp::ns_lookup(ns_id, target_ip));
+    });
+
+    // Cleanup.
+    arp::ns_destroy(ns_id);
+    let _ = crate::netns::delete(ns_id);
+
+    serial_println!(
+        "[bench]   net_ns_arp_lookup: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
 }

@@ -1349,7 +1349,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] shutdown half-close: delegates to SYS_TCP_SHUTDOWN for proper SHUT_RD/SHUT_WR/SHUT_RDWR semantics
   - [x] Error translation fix: translate_net_error() aligned to actual KernelError enum values
 - [-] Translate POSIX calls to native syscalls
-- [ ] /proc, /sys equivalents (for programs that need them)
+- [x] /proc, /sys equivalents (for programs that need them)
+  - [x] procfs mounted at /proc: 10K+ lines, 70+ root files (version, uptime, meminfo, cpuinfo, stat, vmstat, buddyinfo, net, etc.) + per-PID directories (status, cmdline, stat, maps, caps)
+  - [x] sysfs mounted at /sys: kernel info, hostname (r/w), sysctl params (r/w), PCI devices, fs cache stats
 - [ ] POSIX signals → translate to native IPC messages
 
 ### 2.6 Init / service manager

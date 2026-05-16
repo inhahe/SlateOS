@@ -96,6 +96,7 @@ mod ioapic;
 mod irq_storm;
 mod irqbalance;
 mod ipc;
+mod json;
 mod kcounters;
 mod kdiag;
 mod kevent;
@@ -122,6 +123,7 @@ mod net;
 mod netns;
 mod numa;
 mod nvme;
+mod oci;
 mod pci;
 mod pciids;
 mod pcspk;
@@ -1339,6 +1341,18 @@ extern "C" fn kmain() -> ! {
     // into a single lifecycle with create/start/stop/delete state machine.
     container::init();
     container::self_test();
+
+    // Step 22e⅞++++p10a: JSON parser self-test.
+    // Minimal recursive-descent JSON parser for OCI image manifests.
+    if let Err(e) = json::self_test() {
+        serial_println!("[WARN] JSON self-test failed: {:?}", e);
+    }
+
+    // Step 22e⅞++++p10b: OCI image format parser self-test.
+    // Parses OCI image index, manifest, config, and verifies digests.
+    if let Err(e) = oci::self_test() {
+        serial_println!("[WARN] OCI self-test failed: {:?}", e);
+    }
 
     // Step 22e⅞++++p10: Syscall filter (seccomp-equivalent) init + self-test.
     // Per-process bitmap-based syscall allow/deny lists for container

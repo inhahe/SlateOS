@@ -469,6 +469,17 @@ pub struct Task {
     /// this group; the memory allocator checks frame limits.
     pub cgroup_id: crate::cgroup::CgroupId,
 
+    /// Network namespace this task belongs to.
+    ///
+    /// Determines which network namespace is used for TCP/UDP operations
+    /// (bind, connect, etc.).  Default: 0 (root namespace — host network).
+    ///
+    /// Set when a process is added to a container via
+    /// [`crate::container::add_process`].  Syscall handlers read this via
+    /// [`super::current_task_net_ns`] to pass to the namespace-aware
+    /// socket API.
+    pub net_ns: crate::netns::NetNsId,
+
     /// If this task's stack was allocated via the kstack allocator
     /// (with hardware guard pages), this holds the slot index for
     /// deallocation.  `None` means the stack uses legacy HHDM-based
@@ -683,6 +694,7 @@ impl Task {
             cpu_period_used: 0,
             throttled: false,
             cgroup_id: crate::cgroup::ROOT_CGROUP,
+            net_ns: crate::netns::ROOT_NS,
             kstack_slot: None,
             fpu_state: FpuState::new_default(),
         }
@@ -752,6 +764,7 @@ impl Task {
             cpu_period_used: 0,
             throttled: false,
             cgroup_id: crate::cgroup::ROOT_CGROUP,
+            net_ns: crate::netns::ROOT_NS,
             kstack_slot: None,
             fpu_state: FpuState::new_default(),
         }
@@ -870,6 +883,7 @@ impl Task {
             cpu_period_used: 0,
             throttled: false,
             cgroup_id: crate::cgroup::ROOT_CGROUP,
+            net_ns: crate::netns::ROOT_NS,
             kstack_slot,
             fpu_state: FpuState::new_default(),
         })

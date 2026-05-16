@@ -643,7 +643,9 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
 
 /// Register a process as belonging to a container.
 ///
-/// Increments process counts in all the container's namespaces.
+/// Increments process counts in all the container's namespaces and sets
+/// the task's network namespace so syscall-level socket operations
+/// (TCP connect/bind, UDP bind) use the container's isolated network.
 pub fn add_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
     let (pid_ns, user_ns, net_ns, cgroup_id) = with_table(|table| {
         let idx = id as usize;
@@ -665,6 +667,10 @@ pub fn add_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
     let _ = crate::userns::attach_process(user_ns);
     let _ = crate::netns::attach_process(net_ns);
     let _ = crate::cgroup::attach_task(cgroup_id);
+
+    // Set the task's net_ns field so syscall handlers automatically use
+    // this container's network namespace for socket operations.
+    let _ = crate::sched::set_task_net_ns(global_pid, net_ns);
 
     Ok(())
 }
@@ -690,6 +696,10 @@ pub fn remove_process(id: ContainerId, global_pid: u64) -> KernelResult<()> {
     let _ = crate::userns::detach_process(user_ns);
     let _ = crate::netns::detach_process(net_ns);
     let _ = crate::cgroup::detach_task(cgroup_id);
+
+    // Reset the task's net_ns to root so any remaining socket operations
+    // revert to the host namespace.
+    let _ = crate::sched::set_task_net_ns(global_pid, crate::netns::ROOT_NS);
 
     Ok(())
 }
@@ -934,6 +944,39 @@ pub fn self_test() {
     }
     serial_println!("[container]   Veth auto-setup: OK");
 
+    // Test 16: add_process sets task's net_ns, remove_process resets it.
+    {
+        let net_cfg2 = ContainerConfig::new("test-net-ns-propagation")
+            .network([10, 99, 0, 2], Some([255, 255, 255, 0]), Some([10, 99, 0, 1]), None);
+        let ct_ns = create(&net_cfg2).expect("create ns-propagation ct");
+        let ci_ns = info(ct_ns).unwrap();
+
+        // The container's net_ns should be non-root.
+        assert!(ci_ns.net_ns > 0, "container should have non-root net_ns");
+
+        // Use the current task as a guinea pig.
+        let task_id = crate::sched::current_task_id();
+        let original_ns = crate::sched::current_task_net_ns();
+
+        // Add the current task to the container — net_ns should propagate.
+        add_process(ct_ns, task_id).expect("add_process");
+        let after_add = crate::sched::current_task_net_ns();
+        assert_eq!(after_add, ci_ns.net_ns,
+            "task net_ns should match container's net_ns after add_process");
+
+        // Remove the process — net_ns should revert to ROOT_NS.
+        remove_process(ct_ns, task_id).expect("remove_process");
+        let after_remove = crate::sched::current_task_net_ns();
+        assert_eq!(after_remove, crate::netns::ROOT_NS,
+            "task net_ns should revert to ROOT_NS after remove_process");
+
+        // Restore original ns (should already be ROOT_NS but be explicit).
+        let _ = crate::sched::set_task_net_ns(task_id, original_ns);
+
+        delete(ct_ns).expect("cleanup ns-propagation ct");
+    }
+    serial_println!("[container]   Net NS task propagation: OK");
+
     // Cleanup.
     stop(ct2).ok(); // may already be stopped
     stop(ct3).ok();
@@ -943,5 +986,5 @@ pub fn self_test() {
     assert_eq!(active_count(), 0);
     serial_println!("[container]   Cleanup: OK");
 
-    serial_println!("[container] Self-test PASSED (15 tests)");
+    serial_println!("[container] Self-test PASSED (16 tests)");
 }

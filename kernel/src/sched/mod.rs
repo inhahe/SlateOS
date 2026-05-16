@@ -1081,6 +1081,41 @@ pub fn current_task_cgroup() -> crate::cgroup::CgroupId {
     crate::cgroup::ROOT_CGROUP
 }
 
+/// Get the network namespace of the current task (non-blocking).
+///
+/// Returns [`ROOT_NS`](crate::netns::ROOT_NS) if the scheduler lock is
+/// contended or the task isn't found.  Designed for use in syscall
+/// handlers where the task needs namespace-aware socket operations.
+#[must_use]
+pub fn current_task_net_ns() -> crate::netns::NetNsId {
+    let task_id = load_current_task();
+    if let Some(state) = SCHED.try_lock() {
+        if let Some(task) = state.tasks.get(&task_id) {
+            return task.net_ns;
+        }
+    }
+    crate::netns::ROOT_NS
+}
+
+/// Set the network namespace for a specific task.
+///
+/// Used by the container subsystem to assign a task to a container's
+/// network namespace after creation.
+///
+/// Returns `Err(InvalidArgument)` if the task doesn't exist.
+pub fn set_task_net_ns(
+    task_id: TaskId,
+    ns_id: crate::netns::NetNsId,
+) -> KernelResult<()> {
+    let mut state = SCHED.lock();
+    if let Some(task) = state.tasks.get_mut(&task_id) {
+        task.net_ns = ns_id;
+        Ok(())
+    } else {
+        Err(KernelError::InvalidArgument)
+    }
+}
+
 /// Block the current task and yield to the next runnable task.
 ///
 /// The current task is set to [`Blocked`](TaskState::Blocked) and is

@@ -1702,7 +1702,7 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
         - [x] 10 self-tests: create/destroy, MAC generation, loopback, down drop, queue full, move, move-requires-down, stats, multiple pairs, bidirectional
       - [x] Per-namespace firewall rules (16 rules, 32 conntrack entries per namespace; ns_init/ns_enable/ns_add_rule/ns_check_outbound_ns/ns_check_inbound_ns API; 3 self-tests for isolation, conntrack, lifecycle)
       - [x] IPv6 firewall (Rule6/ConntrackEntry6 with independent enable/policy; check_inbound_v6/check_outbound_v6 wired into IPv6 processing; ip6_matches u128 prefix comparison; Protocol::Icmp maps to ICMPv6 for v6 rules; fw on6/off6/policy6/allow6/deny6/remove6/clear6 commands; 5 self-tests)
-      - [ ] Wire process→container→net_ns into socket layer callers
+      - [x] Wire process→container→net_ns into socket layer callers
   - [x] Mount namespace: separate mount point trees (implemented as fs::mount_ns)
   - [x] User namespace: UID/GID remapping for rootless containers
     - [x] IdMapping ranges (up to 16 per namespace) translate inner ↔ outer IDs
@@ -1748,7 +1748,7 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] State machine: Created → Running → Stopped/Failed → deleted
     - [x] Process tracking across all sub-resources
     - [x] kshell `container`/`ct` command: list/create/delete/start/stop/info/test
-    - [x] 15 self-tests (added veth auto-setup test)
+    - [x] 16 self-tests (veth auto-setup, net_ns task propagation)
     - [x] Automatic veth pair creation for networked containers
       - [x] setup_container_veth(): create pair, move end B to container NS, bring up both
       - [x] Veth pair ID stored in Container and ContainerInfo for lifecycle tracking
@@ -1759,6 +1759,12 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] 5-tuple connection lookup (ns_id + local_port + remote_ip + remote_port)
     - [x] Same port bindable in different namespaces
     - [x] 30+ callers updated; self-tests for namespace isolation
+  - [x] Process→container→net_ns wiring into syscall layer
+    - [x] net_ns field on Task struct (sched/task.rs), default ROOT_NS
+    - [x] current_task_net_ns() / set_task_net_ns() scheduler helpers
+    - [x] container::add_process() sets task's net_ns, remove_process() resets it
+    - [x] SYS_TCP_CONNECT, SYS_TCP_BIND, SYS_UDP_BIND use current_task_net_ns()
+    - [x] Self-test: net_ns propagation verified on add/remove
   - [x] Syscall filter (seccomp equivalent, kernel/src/scfilter.rs)
     - [x] Bitmap-based O(1) per-syscall check (1000-bit bitmap)
     - [x] Allow-all and deny-all modes, per-process filters

@@ -19,9 +19,11 @@ popen/pclose → DONE: Full implementation using posix_spawnp + pipe + fd_map.
 Per-namespace ARP → DONE (veth pairs + per-namespace ARP cache with 3 self-tests)
 TCP/UDP namespace-aware → DONE (ns_id field on TcpConnection/TcpListener/UdpSocket,
   all public APIs take ns_id, lookups filter by namespace, self-tests for isolation)
-Wire process→container→net_ns → cross-zone (kernel-process + kernel-ipc)
-  Net-zone side is ready: TCP/UDP are namespace-aware.  Remaining: kernel-process
-  zone adds ns_id to PCB, syscall handlers read pcb.net_ns instead of ROOT_NS.
+Wire process→container→net_ns → DONE
+  net_ns field added to Task struct, current_task_net_ns() / set_task_net_ns()
+  scheduler helpers.  container::add_process() sets task's net_ns, remove_process()
+  resets to ROOT_NS.  SYS_TCP_CONNECT, SYS_TCP_BIND, SYS_UDP_BIND now use
+  current_task_net_ns().  Self-test verifies propagation on add/remove.
 
 Net improvements (not blocked, could still do):
 (DONE) TCP keepalive probes — RFC 1122, 75s idle, 10s interval, 9 probes.
@@ -200,9 +202,9 @@ Remaining net improvements (diminishing returns):
   Per-namespace ARP cache: DONE. 16-entry per-NS cache with ns_init/
   ns_destroy/ns_lookup/ns_insert/ns_flush/ns_cache_entries API.  Root NS
   delegates to global cache.  3 self-tests (isolation, delegation, lifecycle).
-  Remaining: wiring process→container→net_ns lookup into socket-layer callers
-  (requires changes in kernel-process zone for PCB net_ns field and
-  kernel-ipc zone for syscall handler changes — cross-zone work).
+  Process→container→net_ns wiring: DONE. net_ns field on Task struct,
+  current_task_net_ns()/set_task_net_ns() helpers, container::add_process()
+  propagates net_ns to task, syscall handlers use current_task_net_ns().
 
 ## POSIX Layer Notes
 

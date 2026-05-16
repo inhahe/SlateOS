@@ -5634,9 +5634,12 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
     let flags = args.arg2 as u32;
     const CONNECT_NONBLOCK: u32 = 1;
 
+    // Use the calling task's network namespace for isolation.
+    let ns = crate::sched::current_task_net_ns();
+
     if (flags & CONNECT_NONBLOCK) != 0 {
         // Non-blocking connect: return handle immediately in SYN_SENT.
-        match crate::net::tcp::connect_start(crate::netns::ROOT_NS, ip.into(), port) {
+        match crate::net::tcp::connect_start(ns, ip.into(), port) {
             Ok(handle) => {
                 #[allow(clippy::cast_possible_wrap)]
                 SyscallResult::ok(handle as i64)
@@ -5645,7 +5648,7 @@ pub fn sys_tcp_connect(args: &SyscallArgs) -> SyscallResult {
         }
     } else {
         // Blocking connect (original behavior).
-        match crate::net::tcp::connect(crate::netns::ROOT_NS, ip.into(), port) {
+        match crate::net::tcp::connect(ns, ip.into(), port) {
             Ok(handle) => {
                 #[allow(clippy::cast_possible_wrap)]
                 SyscallResult::ok(handle as i64)
@@ -5893,7 +5896,8 @@ pub fn sys_tcp_bind(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::net::tcp::bind(crate::netns::ROOT_NS, port) {
+    let ns = crate::sched::current_task_net_ns();
+    match crate::net::tcp::bind(ns, port) {
         Ok(handle) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle as i64)
@@ -5974,7 +5978,8 @@ pub fn sys_udp_bind(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    match crate::net::udp::bind(crate::netns::ROOT_NS, port) {
+    let ns = crate::sched::current_task_net_ns();
+    match crate::net::udp::bind(ns, port) {
         Ok(handle) => {
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle as i64)

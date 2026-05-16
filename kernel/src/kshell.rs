@@ -37572,6 +37572,84 @@ fn cmd_nc(args: &str) {
             }
         }
 
+        "udp6" | "u6" => {
+            // nc udp6 <ipv6-host> <port> <data...>
+            use crate::net::ipv6::Ipv6Addr;
+            if parts.len() < 4 {
+                shell_println!("Usage: nc udp6 <ipv6-host> <port> <data...>");
+                return;
+            }
+            let host_str = parts[1];
+            let port_str = parts[2];
+            let data_str: alloc::string::String = parts[3..].join(" ");
+
+            let ip6 = match Ipv6Addr::parse(host_str) {
+                Some(addr) => addr,
+                None => {
+                    match crate::net::dns::resolve6(host_str) {
+                        Ok(addr) => addr,
+                        Err(_) => {
+                            shell_println!("nc: cannot resolve IPv6 host '{}'", host_str);
+                            return;
+                        }
+                    }
+                }
+            };
+
+            let port: u16 = match port_str.parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("nc: invalid port '{}'", port_str);
+                    return;
+                }
+            };
+
+            match crate::net::netcat::udp_send_v6(ip6, port, data_str.as_bytes()) {
+                Ok(()) => shell_println!("Sent {} bytes (UDP6) to [{}]:{}", data_str.len(), ip6, port),
+                Err(e) => shell_println!("nc: udp6 send failed: {:?}", e),
+            }
+        }
+
+        "udplisten" | "ul" => {
+            // nc udplisten <port> [timeout]
+            if parts.len() < 2 {
+                shell_println!("Usage: nc udplisten <port> [timeout]");
+                return;
+            }
+            let port: u16 = match parts[1].parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("nc: invalid port '{}'", parts[1]);
+                    return;
+                }
+            };
+            let timeout: u32 = parts.get(2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+
+            shell_println!("Listening for UDP datagrams on port {} ...", port);
+            match crate::net::netcat::udp_recv_any(port, timeout) {
+                Ok((src_addr, src_port, data)) => {
+                    shell_println!("Received {} bytes from [{}]:{}", data.len(), src_addr, src_port);
+                    // Print as text if valid UTF-8, otherwise hex.
+                    if let Ok(text) = core::str::from_utf8(&data) {
+                        shell_println!("{}", text);
+                    } else {
+                        let hex: alloc::string::String = data.iter()
+                            .take(128)
+                            .map(|b| alloc::format!("{:02x}", b))
+                            .collect::<alloc::vec::Vec<_>>()
+                            .join(" ");
+                        shell_println!("(hex) {}", hex);
+                        if data.len() > 128 {
+                            shell_println!("  ... ({} more bytes)", data.len() - 128);
+                        }
+                    }
+                }
+                Err(e) => shell_println!("nc: listen failed: {:?}", e),
+            }
+        }
+
         "scan" | "z" => {
             // nc scan <host> <start-port> [end-port]
             if parts.len() < 3 {
@@ -37672,7 +37750,9 @@ fn cmd_nc(args: &str) {
             shell_println!("  nc connect <host> <port>              — TCP connect (banner grab)");
             shell_println!("  nc listen <port>                      — TCP listen (accept one connection)");
             shell_println!("  nc send <host> <port> <data...>       — TCP send data");
-            shell_println!("  nc udp <host> <port> <data...>        — UDP send datagram");
+            shell_println!("  nc udp <host> <port> <data...>        — UDP send datagram (IPv4)");
+            shell_println!("  nc udp6 <host> <port> <data...>       — UDP send datagram (IPv6)");
+            shell_println!("  nc udplisten <port> [timeout]         — listen for UDP (v4+v6)");
             shell_println!("  nc scan <host> <start> [end]          — port scan");
             shell_println!("  nc service <port>                     — look up well-known service");
             shell_println!("  nc status                             — show statistics");

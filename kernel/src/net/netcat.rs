@@ -7,7 +7,8 @@
 //!
 //! - TCP client: connect to a remote host/port
 //! - TCP server: listen on a port and accept one connection
-//! - UDP client: send datagrams to a host/port
+//! - UDP client: send datagrams to a host/port (IPv4 + IPv6)
+//! - UDP listen: receive datagrams from both IPv4 and IPv6 peers
 //! - Port scanning: test if TCP ports are open
 //! - Banner grabbing: connect and display the server's greeting
 //!
@@ -28,6 +29,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
+use super::ipv6::Ipv6Addr;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -159,6 +161,49 @@ pub fn udp_send(dst: Ipv4Addr, port: u16, data: &[u8]) -> KernelResult<()> {
     // Use an ephemeral source port.
     let src_port = 49152 + (crate::hrtimer::now_ns() % 16384) as u16;
     super::udp::send(src_port, dst, port, data)
+}
+
+/// Send a UDP datagram to a remote IPv6 host:port.
+pub fn udp_send_v6(dst: Ipv6Addr, port: u16, data: &[u8]) -> KernelResult<()> {
+    UDP_SENDS.fetch_add(1, Ordering::Relaxed);
+    BYTES_SENT.fetch_add(data.len() as u64, Ordering::Relaxed);
+
+    let src_port = 49152 + (crate::hrtimer::now_ns() % 16384) as u16;
+    super::udp::send_v6(src_port, dst, port, data)
+}
+
+/// Listen for incoming UDP datagrams on a port, processing both IPv4 and IPv6.
+///
+/// Waits up to `timeout_polls` iterations for a datagram.  Returns the
+/// source address (as a string), source port, and payload.
+pub fn udp_recv_any(port: u16, timeout_polls: u32) -> KernelResult<(String, u16, Vec<u8>)> {
+    let handle = super::udp::bind(port)?;
+    let timeout = if timeout_polls == 0 { RECV_TIMEOUT_POLLS } else { timeout_polls };
+
+    for _ in 0..timeout {
+        super::poll();
+
+        // Check IPv4 first.
+        if let Some(dgram) = super::udp::recv(handle) {
+            BYTES_RECEIVED.fetch_add(dgram.data.len() as u64, Ordering::Relaxed);
+            super::udp::close(handle);
+            return Ok((format!("{}", dgram.src_ip), dgram.src_port, dgram.data));
+        }
+
+        // Check IPv6.
+        if let Some(dgram) = super::udp::recv_v6(handle) {
+            BYTES_RECEIVED.fetch_add(dgram.data.len() as u64, Ordering::Relaxed);
+            super::udp::close(handle);
+            return Ok((format!("{}", dgram.src_ip), dgram.src_port, dgram.data));
+        }
+
+        for _ in 0..1_000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    super::udp::close(handle);
+    Err(KernelError::TimedOut)
 }
 
 // ---------------------------------------------------------------------------

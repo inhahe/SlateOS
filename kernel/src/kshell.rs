@@ -3569,7 +3569,7 @@ const COMMANDS: &[&str] = &[
     "systray", "tray", "taskbar", "startmenu", "smenu", "filepicker", "fpick", "theme", "hotkey", "widgets", "widget", "soundmixer", "smixer", "wallpaper", "wp", "credentials", "cred", "power", "display", "vdesktop", "vd", "keylayout", "kbl", "screenshot", "scap", "a11y", "accessibility", "ime", "netindicator", "netind", "winsnap", "wsnap", "colorpicker", "cpick", "cursorsettings", "cursor", "kbsettings", "kbs", "detailcols", "dcols", "partmgr", "pmgr", "locale", "lcl", "useracct", "uacct", "progmgr", "prog", "scriptlang", "slang", "osreset", "reset", "bootcfg", "boot", "swapcfg", "swap", "autostart", "astart", "schedtune", "stune", "mmtune", "mtune", "capsettings", "caps", "vpn", "dyndns", "ddns", "loginscreen", "logscr", "appnotify", "anotify", "kernelbuild", "kbuild", "wakesensor", "wsensor", "netsettings", "netcfg", "sysinfo", "hwinfo", "perfmon", "resmon", "focusassist", "dnd", "storageclean", "sclean", "sysdiag", "nightlight", "nlight", "tasksched", "schtask", "envvars", "envmgr", "bluetooth", "bt", "printmgr", "lp", "screenrec", "srec", "datausage", "dusage", "mousesettings", "mouse", "touchpad", "tpad", "powerprofile", "pprofile", "defaultapps", "defapp", "monitors", "monitor", "fwsettings", "firewall", "updatemgr", "updates", "notifprefs", "nprefs", "fileshare", "share", "parental", "pctl", "audiodevice", "adev", "sessionmgr", "session", "crashreport", "crash", "netproxy", "proxy", "fileversion", "fver", "devicemgr", "devmgr", "location", "loc", "diskencrypt", "dencrypt", "pkgmgr", "pkg", "remotedesktop", "rdp", "restorepoint", "rpoint", "battery", "batt", "dictation", "dict", "screenreader", "sr", "langpack", "lpack", "spellcheck", "spell", "screentime", "stime", "disksmart", "smart", "magnifier", "mag", "cloudsync", "csync", "gestures", "gesture", "soundevents", "sevents", "usbmgr", "usb", "cliphistory", "cliphist", "displaycolor", "dcolor", "syslog", "slog", "inputa11y", "ia11y", "driverupdate", "dupdate", "netshare", "nshare", "startuprepair", "srepair", "remoteassist", "rassist", "taskmon", "tmon", "printqueue", "pqueue", "servicemgr", "svcmgr", "hwmonitor", "hwmon", "appsandbox", "sandbox", "gamepadinput", "gamepad", "sysrestore", "srestore", "audiomux", "amux", "netthrottle", "nthrottle", "dumpanalyzer", "dump", "memdiag", "mdiag", "parentaltime", "ptime", "mediakeys", "mkeys", "webcam", "cam", "speechio", "speech", "mobilelink", "mlink", "screenlock", "slock", "appstore", "store", "wintiling", "tile", "peninput", "pen", "brightness", "bright", "quicksettings", "qs", "volumeosd", "vosd", "netdiag", "ndiag", "sharesheet", "ssheet", "oobe", "setup", "hdrdisplay", "hdr", "surroundsound", "ssound", "audioeq", "aeq", "screensaver", "ssaver", "colortemp", "ctemp", "gamemode", "gmode", "dpiscaling", "dpi", "netprofile", "nprof", "apppermissions", "apperm", "kbshortcuts", "kbsc", "displayarrange", "darr", "sysanimations", "sanim", "filevault", "fvault", "mousegestures", "mgest", "fontsettings", "fntset", "notifbadge", "nbadge", "lockwallpaper", "lwp", "systemsounds", "ssounds", "hotcorners", "hcorn", "dynlock", "dlock", "snaplayout", "snlayout", "haptfeedback", "haptic", "eyeprotect", "eye", "pinnedapps", "pinned", "inputmethod", "imf", "storagesense", "ssense", "autofix", "afix", "recentsearch", "rsearch", "sysmaint", "maint", "multiclip", "mclip", "focussession", "fsess", "quicknote", "qnote", "cscheme", "uischeme", "appcompat", "acompat", "windowrules", "wrules", "spatialaudio", "spatial", "filetransfer", "ftrans", "startupopt", "sopt", "usagetime", "utime", "voicecontrol", "vctl", "devpair", "dpair", "notifgroup", "ngroup", "playmedia", "pmedia", "kbmacro", "macro", "sysresource", "sres", "faceunlock", "face",
     "ar", "backup", "base64", "batch", "bm", "bookmark", "bunzip2", "bzip2", "bzcat", "capgroups", "capreq", "captags", "cd", "certmgr", "cert", "cg", "cgroup", "chattr", "checksum", "chmod", "chown", "cksum", "clear", "cls", "cmp", "cpio", "cr", "ct",
     "clip", "clipboard", "color", "colorscheme", "column", "columnview", "colview", "comm", "command", "contextmenu", "copy", "cp", "cpuinfo", "crc32", "crc32sum", "ctxmenu",
-    "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "drvmon", "du",
+    "cut", "date", "dd", "dedup", "deskicons", "dragdrop", "del", "df", "dhcp", "dhcpv6", "dhcp6", "diag", "diff", "dir", "directio", "dirname", "dirsync", "dmesg", "dns", "dpkg", "drvmon", "du",
     "echo", "elog", "env", "eval", "exec", "export", "fallocate", "false", "fhist", "file", "fileinfo", "filehist", "fileops", "fileselect", "filetype", "find", "findex", "finfo", "fops", "fsel", "ftype", "fold", "free",
     "firewall", "flock", "fontmgr", "fonts", "fsbench", "fsck", "fsck.ext4", "fsck.fat", "fspolicy", "fsprofile", "fsfreeze", "fstrim", "fstune", "fswalk", "fw", "getfacl", "glob", "grep", "gunzip", "gzip", "hash", "head", "help", "hexdump", "hostname", "http",
     "id", "ifconfig", "installer", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "logpersist", "lpersist", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
@@ -5426,6 +5426,7 @@ fn dispatch(line: &str) {
         "usbdev" => cmd_usb(args),
         "desktop" | "startx" => cmd_desktop(),
         "dhcp" => cmd_dhcp(),
+        "dhcpv6" | "dhcp6" => cmd_dhcpv6(args),
         "ping" => cmd_ping(args),
         "ping6" => cmd_ping6(args),
         "udp6" => cmd_udp6(args),
@@ -64186,6 +64187,71 @@ fn cmd_dhcp() {
     }
 }
 
+fn cmd_dhcpv6(args: &str) {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("help");
+
+    match sub {
+        "discover" | "d" => {
+            shell_println!("Running DHCPv6 stateful discovery...");
+            match crate::net::dhcpv6::discover() {
+                Ok(addr) => {
+                    shell_println!("DHCPv6 successful: {}", addr);
+                    let s = crate::net::dhcpv6::stats();
+                    if let Some(dns) = s.dns_server {
+                        shell_println!("  DNS server: {}", dns);
+                    }
+                }
+                Err(e) => shell_println!("DHCPv6 discovery failed: {:?}", e),
+            }
+        }
+        "info" | "i" => {
+            shell_println!("Sending DHCPv6 Information-Request (stateless)...");
+            match crate::net::dhcpv6::info_request() {
+                Ok(()) => {
+                    let s = crate::net::dhcpv6::stats();
+                    shell_println!("DHCPv6 info-request successful");
+                    if let Some(dns) = s.dns_server {
+                        shell_println!("  DNS server: {}", dns);
+                    }
+                }
+                Err(e) => shell_println!("DHCPv6 info-request failed: {:?}", e),
+            }
+        }
+        "status" | "stats" => {
+            let s = crate::net::dhcpv6::stats();
+            shell_println!("DHCPv6 Client Status");
+            shell_println!("  State:              {}", s.state);
+            if let Some(addr) = s.address {
+                shell_println!("  Address:            {}", addr);
+            }
+            if let Some(dns) = s.dns_server {
+                shell_println!("  DNS server:         {}", dns);
+            }
+            shell_println!("  Solicits sent:      {}", s.solicits_sent);
+            shell_println!("  Requests sent:      {}", s.requests_sent);
+            shell_println!("  Info-Requests sent: {}", s.info_requests_sent);
+            shell_println!("  Replies received:   {}", s.replies_received);
+            shell_println!("  Errors:             {}", s.errors);
+        }
+        "test" => {
+            match crate::net::dhcpv6::self_test() {
+                Ok(()) => shell_println!("DHCPv6 self-test: PASSED"),
+                Err(e) => shell_println!("DHCPv6 self-test FAILED: {:?}", e),
+            }
+        }
+        _ => {
+            shell_println!("dhcpv6 — DHCPv6 client (IPv6 address/config)");
+            shell_println!();
+            shell_println!("Usage:");
+            shell_println!("  dhcpv6 discover    — full stateful address acquisition");
+            shell_println!("  dhcpv6 info        — stateless (DNS/domain only)");
+            shell_println!("  dhcpv6 status      — show client state and stats");
+            shell_println!("  dhcpv6 test        — run self-tests");
+        }
+    }
+}
+
 fn cmd_ping(args: &str) {
     if args.is_empty() {
         crate::console_println!("Usage: ping <ip-address>");
@@ -68836,7 +68902,7 @@ fn is_builtin(name: &str) -> bool {
         | "lsblk" | "blkdev" | "glob" | "fsck" | "fsck.fat" | "fsck.ext4" | "mkfs" | "mkfs.fat"
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
-        | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "ping" | "ping6" | "udp6" | "nslookup"
+        | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "dhcpv6" | "dhcp6" | "ping" | "ping6" | "udp6" | "nslookup"
         | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"

@@ -20,6 +20,7 @@
 pub mod arp;
 pub mod bridge;
 pub mod dhcp;
+pub mod dhcpv6;
 pub mod dns;
 pub mod ethernet;
 pub mod firewall;
@@ -108,6 +109,7 @@ pub fn poll() {
         tcp::tick_retransmit();
         tcp::tick_persist();
         dhcp::tick_renewal();
+        dhcpv6::tick_renewal();
         frag::tick_expire();
         firewall::tick_conntrack_cleanup();
         ntp::tick();

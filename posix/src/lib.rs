@@ -404,3 +404,8 @@ pub mod linux_i2c;
 pub mod linux_spi;
 pub mod linux_cdrom;
 pub mod linux_hdreg;
+pub mod linux_random;
+pub mod linux_unistd;
+pub mod linux_prctl;
+pub mod linux_net;
+pub mod linux_uio;

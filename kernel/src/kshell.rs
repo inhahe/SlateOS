@@ -34684,6 +34684,20 @@ fn cmd_ntp(args: &str) {
                 Err(e) => shell_println!("Sync failed: {:?}", e),
             }
         }
+        "sync6" => {
+            shell_println!("Triggering NTP sync (IPv6)...");
+            if !ntp::is_enabled() {
+                ntp::init();
+            }
+            match ntp::sync_now_v6() {
+                Ok(offset) => {
+                    shell_println!("IPv6 sync OK: offset = {:+}ms", offset / 1_000_000);
+                    let corrected = ntp::corrected_unix_secs();
+                    shell_println!("Corrected Unix time: {}", corrected);
+                }
+                Err(e) => shell_println!("IPv6 sync failed: {:?}", e),
+            }
+        }
         "servers" => {
             let servers = ntp::server_info();
             if servers.is_empty() {
@@ -34752,7 +34766,8 @@ fn cmd_ntp(args: &str) {
             shell_println!("ntp — NTP time synchronization");
             shell_println!("  show            Full status overview");
             shell_println!("  status          Summary statistics");
-            shell_println!("  sync            Trigger immediate sync");
+            shell_println!("  sync            Trigger immediate sync (IPv4, fallback IPv6)");
+            shell_println!("  sync6           Trigger immediate sync (IPv6 only)");
             shell_println!("  servers         List configured servers");
             shell_println!("  add <server>    Add NTP server");
             shell_println!("  remove <server> Remove NTP server");

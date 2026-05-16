@@ -43,7 +43,13 @@
 //! - SNTP (no full NTP state machine, no intersection algorithm).
 //! - No authentication (NTS, autokey, or symmetric key).
 //! - Single-query offset (no multi-sample filtering).
-//! - IPv4 only.
+//!
+//! ## IPv6 support
+//!
+//! Queries can be sent over IPv6 when a SLAAC global address is available.
+//! `sync_now()` tries IPv4 first; on failure it falls back to IPv6 (AAAA
+//! DNS resolution + UDP-over-IPv6).  The `ntp sync6` kshell command forces
+//! an IPv6-only sync attempt.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -54,6 +60,7 @@ use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
+use super::ipv6::Ipv6Addr;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -210,8 +217,10 @@ struct NtpResponse {
 struct NtpServer {
     /// Hostname or IP address.
     address: String,
-    /// Resolved IP (cached).
+    /// Resolved IPv4 address (cached).
     resolved_ip: Option<Ipv4Addr>,
+    /// Resolved IPv6 address (cached).
+    resolved_ipv6: Option<Ipv6Addr>,
     /// Whether this server is active/reachable.
     reachable: bool,
     /// Last query timestamp (kernel monotonic ns).
@@ -233,6 +242,7 @@ impl NtpServer {
         Self {
             address: String::from(address),
             resolved_ip: None,
+            resolved_ipv6: None,
             reachable: false,
             last_query_ns: 0,
             last_offset_ns: 0,
@@ -467,6 +477,80 @@ fn query_server(server_ip: Ipv4Addr) -> KernelResult<(i64, i64, u8)> {
     Ok((offset_ns, delay_ns, resp.stratum))
 }
 
+/// Perform a single NTP query over IPv6.
+///
+/// Same protocol as [`query_server`] but uses the UDP-over-IPv6 transport.
+/// Returns (offset_ns, delay_ns, stratum) on success.
+fn query_server_v6(server_ip: Ipv6Addr) -> KernelResult<(i64, i64, u8)> {
+    let t1_kernel_ns = crate::hrtimer::now_ns();
+    let t1_ntp = wall_clock_to_ntp(t1_kernel_ns);
+
+    let request = build_request(t1_ntp);
+
+    // Bind a UDP socket for the query (same dual-stack socket handles v6).
+    let local_port = ephemeral_port();
+    let udp_handle = super::udp::bind(local_port)?;
+
+    // Send the NTP request over IPv6.
+    let send_result = super::udp::send_v6(local_port, server_ip, NTP_PORT, &request);
+    if let Err(e) = send_result {
+        super::udp::close(udp_handle);
+        return Err(e);
+    }
+
+    QUERIES_SENT.fetch_add(1, Ordering::Relaxed);
+
+    // Wait for IPv6 response.
+    let mut response_data = None;
+    for _ in 0..NTP_TIMEOUT_POLLS {
+        super::poll();
+
+        if let Some(dgram) = super::udp::recv_v6(udp_handle) {
+            if dgram.src_ip == server_ip && dgram.src_port == NTP_PORT {
+                response_data = Some(dgram.data);
+                break;
+            }
+        }
+
+        for _ in 0..5_000 {
+            core::hint::spin_loop();
+        }
+    }
+
+    let t4_kernel_ns = crate::hrtimer::now_ns();
+
+    super::udp::close(udp_handle);
+
+    let data = match response_data {
+        Some(d) => d,
+        None => {
+            TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+            return Err(KernelError::TimedOut);
+        }
+    };
+
+    let resp = parse_response(&data)?;
+    validate_response(&resp, &t1_ntp)?;
+
+    let t2_ns = resp.receive_ts.to_nanos();
+    let t3_ns = resp.transmit_ts.to_nanos();
+    let t1_ns = t1_ntp.to_nanos();
+    let t4_ntp = wall_clock_to_ntp(t4_kernel_ns);
+    let t4_ns = t4_ntp.to_nanos();
+
+    let t2_minus_t1 = (t2_ns as i64).saturating_sub(t1_ns as i64);
+    let t3_minus_t4 = (t3_ns as i64).saturating_sub(t4_ns as i64);
+    let offset_ns = (t2_minus_t1.saturating_add(t3_minus_t4)) / 2;
+
+    let t4_minus_t1 = (t4_ns as i64).saturating_sub(t1_ns as i64);
+    let t3_minus_t2 = (t3_ns as i64).saturating_sub(t2_ns as i64);
+    let delay_ns = t4_minus_t1.saturating_sub(t3_minus_t2);
+
+    RESPONSES_OK.fetch_add(1, Ordering::Relaxed);
+
+    Ok((offset_ns, delay_ns, resp.stratum))
+}
+
 /// Validate an NTP response for sanity.
 fn validate_response(resp: &NtpResponse, our_origin: &NtpTimestamp) -> KernelResult<()> {
     // Must be server mode (4).
@@ -640,14 +724,29 @@ pub fn sync_now() -> KernelResult<i64> {
 
     crate::serial_println!("[ntp] Querying {}...", address);
 
-    // Resolve hostname to IP.
-    let ip = resolve_ntp_server(&address, server_idx)?;
-
-    // Query the server.
     let now = crate::hrtimer::now_ns();
     LAST_ATTEMPT_NS.store(now, Ordering::Relaxed);
 
-    let (offset_ns, delay_ns, stratum) = query_server(ip)?;
+    // Try IPv4 first, fall back to IPv6 if IPv4 resolution or query fails.
+    let (offset_ns, delay_ns, stratum) = match resolve_ntp_server(&address, server_idx) {
+        Ok(ip) => {
+            match query_server(ip) {
+                Ok(result) => result,
+                Err(_v4_err) => {
+                    // IPv4 query failed — try IPv6.
+                    let ipv6 = resolve_ntp_server_v6(&address, server_idx)?;
+                    crate::serial_println!("[ntp] IPv4 failed, trying IPv6 ({})", ipv6);
+                    query_server_v6(ipv6)?
+                }
+            }
+        }
+        Err(_v4_resolve_err) => {
+            // IPv4 resolution failed — try IPv6.
+            let ipv6 = resolve_ntp_server_v6(&address, server_idx)?;
+            crate::serial_println!("[ntp] No IPv4 address, using IPv6 ({})", ipv6);
+            query_server_v6(ipv6)?
+        }
+    };
 
     // Validate delay.
     if delay_ns > MAX_ACCEPTABLE_DELAY_NS {
@@ -711,6 +810,93 @@ fn resolve_ntp_server(address: &str, server_idx: usize) -> KernelResult<Ipv4Addr
         server.resolved_ip = Some(ip);
     }
     Ok(ip)
+}
+
+/// Resolve an NTP server to an IPv6 address, caching the result.
+fn resolve_ntp_server_v6(address: &str, server_idx: usize) -> KernelResult<Ipv6Addr> {
+    // Check cached IPv6 first.
+    {
+        let state = STATE.lock();
+        if let Some(server) = state.servers.get(server_idx) {
+            if let Some(ip) = server.resolved_ipv6 {
+                return Ok(ip);
+            }
+        }
+    }
+
+    // Try parsing as an IPv6 literal.
+    if let Some(ip) = Ipv6Addr::parse(address) {
+        let mut state = STATE.lock();
+        if let Some(server) = state.servers.get_mut(server_idx) {
+            server.resolved_ipv6 = Some(ip);
+        }
+        return Ok(ip);
+    }
+
+    // DNS AAAA resolution.
+    let ip = super::dns::resolve6(address)?;
+    let mut state = STATE.lock();
+    if let Some(server) = state.servers.get_mut(server_idx) {
+        server.resolved_ipv6 = Some(ip);
+    }
+    Ok(ip)
+}
+
+/// Force an NTP sync using only IPv6 transport.
+///
+/// Unlike `sync_now()` which tries IPv4 first, this function uses
+/// AAAA DNS resolution and UDP-over-IPv6 exclusively.  Useful for
+/// testing IPv6 NTP connectivity.
+pub fn sync_now_v6() -> KernelResult<i64> {
+    let (address, server_idx) = {
+        let state = STATE.lock();
+        if state.servers.is_empty() {
+            return Err(KernelError::NotFound);
+        }
+        let idx = state.next_server % state.servers.len();
+        let addr = state.servers.get(idx)
+            .map(|s| s.address.clone())
+            .ok_or(KernelError::InternalError)?;
+        (addr, idx)
+    };
+
+    crate::serial_println!("[ntp] Querying {} (IPv6)...", address);
+
+    let ipv6 = resolve_ntp_server_v6(&address, server_idx)?;
+
+    let now = crate::hrtimer::now_ns();
+    LAST_ATTEMPT_NS.store(now, Ordering::Relaxed);
+
+    let (offset_ns, delay_ns, stratum) = query_server_v6(ipv6)?;
+
+    if delay_ns > MAX_ACCEPTABLE_DELAY_NS {
+        crate::serial_println!(
+            "[ntp] IPv6 delay too high: {}ms (max {}ms)",
+            delay_ns / 1_000_000,
+            MAX_ACCEPTABLE_DELAY_NS / 1_000_000,
+        );
+        update_server_stats(server_idx, offset_ns, delay_ns, stratum, false);
+        return Err(KernelError::TimedOut);
+    }
+
+    BEST_OFFSET_NS.store(offset_ns, Ordering::Relaxed);
+    LAST_SYNC_NS.store(now, Ordering::Relaxed);
+
+    update_server_stats(server_idx, offset_ns, delay_ns, stratum, true);
+
+    {
+        let mut state = STATE.lock();
+        state.next_server = server_idx.wrapping_add(1);
+    }
+
+    crate::serial_println!(
+        "[ntp] IPv6 sync OK: offset={:+}ms, delay={}ms, stratum={}",
+        offset_ns / 1_000_000,
+        delay_ns / 1_000_000,
+        stratum,
+    );
+
+    Ok(offset_ns)
 }
 
 /// Update per-server statistics after a query.
@@ -843,6 +1029,7 @@ pub fn server_info() -> Vec<ServerInfo> {
             index: i,
             address: s.address.clone(),
             resolved_ip: s.resolved_ip,
+            resolved_ipv6: s.resolved_ipv6,
             reachable: s.reachable,
             last_offset_ms: s.last_offset_ns / 1_000_000,
             last_delay_ms: s.last_delay_ns / 1_000_000,
@@ -860,6 +1047,7 @@ pub struct ServerInfo {
     pub index: usize,
     pub address: String,
     pub resolved_ip: Option<Ipv4Addr>,
+    pub resolved_ipv6: Option<Ipv6Addr>,
     pub reachable: bool,
     pub last_offset_ms: i64,
     pub last_delay_ms: i64,
@@ -900,13 +1088,17 @@ pub fn procfs_content() -> String {
 
     out.push_str(&format!("\nServers: {}\n", servers.len()));
     for srv in &servers {
-        let ip_str = match srv.resolved_ip {
+        let v4_str = match srv.resolved_ip {
             Some(ip) => format!("{}", ip),
-            None => String::from("unresolved"),
+            None => String::from("-"),
+        };
+        let v6_str = match srv.resolved_ipv6 {
+            Some(ip) => format!("{}", ip),
+            None => String::from("-"),
         };
         out.push_str(&format!(
-            "  [{}] {} ({}) — {}reachable, offset={:+}ms, delay={}ms, stratum={}, ok={}, fail={}\n",
-            srv.index, srv.address, ip_str,
+            "  [{}] {} (v4={}, v6={}) — {}reachable, offset={:+}ms, delay={}ms, stratum={}, ok={}, fail={}\n",
+            srv.index, srv.address, v4_str, v6_str,
             if srv.reachable { "" } else { "un" },
             srv.last_offset_ms, srv.last_delay_ms,
             srv.last_stratum, srv.success_count, srv.fail_count,

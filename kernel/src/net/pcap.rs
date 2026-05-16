@@ -88,12 +88,14 @@ const PCAP_PKT_HEADER_SIZE: usize = 16;
 
 // EtherType values for simple filtering.
 const ETHERTYPE_IPV4: u16 = 0x0800;
+const ETHERTYPE_IPV6: u16 = 0x86DD;
 const ETHERTYPE_ARP: u16 = 0x0806;
 
-// IP protocol numbers.
+// IP protocol numbers (shared between IPv4 and IPv6 Next Header).
 const PROTO_ICMP: u8 = 1;
 const PROTO_TCP: u8 = 6;
 const PROTO_UDP: u8 = 17;
+const PROTO_ICMPV6: u8 = 58;
 
 // ---------------------------------------------------------------------------
 // Filter types
@@ -126,81 +128,102 @@ impl CaptureFilter {
         }
     }
 
-    /// TCP-only filter.
+    /// TCP-only filter (captures both IPv4 and IPv6 TCP).
     #[allow(dead_code)] // Public API.
     pub const fn tcp_only() -> Self {
         Self {
             capture_rx: true,
             capture_tx: true,
-            ethertype: ETHERTYPE_IPV4,
+            ethertype: 0, // Any EtherType — protocol filter handles matching.
             ip_proto: PROTO_TCP,
             port: 0,
         }
     }
 
-    /// UDP-only filter.
+    /// UDP-only filter (captures both IPv4 and IPv6 UDP).
     #[allow(dead_code)] // Public API.
     pub const fn udp_only() -> Self {
         Self {
             capture_rx: true,
             capture_tx: true,
-            ethertype: ETHERTYPE_IPV4,
+            ethertype: 0, // Any EtherType — protocol filter handles matching.
             ip_proto: PROTO_UDP,
+            port: 0,
+        }
+    }
+
+    /// IPv6-only filter.
+    #[allow(dead_code)] // Public API.
+    pub const fn ipv6_only() -> Self {
+        Self {
+            capture_rx: true,
+            capture_tx: true,
+            ethertype: ETHERTYPE_IPV6,
+            ip_proto: 0,
+            port: 0,
+        }
+    }
+
+    /// ICMPv6-only filter.
+    #[allow(dead_code)] // Public API.
+    pub const fn icmpv6_only() -> Self {
+        Self {
+            capture_rx: true,
+            capture_tx: true,
+            ethertype: ETHERTYPE_IPV6,
+            ip_proto: PROTO_ICMPV6,
             port: 0,
         }
     }
 
     /// Check whether a packet matches this filter.
     fn matches(&self, data: &[u8]) -> bool {
+        if data.len() < 14 {
+            return self.ethertype == 0 && self.ip_proto == 0 && self.port == 0;
+        }
+
+        let etype = (*data.get(12).unwrap_or(&0) as u16) << 8
+            | *data.get(13).unwrap_or(&0) as u16;
+
         // EtherType filter.
-        if self.ethertype != 0 {
-            if data.len() < 14 {
-                return false;
-            }
-            let etype = (*data.get(12).unwrap_or(&0) as u16) << 8
-                | *data.get(13).unwrap_or(&0) as u16;
-            if etype != self.ethertype {
-                return false;
+        if self.ethertype != 0 && etype != self.ethertype {
+            return false;
+        }
+
+        // IP protocol / port filtering — handle both IPv4 and IPv6.
+        if self.ip_proto != 0 || self.port != 0 {
+            if etype == ETHERTYPE_IPV4 {
+                return self.matches_ipv4(data);
+            } else if etype == ETHERTYPE_IPV6 {
+                return self.matches_ipv6(data);
+            } else {
+                // Non-IP packet can't match protocol/port filters.
+                return self.ip_proto == 0 && self.port == 0;
             }
         }
 
-        // IP protocol filter.
-        if self.ip_proto != 0 {
-            if data.len() < 24 {
-                return false;
-            }
-            // Check it's IPv4.
-            let etype = (*data.get(12).unwrap_or(&0) as u16) << 8
-                | *data.get(13).unwrap_or(&0) as u16;
-            if etype != ETHERTYPE_IPV4 {
-                return false;
-            }
-            let proto = *data.get(23).unwrap_or(&0);
-            if proto != self.ip_proto {
-                return false;
-            }
+        true
+    }
+
+    /// Match IPv4 packet protocol and port fields.
+    fn matches_ipv4(&self, data: &[u8]) -> bool {
+        // Minimum: Ethernet(14) + IPv4 header (20) = 34 bytes.
+        if data.len() < 34 {
+            return false;
         }
 
-        // Port filter (TCP/UDP).
+        let proto = *data.get(23).unwrap_or(&0);
+        if self.ip_proto != 0 && proto != self.ip_proto {
+            return false;
+        }
+
         if self.port != 0 {
-            if data.len() < 38 {
-                return false;
-            }
-            let etype = (*data.get(12).unwrap_or(&0) as u16) << 8
-                | *data.get(13).unwrap_or(&0) as u16;
-            if etype != ETHERTYPE_IPV4 {
-                return false;
-            }
             let ihl = (*data.get(14).unwrap_or(&0) & 0x0F) as usize;
-            // RFC 791: IHL minimum is 5 (20-byte header).  Malformed
-            // packets with IHL < 5 would compute a wrong transport offset,
-            // reading ports from the IP header instead of TCP/UDP.
+            // RFC 791: IHL minimum is 5 (20-byte header).
             if ihl < 5 {
                 return false;
             }
-            let ip_header_offset = 14usize;
-            let transport_offset = ip_header_offset.saturating_add(ihl.saturating_mul(4));
-
+            let transport_offset = 14usize.saturating_add(ihl.saturating_mul(4));
             if data.len() < transport_offset.saturating_add(4) {
                 return false;
             }
@@ -208,7 +231,42 @@ impl CaptureFilter {
                 | *data.get(transport_offset.saturating_add(1)).unwrap_or(&0) as u16;
             let dst_port = (*data.get(transport_offset.saturating_add(2)).unwrap_or(&0) as u16) << 8
                 | *data.get(transport_offset.saturating_add(3)).unwrap_or(&0) as u16;
+            if src_port != self.port && dst_port != self.port {
+                return false;
+            }
+        }
 
+        true
+    }
+
+    /// Match IPv6 packet protocol and port fields.
+    ///
+    /// IPv6 fixed header: 40 bytes starting at offset 14 (after Ethernet).
+    /// Next Header is at byte 6 of the IPv6 header (offset 14+6 = 20).
+    /// Transport header starts at offset 14+40 = 54.
+    fn matches_ipv6(&self, data: &[u8]) -> bool {
+        // Minimum: Ethernet(14) + IPv6 header(40) = 54 bytes.
+        if data.len() < 54 {
+            return false;
+        }
+
+        // Next Header field is at IPv6 header byte 6.
+        let next_header = *data.get(20).unwrap_or(&0);
+        if self.ip_proto != 0 && next_header != self.ip_proto {
+            return false;
+        }
+
+        if self.port != 0 {
+            // Transport header starts at offset 54 for basic IPv6
+            // (no extension headers).
+            let transport_offset = 54usize;
+            if data.len() < transport_offset.saturating_add(4) {
+                return false;
+            }
+            let src_port = (*data.get(transport_offset).unwrap_or(&0) as u16) << 8
+                | *data.get(transport_offset.saturating_add(1)).unwrap_or(&0) as u16;
+            let dst_port = (*data.get(transport_offset.saturating_add(2)).unwrap_or(&0) as u16) << 8
+                | *data.get(transport_offset.saturating_add(3)).unwrap_or(&0) as u16;
             if src_port != self.port && dst_port != self.port {
                 return false;
             }

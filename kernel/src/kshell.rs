@@ -35472,8 +35472,10 @@ fn cmd_pcap(args: &str) {
         "" | "help" => {
             shell_println!("pcap — Network packet capture (libpcap format)");
             shell_println!("  pcap start           Start capturing all traffic");
-            shell_println!("  pcap start tcp       Capture TCP only");
-            shell_println!("  pcap start udp       Capture UDP only");
+            shell_println!("  pcap start tcp       Capture TCP only (IPv4+IPv6)");
+            shell_println!("  pcap start udp       Capture UDP only (IPv4+IPv6)");
+            shell_println!("  pcap start ipv6      Capture IPv6 only");
+            shell_println!("  pcap start icmpv6    Capture ICMPv6 only");
             shell_println!("  pcap start port <N>  Capture traffic on port N");
             shell_println!("  pcap start rx        Capture RX only");
             shell_println!("  pcap start tx        Capture TX only");
@@ -35492,6 +35494,8 @@ fn cmd_pcap(args: &str) {
             let filter = match filter_arg {
                 "tcp" => pcap::CaptureFilter::tcp_only(),
                 "udp" => pcap::CaptureFilter::udp_only(),
+                "ipv6" | "ip6" => pcap::CaptureFilter::ipv6_only(),
+                "icmpv6" | "icmp6" => pcap::CaptureFilter::icmpv6_only(),
                 "rx" => {
                     let mut f = pcap::CaptureFilter::all();
                     f.capture_tx = false;

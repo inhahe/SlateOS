@@ -1759,12 +1759,27 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
     - [x] 5-tuple connection lookup (ns_id + local_port + remote_ip + remote_port)
     - [x] Same port bindable in different namespaces
     - [x] 30+ callers updated; self-tests for namespace isolation
+  - [x] Cross-namespace TCP correctness (physical NIC reachability)
+    - [x] alloc_port_for() global uniqueness (prevents wire 4-tuple collisions)
+    - [x] Connection lookup: ROOT_NS packets search all namespaces
+    - [x] Listener lookup: accepted connections inherit listener's ns_id
   - [x] Process→container→net_ns wiring into syscall layer
     - [x] net_ns field on Task struct (sched/task.rs), default ROOT_NS
     - [x] current_task_net_ns() / set_task_net_ns() scheduler helpers
     - [x] container::add_process() sets task's net_ns, remove_process() resets it
     - [x] SYS_TCP_CONNECT, SYS_TCP_BIND, SYS_UDP_BIND use current_task_net_ns()
     - [x] Self-test: net_ns propagation verified on add/remove
+  - [x] NAT/masquerade for container outbound traffic (kernel/src/net/nat.rs)
+    - [x] Source NAT: containers with private IPs communicate through host's public IP
+    - [x] Port mapping table (256 entries, round-robin allocation in 32768-60999)
+    - [x] TCP (300s) and UDP (30s) timeout with automatic entry expiry
+    - [x] translate_outgoing() / translate_incoming() for forward/reverse path
+    - [x] flush_namespace() wired into container delete for cleanup
+    - [x] tick() driven from net::poll() 5-second periodic maintenance
+    - [x] DNAT port forwarding: add_port_forward/remove_port_forward/lookup, 32 rules
+    - [x] flush_port_forwards(ns_id) wired into container delete
+    - [x] kshell `nat` command: enable/disable, status, list, flush, forward add/del/list
+    - [x] 12 self-tests (SNAT: enable/disable, root bypass, outgoing/incoming, flush, UDP, stats; DNAT: add/lookup/remove/flush)
   - [x] Syscall filter (seccomp equivalent, kernel/src/scfilter.rs)
     - [x] Bitmap-based O(1) per-syscall check (1000-bit bitmap)
     - [x] Allow-all and deny-all modes, per-process filters

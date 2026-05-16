@@ -37282,6 +37282,60 @@ fn cmd_iperf(args: &str) {
             }
         }
 
+        "udp6" | "u6" => {
+            // iperf udp6 <ipv6-host> <port> [count] [size]
+            use crate::net::ipv6::Ipv6Addr;
+            if parts.len() < 3 {
+                shell_println!("Usage: iperf udp6 <ipv6-host> <port> [count] [size]");
+                return;
+            }
+            let host_str = parts[1];
+            let port_str = parts[2];
+            let count: u32 = parts.get(3)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(100);
+            let size: usize = parts.get(4)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1400);
+
+            let ip6 = match Ipv6Addr::parse(host_str) {
+                Some(addr) => addr,
+                None => {
+                    // Try AAAA DNS resolution.
+                    match crate::net::dns::resolve6(host_str) {
+                        Ok(addr) => addr,
+                        Err(_) => {
+                            shell_println!("iperf: cannot resolve IPv6 host '{}'", host_str);
+                            return;
+                        }
+                    }
+                }
+            };
+
+            let port: u16 = match port_str.parse() {
+                Ok(p) => p,
+                Err(_) => {
+                    shell_println!("iperf: invalid port '{}'", port_str);
+                    return;
+                }
+            };
+
+            shell_println!("Running UDP6 throughput test to [{}]:{}...", ip6, port);
+            shell_println!("  {} packets x {} bytes", count, size);
+            match crate::net::iperf::udp_client_test_v6(ip6, port, count, size) {
+                Ok(result) => {
+                    shell_println!("--- UDP6 Throughput Test ---");
+                    shell_println!("  Transferred: {}", crate::net::iperf::format_bytes(result.bytes_transferred));
+                    shell_println!("  Duration:    {}", crate::net::iperf::format_duration(result.duration_ns));
+                    shell_println!("  Throughput:  {}", crate::net::iperf::format_bandwidth(result.throughput_bps));
+                    shell_println!("  Packets:     {}/{} sent", result.packets_received, result.packets_sent);
+                    shell_println!("  Loss:        {:.1}%", result.loss_percent);
+                    shell_println!("  Avg jitter:  {}", crate::net::iperf::format_duration(result.avg_jitter_ns));
+                }
+                Err(e) => shell_println!("iperf: test failed: {:?}", e),
+            }
+        }
+
         "status" | "stats" => {
             let s = crate::net::iperf::stats();
             shell_println!("iperf statistics:");
@@ -37301,14 +37355,15 @@ fn cmd_iperf(args: &str) {
         }
 
         _ => {
-            shell_println!("iperf — network bandwidth measurement tool");
+            shell_println!("iperf — network bandwidth measurement tool (IPv4 + IPv6)");
             shell_println!();
             shell_println!("Usage:");
-            shell_println!("  iperf client <host> <port> [duration]  — TCP throughput test");
-            shell_println!("  iperf server <port> [max_polls]        — TCP server mode");
-            shell_println!("  iperf udp <host> <port> [count] [size] — UDP throughput test");
-            shell_println!("  iperf status                           — show statistics");
-            shell_println!("  iperf test                             — run self-tests");
+            shell_println!("  iperf client <host> <port> [duration]   — TCP throughput test");
+            shell_println!("  iperf server <port> [max_polls]         — TCP server mode");
+            shell_println!("  iperf udp <host> <port> [count] [size]  — UDP throughput test");
+            shell_println!("  iperf udp6 <host> <port> [count] [size] — UDP6 throughput test");
+            shell_println!("  iperf status                            — show statistics");
+            shell_println!("  iperf test                              — run self-tests");
         }
     }
 }

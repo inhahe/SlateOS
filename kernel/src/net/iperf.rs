@@ -6,7 +6,7 @@
 //! ## Features
 //!
 //! - TCP throughput test (client sends, server receives)
-//! - UDP throughput test with configurable bandwidth
+//! - UDP throughput test with configurable bandwidth (IPv4 + IPv6)
 //! - Bandwidth calculation with human-readable output
 //! - Jitter and packet loss tracking for UDP
 //! - Server mode: listens and measures incoming throughput
@@ -17,6 +17,7 @@
 //! iperf server <port>              — start iperf server
 //! iperf client <host> <port>       — TCP throughput test
 //! iperf udp <host> <port> [size]   — UDP throughput test
+//! iperf udp6 <host> <port> [size]  — UDP6 throughput test
 //! iperf status                     — show test statistics
 //! ```
 
@@ -28,6 +29,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use super::interface::Ipv4Addr;
+use super::ipv6::Ipv6Addr;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -377,6 +379,104 @@ pub fn udp_client_test(
         throughput_bps,
         packets_sent: count,
         packets_received: sent, // From client side, this is actually "sent successfully".
+        loss_percent: loss,
+        avg_jitter_ns: avg_jitter,
+    })
+}
+
+/// Run a UDP bandwidth test to a remote host over IPv6.
+///
+/// Same measurement methodology as [`udp_client_test`] but using
+/// IPv6 UDP transport.
+pub fn udp_client_test_v6(
+    host: Ipv6Addr,
+    port: u16,
+    packet_count: u32,
+    packet_size: usize,
+) -> KernelResult<ThroughputResult> {
+    TESTS_RUN.fetch_add(1, Ordering::Relaxed);
+    UDP_TESTS.fetch_add(1, Ordering::Relaxed);
+
+    let count = if packet_count == 0 { 100 } else { packet_count.min(MAX_UDP_PACKETS) };
+    let size = if packet_size == 0 { UDP_SEND_SIZE } else { packet_size.min(1472) };
+
+    let payload = generate_pattern(size);
+
+    let start_ns = crate::hrtimer::now_ns();
+    let mut sent: u32 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut last_send_ns: u64 = start_ns;
+    let mut jitter_sum: u64 = 0;
+
+    for seq in 0..count {
+        let mut dgram = alloc::vec![0u8; size.min(payload.len())];
+        dgram[..payload.len().min(size)].copy_from_slice(&payload[..payload.len().min(size)]);
+
+        // Embed sequence number in first 4 bytes.
+        if dgram.len() >= 4 {
+            let seq_bytes = seq.to_be_bytes();
+            dgram[0] = seq_bytes[0];
+            dgram[1] = seq_bytes[1];
+            dgram[2] = seq_bytes[2];
+            dgram[3] = seq_bytes[3];
+        }
+
+        let src_port = 49152u16.saturating_add((crate::hrtimer::now_ns() % 16384) as u16);
+        match super::udp::send_v6(src_port, host, port, &dgram) {
+            Ok(()) => {
+                sent = sent.saturating_add(1);
+                total_bytes = total_bytes.saturating_add(dgram.len() as u64);
+
+                let now = crate::hrtimer::now_ns();
+                let interval = now.saturating_sub(last_send_ns);
+                jitter_sum = jitter_sum.saturating_add(interval);
+                last_send_ns = now;
+            }
+            Err(_) => {
+                // Send failed — count as lost.
+            }
+        }
+
+        if seq % 10 == 0 {
+            super::poll();
+        }
+    }
+
+    let end_ns = crate::hrtimer::now_ns();
+    let duration_ns = end_ns.saturating_sub(start_ns);
+
+    TOTAL_BYTES_TX.fetch_add(total_bytes, Ordering::Relaxed);
+
+    let throughput_bps = if duration_ns > 0 {
+        total_bytes
+            .saturating_mul(8)
+            .saturating_mul(1_000_000_000)
+            .checked_div(duration_ns)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let avg_jitter = if sent > 1 {
+        jitter_sum.checked_div(sent.saturating_sub(1) as u64).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let loss = if count > 0 {
+        let lost = count.saturating_sub(sent);
+        (lost as f32 / count as f32) * 100.0
+    } else {
+        0.0
+    };
+
+    Ok(ThroughputResult {
+        protocol: "UDP",
+        bytes_transferred: total_bytes,
+        duration_ns,
+        throughput_bps,
+        packets_sent: count,
+        packets_received: sent,
         loss_percent: loss,
         avg_jitter_ns: avg_jitter,
     })

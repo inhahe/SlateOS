@@ -627,6 +627,8 @@ pub fn delete(id: ContainerId) -> KernelResult<()> {
     if let Some(pair_id) = veth_pair {
         let _ = crate::net::veth::destroy_pair(pair_id);
     }
+    // Flush NAT entries belonging to this namespace before tearing it down.
+    crate::net::nat::flush_namespace(net_ns);
     let _ = crate::cgroup::delete(cgroup_id);
     let _ = crate::netns::delete(net_ns);
     let _ = crate::userns::delete(user_ns);

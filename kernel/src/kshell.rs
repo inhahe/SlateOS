@@ -3575,7 +3575,7 @@ const COMMANDS: &[&str] = &[
     "id", "ifconfig", "installer", "integrity", "intercept", "ionice", "iommu", "irq", "journal", "kill", "label", "let", "linkcheck", "ln", "link", "locate", "logpersist", "lpersist", "ls", "lsattr", "lsblk", "lsof", "lsp", "lsplus",
     "mapfile", "mem", "meminfo", "mime", "mimetype", "mkdir", "mkelf", "mkfs", "mkfs.fat", "mklink", "mktemp",
     "mount", "mv",
-    "move", "net", "nl", "notifcenter", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "ping6", "printenv",
+    "move", "nat", "net", "nl", "notifcenter", "nproc", "nslookup", "od", "openw", "openwith", "paste", "pci", "ping", "ping6", "printenv",
     "udp6",
     "pathbar", "prefetch", "preview", "printf", "profile", "prop", "properties", "ps", "pwd", "qattr", "queryable", "quota", "readarray", "readlink", "readonly", "realpath",
     "rs", "rsolicit",
@@ -4899,6 +4899,7 @@ fn dispatch(line: &str) {
         "qos" => cmd_qos(args),
         "socks" | "socks5" => cmd_socks(args),
         "brctl" | "bridge" | "bond" => cmd_bridge(args),
+        "nat" => cmd_nat(args),
         "echo" => cmd_echo(args),
         "printf" => cmd_printf(args),
         "date" => cmd_date(args),
@@ -5695,6 +5696,7 @@ fn cmd_help() {
     crate::console_println!("  dns NAME  Resolve a domain name to IP");
     crate::console_println!("  wget URL  Fetch a URL via HTTP GET");
     crate::console_println!("  firewall  Manage packet filtering (fw alias)");
+    crate::console_println!("  nat       NAT/masquerade management (enable/disable/list/flush)");
     crate::console_println!("  version   Show kernel version");
     crate::console_println!("  uname [-asnrvmo] Print system information");
     crate::console_println!("  source F  Execute kshell commands from file F");
@@ -36452,6 +36454,74 @@ fn cmd_bridge(args: &str) {
             shell_println!();
             shell_println!("  brctl show                        — list all");
             shell_println!("  brctl test                        — run self-tests");
+        }
+    }
+}
+
+/// `nat` — NAT/masquerade management for container networking.
+fn cmd_nat(args: &str) {
+    use alloc::vec::Vec;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("status");
+
+    match sub {
+        "enable" | "on" => {
+            crate::net::nat::enable();
+            shell_println!("NAT enabled");
+        }
+        "disable" | "off" => {
+            crate::net::nat::disable();
+            shell_println!("NAT disabled");
+        }
+        "status" | "stats" => {
+            let s = crate::net::nat::stats();
+            shell_println!("NAT status:");
+            shell_println!("  Enabled:          {}", if s.enabled { "yes" } else { "no" });
+            shell_println!("  Active entries:   {}/{}", s.active_entries, s.max_entries);
+            shell_println!("  Outgoing xlat:    {}", s.translations_out);
+            shell_println!("  Incoming xlat:    {}", s.translations_in);
+            shell_println!("  Entries created:  {}", s.entries_created);
+            shell_println!("  Entries expired:  {}", s.entries_expired);
+        }
+        "list" | "ls" => {
+            let entries = crate::net::nat::list_entries();
+            if entries.is_empty() {
+                shell_println!("No active NAT entries");
+            } else {
+                shell_println!("{:<5} {:<18} {:<18} {:<7} {:<4} {:<5}",
+                    "PROTO", "ORIGINAL", "DESTINATION", "NATPORT", "NS", "TTL");
+                for (proto, src_ip, src_port, dst_ip, dst_port, nat_port, ns_id, ttl) in &entries {
+                    let proto_str = match proto {
+                        crate::net::nat::NatProto::Tcp => "TCP",
+                        crate::net::nat::NatProto::Udp => "UDP",
+                    };
+                    shell_println!("{:<5} {}:{:<10} {}:{:<10} {:<7} {:<4} {}s",
+                        proto_str, src_ip, src_port, dst_ip, dst_port, nat_port, ns_id, ttl);
+                }
+                shell_println!("({} entries)", entries.len());
+            }
+        }
+        "flush" => {
+            if let Some(ns_str) = parts.get(1) {
+                if let Ok(ns_id) = ns_str.parse::<u32>() {
+                    crate::net::nat::flush_namespace(ns_id);
+                    shell_println!("Flushed NAT entries for namespace {}", ns_id);
+                } else {
+                    shell_println!("Usage: nat flush <namespace_id>");
+                }
+            } else {
+                shell_println!("Usage: nat flush <namespace_id>");
+            }
+        }
+        "help" | _ => {
+            shell_println!("nat — NAT/masquerade management");
+            shell_println!("Usage:");
+            shell_println!("  nat                  — show status (default)");
+            shell_println!("  nat enable|on        — enable NAT globally");
+            shell_println!("  nat disable|off      — disable NAT globally");
+            shell_println!("  nat status|stats     — show statistics");
+            shell_println!("  nat list|ls          — list active NAT entries");
+            shell_println!("  nat flush <ns_id>    — remove entries for a namespace");
         }
     }
 }
@@ -69175,7 +69245,7 @@ fn is_builtin(name: &str) -> bool {
         | "readlink" | "symlink" | "mklink" | "xattr" | "watch" | "trash" | "journal" | "gunzip" | "gzip" | "bunzip2" | "bzip2" | "bzcat" | "unxz" | "xzcat" | "unzstd" | "zstd" | "zstdcat" | "unlz4" | "lz4" | "lz4cat" | "unzip" | "un7z" | "unrar" | "cpio" | "ar" | "dpkg" | "zip" | "basename" | "dirname"
         | "realpath" | "pwd" | "id" | "whoami" | "mktemp" | "run" | "exec"
         | "mkelf" | "net" | "ifconfig" | "mousedev" | "usbdev" | "audio" | "hda" | "gfx" | "desktop" | "startx" | "dhcp" | "dhcpv6" | "dhcp6" | "ping" | "ping6" | "udp6" | "nslookup"
-        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond"
+        | "upnp" | "portfwd" | "httpc" | "curl" | "ntp" | "ntpdate" | "mdns" | "dnssd" | "telnetd" | "telnet" | "tftp" | "tftpd" | "netsyslog" | "rsyslog" | "wol" | "wakeonlan" | "pcap" | "tcpdump" | "traceroute" | "tracert" | "traceroute6" | "tracert6" | "igmp" | "mld" | "lldp" | "netstat" | "ss" | "ndisc" | "arpscan" | "nc" | "netcat" | "iperf" | "snmp" | "ftp" | "smtp" | "vlan" | "qos" | "socks" | "socks5" | "brctl" | "bridge" | "bond" | "nat"
         | "wget" | "http" | "fw" | "capgroups" | "cg" | "cgroup" | "pidns" | "userns" | "netns" | "container" | "oci" | "scfilter" | "seccomp" | "captags" | "capreq" | "cr" | "sockact" | "sa" | "slimit" | "sl" | "iommu" | "version" | "ver" | "uname" | "source" | "." | "seq" | "nl"
         | "rev" | "sleep" | "true" | "false" | "test" | "[" | "expr" | "printenv"
         | "env" | "eval" | "declare" | "read" | "readarray" | "mapfile"

@@ -694,13 +694,15 @@ ok/degraded/critical status.  More expensive than /api/status because \
 it queries more subsystems and evaluates threshold conditions."""
 
 [dashboard_api_metrics]
-description = "/metrics Prometheus text exposition (22 metrics)"
-target_ns   = 30000
-source      = "22 metric lines with TYPE/HELP annotations + string concat"
+description = "/metrics Prometheus text exposition (~40 metrics + per-CPU labels)"
+target_ns   = 50000
+source      = "~40 metric families covering system, TCP, swap, scheduler, per-CPU ticks"
 notes       = """
-Prometheus-compatible scrape endpoint.  Output is ~2.5 KiB of \
-text/plain.  Dominated by 22 format!() calls and string \
-concatenation.  Scraped every 15-60 seconds by monitoring stacks."""
+Prometheus-compatible scrape endpoint.  Output is ~5-6 KiB of text/plain.  \
+Collects data from 8 subsystems: frame allocator, heap, scheduler, network \
+interface, TCP, HTTP server, DNS, swap/zram, firewall, and containers.  \
+Per-CPU metrics emit labeled lines (os_cpu_total_ticks{cpu="N"}).  \
+Scraped every 15-60 seconds by monitoring stacks."""
 
 # -------------------------------------------------------------------------
 # VFS deep-path baselines (target performance)

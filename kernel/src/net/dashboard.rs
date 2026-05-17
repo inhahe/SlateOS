@@ -20,7 +20,7 @@
 //! | `/api/health`      | JSON: aggregated health check for monitoring    |
 //! | `/api/ipv6`        | JSON: IPv6 addresses, SLAAC, DHCPv6 status      |
 //! | `/api/containers`  | JSON: active container list with details         |
-//! | `/metrics`         | Prometheus text format metrics for monitoring   |
+//! | `/metrics`         | Prometheus text format (~40 metrics) for monitoring |
 //!
 //! ## Integration
 //!
@@ -650,13 +650,22 @@ fn api_health() -> Vec<u8> {
 ///
 /// Exports key system metrics in Prometheus exposition format for
 /// integration with monitoring stacks (Prometheus, Grafana, etc.).
+/// Currently exposes ~40 metrics covering system, memory, heap, tasks,
+/// network, TCP, HTTP, DNS, swap/zram, scheduler, firewall, containers,
+/// and per-CPU utilization.
 fn api_metrics() -> Vec<u8> {
     use super::httpd;
+    use core::fmt::Write;
 
-    let uptime_ns = crate::hrtimer::now_ns();
-    let uptime_secs = uptime_ns / 1_000_000_000;
+    // Pre-allocate generously — avoids multiple reallocs for ~40 metrics.
+    let mut t = String::with_capacity(6144);
 
-    // Memory.
+    // -- Uptime ---------------------------------------------------------------
+    let uptime_secs = crate::hrtimer::now_ns() / 1_000_000_000;
+    prom_gauge(&mut t, "os_uptime_seconds",
+        "System uptime in seconds.", uptime_secs);
+
+    // -- Physical memory ------------------------------------------------------
     let (total_frames, free_frames) = crate::mm::frame::stats()
         .map(|s| (s.total_frames, s.free_frames))
         .unwrap_or((0, 0));
@@ -665,109 +674,176 @@ fn api_metrics() -> Vec<u8> {
     let total_mem = (total_frames as u64).saturating_mul(page_size);
     let used_mem = (used_frames as u64).saturating_mul(page_size);
 
-    // Heap.
+    prom_gauge(&mut t, "os_memory_total_bytes",
+        "Total physical memory in bytes.", total_mem);
+    prom_gauge(&mut t, "os_memory_used_bytes",
+        "Used physical memory in bytes.", used_mem);
+    prom_gauge(&mut t, "os_memory_frames_total",
+        "Total physical frames.", total_frames as u64);
+    prom_gauge(&mut t, "os_memory_frames_used",
+        "Used physical frames.", used_frames as u64);
+
+    // -- Kernel heap ----------------------------------------------------------
     let heap = crate::mm::heap::stats();
+    prom_gauge(&mut t, "os_heap_bytes_in_use",
+        "Kernel heap bytes in use.", heap.bytes_in_use);
+    prom_gauge(&mut t, "os_heap_peak_bytes",
+        "Peak kernel heap usage.", heap.peak_bytes_in_use);
 
-    // Tasks.
-    let task_count = crate::sched::task_list().len();
+    // -- Tasks ----------------------------------------------------------------
+    let task_count = crate::sched::task_list().len() as u64;
+    prom_gauge(&mut t, "os_tasks_total", "Active task count.", task_count);
 
-    // Network.
+    // -- Network interface (L2) -----------------------------------------------
     let net_stats = crate::net::interface::stats();
+    prom_counter(&mut t, "os_net_rx_bytes_total",
+        "Network bytes received.", net_stats.rx_bytes);
+    prom_counter(&mut t, "os_net_tx_bytes_total",
+        "Network bytes transmitted.", net_stats.tx_bytes);
+    prom_counter(&mut t, "os_net_rx_packets_total",
+        "Network packets received.", net_stats.rx_packets);
+    prom_counter(&mut t, "os_net_tx_packets_total",
+        "Network packets transmitted.", net_stats.tx_packets);
 
-    // HTTP.
-    let http_requests = httpd::request_count();
-    let http_304 = httpd::not_modified_count();
-    let http_206 = httpd::partial_count();
-    let http_429 = httpd::rate_limited_count();
-    let http_gzip = httpd::gzip_count();
-    let http_gzip_saved = httpd::gzip_bytes_saved();
+    // -- TCP ------------------------------------------------------------------
+    let tcp = super::tcp::stats();
+    prom_gauge(&mut t, "os_tcp_connections_active",
+        "Active TCP connections (any state except Closed).",
+        tcp.active_connections as u64);
+    prom_gauge(&mut t, "os_tcp_connections_established",
+        "TCP connections in ESTABLISHED state.",
+        tcp.established as u64);
+    prom_gauge(&mut t, "os_tcp_connections_syn_sent",
+        "TCP connections in SYN_SENT state.",
+        tcp.syn_sent as u64);
+    prom_gauge(&mut t, "os_tcp_connections_time_wait",
+        "TCP connections in TIME_WAIT state.",
+        tcp.time_wait as u64);
+    prom_gauge(&mut t, "os_tcp_connections_close_wait",
+        "TCP connections in CLOSE_WAIT state.",
+        tcp.close_wait as u64);
+    prom_gauge(&mut t, "os_tcp_listeners",
+        "Active TCP listeners.", tcp.listeners as u64);
+    prom_counter(&mut t, "os_tcp_rx_bytes_total",
+        "TCP receive buffer bytes across all connections.",
+        tcp.total_rx_bytes as u64);
+    prom_counter(&mut t, "os_tcp_tx_bytes_total",
+        "TCP transmit buffer bytes across all connections.",
+        tcp.total_tx_bytes as u64);
 
-    // DNS.
+    // -- HTTP -----------------------------------------------------------------
+    prom_counter(&mut t, "os_http_requests_total",
+        "HTTP requests served.", httpd::request_count());
+    prom_counter(&mut t, "os_http_304_total",
+        "HTTP 304 Not Modified responses.", httpd::not_modified_count());
+    prom_counter(&mut t, "os_http_206_total",
+        "HTTP 206 Partial Content responses.", httpd::partial_count());
+    prom_counter(&mut t, "os_http_429_total",
+        "HTTP 429 Rate Limited responses.", httpd::rate_limited_count());
+    prom_counter(&mut t, "os_http_gzip_total",
+        "Gzip-compressed responses served.", httpd::gzip_count());
+    prom_counter(&mut t, "os_http_gzip_bytes_saved_total",
+        "Bytes saved by gzip compression.", httpd::gzip_bytes_saved());
+
+    // -- DNS ------------------------------------------------------------------
     let dns = super::dns::cache_stats();
+    prom_counter(&mut t, "os_dns_cache_hits_total",
+        "DNS cache hits.", dns.hits);
+    prom_counter(&mut t, "os_dns_cache_misses_total",
+        "DNS cache misses.", dns.misses);
+    prom_gauge(&mut t, "os_dns_cache_entries",
+        "Current DNS cache entries.", dns.entries);
 
-    let text = format!(
-        concat!(
-            "# HELP os_uptime_seconds System uptime in seconds.\n",
-            "# TYPE os_uptime_seconds gauge\n",
-            "os_uptime_seconds {}\n",
-            "# HELP os_memory_total_bytes Total physical memory in bytes.\n",
-            "# TYPE os_memory_total_bytes gauge\n",
-            "os_memory_total_bytes {}\n",
-            "# HELP os_memory_used_bytes Used physical memory in bytes.\n",
-            "# TYPE os_memory_used_bytes gauge\n",
-            "os_memory_used_bytes {}\n",
-            "# HELP os_memory_frames_total Total physical frames.\n",
-            "# TYPE os_memory_frames_total gauge\n",
-            "os_memory_frames_total {}\n",
-            "# HELP os_memory_frames_used Used physical frames.\n",
-            "# TYPE os_memory_frames_used gauge\n",
-            "os_memory_frames_used {}\n",
-            "# HELP os_heap_bytes_in_use Kernel heap bytes in use.\n",
-            "# TYPE os_heap_bytes_in_use gauge\n",
-            "os_heap_bytes_in_use {}\n",
-            "# HELP os_heap_peak_bytes Peak kernel heap usage.\n",
-            "# TYPE os_heap_peak_bytes gauge\n",
-            "os_heap_peak_bytes {}\n",
-            "# HELP os_tasks_total Active task count.\n",
-            "# TYPE os_tasks_total gauge\n",
-            "os_tasks_total {}\n",
-            "# HELP os_net_rx_bytes_total Network bytes received.\n",
-            "# TYPE os_net_rx_bytes_total counter\n",
-            "os_net_rx_bytes_total {}\n",
-            "# HELP os_net_tx_bytes_total Network bytes transmitted.\n",
-            "# TYPE os_net_tx_bytes_total counter\n",
-            "os_net_tx_bytes_total {}\n",
-            "# HELP os_net_rx_packets_total Network packets received.\n",
-            "# TYPE os_net_rx_packets_total counter\n",
-            "os_net_rx_packets_total {}\n",
-            "# HELP os_net_tx_packets_total Network packets transmitted.\n",
-            "# TYPE os_net_tx_packets_total counter\n",
-            "os_net_tx_packets_total {}\n",
-            "# HELP os_http_requests_total HTTP requests served.\n",
-            "# TYPE os_http_requests_total counter\n",
-            "os_http_requests_total {}\n",
-            "# HELP os_http_304_total HTTP 304 Not Modified responses.\n",
-            "# TYPE os_http_304_total counter\n",
-            "os_http_304_total {}\n",
-            "# HELP os_http_206_total HTTP 206 Partial Content responses.\n",
-            "# TYPE os_http_206_total counter\n",
-            "os_http_206_total {}\n",
-            "# HELP os_http_429_total HTTP 429 Rate Limited responses.\n",
-            "# TYPE os_http_429_total counter\n",
-            "os_http_429_total {}\n",
-            "# HELP os_http_gzip_total Gzip-compressed responses served.\n",
-            "# TYPE os_http_gzip_total counter\n",
-            "os_http_gzip_total {}\n",
-            "# HELP os_http_gzip_bytes_saved_total Bytes saved by gzip compression.\n",
-            "# TYPE os_http_gzip_bytes_saved_total counter\n",
-            "os_http_gzip_bytes_saved_total {}\n",
-            "# HELP os_dns_cache_hits_total DNS cache hits.\n",
-            "# TYPE os_dns_cache_hits_total counter\n",
-            "os_dns_cache_hits_total {}\n",
-            "# HELP os_dns_cache_misses_total DNS cache misses.\n",
-            "# TYPE os_dns_cache_misses_total counter\n",
-            "os_dns_cache_misses_total {}\n",
-            "# HELP os_dns_cache_entries Current DNS cache entries.\n",
-            "# TYPE os_dns_cache_entries gauge\n",
-            "os_dns_cache_entries {}\n",
-            "# HELP os_containers_active Active container count.\n",
-            "# TYPE os_containers_active gauge\n",
-            "os_containers_active {}\n",
-        ),
-        uptime_secs,
-        total_mem, used_mem,
-        total_frames, used_frames,
-        heap.bytes_in_use, heap.peak_bytes_in_use,
-        task_count,
-        net_stats.rx_bytes, net_stats.tx_bytes,
-        net_stats.rx_packets, net_stats.tx_packets,
-        http_requests, http_304, http_206, http_429,
-        http_gzip, http_gzip_saved,
-        dns.hits, dns.misses, dns.entries,
-        if crate::container::is_initialized() { crate::container::active_count() } else { 0 },
+    // -- Swap / zram ----------------------------------------------------------
+    let swap = crate::mm::swap::compression_stats();
+    prom_gauge(&mut t, "os_swap_compressed_bytes",
+        "Compressed size of swapped pages (actual storage).",
+        swap.compressed_bytes);
+    prom_gauge(&mut t, "os_swap_uncompressed_bytes",
+        "Logical (uncompressed) size of swapped pages.",
+        swap.uncompressed_bytes);
+    prom_gauge(&mut t, "os_swap_compressed_pages",
+        "Number of pages stored with compression.",
+        swap.compressed_count);
+    prom_gauge(&mut t, "os_swap_uncompressed_pages",
+        "Number of pages stored uncompressed (incompressible).",
+        swap.uncompressed_count);
+
+    // -- Scheduler ------------------------------------------------------------
+    let sched = crate::sched::sched_stats();
+    prom_counter(&mut t, "os_sched_context_switches_total",
+        "Total context switches across all CPUs.",
+        sched.total_ctx_switches);
+    prom_counter(&mut t, "os_sched_work_steals_total",
+        "Total work-stealing operations.", sched.total_work_steals);
+    prom_counter(&mut t, "os_sched_tasks_spawned_total",
+        "Total tasks spawned since boot.", sched.total_tasks_spawned);
+    prom_counter(&mut t, "os_sched_tasks_exited_total",
+        "Total tasks exited since boot.", sched.total_tasks_exited);
+    // Load average is stored ×100 (e.g. 150 = load 1.50).
+    // Emit as integer ×100 — Prometheus can divide in queries.
+    prom_gauge(&mut t, "os_sched_load_avg_x100",
+        "System load average times 100 (150 = 1.50).",
+        sched.load_avg_x100);
+
+    // -- Per-CPU utilization --------------------------------------------------
+    // Emit (total_ticks, idle_ticks) per online CPU as labeled counters.
+    // Prometheus consumers compute utilization as:
+    //   1 - rate(os_cpu_idle_ticks[5m]) / rate(os_cpu_total_ticks[5m])
+    let _ = write!(t,
+        "# HELP os_cpu_total_ticks Total scheduler ticks per CPU.\n\
+         # TYPE os_cpu_total_ticks counter\n");
+    for cpu in 0..sched.num_cpus {
+        if let Some(&(total, _idle)) = sched.cpu_ticks.get(cpu) {
+            let _ = write!(t, "os_cpu_total_ticks{{cpu=\"{}\"}} {}\n", cpu, total);
+        }
+    }
+    let _ = write!(t,
+        "# HELP os_cpu_idle_ticks Idle scheduler ticks per CPU.\n\
+         # TYPE os_cpu_idle_ticks counter\n");
+    for cpu in 0..sched.num_cpus {
+        if let Some(&(_total, idle)) = sched.cpu_ticks.get(cpu) {
+            let _ = write!(t, "os_cpu_idle_ticks{{cpu=\"{}\"}} {}\n", cpu, idle);
+        }
+    }
+
+    // -- Firewall -------------------------------------------------------------
+    prom_gauge(&mut t, "os_firewall_conntrack_entries",
+        "Active firewall connection tracking entries.",
+        super::firewall::conntrack_count() as u64);
+
+    // -- Containers -----------------------------------------------------------
+    let ct_active = if crate::container::is_initialized() {
+        crate::container::active_count() as u64
+    } else {
+        0
+    };
+    prom_gauge(&mut t, "os_containers_active",
+        "Active container count.", ct_active);
+
+    t.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
+// Prometheus text-format helpers
+// ---------------------------------------------------------------------------
+
+/// Emit a gauge metric (HELP + TYPE + value) into the buffer.
+fn prom_gauge(buf: &mut String, name: &str, help: &str, value: impl core::fmt::Display) {
+    use core::fmt::Write;
+    let _ = write!(buf,
+        "# HELP {n} {h}\n# TYPE {n} gauge\n{n} {v}\n",
+        n = name, h = help, v = value,
     );
+}
 
-    text.into_bytes()
+/// Emit a counter metric (HELP + TYPE + value) into the buffer.
+fn prom_counter(buf: &mut String, name: &str, help: &str, value: impl core::fmt::Display) {
+    use core::fmt::Write;
+    let _ = write!(buf,
+        "# HELP {n} {h}\n# TYPE {n} counter\n{n} {v}\n",
+        n = name, h = help, v = value,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,8 +1133,8 @@ pub fn bench_api_health() -> Vec<u8> {
 
 /// Generate the Prometheus /metrics text response.  Exposed for benchmarking.
 ///
-/// Measures the cost of formatting all 22 Prometheus metrics with
-/// TYPE/HELP annotations.
+/// Measures the cost of formatting ~40 Prometheus metrics (including
+/// per-CPU labeled metrics) with TYPE/HELP annotations.
 #[inline(never)]
 pub fn bench_api_metrics() -> Vec<u8> {
     api_metrics()
@@ -1230,19 +1306,45 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let metrics = api_metrics();
         assert!(!metrics.is_empty());
         let metrics_str = core::str::from_utf8(&metrics).unwrap_or("");
-        // Must contain TYPE and HELP annotations.
+        // Original metrics — TYPE and HELP annotations.
         assert!(metrics_str.contains("# TYPE os_uptime_seconds gauge"));
         assert!(metrics_str.contains("# HELP os_memory_total_bytes"));
         assert!(metrics_str.contains("os_http_requests_total "));
         assert!(metrics_str.contains("os_dns_cache_entries "));
         assert!(metrics_str.contains("os_tasks_total "));
         assert!(metrics_str.contains("os_net_rx_bytes_total "));
+        // New TCP metrics.
+        assert!(metrics_str.contains("# TYPE os_tcp_connections_active gauge"));
+        assert!(metrics_str.contains("os_tcp_connections_established "));
+        assert!(metrics_str.contains("os_tcp_listeners "));
+        assert!(metrics_str.contains("os_tcp_rx_bytes_total "));
+        // New swap/zram metrics.
+        assert!(metrics_str.contains("# TYPE os_swap_compressed_bytes gauge"));
+        assert!(metrics_str.contains("os_swap_uncompressed_bytes "));
+        assert!(metrics_str.contains("os_swap_compressed_pages "));
+        // New scheduler metrics.
+        assert!(metrics_str.contains("# TYPE os_sched_context_switches_total counter"));
+        assert!(metrics_str.contains("os_sched_load_avg_x100 "));
+        assert!(metrics_str.contains("os_sched_tasks_spawned_total "));
+        // Per-CPU metrics (at least CPU 0 must exist).
+        assert!(metrics_str.contains("os_cpu_total_ticks{cpu=\"0\"}"));
+        assert!(metrics_str.contains("os_cpu_idle_ticks{cpu=\"0\"}"));
+        // Firewall conntrack.
+        assert!(metrics_str.contains("os_firewall_conntrack_entries "));
         // Each metric line should end with a number (no trailing whitespace).
+        // Lines with labels like {cpu="0"} have the value after the closing brace.
         let has_numeric_values = metrics_str.lines()
             .filter(|l| !l.starts_with('#') && !l.is_empty())
             .all(|l| l.split_whitespace().last().map_or(false, |v| v.parse::<u64>().is_ok()));
         assert!(has_numeric_values, "All metric lines must have numeric values");
-        serial_println!("[dashboard]   Prometheus metrics: OK ({} bytes)", metrics.len());
+        // Count total metric families (# TYPE lines).
+        let type_lines = metrics_str.lines()
+            .filter(|l| l.starts_with("# TYPE "))
+            .count();
+        assert!(type_lines >= 35,
+            "Expected at least 35 metric families, got {}", type_lines);
+        serial_println!("[dashboard]   Prometheus metrics: OK ({} bytes, {} families)",
+            metrics.len(), type_lines);
     }
 
     // Test 14: API ipv6 returns valid JSON with expected fields.

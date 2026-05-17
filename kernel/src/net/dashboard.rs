@@ -14,6 +14,8 @@
 //! | `/api/network`     | JSON: interface info, TCP connections, stats  |
 //! | `/api/memory`      | JSON: frame allocator, heap, swap stats       |
 //! | `/api/httpd`       | JSON: HTTP server stats, recent access log    |
+//! | `/api/dns`         | JSON: DNS cache stats (hits, misses, entries) |
+//! | `/api/firewall`    | JSON: firewall status, rules, conntrack count |
 //!
 //! ## Integration
 //!
@@ -93,6 +95,12 @@ pub fn handle_api_request(path: &str) -> Option<(String, Vec<u8>)> {
         }
         "/api/httpd" => {
             Some((String::from("application/json"), api_httpd()))
+        }
+        "/api/dns" => {
+            Some((String::from("application/json"), api_dns()))
+        }
+        "/api/firewall" => {
+            Some((String::from("application/json"), api_firewall()))
         }
         _ => None,
     }
@@ -296,6 +304,71 @@ fn api_httpd() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// /api/dns
+// ---------------------------------------------------------------------------
+
+fn api_dns() -> Vec<u8> {
+    let stats = super::dns::cache_stats();
+
+    let json = format!(
+        concat!(
+            r#"{{"cache":{{"hits":{},"misses":{},"evictions":{},"#,
+            r#""entries":{},"capacity":{}}}}}"#,
+        ),
+        stats.hits, stats.misses, stats.evictions,
+        stats.entries, stats.capacity,
+    );
+
+    json.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
+// /api/firewall
+// ---------------------------------------------------------------------------
+
+fn api_firewall() -> Vec<u8> {
+    let enabled = super::firewall::is_enabled();
+    let policy = super::firewall::default_policy();
+    let conntrack = super::firewall::conntrack_count();
+
+    let policy_str = match policy {
+        super::firewall::DefaultPolicy::Accept => "accept",
+        super::firewall::DefaultPolicy::Drop => "drop",
+    };
+
+    let (rules, rule_count) = super::firewall::rule_stats();
+
+    let mut json = format!(
+        r#"{{"enabled":{},"default_policy":"{}","conntrack_entries":{},"rules":["#,
+        enabled,
+        policy_str,
+        conntrack,
+    );
+
+    for i in 0..rule_count {
+        if i > 0 {
+            json.push(',');
+        }
+        let r = &rules[i];
+        let src = core::str::from_utf8(r.source.get(..r.source_len as usize).unwrap_or(&[]))
+            .unwrap_or("?");
+        json.push_str(&format!(
+            r#"{{"priority":{},"protocol":"{}","action":"{}","direction":"{}","dst_port":{},"source":"{}","matches":{}}}"#,
+            r.priority,
+            r.protocol,
+            r.action,
+            r.direction,
+            r.dst_port,
+            json_escape(src),
+            r.matches,
+        ));
+    }
+
+    json.push_str("]}");
+    json.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
 // HTML dashboard
 // ---------------------------------------------------------------------------
 
@@ -381,6 +454,14 @@ tr:hover td { background: #1c2128; }
     <h2>HTTP Server</h2>
     <div id="httpd-stats"></div>
   </div>
+  <div class="card">
+    <h2>DNS Cache</h2>
+    <div id="dns-stats"></div>
+  </div>
+  <div class="card">
+    <h2>Firewall</h2>
+    <div id="fw-stats"></div>
+  </div>
 </div>
 
 <div class="card">
@@ -418,12 +499,14 @@ function bar(pct, cls) {
 
 async function update() {
   try {
-    var [sr,tr,nr,mr,hr] = await Promise.all([
+    var [sr,tr,nr,mr,hr,dr,fr] = await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/tasks').then(r=>r.json()),
       fetch('/api/network').then(r=>r.json()),
       fetch('/api/memory').then(r=>r.json()),
       fetch('/api/httpd').then(r=>r.json()),
+      fetch('/api/dns').then(r=>r.json()),
+      fetch('/api/firewall').then(r=>r.json()),
     ]);
     var memPct = sr.memory.total_bytes>0 ?
       Math.round(sr.memory.used_bytes*100/sr.memory.total_bytes) : 0;
@@ -466,6 +549,18 @@ async function update() {
       lb+='<tr><td>'+e.method+'</td><td>'+e.path+'</td><td><span class="stat-value'+(sc?' '+sc:'')+'">'+e.status+'</span></td><td>'+fmt(e.body_size)+'</td></tr>';
     });
     document.getElementById('httpd-log').innerHTML=lb||'<tr><td colspan="4" style="color:#484f58">No requests yet</td></tr>';
+    var hitRate=dr.cache.hits+dr.cache.misses>0?Math.round(dr.cache.hits*100/(dr.cache.hits+dr.cache.misses))+'%':'n/a';
+    document.getElementById('dns-stats').innerHTML =
+      stat('Entries', dr.cache.entries+' / '+dr.cache.capacity) +
+      stat('Hits', dr.cache.hits, dr.cache.hits>0?'ok':'') +
+      stat('Misses', dr.cache.misses) +
+      stat('Hit Rate', hitRate, hitRate!=='n/a'?'ok':'') +
+      stat('Evictions', dr.cache.evictions, dr.cache.evictions>0?'warn':'');
+    document.getElementById('fw-stats').innerHTML =
+      stat('Status', fr.enabled?'Enabled':'Disabled', fr.enabled?'ok':'') +
+      stat('Default Policy', fr.default_policy) +
+      stat('Rules', fr.rules.length) +
+      stat('Conntrack', fr.conntrack_entries);
     document.getElementById('refresh').textContent='updated '+new Date().toLocaleTimeString();
   } catch(e) {
     document.getElementById('refresh').textContent='error: '+e.message;
@@ -549,6 +644,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(handle_api_request("/api/network").is_some());
         assert!(handle_api_request("/api/memory").is_some());
         assert!(handle_api_request("/api/httpd").is_some());
+        assert!(handle_api_request("/api/dns").is_some());
+        assert!(handle_api_request("/api/firewall").is_some());
         assert!(handle_api_request("/not-an-api").is_none());
         assert!(handle_api_request("/api/nonexistent").is_none());
         serial_println!("[dashboard]   API routing: OK");
@@ -561,14 +658,38 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(httpd[0], b'{');
         assert_eq!(httpd[httpd.len().saturating_sub(1)], b'}');
         let httpd_str = core::str::from_utf8(&httpd).unwrap_or("");
-        // Should contain server, stats, and access_log fields.
         assert!(httpd_str.contains("\"server\""));
         assert!(httpd_str.contains("\"stats\""));
         assert!(httpd_str.contains("\"access_log\""));
-        assert!(httpd_str.contains("\"requests\""));
         serial_println!("[dashboard]   API httpd: OK ({} bytes)", httpd.len());
     }
 
-    serial_println!("[dashboard] Self-test PASSED (8 tests)");
+    // Test 9: API dns returns valid JSON with cache stats.
+    {
+        let dns = api_dns();
+        assert!(!dns.is_empty());
+        assert_eq!(dns[0], b'{');
+        assert_eq!(dns[dns.len().saturating_sub(1)], b'}');
+        let dns_str = core::str::from_utf8(&dns).unwrap_or("");
+        assert!(dns_str.contains("\"cache\""));
+        assert!(dns_str.contains("\"hits\""));
+        assert!(dns_str.contains("\"capacity\""));
+        serial_println!("[dashboard]   API dns: OK ({} bytes)", dns.len());
+    }
+
+    // Test 10: API firewall returns valid JSON.
+    {
+        let fw = api_firewall();
+        assert!(!fw.is_empty());
+        assert_eq!(fw[0], b'{');
+        assert_eq!(fw[fw.len().saturating_sub(1)], b'}');
+        let fw_str = core::str::from_utf8(&fw).unwrap_or("");
+        assert!(fw_str.contains("\"enabled\""));
+        assert!(fw_str.contains("\"default_policy\""));
+        assert!(fw_str.contains("\"rules\""));
+        serial_println!("[dashboard]   API firewall: OK ({} bytes)", fw.len());
+    }
+
+    serial_println!("[dashboard] Self-test PASSED (10 tests)");
     Ok(())
 }

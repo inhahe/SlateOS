@@ -866,6 +866,28 @@ pub fn tls_port() -> u16 {
 }
 
 // ---------------------------------------------------------------------------
+// Benchmark helpers (public for bench module)
+// ---------------------------------------------------------------------------
+
+/// Parse an HTTP request from raw bytes.  Exposed for benchmarking.
+#[inline(never)]
+pub fn bench_parse_request(data: &[u8]) -> Option<bool> {
+    parse_request(data).map(|r| !r.method.is_empty())
+}
+
+/// Determine MIME type for a file path.  Exposed for benchmarking.
+#[inline(never)]
+pub fn bench_mime_type(path: &str) -> &'static str {
+    mime_for_path(path)
+}
+
+/// Percent-decode a URI string.  Exposed for benchmarking.
+#[inline(never)]
+pub fn bench_percent_decode(s: &str) -> String {
+    percent_decode(s)
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 

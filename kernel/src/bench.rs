@@ -723,6 +723,16 @@ pub fn run_all() {
     bench_crypto_ed25519_sign();
     bench_crypto_ed25519_verify();
 
+    // --- VFS deep-path and throughput benchmarks ---
+    bench_vfs_stat_deep();
+    bench_vfs_stat_3comp();
+    bench_vfs_throughput_16k();
+
+    // --- HTTP server benchmarks ---
+    bench_http_parse_request();
+    bench_http_mime_type();
+    bench_http_percent_decode();
+
     serial_println!("[bench] === Benchmarks complete ===");
 }
 
@@ -2850,6 +2860,227 @@ fn bench_crypto_ed25519_verify() {
 
     serial_println!(
         "[bench]   crypto_ed25519_verify: min {}ns ({}cy)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VFS deep-path and throughput benchmarks (fs zone)
+// ---------------------------------------------------------------------------
+
+/// Benchmark VFS stat on a multi-component path.
+///
+/// Measures the cost of resolving "/proc/meminfo" — a 2-component path
+/// that traverses the VFS mount table, descends into the procfs mount,
+/// and does a final filename lookup.  This captures the per-component
+/// traversal cost better than stat("/").
+///
+/// The design spec says Linux cached lookup is ~200-500ns per component.
+/// With 2 components, expect 2× the single-component cost.
+fn bench_vfs_stat_deep() {
+    use crate::fs::vfs::Vfs;
+
+    // /proc/meminfo should exist if procfs is mounted (it is by boot time).
+    if Vfs::stat("/proc/meminfo").is_err() {
+        serial_println!("[bench] vfs_stat_deep: SKIP (/proc/meminfo not available)");
+        return;
+    }
+
+    let result = run("vfs_stat_deep_2comp", 500, || {
+        let _ = core::hint::black_box(Vfs::stat("/proc/meminfo"));
+    });
+
+    let target_ns = 1400u64; // 2 components × 700ns target
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   vfs_stat_deep_2comp: PASS (min {}ns <= target {}ns)",
+            result.min_ns, target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   vfs_stat_deep_2comp: ABOVE TARGET (min {}ns > target {}ns, per-component ~{}ns)",
+            result.min_ns, target_ns, result.min_ns / 2
+        );
+    }
+}
+
+/// Benchmark VFS stat on a 3-component path.
+///
+/// Uses "/proc/net/tcp" to measure the cost of 3-level path resolution.
+/// If that path doesn't exist, falls back to creating a temporary
+/// 3-level directory structure.
+fn bench_vfs_stat_3comp() {
+    use crate::fs::vfs::Vfs;
+
+    // Try to use an existing deep path first.
+    let path = "/proc/sched/stats";
+    let alt_path = "/proc/meminfo"; // fallback: 2-component
+
+    let test_path = if Vfs::stat(path).is_ok() {
+        path
+    } else {
+        // Create a temporary 3-level path for the benchmark.
+        let dir = "/bench_deep_dir";
+        let subdir = "/bench_deep_dir/sub";
+        let file = "/bench_deep_dir/sub/testfile";
+        if Vfs::mkdir(dir).is_ok() {
+            let _ = Vfs::mkdir(subdir);
+            let _ = Vfs::write_file(file, b"bench");
+            if Vfs::stat(file).is_ok() {
+                file
+            } else {
+                // Clean up and skip.
+                let _ = Vfs::remove(file);
+                let _ = Vfs::remove(subdir);
+                let _ = Vfs::remove(dir);
+                if Vfs::stat(alt_path).is_ok() {
+                    alt_path
+                } else {
+                    serial_println!("[bench] vfs_stat_3comp: SKIP (no deep path available)");
+                    return;
+                }
+            }
+        } else if Vfs::stat(alt_path).is_ok() {
+            alt_path
+        } else {
+            serial_println!("[bench] vfs_stat_3comp: SKIP (no paths available)");
+            return;
+        }
+    };
+
+    let components = test_path.matches('/').count(); // approximate
+    let result = run("vfs_stat_3comp", 500, || {
+        let _ = core::hint::black_box(Vfs::stat(test_path));
+    });
+
+    serial_println!(
+        "[bench]   vfs_stat_3comp ({}comp, \"{}\"): min {}ns ({}ns/component)",
+        components, test_path, result.min_ns, result.min_ns / components as u64
+    );
+
+    // Clean up temporary files if we created them.
+    let _ = Vfs::remove("/bench_deep_dir/sub/testfile");
+    let _ = Vfs::remove("/bench_deep_dir/sub");
+    let _ = Vfs::remove("/bench_deep_dir");
+}
+
+/// Benchmark VFS sequential write throughput (4 KiB chunks).
+///
+/// Writes a 16 KiB file in a single call, then reads it back.
+/// Measures the throughput for the common file I/O pattern.
+fn bench_vfs_throughput_16k() {
+    use crate::fs::vfs::Vfs;
+
+    // 16 KiB of pattern data (one full page).
+    let data: [u8; 16384] = {
+        let mut buf = [0u8; 16384];
+        for (i, b) in buf.iter_mut().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            { *b = ((i * 7 + 13) & 0xFF) as u8; }
+        }
+        buf
+    };
+
+    let path = "/bench_throughput_16k.tmp";
+
+    // Verify VFS write works.
+    if Vfs::write_file(path, &data).is_err() {
+        serial_println!("[bench] vfs_throughput_16k: SKIP (VFS write not available)");
+        return;
+    }
+
+    // Benchmark write.
+    let write_result = run("vfs_write_16k", 100, || {
+        let _ = core::hint::black_box(Vfs::write_file(path, &data));
+    });
+
+    // Benchmark read.
+    let read_result = run("vfs_read_16k", 100, || {
+        let _ = core::hint::black_box(Vfs::read_file(path));
+    });
+
+    // Throughput: 16 KiB / time_ns * 1e9 / 1e6 = MiB/s
+    let write_mibs = if write_result.min_ns > 0 {
+        16384u64.saturating_mul(1_000) / write_result.min_ns
+    } else { 0 };
+    let read_mibs = if read_result.min_ns > 0 {
+        16384u64.saturating_mul(1_000) / read_result.min_ns
+    } else { 0 };
+
+    serial_println!(
+        "[bench]   vfs_write_16k: min {}ns (~{} MiB/s), vfs_read_16k: min {}ns (~{} MiB/s)",
+        write_result.min_ns, write_mibs, read_result.min_ns, read_mibs
+    );
+
+    // Clean up.
+    let _ = Vfs::remove(path);
+}
+
+// ---------------------------------------------------------------------------
+// HTTP server benchmarks (net zone)
+// ---------------------------------------------------------------------------
+
+/// Benchmark HTTP request parsing.
+///
+/// Measures the cost of parsing a typical GET request from raw bytes.
+/// This is the entry point for every HTTP/HTTPS request served.
+fn bench_http_parse_request() {
+    use crate::net::httpd;
+
+    // Typical browser GET request (~200 bytes).
+    let raw_request = b"GET /index.html HTTP/1.1\r\n\
+        Host: 10.0.2.15\r\n\
+        User-Agent: Mozilla/5.0\r\n\
+        Accept: text/html\r\n\
+        Connection: keep-alive\r\n\
+        \r\n";
+
+    let result = run("http_parse_request", 1000, || {
+        let _ = core::hint::black_box(httpd::bench_parse_request(raw_request));
+    });
+
+    serial_println!(
+        "[bench]   http_parse_request: min {}ns ({}cy)",
+        result.min_ns, result.min_cycles
+    );
+}
+
+/// Benchmark HTTP MIME type detection.
+///
+/// Measures the cost of determining the MIME type from a file extension.
+/// This runs once per served file.
+fn bench_http_mime_type() {
+    use crate::net::httpd;
+
+    let result = run("http_mime_type", 2000, || {
+        let _ = core::hint::black_box(httpd::bench_mime_type("/styles/main.css"));
+        let _ = core::hint::black_box(httpd::bench_mime_type("/app.js"));
+        let _ = core::hint::black_box(httpd::bench_mime_type("/photo.png"));
+        let _ = core::hint::black_box(httpd::bench_mime_type("/data.json"));
+    });
+
+    serial_println!(
+        "[bench]   http_mime_type (4 lookups): min {}ns ({}cy, ~{}ns/lookup)",
+        result.min_ns, result.min_cycles, result.min_ns / 4
+    );
+}
+
+/// Benchmark HTTP percent-decode path.
+///
+/// Measures the cost of decoding a URL path with percent-encoded
+/// characters.  This runs on every request URI.
+fn bench_http_percent_decode() {
+    use crate::net::httpd;
+
+    // Path with several percent-encoded characters (spaces, etc.).
+    let encoded = "/path%20to/my%20file%20%28copy%29.txt";
+
+    let result = run("http_percent_decode", 2000, || {
+        let _ = core::hint::black_box(httpd::bench_percent_decode(encoded));
+    });
+
+    serial_println!(
+        "[bench]   http_percent_decode: min {}ns ({}cy)",
         result.min_ns, result.min_cycles
     );
 }

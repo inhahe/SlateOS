@@ -592,6 +592,79 @@ min_cycles = 5013666
 # QEMU/TCG: ~1.35ms.  Expected ~200-400us on native hardware.
 
 # -------------------------------------------------------------------------
+# QEMU measured — HTTP server benchmarks (2026-05-17)
+# -------------------------------------------------------------------------
+
+[qemu.http_parse_request]
+min_ns     = 10516
+min_cycles = 39028
+# Parses a ~200-byte GET request: UTF-8 decode, line split, percent-decode,
+# path normalization.  Heap allocations (3 Strings) dominate.
+
+[qemu.http_mime_type_4x]
+min_ns     = 1328
+min_cycles = 4930
+# 4 MIME lookups (.css, .js, .png, .json): ~332ns per lookup.
+# Pure match statement — no allocation, no I/O.
+
+[qemu.http_percent_decode]
+min_ns     = 15148
+min_cycles = 56216
+# Decode a path with 4 percent-encoded sequences.  Vec allocation +
+# byte-by-byte scan + hex digit parsing.
+
+# -------------------------------------------------------------------------
+# HTTP server baselines (target performance)
+# -------------------------------------------------------------------------
+
+[http_parse_request]
+description = "HTTP/1.1 request parsing (~200 bytes)"
+target_ns   = 15000
+source      = "Dominated by 3 String allocations + UTF-8 validation"
+notes       = """
+Runs once per HTTP request.  Not a hot loop but affects request \
+latency.  The main cost is heap allocation (method, path, version \
+strings).  Could be optimized with a zero-copy parser but the \
+current approach is correct and clear."""
+
+[http_mime_type]
+description = "MIME type lookup from file extension"
+target_ns   = 500
+source      = "Pure match statement, no allocation"
+notes       = "Per-lookup cost.  Runs once per served file."
+
+[http_percent_decode]
+description = "URI percent-decode with encoded characters"
+target_ns   = 20000
+source      = "Vec allocation + byte scan + hex parsing"
+notes       = """
+Runs once per request on the URI path.  Cost scales with the \
+number of percent-encoded sequences.  Most paths have zero \
+encodings (fast path: just copy bytes)."""
+
+# -------------------------------------------------------------------------
+# VFS deep-path baselines (target performance)
+# -------------------------------------------------------------------------
+
+[vfs_stat_deep_2comp]
+description = "VFS stat with 2-component path (/proc/meminfo)"
+target_ns   = 1400
+source      = "2 × 700ns per-component target"
+notes       = """
+Requires procfs mounted at /proc.  Tests mount-point traversal \
++ procfs filename lookup.  Skips under QEMU when no filesystem \
+is mounted."""
+
+[vfs_throughput_16k]
+description = "VFS write+read cycle for 16 KiB file"
+target_ns   = 50000
+source      = "Full page write + read through VFS → driver → buffer"
+notes       = """
+Requires writable filesystem (FAT/tmpfs).  Skips when VFS not \
+available.  Target is conservative — dominated by file system \
+overhead, not raw I/O."""
+
+# -------------------------------------------------------------------------
 # Measurement methodology notes
 # -------------------------------------------------------------------------
 #

@@ -1849,14 +1849,14 @@ fn bench_isr_latency() {
 
     let start_tick = apic::tick_count();
     serial_println!(
-        "[bench] isr_latency: measuring ~100 timer ticks (start_tick={})...",
+        "[bench] isr_latency: measuring ~10 timer ticks (start_tick={})...",
         start_tick,
     );
 
     // Start measurement — next timer ISR begins sampling.
     apic::start_isr_measurement();
 
-    // Busy-wait for ~100 timer ticks (~1 second at 100 Hz).
+    // Busy-wait for ~10 timer ticks (~100ms at 100 Hz).
     //
     // We can't use yield_now() here because the boot task (priority 0)
     // gets re-selected immediately on each yield — all 2000 yields
@@ -1864,12 +1864,13 @@ fn bench_isr_latency() {
     // on the tick counter.  The timer ISR fires normally (interrupts
     // are enabled) and records ISR latency measurements on each tick.
     //
-    // Use a TSC-based timeout (~5 seconds) as a safety net in case
-    // tick_count stops advancing (e.g., timer misconfiguration, CPU
-    // migration to a non-BSP core).
-    let target_ticks = 100u64;
+    // Under QEMU/TCG, timer delivery is very slow — 100 ticks could
+    // take minutes of wall-clock time.  We keep the sample count low
+    // (10 ticks, ~100ms on real hardware) with a tight 2-second TSC
+    // timeout.  Even a few samples give a reliable minimum measurement.
+    let target_ticks = 10u64;
     let tsc_start = rdtsc();
-    let tsc_timeout = tsc_freq().saturating_mul(5); // 5 seconds worth of cycles
+    let tsc_timeout = tsc_freq().saturating_mul(2); // 2 seconds worth of cycles
     loop {
         let elapsed_ticks = apic::tick_count().saturating_sub(start_tick);
         if elapsed_ticks >= target_ticks {
@@ -1878,7 +1879,7 @@ fn bench_isr_latency() {
         let elapsed_tsc = rdtsc().saturating_sub(tsc_start);
         if elapsed_tsc > tsc_timeout {
             serial_println!(
-                "[bench] isr_latency: TSC timeout after ~5s (ticks advanced: {}, expected: {})",
+                "[bench] isr_latency: TSC timeout after ~2s (ticks advanced: {}, expected: {})",
                 elapsed_ticks, target_ticks
             );
             break;

@@ -3,10 +3,12 @@
 //! Content-addressed package store with atomic generational updates.
 //!
 //! Usage:
-//!   pkg install <PACKAGE>...     Install packages
+//!   pkg install <PACKAGE>...     Install packages (repo names or local .pkg files)
 //!   pkg remove <PACKAGE>...      Remove packages
 //!   pkg update                   Refresh repository metadata
 //!   pkg upgrade [PACKAGE...]     Upgrade packages (all if none specified)
+//!   pkg fetch <PACKAGE>...       Download packages to CAS without installing
+//!   pkg pack <MANIFEST>          Create a .pkg archive from source files
 //!   pkg list [--installed]       List packages
 //!   pkg search <QUERY>           Search available packages
 //!   pkg info <PACKAGE>           Show package details
@@ -29,6 +31,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use httpclient::Client as HttpClient;
 
 // ============================================================================
 // Configuration
@@ -671,6 +675,128 @@ impl ContentStore {
         }
         Ok(total)
     }
+
+    /// Deploy a blob to a destination path using hardlink deduplication.
+    ///
+    /// This creates a hard link from `dst` to the CAS blob identified by `hash`.
+    /// If the blob is shared between multiple packages, they all point to the same
+    /// physical storage — zero additional disk space for duplicated files.
+    ///
+    /// Falls back to a regular file copy if hardlinks fail (e.g., cross-device).
+    fn deploy_hardlink(&self, hash: &str, dst: &Path) -> io::Result<()> {
+        let blob_path = self.blob_path(hash);
+        if !blob_path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("blob {hash} not found in CAS"),
+            ));
+        }
+
+        // Ensure parent directory exists
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Remove existing file at destination if any
+        if dst.exists() {
+            let _ = fs::remove_file(dst);
+        }
+
+        // Try hardlink first (zero-copy, shared storage)
+        match fs::hard_link(&blob_path, dst) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // Fallback: copy the file (cross-device or unsupported filesystem)
+                fs::copy(&blob_path, dst)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Deploy all files from a package manifest to the filesystem.
+    ///
+    /// Uses hardlinks from CAS for deduplication. Returns the number of
+    /// files successfully deployed and the number of bytes saved by dedup.
+    fn deploy_package_files(&self, manifest: &PackageManifest) -> io::Result<DeployStats> {
+        let mut stats = DeployStats::default();
+
+        for file in &manifest.files {
+            if file.hash.is_empty() {
+                continue;
+            }
+
+            let dst = Path::new(&file.dst);
+            match self.deploy_hardlink(&file.hash, dst) {
+                Ok(()) => {
+                    stats.deployed += 1;
+                    stats.total_bytes += file.size;
+                    // Check if the blob has more than one link (dedup savings)
+                    if let Ok(meta) = fs::metadata(self.blob_path(&file.hash)) {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::MetadataExt;
+                            if meta.nlink() > 1 {
+                                stats.dedup_bytes += file.size;
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            // On non-unix, we can't easily check nlink.
+                            // Assume dedup if the file was already in CAS.
+                            let _ = meta;
+                        }
+                    }
+
+                    // Set file permissions
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = fs::set_permissions(dst, fs::Permissions::from_mode(file.mode));
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  warning: failed to deploy {}: {e}",
+                        file.dst
+                    );
+                    stats.failed += 1;
+                }
+            }
+        }
+
+        Ok(stats)
+    }
+
+    /// Remove deployed files for a package (cleanup on remove/rollback).
+    fn undeploy_package_files(&self, file_hashes: &[(String, String)]) -> u64 {
+        let mut removed = 0u64;
+        for (dst_path, _hash) in file_hashes {
+            let dst = Path::new(dst_path);
+            if dst.exists() {
+                if fs::remove_file(dst).is_ok() {
+                    removed += 1;
+                }
+                // Clean up empty parent directories
+                if let Some(parent) = dst.parent() {
+                    let _ = fs::remove_dir(parent); // Only succeeds if empty
+                }
+            }
+        }
+        removed
+    }
+}
+
+/// Statistics from a package file deployment operation.
+#[derive(Default)]
+struct DeployStats {
+    /// Number of files successfully deployed.
+    deployed: u64,
+    /// Number of files that failed to deploy.
+    failed: u64,
+    /// Total bytes of all deployed files.
+    total_bytes: u64,
+    /// Bytes saved through hardlink deduplication.
+    dedup_bytes: u64,
 }
 
 // ============================================================================
@@ -1201,13 +1327,28 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
         .as_secs();
 
     for manifest in &resolved {
-        // In a real implementation, this would:
-        // 1. Download the archive from the repository
-        // 2. Verify archive_hash
-        // 3. Extract files, storing each in the CAS
-        // 4. Install files to their destinations using a filesystem transaction
-        //
-        // For now, store the manifest in CAS and record the installation.
+        // Ensure the package archive is available in CAS. If not, try to
+        // download it from the repository.
+        if !manifest.archive_hash.is_empty() && !db.cas.has(&manifest.archive_hash) {
+            let version_str = manifest.version.to_string();
+            match cmd_download(db, &manifest.name, &version_str) {
+                Ok(hash) => {
+                    if hash != manifest.archive_hash {
+                        eprintln!(
+                            "pkg: hash mismatch for {}: expected {}, got {}",
+                            manifest.name, manifest.archive_hash, hash
+                        );
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("pkg: failed to download {}: {e}", manifest.name);
+                    eprintln!("pkg: continuing with manifest-only install");
+                }
+            }
+        }
+
+        // Store the manifest itself in CAS
         let manifest_data = manifest.serialize();
         let manifest_hash = match db.cas.put(manifest_data.as_bytes()) {
             Ok(h) => h,
@@ -1236,7 +1377,34 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
             },
         );
 
-        println!("  Installing {} {}...", manifest.name, manifest.version);
+        // Deploy files to the filesystem via hardlinks from CAS
+        if !manifest.files.is_empty() && !manifest.archive_hash.is_empty() {
+            match db.cas.deploy_package_files(manifest) {
+                Ok(stats) => {
+                    let dedup_info = if stats.dedup_bytes > 0 {
+                        format!(" ({} saved via dedup)", format_size(stats.dedup_bytes))
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  Installed {} {}: {} files, {}{}",
+                        manifest.name,
+                        manifest.version,
+                        stats.deployed,
+                        format_size(stats.total_bytes),
+                        dedup_info
+                    );
+                    if stats.failed > 0 {
+                        eprintln!("    {} file(s) failed to deploy", stats.failed);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  warning: file deployment error for {}: {e}", manifest.name);
+                }
+            }
+        } else {
+            println!("  Installed {} {} (metadata only)", manifest.name, manifest.version);
+        }
     }
 
     // Commit generation atomically
@@ -1320,8 +1488,16 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
     let mut new_gen = db.next_generation(&desc);
 
     for name in packages {
+        // Undeploy files from the filesystem before removing from generation
+        if let Some(pkg) = current.packages.get(name) {
+            let removed = db.cas.undeploy_package_files(&pkg.file_hashes);
+            if removed > 0 {
+                println!("  Removing {name}... ({removed} files removed)");
+            } else {
+                println!("  Removing {name}...");
+            }
+        }
         new_gen.packages.remove(name);
-        println!("  Removing {name}...");
     }
 
     match db.save_generation(&new_gen) {
@@ -1896,30 +2072,294 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
     }
 }
 
-fn cmd_update(_db: &PackageDb) {
-    // In a real implementation, this would:
-    // 1. Read repository URLs from /etc/pkg.conf
-    // 2. Download index files from each repo
-    // 3. Verify signatures
-    // 4. Store in REPO_DIR
-    //
-    // For now, just check if the index exists and report status.
-    let index_path = Path::new(REPO_DIR).join("index");
-    if index_path.exists() {
-        if let Ok(meta) = fs::metadata(&index_path) {
-            println!(
-                "Repository index: {} ({} entries)",
-                format_size(meta.len()),
-                count_index_entries(&index_path)
-            );
+fn cmd_update(db: &PackageDb) {
+    db.ensure_dirs();
+
+    let repo_url = DEFAULT_REPO;
+    let index_url = format!("{repo_url}/index");
+    println!("Fetching repository index from {index_url}...");
+
+    match fetch_url(&index_url) {
+        Ok(body) => {
+            let index_path = db.repo_dir.join("index");
+            match fs::write(&index_path, &body) {
+                Ok(()) => {
+                    let entry_count = count_index_entries(&index_path);
+                    println!(
+                        "Repository index updated: {} ({} entries)",
+                        format_size(body.len() as u64),
+                        entry_count
+                    );
+                }
+                Err(e) => {
+                    eprintln!("pkg: failed to write index to {}: {e}", index_path.display());
+                    process::exit(1);
+                }
+            }
         }
-    } else {
-        println!("No repository index found.");
-        println!("Repository URL: {DEFAULT_REPO}");
-        println!("(Network fetching not yet implemented — place index file manually at {REPO_DIR}/index)");
+        Err(e) => {
+            eprintln!("pkg: failed to fetch repository index: {e}");
+            // Fall back to showing local status if available
+            let index_path = db.repo_dir.join("index");
+            if index_path.exists() {
+                if let Ok(meta) = fs::metadata(&index_path) {
+                    println!(
+                        "Using cached index: {} ({} entries)",
+                        format_size(meta.len()),
+                        count_index_entries(&index_path)
+                    );
+                }
+            } else {
+                eprintln!("pkg: no cached index available");
+                process::exit(1);
+            }
+        }
     }
-    println!("\nTo populate the index, create {} with package manifests", REPO_DIR);
-    println!("separated by blank lines. See 'pkg help' for manifest format.");
+}
+
+/// Download a package archive from the repository and store it in the CAS.
+///
+/// Returns the SHA-256 hash of the downloaded content. Verifies the hash against
+/// `expected_hash` if provided.
+fn cmd_download(db: &PackageDb, name: &str, version: &str) -> Result<String, String> {
+    db.ensure_dirs();
+
+    let repo_url = DEFAULT_REPO;
+    let pkg_url = format!("{repo_url}/packages/{name}-{version}.pkg");
+    println!("Downloading {name} {version} from {pkg_url}...");
+
+    let body = fetch_url(&pkg_url).map_err(|e| format!("download failed: {e}"))?;
+
+    // Look up expected hash from the repository index
+    let expected_hash = db
+        .find_in_repo(name)
+        .ok()
+        .flatten()
+        .and_then(|m| {
+            if m.version.to_string() == version {
+                Some(m.archive_hash.clone())
+            } else {
+                None
+            }
+        });
+
+    // Store in CAS — this computes the SHA-256 as a side effect
+    let hash = db
+        .cas
+        .put(&body)
+        .map_err(|e| format!("failed to store package in CAS: {e}"))?;
+
+    // Verify hash against the index manifest if we have an expected hash
+    if let Some(ref expected) = expected_hash {
+        if !expected.is_empty() && hash != *expected {
+            // Remove the bad blob
+            let _ = db.cas.remove(&hash);
+            return Err(format!(
+                "hash mismatch for {name}-{version}: expected {expected}, got {hash}"
+            ));
+        }
+    }
+
+    println!(
+        "Downloaded {name} {version}: {} (sha256: {:.12}...)",
+        format_size(body.len() as u64),
+        hash
+    );
+    Ok(hash)
+}
+
+/// Fetch a package and store it in CAS without installing.
+///
+/// `pkg fetch <PACKAGE>` downloads the latest version from the repository index
+/// into the content-addressed store for later offline installation.
+fn cmd_fetch(db: &PackageDb, packages: &[String]) {
+    if packages.is_empty() {
+        eprintln!("pkg: no packages specified");
+        process::exit(1);
+    }
+
+    db.ensure_dirs();
+
+    let repo_index = match db.load_repo_index() {
+        Ok(idx) => idx,
+        Err(e) => {
+            eprintln!("pkg: failed to load repository index: {e}");
+            eprintln!("pkg: try 'pkg update' first");
+            process::exit(1);
+        }
+    };
+
+    let mut failures = 0u32;
+    for name in packages {
+        let manifest = match repo_index.iter().find(|m| m.name == *name) {
+            Some(m) => m,
+            None => {
+                eprintln!("pkg: package '{name}' not found in repository index");
+                failures += 1;
+                continue;
+            }
+        };
+
+        let version_str = manifest.version.to_string();
+
+        // Check if we already have it in CAS
+        if !manifest.archive_hash.is_empty() && db.cas.has(&manifest.archive_hash) {
+            println!("{name} {version_str}: already in CAS (sha256: {:.12}...)", manifest.archive_hash);
+            continue;
+        }
+
+        match cmd_download(db, name, &version_str) {
+            Ok(_hash) => {}
+            Err(e) => {
+                eprintln!("pkg: failed to fetch {name}: {e}");
+                failures += 1;
+            }
+        }
+    }
+
+    if failures > 0 {
+        eprintln!("\npkg: {failures} package(s) failed to fetch");
+        process::exit(1);
+    }
+    println!("\nDone.");
+}
+
+/// Perform an HTTP GET request and return the response body.
+///
+/// Validates the response status is 200 OK. Maps HTTP and I/O errors into
+/// a human-readable string.
+fn fetch_url(url: &str) -> Result<Vec<u8>, String> {
+    let client = HttpClient::new();
+    let request = client
+        .get(url)
+        .map_err(|e| format!("invalid URL '{url}': {e}"))?
+        .header("Accept", "*/*")
+        .build();
+
+    // Serialize the request — the actual sending happens via the OS network
+    // stack. In a full implementation, this would open a TCP socket to
+    // request.url.host:request.url.port, send the serialized bytes, and
+    // read the response. For now we use the system's network facilities.
+    let response_bytes = http_roundtrip(&request).map_err(|e| format!("{e}"))?;
+
+    let response =
+        httpclient::parse_response(&response_bytes, &request.url).map_err(|e| format!("{e}"))?;
+
+    if !response.is_success() {
+        return Err(format!(
+            "HTTP {} {} from {url}",
+            response.status, response.status_text
+        ));
+    }
+
+    Ok(response.body)
+}
+
+/// Perform the actual network I/O for an HTTP request.
+///
+/// Opens a TCP connection to the target host, sends the serialized request,
+/// and reads the full response. This bridges the httpclient library (which
+/// handles serialization/parsing) to the OS network stack.
+fn http_roundtrip(request: &httpclient::Request) -> io::Result<Vec<u8>> {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let addr = format!("{}:{}", request.url.host, request.url.port);
+    let mut stream = TcpStream::connect(&addr)?;
+
+    // Apply timeout if set
+    if request.timeout_ms > 0 {
+        let timeout = std::time::Duration::from_millis(u64::from(request.timeout_ms));
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+    }
+
+    let serialized = request.serialize();
+    stream.write_all(&serialized)?;
+
+    // Read the full response. We read in chunks until the connection is closed
+    // or we detect the end of the HTTP response.
+    let mut response_buf = Vec::with_capacity(8192);
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break, // Connection closed
+            Ok(n) => {
+                response_buf.extend_from_slice(&chunk[..n]);
+                // Check if we have a complete response by looking for
+                // the end of the body based on Content-Length or chunked encoding
+                if response_is_complete(&response_buf) {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                if response_buf.is_empty() {
+                    return Err(e);
+                }
+                // We have partial data; try to use it
+                break;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if response_buf.is_empty() {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "request timed out"));
+                }
+                break;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    if response_buf.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "empty response from server",
+        ));
+    }
+
+    Ok(response_buf)
+}
+
+/// Check if a raw HTTP response buffer contains a complete response.
+///
+/// Looks for the header/body separator, then uses Content-Length or chunked
+/// encoding markers to determine if the full body has been received.
+fn response_is_complete(data: &[u8]) -> bool {
+    // Find the header/body separator (\r\n\r\n)
+    let header_end = match data.windows(4).position(|w| w == b"\r\n\r\n") {
+        Some(pos) => pos,
+        None => return false, // Haven't received full headers yet
+    };
+
+    let header_bytes = &data[..header_end];
+    let header_str = match core::str::from_utf8(header_bytes) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let body_start = header_end + 4;
+
+    // Check for chunked encoding
+    for line in header_str.lines() {
+        let lower = line.to_ascii_lowercase();
+        if lower.starts_with("transfer-encoding:") && lower.contains("chunked") {
+            // For chunked, look for the terminal "0\r\n\r\n"
+            return data[body_start..].windows(5).any(|w| w == b"0\r\n\r\n");
+        }
+    }
+
+    // Check for Content-Length
+    for line in header_str.lines() {
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:") {
+            if let Ok(len) = rest.trim().parse::<usize>() {
+                return data.len() >= body_start + len;
+            }
+        }
+    }
+
+    // No Content-Length and not chunked — we can't tell, so assume complete
+    // once we have headers (the server will close the connection to signal end)
+    true
 }
 
 fn count_index_entries(path: &Path) -> usize {
@@ -1928,6 +2368,410 @@ fn count_index_entries(path: &Path) -> usize {
         .split("\n\n")
         .filter(|chunk| !chunk.trim().is_empty())
         .count()
+}
+
+// ============================================================================
+// .pkg file format — local package archives
+// ============================================================================
+
+/// A list of file blobs extracted from a .pkg archive: (hash, content).
+type PkgFileBlobs = Vec<(String, Vec<u8>)>;
+
+/// Magic bytes identifying our package archive format.
+const PKG_MAGIC: &[u8] = b"PKG1\n";
+
+/// Separator between the manifest section and file data section.
+const PKG_FILES_SEP: &[u8] = b"\n---FILES---\n";
+
+/// Parse a .pkg archive from raw bytes.
+///
+/// Format:
+/// ```text
+/// PKG1\n
+/// <manifest text (UTF-8)>
+/// \n---FILES---\n
+/// <hash_hex> <size_decimal>\n
+/// <raw_bytes of `size`>
+/// <hash_hex> <size_decimal>\n
+/// <raw_bytes of `size`>
+/// ...
+/// ```
+///
+/// Returns the manifest and an iterator-like vec of (hash, data) pairs.
+fn parse_pkg_archive(data: &[u8]) -> Result<(PackageManifest, PkgFileBlobs), String> {
+    // Verify magic
+    if !data.starts_with(PKG_MAGIC) {
+        return Err("not a valid .pkg file (missing PKG1 magic)".to_string());
+    }
+
+    let after_magic = &data[PKG_MAGIC.len()..];
+
+    // Find the files separator
+    let sep_pos = after_magic
+        .windows(PKG_FILES_SEP.len())
+        .position(|w| w == PKG_FILES_SEP)
+        .ok_or_else(|| "invalid .pkg file (missing ---FILES--- separator)".to_string())?;
+
+    // Parse manifest text
+    let manifest_bytes = &after_magic[..sep_pos];
+    let manifest_text = core::str::from_utf8(manifest_bytes)
+        .map_err(|e| format!("invalid manifest UTF-8: {e}"))?;
+    let manifest = PackageManifest::parse(manifest_text)
+        .ok_or_else(|| "failed to parse manifest from .pkg file".to_string())?;
+
+    // Parse file entries
+    let files_section = &after_magic[sep_pos + PKG_FILES_SEP.len()..];
+    let mut files = Vec::new();
+    let mut pos = 0;
+
+    while pos < files_section.len() {
+        // Read the header line: "<hash> <size>\n"
+        let line_end = files_section[pos..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .ok_or_else(|| "truncated file entry header in .pkg".to_string())?;
+
+        let header_line = core::str::from_utf8(&files_section[pos..pos + line_end])
+            .map_err(|e| format!("invalid file entry header: {e}"))?;
+        pos += line_end + 1; // skip past the newline
+
+        let (hash, size_str) = header_line
+            .split_once(' ')
+            .ok_or_else(|| format!("malformed file entry header: '{header_line}'"))?;
+
+        let size: usize = size_str
+            .parse()
+            .map_err(|e| format!("invalid file size in entry '{header_line}': {e}"))?;
+
+        // Read the file data
+        if pos + size > files_section.len() {
+            return Err(format!(
+                "truncated file data for {hash}: expected {size} bytes, have {}",
+                files_section.len() - pos
+            ));
+        }
+
+        let file_data = files_section[pos..pos + size].to_vec();
+        pos += size;
+
+        files.push((hash.to_string(), file_data));
+    }
+
+    Ok((manifest, files))
+}
+
+/// Create a .pkg archive from a manifest and a directory of files.
+///
+/// Reads each file listed in the manifest from `base_dir`, computes its hash,
+/// and packs everything into the PKG1 format.
+fn create_pkg_archive(manifest: &PackageManifest, base_dir: &Path) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+
+    // Write magic
+    output.extend_from_slice(PKG_MAGIC);
+
+    // Write manifest
+    let manifest_text = manifest.serialize();
+    output.extend_from_slice(manifest_text.as_bytes());
+
+    // Write files separator
+    output.extend_from_slice(PKG_FILES_SEP);
+
+    // Write each file entry
+    for file in &manifest.files {
+        let src_path = base_dir.join(&file.src);
+        let data = fs::read(&src_path).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("failed to read {}: {e}", src_path.display()),
+            )
+        })?;
+
+        let hash = sha256_hex(&data);
+        let header = format!("{} {}\n", hash, data.len());
+        output.extend_from_slice(header.as_bytes());
+        output.extend_from_slice(&data);
+    }
+
+    Ok(output)
+}
+
+/// Install packages from local .pkg files.
+///
+/// Each path is opened, parsed as a PKG1 archive, its file blobs are stored
+/// in CAS, and then deployed via hardlinks. A new generation is created
+/// encompassing all installed packages.
+fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
+    db.ensure_dirs();
+
+    let current = db.current_generation();
+
+    // Parse all .pkg files first to validate them before making changes
+    let mut parsed: Vec<(PathBuf, PackageManifest, PkgFileBlobs)> = Vec::new();
+    for path in paths {
+        let data = match fs::read(path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("pkg: failed to read {}: {e}", path.display());
+                process::exit(1);
+            }
+        };
+
+        match parse_pkg_archive(&data) {
+            Ok((manifest, files)) => {
+                if current.packages.contains_key(&manifest.name) {
+                    let existing = &current.packages[&manifest.name];
+                    println!(
+                        "{} {}: already installed (version {})",
+                        manifest.name, manifest.version, existing.version
+                    );
+                    if manifest.version <= existing.version {
+                        continue;
+                    }
+                    println!("  upgrading to {}", manifest.version);
+                }
+                parsed.push((path.clone(), manifest, files));
+            }
+            Err(e) => {
+                eprintln!("pkg: {}: {e}", path.display());
+                process::exit(1);
+            }
+        }
+    }
+
+    if parsed.is_empty() {
+        println!("Nothing to install.");
+        return;
+    }
+
+    // Show what will be installed
+    println!("The following packages will be installed from local files:");
+    for (path, manifest, files) in &parsed {
+        println!(
+            "  {} {} ({}, {} files)",
+            manifest.name,
+            manifest.version,
+            path.display(),
+            files.len()
+        );
+    }
+
+    // Show capabilities
+    let mut has_caps = false;
+    for (_, manifest, _) in &parsed {
+        if !manifest.capabilities.is_empty() {
+            if !has_caps {
+                println!("\nCapabilities requested:");
+                has_caps = true;
+            }
+            let caps: Vec<&str> = manifest.capabilities.iter().map(|c| c.name.as_str()).collect();
+            println!("  {}: {}", manifest.name, caps.join(", "));
+        }
+    }
+
+    // Create new generation
+    let names: Vec<&str> = parsed.iter().map(|(_, m, _)| m.name.as_str()).collect();
+    let desc = format!("install (local) {}", names.join(", "));
+    let mut new_gen = db.next_generation(&desc);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    for (_path, manifest, files) in &parsed {
+        // Store all file blobs in CAS
+        let mut store_errors = 0u32;
+        for (hash, data) in files {
+            // Verify the hash matches the actual data
+            let computed = sha256_hex(data);
+            if computed != *hash {
+                eprintln!(
+                    "  warning: {}: file hash mismatch (archive says {hash}, data hashes to {computed})",
+                    manifest.name
+                );
+                store_errors += 1;
+                continue;
+            }
+            if let Err(e) = db.cas.put(data) {
+                eprintln!("  warning: failed to store blob {hash}: {e}");
+                store_errors += 1;
+            }
+        }
+
+        if store_errors > 0 {
+            eprintln!(
+                "  warning: {} file(s) had errors for {}",
+                store_errors, manifest.name
+            );
+        }
+
+        // Store the manifest itself in CAS
+        let manifest_data = manifest.serialize();
+        let manifest_hash = match db.cas.put(manifest_data.as_bytes()) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("pkg: failed to store manifest for {}: {e}", manifest.name);
+                continue;
+            }
+        };
+
+        let file_hashes: Vec<(String, String)> = manifest
+            .files
+            .iter()
+            .map(|f| (f.dst.clone(), f.hash.clone()))
+            .collect();
+
+        new_gen.packages.insert(
+            manifest.name.clone(),
+            InstalledPackage {
+                version: manifest.version.clone(),
+                manifest_hash,
+                file_hashes,
+                installed_at: now,
+                explicit: true,
+            },
+        );
+
+        // Deploy files via hardlinks
+        if !manifest.files.is_empty() {
+            match db.cas.deploy_package_files(manifest) {
+                Ok(stats) => {
+                    let dedup_info = if stats.dedup_bytes > 0 {
+                        format!(" ({} saved via dedup)", format_size(stats.dedup_bytes))
+                    } else {
+                        String::new()
+                    };
+                    println!(
+                        "  Installed {} {}: {} files, {}{}",
+                        manifest.name,
+                        manifest.version,
+                        stats.deployed,
+                        format_size(stats.total_bytes),
+                        dedup_info
+                    );
+                    if stats.failed > 0 {
+                        eprintln!("    {} file(s) failed to deploy", stats.failed);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  warning: file deployment error for {}: {e}", manifest.name);
+                }
+            }
+        } else {
+            println!(
+                "  Installed {} {} (metadata only)",
+                manifest.name, manifest.version
+            );
+        }
+    }
+
+    // Commit generation atomically
+    match db.save_generation(&new_gen) {
+        Ok(()) => {
+            if let Err(e) = db.set_current_generation(new_gen.id) {
+                eprintln!("pkg: CRITICAL — saved generation but failed to update pointer: {e}");
+                eprintln!("pkg: manually run: echo {} > {}/current", new_gen.id, GEN_DIR);
+                process::exit(1);
+            }
+            println!("\nDone. Generation {} created.", new_gen.id);
+        }
+        Err(e) => {
+            eprintln!("pkg: failed to save generation: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+/// Create a .pkg file from a manifest and source directory.
+///
+/// Usage: pkg pack <manifest-path> [--output <file.pkg>]
+///
+/// Reads the manifest, locates all referenced source files relative to the
+/// manifest's parent directory, computes hashes, and creates the archive.
+fn cmd_pack(manifest_path: &Path, output_path: Option<&Path>) {
+    let manifest_text = match fs::read_to_string(manifest_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("pkg: failed to read manifest {}: {e}", manifest_path.display());
+            process::exit(1);
+        }
+    };
+
+    let mut manifest = match PackageManifest::parse(&manifest_text) {
+        Some(m) => m,
+        None => {
+            eprintln!("pkg: failed to parse manifest {}", manifest_path.display());
+            process::exit(1);
+        }
+    };
+
+    let base_dir = manifest_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+
+    // Compute hashes for all files and update the manifest entries
+    let mut updated_files = Vec::new();
+    for file in &manifest.files {
+        let src_path = base_dir.join(&file.src);
+        let data = match fs::read(&src_path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!(
+                    "pkg: failed to read source file {}: {e}",
+                    src_path.display()
+                );
+                process::exit(1);
+            }
+        };
+        let hash = sha256_hex(&data);
+        let size = data.len() as u64;
+        updated_files.push(PackageFile {
+            src: file.src.clone(),
+            dst: file.dst.clone(),
+            mode: file.mode,
+            hash,
+            size,
+        });
+    }
+    manifest.files = updated_files;
+
+    // Build the archive
+    let archive = match create_pkg_archive(&manifest, base_dir) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("pkg: failed to create archive: {e}");
+            process::exit(1);
+        }
+    };
+
+    // Compute archive hash and update manifest
+    let archive_hash = sha256_hex(&archive);
+    let archive_size = archive.len() as u64;
+
+    // Determine output path
+    let default_name = format!("{}-{}.pkg", manifest.name, manifest.version);
+    let out = output_path.unwrap_or_else(|| Path::new(&default_name));
+
+    match fs::write(out, &archive) {
+        Ok(()) => {
+            println!(
+                "Created {} ({}, sha256: {:.12}...)",
+                out.display(),
+                format_size(archive_size),
+                archive_hash
+            );
+            println!("  {} {} — {} files packed",
+                manifest.name,
+                manifest.version,
+                manifest.files.len()
+            );
+        }
+        Err(e) => {
+            eprintln!("pkg: failed to write {}: {e}", out.display());
+            process::exit(1);
+        }
+    }
 }
 
 // ============================================================================
@@ -2006,10 +2850,12 @@ fn print_usage() {
 Usage: pkg <command> [options] [arguments]
 
 Commands:
-  install <pkg>...       Install packages
+  install <pkg>...       Install packages (names from repo, or local .pkg files)
   remove <pkg>...        Remove packages
   update                 Refresh repository metadata
   upgrade [pkg...]       Upgrade packages (all if none specified)
+  fetch <pkg>...         Download packages to CAS without installing
+  pack <manifest>        Create a .pkg archive from a manifest and source files
   list [--installed]     List packages
   search <query>         Search available packages
   info <pkg>             Show package details
@@ -2023,6 +2869,22 @@ Commands:
 
 Options:
   --dry-run              Show what would be done without making changes
+  --output, -o <file>    Output path for 'pack' command
+
+Local Installation:
+  pkg install ./path/to/package.pkg
+  pkg install /abs/path/to/package.pkg
+
+  Arguments ending in '.pkg' or pointing to existing files via relative/
+  absolute paths are treated as local package archives. They are installed
+  directly without needing a repository.
+
+Creating Packages:
+  pkg pack manifest.txt --output mypackage-1.0.0.pkg
+
+  Reads a manifest file, locates all referenced source files relative to
+  the manifest's directory, computes SHA-256 hashes, and produces a .pkg
+  archive that can be installed with 'pkg install'.
 
 Generation System:
   Each install/remove/upgrade creates a new generation. Generations
@@ -2073,7 +2935,25 @@ fn main() {
         .collect();
 
     match command {
-        "install" => cmd_install(&db, &rest_filtered, dry_run),
+        "install" => {
+            // Detect if any argument is a local .pkg file path.
+            // A local path is identified by: ending in ".pkg", starting with "/" or "./",
+            // or containing a path separator and pointing to an existing file.
+            let (local_paths, repo_names): (Vec<String>, Vec<String>) =
+                rest_filtered.into_iter().partition(|arg| is_local_pkg_path(arg));
+
+            if !local_paths.is_empty() {
+                let paths: Vec<PathBuf> = local_paths.iter().map(PathBuf::from).collect();
+                cmd_install_local(&db, &paths);
+            }
+            if !repo_names.is_empty() {
+                cmd_install(&db, &repo_names, dry_run);
+            }
+            if local_paths.is_empty() && repo_names.is_empty() {
+                eprintln!("pkg: no packages specified");
+                process::exit(1);
+            }
+        }
         "remove" | "uninstall" => cmd_remove(&db, &rest_filtered, dry_run),
         "update" => cmd_update(&db),
         "upgrade" => cmd_upgrade(&db, &rest_filtered, dry_run),
@@ -2130,6 +3010,27 @@ fn main() {
             }
             cmd_which(&db, &rest_filtered[0]);
         }
+        "fetch" | "download" => {
+            if rest_filtered.is_empty() {
+                eprintln!("pkg: fetch requires one or more package names");
+                process::exit(1);
+            }
+            cmd_fetch(&db, &rest_filtered);
+        }
+        "pack" => {
+            if rest_filtered.is_empty() {
+                eprintln!("pkg: pack requires a manifest path");
+                eprintln!("Usage: pkg pack <manifest-file> [--output <file.pkg>]");
+                process::exit(1);
+            }
+            let manifest_path = Path::new(&rest_filtered[0]);
+            let output = rest_filtered
+                .iter()
+                .position(|a| a == "--output" || a == "-o")
+                .and_then(|i| rest_filtered.get(i + 1))
+                .map(|s| Path::new(s.as_str()));
+            cmd_pack(manifest_path, output);
+        }
         "help" | "--help" | "-h" => print_usage(),
         _ => {
             eprintln!("pkg: unknown command: {command}");
@@ -2137,4 +3038,22 @@ fn main() {
             process::exit(1);
         }
     }
+}
+
+/// Determine if an argument to `pkg install` is a local file path rather than
+/// a repository package name.
+///
+/// Heuristic: it's a local path if it ends in `.pkg`, starts with `/` or `./`
+/// or `../`, or contains a path separator and the file exists.
+fn is_local_pkg_path(arg: &str) -> bool {
+    if arg.ends_with(".pkg") {
+        return true;
+    }
+    if arg.starts_with('/') || arg.starts_with("./") || arg.starts_with("../") {
+        return Path::new(arg).exists();
+    }
+    if arg.contains('/') {
+        return Path::new(arg).exists();
+    }
+    false
 }

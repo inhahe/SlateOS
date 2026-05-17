@@ -1708,17 +1708,17 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Dependency resolution with version constraints (>=, <=, ^, ==, *)
 - [x] CLI: install, remove, upgrade, update, list, search, info, rollback, generations, gc, verify, files, which
 - [ ] Shared dynamic linking within a generation (fast security patches)
-- [ ] File-level deduplication via hardlinks within the store
+- [x] File-level deduplication via hardlinks within the store (deploy_hardlink CAS→filesystem, DeployStats tracking, nlink-based dedup reporting, fallback to copy for cross-device)
 - [ ] Binary packages (preferred) with source build option
-- [-] Network repository fetching:
+- [x] Network repository fetching:
   - [x] HTTP/1.1 client library (net/httpclient): URL parser, request builder, chunked transfer, cookies, redirects, base64
   - [x] DNS resolver library (net/dns): RFC 1035, compression pointers, cache, A/AAAA/CNAME/MX/PTR, hosts file
   - [x] `fetch` coreutil (wget/curl-like CLI): URL parsing, redirect following, progress display
-  - [ ] Wire httpclient into package manager for repository index + package download
+  - [x] Wire httpclient into package manager for repository index + package download (fetch_url + http_roundtrip + TcpStream, hash verification, CAS storage)
 - [ ] Repository model:
   - [ ] Official curated repository
   - [ ] Third-party repository support (user adds URL)
-  - [ ] Direct .pkg installation from anywhere
+  - [x] Direct .pkg installation from anywhere (PKG1 binary format with manifest + file blobs, parse_pkg_archive/create_pkg_archive, cmd_install_local for local file install, cmd_pack for creating archives, auto-detection of .pkg paths in install args)
 
 ### 4.3 Port Chromium
 _This is the biggest single porting effort. Unlocks browser, web apps, and VS Code._

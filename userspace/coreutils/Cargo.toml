@@ -2,7 +2,7 @@
 name = "coreutils"
 version = "0.1.0"
 edition = "2024"
-description = "Basic userspace utilities (cat, echo, ls, mkdir, head, wc, cp, rm)"
+description = "Basic userspace utilities (cat, echo, ls, mkdir, head, wc, cp, rm, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename)"
 
 # Standalone crate — not part of the kernel workspace.
 [workspace]
@@ -19,3 +19,55 @@ strip = "symbols"
 
 [profile.dev]
 panic = "abort"
+
+[[bin]]
+name = "mv"
+path = "src/bin/mv.rs"
+
+[[bin]]
+name = "touch"
+path = "src/bin/touch.rs"
+
+[[bin]]
+name = "tail"
+path = "src/bin/tail.rs"
+
+[[bin]]
+name = "sort"
+path = "src/bin/sort.rs"
+
+[[bin]]
+name = "grep"
+path = "src/bin/grep.rs"
+
+[[bin]]
+name = "ln"
+path = "src/bin/ln.rs"
+
+[[bin]]
+name = "pwd"
+path = "src/bin/pwd.rs"
+
+[[bin]]
+name = "env"
+path = "src/bin/env.rs"
+
+[[bin]]
+name = "sleep"
+path = "src/bin/sleep.rs"
+
+[[bin]]
+name = "true"
+path = "src/bin/true.rs"
+
+[[bin]]
+name = "false"
+path = "src/bin/false.rs"
+
+[[bin]]
+name = "uname"
+path = "src/bin/uname.rs"
+
+[[bin]]
+name = "basename"
+path = "src/bin/basename.rs"

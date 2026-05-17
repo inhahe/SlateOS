@@ -9,6 +9,8 @@
 //!   pkg upgrade [PACKAGE...]     Upgrade packages (all if none specified)
 //!   pkg fetch <PACKAGE>...       Download packages to CAS without installing
 //!   pkg pack <MANIFEST>          Create a .pkg archive from source files
+//!   pkg repo [subcommand]       Manage package repositories
+//!   pkg log [N|--all]           Show transaction history
 //!   pkg list [--installed]       List packages
 //!   pkg search <QUERY>           Search available packages
 //!   pkg info <PACKAGE>           Show package details
@@ -396,6 +398,13 @@ struct PackageManifest {
     archive_hash: String,
     /// Size of the package archive.
     archive_size: u64,
+    /// Paths that are config files (protected from overwrite during upgrade).
+    conffiles: Vec<String>,
+    /// Lifecycle hooks.
+    hook_pre_install: String,
+    hook_post_install: String,
+    hook_pre_remove: String,
+    hook_post_remove: String,
 }
 
 impl PackageManifest {
@@ -426,6 +435,11 @@ impl PackageManifest {
         let mut files = Vec::new();
         let mut archive_hash = String::new();
         let mut archive_size = 0u64;
+        let mut conffiles = Vec::new();
+        let mut hook_pre_install = String::new();
+        let mut hook_post_install = String::new();
+        let mut hook_pre_remove = String::new();
+        let mut hook_post_remove = String::new();
 
         for line in text.lines() {
             let line = line.trim();
@@ -482,6 +496,9 @@ impl PackageManifest {
                         })
                         .collect();
                 }
+                "conffiles" => {
+                    conffiles = value.split(',').map(|s| s.trim().to_string()).collect();
+                }
                 "file" => {
                     // file: src -> dst mode hash size
                     if let Some(pf) = parse_file_entry(value) {
@@ -490,6 +507,10 @@ impl PackageManifest {
                 }
                 "archive_hash" => archive_hash = value.to_string(),
                 "archive_size" => archive_size = value.parse().unwrap_or(0),
+                "hook-pre-install" => hook_pre_install = value.to_string(),
+                "hook-post-install" => hook_post_install = value.to_string(),
+                "hook-pre-remove" => hook_pre_remove = value.to_string(),
+                "hook-post-remove" => hook_post_remove = value.to_string(),
                 _ => {} // ignore unknown keys for forward compat
             }
         }
@@ -511,6 +532,11 @@ impl PackageManifest {
             files,
             archive_hash,
             archive_size,
+            conffiles,
+            hook_pre_install,
+            hook_post_install,
+            hook_pre_remove,
+            hook_post_remove,
         })
     }
 
@@ -548,11 +574,26 @@ impl PackageManifest {
                 file.src, file.dst, file.mode, file.hash, file.size
             ));
         }
+        if !self.conffiles.is_empty() {
+            out.push_str(&format!("conffiles: {}\n", self.conffiles.join(", ")));
+        }
         if !self.archive_hash.is_empty() {
             out.push_str(&format!("archive_hash: {}\n", self.archive_hash));
         }
         if self.archive_size > 0 {
             out.push_str(&format!("archive_size: {}\n", self.archive_size));
+        }
+        if !self.hook_pre_install.is_empty() {
+            out.push_str(&format!("hook-pre-install: {}\n", self.hook_pre_install));
+        }
+        if !self.hook_post_install.is_empty() {
+            out.push_str(&format!("hook-post-install: {}\n", self.hook_post_install));
+        }
+        if !self.hook_pre_remove.is_empty() {
+            out.push_str(&format!("hook-pre-remove: {}\n", self.hook_pre_remove));
+        }
+        if !self.hook_post_remove.is_empty() {
+            out.push_str(&format!("hook-post-remove: {}\n", self.hook_post_remove));
         }
         out
     }
@@ -1367,6 +1408,347 @@ impl PackageDb {
 }
 
 // ============================================================================
+// Transaction log — audit trail for all package operations
+// ============================================================================
+
+/// Where the transaction log lives.
+const TX_LOG_PATH: &str = "/var/pkg/transactions.log";
+
+/// A transaction records a single package manager operation.
+#[derive(Clone, Debug)]
+struct Transaction {
+    /// Monotonic sequence number.
+    id: u64,
+    /// Unix timestamp.
+    timestamp: u64,
+    /// What operation was performed.
+    operation: TxOperation,
+    /// Generation ID created by this operation.
+    generation_id: u64,
+    /// Previous generation ID.
+    prev_generation_id: u64,
+    /// Packages affected.
+    packages: Vec<String>,
+    /// Human-readable description.
+    description: String,
+}
+
+#[derive(Clone, Debug)]
+enum TxOperation {
+    Install,
+    InstallLocal,
+    Remove,
+    Upgrade,
+    Rollback,
+    GarbageCollect,
+}
+
+impl TxOperation {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::InstallLocal => "install-local",
+            Self::Remove => "remove",
+            Self::Upgrade => "upgrade",
+            Self::Rollback => "rollback",
+            Self::GarbageCollect => "gc",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "install" => Some(Self::Install),
+            "install-local" => Some(Self::InstallLocal),
+            "remove" => Some(Self::Remove),
+            "upgrade" => Some(Self::Upgrade),
+            "rollback" => Some(Self::Rollback),
+            "gc" => Some(Self::GarbageCollect),
+            _ => None,
+        }
+    }
+}
+
+/// Transaction log manager — append-only log of all package operations.
+///
+/// Each line is a JSON-lines record (text-based per OS design spec):
+/// ```json
+/// {"id":1,"ts":1700000000,"op":"install","gen":2,"prev":1,"pkgs":["foo","bar"],"desc":"install foo, bar"}
+/// ```
+struct TransactionLog;
+
+impl TransactionLog {
+    /// Append a transaction to the log.
+    fn append(tx: &Transaction) -> io::Result<()> {
+        let pkgs_json: Vec<String> = tx
+            .packages
+            .iter()
+            .map(|p| format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect();
+
+        let line = format!(
+            "{{\"id\":{},\"ts\":{},\"op\":\"{}\",\"gen\":{},\"prev\":{},\"pkgs\":[{}],\"desc\":\"{}\"}}\n",
+            tx.id,
+            tx.timestamp,
+            tx.operation.as_str(),
+            tx.generation_id,
+            tx.prev_generation_id,
+            pkgs_json.join(","),
+            tx.description.replace('\\', "\\\\").replace('"', "\\\""),
+        );
+
+        // Ensure parent directory exists
+        if let Some(parent) = Path::new(TX_LOG_PATH).parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+
+        // Append to the log file
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(TX_LOG_PATH)?;
+        io::Write::write_all(&mut file, line.as_bytes())?;
+        Ok(())
+    }
+
+    /// Read the transaction log.
+    fn read_all() -> io::Result<Vec<Transaction>> {
+        let text = match fs::read_to_string(TX_LOG_PATH) {
+            Ok(t) => t,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+
+        let mut transactions = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(tx) = Self::parse_json_line(line) {
+                transactions.push(tx);
+            }
+        }
+        Ok(transactions)
+    }
+
+    /// Read the last N transactions.
+    #[allow(dead_code)] // Will be used by future 'pkg log' enhancements
+    fn read_last(n: usize) -> io::Result<Vec<Transaction>> {
+        let all = Self::read_all()?;
+        let start = all.len().saturating_sub(n);
+        Ok(all[start..].to_vec())
+    }
+
+    /// Get the next transaction ID.
+    fn next_id() -> u64 {
+        Self::read_all()
+            .ok()
+            .and_then(|txs| txs.last().map(|t| t.id + 1))
+            .unwrap_or(1)
+    }
+
+    /// Parse a JSON-lines record. Minimal parser — we know the exact format.
+    fn parse_json_line(line: &str) -> Option<Transaction> {
+        // Extract values from our known JSON format
+        let id = Self::extract_u64(line, "\"id\":")?;
+        let timestamp = Self::extract_u64(line, "\"ts\":")?;
+        let op_str = Self::extract_string(line, "\"op\":\"")?;
+        let operation = TxOperation::parse(&op_str)?;
+        let generation_id = Self::extract_u64(line, "\"gen\":")?;
+        let prev_generation_id = Self::extract_u64(line, "\"prev\":")?;
+        let description = Self::extract_string(line, "\"desc\":\"").unwrap_or_default();
+
+        // Extract packages array
+        let packages = Self::extract_string_array(line, "\"pkgs\":");
+
+        Some(Transaction {
+            id,
+            timestamp,
+            operation,
+            generation_id,
+            prev_generation_id,
+            packages,
+            description,
+        })
+    }
+
+    fn extract_u64(line: &str, key: &str) -> Option<u64> {
+        let start = line.find(key)? + key.len();
+        let rest = &line[start..];
+        let end = rest.find(|c: char| !c.is_ascii_digit())?;
+        rest[..end].parse().ok()
+    }
+
+    fn extract_string(line: &str, key: &str) -> Option<String> {
+        let start = line.find(key)? + key.len();
+        let rest = &line[start..];
+        // Find the closing quote (handle escaped quotes)
+        let mut end = 0;
+        let bytes = rest.as_bytes();
+        while end < bytes.len() {
+            if bytes[end] == b'"' {
+                if end == 0 || bytes[end - 1] != b'\\' {
+                    break;
+                }
+            }
+            end += 1;
+        }
+        Some(rest[..end].replace("\\\"", "\"").replace("\\\\", "\\"))
+    }
+
+    fn extract_string_array(line: &str, key: &str) -> Vec<String> {
+        let start = match line.find(key) {
+            Some(s) => s + key.len(),
+            None => return Vec::new(),
+        };
+        let rest = &line[start..];
+        let end = match rest.find(']') {
+            Some(e) => e,
+            None => return Vec::new(),
+        };
+        let array_content = &rest[1..end]; // skip '['
+        let mut result = Vec::new();
+        for item in array_content.split(',') {
+            let item = item.trim().trim_matches('"');
+            if !item.is_empty() {
+                result.push(item.replace("\\\"", "\"").replace("\\\\", "\\"));
+            }
+        }
+        result
+    }
+}
+
+/// Helper: create and log a transaction for a package operation.
+fn log_transaction(
+    op: TxOperation,
+    gen_id: u64,
+    prev_gen_id: u64,
+    packages: &[String],
+    description: &str,
+) {
+    let tx = Transaction {
+        id: TransactionLog::next_id(),
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        operation: op,
+        generation_id: gen_id,
+        prev_generation_id: prev_gen_id,
+        packages: packages.to_vec(),
+        description: description.to_string(),
+    };
+    if let Err(e) = TransactionLog::append(&tx) {
+        eprintln!("pkg: warning: failed to write transaction log: {e}");
+    }
+}
+
+// ============================================================================
+// Config file management
+// ============================================================================
+
+/// A file that should not be overwritten during upgrades if the user has
+/// modified it.
+///
+/// Config files are tracked in the generation's installed package info
+/// alongside regular file hashes. During upgrade, if a config file's
+/// deployed copy differs from the original hash, we preserve the user's
+/// version and save the new version as `<file>.pkg-new`.
+struct ConfigFileTracker;
+
+#[allow(dead_code)] // Infrastructure for upgrade config protection — wired in next
+impl ConfigFileTracker {
+    /// Check whether a deployed file has been modified by the user.
+    ///
+    /// Compares the current file on disk to its expected CAS hash.
+    /// Returns true if the file exists and has been modified.
+    fn is_user_modified(path: &Path, expected_hash: &str) -> bool {
+        if expected_hash.is_empty() {
+            return false;
+        }
+        match fs::read(path) {
+            Ok(data) => sha256_hex(&data) != expected_hash,
+            Err(_) => false, // file doesn't exist or unreadable — not "modified"
+        }
+    }
+
+    /// Deploy a config file with user-modification protection.
+    ///
+    /// If the file already exists and has been modified by the user,
+    /// save the new version as `<path>.pkg-new` and print a notice.
+    /// Otherwise deploy normally.
+    fn deploy_config(cas: &ContentStore, hash: &str, dst: &Path, old_hash: &str) -> io::Result<bool> {
+        if dst.exists() && Self::is_user_modified(dst, old_hash) {
+            // User modified the config — don't clobber it
+            let new_path = PathBuf::from(format!("{}.pkg-new", dst.display()));
+            cas.deploy_hardlink(hash, &new_path)?;
+            eprintln!(
+                "  notice: {} modified by user — new version saved as {}",
+                dst.display(),
+                new_path.display()
+            );
+            Ok(false) // not replaced
+        } else {
+            cas.deploy_hardlink(hash, dst)?;
+            Ok(true) // replaced
+        }
+    }
+}
+
+// ============================================================================
+// Package hooks
+// ============================================================================
+
+/// Package lifecycle hooks — shell commands run at specific points during
+/// install/remove/upgrade operations.
+///
+/// Hooks are defined in the manifest:
+/// ```
+/// hook-pre-install: /usr/lib/mypackage/setup.sh
+/// hook-post-install: /usr/lib/mypackage/configure.sh
+/// hook-pre-remove: /usr/lib/mypackage/cleanup.sh
+/// hook-post-remove: /usr/lib/mypackage/teardown.sh
+/// ```
+///
+/// Hooks run with the package name and version as arguments.
+/// A non-zero exit code from a pre-hook aborts the operation.
+struct PackageHooks;
+
+#[allow(dead_code)] // Infrastructure for package lifecycle hooks — wired in next
+impl PackageHooks {
+    /// Run a hook command if it exists.
+    ///
+    /// Returns Ok(true) if the hook ran and succeeded,
+    /// Ok(false) if no hook was defined, or Err if it failed.
+    fn run(command: &str, pkg_name: &str, pkg_version: &str) -> Result<bool, String> {
+        if command.is_empty() {
+            return Ok(false);
+        }
+
+        use std::process::Command;
+
+        match Command::new(command)
+            .arg(pkg_name)
+            .arg(pkg_version)
+            .status()
+        {
+            Ok(status) => {
+                if status.success() {
+                    Ok(true)
+                } else {
+                    Err(format!(
+                        "hook '{}' failed with exit code {}",
+                        command,
+                        status.code().unwrap_or(-1)
+                    ))
+                }
+            }
+            Err(e) => Err(format!("failed to execute hook '{}': {e}", command)),
+        }
+    }
+}
+
+// ============================================================================
 // Dependency resolver
 // ============================================================================
 
@@ -1648,6 +2030,13 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
                 eprintln!("pkg: manually run: echo {} > {}/current", new_gen.id, GEN_DIR);
                 process::exit(1);
             }
+            log_transaction(
+                TxOperation::Install,
+                new_gen.id,
+                current.id,
+                &to_install,
+                &desc,
+            );
             println!(
                 "\nDone. Generation {} created.",
                 new_gen.id
@@ -1736,6 +2125,13 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
     match db.save_generation(&new_gen) {
         Ok(()) => {
             let _ = db.set_current_generation(new_gen.id);
+            log_transaction(
+                TxOperation::Remove,
+                new_gen.id,
+                current.id,
+                packages,
+                &desc,
+            );
             println!("\nDone. Generation {} created.", new_gen.id);
         }
         Err(e) => {
@@ -2005,6 +2401,13 @@ fn cmd_rollback(db: &PackageDb, target_gen: Option<u64>) {
     match db.save_generation(&rollback_gen) {
         Ok(()) => {
             let _ = db.set_current_generation(rollback_gen.id);
+            log_transaction(
+                TxOperation::Rollback,
+                rollback_gen.id,
+                current_id,
+                &[],
+                &desc,
+            );
             println!(
                 "\nRolled back. Generation {} created (based on {target}).",
                 rollback_gen.id
@@ -2089,6 +2492,20 @@ fn cmd_gc(db: &PackageDb, keep: usize) {
             }
         }
     }
+
+    let gc_desc = format!(
+        "gc: removed {} gen(s), {} blob(s), {} freed",
+        remove_ids.len(),
+        orphaned,
+        format_size(freed)
+    );
+    log_transaction(
+        TxOperation::GarbageCollect,
+        current_id,
+        current_id,
+        &[],
+        &gc_desc,
+    );
 
     println!(
         "Removed {} generation(s), {} orphaned blob(s) ({} freed).",
@@ -2296,6 +2713,13 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
     match db.save_generation(&new_gen) {
         Ok(()) => {
             let _ = db.set_current_generation(new_gen.id);
+            log_transaction(
+                TxOperation::Upgrade,
+                new_gen.id,
+                current.id,
+                &names,
+                &desc,
+            );
             println!("\nDone. Generation {} created.", new_gen.id);
         }
         Err(e) => {
@@ -2519,6 +2943,68 @@ fn cmd_repo_list() {
         println!(
             "{:<20} {:<8} {:<8} {}",
             repo.name, repo.priority, status, repo.url
+        );
+    }
+}
+
+/// Show the transaction log.
+///
+/// `pkg log` shows the last 20 transactions.
+/// `pkg log N` shows the last N transactions.
+/// `pkg log --all` shows all transactions.
+fn cmd_log(args: &[String]) {
+    let transactions = match TransactionLog::read_all() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("pkg: failed to read transaction log: {e}");
+            process::exit(1);
+        }
+    };
+
+    if transactions.is_empty() {
+        println!("No transactions recorded.");
+        return;
+    }
+
+    let show_all = args.iter().any(|a| a == "--all" || a == "-a");
+    let count: usize = if show_all {
+        transactions.len()
+    } else {
+        args.iter()
+            .find(|a| a.parse::<usize>().is_ok())
+            .and_then(|a| a.parse().ok())
+            .unwrap_or(20)
+    };
+
+    let start = transactions.len().saturating_sub(count);
+    let shown = &transactions[start..];
+
+    println!(
+        "{:<6} {:<20} {:<14} {:<6} {}",
+        "TX", "DATE", "OPERATION", "GEN", "PACKAGES"
+    );
+
+    for tx in shown {
+        let date = format_timestamp(tx.timestamp);
+        let pkgs = if tx.packages.is_empty() {
+            tx.description.clone()
+        } else {
+            tx.packages.join(", ")
+        };
+        println!(
+            "{:<6} {:<20} {:<14} {:<6} {}",
+            tx.id,
+            date,
+            tx.operation.as_str(),
+            tx.generation_id,
+            pkgs,
+        );
+    }
+
+    if !show_all && start > 0 {
+        println!(
+            "\n({} older transactions not shown — use 'pkg log --all')",
+            start
         );
     }
 }
@@ -3089,6 +3575,7 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
     }
 
     // Commit generation atomically
+    let current_id = db.current_generation_id();
     match db.save_generation(&new_gen) {
         Ok(()) => {
             if let Err(e) = db.set_current_generation(new_gen.id) {
@@ -3096,6 +3583,14 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
                 eprintln!("pkg: manually run: echo {} > {}/current", new_gen.id, GEN_DIR);
                 process::exit(1);
             }
+            let pkg_names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+            log_transaction(
+                TxOperation::InstallLocal,
+                new_gen.id,
+                current_id,
+                &pkg_names,
+                &desc,
+            );
             println!("\nDone. Generation {} created.", new_gen.id);
         }
         Err(e) => {
@@ -3279,6 +3774,7 @@ Commands:
   fetch <pkg>...         Download packages to CAS without installing
   pack <manifest>        Create a .pkg archive from a manifest and source files
   repo [subcommand]      Manage package repositories
+  log [N|--all]          Show transaction history (default: last 20)
   list [--installed]     List packages
   search <query>         Search available packages
   info <pkg>             Show package details
@@ -3467,6 +3963,7 @@ fn main() {
             cmd_pack(manifest_path, output);
         }
         "repo" | "repository" => cmd_repo(&rest_filtered),
+        "log" | "history" => cmd_log(&rest_filtered),
         "help" | "--help" | "-h" => print_usage(),
         _ => {
             eprintln!("pkg: unknown command: {command}");

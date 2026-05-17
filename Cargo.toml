@@ -10,7 +10,11 @@ exclude = [
     "userspace/init",
     "userspace/hello",
     "userspace/ticker",
+    # --- shell (osb2) ---
+    "userspace/shell",
     "posix",
+    # --- toolchain (osb2) ---
+    "toolchain/stubs",
 ]
 
 [workspace.lints.clippy]

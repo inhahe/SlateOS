@@ -1,0 +1,14 @@
+[package]
+name = "ouros-stubs"
+version = "0.1.0"
+edition = "2024"
+description = "Stub symbols needed by Rust std that our POSIX layer doesn't provide"
+
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[profile.release]
+opt-level = "s"
+panic = "abort"

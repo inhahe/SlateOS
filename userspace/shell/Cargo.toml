@@ -1,0 +1,25 @@
+[package]
+name = "shell"
+version = "0.1.0"
+edition = "2024"
+description = "Userspace POSIX-compatible shell — default interactive shell for the OS"
+
+# Standalone crate — not part of the kernel workspace.
+# Userspace binaries need different targets and rustflags.
+[workspace]
+
+# No posix dependency here — posix is built separately as a staticlib
+# and linked as libc.a via the sysroot.  This avoids the cfg(target_os)
+# conflict: posix uses #[cfg(target_os = "none")] for no_mangle, but
+# our custom target reports target_os = "linux" so std's unix backend
+# works.  Building posix separately with its own target preserves the
+# no_mangle exports.
+
+[profile.release]
+opt-level = "s"       # Optimize for size — embedded in kernel image.
+lto = false           # LTO conflicts with code-model=large (core uses small).
+panic = "abort"
+strip = "symbols"     # Strip debug symbols from the final binary.
+
+[profile.dev]
+panic = "abort"

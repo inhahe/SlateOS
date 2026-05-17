@@ -1,0 +1,12 @@
+# Build for bare-metal x86_64 (same as posix crate).
+# The output is linked into userspace programs via the sysroot.
+
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+linker = "rust-lld"
+rustflags = [
+    "-C", "code-model=large",
+    "-C", "relocation-model=static",
+]

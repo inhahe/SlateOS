@@ -45,6 +45,7 @@ pub mod ntp;
 pub mod smtp;
 pub mod snmp;
 pub mod socks;
+pub mod ssh;
 pub mod syslog;
 pub mod telnet;
 pub mod tftp;
@@ -129,6 +130,7 @@ pub fn poll() {
         mdns::tick();
         syslog::tick();
         telnet::tick();
+        ssh::tick();
         tftp::tick();
         nat::tick();
         httpd::tick();

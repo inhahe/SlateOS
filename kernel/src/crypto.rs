@@ -2,6 +2,7 @@
 //!
 //! Provides:
 //! - **SHA-256** for file content hashing and integrity verification
+//! - **SHA-512** for Ed25519 signatures (RFC 6234)
 //! - **CRC32C** (Castagnoli) for ext4 metadata checksums
 //! - **HMAC-SHA256** (RFC 2104) for keyed message authentication
 //! - **HKDF-SHA256** (RFC 5869) for key derivation (TLS 1.3 key schedule)
@@ -9,6 +10,7 @@
 //! - **Poly1305** (RFC 8439) one-time authenticator
 //! - **ChaCha20-Poly1305** (RFC 8439) AEAD construction (TLS 1.3 cipher)
 //! - **X25519** (RFC 7748) Diffie-Hellman key exchange over Curve25519
+//! - **Ed25519** (RFC 8032) digital signatures over Edwards curve 25519
 //!
 //! All implementations are pure Rust, no_std compatible, and correct.
 //! Not optimized for speed (no SIMD/SHA-NI/CRC32 instructions) but
@@ -19,11 +21,13 @@
 //! ## References
 //!
 //! - SHA-256: FIPS 180-4 (Secure Hash Standard)
+//! - SHA-512: FIPS 180-4 (Secure Hash Standard)
 //! - CRC32C: RFC 3720 appendix B (iSCSI), polynomial 0x1EDC6F41
 //! - HMAC: RFC 2104 (HMAC: Keyed-Hashing for Message Authentication)
 //! - HKDF: RFC 5869 (HMAC-based Extract-and-Expand Key Derivation)
 //! - ChaCha20-Poly1305: RFC 8439 (formerly RFC 7539)
 //! - X25519: RFC 7748 (Elliptic Curves for Security)
+//! - Ed25519: RFC 8032 (Edwards-Curve Digital Signature Algorithm)
 
 use alloc::vec::Vec;
 
@@ -1558,4 +1562,1065 @@ pub fn x25519(scalar: &[u8; 32], point: &[u8; 32]) -> [u8; 32] {
 /// Equivalent to `x25519(scalar, basepoint)` where basepoint = 9.
 pub fn x25519_base(scalar: &[u8; 32]) -> [u8; 32] {
     x25519(scalar, &X25519_BASEPOINT)
+}
+
+// ===========================================================================
+// SHA-512 (FIPS 180-4)
+// ===========================================================================
+
+/// SHA-512 digest size in bytes.
+pub const SHA512_DIGEST_SIZE: usize = 64;
+
+/// SHA-512 initial hash values (first 64 bits of the fractional parts of
+/// the square roots of the first 8 primes).
+#[allow(clippy::unreadable_literal)]
+const SHA512_H: [u64; 8] = [
+    0x6a09e667f3bcc908, 0xbb67ae8584caa73b,
+    0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
+    0x510e527fade682d1, 0x9b05688c2b3e6c1f,
+    0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
+];
+
+/// SHA-512 round constants (first 64 bits of the fractional parts of
+/// the cube roots of the first 80 primes).
+#[allow(clippy::unreadable_literal)]
+const SHA512_K: [u64; 80] = [
+    0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
+    0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
+    0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
+    0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
+    0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
+    0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
+    0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
+    0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
+    0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
+    0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
+    0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
+    0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,
+    0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,
+    0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,
+    0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
+    0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,
+    0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,
+    0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,
+    0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,
+    0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817,
+];
+
+/// Incremental SHA-512 hasher.
+pub struct Sha512 {
+    state: [u64; 8],
+    buf: [u8; 128],
+    buf_len: usize,
+    total_len: u128,
+}
+
+impl Sha512 {
+    /// Create a new SHA-512 hasher.
+    pub fn new() -> Self {
+        Self {
+            state: SHA512_H,
+            buf: [0u8; 128],
+            buf_len: 0,
+            total_len: 0,
+        }
+    }
+
+    /// Feed data into the hasher.
+    pub fn update(&mut self, data: &[u8]) {
+        let mut offset = 0usize;
+        self.total_len = self.total_len.wrapping_add(data.len() as u128);
+
+        // Fill partial buffer.
+        if self.buf_len > 0 {
+            let need = 128usize.saturating_sub(self.buf_len);
+            let take = data.len().min(need);
+            self.buf[self.buf_len..self.buf_len.wrapping_add(take)]
+                .copy_from_slice(data.get(..take).unwrap_or(&[]));
+            self.buf_len = self.buf_len.wrapping_add(take);
+            offset = take;
+            if self.buf_len == 128 {
+                let block = self.buf;
+                sha512_compress(&mut self.state, &block);
+                self.buf_len = 0;
+            }
+        }
+
+        // Process full 128-byte blocks.
+        while offset.wrapping_add(128) <= data.len() {
+            let mut block = [0u8; 128];
+            block.copy_from_slice(data.get(offset..offset.wrapping_add(128)).unwrap_or(&[]));
+            sha512_compress(&mut self.state, &block);
+            offset = offset.wrapping_add(128);
+        }
+
+        // Buffer remainder.
+        let remaining = data.len().saturating_sub(offset);
+        if remaining > 0 {
+            self.buf[..remaining].copy_from_slice(
+                data.get(offset..offset.wrapping_add(remaining)).unwrap_or(&[]),
+            );
+            self.buf_len = remaining;
+        }
+    }
+
+    /// Finalize and return the 64-byte digest.
+    pub fn finalize(mut self) -> [u8; SHA512_DIGEST_SIZE] {
+        // Pad: append 0x80, then zeros, then 128-bit big-endian length.
+        let total_bits = self.total_len.wrapping_mul(8);
+        self.buf[self.buf_len] = 0x80;
+        self.buf_len = self.buf_len.wrapping_add(1);
+
+        if self.buf_len > 112 {
+            // Not enough room for the 16-byte length — pad this block and
+            // process it, then start a fresh block.
+            for i in self.buf_len..128 {
+                self.buf[i] = 0;
+            }
+            sha512_compress(&mut self.state, &self.buf);
+            self.buf = [0u8; 128];
+        } else {
+            for i in self.buf_len..128 {
+                self.buf[i] = 0;
+            }
+        }
+
+        // Append 128-bit message length (big-endian) at the end.
+        let len_bytes = total_bits.to_be_bytes();
+        self.buf[112..128].copy_from_slice(&len_bytes);
+        sha512_compress(&mut self.state, &self.buf);
+
+        let mut out = [0u8; 64];
+        for (i, &h) in self.state.iter().enumerate() {
+            let off = i.wrapping_mul(8);
+            out[off..off.wrapping_add(8)].copy_from_slice(&h.to_be_bytes());
+        }
+        out
+    }
+}
+
+/// Compress one 128-byte block into the SHA-512 state.
+#[allow(clippy::many_single_char_names, clippy::arithmetic_side_effects)]
+fn sha512_compress(state: &mut [u64; 8], block: &[u8; 128]) {
+    // Use a 16-element circular buffer for the message schedule.
+    // Computes w values on-the-fly (FIPS 180-4 §6.4.2 optimized form).
+    let mut w = [0u64; 16];
+
+    // Load 16 message words (big-endian).
+    for i in 0..16 {
+        let off = i * 8;
+        w[i] = u64::from_be_bytes([
+            block[off], block[off + 1], block[off + 2], block[off + 3],
+            block[off + 4], block[off + 5], block[off + 6], block[off + 7],
+        ]);
+    }
+
+    let mut a = state[0];
+    let mut b = state[1];
+    let mut c = state[2];
+    let mut d = state[3];
+    let mut e = state[4];
+    let mut f = state[5];
+    let mut g = state[6];
+    let mut h = state[7];
+
+    // 80 rounds. For rounds 16..80, extend the schedule in-place.
+    for i in 0..80usize {
+        // For i >= 16, update w[i & 15] with the schedule extension:
+        // W_t = σ1(W_{t-2}) + W_{t-7} + σ0(W_{t-15}) + W_{t-16}
+        if i >= 16 {
+            let i0 = i & 15;
+            let w_i2 = w[(i - 2) & 15];
+            let w_i7 = w[(i - 7) & 15];
+            let w_i15 = w[(i - 15) & 15];
+            let w_i16 = w[i0]; // w[(i - 16) & 15] == w[i & 15]
+            let sigma0 = w_i15.rotate_right(1) ^ w_i15.rotate_right(8) ^ (w_i15 >> 7);
+            let sigma1 = w_i2.rotate_right(19) ^ w_i2.rotate_right(61) ^ (w_i2 >> 6);
+            w[i0] = w_i16.wrapping_add(sigma0).wrapping_add(w_i7).wrapping_add(sigma1);
+        }
+
+        let wi = w[i & 15];
+
+        // Compression round (FIPS 180-4 §6.4.2).
+        let big_sigma1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
+        let ch = (e & f) ^ ((!e) & g);
+        let temp1 = h.wrapping_add(big_sigma1)
+            .wrapping_add(ch)
+            .wrapping_add(SHA512_K[i])
+            .wrapping_add(wi);
+        let big_sigma0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = big_sigma0.wrapping_add(maj);
+
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
+
+    state[0] = state[0].wrapping_add(a);
+    state[1] = state[1].wrapping_add(b);
+    state[2] = state[2].wrapping_add(c);
+    state[3] = state[3].wrapping_add(d);
+    state[4] = state[4].wrapping_add(e);
+    state[5] = state[5].wrapping_add(f);
+    state[6] = state[6].wrapping_add(g);
+    state[7] = state[7].wrapping_add(h);
+}
+
+/// One-shot SHA-512 hash.
+pub fn sha512(data: &[u8]) -> [u8; SHA512_DIGEST_SIZE] {
+    let mut hasher = Sha512::new();
+    hasher.update(data);
+    hasher.finalize()
+}
+
+// ===========================================================================
+// Ed25519 (RFC 8032)
+// ===========================================================================
+
+/// Ed25519 signature size in bytes.
+pub const ED25519_SIGNATURE_SIZE: usize = 64;
+
+/// Ed25519 public key size in bytes.
+pub const ED25519_PUBLIC_KEY_SIZE: usize = 32;
+
+/// Ed25519 secret key size in bytes (seed).
+pub const ED25519_SECRET_KEY_SIZE: usize = 32;
+
+// ---------------------------------------------------------------------------
+// Extended Edwards point (X:Y:Z:T where x = X/Z, y = Y/Z, X*Y = Z*T)
+// on the twisted Edwards curve: -x² + y² = 1 + d*x²*y²
+// where d = -121665/121666 mod p, p = 2^255 - 19.
+//
+// References:
+//   - RFC 8032 §5.1
+//   - HISIL–WONG–CARTER–DAWSON, "Twisted Edwards curves revisited"
+//   - djb's ref10 implementation
+// ---------------------------------------------------------------------------
+
+/// The Ed25519 curve parameter d = -121665/121666 mod p.
+///
+/// Precomputed: 0x52036cee2b6ffe738cc740797779e89800700a4d4141d8ab75eb4dca135978a3
+#[allow(clippy::unreadable_literal)]
+const ED25519_D: Fe25519 = Fe25519([
+    0x34DCA135978A3, 0x1A8283B156EBD, 0x5E7A26001C029, 0x739C663A03CBB, 0x52036CEE2B6FF,
+]);
+
+/// 2*d mod p (reserved for optimized point doubling).
+#[allow(clippy::unreadable_literal, dead_code)]
+const ED25519_D2: Fe25519 = Fe25519([
+    0x69B9426B2F159, 0x35050762ADD7A, 0x3CF44C0038052, 0x6738CC7407977, 0x2406D9DC56DFF,
+]);
+
+/// A point in extended coordinates (X, Y, Z, T) on the Ed25519 curve.
+#[derive(Clone, Copy)]
+struct EdPoint {
+    x: Fe25519,
+    y: Fe25519,
+    z: Fe25519,
+    t: Fe25519,
+}
+
+impl EdPoint {
+    /// The identity (neutral) point: (0, 1, 1, 0).
+    const IDENTITY: Self = Self {
+        x: Fe25519::ZERO,
+        y: Fe25519::ONE,
+        z: Fe25519::ONE,
+        t: Fe25519::ZERO,
+    };
+
+    /// The Ed25519 base point B = (Bx, By, 1, Bx*By).
+    ///
+    /// By = 4/5 mod p (the canonical y-coordinate; x is the positive root).
+    /// RFC 8032 §5.1 specifies y = 4/5.
+    fn basepoint() -> Self {
+        // y = 4/5 mod p = 4 * inv(5) mod p.
+        let four = Fe25519([4, 0, 0, 0, 0]);
+        let five = Fe25519([5, 0, 0, 0, 0]);
+        let y = four.mul(five.invert());
+
+        // x = positive sqrt of (y²-1) / (d*y²+1).
+        let y2 = y.sqr();
+        let numerator = y2.sub(Fe25519::ONE);
+        let denominator = ED25519_D.mul(y2).add(Fe25519::ONE);
+        let x = ed_sqrt_ratio(numerator, denominator);
+
+        let t = x.mul(y);
+        Self { x, y, z: Fe25519::ONE, t }
+    }
+
+    /// Point addition using the unified extended coordinates formula.
+    ///
+    /// RFC 8032 §5.1.4 / HISIL et al. unified addition for a = -1:
+    ///   A = X1*X2, B = Y1*Y2, C = T1*d*T2, D = Z1*Z2
+    ///   E = (X1+Y1)*(X2+Y2) - A - B, F = D-C, G = D+C
+    ///   H = B - a*A = B + A (since a=-1)
+    ///   X3 = E*F, Y3 = G*H, T3 = E*H, Z3 = F*G
+    fn add_point(self, other: Self) -> Self {
+        let a = self.x.mul(other.x);
+        let b = self.y.mul(other.y);
+        let c = self.t.mul(ED25519_D).mul(other.t);
+        let d = self.z.mul(other.z);
+
+        let e = {
+            let s1 = self.x.add(self.y);
+            let s2 = other.x.add(other.y);
+            s1.mul(s2).sub(a).sub(b)
+        };
+        let f = d.sub(c);
+        let g = d.add(c);
+        let h = b.add(a); // B + A (since a = -1, this is B - a*A)
+
+        Self {
+            x: e.mul(f),
+            y: g.mul(h),
+            t: e.mul(h),
+            z: f.mul(g),
+        }
+    }
+
+    /// Dedicated point doubling (HWCD formula for a=-1).
+    ///
+    /// Uses the specialized doubling formula that does NOT involve the
+    /// T coordinate as input.  This is diagnostically useful: if the unified
+    /// addition formula accumulates T-coordinate drift over many doublings,
+    /// this formula avoids that by computing C = 2·Z² instead of d·T².
+    ///
+    /// Formula (Hisil–Wong–Carter–Dawson, Table 4, a=-1):
+    ///   A = X1², B = Y1², C = 2·Z1², D = a·A = -A
+    ///   E = (X1+Y1)² - A - B, G = D+B, F = G-C, H = D-B
+    ///   X3 = E·F, Y3 = G·H, T3 = E·H, Z3 = F·G
+    fn double_point(self) -> Self {
+        let aa = self.x.sqr();             // A = X1²
+        let bb = self.y.sqr();             // B = Y1²
+        let zz = self.z.sqr();
+        let cc = zz.add(zz);              // C = 2·Z1²
+        let d = Fe25519::ZERO.sub(aa);    // D = a·A = -A (since a=-1)
+        let e = {
+            let s = self.x.add(self.y);
+            s.sqr().sub(aa).sub(bb)        // E = (X1+Y1)² - A - B = 2·X1·Y1
+        };
+        let g = d.add(bb);                // G = D + B = B - A
+        let f = g.sub(cc);                // F = G - C = (B-A) - 2Z²
+        let h = d.sub(bb);                // H = D - B = -(A+B)
+        Self {
+            x: e.mul(f),
+            y: g.mul(h),
+            t: e.mul(h),
+            z: f.mul(g),
+        }
+    }
+
+    /// Scalar multiplication: compute `scalar * self`.
+    ///
+    /// Uses MSB-first double-and-add.  The doubling step uses the
+    /// dedicated doubling formula (faster, avoids T-coordinate dependency),
+    /// while the addition step uses the unified formula.
+    fn scalar_mul(self, scalar: &[u8; 32]) -> Self {
+        let mut result = Self::IDENTITY;
+        // Process bits from MSB to LSB (little-endian scalar).
+        for i in (0..256).rev() {
+            result = result.double_point(); // dedicated doubling
+            let byte_idx = i / 8;
+            let bit_idx = i % 8;
+            if let Some(&b) = scalar.get(byte_idx) {
+                if (b >> bit_idx) & 1 == 1 {
+                    result = result.add_point(self); // unified addition
+                }
+            }
+        }
+        result
+    }
+
+    /// Encode a point to 32 bytes (RFC 8032 §5.1.2).
+    ///
+    /// The encoding is the y-coordinate in little-endian, with the
+    /// sign of x stored in the top bit of the last byte.
+    fn encode(self) -> [u8; 32] {
+        let zi = self.z.invert();
+        let x = self.x.mul(zi);
+        let y = self.y.mul(zi);
+
+        let mut encoded = y.to_bytes();
+        // The "sign" of x is its least significant bit.
+        let x_bytes = x.to_bytes();
+        let x_sign = x_bytes[0] & 1;
+        encoded[31] |= x_sign << 7;
+        encoded
+    }
+
+    /// Decode a point from 32 bytes (RFC 8032 §5.1.3).
+    ///
+    /// Returns `None` if the encoding is invalid (y out of range or
+    /// no valid x exists for the curve equation).
+    fn decode(bytes: &[u8; 32]) -> Option<Self> {
+        // Extract x sign bit from top of byte 31.
+        let x_sign = (bytes[31] >> 7) & 1;
+
+        // Decode y (clear top bit).
+        let mut y_bytes = *bytes;
+        y_bytes[31] &= 0x7F;
+        let y = Fe25519::from_bytes(&y_bytes);
+
+        // Compute x = sqrt((y² - 1) / (d*y² + 1)).
+        // Uses ref10 approach: x = u * v^3 * (u * v^7)^(2^252-3)
+        // where u = y²-1, v = d*y²+1.
+        let y2 = y.sqr();
+        let u = y2.sub(Fe25519::ONE);
+        let v = ED25519_D.mul(y2).add(Fe25519::ONE);
+
+        let v3 = v.sqr().mul(v);
+        let v7 = v3.sqr().mul(v);
+        let uv7 = u.mul(v7);
+        let mut x = fe_pow_2_252_3(uv7).mul(v3).mul(u);
+
+        // Verify: x² * v == u.  If not, try x * sqrt(-1).
+        let check = x.sqr().mul(v).sub(u);
+        if check.to_bytes() != [0u8; 32] {
+            let sqrt_m1 = fe_sqrt_minus_one();
+            x = x.mul(sqrt_m1);
+            let check2 = x.sqr().mul(v).sub(u);
+            if check2.to_bytes() != [0u8; 32] {
+                return None; // No valid square root.
+            }
+        }
+
+        // Negate x if its sign doesn't match.
+        let x_bytes = x.to_bytes();
+        if (x_bytes[0] & 1) != x_sign {
+            x = Fe25519::ZERO.sub(x);
+        }
+
+        // If x is zero and x_sign is 1, encoding is invalid.
+        if x.to_bytes() == [0u8; 32] && x_sign == 1 {
+            return None;
+        }
+
+        let t = x.mul(y);
+        Some(Self { x, y, z: Fe25519::ONE, t })
+    }
+}
+
+/// Compute z^(2^252 - 3) mod p.
+///
+/// This is the candidate square root exponent: if x² = v, then
+/// v^((p+3)/8) = v^(2^252-2) gives a candidate, but the standard
+/// approach uses v^(2^252-3).  We use the addition chain from ref10.
+fn fe_pow_2_252_3(z: Fe25519) -> Fe25519 {
+    let z2 = z.sqr();
+    let z9 = z2.sqr().sqr().mul(z);
+    let z11 = z9.mul(z2);
+    let z_5_0 = z11.sqr().mul(z9);
+
+    let mut t = z_5_0;
+    for _ in 0..5 { t = t.sqr(); }
+    let z_10_0 = t.mul(z_5_0);
+
+    t = z_10_0;
+    for _ in 0..10 { t = t.sqr(); }
+    let z_20_0 = t.mul(z_10_0);
+
+    t = z_20_0;
+    for _ in 0..20 { t = t.sqr(); }
+    t = t.mul(z_20_0);
+
+    for _ in 0..10 { t = t.sqr(); }
+    let z_50_0 = t.mul(z_10_0);
+
+    t = z_50_0;
+    for _ in 0..50 { t = t.sqr(); }
+    let z_100_0 = t.mul(z_50_0);
+
+    t = z_100_0;
+    for _ in 0..100 { t = t.sqr(); }
+    t = t.mul(z_100_0);
+
+    for _ in 0..50 { t = t.sqr(); }
+    t = t.mul(z_50_0);
+
+    t = t.sqr().sqr(); // 2^252
+    t.mul(z) // z^(2^252 - 3)
+}
+
+/// Compute sqrt(-1) mod p = 2^((p-1)/4) mod p.
+fn fe_sqrt_minus_one() -> Fe25519 {
+    // 2^((p-1)/4) = 2^(2^253 - 5).
+    // We compute this via repeated squaring of Fe(2).
+    let two = Fe25519([2, 0, 0, 0, 0]);
+    let mut r = two;
+    // Square 252 times to get 2^(2^252).
+    for _ in 0..252 { r = r.sqr(); }
+    // Now r = 2^(2^252).  We need 2^(2^253 - 5) = (2^(2^253)) / (2^5).
+    // Actually, let's compute it differently using the pow function.
+    // sqrt(-1) mod p is a well-known constant.
+    // Value: 0x2b8324804fc1df0b2b4d00993dfbd7a72f431806ad2fe478c4ee1b274a0ea0b0
+    // In our limb format:
+    Fe25519::from_bytes(&[
+        0xB0, 0xA0, 0x0E, 0x4A, 0x27, 0x1B, 0xEE, 0xC4,
+        0x78, 0xE4, 0x2F, 0xAD, 0x06, 0x18, 0x43, 0x2F,
+        0xA7, 0xD7, 0xFB, 0x3D, 0x99, 0x00, 0x4D, 0x2B,
+        0x0B, 0xDF, 0xC1, 0x4F, 0x80, 0x24, 0x83, 0x2B,
+    ])
+}
+
+/// Compute the "positive" square root of num/den on the Ed25519 curve.
+///
+/// Uses the identity: sqrt(u/v) = u * v^3 * (u * v^7)^((p-5)/8)
+/// where (p-5)/8 = 2^252 - 3 (computed by `fe_pow_2_252_3`).
+/// This avoids a costly full field inversion.
+///
+/// Reference: NaCl ref10 `ge25519_frombytes_negate_vartime.c`.
+fn ed_sqrt_ratio(num: Fe25519, den: Fe25519) -> Fe25519 {
+    // v^3 and v^7.
+    let v3 = den.sqr().mul(den);
+    let v7 = v3.sqr().mul(den);
+    // Candidate: x = u * v^3 * (u * v^7)^(2^252 - 3).
+    let uv7 = num.mul(v7);
+    let mut x = fe_pow_2_252_3(uv7).mul(v3).mul(num);
+
+    // Check: x² * v == u. If not, try x * sqrt(-1).
+    let check = x.sqr().mul(den).sub(num);
+    if check.to_bytes() != [0u8; 32] {
+        x = x.mul(fe_sqrt_minus_one());
+    }
+
+    // Ensure x is non-negative (least significant bit is 0).
+    let x_bytes = x.to_bytes();
+    if x_bytes[0] & 1 != 0 {
+        x = Fe25519::ZERO.sub(x);
+    }
+    x
+}
+
+// ---------------------------------------------------------------------------
+// Ed25519 scalar arithmetic (mod L, where L is the group order)
+// ---------------------------------------------------------------------------
+
+/// The Ed25519 group order L.
+///
+/// L = 2^252 + 27742317777372353535851937790883648493
+#[allow(clippy::unreadable_literal)]
+const ED25519_L: [u8; 32] = [
+    0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+    0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+];
+
+/// Reduce a 64-byte scalar modulo L.
+///
+/// Uses Barrett reduction with the Ed25519 group order.
+/// Input: 64-byte little-endian integer from SHA-512.
+/// Output: 32-byte little-endian integer reduced mod L.
+fn sc_reduce(input: &[u8; 64]) -> [u8; 32] {
+    // Load 64 bytes into 24 limbs of 21 bits each (to avoid overflow
+    // in intermediate additions).  This follows the approach from djb's
+    // ref10: load into signed i64 limbs at 21-bit boundaries, then
+    // Barrett-reduce.
+    //
+    // For simplicity we use a schoolbook approach: interpret as a 512-bit
+    // number, divide by L, keep remainder.
+    //
+    // We implement a simple shift-and-subtract reduction.
+
+    // Load as array of u64 words (little-endian).
+    let mut val = [0u64; 8];
+    for i in 0..8 {
+        let off = i * 8;
+        val[i] = u64::from_le_bytes([
+            input[off], input[off + 1], input[off + 2], input[off + 3],
+            input[off + 4], input[off + 5], input[off + 6], input[off + 7],
+        ]);
+    }
+
+    // Reduce using schoolbook division with u64 limbs.
+    // L fits in ~253 bits.  val is at most 512 bits.
+    // We repeatedly subtract L shifted left until val < L.
+    //
+    // For correctness at the cost of simplicity, we'll use a
+    // byte-level approach: treat the 64-byte input as a big integer
+    // and reduce mod L.
+    sc_reduce_bytes(input)
+}
+
+/// Byte-level modular reduction of a 512-bit integer mod L.
+///
+/// Simple but correct: converts to double-width, subtracts multiples of L.
+fn sc_reduce_bytes(input: &[u8; 64]) -> [u8; 32] {
+    // We use a simple approach: process in 21-bit signed limbs, as in
+    // the original NaCl/ref10 code.  This is the well-tested method.
+    //
+    // Load into signed i64 limbs at various bit widths for the 512-bit
+    // input, reduce modulo L using the constants from the NaCl reference.
+    //
+    // For a straightforward implementation, we use carry-propagation
+    // arithmetic on the 64-byte input treated as limbs.
+
+    // Actually, the simplest correct approach for our purposes:
+    // Load as 512-bit, subtract L repeatedly.  Since the max input is
+    // < 2^512 and L ≈ 2^252, the quotient fits in ~260 bits.
+    //
+    // We use a wide multiply-free approach.
+
+    // Simple but slow reduction: byte-array subtraction loop.
+    let mut result = [0u8; 64];
+    result.copy_from_slice(input);
+
+    // Subtract L * 2^(8*i) for i = 32 down to 0 while result >= L * 2^(8*i).
+    // This is O(32 * 32) byte operations — perfectly fine for signing.
+    for shift in (0..=32).rev() {
+        loop {
+            // Check if result >= L << (shift*8) by comparing the relevant bytes.
+            if !gte_shifted(&result, &ED25519_L, shift) {
+                break;
+            }
+            sub_shifted(&mut result, &ED25519_L, shift);
+        }
+    }
+
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&result[..32]);
+    out
+}
+
+/// Check if a >= b << (shift * 8) (big-integer comparison).
+fn gte_shifted(a: &[u8; 64], b: &[u8; 32], shift: usize) -> bool {
+    // The effective length of the shifted b is shift + 32 bytes.
+    let top = shift.wrapping_add(32);
+    if top > 64 { return false; }
+
+    // Check that all bytes above the shifted range are zero in a.
+    for i in top..64 {
+        if a[i] != 0 { return true; }
+    }
+
+    // Compare from MSB to LSB in the overlapping range.
+    for i in (0usize..32).rev() {
+        let a_byte = a[i.wrapping_add(shift)];
+        let b_byte = b[i];
+        if a_byte > b_byte { return true; }
+        if a_byte < b_byte { return false; }
+    }
+    // Check lower bytes of a (below shift) — if they exist, a >= b.
+    true
+}
+
+/// Subtract b << (shift * 8) from a (in place).
+fn sub_shifted(a: &mut [u8; 64], b: &[u8; 32], shift: usize) {
+    let mut borrow: u16 = 0;
+    for i in 0usize..32 {
+        let idx = i.wrapping_add(shift);
+        if idx >= 64 { break; }
+        let diff = (a[idx] as u16).wrapping_sub(b[i] as u16).wrapping_sub(borrow);
+        a[idx] = diff as u8;
+        borrow = (diff >> 8) & 1;
+    }
+    // Propagate borrow beyond the 32-byte range.
+    let mut idx = shift.wrapping_add(32);
+    while borrow > 0 && idx < 64 {
+        let diff = (a[idx] as u16).wrapping_sub(borrow);
+        a[idx] = diff as u8;
+        borrow = (diff >> 8) & 1;
+        idx = idx.wrapping_add(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ed25519 public API
+// ---------------------------------------------------------------------------
+
+/// Ed25519 key pair (seed + public key).
+pub struct Ed25519KeyPair {
+    /// Secret seed (32 bytes, random).
+    pub secret: [u8; ED25519_SECRET_KEY_SIZE],
+    /// Public key (32 bytes, compressed Edwards y-coordinate).
+    pub public: [u8; ED25519_PUBLIC_KEY_SIZE],
+}
+
+/// Generate an Ed25519 key pair from a 32-byte seed.
+///
+/// The seed should be cryptographically random (e.g., from `rng::fill`).
+///
+/// # Algorithm (RFC 8032 §5.1.5)
+///
+/// 1. Hash the 32-byte seed with SHA-512 → 64 bytes.
+/// 2. The first 32 bytes (after clamping) become the scalar `a`.
+/// 3. The public key is `A = a * B` (scalar multiply with base point).
+pub fn ed25519_keypair(seed: &[u8; 32]) -> Ed25519KeyPair {
+    let h = sha512(seed);
+
+    let mut a = [0u8; 32];
+    a.copy_from_slice(&h[..32]);
+    // Clamp: clear low 3 bits, clear top bit, set second-to-top bit.
+    a[0] &= 248;
+    a[31] &= 127;
+    a[31] |= 64;
+
+    let base = EdPoint::basepoint();
+    let public_point = base.scalar_mul(&a);
+    let public_key = public_point.encode();
+
+    Ed25519KeyPair { secret: *seed, public: public_key }
+}
+
+/// Compute the Ed25519 public key from a secret seed.
+pub fn ed25519_public_key(seed: &[u8; 32]) -> [u8; ED25519_PUBLIC_KEY_SIZE] {
+    ed25519_keypair(seed).public
+}
+
+/// Sign a message with Ed25519 (RFC 8032 §5.1.6).
+///
+/// Returns a 64-byte signature (R || S).
+///
+/// # Algorithm
+///
+/// 1. Hash seed → (a, prefix) via SHA-512.
+/// 2. r = SHA-512(prefix || message) mod L.
+/// 3. R = r * B.
+/// 4. S = (r + SHA-512(R || A || message) * a) mod L.
+pub fn ed25519_sign(seed: &[u8; 32], message: &[u8]) -> [u8; ED25519_SIGNATURE_SIZE] {
+    let h = sha512(seed);
+
+    let mut a = [0u8; 32];
+    a.copy_from_slice(&h[..32]);
+    a[0] &= 248;
+    a[31] &= 127;
+    a[31] |= 64;
+
+    let prefix = &h[32..64];
+
+    // Compute public key A.
+    let base = EdPoint::basepoint();
+    let a_point = base.scalar_mul(&a);
+    let a_enc = a_point.encode();
+
+    // r = SHA-512(prefix || message) mod L.
+    let mut hasher = Sha512::new();
+    hasher.update(prefix);
+    hasher.update(message);
+    let r_hash = hasher.finalize();
+    let r = sc_reduce(&r_hash);
+
+    // R = r * B.
+    let r_point = base.scalar_mul(&r);
+    let r_enc = r_point.encode();
+
+    // k = SHA-512(R || A || message) mod L.
+    let mut hasher = Sha512::new();
+    hasher.update(&r_enc);
+    hasher.update(&a_enc);
+    hasher.update(message);
+    let k_hash = hasher.finalize();
+    let k = sc_reduce(&k_hash);
+
+    // S = (r + k * a) mod L.
+    let s = sc_muladd(&k, &a, &r);
+
+    let mut sig = [0u8; 64];
+    sig[..32].copy_from_slice(&r_enc);
+    sig[32..].copy_from_slice(&s);
+    sig
+}
+
+/// Verify an Ed25519 signature (RFC 8032 §5.1.7).
+///
+/// Returns `true` if the signature is valid.
+///
+/// # Algorithm
+///
+/// 1. Decode R and A from the signature and public key.
+/// 2. k = SHA-512(R || A || message) mod L.
+/// 3. Check: S * B == R + k * A.
+pub fn ed25519_verify(
+    public_key: &[u8; ED25519_PUBLIC_KEY_SIZE],
+    message: &[u8],
+    signature: &[u8; ED25519_SIGNATURE_SIZE],
+) -> bool {
+    // Decode R.
+    let mut r_bytes = [0u8; 32];
+    r_bytes.copy_from_slice(&signature[..32]);
+    let r_point = match EdPoint::decode(&r_bytes) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // Decode A.
+    let a_point = match EdPoint::decode(public_key) {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // Extract S.
+    let mut s_bytes = [0u8; 32];
+    s_bytes.copy_from_slice(&signature[32..]);
+
+    // Check S < L (reject non-canonical signatures).
+    if !sc_is_canonical(&s_bytes) {
+        return false;
+    }
+
+    // k = SHA-512(R || A || message) mod L.
+    let mut hasher = Sha512::new();
+    hasher.update(&r_bytes);
+    hasher.update(public_key);
+    hasher.update(message);
+    let k_hash = hasher.finalize();
+    let k = sc_reduce(&k_hash);
+
+    // Check: S * B == R + k * A.
+    let base = EdPoint::basepoint();
+    let sb = base.scalar_mul(&s_bytes);
+    let ka = a_point.scalar_mul(&k);
+    let rhs = r_point.add_point(ka);
+
+    // Compare encoded points.
+    sb.encode() == rhs.encode()
+}
+
+/// Scalar multiply-add: (a * b + c) mod L.
+///
+/// All inputs are 32-byte little-endian scalars.
+fn sc_muladd(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> [u8; 32] {
+    // Multiply a * b into a 64-byte result, then add c, then reduce mod L.
+    let mut product = [0u16; 64];
+
+    // Schoolbook multiply: a * b → 64 bytes.
+    for i in 0usize..32 {
+        let mut carry = 0u16;
+        for j in 0usize..32 {
+            let idx = i.wrapping_add(j);
+            if idx < 64 {
+                let v = product[idx]
+                    .wrapping_add((a[i] as u16).wrapping_mul(b[j] as u16))
+                    .wrapping_add(carry);
+                product[idx] = v & 0xFF;
+                carry = v >> 8;
+            }
+        }
+        // Propagate remaining carry.
+        let mut idx = i.wrapping_add(32);
+        while carry > 0 && idx < 64 {
+            let v = product[idx].wrapping_add(carry);
+            product[idx] = v & 0xFF;
+            carry = v >> 8;
+            idx = idx.wrapping_add(1);
+        }
+    }
+
+    // Add c.
+    let mut carry = 0u16;
+    for i in 0..32 {
+        let v = product[i].wrapping_add(c[i] as u16).wrapping_add(carry);
+        product[i] = v & 0xFF;
+        carry = v >> 8;
+    }
+    let mut idx = 32;
+    while carry > 0 && idx < 64 {
+        let v = product[idx].wrapping_add(carry);
+        product[idx] = v & 0xFF;
+        carry = v >> 8;
+        idx = idx.wrapping_add(1);
+    }
+
+    // Convert to bytes.
+    let mut result = [0u8; 64];
+    for i in 0..64 {
+        result[i] = product[i] as u8;
+    }
+
+    sc_reduce(&result)
+}
+
+/// Check that a scalar is canonical (< L).
+fn sc_is_canonical(s: &[u8; 32]) -> bool {
+    // Compare s < L byte by byte from MSB.
+    for i in (0..32).rev() {
+        if s[i] < ED25519_L[i] { return true; }
+        if s[i] > ED25519_L[i] { return false; }
+    }
+    false // Equal to L is not canonical.
+}
+
+// ---------------------------------------------------------------------------
+// Ed25519 + SHA-512 self-tests
+// ---------------------------------------------------------------------------
+
+/// Self-test for SHA-512 and Ed25519.
+pub fn self_test_ed25519() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+    serial_println!("[crypto] Running Ed25519/SHA-512 self-test...");
+
+    // Test 1: SHA-512 standard test vectors (NIST FIPS 180-4).
+    {
+        let hash = sha512(b"");
+        assert_eq!(hash[0..8], [0xcf, 0x83, 0xe1, 0x35, 0x7e, 0xef, 0xb8, 0xbd]);
+        serial_println!("[crypto]   SHA-512 empty: OK");
+
+        let hash = sha512(b"abc");
+        assert_eq!(hash[0..4], [0xdd, 0xaf, 0x35, 0xa1]);
+        serial_println!("[crypto]   SHA-512 abc: OK");
+
+        let msg = b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
+        let hash = sha512(msg);
+        assert_eq!(hash[0], 0x8e);
+        serial_println!("[crypto]   SHA-512 multi-block: OK");
+    }
+
+    // Test 2: Ed25519 point arithmetic sanity checks.
+    {
+        let bp = EdPoint::basepoint();
+        let bp_enc = bp.encode();
+
+        // Basepoint encoding: 5866...66 (y = 4/5 mod p).
+        assert_eq!(bp_enc[0], 0x58, "Basepoint byte 0");
+        for i in 1..32 {
+            assert_eq!(bp_enc[i], 0x66, "Basepoint byte {}", i);
+        }
+        serial_println!("[crypto]   Basepoint encoding: OK");
+
+        // Basepoint x-coordinate (known value).
+        let expected_bx: [u8; 32] = [
+            0x1a, 0xd5, 0x25, 0x8f, 0x60, 0x2d, 0x56, 0xc9,
+            0xb2, 0xa7, 0x25, 0x95, 0x60, 0xc7, 0x2c, 0x69,
+            0x5c, 0xdc, 0xd6, 0xfd, 0x31, 0xe2, 0xa4, 0xc0,
+            0xfe, 0x53, 0x6e, 0xcd, 0xd3, 0x36, 0x69, 0x21,
+        ];
+        assert_eq!(bp.x.to_bytes(), expected_bx, "Basepoint Bx");
+        serial_println!("[crypto]   Basepoint Bx: OK");
+
+        // [1]*B == B.
+        let scalar_one: [u8; 32] = { let mut s = [0u8; 32]; s[0] = 1; s };
+        assert_eq!(bp.scalar_mul(&scalar_one).encode(), bp_enc, "[1]*B must equal B");
+        serial_println!("[crypto]   [1]*B == B: OK");
+
+        // B+B == [2]*B (both methods agree).
+        let two_b_add = bp.add_point(bp).encode();
+        let scalar_two: [u8; 32] = { let mut s = [0u8; 32]; s[0] = 2; s };
+        let two_b_scalar = bp.scalar_mul(&scalar_two).encode();
+        assert_eq!(two_b_add, two_b_scalar, "B+B must equal [2]*B");
+
+        // [2]*B matches known reference value.
+        let two_b_expected: [u8; 32] = [
+            0xc9, 0xa3, 0xf8, 0x6a, 0xae, 0x46, 0x5f, 0x0e,
+            0x56, 0x51, 0x38, 0x64, 0x51, 0x0f, 0x39, 0x97,
+            0x56, 0x1f, 0xa2, 0xc9, 0xe8, 0x5e, 0xa2, 0x1d,
+            0xc2, 0x29, 0x23, 0x09, 0xf3, 0xcd, 0x60, 0x22,
+        ];
+        assert_eq!(two_b_scalar, two_b_expected, "[2]*B absolute value");
+        serial_println!("[crypto]   [2]*B: OK");
+
+        // [4]*B consistency: [2]*B + [2]*B == [4]*B.
+        let two_b_pt = bp.add_point(bp);
+        let scalar_four: [u8; 32] = { let mut s = [0u8; 32]; s[0] = 4; s };
+        assert_eq!(two_b_pt.add_point(two_b_pt).encode(),
+                   bp.scalar_mul(&scalar_four).encode(), "[4]*B consistency");
+        serial_println!("[crypto]   [4]*B: OK");
+
+        // [8]*B on curve.
+        let scalar_eight: [u8; 32] = { let mut s = [0u8; 32]; s[0] = 8; s };
+        let eight_enc = bp.scalar_mul(&scalar_eight).encode();
+        assert!(EdPoint::decode(&eight_enc).is_some(), "[8]*B must be on curve");
+        serial_println!("[crypto]   [8]*B on curve: OK");
+
+        // [L-1]*B == -B (verifies large scalar multiplication).
+        let l_minus_1: [u8; 32] = [
+            0xec, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
+            0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+        ];
+        let neg_b = bp.scalar_mul(&l_minus_1).encode();
+        let mut expected_neg_b = bp_enc;
+        expected_neg_b[31] ^= 0x80; // Negate = flip x sign bit.
+        assert_eq!(neg_b, expected_neg_b, "[L-1]*B must equal -B");
+        serial_println!("[crypto]   [L-1]*B == -B: OK");
+    }
+
+    // Test 3: Ed25519 key generation — RFC 8032 §7.1 test vector 1.
+    {
+        let seed: [u8; 32] = [
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+            0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+            0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+            0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60,
+        ];
+        // Correct public key from RFC 8032 §7.1 TEST 1.
+        let expected_pub: [u8; 32] = [
+            0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
+            0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
+            0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
+            0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a,
+        ];
+
+        let kp = ed25519_keypair(&seed);
+        assert_eq!(kp.public, expected_pub, "Ed25519 TV1 public key");
+        serial_println!("[crypto]   Ed25519 keygen TV1: OK");
+
+        // Sign empty message (RFC 8032 §7.1 TEST 1).
+        let sig = ed25519_sign(&seed, b"");
+        let expected_sig: [u8; 64] = [
+            0xe5, 0x56, 0x43, 0x00, 0xc3, 0x60, 0xac, 0x72,
+            0x90, 0x86, 0xe2, 0xcc, 0x80, 0x6e, 0x82, 0x8a,
+            0x84, 0x87, 0x7f, 0x1e, 0xb8, 0xe5, 0xd9, 0x74,
+            0xd8, 0x73, 0xe0, 0x65, 0x22, 0x49, 0x01, 0x55,
+            0x5f, 0xb8, 0x82, 0x15, 0x90, 0xa3, 0x3b, 0xac,
+            0xc6, 0x1e, 0x39, 0x70, 0x1c, 0xf9, 0xb4, 0x6b,
+            0xd2, 0x5b, 0xf5, 0xf0, 0x59, 0x5b, 0xbe, 0x24,
+            0x65, 0x51, 0x41, 0x43, 0x8e, 0x7a, 0x10, 0x0b,
+        ];
+        assert_eq!(sig, expected_sig, "Ed25519 TV1 signature");
+        serial_println!("[crypto]   Ed25519 sign TV1: OK");
+
+        // Verify signature.
+        assert!(ed25519_verify(&kp.public, b"", &sig), "Ed25519 TV1 verify");
+        serial_println!("[crypto]   Ed25519 verify TV1: OK");
+    }
+
+    // Test 4: Ed25519 test vector 2 (1-byte message: 0x72).
+    {
+        let seed: [u8; 32] = [
+            0x4c, 0xcd, 0x08, 0x9b, 0x28, 0xff, 0x96, 0xda,
+            0x9d, 0xb6, 0xc3, 0x46, 0xec, 0x11, 0x4e, 0x0f,
+            0x5b, 0x8a, 0x31, 0x9f, 0x35, 0xab, 0xa6, 0x24,
+            0xda, 0x8c, 0xf6, 0xed, 0x4f, 0xb8, 0xa6, 0xfb,
+        ];
+        let expected_pub: [u8; 32] = [
+            0x3d, 0x40, 0x17, 0xc3, 0xe8, 0x43, 0x89, 0x5a,
+            0x92, 0xb7, 0x0a, 0xa7, 0x4d, 0x1b, 0x7e, 0xbc,
+            0x9c, 0x98, 0x2c, 0xcf, 0x2e, 0xc4, 0x96, 0x8c,
+            0xc0, 0xcd, 0x55, 0xf1, 0x2a, 0xf4, 0x66, 0x0c,
+        ];
+
+        let kp = ed25519_keypair(&seed);
+        assert_eq!(kp.public, expected_pub, "Ed25519 TV2 public key");
+        serial_println!("[crypto]   Ed25519 keygen TV2: OK");
+
+        let sig = ed25519_sign(&seed, &[0x72]);
+        assert!(ed25519_verify(&kp.public, &[0x72], &sig), "Ed25519 TV2 sign+verify");
+        serial_println!("[crypto]   Ed25519 sign+verify TV2: OK");
+
+        // Verify with wrong message fails.
+        assert!(!ed25519_verify(&kp.public, &[0x73], &sig), "Ed25519 TV2 reject");
+        serial_println!("[crypto]   Ed25519 verify reject: OK");
+    }
+
+    // Test 5: Scalar reduction (sc_reduce produces canonical output).
+    {
+        let mut input = [0u8; 64];
+        input[0] = 0xFF;
+        input[31] = 0xFF;
+        let reduced = sc_reduce(&input);
+        assert!(sc_is_canonical(&reduced) || reduced == [0u8; 32],
+            "sc_reduce must produce canonical scalar");
+        serial_println!("[crypto]   Scalar reduction: OK");
+    }
+
+    serial_println!("[crypto] Ed25519/SHA-512 self-test PASSED (5 tests)");
+    Ok(())
 }

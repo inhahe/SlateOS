@@ -1029,6 +1029,9 @@ extern "C" fn kmain() -> ! {
     if let Err(e) = crypto::self_test_tls_crypto() {
         serial_println!("WARNING: TLS crypto self-test failed: {:?}", e);
     }
+    if let Err(e) = crypto::self_test_ed25519() {
+        serial_println!("WARNING: Ed25519/SHA-512 self-test failed: {:?}", e);
+    }
 
     console::boot_step_update(console::BootStatus::Ok, "Storage & filesystems");
 
@@ -1340,6 +1343,11 @@ extern "C" fn kmain() -> ! {
     // Source NAT for container traffic traversing namespace boundaries.
     if let Err(e) = net::nat::self_test() {
         serial_println!("[WARN] NAT self-test failed: {:?}", e);
+    }
+
+    // SSH server self-test (binary packet protocol, encryption, key derivation).
+    if let Err(e) = net::ssh::self_test() {
+        serial_println!("[WARN] SSH self-test failed: {:?}", e);
     }
 
     // Step 22e⅞++++p9: Container lifecycle manager init + self-test.

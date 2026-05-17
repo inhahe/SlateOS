@@ -3669,6 +3669,7 @@ const COMMANDS: &[&str] = &[
     "ntp", "ntpdate",
     "mdns", "dnssd",
     "telnetd", "telnet",
+    "sshd", "ssh",
     "tftp", "tftpd",
     "netsyslog", "rsyslog",
     "wol", "wakeonlan",
@@ -4887,6 +4888,7 @@ fn dispatch(line: &str) {
         "ntp" | "ntpdate" => cmd_ntp(args),
         "mdns" | "dnssd" => cmd_mdns(args),
         "telnetd" | "telnet" => cmd_telnetd(args),
+        "sshd" | "ssh" => cmd_sshd(args),
         "tftp" | "tftpd" => cmd_tftp(args),
         "netsyslog" | "rsyslog" => cmd_netsyslog(args),
         "wol" | "wakeonlan" => cmd_wol(args),
@@ -35319,6 +35321,68 @@ fn cmd_telnetd(args: &str) {
         }
         _ => {
             shell_println!("Unknown subcommand: {}. Use 'telnetd help'.", sub);
+        }
+    }
+}
+
+/// `sshd` / `ssh` — SSH server management.
+fn cmd_sshd(args: &str) {
+    use crate::net::ssh;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("");
+    match sub {
+        "" | "status" | "stats" => {
+            let s = ssh::stats();
+            shell_println!("SSH Server");
+            shell_println!("  Status:       {}",
+                if ssh::is_running() { "running" } else { "stopped" }
+            );
+            shell_println!("  Port:         {}", ssh::get_port());
+            shell_println!("  Sessions:     {}/4", s.active_sessions);
+            shell_println!("  Connections:  {}", s.total_connections);
+            shell_println!("  Auth fails:   {}", s.total_auth_failures);
+            shell_println!("  Rejected:     {}", s.rejected_connections);
+        }
+        "start" | "init" => {
+            match ssh::init() {
+                Ok(()) => shell_println!("SSH server started"),
+                Err(e) => shell_println!("Failed to start SSH server: {:?}", e),
+            }
+        }
+        "stop" | "shutdown" => {
+            ssh::shutdown();
+            shell_println!("SSH server stopped");
+        }
+        "port" => {
+            let port_str = parts.get(1).copied().unwrap_or("");
+            if port_str.is_empty() {
+                shell_println!("SSH listening port: {}", ssh::get_port());
+            } else {
+                let port: u16 = port_str.parse().unwrap_or(0);
+                if port == 0 {
+                    shell_println!("Invalid port");
+                } else {
+                    ssh::set_port(port);
+                    shell_println!("Port set to {} (restart server to apply)", port);
+                }
+            }
+        }
+        "test" => {
+            match ssh::self_test() {
+                Ok(()) => shell_println!("SSH self-test: PASSED"),
+                Err(e) => shell_println!("SSH self-test FAILED: {:?}", e),
+            }
+        }
+        "help" => {
+            shell_println!("sshd — secure remote kernel shell server");
+            shell_println!("  status            Summary statistics");
+            shell_println!("  start             Start the SSH server");
+            shell_println!("  stop              Stop and disconnect all");
+            shell_println!("  port [num]        Get/set listening port");
+            shell_println!("  test              Run self-tests");
+        }
+        _ => {
+            shell_println!("Unknown subcommand: {}. Use 'sshd help'.", sub);
         }
     }
 }

@@ -2,7 +2,7 @@
 name = "coreutils"
 version = "0.1.0"
 edition = "2024"
-description = "Basic userspace utilities (46 total: cat, echo, ls, mkdir, head, wc, cp, rm, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs)"
+description = "Coreutils for OurOS (60 total)"
 
 # Standalone crate — not part of the kernel workspace.
 [workspace]
@@ -171,3 +171,59 @@ path = "src/bin/du.rs"
 [[bin]]
 name = "xargs"
 path = "src/bin/xargs.rs"
+
+[[bin]]
+name = "find"
+path = "src/bin/find.rs"
+
+[[bin]]
+name = "ps"
+path = "src/bin/ps.rs"
+
+[[bin]]
+name = "nohup"
+path = "src/bin/nohup.rs"
+
+[[bin]]
+name = "nice"
+path = "src/bin/nice.rs"
+
+[[bin]]
+name = "mkfifo"
+path = "src/bin/mkfifo.rs"
+
+[[bin]]
+name = "expr"
+path = "src/bin/expr.rs"
+
+[[bin]]
+name = "nl"
+path = "src/bin/nl.rs"
+
+[[bin]]
+name = "paste"
+path = "src/bin/paste.rs"
+
+[[bin]]
+name = "comm"
+path = "src/bin/comm.rs"
+
+[[bin]]
+name = "expand"
+path = "src/bin/expand.rs"
+
+[[bin]]
+name = "fold"
+path = "src/bin/fold.rs"
+
+[[bin]]
+name = "md5sum"
+path = "src/bin/md5sum.rs"
+
+[[bin]]
+name = "sha256sum"
+path = "src/bin/sha256sum.rs"
+
+[[bin]]
+name = "tty"
+path = "src/bin/tty.rs"

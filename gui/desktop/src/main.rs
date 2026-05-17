@@ -12,6 +12,9 @@
 //! Communicates with the compositor via IPC messages (channels).
 //! Uses the guitk library for UI rendering.
 
+#[allow(dead_code)]
+mod icons;
+
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};
 use guitk::render::RenderTree;

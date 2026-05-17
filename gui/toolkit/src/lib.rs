@@ -34,6 +34,7 @@ pub mod menu;
 pub mod render;
 pub mod style;
 pub mod tabs;
+pub mod textview;
 pub mod tree;
 pub mod widget;
 

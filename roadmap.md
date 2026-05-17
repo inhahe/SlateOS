@@ -1705,7 +1705,13 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Verify command with integrity checking
   - [x] List, show, and delete backup management
   - [x] --exclude flag for skip patterns
-- [ ] Background file indexer (configurable paths/extensions, off by default) — Python/fastpy candidate
+- [x] Background file indexer (configurable paths/extensions, off by default) — Rust userspace binary
+  - [x] Configurable scan paths, extension include/exclude filters, directory exclusions
+  - [x] Daemon mode with periodic re-indexing (configurable interval)
+  - [x] Search: filename substring, glob patterns, extension, recent files, large files
+  - [x] Persistent flat-file index with metadata (size, mtime, extension)
+  - [x] Config file at /etc/indexer.conf with enable/disable, path management
+  - [x] Status reporting, statistics with extension breakdown
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

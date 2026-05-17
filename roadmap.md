@@ -1395,7 +1395,7 @@ _Port ext4 first. Don't write a custom filesystem._
 ### 2.7 Shell and basic userspace tools
 - [ ] Port bash (POSIX compatibility)
 - [-] Port or adopt Nushell as default shell (Rust, structured data piping) — type-checks and links with os-minimal feature
-- [x] Port coreutils (69 binaries: echo, cat, ls, head, wc, mkdir, rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo, expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff, cmp, od, strings, uptime, free, unexpand, cal, time)
+- [x] Port coreutils (85 binaries: echo, cat, ls, head, wc, mkdir, rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo, expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff, cmp, od, strings, uptime, free, unexpand, cal, time, sed, awk, ed, more, sh, tar, bc, patch, split, join, csplit, logger, logname, who, tsort, renice)
 - [ ] Port rsync (replaces robocopy need)
 - [ ] Port curl
 - [ ] Port ssh/sshd
@@ -1563,12 +1563,15 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [ ] Background file indexer (configurable paths/extensions, off by default) — Python/fastpy candidate
 
 ### 4.2 Package manager — Python/fastpy candidate
-- [ ] Content-addressed immutable store (Nix model)
+- [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs
+- [x] Atomic updates and rollback (generation pointer swap) — append-only generation history
+- [x] Show requested capabilities before install (Android-style) — manifest capabilities field
+- [x] Dependency resolution with version constraints (>=, <=, ^, ==, *)
+- [x] CLI: install, remove, upgrade, update, list, search, info, rollback, generations, gc, verify, files, which
 - [ ] Shared dynamic linking within a generation (fast security patches)
-- [ ] Atomic updates and rollback (generation pointer swap)
 - [ ] File-level deduplication via hardlinks within the store
 - [ ] Binary packages (preferred) with source build option
-- [ ] Show requested capabilities before install (Android-style)
+- [ ] Network repository fetching (currently manual index placement)
 - [ ] Repository model:
   - [ ] Official curated repository
   - [ ] Third-party repository support (user adds URL)

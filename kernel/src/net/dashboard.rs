@@ -750,6 +750,9 @@ fn api_metrics() -> Vec<u8> {
             "# HELP os_dns_cache_entries Current DNS cache entries.\n",
             "# TYPE os_dns_cache_entries gauge\n",
             "os_dns_cache_entries {}\n",
+            "# HELP os_containers_active Active container count.\n",
+            "# TYPE os_containers_active gauge\n",
+            "os_containers_active {}\n",
         ),
         uptime_secs,
         total_mem, used_mem,
@@ -761,6 +764,7 @@ fn api_metrics() -> Vec<u8> {
         http_requests, http_304, http_206, http_429,
         http_gzip, http_gzip_saved,
         dns.hits, dns.misses, dns.entries,
+        if crate::container::is_initialized() { crate::container::active_count() } else { 0 },
     );
 
     text.into_bytes()

@@ -2,7 +2,7 @@
 name = "coreutils"
 version = "0.1.0"
 edition = "2024"
-description = "Coreutils for OurOS (75 total)"
+description = "Coreutils for OurOS (85 total)"
 
 # Standalone crate — not part of the kernel workspace.
 [workspace]
@@ -19,6 +19,38 @@ strip = "symbols"
 
 [profile.dev]
 panic = "abort"
+
+[[bin]]
+name = "cat"
+path = "src/bin/cat.rs"
+
+[[bin]]
+name = "cp"
+path = "src/bin/cp.rs"
+
+[[bin]]
+name = "echo"
+path = "src/bin/echo.rs"
+
+[[bin]]
+name = "head"
+path = "src/bin/head.rs"
+
+[[bin]]
+name = "ls"
+path = "src/bin/ls.rs"
+
+[[bin]]
+name = "mkdir"
+path = "src/bin/mkdir.rs"
+
+[[bin]]
+name = "rm"
+path = "src/bin/rm.rs"
+
+[[bin]]
+name = "wc"
+path = "src/bin/wc.rs"
 
 [[bin]]
 name = "mv"
@@ -287,3 +319,43 @@ path = "src/bin/sh.rs"
 [[bin]]
 name = "tar"
 path = "src/bin/tar.rs"
+
+[[bin]]
+name = "bc"
+path = "src/bin/bc.rs"
+
+[[bin]]
+name = "patch"
+path = "src/bin/patch.rs"
+
+[[bin]]
+name = "split"
+path = "src/bin/split.rs"
+
+[[bin]]
+name = "join"
+path = "src/bin/join.rs"
+
+[[bin]]
+name = "csplit"
+path = "src/bin/csplit.rs"
+
+[[bin]]
+name = "logger"
+path = "src/bin/logger.rs"
+
+[[bin]]
+name = "logname"
+path = "src/bin/logname.rs"
+
+[[bin]]
+name = "who"
+path = "src/bin/who.rs"
+
+[[bin]]
+name = "tsort"
+path = "src/bin/tsort.rs"
+
+[[bin]]
+name = "renice"
+path = "src/bin/renice.rs"

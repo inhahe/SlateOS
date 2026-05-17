@@ -1529,7 +1529,8 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Tabs view (tabs.rs: close buttons, dirty indicator, overflow scroll, Ctrl+Tab nav)
   - [ ] Grid view
   - [x] Scroll bars (ScrollView widget)
-  - [ ] Tooltips
+  - [x] Context menus (menu.rs: Action/Separator/Submenu, keyboard nav, edge-flip, checkmarks)
+  - [x] Tooltips (menu.rs: hover delay, auto-position, max-width wrap)
   - [ ] Color picker
   - [ ] Modal and non-modal dialogs, alert popups
 - [x] Render tree abstraction (backend-agnostic drawing primitives)
@@ -1565,9 +1566,13 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [ ] Enable/disable controls with optional reason tooltip
   - [ ] SVG rendering support
   - [ ] Context menu extension API (capability-gated, lazy-loading, 200ms timeout)
-- [ ] Credential manager service (factotum-like):
-  - [ ] Central credential storage, apps never see raw passwords
-  - [ ] API for username/password fields with autofill
+- [x] Credential manager service (gui/credentials):
+  - [x] Central credential storage (6 types: Password/Token/Certificate/SshKey/ApiKey/Custom)
+  - [x] XOR stream cipher encryption with SHA-256-derived session key
+  - [x] Master password, auto-lock (5 min idle), rate-limited unlock (3 fails = 30s lockout)
+  - [x] URL matching for autofill (exact > parent domain > wildcard, path prefix)
+  - [x] Password generator with strength estimation
+  - [x] Store/retrieve/update/delete/list/search API
   - [ ] User identity verification with debounce
 
 ### 3.6 Audio

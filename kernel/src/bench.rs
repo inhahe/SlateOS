@@ -2162,6 +2162,8 @@ fn bench_net_ipv4_parse() {
         "[bench]   net_ipv4_parse: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    // Target from baselines.toml: 300ns (runs on every incoming IP packet).
+    score("net_ipv4_parse", &result, 300);
 }
 
 /// Benchmark Ethernet frame parsing.
@@ -2285,6 +2287,8 @@ fn bench_net_tcp_checksum_v4() {
         "[bench]   net_tcp_checksum_v4_1460b: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    // Target from baselines.toml: 2000ns for 1460 bytes.
+    score("tcp_checksum_v4", &result, 2000);
 }
 
 /// TCP checksum (duplicated to avoid depending on tcp module internals).
@@ -2440,6 +2444,8 @@ fn bench_net_firewall_check() {
         "[bench]   net_firewall_inbound_check: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    // Target from baselines.toml: 2000ns (runs on every inbound packet).
+    score("firewall_check", &result, 2000);
 }
 
 /// Benchmark DNS query packet building (label encoding).
@@ -2899,6 +2905,8 @@ fn bench_crypto_x25519() {
         "[bench]   crypto_x25519: min {}ns ({}cy)",
         result.min_ns, result.min_cycles
     );
+    // Target from baselines.toml: 2_000_000ns (2ms per key exchange).
+    score("crypto_x25519", &result, 2_000_000);
 }
 
 /// Ed25519 signature generation (per SSH auth, per signed message).
@@ -2922,6 +2930,8 @@ fn bench_crypto_ed25519_sign() {
         "[bench]   crypto_ed25519_sign: min {}ns ({}cy)",
         result.min_ns, result.min_cycles
     );
+    // Target from baselines.toml: 5_000_000ns (5ms per signature).
+    score("crypto_ed25519_sign", &result, 5_000_000);
 }
 
 /// Ed25519 signature verification (per SSH host key check, per cert verify).
@@ -2950,6 +2960,8 @@ fn bench_crypto_ed25519_verify() {
         "[bench]   crypto_ed25519_verify: min {}ns ({}cy)",
         result.min_ns, result.min_cycles
     );
+    // Target from baselines.toml: 10_000_000ns (10ms per verify).
+    score("crypto_ed25519_verify", &result, 10_000_000);
 }
 
 // ---------------------------------------------------------------------------
@@ -3132,6 +3144,8 @@ fn bench_http_parse_request() {
         "[bench]   http_parse_request: min {}ns ({}cy)",
         result.min_ns, result.min_cycles
     );
+    // Target from baselines.toml: 15000ns (dominated by string allocations).
+    score("http_parse_request", &result, 15000);
 }
 
 /// Benchmark HTTP MIME type detection.

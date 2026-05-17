@@ -31,6 +31,7 @@ pub mod event;
 pub mod grid;
 pub mod layout;
 pub mod menu;
+pub mod modal;
 pub mod render;
 pub mod style;
 pub mod tabs;

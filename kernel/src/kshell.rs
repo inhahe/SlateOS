@@ -34750,10 +34750,17 @@ fn cmd_httpd(args: &str) {
             if entries.is_empty() {
                 shell_println!("No access log entries.");
             } else {
-                shell_println!("{:<6} {:<5} {:<8} {}", "METHOD", "CODE", "SIZE", "PATH");
-                shell_println!("{}", "-".repeat(60));
+                shell_println!("{:<6} {:<5} {:<8} {:<10} {}", "METHOD", "CODE", "SIZE", "TIME", "PATH");
+                shell_println!("{}", "-".repeat(72));
                 for e in &entries {
-                    shell_println!("{:<6} {:<5} {:<8} {}", e.method, e.status, e.body_size, e.path);
+                    let dur = if e.duration_us < 1000 {
+                        alloc::format!("{}us", e.duration_us)
+                    } else if e.duration_us < 1_000_000 {
+                        alloc::format!("{}.{}ms", e.duration_us / 1000, (e.duration_us % 1000) / 100)
+                    } else {
+                        alloc::format!("{}.{}s", e.duration_us / 1_000_000, (e.duration_us % 1_000_000) / 100_000)
+                    };
+                    shell_println!("{:<6} {:<5} {:<8} {:<10} {}", e.method, e.status, e.body_size, dur, e.path);
                 }
                 shell_println!("({} entries shown)", entries.len());
             }

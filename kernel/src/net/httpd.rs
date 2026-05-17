@@ -402,6 +402,8 @@ pub struct AccessLogEntry {
     pub status: u16,
     /// Response body size in bytes.
     pub body_size: usize,
+    /// Request processing time in microseconds.
+    pub duration_us: u64,
 }
 
 /// Ring buffer for recent HTTP access logs.
@@ -455,12 +457,13 @@ impl AccessLog {
 }
 
 /// Log an HTTP request to the access log ring buffer.
-fn log_access(method: &str, path: &str, status: u16, body_size: usize) {
+fn log_access(method: &str, path: &str, status: u16, body_size: usize, duration_us: u64) {
     ACCESS_LOG.lock().push(AccessLogEntry {
         method: String::from(method),
         path: String::from(path),
         status,
         body_size,
+        duration_us,
     });
 }
 
@@ -1044,7 +1047,7 @@ fn handle_connection(conn_handle: usize) {
         if !check_rate_limit(ip_bytes) {
             RATE_LIMITED_COUNT.fetch_add(1, Ordering::Relaxed);
             REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-            log_access("*", "(rate-limited)", 429, 0);
+            log_access("*", "(rate-limited)", 429, 0, 0);
             let resp = too_many_requests_response();
             let _ = tcp::send(conn_handle, &resp);
             let _ = tcp::close(conn_handle);
@@ -1266,7 +1269,7 @@ fn handle_tls_connection(tcp_handle: usize) {
         if !check_rate_limit(ip_bytes) {
             RATE_LIMITED_COUNT.fetch_add(1, Ordering::Relaxed);
             REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
-            log_access("*", "(rate-limited/tls)", 429, 0);
+            log_access("*", "(rate-limited/tls)", 429, 0, 0);
             // Can't send HTTP response before TLS handshake, just close.
             let _ = super::tcp::close(tcp_handle);
             return;
@@ -1387,6 +1390,9 @@ fn etag_matches(if_none_match: &Option<String>, body: &[u8]) -> bool {
 fn process_http_request(request_data: &[u8]) -> Vec<u8> {
     use crate::fs::vfs::{Vfs, EntryType};
 
+    // Capture request start time for access log duration tracking.
+    let req_start_ns = crate::hrtimer::now_ns();
+
     // Track request count.
     REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
 
@@ -1400,7 +1406,8 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
 
     // Only allow GET and HEAD.
     if req.method != "GET" && req.method != "HEAD" {
-        log_access(&req.method, &req.path, 405, 0);
+        let dur = crate::hrtimer::now_ns().saturating_sub(req_start_ns) / 1000;
+        log_access(&req.method, &req.path, 405, 0, dur);
         return error_response(405, "Method Not Allowed");
     }
 
@@ -1411,7 +1418,8 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
             // auto-refresh dashboard that polls every 3 seconds).
             if etag_matches(&req.if_none_match, &body) {
                 NOT_MODIFIED_COUNT.fetch_add(1, Ordering::Relaxed);
-                log_access(&req.method, &req.path, 304, 0);
+                let dur = crate::hrtimer::now_ns().saturating_sub(req_start_ns) / 1000;
+                log_access(&req.method, &req.path, 304, 0, dur);
                 return not_modified_response(&etag_for_body(&body));
             }
             let blen = body.len();
@@ -1425,7 +1433,8 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
             } else {
                 build_response(200, "OK", &content_type, &body)
             };
-            log_access(&req.method, &req.path, 200, blen);
+            let dur = crate::hrtimer::now_ns().saturating_sub(req_start_ns) / 1000;
+            log_access(&req.method, &req.path, 200, blen, dur);
             return response;
         }
     }
@@ -1507,7 +1516,8 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
         }
     };
 
-    log_access(&req.method, &req.path, status, body_len);
+    let dur = crate::hrtimer::now_ns().saturating_sub(req_start_ns) / 1000;
+    log_access(&req.method, &req.path, status, body_len, dur);
     response
 }
 
@@ -1848,12 +1858,14 @@ pub fn self_test() -> KernelResult<()> {
             path: String::from("/a"),
             status: 200,
             body_size: 100,
+            duration_us: 0,
         });
         log.push(AccessLogEntry {
             method: String::from("HEAD"),
             path: String::from("/b"),
             status: 304,
             body_size: 0,
+            duration_us: 0,
         });
         let recent = log.recent(10);
         assert_eq!(recent.len(), 2);
@@ -1877,6 +1889,7 @@ pub fn self_test() -> KernelResult<()> {
                 path: format!("/{}", i),
                 status: 200,
                 body_size: i,
+                duration_us: 0,
             });
         }
         let recent = log.recent(ACCESS_LOG_SIZE);
@@ -2037,6 +2050,7 @@ mod tests {
             path: String::from("/index.html"),
             status: 200,
             body_size: 512,
+            duration_us: 0,
         });
         let entries = log.recent(10);
         assert_eq!(entries.len(), 1);
@@ -2053,6 +2067,7 @@ mod tests {
                 path: format!("/p{}", i),
                 status: 200,
                 body_size: 0,
+                duration_us: 0,
             });
         }
         let entries = log.recent(ACCESS_LOG_SIZE);

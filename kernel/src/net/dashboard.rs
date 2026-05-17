@@ -319,11 +319,12 @@ fn api_httpd() -> Vec<u8> {
             json.push(',');
         }
         json.push_str(&format!(
-            r#"{{"method":"{}","path":"{}","status":{},"body_size":{}}}"#,
+            r#"{{"method":"{}","path":"{}","status":{},"body_size":{},"duration_us":{}}}"#,
             json_escape(&e.method),
             json_escape(&e.path),
             e.status,
             e.body_size,
+            e.duration_us,
         ));
     }
 
@@ -729,7 +730,7 @@ tr:hover td { background: #1c2128; }
 <div class="card">
   <h2>Recent HTTP Requests</h2>
   <table>
-    <thead><tr><th>Method</th><th>Path</th><th>Status</th><th>Size</th></tr></thead>
+    <thead><tr><th>Method</th><th>Path</th><th>Status</th><th>Size</th><th>Time</th></tr></thead>
     <tbody id="httpd-log"></tbody>
   </table>
 </div>
@@ -814,9 +815,10 @@ async function update() {
       stat('Rate Limiting', hr.rate_limit.enabled?'Enabled':'Disabled');
     var lb=''; hr.access_log.slice().reverse().forEach(function(e){
       var sc=e.status>=400?'warn':(e.status===304?'ok':'');
-      lb+='<tr><td>'+e.method+'</td><td>'+e.path+'</td><td><span class="stat-value'+(sc?' '+sc:'')+'">'+e.status+'</span></td><td>'+fmt(e.body_size)+'</td></tr>';
+      var dur=e.duration_us<1000?(e.duration_us+'\u00b5s'):(e.duration_us<1000000?((e.duration_us/1000).toFixed(1)+'ms'):((e.duration_us/1000000).toFixed(2)+'s'));
+      lb+='<tr><td>'+e.method+'</td><td>'+e.path+'</td><td><span class="stat-value'+(sc?' '+sc:'')+'">'+e.status+'</span></td><td>'+fmt(e.body_size)+'</td><td>'+dur+'</td></tr>';
     });
-    document.getElementById('httpd-log').innerHTML=lb||'<tr><td colspan="4" style="color:#484f58">No requests yet</td></tr>';
+    document.getElementById('httpd-log').innerHTML=lb||'<tr><td colspan="5" style="color:#484f58">No requests yet</td></tr>';
     var hitRate=dr.cache.hits+dr.cache.misses>0?Math.round(dr.cache.hits*100/(dr.cache.hits+dr.cache.misses))+'%':'n/a';
     document.getElementById('dns-stats').innerHTML =
       stat('Entries', dr.cache.entries+' / '+dr.cache.capacity) +

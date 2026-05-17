@@ -1459,8 +1459,19 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [ ] 2D drawing library: Vello (Rust-native, GPU compute shaders) + HarfBuzz via FFI for complex text shaping
 
 ### 3.3 Compositor
-- [ ] Wayland-inspired compositor (userspace):
-  - [ ] Window compositing with GPU acceleration
+- [-] Wayland-inspired compositor (userspace):
+  - [x] Window management (create/destroy/move/resize/minimize/maximize/focus/Z-ordering)
+  - [x] Compositing pipeline: double-buffered framebuffer, alpha blending, damage tracking
+  - [x] Render engine: execute guitk RenderCommands (rect fill/stroke, text, lines, clip/translate)
+  - [x] Bitmap font rendering (monospace, A-Z/a-z/0-9/punctuation)
+  - [x] Input routing: hit testing, keyboard→focused, mouse→under-cursor
+  - [x] Window decorations: title bar with buttons, borders, shadow
+  - [x] Drag operations: window move (title bar), resize (8 edges/corners)
+  - [x] Cursor shape management (arrow, resize variants, text, hand, wait)
+  - [x] Multi-monitor display management with virtual bounds
+  - [x] Compositor protocol: request/response/notification enums (ready for IPC)
+  - [x] Frame timing for VSync-aware scheduling
+  - [ ] GPU acceleration (currently software rasterizer)
   - [ ] DMA-BUF buffer sharing between apps and compositor
   - [ ] Fullscreen bypass (direct scanout for games)
   - [ ] Native remote desktop streaming (compositor knows draw commands — most efficient option)
@@ -1625,7 +1636,12 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Network page: adapter status, IP config (DHCP/static), DNS, proxy
   - [x] Search bar, toggle switches, sliders, dropdowns, dark theme
   - [ ] All remaining settings pages (accounts, privacy, accessibility, update)
-- [ ] System information explorer (hardware info + OS info + tuning params) — Python/fastpy candidate
+- [-] System information explorer:
+  - [x] Tree navigation (21 categories: Hardware Resources, Components, Software Environment)
+  - [x] Property tables for each category (CPU, memory, storage, display, network, PCI, etc.)
+  - [x] Expand/collapse tree nodes, search across categories
+  - [x] Export to text, copy to clipboard
+  - [ ] Live hardware querying (currently uses representative stub data)
 - [ ] Backup program (snapshot-based, with all common backup types) — Python/fastpy candidate
 - [ ] Background file indexer (configurable paths/extensions, off by default) — Python/fastpy candidate
 
@@ -1671,11 +1687,22 @@ _This is the biggest single porting effort. Unlocks browser, web apps, and VS Co
 - [ ] Snapshot tree (branch like VMs, select what to include)
 - [ ] Rollback any OS update, permanently disable it or retry later
 
-### 4.7 Service discovery / RPC — Python/fastpy candidate
-- [ ] D-Bus-like named service registry (simpler binary protocol, not XML)
-- [ ] Programs register named services with typed interfaces
-- [ ] Service discovery by name, typed RPC calls over channel IPC
+### 4.7 Service discovery / RPC
+- [x] D-Bus-like named service registry (binary protocol, not XML)
+  - [x] Named service registration with typed interface descriptions
+  - [x] TypeDesc system: 14 types (primitives, String, Bytes, Array, Map, Struct, Optional, Handle)
+  - [x] Name ownership queue with transfer on disconnect
+  - [x] Message routing: MethodCall, MethodReturn, Error, Signal
+  - [x] Binary wire serialization with natural alignment
+  - [x] Signal subscriptions with match rules (sender/interface/member filter)
+  - [x] Service activation on first request (configurable timeout)
+  - [x] Bus policy: allow/deny rules per sender/destination/interface
+  - [x] Per-connection rate limiting (messages/sec)
+  - [x] Connection lifecycle: Hello handshake, unique names (:1.N), disconnect cleanup
+  - [x] Name watching: subscribe to acquired/lost notifications
+  - [x] Introspection: query interfaces/methods a service exposes
 - [ ] Standard event loop integration API ("give me the waitable handle")
+- [ ] Client library (libservicebus) for easy integration
 
 ---
 

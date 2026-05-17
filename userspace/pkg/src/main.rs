@@ -4050,6 +4050,512 @@ fn is_leap_year(y: i64) -> bool {
 }
 
 // ============================================================================
+// Package snapshots — portable manifest of installed package state
+// ============================================================================
+
+/// Snapshot file format version.
+const SNAPSHOT_MAGIC: &str = "# pkg-snapshot v1\n";
+
+/// A snapshot entry: one package with its version and install status.
+#[derive(Clone, Debug)]
+struct SnapshotEntry {
+    name: String,
+    version: Version,
+    explicit: bool,
+    manifest_hash: String,
+}
+
+/// Serialize snapshot to portable text format.
+///
+/// The format is human-readable and machine-parseable:
+/// ```text
+/// # pkg-snapshot v1
+/// # created: 2026-05-17 12:00:00
+/// # generation: 42
+/// # packages: 15
+///
+/// name version explicit manifest_hash
+/// libc 0.1.0 dep a1b2c3...
+/// myapp 1.2.3 yes d4e5f6...
+/// ```
+fn serialize_snapshot(entries: &[SnapshotEntry], generation: &Generation) -> String {
+    let mut out = String::new();
+    out.push_str(SNAPSHOT_MAGIC);
+    out.push_str(&format!(
+        "# created: {}\n",
+        format_timestamp(generation.timestamp)
+    ));
+    out.push_str(&format!("# generation: {}\n", generation.id));
+    out.push_str(&format!("# packages: {}\n", entries.len()));
+    out.push('\n');
+
+    for entry in entries {
+        let explicit_str = if entry.explicit { "yes" } else { "dep" };
+        out.push_str(&format!(
+            "{} {} {} {}\n",
+            entry.name, entry.version, explicit_str, entry.manifest_hash
+        ));
+    }
+
+    out
+}
+
+/// Parse a snapshot file back into entries.
+fn parse_snapshot(text: &str) -> Result<Vec<SnapshotEntry>, String> {
+    let mut entries = Vec::new();
+    let mut found_magic = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Check magic on first non-empty line
+        if !found_magic {
+            if trimmed == "# pkg-snapshot v1" {
+                found_magic = true;
+                continue;
+            } else {
+                return Err("not a valid package snapshot (missing header)".to_string());
+            }
+        }
+
+        // Skip comment lines
+        if trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Parse entry: name version explicit manifest_hash
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 3 {
+            return Err(format!("invalid snapshot line: {trimmed}"));
+        }
+
+        let name = parts[0].to_string();
+        let version = match Version::parse(parts[1]) {
+            Some(v) => v,
+            None => return Err(format!("invalid version '{}' for {}", parts[1], name)),
+        };
+        let explicit = parts[2] == "yes";
+        let manifest_hash = if parts.len() >= 4 {
+            parts[3].to_string()
+        } else {
+            String::new()
+        };
+
+        entries.push(SnapshotEntry {
+            name,
+            version,
+            explicit,
+            manifest_hash,
+        });
+    }
+
+    if !found_magic {
+        return Err("not a valid package snapshot (empty or missing header)".to_string());
+    }
+
+    Ok(entries)
+}
+
+/// Export current generation as a portable snapshot file.
+fn cmd_snapshot_export(db: &PackageDb, output_path: Option<&Path>) {
+    let current = db.current_generation();
+
+    if current.packages.is_empty() {
+        println!("No packages installed — nothing to export.");
+        return;
+    }
+
+    let mut entries: Vec<SnapshotEntry> = current
+        .packages
+        .iter()
+        .map(|(name, pkg)| SnapshotEntry {
+            name: name.clone(),
+            version: pkg.version.clone(),
+            explicit: pkg.explicit,
+            manifest_hash: pkg.manifest_hash.clone(),
+        })
+        .collect();
+
+    // Sort by name for deterministic output
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let snapshot_text = serialize_snapshot(&entries, &current);
+
+    match output_path {
+        Some(path) => {
+            match fs::write(path, &snapshot_text) {
+                Ok(()) => {
+                    println!(
+                        "Snapshot exported to {} ({} packages, {} bytes)",
+                        path.display(),
+                        entries.len(),
+                        snapshot_text.len()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("pkg: failed to write snapshot: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+        None => {
+            // Print to stdout
+            print!("{snapshot_text}");
+        }
+    }
+}
+
+/// Show differences between current installed state and a snapshot.
+fn cmd_snapshot_diff(db: &PackageDb, snapshot_path: &Path) {
+    let snapshot_text = match fs::read_to_string(snapshot_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("pkg: failed to read snapshot: {e}");
+            process::exit(1);
+        }
+    };
+
+    let entries = match parse_snapshot(&snapshot_text) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("pkg: {e}");
+            process::exit(1);
+        }
+    };
+
+    let current = db.current_generation();
+
+    // Build lookup for snapshot and current
+    let snap_map: BTreeMap<&str, &SnapshotEntry> =
+        entries.iter().map(|e| (e.name.as_str(), e)).collect();
+    let curr_map: BTreeMap<&str, &InstalledPackage> =
+        current.packages.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+    let mut added = Vec::new(); // In current but not in snapshot
+    let mut removed = Vec::new(); // In snapshot but not in current
+    let mut changed = Vec::new(); // In both but different version
+
+    // Check for packages in snapshot that are missing or changed locally
+    for (name, snap_entry) in &snap_map {
+        match curr_map.get(name) {
+            None => removed.push(*name),
+            Some(curr_pkg) => {
+                if curr_pkg.version != snap_entry.version {
+                    changed.push((*name, &snap_entry.version, &curr_pkg.version));
+                }
+            }
+        }
+    }
+
+    // Check for packages installed locally but not in snapshot
+    for name in curr_map.keys() {
+        if !snap_map.contains_key(name) {
+            added.push(*name);
+        }
+    }
+
+    if added.is_empty() && removed.is_empty() && changed.is_empty() {
+        println!("Current state matches snapshot exactly.");
+        return;
+    }
+
+    if !added.is_empty() {
+        println!("Packages installed locally but not in snapshot:");
+        for name in &added {
+            if let Some(pkg) = curr_map.get(name) {
+                println!("  + {name} {}", pkg.version);
+            }
+        }
+    }
+
+    if !removed.is_empty() {
+        println!("Packages in snapshot but not installed locally:");
+        for name in &removed {
+            if let Some(entry) = snap_map.get(name) {
+                println!("  - {name} {}", entry.version);
+            }
+        }
+    }
+
+    if !changed.is_empty() {
+        println!("Packages with version differences:");
+        for (name, snap_ver, curr_ver) in &changed {
+            println!("  ~ {name}: snapshot {snap_ver} → local {curr_ver}");
+        }
+    }
+
+    println!(
+        "\nSummary: {} added, {} removed, {} changed",
+        added.len(),
+        removed.len(),
+        changed.len()
+    );
+}
+
+/// Apply a snapshot — install/upgrade/remove packages to match the snapshot state.
+fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
+    let snapshot_text = match fs::read_to_string(snapshot_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("pkg: failed to read snapshot: {e}");
+            process::exit(1);
+        }
+    };
+
+    let entries = match parse_snapshot(&snapshot_text) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("pkg: {e}");
+            process::exit(1);
+        }
+    };
+
+    let current = db.current_generation();
+
+    // Determine what needs to change
+    let snap_map: BTreeMap<&str, &SnapshotEntry> =
+        entries.iter().map(|e| (e.name.as_str(), e)).collect();
+
+    let mut to_install: Vec<&SnapshotEntry> = Vec::new();
+    let mut to_upgrade: Vec<(&SnapshotEntry, &Version)> = Vec::new(); // (target, current_ver)
+    let mut to_remove: Vec<&str> = Vec::new();
+
+    // Find packages to install or upgrade
+    for entry in &entries {
+        match current.packages.get(&entry.name) {
+            None => to_install.push(entry),
+            Some(curr) => {
+                if curr.version != entry.version {
+                    to_upgrade.push((entry, &curr.version));
+                }
+            }
+        }
+    }
+
+    // Find packages to remove (installed but not in snapshot)
+    for name in current.packages.keys() {
+        if !snap_map.contains_key(name.as_str()) {
+            to_remove.push(name.as_str());
+        }
+    }
+
+    if to_install.is_empty() && to_upgrade.is_empty() && to_remove.is_empty() {
+        println!("System already matches snapshot — nothing to do.");
+        return;
+    }
+
+    println!("Snapshot apply plan:");
+    if !to_install.is_empty() {
+        println!("\n  Install ({}):", to_install.len());
+        for entry in &to_install {
+            println!("    + {} {}", entry.name, entry.version);
+        }
+    }
+    if !to_upgrade.is_empty() {
+        println!("\n  Upgrade/downgrade ({}):", to_upgrade.len());
+        for (entry, curr_ver) in &to_upgrade {
+            println!("    ~ {} {} → {}", entry.name, curr_ver, entry.version);
+        }
+    }
+    if !to_remove.is_empty() {
+        println!("\n  Remove ({}):", to_remove.len());
+        for name in &to_remove {
+            println!("    - {name}");
+        }
+    }
+
+    if dry_run {
+        println!("\n(dry run — no changes made)");
+        return;
+    }
+
+    // Build new generation
+    let install_names: Vec<String> = to_install.iter().map(|e| e.name.clone()).collect();
+    let upgrade_names: Vec<String> = to_upgrade.iter().map(|(e, _)| e.name.clone()).collect();
+    let remove_names: Vec<String> = to_remove.iter().map(|s| s.to_string()).collect();
+
+    let mut all_changed: Vec<String> = Vec::new();
+    all_changed.extend(install_names.iter().cloned());
+    all_changed.extend(upgrade_names.iter().cloned());
+    all_changed.extend(remove_names.iter().cloned());
+
+    let desc = format!("snapshot apply ({})", snapshot_path.display());
+    let mut new_gen = db.next_generation(&desc);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Remove packages not in snapshot
+    for name in &to_remove {
+        if let Some(pkg) = current.packages.get(*name) {
+            let removed = db.cas.undeploy_package_files(&pkg.file_hashes);
+            println!("  Removing {name}... ({removed} files removed)");
+        }
+        new_gen.packages.remove(*name);
+    }
+
+    // Install/upgrade packages — try to resolve from repo index
+    let available = db.load_repo_index().unwrap_or_default();
+
+    for entry in &entries {
+        // If already at the right version, keep it
+        if let Some(curr) = current.packages.get(&entry.name) {
+            if curr.version == entry.version {
+                // Keep the existing entry unchanged
+                continue;
+            }
+        }
+
+        // Find the package in the repo index
+        let manifest = available
+            .iter()
+            .find(|m| m.name == entry.name && m.version == entry.version);
+
+        match manifest {
+            Some(manifest) => {
+                // Store manifest in CAS
+                let manifest_data = manifest.serialize();
+                let manifest_hash = match db.cas.put(manifest_data.as_bytes()) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        eprintln!("pkg: failed to store manifest for {}: {e}", entry.name);
+                        continue;
+                    }
+                };
+
+                // Download archive if needed
+                if !manifest.archive_hash.is_empty() && !db.cas.has(&manifest.archive_hash) {
+                    let version_str = manifest.version.to_string();
+                    if let Err(e) = cmd_download(db, &manifest.name, &version_str) {
+                        eprintln!("pkg: failed to download {}: {e}", entry.name);
+                    }
+                }
+
+                // Deploy files
+                if !manifest.files.is_empty() && !manifest.archive_hash.is_empty() {
+                    match db.cas.deploy_package_files(manifest) {
+                        Ok(stats) => {
+                            println!(
+                                "  Installed {} {}: {} files, {}",
+                                entry.name,
+                                entry.version,
+                                stats.deployed,
+                                format_size(stats.total_bytes)
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("  warning: file deploy error for {}: {e}", entry.name);
+                        }
+                    }
+                } else {
+                    println!("  Installed {} {} (metadata only)", entry.name, entry.version);
+                }
+
+                let file_hashes: Vec<(String, String)> = manifest
+                    .files
+                    .iter()
+                    .map(|f| (f.dst.clone(), f.hash.clone()))
+                    .collect();
+
+                new_gen.packages.insert(
+                    entry.name.clone(),
+                    InstalledPackage {
+                        version: entry.version.clone(),
+                        manifest_hash,
+                        file_hashes,
+                        installed_at: now,
+                        explicit: entry.explicit,
+                    },
+                );
+            }
+            None => {
+                eprintln!(
+                    "  warning: {} {} not found in repos — skipping",
+                    entry.name, entry.version
+                );
+                // If we already had it installed, keep the old version
+                if let Some(curr) = current.packages.get(&entry.name) {
+                    // Keep existing — don't remove it just because the exact version isn't
+                    // in the current repo index. The CAS might still have the data.
+                    new_gen.packages.entry(entry.name.clone()).or_insert_with(|| curr.clone());
+                }
+            }
+        }
+    }
+
+    match db.save_generation(&new_gen) {
+        Ok(()) => {
+            let _ = db.set_current_generation(new_gen.id);
+            log_transaction(
+                TxOperation::Install, // Closest operation type
+                new_gen.id,
+                current.id,
+                &all_changed,
+                &desc,
+            );
+            println!(
+                "\nDone. Generation {} created ({} packages).",
+                new_gen.id,
+                new_gen.packages.len()
+            );
+        }
+        Err(e) => {
+            eprintln!("pkg: failed to save generation: {e}");
+            process::exit(1);
+        }
+    }
+}
+
+/// Top-level snapshot command dispatcher.
+fn cmd_snapshot(db: &PackageDb, args: &[String], dry_run: bool) {
+    if args.is_empty() {
+        println!("Usage: pkg snapshot <subcommand> [options]");
+        println!();
+        println!("Subcommands:");
+        println!("  export [file]      Export current state as snapshot (stdout if no file)");
+        println!("  diff <file>        Compare current state with a snapshot");
+        println!("  apply <file>       Install/remove/upgrade to match snapshot");
+        println!();
+        println!("Package snapshots are lightweight manifests of installed packages.");
+        println!("Use them to reproduce a known-good package set on another machine");
+        println!("or to restore after a system reset.");
+        return;
+    }
+
+    match args[0].as_str() {
+        "export" => {
+            let path = args.get(1).map(|s| Path::new(s.as_str()));
+            cmd_snapshot_export(db, path);
+        }
+        "diff" | "compare" => {
+            if args.len() < 2 {
+                eprintln!("pkg: snapshot diff requires a snapshot file path");
+                process::exit(1);
+            }
+            cmd_snapshot_diff(db, Path::new(&args[1]));
+        }
+        "apply" | "restore" => {
+            if args.len() < 2 {
+                eprintln!("pkg: snapshot apply requires a snapshot file path");
+                process::exit(1);
+            }
+            cmd_snapshot_apply(db, Path::new(&args[1]), dry_run);
+        }
+        other => {
+            eprintln!("pkg: unknown snapshot subcommand: {other}");
+            eprintln!("Run 'pkg snapshot' for help.");
+            process::exit(1);
+        }
+    }
+}
+
+// ============================================================================
 // Usage / help
 // ============================================================================
 
@@ -4067,6 +4573,7 @@ Commands:
   fetch <pkg>...         Download packages to CAS without installing
   pack <manifest>        Create a .pkg archive from a manifest and source files
   repo [subcommand]      Manage package repositories
+  snapshot [subcommand]  Export, diff, or apply package snapshots
   log [N|--all]          Show transaction history (default: last 20)
   list [--installed]     List packages
   search <query>         Search available packages
@@ -4109,6 +4616,15 @@ Creating Packages:
   Reads a manifest file, locates all referenced source files relative to
   the manifest's directory, computes SHA-256 hashes, and produces a .pkg
   archive that can be installed with 'pkg install'.
+
+Package Snapshots:
+  pkg snapshot export [file]   Export installed packages as portable manifest
+  pkg snapshot diff <file>     Compare current state against a saved snapshot
+  pkg snapshot apply <file>    Install/remove/upgrade to match a snapshot
+
+  Snapshots are lightweight text files listing every installed package,
+  version, and dependency status. Use them to reproduce a known-good
+  state on another machine or to restore after a system reset.
 
 Generation System:
   Each install/remove/upgrade creates a new generation. Generations
@@ -4257,6 +4773,7 @@ fn main() {
         }
         "repo" | "repository" => cmd_repo(&rest_filtered),
         "log" | "history" => cmd_log(&rest_filtered),
+        "snapshot" | "snap" => cmd_snapshot(&db, &rest_filtered, dry_run),
         "help" | "--help" | "-h" => print_usage(),
         _ => {
             eprintln!("pkg: unknown command: {command}");

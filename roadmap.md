@@ -1742,7 +1742,11 @@ _This is the biggest single porting effort. Unlocks browser, web apps, and VS Co
 - [ ] DynDNS setup helper in settings
 
 ### 4.6 System snapshots
-- [ ] Package snapshots (manifest of active store paths — essentially free)
+- [x] Package snapshots (manifest of active store paths — essentially free)
+  - [x] Snapshot export: serialize current generation as portable text manifest (name, version, explicit/dep, manifest hash)
+  - [x] Snapshot diff: compare current installed state against a saved snapshot (added/removed/changed)
+  - [x] Snapshot apply: install/remove/upgrade packages to match a snapshot (with dry-run support)
+  - [x] Parse/serialize round-trip format with version header and comment metadata
 - [ ] Mutable data snapshots (CoW at filesystem level, 64 KiB block default)
 - [ ] Snapshot tree (branch like VMs, select what to include)
 - [ ] Rollback any OS update, permanently disable it or retry later

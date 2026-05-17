@@ -1548,7 +1548,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Tooltips (menu.rs: hover delay, auto-position, max-width wrap)
   - [x] Color picker (colorpicker.rs: HSV square+hue bar, RGB/HSV sliders, hex input, alpha, 48 presets, eyedropper, recent colors)
   - [x] Grid view (grid.rs: virtual-scrolled grid, icon+label cells, multi-select, rubber-band, type-ahead, drag)
-  - [ ] Modal and non-modal dialogs, alert popups
+  - [x] Modal and non-modal dialogs, alert popups (modal.rs: ModalOverlay, AlertDialog, InputDialog, ProgressDialog, NonModalDialog)
 - [x] Render tree abstraction (backend-agnostic drawing primitives)
   - [x] RenderCommand enum: FillRect, StrokeRect, Text, Image, Line, BoxShadow
   - [x] Clip/translate stack (PushClip/PopClip, PushTranslate/PopTranslate)

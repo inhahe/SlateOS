@@ -1012,7 +1012,7 @@ fn bench_pick_next() {
     }
 
     // Measure yield with multiple tasks in the run queue.
-    let _result = run("sched_pick_next_4tasks", 500, || {
+    let result = run("sched_pick_next_4tasks", 500, || {
         sched::yield_now();
     });
 
@@ -1021,6 +1021,8 @@ fn bench_pick_next() {
     serial_println!(
         "[bench]   pick_next overhead included in context switch"
     );
+    // Target: same order as context switch round-trip (yield = 2 switches).
+    score("pick_next", &result, 10000);
 
     // Clean up.
     for id in task_ids {
@@ -1289,6 +1291,16 @@ fn bench_ipc_channel_sync() {
     // achieve ~0.5-1 µs for the pure IPC portion; our target includes
     // full context switch overhead under QEMU emulation.
     let target_ns = 5000u64;
+    let sync_result = BenchResult {
+        name: String::from("ipc_channel_sync"),
+        iterations: ITERS,
+        min_cycles: min,
+        mean_cycles: mean,
+        max_cycles: max,
+        min_ns,
+        mean_ns,
+    };
+    score("ipc_channel_sync", &sync_result, target_ns);
     if min_ns <= target_ns {
         serial_println!(
             "[bench]   ipc_channel_sync: PASS (min {}ns <= target {}ns)",
@@ -1392,6 +1404,7 @@ fn bench_service_connect() {
 
     // Target: connect+accept should be < 5 µs (channel create + queue push + dequeue).
     let target_ns = 5000u64;
+    score("service_connect", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   service_connect_accept: PASS (min {}ns <= target {}ns)",
@@ -1434,6 +1447,7 @@ fn bench_ipc_eventfd() {
 
     // Target: < 1 µs (lighter than channels).
     let target_ns = 1000u64;
+    score("ipc_eventfd", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   eventfd_signal_read: PASS (min {}ns <= target {}ns)",
@@ -1477,6 +1491,7 @@ fn bench_ipc_semaphore() {
 
     // Target: < 1 µs (similar to eventfd — both are counter-based).
     let target_ns = 1000u64;
+    score("ipc_semaphore", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   semaphore_signal_wait: PASS (min {}ns <= target {}ns)",
@@ -1591,6 +1606,7 @@ fn bench_ipc_shm() {
     // Target: < 5 µs.  Includes frame allocation, handle management,
     // and kernel mapping/unmapping.
     let target_ns = 5000u64;
+    score("shm_create_close", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   shm_create_close: PASS (min {}ns <= target {}ns)",
@@ -1623,6 +1639,7 @@ fn bench_ipc_shm() {
 
         // Target: < 200 ns.  This is just a memset + memory read.
         let rw_target_ns = 200u64;
+        score("shm_rw_64bytes", &result_rw, rw_target_ns);
         if result_rw.min_ns <= rw_target_ns {
             serial_println!(
                 "[bench]   shm_rw_64bytes: PASS (min {}ns <= target {}ns)",
@@ -1664,6 +1681,7 @@ fn bench_ipc_completion_port() {
 
     // Target: < 500 ns.  Lock acquire, check empty queue, return.
     let target_ns = 500u64;
+    score("cp_try_wait_empty", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   cp_try_wait_empty: PASS (min {}ns <= target {}ns)",
@@ -1701,6 +1719,7 @@ fn bench_ipc_completion_port() {
 
         // Target: < 2 µs.  Eventfd write + CP notification + try_wait.
         let rt_target_ns = 2000u64;
+        score("cp_notify_wait_rt", &result_rt, rt_target_ns);
         if result_rt.min_ns <= rt_target_ns {
             serial_println!(
                 "[bench]   cp_notify_wait_rt: PASS (min {}ns <= target {}ns)",
@@ -2046,6 +2065,16 @@ fn bench_isr_latency() {
 
             // Target from baselines.toml: < 37000 cycles (< 10 µs).
             let target_cycles = 37_000u64;
+            let isr_result = BenchResult {
+                name: String::from("isr_latency"),
+                iterations: m.count as u32,
+                min_cycles: m.min_cycles,
+                mean_cycles: m.mean_cycles,
+                max_cycles: m.max_cycles,
+                min_ns,
+                mean_ns,
+            };
+            score("isr_latency", &isr_result, 10000);
             if m.min_cycles <= target_cycles {
                 serial_println!(
                     "[bench]   isr_latency: PASS (min {} cycles <= target {} cycles)",
@@ -2176,6 +2205,7 @@ fn bench_vfs_readdir() {
         "[bench]   vfs_readdir_root: min {}ns ({}ns mean)",
         result.min_ns, result.mean_ns
     );
+    score("vfs_readdir", &result, 50000);
 }
 
 // ---------------------------------------------------------------------------
@@ -2233,6 +2263,7 @@ fn bench_net_ethernet_parse() {
         "[bench]   net_ethernet_parse: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    score("net_ethernet_parse", &result, 200);
 }
 
 /// Benchmark ARP table lookup.
@@ -2254,6 +2285,7 @@ fn bench_net_arp_lookup() {
         "[bench]   net_arp_lookup_miss: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    score("net_arp_lookup", &result, 1000);
 }
 
 /// Benchmark IP checksum computation.
@@ -2278,6 +2310,7 @@ fn bench_net_checksum() {
         "[bench]   net_ip_checksum_20b: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    score("net_checksum", &result, 500);
 }
 
 /// Internet checksum (RFC 1071) — one's complement sum of 16-bit words.
@@ -2390,6 +2423,7 @@ fn bench_net_tcp_checksum_v6() {
         "[bench]   net_tcp_checksum_v6_1460b: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    score("tcp_checksum_v6", &result, 2200);
 }
 
 /// TCP checksum with IPv6 pseudo-header (bench-local copy).
@@ -2458,6 +2492,7 @@ fn bench_net_ipv6_parse() {
         "[bench]   net_ipv6_parse: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    score("net_ipv6_parse", &result, 500);
 }
 
 /// Benchmark firewall inbound packet check.
@@ -2548,6 +2583,7 @@ fn bench_net_tcp_conn_lookup() {
         "[bench]   net_tcp_conn_table_scan: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    score("net_tcp_conn_lookup", &result, 3000);
 }
 
 /// Benchmark veth pair send (TX → peer RX enqueue).
@@ -2617,6 +2653,7 @@ fn bench_net_veth_send() {
         "[bench]   net_veth_send: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    score("net_veth_send", &result, 2000);
 }
 
 /// Benchmark veth pair recv (dequeue from RX queue).
@@ -2684,6 +2721,7 @@ fn bench_net_veth_recv() {
         "[bench]   net_veth_recv: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    score("net_veth_recv", &result, 1500);
 }
 
 /// Benchmark veth send+recv round-trip (TX on A → RX on B).
@@ -2735,6 +2773,7 @@ fn bench_net_veth_roundtrip() {
         "[bench]   net_veth_roundtrip: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    score("net_veth_roundtrip", &result, 3500);
 }
 
 /// Benchmark per-namespace ARP cache lookup.
@@ -2778,6 +2817,7 @@ fn bench_net_ns_arp_lookup() {
         "[bench]   net_ns_arp_lookup: min {}ns ({}cycles)",
         result.min_ns, result.min_cycles
     );
+    score("net_ns_arp_lookup", &result, 1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -2832,6 +2872,7 @@ fn bench_crypto_sha512_64() {
         "[bench]   crypto_sha512_64B: min {}ns ({}cy)",
         result.min_ns, result.min_cycles
     );
+    score("crypto_sha512_64B", &result, 6000);
 }
 
 /// HMAC-SHA256 with 32-byte key and 64-byte message (TLS Finished, HKDF).
@@ -2851,6 +2892,7 @@ fn bench_crypto_hmac_sha256() {
         "[bench]   crypto_hmac_sha256: min {}ns ({}cy)",
         result.min_ns, result.min_cycles
     );
+    score("crypto_hmac_sha256", &result, 15000);
 }
 
 /// ChaCha20 encryption of 1 KiB (TLS/SSH bulk data encryption).
@@ -2874,6 +2916,7 @@ fn bench_crypto_chacha20_1k() {
         result.min_ns, result.min_cycles,
         if result.min_ns > 0 { 1_000_000_000u64 / result.min_ns * 1024 / (1024 * 1024) } else { 0 }
     );
+    score("crypto_chacha20_1KiB", &result, 40000);
 }
 
 /// Poly1305 MAC of 1 KiB (TLS/SSH authentication tag).
@@ -2894,6 +2937,7 @@ fn bench_crypto_poly1305_1k() {
         result.min_ns, result.min_cycles,
         if result.min_ns > 0 { 1_000_000_000u64 / result.min_ns * 1024 / (1024 * 1024) } else { 0 }
     );
+    score("crypto_poly1305_1KiB", &result, 30000);
 }
 
 /// ChaCha20-Poly1305 AEAD encrypt of 1 KiB (TLS 1.3 / SSH record layer).
@@ -3168,6 +3212,8 @@ fn bench_vfs_throughput_16k() {
         "[bench]   vfs_write_16k: min {}ns (~{} MiB/s), vfs_read_16k: min {}ns (~{} MiB/s)",
         write_result.min_ns, write_mibs, read_result.min_ns, read_mibs
     );
+    score("vfs_throughput_16k_write", &write_result, 50000);
+    score("vfs_throughput_16k_read", &read_result, 50000);
 
     // Clean up.
     let _ = Vfs::remove(path);
@@ -3222,6 +3268,8 @@ fn bench_http_mime_type() {
         "[bench]   http_mime_type (4 lookups): min {}ns ({}cy, ~{}ns/lookup)",
         result.min_ns, result.min_cycles, result.min_ns / 4
     );
+    // Benchmark does 4 lookups; target 500ns per lookup = 2000ns total.
+    score("http_mime_type", &result, 2000);
 }
 
 /// Benchmark HTTP percent-decode path.
@@ -3242,6 +3290,7 @@ fn bench_http_percent_decode() {
         "[bench]   http_percent_decode: min {}ns ({}cy)",
         result.min_ns, result.min_cycles
     );
+    score("http_percent_decode", &result, 20000);
 }
 
 // ---------------------------------------------------------------------------

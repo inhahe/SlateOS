@@ -16,6 +16,7 @@
 //! | `/api/httpd`       | JSON: HTTP server stats, recent access log    |
 //! | `/api/dns`         | JSON: DNS cache stats (hits, misses, entries) |
 //! | `/api/firewall`    | JSON: firewall status, rules, conntrack count |
+//! | `/api/bench`       | JSON: benchmark scorecard (pass/fail, targets)  |
 //!
 //! ## Integration
 //!
@@ -101,6 +102,9 @@ pub fn handle_api_request(path: &str) -> Option<(String, Vec<u8>)> {
         }
         "/api/firewall" => {
             Some((String::from("application/json"), api_firewall()))
+        }
+        "/api/bench" => {
+            Some((String::from("application/json"), api_bench()))
         }
         _ => None,
     }
@@ -383,6 +387,39 @@ fn api_firewall() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// /api/bench
+// ---------------------------------------------------------------------------
+
+fn api_bench() -> Vec<u8> {
+    let entries = crate::bench::scorecard_snapshot();
+
+    let total = entries.len();
+    let passed = entries.iter().filter(|e| e.passed).count();
+    let failed = total.saturating_sub(passed);
+
+    let mut json = format!(
+        r#"{{"summary":{{"total":{},"passed":{},"failed":{}}},"entries":["#,
+        total, passed, failed,
+    );
+
+    for (i, e) in entries.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push_str(&format!(
+            r#"{{"name":"{}","measured_ns":{},"target_ns":{},"passed":{}}}"#,
+            json_escape(e.name),
+            e.measured_ns,
+            e.target_ns,
+            e.passed,
+        ));
+    }
+
+    json.push_str("]}");
+    json.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
 // HTML dashboard
 // ---------------------------------------------------------------------------
 
@@ -478,6 +515,14 @@ tr:hover td { background: #1c2128; }
   </div>
 </div>
 
+<div class="card" style="margin-bottom:16px">
+  <h2>Benchmarks <span id="bench-summary" style="font-size:12px;color:#8b949e;text-transform:none;letter-spacing:0"></span></h2>
+  <table>
+    <thead><tr><th>Benchmark</th><th>Measured</th><th>Target</th><th>Result</th></tr></thead>
+    <tbody id="bench-body"></tbody>
+  </table>
+</div>
+
 <div class="card">
   <h2>Recent HTTP Requests</h2>
   <table>
@@ -513,7 +558,7 @@ function bar(pct, cls) {
 
 async function update() {
   try {
-    var [sr,tr,nr,mr,hr,dr,fr] = await Promise.all([
+    var [sr,tr,nr,mr,hr,dr,fr,br] = await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/tasks').then(r=>r.json()),
       fetch('/api/network').then(r=>r.json()),
@@ -521,6 +566,7 @@ async function update() {
       fetch('/api/httpd').then(r=>r.json()),
       fetch('/api/dns').then(r=>r.json()),
       fetch('/api/firewall').then(r=>r.json()),
+      fetch('/api/bench').then(r=>r.json()),
     ]);
     var memPct = sr.memory.total_bytes>0 ?
       Math.round(sr.memory.used_bytes*100/sr.memory.total_bytes) : 0;
@@ -578,6 +624,18 @@ async function update() {
       stat('Default Policy', fr.default_policy) +
       stat('Rules', fr.rules.length) +
       stat('Conntrack', fr.conntrack_entries);
+    function nsFmt(ns){if(ns>=1000000)return (ns/1000000).toFixed(1)+'ms';if(ns>=1000)return (ns/1000).toFixed(1)+'us';return ns+'ns';}
+    var bs=br.summary;
+    document.getElementById('bench-summary').textContent=bs.total>0?
+      '('+bs.passed+'/'+bs.total+' passed'+(bs.failed>0?', '+bs.failed+' failed':'')+')'
+      :'(no data)';
+    var bb=''; br.entries.forEach(function(e){
+      var cls=e.passed?'ok':'warn';
+      bb+='<tr><td>'+e.name+'</td><td><span class="stat-value">'+nsFmt(e.measured_ns)+
+        '</span></td><td>'+nsFmt(e.target_ns)+'</td><td><span class="stat-value '+cls+'">'+
+        (e.passed?'PASS':'FAIL')+'</span></td></tr>';
+    });
+    document.getElementById('bench-body').innerHTML=bb||'<tr><td colspan="4" style="color:#484f58">No benchmark data yet</td></tr>';
     document.getElementById('refresh').textContent='updated '+new Date().toLocaleTimeString();
   } catch(e) {
     document.getElementById('refresh').textContent='error: '+e.message;
@@ -663,6 +721,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(handle_api_request("/api/httpd").is_some());
         assert!(handle_api_request("/api/dns").is_some());
         assert!(handle_api_request("/api/firewall").is_some());
+        assert!(handle_api_request("/api/bench").is_some());
         assert!(handle_api_request("/not-an-api").is_none());
         assert!(handle_api_request("/api/nonexistent").is_none());
         serial_println!("[dashboard]   API routing: OK");
@@ -707,6 +766,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!("[dashboard]   API firewall: OK ({} bytes)", fw.len());
     }
 
-    serial_println!("[dashboard] Self-test PASSED (10 tests)");
+    // Test 11: API bench returns valid JSON with expected structure.
+    {
+        let bench = api_bench();
+        assert!(!bench.is_empty());
+        assert_eq!(bench[0], b'{');
+        assert_eq!(bench[bench.len().saturating_sub(1)], b'}');
+        let bench_str = core::str::from_utf8(&bench).unwrap_or("");
+        assert!(bench_str.contains("\"summary\""));
+        assert!(bench_str.contains("\"total\""));
+        assert!(bench_str.contains("\"passed\""));
+        assert!(bench_str.contains("\"failed\""));
+        assert!(bench_str.contains("\"entries\""));
+        serial_println!("[dashboard]   API bench: OK ({} bytes)", bench.len());
+    }
+
+    serial_println!("[dashboard] Self-test PASSED (11 tests)");
     Ok(())
 }

@@ -31,6 +31,7 @@
 //!   minimum as the most representative value.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use crate::serial_println;
 use spin::Mutex;
 
@@ -380,6 +381,35 @@ struct ScoreEntry {
     measured_ns: u64,
     target_ns: u64,
     passed: bool,
+}
+
+/// Public view of a scorecard entry for the dashboard API.
+#[derive(Clone)]
+pub struct ScoreInfo {
+    /// Benchmark name.
+    pub name: &'static str,
+    /// Measured minimum nanoseconds.
+    pub measured_ns: u64,
+    /// Target nanoseconds from baselines.
+    pub target_ns: u64,
+    /// Whether the benchmark met its target.
+    pub passed: bool,
+}
+
+/// Return a snapshot of the current scorecard for external use.
+///
+/// Returns an empty Vec if benchmarks haven't run yet.
+pub fn scorecard_snapshot() -> Vec<ScoreInfo> {
+    SCORECARD
+        .lock()
+        .iter()
+        .map(|e| ScoreInfo {
+            name: e.name,
+            measured_ns: e.measured_ns,
+            target_ns: e.target_ns,
+            passed: e.passed,
+        })
+        .collect()
 }
 
 /// Global scorecard for collecting benchmark pass/fail results.

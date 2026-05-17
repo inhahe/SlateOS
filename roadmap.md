@@ -1976,18 +1976,18 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
 - [x] Archive support (zip, 7z, tar.gz/bz2/xz/zst/lz4, rar, cpio, ar, deb)
 - [ ] Speech input / speech output
 - [ ] Cellphone camera/microphone integration
-- [ ] Scripting language registration (Lua and/or WASM runtime for app extensibility)
-- [ ] Keyboard layout customizer (arbitrary remap, save named layouts)
-- [ ] Let's Encrypt SSL certificate helper
-- [ ] Optimized keyboard layouts (Dvorak, Colemak, others)
+- [x] Scripting language registration (Lua and/or WASM runtime for app extensibility) — implemented as fs::scriptlang with 5 built-in engines (Lua/Wasmtime/Shell/Fastpy/QuickJS), sandbox levels, resource limits, eval API
+- [x] Keyboard layout customizer (arbitrary remap, save named layouts) — implemented as fs::keylayout with per-key remap, disable keys, 64 max layouts
+- [x] Let's Encrypt SSL certificate helper — implemented as fs::certmgr with ACME request/complete workflow, auto-renewal, 5 built-in root CAs
+- [x] Optimized keyboard layouts (Dvorak, Colemak, others) — built-in US QWERTY, Dvorak, Colemak, US-NoCaps layouts in fs::keylayout init_defaults()
 
 ### 5.7 Installation wizard — Python/fastpy candidate
-- [ ] Easy install (automatic partitioning) and manual install (partition manager)
-- [ ] Keyboard/layout selection
-- [ ] Auto-detect monitor DPI, let user adjust scaling
-- [ ] Workload type selection (populates tuning presets, changeable later)
-- [ ] Swap file sizing
-- [ ] Post-reboot setup: audio device, timezone, user/password, WiFi, theme, browser choice
+- [x] Easy install (automatic partitioning) and manual install (partition manager) — fs::installer with Easy/Manual/Unattended modes, PartitionPlan struct
+- [x] Keyboard/layout selection — set_keyboard() in InstallSession, integrated with fs::keylayout
+- [x] Auto-detect monitor DPI, let user adjust scaling — detect_and_set_scaling() with recommended_scale() from fs::display
+- [x] Workload type selection (populates tuning presets, changeable later) — WorkloadType enum (Desktop/Server/Development/Gaming) with fs::fspolicy integration
+- [x] Swap file sizing — swap_mib field in PartitionPlan (None = file-based via fs::swapcfg)
+- [x] Post-reboot setup: audio device, timezone, user/password, WiFi, theme, browser choice — FirstBoot phase in InstallSession with all fields
 - [ ] Unattended install via YAML configuration file
 - [ ] GRUB integration for dual-boot (add menu entry, don't replace GRUB)
 

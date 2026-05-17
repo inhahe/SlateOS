@@ -306,6 +306,30 @@ Remaining net improvements (diminishing returns):
   of hardcoding FILE.  Cleanup in destroy_process_resources is now
   type-aware (skips close for CONSOLE and PIPE handles).
 
+## Toolchain — Rust std for Userspace (osb2)
+
+- DONE: Custom Rust target spec (toolchain/x86_64-ouros.json) that presents
+  as linux-musl so std's unix backend works.  POSIX library provides libc.a.
+  Stubs library (toolchain/stubs/) provides 6 missing symbols: _Unwind_Backtrace,
+  _Unwind_GetIP, syscall, pthread_getattr_np, pthread_attr_getguardsize,
+  pthread_attr_getstack.  Build: cargo +nightly -Zbuild-std for our target.
+  Verified: 651 KiB stripped ELF, entry 0x4000000000, correct _start from crt.rs.
+
+- TODO: The syscall() stub maps Linux SYS_gettid/SYS_getrandom/SYS_futex to
+  our OS equivalents.  Other Linux syscall numbers return ENOSYS.  As std
+  evolves, more mappings may be needed.
+
+- TODO: The pthread stubs (getattr_np, attr_getguardsize, attr_getstack) return
+  failure/zero.  This disables std's stack overflow detection.  Real
+  implementations in the posix crate would fix this.
+
+- TODO: Validate toolchain with a more complex program before attempting
+  Nushell port.  Key areas: file I/O, process spawning, pipes.
+
+- NOTE: Cross-zone inclusion — commit 41b1a04 (posix batch 83) accidentally
+  included toolchain/ and userspace/shell/ files via git add -A in the osb
+  session.  The files are correct, just committed under the wrong message.
+
 ## Judgment Calls
 
 - Cross-zone edit: handlers.rs (kernel-ipc zone) was minimally edited as

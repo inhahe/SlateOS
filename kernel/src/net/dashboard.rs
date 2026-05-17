@@ -17,6 +17,7 @@
 //! | `/api/dns`         | JSON: DNS cache stats (hits, misses, entries) |
 //! | `/api/firewall`    | JSON: firewall status, rules, conntrack count |
 //! | `/api/bench`       | JSON: benchmark scorecard (pass/fail, targets)  |
+//! | `/api/health`      | JSON: aggregated health check for monitoring    |
 //!
 //! ## Integration
 //!
@@ -105,6 +106,9 @@ pub fn handle_api_request(path: &str) -> Option<(String, Vec<u8>)> {
         }
         "/api/bench" => {
             Some((String::from("application/json"), api_bench()))
+        }
+        "/api/health" => {
+            Some((String::from("application/json"), api_health()))
         }
         _ => None,
     }
@@ -422,6 +426,75 @@ fn api_bench() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// /api/health
+// ---------------------------------------------------------------------------
+
+/// Aggregated health check for external monitoring tools.
+///
+/// Returns a single JSON object with an overall `status` field
+/// ("ok", "degraded", or "critical") and individual check results.
+/// Designed to be polled by uptime monitors and orchestration systems.
+fn api_health() -> Vec<u8> {
+    // Memory health: critical if >95% used, degraded if >85%.
+    let (total_frames, free_frames) = crate::mm::frame::stats()
+        .map(|s| (s.total_frames, s.free_frames))
+        .unwrap_or((0, 0));
+    let used_frames = total_frames.saturating_sub(free_frames);
+    let mem_pct = if total_frames > 0 {
+        used_frames.saturating_mul(100) / total_frames
+    } else {
+        0
+    };
+    let mem_status = if mem_pct > 95 { "critical" }
+        else if mem_pct > 85 { "degraded" }
+        else { "ok" };
+
+    // Network health: check interface is up and has an IP.
+    let iface = crate::net::interface::info();
+    let net_up = iface.up && iface.ip.0 != [0, 0, 0, 0];
+    let net_status = if net_up { "ok" } else { "degraded" };
+
+    // HTTP server health.
+    let httpd_running = super::httpd::is_running();
+    let httpd_status = if httpd_running { "ok" } else { "degraded" };
+
+    // Task count (sanity — zero tasks is impossible during normal operation).
+    let task_count = crate::sched::task_list().len();
+    let tasks_status = if task_count > 0 { "ok" } else { "critical" };
+
+    // Uptime (seconds).
+    let uptime_secs = crate::hrtimer::now_ns() / 1_000_000_000;
+
+    // Overall status: worst of all individual checks.
+    let overall = if mem_status == "critical" || tasks_status == "critical" {
+        "critical"
+    } else if mem_status == "degraded" || net_status == "degraded"
+           || httpd_status == "degraded"
+    {
+        "degraded"
+    } else {
+        "ok"
+    };
+
+    let json = format!(
+        concat!(
+            r#"{{"status":"{}","uptime_secs":{},"checks":{{"#,
+            r#""memory":{{"status":"{}","used_pct":{}}},"#,
+            r#""network":{{"status":"{}","up":{}}},"#,
+            r#""httpd":{{"status":"{}","running":{}}},"#,
+            r#""tasks":{{"status":"{}","count":{}}}}}}}"#,
+        ),
+        overall, uptime_secs,
+        mem_status, mem_pct,
+        net_status, net_up,
+        httpd_status, httpd_running,
+        tasks_status, task_count,
+    );
+
+    json.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
 // HTML dashboard
 // ---------------------------------------------------------------------------
 
@@ -726,6 +799,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(handle_api_request("/api/dns").is_some());
         assert!(handle_api_request("/api/firewall").is_some());
         assert!(handle_api_request("/api/bench").is_some());
+        assert!(handle_api_request("/api/health").is_some());
         assert!(handle_api_request("/not-an-api").is_none());
         assert!(handle_api_request("/api/nonexistent").is_none());
         serial_println!("[dashboard]   API routing: OK");
@@ -787,6 +861,29 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!("[dashboard]   API bench: OK ({} bytes)", bench.len());
     }
 
-    serial_println!("[dashboard] Self-test PASSED (11 tests)");
+    // Test 12: API health returns valid JSON with status and checks.
+    {
+        let health = api_health();
+        assert!(!health.is_empty());
+        assert_eq!(health[0], b'{');
+        assert_eq!(health[health.len().saturating_sub(1)], b'}');
+        let health_str = core::str::from_utf8(&health).unwrap_or("");
+        assert!(health_str.contains("\"status\""));
+        assert!(health_str.contains("\"checks\""));
+        assert!(health_str.contains("\"memory\""));
+        assert!(health_str.contains("\"network\""));
+        assert!(health_str.contains("\"httpd\""));
+        assert!(health_str.contains("\"tasks\""));
+        assert!(health_str.contains("\"used_pct\""));
+        // Status must be one of the three valid values.
+        assert!(
+            health_str.contains("\"ok\"")
+            || health_str.contains("\"degraded\"")
+            || health_str.contains("\"critical\"")
+        );
+        serial_println!("[dashboard]   API health: OK ({} bytes)", health.len());
+    }
+
+    serial_println!("[dashboard] Self-test PASSED (12 tests)");
     Ok(())
 }

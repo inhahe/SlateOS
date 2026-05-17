@@ -34910,6 +34910,14 @@ fn cmd_dashboard(args: &str) {
                 }
             }
         }
+        "health" => {
+            let data = dashboard::handle_api_request("/api/health");
+            if let Some((_ct, body)) = data {
+                if let Ok(s) = core::str::from_utf8(&body) {
+                    crate::serial_println!("{}", s);
+                }
+            }
+        }
         "test" => {
             match dashboard::self_test() {
                 Ok(()) => crate::serial_println!("[dashboard] Self-test passed."),
@@ -34917,7 +34925,7 @@ fn cmd_dashboard(args: &str) {
             }
         }
         _ => {
-            crate::serial_println!("Usage: dashboard [status|tasks|network|memory|httpd|dns|fw|bench|test]");
+            crate::serial_println!("Usage: dashboard [status|tasks|network|memory|httpd|dns|fw|bench|health|test]");
             crate::serial_println!("  status   - System overview (default)");
             crate::serial_println!("  tasks    - Task list (JSON)");
             crate::serial_println!("  network  - Network info (JSON)");
@@ -34926,6 +34934,7 @@ fn cmd_dashboard(args: &str) {
             crate::serial_println!("  dns      - DNS cache stats (JSON)");
             crate::serial_println!("  fw       - Firewall status + rules (JSON)");
             crate::serial_println!("  bench    - Benchmark scorecard (JSON)");
+            crate::serial_println!("  health   - Aggregated health check (JSON)");
             crate::serial_println!("  test     - Run dashboard self-test");
             crate::serial_println!("Web dashboard available at http://<ip>/dashboard");
         }

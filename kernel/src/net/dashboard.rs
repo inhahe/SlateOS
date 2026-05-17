@@ -280,17 +280,23 @@ fn api_httpd() -> Vec<u8> {
     let requests = httpd::request_count();
     let not_modified = httpd::not_modified_count();
     let partial = httpd::partial_count();
+    let rate_limited = httpd::rate_limited_count();
+    let rl_enabled = httpd::rate_limit_enabled();
 
     let mut json = format!(
         concat!(
             r#"{{"server":{{"http_running":{},"http_port":{},"#,
             r#""tls_running":{},"tls_port":{}}},"#,
-            r#""stats":{{"requests":{},"not_modified_304":{},"partial_206":{}}},"#,
+            r#""stats":{{"requests":{},"not_modified_304":{},"partial_206":{},"#,
+            r#""rate_limited_429":{}}},"#,
+            r#""rate_limit":{{"enabled":{}}},"#,
             r#""access_log":["#,
         ),
         running, port,
         tls_running, tls_port,
         requests, not_modified, partial,
+        rate_limited,
+        rl_enabled,
     );
 
     let entries = httpd::recent_access_log(20);
@@ -552,7 +558,9 @@ async function update() {
       stat('HTTPS', hr.server.tls_running?'Running (port '+hr.server.tls_port+')':'Stopped', hr.server.tls_running?'ok':'') +
       stat('Requests', hr.stats.requests) +
       stat('304 Not Modified', hr.stats.not_modified_304, hr.stats.not_modified_304>0?'ok':'') +
-      stat('206 Partial', hr.stats.partial_206);
+      stat('206 Partial', hr.stats.partial_206) +
+      stat('429 Rate Limited', hr.stats.rate_limited_429, hr.stats.rate_limited_429>0?'warn':'') +
+      stat('Rate Limiting', hr.rate_limit.enabled?'Enabled':'Disabled');
     var lb=''; hr.access_log.slice().reverse().forEach(function(e){
       var sc=e.status>=400?'warn':(e.status===304?'ok':'');
       lb+='<tr><td>'+e.method+'</td><td>'+e.path+'</td><td><span class="stat-value'+(sc?' '+sc:'')+'">'+e.status+'</span></td><td>'+fmt(e.body_size)+'</td></tr>';

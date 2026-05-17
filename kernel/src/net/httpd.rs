@@ -477,6 +477,140 @@ pub fn not_modified_count() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Rate limiting
+// ---------------------------------------------------------------------------
+
+/// Maximum number of tracked source IPs for rate limiting.
+const RATE_LIMIT_SLOTS: usize = 16;
+
+/// Maximum requests per second per source IP (token bucket refill rate).
+const RATE_LIMIT_RPS: u32 = 30;
+
+/// Token bucket capacity (burst size).
+const RATE_LIMIT_BURST: u32 = 60;
+
+/// Rate limit enabled flag.
+static RATE_LIMIT_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Atomic 429 Too Many Requests counter.
+static RATE_LIMITED_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Per-IP token bucket entry.
+struct RateLimitEntry {
+    /// Source IP as 4 bytes (0 = unused slot).
+    ip: [u8; 4],
+    /// Available tokens (decremented per request, refilled over time).
+    tokens: u32,
+    /// Last refill time (uptime ticks, ~100Hz).
+    last_tick: u64,
+}
+
+/// Rate limiter state.
+static RATE_LIMITER: spin::Mutex<[RateLimitEntry; RATE_LIMIT_SLOTS]> =
+    spin::Mutex::new(init_rate_entries());
+
+/// Create the initial empty rate limit table (const-compatible).
+const fn init_rate_entries() -> [RateLimitEntry; RATE_LIMIT_SLOTS] {
+    let mut arr = [const { RateLimitEntry { ip: [0; 4], tokens: 0, last_tick: 0 } }; RATE_LIMIT_SLOTS];
+    let mut i = 0;
+    while i < RATE_LIMIT_SLOTS {
+        arr[i] = RateLimitEntry {
+            ip: [0, 0, 0, 0],
+            tokens: RATE_LIMIT_BURST,
+            last_tick: 0,
+        };
+        i += 1;
+    }
+    arr
+}
+
+/// Check rate limit for a source IP.  Returns `true` if the request
+/// is allowed, `false` if rate-limited (should return 429).
+///
+/// Uses a token bucket per source IP: each IP gets `RATE_LIMIT_BURST`
+/// tokens initially and `RATE_LIMIT_RPS` tokens refilled per second.
+/// Each request consumes one token.
+#[allow(clippy::arithmetic_side_effects)]
+fn check_rate_limit(src_ip: [u8; 4]) -> bool {
+    if !RATE_LIMIT_ENABLED.load(Ordering::Relaxed) {
+        return true;
+    }
+
+    // Current time in APIC timer ticks (~100 Hz).
+    let now = crate::hrtimer::now_ns() / 10_000_000; // ~100 ticks/sec
+
+    let mut table = RATE_LIMITER.lock();
+
+    // Find existing entry or oldest slot for eviction.
+    let mut found_idx: Option<usize> = None;
+    let mut oldest_idx = 0;
+    let mut oldest_tick = u64::MAX;
+
+    for (i, entry) in table.iter().enumerate() {
+        if entry.ip == src_ip {
+            found_idx = Some(i);
+            break;
+        }
+        if entry.ip == [0, 0, 0, 0] {
+            // Empty slot — use it immediately.
+            found_idx = None;
+            oldest_idx = i;
+            oldest_tick = 0;
+            break;
+        }
+        if entry.last_tick < oldest_tick {
+            oldest_tick = entry.last_tick;
+            oldest_idx = i;
+        }
+    }
+
+    let idx = match found_idx {
+        Some(i) => i,
+        None => {
+            // New IP — initialize the oldest/empty slot.
+            table[oldest_idx] = RateLimitEntry {
+                ip: src_ip,
+                tokens: RATE_LIMIT_BURST.saturating_sub(1), // consume 1 for this request
+                last_tick: now,
+            };
+            return true;
+        }
+    };
+
+    // Refill tokens based on elapsed time.
+    let elapsed_ticks = now.saturating_sub(table[idx].last_tick);
+    if elapsed_ticks > 0 {
+        let refill = (elapsed_ticks as u32).saturating_mul(RATE_LIMIT_RPS) / 100;
+        table[idx].tokens = table[idx].tokens.saturating_add(refill).min(RATE_LIMIT_BURST);
+        table[idx].last_tick = now;
+    }
+
+    // Consume a token.
+    if table[idx].tokens > 0 {
+        table[idx].tokens -= 1;
+        true
+    } else {
+        false
+    }
+}
+
+/// Get the number of rate-limited (429) responses.
+pub fn rate_limited_count() -> u64 {
+    RATE_LIMITED_COUNT.load(Ordering::Relaxed)
+}
+
+/// Enable or disable rate limiting.
+pub fn set_rate_limit(enabled: bool) {
+    RATE_LIMIT_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Check if rate limiting is enabled.
+pub fn rate_limit_enabled() -> bool {
+    RATE_LIMIT_ENABLED.load(Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
 // HTTP response building
 // ---------------------------------------------------------------------------
 
@@ -586,6 +720,27 @@ fn range_not_satisfiable(total_size: usize) -> Vec<u8> {
         total_size,
     );
     resp.into_bytes()
+}
+
+/// Build a 429 Too Many Requests response with Retry-After header.
+fn too_many_requests_response() -> Vec<u8> {
+    let body = b"<html><head><title>429 Too Many Requests</title></head>\
+                 <body><h1>429 Too Many Requests</h1>\
+                 <p>Rate limit exceeded. Please retry after 1 second.</p></body></html>";
+    let resp = format!(
+        "HTTP/1.1 429 Too Many Requests\r\n\
+         Server: {}\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Retry-After: 1\r\n\
+         Connection: close\r\n\
+         \r\n",
+        SERVER_NAME,
+        body.len(),
+    );
+    let mut bytes = resp.into_bytes();
+    bytes.extend_from_slice(body);
+    bytes
 }
 
 /// Parse a Range header value (RFC 7233).
@@ -789,6 +944,26 @@ fn format_size(size: u64) -> String {
 fn handle_connection(conn_handle: usize) {
     use crate::net::tcp;
 
+    // Rate limiting: check the source IP before reading the full request.
+    if let Some((ip, _port)) = tcp::peer_addr(conn_handle) {
+        let ip_bytes = match ip {
+            crate::net::interface::IpAddr::V4(addr) => addr.0,
+            // IPv6 clients use the last 4 bytes of the address for rate limiting.
+            crate::net::interface::IpAddr::V6(addr) => {
+                [addr.0[12], addr.0[13], addr.0[14], addr.0[15]]
+            }
+        };
+        if !check_rate_limit(ip_bytes) {
+            RATE_LIMITED_COUNT.fetch_add(1, Ordering::Relaxed);
+            REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+            log_access("*", "(rate-limited)", 429, 0);
+            let resp = too_many_requests_response();
+            let _ = tcp::send(conn_handle, &resp);
+            let _ = tcp::close(conn_handle);
+            return;
+        }
+    }
+
     // Read the request (up to MAX_REQUEST_SIZE).
     let request_data = match tcp::read_blocking(conn_handle, READ_TIMEOUT_POLLS, MAX_REQUEST_SIZE) {
         Ok(data) => data,
@@ -988,6 +1163,24 @@ pub fn tick_tls() {
 #[allow(clippy::arithmetic_side_effects)]
 fn handle_tls_connection(tcp_handle: usize) {
     use super::tls;
+
+    // Rate limiting: check before expensive TLS handshake.
+    if let Some((ip, _port)) = super::tcp::peer_addr(tcp_handle) {
+        let ip_bytes = match ip {
+            crate::net::interface::IpAddr::V4(addr) => addr.0,
+            crate::net::interface::IpAddr::V6(addr) => {
+                [addr.0[12], addr.0[13], addr.0[14], addr.0[15]]
+            }
+        };
+        if !check_rate_limit(ip_bytes) {
+            RATE_LIMITED_COUNT.fetch_add(1, Ordering::Relaxed);
+            REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
+            log_access("*", "(rate-limited/tls)", 429, 0);
+            // Can't send HTTP response before TLS handshake, just close.
+            let _ = super::tcp::close(tcp_handle);
+            return;
+        }
+    }
 
     let seed = *TLS_HOST_KEY_SEED.lock();
     let public = *TLS_HOST_KEY_PUBLIC.lock();
@@ -1601,7 +1794,39 @@ pub fn self_test() -> KernelResult<()> {
     assert!(resp_ar_str.contains("Accept-Ranges: bytes\r\n"));
     serial_println!("[httpd]   Accept-Ranges header: OK");
 
-    serial_println!("[httpd] Self-test PASSED (30 tests)");
+    // Test 31: Rate limiting — first requests should pass.
+    {
+        // Temporarily enable rate limiting for the test.
+        let was_enabled = RATE_LIMIT_ENABLED.load(Ordering::Relaxed);
+        RATE_LIMIT_ENABLED.store(true, Ordering::Relaxed);
+
+        let test_ip = [192, 168, 99, 99];
+        // First request should always succeed (new IP gets full bucket).
+        assert!(check_rate_limit(test_ip));
+        serial_println!("[httpd]   Rate limit initial allow: OK");
+
+        // Restore previous state.
+        RATE_LIMIT_ENABLED.store(was_enabled, Ordering::Relaxed);
+    }
+
+    // Test 32: Rate limiting — disabled returns true.
+    {
+        RATE_LIMIT_ENABLED.store(false, Ordering::Relaxed);
+        assert!(check_rate_limit([10, 0, 0, 1]));
+        RATE_LIMIT_ENABLED.store(true, Ordering::Relaxed);
+        serial_println!("[httpd]   Rate limit disabled bypass: OK");
+    }
+
+    // Test 33: 429 response format.
+    {
+        let resp = too_many_requests_response();
+        let resp_str = core::str::from_utf8(&resp).unwrap_or("");
+        assert!(resp_str.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
+        assert!(resp_str.contains("Retry-After: 1\r\n"));
+        serial_println!("[httpd]   429 response format: OK");
+    }
+
+    serial_println!("[httpd] Self-test PASSED (33 tests)");
     Ok(())
 }
 
@@ -1669,5 +1894,24 @@ mod tests {
         assert_eq!(entries[0].path, "/p10");
         // Last should be ACCESS_LOG_SIZE + 9.
         assert_eq!(entries[ACCESS_LOG_SIZE - 1].path, format!("/p{}", ACCESS_LOG_SIZE + 9));
+    }
+
+    #[test]
+    fn test_rate_limit_entries_init() {
+        let entries = init_rate_entries();
+        assert_eq!(entries.len(), RATE_LIMIT_SLOTS);
+        for entry in &entries {
+            assert_eq!(entry.ip, [0, 0, 0, 0]);
+            assert_eq!(entry.tokens, RATE_LIMIT_BURST);
+        }
+    }
+
+    #[test]
+    fn test_429_response() {
+        let resp = too_many_requests_response();
+        let s = core::str::from_utf8(&resp).unwrap_or("");
+        assert!(s.starts_with("HTTP/1.1 429 Too Many Requests\r\n"));
+        assert!(s.contains("Retry-After: 1\r\n"));
+        assert!(s.contains("text/html"));
     }
 }

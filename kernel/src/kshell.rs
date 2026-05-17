@@ -34674,6 +34674,7 @@ fn cmd_httpd(args: &str) {
             shell_println!("  status                 Show server status");
             shell_println!("  root [path]            Get/set document root");
             shell_println!("  log [N]                Show last N access log entries (default: 20)");
+            shell_println!("  ratelimit [on|off]     Show/toggle rate limiting");
             shell_println!("  test                   Run self-tests");
             shell_println!("");
             shell_println!("Examples:");
@@ -34734,6 +34735,10 @@ fn cmd_httpd(args: &str) {
             shell_println!("  Requests:     {}", httpd::request_count());
             shell_println!("  304 hits:     {}", httpd::not_modified_count());
             shell_println!("  206 ranges:   {}", httpd::partial_count());
+            shell_println!("  429 limited:  {}", httpd::rate_limited_count());
+            shell_println!("");
+            shell_println!("Rate Limiting");
+            shell_println!("  Enabled:      {}", httpd::rate_limit_enabled());
         }
         "log" => {
             let count: usize = parts.get(1)
@@ -34764,6 +34769,23 @@ fn cmd_httpd(args: &str) {
                 );
                 httpd::set_doc_root(leaked);
                 shell_println!("Document root set to: {}", path);
+            }
+        }
+        "ratelimit" | "rl" => {
+            let arg = parts.get(1).copied().unwrap_or("");
+            match arg {
+                "on" | "enable" => {
+                    httpd::set_rate_limit(true);
+                    shell_println!("Rate limiting enabled");
+                }
+                "off" | "disable" => {
+                    httpd::set_rate_limit(false);
+                    shell_println!("Rate limiting disabled");
+                }
+                _ => {
+                    shell_println!("Rate limiting: {}", if httpd::rate_limit_enabled() { "enabled" } else { "disabled" });
+                    shell_println!("  429 responses: {}", httpd::rate_limited_count());
+                }
             }
         }
         "test" => {

@@ -481,6 +481,117 @@ mean_cycles = 50168
 # paths that acquire SWAP/RECLAIM during timer-driven reclaim checks).
 
 # -------------------------------------------------------------------------
+# QEMU measured — Network benchmarks (2026-05-17)
+# -------------------------------------------------------------------------
+
+[qemu.net_ipv4_parse]
+min_ns     = 71
+min_cycles = 264
+
+[qemu.net_ethernet_parse]
+min_ns     = 28
+min_cycles = 106
+
+[qemu.net_arp_lookup_miss]
+min_ns     = 983
+min_cycles = 3648
+
+[qemu.net_ip_checksum_20b]
+min_ns     = 18
+min_cycles = 70
+
+[qemu.net_tcp_checksum_v4_1460b]
+min_ns     = 1842
+min_cycles = 6838
+
+[qemu.net_tcp_checksum_v6_1460b]
+min_ns     = 1602
+min_cycles = 5948
+
+[qemu.net_ipv6_parse]
+min_ns     = 81
+min_cycles = 302
+
+[qemu.net_firewall_inbound_check]
+min_ns     = 55
+min_cycles = 206
+
+[qemu.net_dns_build_a_query]
+min_ns     = 35406
+min_cycles = 131384
+
+[qemu.net_tcp_conn_table_scan]
+min_ns     = 220
+min_cycles = 818
+
+[qemu.net_veth_send]
+min_ns     = 924
+min_cycles = 3432
+
+[qemu.net_veth_recv]
+min_ns     = 496
+min_cycles = 1842
+
+[qemu.net_veth_roundtrip]
+min_ns     = 2705
+min_cycles = 10038
+
+[qemu.net_ns_arp_lookup]
+min_ns     = 692
+min_cycles = 2570
+
+# -------------------------------------------------------------------------
+# QEMU measured — Crypto benchmarks (2026-05-17)
+# -------------------------------------------------------------------------
+
+[qemu.crypto_sha256_64B]
+min_ns     = 1980
+min_cycles = 7350
+
+[qemu.crypto_sha256_1KiB]
+min_ns     = 15080
+min_cycles = 55958
+# ~64 MiB/s
+
+[qemu.crypto_sha512_64B]
+min_ns     = 2013
+min_cycles = 7472
+
+[qemu.crypto_hmac_sha256]
+min_ns     = 7034
+min_cycles = 26102
+
+[qemu.crypto_chacha20_1KiB]
+min_ns     = 12247
+min_cycles = 45446
+# ~79 MiB/s
+
+[qemu.crypto_poly1305_1KiB]
+min_ns     = 5143
+min_cycles = 19086
+# ~189 MiB/s
+
+[qemu.crypto_aead_1KiB]
+min_ns     = 20181
+min_cycles = 74888
+# ~48 MiB/s
+
+[qemu.crypto_x25519]
+min_ns     = 353859
+min_cycles = 1313076
+# QEMU/TCG: ~354us.  Expected ~25us on native hardware.
+
+[qemu.crypto_ed25519_sign]
+min_ns     = 2160491
+min_cycles = 8017004
+# QEMU/TCG: ~2.16ms.  Expected ~100-200us on native hardware.
+
+[qemu.crypto_ed25519_verify]
+min_ns     = 1351126
+min_cycles = 5013666
+# QEMU/TCG: ~1.35ms.  Expected ~200-400us on native hardware.
+
+# -------------------------------------------------------------------------
 # Measurement methodology notes
 # -------------------------------------------------------------------------
 #

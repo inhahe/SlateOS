@@ -1489,19 +1489,33 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [ ] Multi-monitor support (deferred but planned)
 
 ### 3.5 GUI toolkit / widget API
-- [ ] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
-- [ ] Styling system (subset of CSS properties without cascade complexity)
+- [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
+  - [x] FlexDirection (Row/Column), FlexWrap, FlexJustify (Start/End/Center/SpaceBetween/SpaceAround/SpaceEvenly)
+  - [x] FlexAlign (Start/End/Center/Stretch/Baseline), gap support
+  - [x] FlexItem with grow/shrink/basis, per-item align override
+  - [x] LayoutBox output with position, size, children
+- [x] Styling system (subset of CSS properties without cascade complexity)
+  - [x] Style struct: width/height/min/max, padding/margin (Edges), borders, corner radii
+  - [x] Background/foreground colors, font size/weight, text alignment, cursor
+  - [x] BoxShadow, opacity, overflow (visible/hidden/scroll)
 - [ ] Signals and slots (Rust channels or callbacks)
-- [ ] Core widgets:
-  - [ ] Buttons (text, graphic), labels, menus
-  - [ ] Input fields (single/multiline, placeholder text, word wrap option)
-  - [ ] Checkboxes, tristate checkboxes
-  - [ ] Radio buttons (grouped, with deselect option)
+- [x] Core widgets:
+  - [x] Buttons (text), labels
+  - [ ] Menus
+  - [x] Input fields (single-line TextInput, multiline TextArea)
+  - [x] Checkboxes, tristate checkboxes (Unchecked/Checked/Indeterminate)
+  - [x] Radio buttons
   - [ ] Treeview, tristate checkbox treeview
   - [ ] Tabs view, grid view
-  - [ ] Scroll bars (auto-hide), tooltips
+  - [x] Scroll bars (ScrollView widget)
+  - [ ] Tooltips
   - [ ] Color picker
   - [ ] Modal and non-modal dialogs, alert popups
+- [x] Render tree abstraction (backend-agnostic drawing primitives)
+  - [x] RenderCommand enum: FillRect, StrokeRect, Text, Image, Line, BoxShadow
+  - [x] Clip/translate stack (PushClip/PopClip, PushTranslate/PopTranslate)
+  - [x] RenderTree with command list and viewport
+- [x] Additional widgets: Separator, ProgressBar, Slider, Image, Container
 - [ ] Text views:
   - [ ] Simple text (plain text, ANSI colors, single font)
   - [ ] Rich text (fonts, sizes, colors, inline images — NOT HTML)
@@ -1547,14 +1561,27 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver desktop._
 
 ### 4.1 Core applications
-- [ ] File explorer:
+- [-] File explorer:
+  - [x] Navigation with back/forward history, breadcrumb address bar
+  - [x] Detail view with columns (name, size, modified, type)
+  - [x] File type detection (18+ extensions), icon assignment
+  - [x] View modes (Details/List/Icons), sort by name/size/date/type
+  - [x] Toolbar, sidebar with quick-access locations, status bar
   - [ ] Path bar with autocomplete
   - [ ] Thumbnails (images, video, PDF)
-  - [ ] Detail columns (union of relevant columns per file type in folder)
   - [ ] Custom columns per file type, app-extensible columns
   - [ ] Drop zones for drag-and-drop (empty space = this dir, folder = into folder)
   - [ ] Atomic copy/move/delete with undo, resume on interruption
-- [ ] Text editor (port Helix initially — Rust, easy to port; consider Neovim)
+- [-] Text editor:
+  - [x] Multi-tab document editing with tab bar
+  - [x] Cursor movement, selection, clipboard (cut/copy/paste)
+  - [x] Undo/redo stack (insert/delete char, insert/delete line)
+  - [x] Find & replace (find all, next/prev match, replace current/all)
+  - [x] Language detection (12 languages from extension)
+  - [x] Line numbers (gutter), scroll support, status bar
+  - [x] Dark theme (Catppuccin Mocha)
+  - [ ] Syntax highlighting (token-based coloring)
+  - [ ] Port Helix or integrate tree-sitter for advanced editing
 - [ ] Process explorer:
   - [ ] Identify process by clicking window, kill it
   - [ ] Find by name, show subprocesses/threads/libraries/capabilities

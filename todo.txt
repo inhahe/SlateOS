@@ -323,8 +323,16 @@ Remaining net improvements (diminishing returns):
   failure/zero.  This disables std's stack overflow detection.  Real
   implementations in the posix crate would fix this.
 
-- DONE: Validated toolchain — built 8 coreutils (echo, cat, ls, head, wc,
-  mkdir, rm, cp) as real ELF binaries, 655 KiB to 1.2 MiB each.
+- DONE: Validated toolchain — built 71 coreutils as real ELF binaries,
+  650 KiB to 1.3 MiB each. Full list: echo, cat, ls, head, wc, mkdir,
+  rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false,
+  uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut,
+  tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat,
+  printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo,
+  expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff,
+  cmp, od, strings, uptime, free, unexpand, cal, time, sed, awk.
+  Includes inline MD5/SHA-256 implementations, LCS-based diff,
+  regex engines for sed/grep/awk, /proc readers for ps/uptime/free.
 
 - DONE: Nushell full type-check passes for our custom target!
   All crates (nu-parser, nu-protocol, nu-engine, nu-command, nu-cli, nu-lsp,

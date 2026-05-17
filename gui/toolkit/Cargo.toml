@@ -1,0 +1,17 @@
+[package]
+name = "guitk"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS GUI toolkit — widget library with Flexbox/Grid layout engine"
+
+# Standalone crate — not part of the kernel workspace.
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

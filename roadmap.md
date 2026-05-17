@@ -1518,7 +1518,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Frecency scoring (combines match quality with launch frequency/recency)
   - [x] 18 built-in application entries, keyboard navigation (arrows, Enter, Escape)
   - [x] Category filtering, hotkey activation (Super+Space)
-- [ ] Ctrl+R run dialog (completion, recent commands)
+- [x] Ctrl+R run dialog (run_dialog.rs: text input, 50-entry history, fuzzy autocomplete, path resolution, Browse)
 - [ ] Sound mixer (per-app volume, show currently-playing apps first)
 - [ ] Light / dark / custom theme support
 - [ ] Theme color API for applications
@@ -1534,7 +1534,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Style struct: width/height/min/max, padding/margin (Edges), borders, corner radii
   - [x] Background/foreground colors, font size/weight, text alignment, cursor
   - [x] BoxShadow, opacity, overflow (visible/hidden/scroll)
-- [ ] Signals and slots (Rust channels or callbacks)
+- [x] Signals and slots (signal.rs: Signal<T>, connect/emit/disconnect, re-entrancy safe, EventBus named registry, SignalGroup)
 - [x] Core widgets:
   - [x] Buttons (text), labels
   - [ ] Menus
@@ -1781,8 +1781,19 @@ _This is the biggest single porting effort. Unlocks browser, web apps, and VS Co
   - [x] Connection lifecycle: Hello handshake, unique names (:1.N), disconnect cleanup
   - [x] Name watching: subscribe to acquired/lost notifications
   - [x] Introspection: query interfaces/methods a service exposes
-- [ ] Standard event loop integration API ("give me the waitable handle")
-- [ ] Client library (libservicebus) for easy integration
+- [x] Standard event loop integration API ("give me the waitable handle")
+  - [x] EventLoop struct wrapping kernel completion ports (SYS_CP_CREATE/WAIT/TRY_WAIT)
+  - [x] Register channels, timers, pipes, eventfds, process exits with user_data tags
+  - [x] Blocking wait and non-blocking poll for multiplexed events
+  - [x] Manual notification (wake waiter from another thread)
+  - [x] Timer integration (one-shot and periodic kernel timers)
+- [x] Client library (libservicebus) for easy integration
+  - [x] Connection: connect to named service, send/recv messages, call+wait-for-reply
+  - [x] ServiceHost: register a service, accept incoming connections
+  - [x] Message: structured wire format (type/member/payload/serial) with serialization
+  - [x] BusError: typed errors matching kernel error codes
+  - [x] Blocking, non-blocking, and timeout variants for all operations
+  - [x] Unit tests for message round-trip, error mapping, duration helpers
 
 ---
 

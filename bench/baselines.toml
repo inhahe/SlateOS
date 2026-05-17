@@ -278,6 +278,113 @@ the scan.  Compare to global ARP lookup which is the same algorithm \
 but with a 32-entry array."""
 
 # -------------------------------------------------------------------------
+# Cryptographic primitives
+# -------------------------------------------------------------------------
+# These are software-only implementations (no AES-NI, no hardware SHA).
+# Reference numbers from OpenSSL on the same CPU (i7-8700K) with
+# hardware acceleration disabled.  Our implementations prioritize
+# correctness and code clarity; they are not SIMD-optimized.
+
+[crypto_sha256_64B]
+description = "SHA-256 hash of 64 bytes (one block)"
+openssl_ns  = 300
+target_ns   = 5000
+source      = "OpenSSL EVP_Digest, no-hw, 1M iterations"
+notes       = """
+A single SHA-256 block transform.  OpenSSL's C implementation is \
+heavily unrolled.  Our Rust version is a direct port of FIPS 180-4 \
+without SIMD.  Used in TLS Finished, HKDF, file integrity."""
+
+[crypto_sha256_1KiB]
+description = "SHA-256 hash of 1 KiB (16 blocks)"
+target_ns   = 40000
+source      = "~16× single-block cost, dominated by compression rounds"
+notes       = """
+Used in file content hashing, CAS deduplication.  Throughput target: \
+~25 MiB/s under QEMU (software SHA-256 without SIMD).  On real \
+hardware with SHA-NI extensions, expect 10-50× improvement."""
+
+[crypto_sha512_64B]
+description = "SHA-512 hash of 64 bytes (one block, 80 rounds)"
+target_ns   = 6000
+source      = "SHA-512 uses 64-bit words and 80 rounds (vs SHA-256's 64)"
+notes       = """
+SHA-512 on 64-bit CPUs is roughly the same speed as SHA-256 for \
+large inputs (same throughput per byte — wider words, fewer blocks) \
+but slightly slower for small inputs (80 vs 64 rounds per block). \
+Used in Ed25519 key derivation."""
+
+[crypto_hmac_sha256]
+description = "HMAC-SHA256 with 32-byte key and 64-byte message"
+target_ns   = 15000
+source      = "Two SHA-256 computations (inner + outer hash) plus padding"
+notes       = """
+Used in TLS 1.3 key derivation (HKDF) and SSH MAC verification. \
+Cost is ~2× SHA-256 since HMAC runs the hash twice."""
+
+[crypto_chacha20_1KiB]
+description = "ChaCha20 stream cipher, 1 KiB encryption"
+openssl_ns  = 1500
+target_ns   = 40000
+source      = "OpenSSL ChaCha20 no-hw, 100K iterations"
+notes       = """
+20 quarter-round operations per 64-byte block, 16 blocks for 1 KiB. \
+OpenSSL uses SIMD (4 blocks at a time); our scalar implementation \
+is ~20-30× slower.  On the TLS/SSH data path for every packet. \
+Throughput target: ~25 MiB/s under QEMU."""
+
+[crypto_poly1305_1KiB]
+description = "Poly1305 MAC of 1 KiB"
+target_ns   = 30000
+source      = "128-bit polynomial evaluation over 16-byte blocks"
+notes       = """
+Poly1305 uses 130-bit arithmetic on 16-byte blocks.  Our implementation \
+uses u128 multiplies (which Rust compiles to 64×64→128 mulq on x86_64). \
+Throughput target: ~30 MiB/s under QEMU."""
+
+[crypto_aead_1KiB]
+description = "ChaCha20-Poly1305 AEAD encrypt, 1 KiB payload"
+target_ns   = 70000
+source      = "ChaCha20 encrypt + Poly1305 MAC + keystream generation"
+notes       = """
+The combined cipher for TLS 1.3 and SSH.  Measures the full pipeline: \
+generate Poly1305 key from ChaCha20 block 0, encrypt payload, compute \
+MAC.  Cost is roughly chacha20 + poly1305 + overhead.  This determines \
+maximum TLS/SSH throughput: ~14 MiB/s at 70us/KiB under QEMU."""
+
+[crypto_x25519]
+description = "X25519 scalar multiplication (key exchange)"
+target_ns   = 2_000_000
+source      = "255 ladder steps of field multiply + square over 255-bit prime"
+notes       = """
+Runs once per TLS handshake and once per SSH key exchange.  Not a hot \
+path — connection setup latency.  The Montgomery ladder does 255 \
+iterations of (field_mul + field_sqr + field_add + field_sub).  Each \
+field multiply is ~10 64×64→128 multiplies.  Under QEMU/TCG this is \
+very slow (~2ms); real hardware should be 100-200us."""
+
+[crypto_ed25519_sign]
+description = "Ed25519 signature generation"
+target_ns   = 5_000_000
+source      = "Two SHA-512 + double-base scalar multiplication"
+notes       = """
+Runs once per SSH public key authentication and once per signed message. \
+Includes: SHA-512(seed) for key expansion, SHA-512(nonce‖msg) for r, \
+basepoint multiply for R, double-base multiply for S.  Under QEMU \
+expect ~5ms; real hardware ~500us."""
+
+[crypto_ed25519_verify]
+description = "Ed25519 signature verification"
+target_ns   = 10_000_000
+source      = "Point decompression + double-base scalar multiply + SHA-512"
+notes       = """
+The costliest single cryptographic operation in TLS/SSH.  Includes \
+point decompression (modular square root via exponentiation), \
+double-base scalar multiplication (A*s + R*h), and SHA-512.  Verify \
+is slower than sign because of the extra point decompression. \
+Under QEMU expect ~10ms; real hardware ~1ms."""
+
+# -------------------------------------------------------------------------
 # QEMU measurements (i7-8700K, -cpu qemu64,+rdtscp, -m 256M)
 # -------------------------------------------------------------------------
 # Measured under QEMU on the same i7-8700K. QEMU auto-selects WHPX

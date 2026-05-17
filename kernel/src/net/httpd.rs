@@ -204,6 +204,8 @@ struct HttpRequest {
     /// Accept-Encoding header value (for future compression support).
     #[allow(dead_code)]
     accept_encoding: Option<String>,
+    /// Range header value (for partial content serving).
+    range: Option<String>,
 }
 
 /// Parse an HTTP request from raw bytes.
@@ -235,6 +237,7 @@ fn parse_request(data: &[u8]) -> Option<HttpRequest> {
     // Parse headers we care about.
     let mut if_none_match = None;
     let mut accept_encoding = None;
+    let mut range = None;
     let mut header_count = 0;
 
     for line in text.lines().skip(1) {
@@ -255,6 +258,8 @@ fn parse_request(data: &[u8]) -> Option<HttpRequest> {
                 if_none_match = Some(String::from(value));
             } else if name.eq_ignore_ascii_case("Accept-Encoding") {
                 accept_encoding = Some(String::from(value));
+            } else if name.eq_ignore_ascii_case("Range") {
+                range = Some(String::from(value));
             }
         }
     }
@@ -265,6 +270,7 @@ fn parse_request(data: &[u8]) -> Option<HttpRequest> {
         version,
         if_none_match,
         accept_encoding,
+        range,
     })
 }
 
@@ -441,6 +447,110 @@ fn not_modified_response(etag: &str) -> Vec<u8> {
     resp.into_bytes()
 }
 
+/// Build a 206 Partial Content response for Range requests.
+///
+/// Serves the byte range `[start, end]` (inclusive) from `data` with
+/// appropriate Content-Range header.
+#[allow(clippy::arithmetic_side_effects)]
+fn partial_content_response(
+    content_type: &str,
+    data: &[u8],
+    start: usize,
+    end: usize,
+    etag: &str,
+) -> Vec<u8> {
+    let total = data.len();
+    let slice = &data[start..=end];
+    let resp = format!(
+        "HTTP/1.1 206 Partial Content\r\n\
+         Server: {}\r\n\
+         Content-Type: {}\r\n\
+         Content-Length: {}\r\n\
+         Content-Range: bytes {}-{}/{}\r\n\
+         ETag: {}\r\n\
+         Accept-Ranges: bytes\r\n\
+         Connection: close\r\n\
+         \r\n",
+        SERVER_NAME,
+        content_type,
+        slice.len(),
+        start, end, total,
+        etag,
+    );
+
+    let mut bytes = resp.into_bytes();
+    bytes.extend_from_slice(slice);
+    bytes
+}
+
+/// Build a 416 Range Not Satisfiable response.
+fn range_not_satisfiable(total_size: usize) -> Vec<u8> {
+    let resp = format!(
+        "HTTP/1.1 416 Range Not Satisfiable\r\n\
+         Server: {}\r\n\
+         Content-Range: bytes */{}\r\n\
+         Connection: close\r\n\
+         \r\n",
+        SERVER_NAME,
+        total_size,
+    );
+    resp.into_bytes()
+}
+
+/// Parse a Range header value (RFC 7233).
+///
+/// Supports the single byte-range format: `bytes=START-END` or `bytes=START-`
+/// or `bytes=-SUFFIX`.  Returns `(start, end)` inclusive indices, or None
+/// if the header is invalid or uses unsupported multi-range syntax.
+#[allow(clippy::arithmetic_side_effects)]
+fn parse_range(header: &str, total_size: usize) -> Option<(usize, usize)> {
+    // Must start with "bytes=".
+    let spec = header.strip_prefix("bytes=")?;
+
+    // We only support single ranges (no comma-separated multi-range).
+    if spec.contains(',') {
+        return None;
+    }
+
+    let spec = spec.trim();
+    if let Some(dash_pos) = spec.find('-') {
+        let start_str = &spec[..dash_pos];
+        let end_str = &spec[dash_pos.saturating_add(1)..];
+
+        if start_str.is_empty() {
+            // Suffix range: `-500` means last 500 bytes.
+            let suffix: usize = end_str.parse().ok()?;
+            if suffix == 0 || suffix > total_size {
+                return None;
+            }
+            let start = total_size.saturating_sub(suffix);
+            return Some((start, total_size.saturating_sub(1)));
+        }
+
+        let start: usize = start_str.parse().ok()?;
+        if start >= total_size {
+            return None;
+        }
+
+        let end = if end_str.is_empty() {
+            // Open-ended: `100-` means from 100 to end.
+            total_size.saturating_sub(1)
+        } else {
+            let e: usize = end_str.parse().ok()?;
+            // Clamp end to last valid index.
+            e.min(total_size.saturating_sub(1))
+        };
+
+        if start > end {
+            return None;
+        }
+
+        Some((start, end))
+    } else {
+        None
+    }
+}
+
 /// Build a simple error response.
 fn error_response(status: u16, reason: &str) -> Vec<u8> {
     let body = format!(
@@ -602,11 +712,13 @@ fn handle_connection(conn_handle: usize) {
     let _ = tcp::close(conn_handle);
 }
 
-/// Serve a file from the VFS with ETag support.
+/// Serve a file from the VFS with ETag and Range support.
 ///
-/// If the client provides an `If-None-Match` header matching the file's
-/// current content hash, returns 304 Not Modified instead of the full file.
-fn serve_file(vfs_path: &str, method: &str, if_none_match: &Option<String>) -> Vec<u8> {
+/// Supports:
+/// - ETag conditional requests (If-None-Match → 304 Not Modified)
+/// - Range requests (Range: bytes=N-M → 206 Partial Content)
+/// - HEAD method (headers only)
+fn serve_file(vfs_path: &str, method: &str, if_none_match: &Option<String>, range: &Option<String>) -> Vec<u8> {
     use crate::fs::vfs::Vfs;
 
     match Vfs::read_file(vfs_path) {
@@ -622,6 +734,18 @@ fn serve_file(vfs_path: &str, method: &str, if_none_match: &Option<String>) -> V
             }
 
             let content_type = mime_for_path(vfs_path);
+            let etag = etag_for_body(&data);
+
+            // Range request: serve partial content.
+            if let Some(range_header) = range {
+                if method != "HEAD" {
+                    if let Some((start, end)) = parse_range(range_header, data.len()) {
+                        return partial_content_response(content_type, &data, start, end, &etag);
+                    } else {
+                        return range_not_satisfiable(data.len());
+                    }
+                }
+            }
 
             if method == "HEAD" {
                 build_head_response(200, "OK", content_type, data.len())
@@ -927,7 +1051,7 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
             };
 
             if Vfs::stat(&index_path).is_ok() {
-                serve_file(&index_path, &req.method, &req.if_none_match)
+                serve_file(&index_path, &req.method, &req.if_none_match, &req.range)
             } else {
                 match directory_listing(&vfs_path, &req.path) {
                     Ok(body) => {
@@ -946,7 +1070,7 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
                 }
             }
         }
-        Ok(_) => serve_file(&vfs_path, &req.method, &req.if_none_match),
+        Ok(_) => serve_file(&vfs_path, &req.method, &req.if_none_match, &req.range),
         Err(KernelError::NotFound) => error_response(404, "Not Found"),
         Err(KernelError::PermissionDenied) => error_response(403, "Forbidden"),
         Err(_) => error_response(500, "Internal Server Error"),
@@ -1212,7 +1336,57 @@ pub fn self_test() -> KernelResult<()> {
     assert!(request_count() > before, "Request counter should increment");
     serial_println!("[httpd]   Request statistics: OK");
 
-    serial_println!("[httpd] Self-test PASSED (19 tests)");
+    // Test 20: Range header parsing.
+    // Standard range: bytes=0-99
+    assert_eq!(parse_range("bytes=0-99", 1000), Some((0, 99)));
+    // Open-ended range: bytes=500-
+    assert_eq!(parse_range("bytes=500-", 1000), Some((500, 999)));
+    // Suffix range: bytes=-200 (last 200 bytes)
+    assert_eq!(parse_range("bytes=-200", 1000), Some((800, 999)));
+    // Start beyond file size: invalid.
+    assert_eq!(parse_range("bytes=1000-1500", 1000), None);
+    // End clamped to file size.
+    assert_eq!(parse_range("bytes=900-2000", 1000), Some((900, 999)));
+    // Single byte range.
+    assert_eq!(parse_range("bytes=0-0", 100), Some((0, 0)));
+    // Invalid: no "bytes=" prefix.
+    assert_eq!(parse_range("chars=0-100", 1000), None);
+    // Invalid: multi-range (unsupported).
+    assert_eq!(parse_range("bytes=0-100,200-300", 1000), None);
+    // Invalid: start > end.
+    assert_eq!(parse_range("bytes=500-100", 1000), None);
+    // Empty file with suffix range.
+    assert_eq!(parse_range("bytes=-100", 0), None);
+    serial_println!("[httpd]   Range header parsing: OK");
+
+    // Test 21: 206 Partial Content response.
+    let data = b"Hello, World! This is test content for range requests.";
+    let resp = partial_content_response("text/plain", data, 7, 11, "\"test-etag\"");
+    let resp_str = core::str::from_utf8(&resp).unwrap_or("");
+    assert!(resp_str.starts_with("HTTP/1.1 206 Partial Content\r\n"));
+    assert!(resp_str.contains("Content-Range: bytes 7-11/54\r\n"));
+    assert!(resp_str.contains("Content-Length: 5\r\n"));
+    assert!(resp_str.contains("Accept-Ranges: bytes\r\n"));
+    assert!(resp_str.ends_with("World"));
+    serial_println!("[httpd]   Partial content response: OK");
+
+    // Test 22: 416 Range Not Satisfiable response.
+    let resp416 = range_not_satisfiable(1000);
+    let resp416_str = core::str::from_utf8(&resp416).unwrap_or("");
+    assert!(resp416_str.starts_with("HTTP/1.1 416 Range Not Satisfiable\r\n"));
+    assert!(resp416_str.contains("Content-Range: bytes */1000\r\n"));
+    serial_println!("[httpd]   416 Range Not Satisfiable: OK");
+
+    // Test 23: Range header in request parsing.
+    let req = parse_request(
+        b"GET /bigfile.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=0-1023\r\n\r\n"
+    );
+    assert!(req.is_some());
+    let r = req.unwrap();
+    assert_eq!(r.range.as_deref(), Some("bytes=0-1023"));
+    serial_println!("[httpd]   Range header in request: OK");
+
+    serial_println!("[httpd] Self-test PASSED (23 tests)");
     Ok(())
 }
 

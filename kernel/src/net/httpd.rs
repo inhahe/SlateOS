@@ -365,7 +365,7 @@ fn etag_for_body(body: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Request statistics
+// Request statistics and access log
 // ---------------------------------------------------------------------------
 
 /// Atomic request counter.
@@ -375,6 +375,96 @@ static REQUEST_COUNT: core::sync::atomic::AtomicU64 =
 /// Atomic 304 Not Modified counter (ETag cache hits).
 static NOT_MODIFIED_COUNT: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
+
+/// Atomic 206 Partial Content counter (Range request hits).
+static PARTIAL_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Maximum entries in the access log ring buffer.
+const ACCESS_LOG_SIZE: usize = 64;
+
+/// A single access log entry.
+#[derive(Clone)]
+pub struct AccessLogEntry {
+    /// HTTP method (GET, HEAD, etc.).
+    pub method: String,
+    /// Request path.
+    pub path: String,
+    /// HTTP status code returned.
+    pub status: u16,
+    /// Response body size in bytes.
+    pub body_size: usize,
+}
+
+/// Ring buffer for recent HTTP access logs.
+static ACCESS_LOG: spin::Mutex<AccessLog> = spin::Mutex::new(AccessLog::new());
+
+/// Fixed-size ring buffer for access log entries.
+struct AccessLog {
+    entries: [Option<AccessLogEntry>; ACCESS_LOG_SIZE],
+    write_idx: usize,
+    total: u64,
+}
+
+impl AccessLog {
+    const fn new() -> Self {
+        // Initialize with None entries.
+        const NONE: Option<AccessLogEntry> = None;
+        Self {
+            entries: [NONE; ACCESS_LOG_SIZE],
+            write_idx: 0,
+            total: 0,
+        }
+    }
+
+    /// Push a new entry, overwriting the oldest if the buffer is full.
+    #[allow(clippy::arithmetic_side_effects)]
+    fn push(&mut self, entry: AccessLogEntry) {
+        self.entries[self.write_idx] = Some(entry);
+        self.write_idx = (self.write_idx + 1) % ACCESS_LOG_SIZE;
+        self.total = self.total.wrapping_add(1);
+    }
+
+    /// Get recent entries in chronological order (oldest first).
+    fn recent(&self, count: usize) -> Vec<&AccessLogEntry> {
+        let mut result = Vec::new();
+        let avail = core::cmp::min(self.total as usize, ACCESS_LOG_SIZE);
+        let start = if avail >= count {
+            avail.saturating_sub(count)
+        } else {
+            0
+        };
+
+        for i in start..avail {
+            #[allow(clippy::arithmetic_side_effects)]
+            let idx = (self.write_idx + ACCESS_LOG_SIZE - avail + i) % ACCESS_LOG_SIZE;
+            if let Some(entry) = &self.entries[idx] {
+                result.push(entry);
+            }
+        }
+        result
+    }
+}
+
+/// Log an HTTP request to the access log ring buffer.
+fn log_access(method: &str, path: &str, status: u16, body_size: usize) {
+    ACCESS_LOG.lock().push(AccessLogEntry {
+        method: String::from(method),
+        path: String::from(path),
+        status,
+        body_size,
+    });
+}
+
+/// Get the N most recent access log entries.
+pub fn recent_access_log(count: usize) -> Vec<AccessLogEntry> {
+    ACCESS_LOG.lock().recent(count).into_iter().cloned().collect()
+}
+
+/// Get the number of 206 Partial Content responses (Range request hits).
+pub fn partial_count() -> u64 {
+    PARTIAL_COUNT.load(Ordering::Relaxed)
+}
 
 /// Get the total number of requests served (HTTP + HTTPS).
 pub fn request_count() -> u64 {
@@ -400,6 +490,7 @@ fn build_response(status: u16, reason: &str, content_type: &str, body: &[u8]) ->
          Content-Type: {}\r\n\
          Content-Length: {}\r\n\
          ETag: {}\r\n\
+         Accept-Ranges: bytes\r\n\
          Cache-Control: no-cache\r\n\
          Connection: close\r\n\
          \r\n",
@@ -559,6 +650,25 @@ fn error_response(status: u16, reason: &str) -> Vec<u8> {
         status, reason, status, reason,
     );
     build_response(status, reason, "text/html; charset=utf-8", body.as_bytes())
+}
+
+/// Extract the HTTP status code from a raw response.
+///
+/// All our responses start with `HTTP/1.1 NNN `, where NNN is the 3-digit
+/// status code at byte offsets 9..12.  Returns 0 if the response is
+/// malformed or too short.
+fn extract_status(response: &[u8]) -> u16 {
+    // "HTTP/1.1 " is 9 bytes, then 3 ASCII digits.
+    if response.len() < 12 {
+        return 0;
+    }
+    let hundreds = response[9].wrapping_sub(b'0') as u16;
+    let tens = response[10].wrapping_sub(b'0') as u16;
+    let ones = response[11].wrapping_sub(b'0') as u16;
+    if hundreds > 9 || tens > 9 || ones > 9 {
+        return 0;
+    }
+    hundreds * 100 + tens * 10 + ones
 }
 
 // ---------------------------------------------------------------------------
@@ -740,6 +850,7 @@ fn serve_file(vfs_path: &str, method: &str, if_none_match: &Option<String>, rang
             if let Some(range_header) = range {
                 if method != "HEAD" {
                     if let Some((start, end)) = parse_range(range_header, data.len()) {
+                        PARTIAL_COUNT.fetch_add(1, Ordering::Relaxed);
                         return partial_content_response(content_type, &data, start, end, &etag);
                     } else {
                         return range_not_satisfiable(data.len());
@@ -1003,10 +1114,9 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
         }
     };
 
-    serial_println!("[httpd/tls] {} {}", req.method, req.path);
-
     // Only allow GET and HEAD.
     if req.method != "GET" && req.method != "HEAD" {
+        log_access(&req.method, &req.path, 405, 0);
         return error_response(405, "Method Not Allowed");
     }
 
@@ -1017,13 +1127,16 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
             // auto-refresh dashboard that polls every 3 seconds).
             if etag_matches(&req.if_none_match, &body) {
                 NOT_MODIFIED_COUNT.fetch_add(1, Ordering::Relaxed);
+                log_access(&req.method, &req.path, 304, 0);
                 return not_modified_response(&etag_for_body(&body));
             }
+            let blen = body.len();
             let response = if req.method == "HEAD" {
-                build_head_response(200, "OK", &content_type, body.len())
+                build_head_response(200, "OK", &content_type, blen)
             } else {
                 build_response(200, "OK", &content_type, &body)
             };
+            log_access(&req.method, &req.path, 200, blen);
             return response;
         }
     }
@@ -1041,7 +1154,7 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
     // Check if path exists and is a directory or file.
     let meta = Vfs::stat(&vfs_path);
 
-    match meta {
+    let (response, status, body_len) = match meta {
         Ok(m) if m.entry_type == EntryType::Directory => {
             // Try index.html first.
             let index_path = if vfs_path.ends_with('/') {
@@ -1051,30 +1164,57 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
             };
 
             if Vfs::stat(&index_path).is_ok() {
-                serve_file(&index_path, &req.method, &req.if_none_match, &req.range)
+                let r = serve_file(&index_path, &req.method, &req.if_none_match, &req.range);
+                let s = extract_status(&r);
+                let l = r.len();
+                (r, s, l)
             } else {
                 match directory_listing(&vfs_path, &req.path) {
                     Ok(body) => {
                         // ETag check for directory listings.
                         if etag_matches(&req.if_none_match, &body) {
                             NOT_MODIFIED_COUNT.fetch_add(1, Ordering::Relaxed);
-                            return not_modified_response(&etag_for_body(&body));
-                        }
-                        if req.method == "HEAD" {
-                            build_head_response(200, "OK", "text/html; charset=utf-8", body.len())
+                            let r = not_modified_response(&etag_for_body(&body));
+                            (r, 304, 0)
                         } else {
-                            build_response(200, "OK", "text/html; charset=utf-8", &body)
+                            let blen = body.len();
+                            let r = if req.method == "HEAD" {
+                                build_head_response(200, "OK", "text/html; charset=utf-8", blen)
+                            } else {
+                                build_response(200, "OK", "text/html; charset=utf-8", &body)
+                            };
+                            (r, 200, blen)
                         }
                     }
-                    Err(_) => error_response(500, "Internal Server Error"),
+                    Err(_) => {
+                        let r = error_response(500, "Internal Server Error");
+                        (r, 500, 0)
+                    }
                 }
             }
         }
-        Ok(_) => serve_file(&vfs_path, &req.method, &req.if_none_match, &req.range),
-        Err(KernelError::NotFound) => error_response(404, "Not Found"),
-        Err(KernelError::PermissionDenied) => error_response(403, "Forbidden"),
-        Err(_) => error_response(500, "Internal Server Error"),
-    }
+        Ok(_) => {
+            let r = serve_file(&vfs_path, &req.method, &req.if_none_match, &req.range);
+            let s = extract_status(&r);
+            let l = r.len();
+            (r, s, l)
+        }
+        Err(KernelError::NotFound) => {
+            let r = error_response(404, "Not Found");
+            (r, 404, 0)
+        }
+        Err(KernelError::PermissionDenied) => {
+            let r = error_response(403, "Forbidden");
+            (r, 403, 0)
+        }
+        Err(_) => {
+            let r = error_response(500, "Internal Server Error");
+            (r, 500, 0)
+        }
+    };
+
+    log_access(&req.method, &req.path, status, body_len);
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -1386,7 +1526,82 @@ pub fn self_test() -> KernelResult<()> {
     assert_eq!(r.range.as_deref(), Some("bytes=0-1023"));
     serial_println!("[httpd]   Range header in request: OK");
 
-    serial_println!("[httpd] Self-test PASSED (23 tests)");
+    // Test 24: extract_status from a 200 response.
+    let resp200 = build_response(200, "OK", "text/plain", b"hi");
+    assert_eq!(extract_status(&resp200), 200);
+    serial_println!("[httpd]   extract_status 200: OK");
+
+    // Test 25: extract_status from a 404 response.
+    let resp404 = error_response(404, "Not Found");
+    assert_eq!(extract_status(&resp404), 404);
+    serial_println!("[httpd]   extract_status 404: OK");
+
+    // Test 26: extract_status from 304 response.
+    let resp304 = not_modified_response("\"abc\"");
+    assert_eq!(extract_status(&resp304), 304);
+    serial_println!("[httpd]   extract_status 304: OK");
+
+    // Test 27: extract_status with empty/malformed input.
+    assert_eq!(extract_status(b""), 0);
+    assert_eq!(extract_status(b"short"), 0);
+    serial_println!("[httpd]   extract_status malformed: OK");
+
+    // Test 28: Access log ring buffer push and recent.
+    {
+        let mut log = AccessLog::new();
+        log.push(AccessLogEntry {
+            method: String::from("GET"),
+            path: String::from("/a"),
+            status: 200,
+            body_size: 100,
+        });
+        log.push(AccessLogEntry {
+            method: String::from("HEAD"),
+            path: String::from("/b"),
+            status: 304,
+            body_size: 0,
+        });
+        let recent = log.recent(10);
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].path, "/a");
+        assert_eq!(recent[1].path, "/b");
+
+        // Request only last 1 entry.
+        let last = log.recent(1);
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].path, "/b");
+    }
+    serial_println!("[httpd]   Access log ring buffer: OK");
+
+    // Test 29: Access log ring buffer wraps correctly.
+    {
+        let mut log = AccessLog::new();
+        // Fill past capacity to verify wrapping.
+        for i in 0..ACCESS_LOG_SIZE + 5 {
+            log.push(AccessLogEntry {
+                method: String::from("GET"),
+                path: format!("/{}", i),
+                status: 200,
+                body_size: i,
+            });
+        }
+        let recent = log.recent(ACCESS_LOG_SIZE);
+        assert_eq!(recent.len(), ACCESS_LOG_SIZE);
+        // Oldest entry should be #5 (indices 0-4 were overwritten).
+        assert_eq!(recent[0].path, "/5");
+        // Newest should be ACCESS_LOG_SIZE + 4.
+        let expected_last = format!("/{}", ACCESS_LOG_SIZE + 4);
+        assert_eq!(recent[ACCESS_LOG_SIZE - 1].path, expected_last);
+    }
+    serial_println!("[httpd]   Access log wrap: OK");
+
+    // Test 30: Accept-Ranges header in normal responses.
+    let resp_ar = build_response(200, "OK", "text/plain", b"test");
+    let resp_ar_str = core::str::from_utf8(&resp_ar).unwrap_or("");
+    assert!(resp_ar_str.contains("Accept-Ranges: bytes\r\n"));
+    serial_println!("[httpd]   Accept-Ranges header: OK");
+
+    serial_println!("[httpd] Self-test PASSED (30 tests)");
     Ok(())
 }
 
@@ -1405,5 +1620,54 @@ mod tests {
     fn test_percent_decode() {
         assert_eq!(percent_decode("/foo%20bar"), "/foo bar");
         assert_eq!(percent_decode("%41%42%43"), "ABC");
+    }
+
+    #[test]
+    fn test_extract_status() {
+        assert_eq!(extract_status(b"HTTP/1.1 200 OK\r\n"), 200);
+        assert_eq!(extract_status(b"HTTP/1.1 404 Not Found\r\n"), 404);
+        assert_eq!(extract_status(b"HTTP/1.1 304 Not Modified\r\n"), 304);
+        assert_eq!(extract_status(b"HTTP/1.1 206 Partial Content\r\n"), 206);
+        assert_eq!(extract_status(b"HTTP/1.1 416 Range Not Satisfiable\r\n"), 416);
+        // Malformed / too short.
+        assert_eq!(extract_status(b""), 0);
+        assert_eq!(extract_status(b"HTTP/1.1"), 0);
+        assert_eq!(extract_status(b"HTTP/1.1 XX"), 0);
+    }
+
+    #[test]
+    fn test_access_log_ring_buffer() {
+        let mut log = AccessLog::new();
+        assert_eq!(log.recent(10).len(), 0);
+
+        log.push(AccessLogEntry {
+            method: String::from("GET"),
+            path: String::from("/index.html"),
+            status: 200,
+            body_size: 512,
+        });
+        let entries = log.recent(10);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, 200);
+        assert_eq!(entries[0].path, "/index.html");
+    }
+
+    #[test]
+    fn test_access_log_wrap() {
+        let mut log = AccessLog::new();
+        for i in 0..ACCESS_LOG_SIZE + 10 {
+            log.push(AccessLogEntry {
+                method: String::from("GET"),
+                path: format!("/p{}", i),
+                status: 200,
+                body_size: 0,
+            });
+        }
+        let entries = log.recent(ACCESS_LOG_SIZE);
+        assert_eq!(entries.len(), ACCESS_LOG_SIZE);
+        // First entry should be #10 (0..9 overwritten).
+        assert_eq!(entries[0].path, "/p10");
+        // Last should be ACCESS_LOG_SIZE + 9.
+        assert_eq!(entries[ACCESS_LOG_SIZE - 1].path, format!("/p{}", ACCESS_LOG_SIZE + 9));
     }
 }

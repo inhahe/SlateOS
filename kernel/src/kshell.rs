@@ -34673,6 +34673,7 @@ fn cmd_httpd(args: &str) {
             shell_println!("  tls-stop               Stop HTTPS/TLS server");
             shell_println!("  status                 Show server status");
             shell_println!("  root [path]            Get/set document root");
+            shell_println!("  log [N]                Show last N access log entries (default: 20)");
             shell_println!("  test                   Run self-tests");
             shell_println!("");
             shell_println!("Examples:");
@@ -34732,6 +34733,23 @@ fn cmd_httpd(args: &str) {
             shell_println!("Statistics");
             shell_println!("  Requests:     {}", httpd::request_count());
             shell_println!("  304 hits:     {}", httpd::not_modified_count());
+            shell_println!("  206 ranges:   {}", httpd::partial_count());
+        }
+        "log" => {
+            let count: usize = parts.get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(20);
+            let entries = httpd::recent_access_log(count);
+            if entries.is_empty() {
+                shell_println!("No access log entries.");
+            } else {
+                shell_println!("{:<6} {:<5} {:<8} {}", "METHOD", "CODE", "SIZE", "PATH");
+                shell_println!("{}", "-".repeat(60));
+                for e in &entries {
+                    shell_println!("{:<6} {:<5} {:<8} {}", e.method, e.status, e.body_size, e.path);
+                }
+                shell_println!("({} entries shown)", entries.len());
+            }
         }
         "root" => {
             let path = parts.get(1).copied().unwrap_or("");

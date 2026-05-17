@@ -323,8 +323,29 @@ Remaining net improvements (diminishing returns):
   failure/zero.  This disables std's stack overflow detection.  Real
   implementations in the posix crate would fix this.
 
-- TODO: Validate toolchain with a more complex program before attempting
-  Nushell port.  Key areas: file I/O, process spawning, pipes.
+- DONE: Validated toolchain — built 8 coreutils (echo, cat, ls, head, wc,
+  mkdir, rm, cp) as real ELF binaries, 655 KiB to 1.2 MiB each.
+
+- DONE: Nushell full type-check passes for our custom target!
+  All crates (nu-parser, nu-protocol, nu-engine, nu-command, nu-cli, nu-lsp,
+  nu top-level) pass `cargo check` with --no-default-features.
+  Required patches:
+  1. Top-level Cargo.toml: removed features=["os"] from nu-command dep
+  2. nu-cli/Cargo.toml: same
+  3. nu-command/src/filters/tee.rs: added #[cfg(not(feature="os"))] match arm
+  Build command:
+    INCLUDE="<msvc>;ucrt;shared;um" CC_x86_64_ouros=cl.exe AR_x86_64_ouros=llvm-ar.exe \
+    RUSTUP_TOOLCHAIN=nightly-x86_64-pc-windows-msvc \
+    cargo check -Zbuild-std=core,alloc,std,panic_abort --target ../toolchain/x86_64-ouros.json \
+    --release --no-default-features
+
+- TODO (Nushell next steps):
+  1. Re-enable nu-command "os" feature incrementally — need to replace/stub
+     problematic C deps: blake3 (assembly), libgit2-sys (poll.h), fff-search
+  2. crossterm/reedline — terminal I/O, needs our OS's terminal driver
+  3. ctrlc/nix — signal handling, needs POSIX signal support
+  4. Attempt full `cargo build` (not just check) — needs all C deps resolved
+  5. sysinfo — system information, needs /proc or equivalent
 
 - NOTE: Cross-zone inclusion — commit 41b1a04 (posix batch 83) accidentally
   included toolchain/ and userspace/shell/ files via git add -A in the osb

@@ -28,6 +28,7 @@ pub mod dialog;
 pub mod dnd;
 pub mod event;
 pub mod layout;
+pub mod menu;
 pub mod render;
 pub mod style;
 pub mod tabs;

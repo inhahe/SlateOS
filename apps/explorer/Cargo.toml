@@ -1,0 +1,20 @@
+[package]
+name = "explorer"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS File Explorer — graphical file manager with tree view"
+
+# Standalone crate — not part of the kernel workspace.
+[workspace]
+
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

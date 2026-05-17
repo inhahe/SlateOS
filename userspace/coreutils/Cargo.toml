@@ -2,7 +2,7 @@
 name = "coreutils"
 version = "0.1.0"
 edition = "2024"
-description = "Basic userspace utilities (cat, echo, ls, mkdir, head, wc, cp, rm, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename)"
+description = "Basic userspace utilities (cat, echo, ls, mkdir, head, wc, cp, rm, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr)"
 
 # Standalone crate — not part of the kernel workspace.
 [workspace]
@@ -71,3 +71,43 @@ path = "src/bin/uname.rs"
 [[bin]]
 name = "basename"
 path = "src/bin/basename.rs"
+
+[[bin]]
+name = "dirname"
+path = "src/bin/dirname.rs"
+
+[[bin]]
+name = "tee"
+path = "src/bin/tee.rs"
+
+[[bin]]
+name = "rmdir"
+path = "src/bin/rmdir.rs"
+
+[[bin]]
+name = "seq"
+path = "src/bin/seq.rs"
+
+[[bin]]
+name = "yes"
+path = "src/bin/yes.rs"
+
+[[bin]]
+name = "which"
+path = "src/bin/which.rs"
+
+[[bin]]
+name = "date"
+path = "src/bin/date.rs"
+
+[[bin]]
+name = "uniq"
+path = "src/bin/uniq.rs"
+
+[[bin]]
+name = "cut"
+path = "src/bin/cut.rs"
+
+[[bin]]
+name = "tr"
+path = "src/bin/tr.rs"

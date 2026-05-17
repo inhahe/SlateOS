@@ -32,11 +32,13 @@ pub mod grid;
 pub mod layout;
 pub mod menu;
 pub mod modal;
+pub mod pathbar;
 pub mod render;
 pub mod signal;
 pub mod style;
 pub mod tabs;
 pub mod textview;
+pub mod theme;
 pub mod tree;
 pub mod widget;
 

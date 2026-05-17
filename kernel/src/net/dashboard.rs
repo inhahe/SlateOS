@@ -18,6 +18,8 @@
 //! | `/api/firewall`    | JSON: firewall status, rules, conntrack count |
 //! | `/api/bench`       | JSON: benchmark scorecard (pass/fail, targets)  |
 //! | `/api/health`      | JSON: aggregated health check for monitoring    |
+//! | `/api/ipv6`        | JSON: IPv6 addresses, SLAAC, DHCPv6 status      |
+//! | `/api/containers`  | JSON: active container list with details         |
 //! | `/metrics`         | Prometheus text format metrics for monitoring   |
 //!
 //! ## Integration
@@ -110,6 +112,12 @@ pub fn handle_api_request(path: &str) -> Option<(String, Vec<u8>)> {
         }
         "/api/health" => {
             Some((String::from("application/json"), api_health()))
+        }
+        "/api/ipv6" => {
+            Some((String::from("application/json"), api_ipv6()))
+        }
+        "/api/containers" => {
+            Some((String::from("application/json"), api_containers()))
         }
         "/metrics" => {
             Some((String::from("text/plain; version=0.0.4; charset=utf-8"), api_metrics()))
@@ -431,6 +439,141 @@ fn api_bench() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// /api/ipv6
+// ---------------------------------------------------------------------------
+
+fn api_ipv6() -> Vec<u8> {
+    use crate::net::icmpv6;
+    use crate::net::dhcpv6;
+    use crate::net::ipv6::Ipv6Addr;
+
+    let link_local = {
+        let iface = crate::net::interface::info();
+        if iface.up {
+            Some(Ipv6Addr::from_mac_link_local(&iface.mac))
+        } else {
+            None
+        }
+    };
+
+    let ra_received = icmpv6::ra_received();
+    let global_addr = icmpv6::slaac_global_addr();
+    let (slaac_addrs, slaac_count) = icmpv6::slaac_addresses();
+    let rdnss = icmpv6::slaac_rdnss();
+    let router = if ra_received { Some(icmpv6::slaac_router()) } else { None };
+
+    let dhcpv6 = dhcpv6::stats();
+
+    let mut json = String::from(r#"{"link_local":"#);
+    if let Some(ll) = link_local {
+        json.push_str(&format!(r#""{}""#, ll));
+    } else {
+        json.push_str("null");
+    }
+
+    json.push_str(r#","slaac":{"ra_received":"#);
+    json.push_str(if ra_received { "true" } else { "false" });
+
+    json.push_str(r#","addresses":["#);
+    for i in 0..slaac_count {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push_str(&format!(
+            r#"{{"addr":"{}","prefix_len":{}}}"#,
+            slaac_addrs[i].0,
+            slaac_addrs[i].1,
+        ));
+    }
+    json.push(']');
+
+    if let Some(r) = router {
+        json.push_str(&format!(r#","router":"{}""#, r));
+    }
+    if let Some(d) = rdnss {
+        json.push_str(&format!(r#","rdnss":"{}""#, d));
+    }
+    json.push('}');
+
+    // DHCPv6 section.
+    json.push_str(&format!(
+        concat!(
+            r#","dhcpv6":{{"state":"{}","has_address":{},"#,
+            r#""solicits_sent":{},"requests_sent":{},"info_requests":{},"#,
+            r#""replies":{},"errors":{}"#,
+        ),
+        json_escape(dhcpv6.state),
+        dhcpv6.has_address,
+        dhcpv6.solicits_sent,
+        dhcpv6.requests_sent,
+        dhcpv6.info_requests_sent,
+        dhcpv6.replies_received,
+        dhcpv6.errors,
+    ));
+    if let Some(addr) = dhcpv6.address {
+        json.push_str(&format!(r#","address":"{}""#, addr));
+    }
+    if let Some(dns) = dhcpv6.dns_server {
+        json.push_str(&format!(r#","dns":"{}""#, dns));
+    }
+    json.push_str("}}");
+
+    json.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
+// /api/containers
+// ---------------------------------------------------------------------------
+
+fn api_containers() -> Vec<u8> {
+    // The container subsystem may not be initialized during early boot.
+    // Check safely by trying to lock the table and inspecting the Option.
+    if !crate::container::is_initialized() {
+        return br#"{"active_count":0,"containers":[]}"#.to_vec();
+    }
+
+    let containers = crate::container::list();
+    let count = crate::container::active_count();
+
+    let mut json = format!(r#"{{"active_count":{},"containers":["#, count);
+
+    for (i, (id, name, state)) in containers.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        let state_str = match state {
+            crate::container::ContainerState::Created => "created",
+            crate::container::ContainerState::Running => "running",
+            crate::container::ContainerState::Stopped => "stopped",
+            crate::container::ContainerState::Failed => "failed",
+        };
+
+        json.push_str(&format!(
+            r#"{{"id":{},"name":"{}","state":"{}""#,
+            id,
+            json_escape(name),
+            state_str,
+        ));
+
+        // Enrich with full info if available.
+        if let Some(info) = crate::container::info(*id) {
+            json.push_str(&format!(
+                r#","pid_ns":{},"net_ns":{},"cgroup_id":{},"nr_procs":{}"#,
+                info.pid_ns,
+                info.net_ns,
+                info.cgroup_id,
+                info.nr_procs,
+            ));
+        }
+
+        json.push('}');
+    }
+
+    json.push_str("]}");
+    json.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
 // /api/health
 // ---------------------------------------------------------------------------
 
@@ -719,6 +862,17 @@ tr:hover td { background: #1c2128; }
   </div>
 </div>
 
+<div class="grid" style="margin-top:16px">
+  <div class="card">
+    <h2>IPv6</h2>
+    <div id="ipv6-stats"></div>
+  </div>
+  <div class="card">
+    <h2>Containers</h2>
+    <div id="ct-stats"></div>
+  </div>
+</div>
+
 <div class="card" style="margin-bottom:16px">
   <h2>Benchmarks <span id="bench-summary" style="font-size:12px;color:#8b949e;text-transform:none;letter-spacing:0"></span></h2>
   <table>
@@ -762,7 +916,7 @@ function bar(pct, cls) {
 
 async function update() {
   try {
-    var [sr,tr,nr,mr,hr,dr,fr,br] = await Promise.all([
+    var [sr,tr,nr,mr,hr,dr,fr,br,v6r,ctr] = await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/tasks').then(r=>r.json()),
       fetch('/api/network').then(r=>r.json()),
@@ -771,6 +925,8 @@ async function update() {
       fetch('/api/dns').then(r=>r.json()),
       fetch('/api/firewall').then(r=>r.json()),
       fetch('/api/bench').then(r=>r.json()),
+      fetch('/api/ipv6').then(r=>r.json()),
+      fetch('/api/containers').then(r=>r.json()),
     ]);
     var memPct = sr.memory.total_bytes>0 ?
       Math.round(sr.memory.used_bytes*100/sr.memory.total_bytes) : 0;
@@ -831,6 +987,24 @@ async function update() {
       stat('Default Policy', fr.default_policy) +
       stat('Rules', fr.rules.length) +
       stat('Conntrack', fr.conntrack_entries);
+    var v6h = stat('Link-Local', v6r.link_local||'none');
+    if(v6r.slaac.ra_received){
+      v6r.slaac.addresses.forEach(function(a){v6h+=stat('Global', a.addr+'/'+a.prefix_len, 'ok');});
+      if(v6r.slaac.router)v6h+=stat('Router', v6r.slaac.router);
+      if(v6r.slaac.rdnss)v6h+=stat('RDNSS', v6r.slaac.rdnss);
+    } else {
+      v6h+=stat('SLAAC', 'No RA received');
+    }
+    v6h+=stat('DHCPv6', v6r.dhcpv6.state, v6r.dhcpv6.has_address?'ok':'');
+    if(v6r.dhcpv6.address)v6h+=stat('DHCPv6 Addr', v6r.dhcpv6.address, 'ok');
+    if(v6r.dhcpv6.dns)v6h+=stat('DHCPv6 DNS', v6r.dhcpv6.dns);
+    document.getElementById('ipv6-stats').innerHTML=v6h;
+    var cth='';
+    if(ctr.active_count===0){cth=stat('Status','No active containers');}
+    else{cth=stat('Active',ctr.active_count);
+      ctr.containers.forEach(function(c){var sc=c.state==='running'?'ok':(c.state==='failed'?'warn':'');cth+=stat(c.name,c.state+(c.nr_procs!==undefined?' ('+c.nr_procs+' procs)':''),sc);});
+    }
+    document.getElementById('ct-stats').innerHTML=cth;
     function nsFmt(ns){if(ns>=1000000)return (ns/1000000).toFixed(1)+'ms';if(ns>=1000)return (ns/1000).toFixed(1)+'us';return ns+'ns';}
     var bs=br.summary;
     document.getElementById('bench-summary').textContent=bs.total>0?
@@ -930,6 +1104,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(handle_api_request("/api/firewall").is_some());
         assert!(handle_api_request("/api/bench").is_some());
         assert!(handle_api_request("/api/health").is_some());
+        assert!(handle_api_request("/api/ipv6").is_some());
+        assert!(handle_api_request("/api/containers").is_some());
         assert!(handle_api_request("/metrics").is_some());
         assert!(handle_api_request("/not-an-api").is_none());
         assert!(handle_api_request("/api/nonexistent").is_none());
@@ -1035,6 +1211,32 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!("[dashboard]   Prometheus metrics: OK ({} bytes)", metrics.len());
     }
 
-    serial_println!("[dashboard] Self-test PASSED (13 tests)");
+    // Test 14: API ipv6 returns valid JSON with expected fields.
+    {
+        let ipv6 = api_ipv6();
+        assert!(!ipv6.is_empty());
+        assert_eq!(ipv6[0], b'{');
+        assert_eq!(ipv6[ipv6.len().saturating_sub(1)], b'}');
+        let ipv6_str = core::str::from_utf8(&ipv6).unwrap_or("");
+        assert!(ipv6_str.contains("\"link_local\""));
+        assert!(ipv6_str.contains("\"slaac\""));
+        assert!(ipv6_str.contains("\"dhcpv6\""));
+        assert!(ipv6_str.contains("\"state\""));
+        serial_println!("[dashboard]   API ipv6: OK ({} bytes)", ipv6.len());
+    }
+
+    // Test 15: API containers returns valid JSON with expected fields.
+    {
+        let ct = api_containers();
+        assert!(!ct.is_empty());
+        assert_eq!(ct[0], b'{');
+        assert_eq!(ct[ct.len().saturating_sub(1)], b'}');
+        let ct_str = core::str::from_utf8(&ct).unwrap_or("");
+        assert!(ct_str.contains("\"active_count\""));
+        assert!(ct_str.contains("\"containers\""));
+        serial_println!("[dashboard]   API containers: OK ({} bytes)", ct.len());
+    }
+
+    serial_println!("[dashboard] Self-test PASSED (15 tests)");
     Ok(())
 }

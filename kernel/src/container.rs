@@ -283,6 +283,11 @@ impl ContainerTable {
 
 static TABLE: Mutex<Option<ContainerTable>> = Mutex::new(None);
 
+/// Check whether the container subsystem has been initialized.
+pub fn is_initialized() -> bool {
+    TABLE.lock().is_some()
+}
+
 /// Initialize the container manager.
 pub fn init() {
     let mut table = TABLE.lock();

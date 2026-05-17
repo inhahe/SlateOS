@@ -125,6 +125,9 @@ pub fn heartbeat() {
 /// [`LOCKUP_THRESHOLD_TICKS`] consecutive ticks (checked every
 /// CHECK_INTERVAL_TICKS, so the number of stale checks before trigger =
 /// LOCKUP_THRESHOLD_TICKS / CHECK_INTERVAL_TICKS).
+///
+/// CPUs in tickless idle are exempt — their APIC timer is stopped, so
+/// they legitimately send no heartbeats.
 pub fn check() {
     if ENABLED.load(Ordering::Acquire) == 0 {
         return;
@@ -135,6 +138,17 @@ pub fn check() {
     let stale_threshold = LOCKUP_THRESHOLD_TICKS / CHECK_INTERVAL_TICKS;
 
     for cpu in 0..cpus {
+        // Skip CPUs in tickless idle — their APIC timer is stopped so
+        // they legitimately send no heartbeats.  Reset stale count so
+        // we don't carry over a partial count from before the CPU went
+        // idle.
+        if crate::sched::cpu_is_idle(cpu) {
+            if let Some(sc) = STALE_COUNT.get(cpu) {
+                sc.store(0, Ordering::Relaxed);
+            }
+            continue;
+        }
+
         let current = HEARTBEATS.get(cpu)
             .map_or(0, |h| h.load(Ordering::Relaxed));
         let last = LAST_SEEN.get(cpu)

@@ -1394,13 +1394,13 @@ _Port ext4 first. Don't write a custom filesystem._
 
 ### 2.7 Shell and basic userspace tools
 - [ ] Port bash (POSIX compatibility)
-- [ ] Port or adopt Nushell as default shell (Rust, structured data piping)
-- [ ] Port coreutils (ls, cp, mv, rm, mkdir, cat, etc.)
+- [-] Port or adopt Nushell as default shell (Rust, structured data piping) — type-checks and links with os-minimal feature
+- [x] Port coreutils (69 binaries: echo, cat, ls, head, wc, mkdir, rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo, expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff, cmp, od, strings, uptime, free, unexpand, cal, time)
 - [ ] Port rsync (replaces robocopy need)
 - [ ] Port curl
 - [ ] Port ssh/sshd
-- [ ] Build custom grep (Rust, with unique features from Python grep)
-- [ ] Port find
+- [x] Build custom grep (Rust, regex support, line numbers, recursive, case-insensitive)
+- [x] Port find (glob matching, -name, -type, -maxdepth)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

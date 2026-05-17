@@ -30,6 +30,8 @@ pub mod event;
 pub mod layout;
 pub mod render;
 pub mod style;
+pub mod tabs;
+pub mod tree;
 pub mod widget;
 
 pub use color::Color;

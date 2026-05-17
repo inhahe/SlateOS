@@ -5,46 +5,27 @@
 
 ## What's needed
 
-Add the 8 coreutils binaries to the kernel's embedded binaries and
+Add the 60 coreutils binaries to the kernel's embedded binaries and
 deploy them to /bin/ on boot, alongside hello, ticker, and shell.
 
-In `kernel/src/main.rs`, add include_bytes for each:
+Recommend using a loop over the binary directory or a build script that
+scans `userspace/coreutils/target/x86_64-ouros/release/` for all
+binaries and generates `include_bytes!` statics automatically.
+
+Example pattern in `kernel/src/main.rs`:
 
 ```rust
-static ECHO_ELF: &[u8] = include_bytes!(
-    "../../userspace/coreutils/target/x86_64-ouros/release/echo"
-);
-static CAT_ELF: &[u8] = include_bytes!(
-    "../../userspace/coreutils/target/x86_64-ouros/release/cat"
-);
-static LS_ELF: &[u8] = include_bytes!(
-    "../../userspace/coreutils/target/x86_64-ouros/release/ls"
-);
-static HEAD_ELF: &[u8] = include_bytes!(
-    "../../userspace/coreutils/target/x86_64-ouros/release/head"
-);
-static WC_ELF: &[u8] = include_bytes!(
-    "../../userspace/coreutils/target/x86_64-ouros/release/wc"
-);
-static MKDIR_ELF: &[u8] = include_bytes!(
-    "../../userspace/coreutils/target/x86_64-ouros/release/mkdir"
-);
-static RM_ELF: &[u8] = include_bytes!(
-    "../../userspace/coreutils/target/x86_64-ouros/release/rm"
-);
-static CP_ELF: &[u8] = include_bytes!(
-    "../../userspace/coreutils/target/x86_64-ouros/release/cp"
-);
-```
+// One include_bytes per utility. Generate with a build script or
+// maintain a list. Key binaries (sorted):
+const COREUTILS: &[(&str, &[u8])] = &[
+    ("basename", include_bytes!("../../userspace/coreutils/target/x86_64-ouros/release/basename")),
+    ("cat", include_bytes!("../../userspace/coreutils/target/x86_64-ouros/release/cat")),
+    ("chmod", include_bytes!("../../userspace/coreutils/target/x86_64-ouros/release/chmod")),
+    // ... etc for all 60 binaries
+];
 
-And in VFS population, install each to /bin/:
-
-```rust
-for (name, elf) in [
-    ("echo", ECHO_ELF), ("cat", CAT_ELF), ("ls", LS_ELF),
-    ("head", HEAD_ELF), ("wc", WC_ELF), ("mkdir", MKDIR_ELF),
-    ("rm", RM_ELF), ("cp", CP_ELF),
-] {
+// At VFS init time:
+for (name, elf) in COREUTILS {
     let path = format!("/bin/{name}");
     if let Err(e) = fs::Vfs::write_file(&path, elf) {
         serial_println!("[init] WARNING: failed to write {}: {:?}", path, e);
@@ -63,20 +44,15 @@ interactive — users can list files, copy them, read them, etc.
 
 ## Sizes
 
-| Binary | Size |
-|--------|------|
-| echo   | 655 KiB |
-| cat    | 681 KiB |
-| ls     | 1.2 MiB |
-| head   | 682 KiB |
-| wc     | 680 KiB |
-| mkdir  | 657 KiB |
-| rm     | 1.2 MiB |
-| cp     | 1.2 MiB |
-| **Total** | **~6.0 MiB** |
+60 binaries, ranging from ~650 KiB to ~1.3 MiB each.
+Estimated total: ~45 MiB embedded in kernel image.
 
-This will increase the kernel image size by ~6 MiB. The debug build is
-already ~9MB, so this is significant but manageable.
+This is large — consider either:
+1. Embedding only essential utilities (echo, cat, ls, cp, mv, rm, mkdir,
+   chmod, stat, kill, ps, test, which, find) and loading the rest from
+   a disk image.
+2. Using a compressed initramfs instead of include_bytes!.
+3. Stripping with `opt-level = "z"` (currently using `"s"`).
 
 ## Build dependency
 
@@ -94,7 +70,16 @@ cd ../..
 cargo build --release
 ```
 
+## Full binary list (60 total)
+
+basename, cat, chmod, chown, comm, cp, cut, date, dd, df, dirname,
+du, echo, env, expand, expr, false, find, fold, grep, head, hostname,
+id, kill, ln, ls, md5sum, mkdir, mkfifo, mv, nice, nl, nohup, paste,
+printf, ps, pwd, readlink, realpath, rm, rmdir, seq, sha256sum, sleep,
+sort, stat, tail, tee, test, touch, tr, true, tty, uname, uniq, wc,
+which, whoami, xargs, yes
+
 ## Priority
 
-Medium-high — these utilities make the OS actually usable from a shell.
+High — these utilities make the OS actually usable from a shell.
 Can be batched with the shell embedding request.

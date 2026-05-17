@@ -776,14 +776,11 @@ pub fn run_all() {
     // Target from baselines.toml: < 10 µs (Linux: ~2-5 µs).
     bench_page_fault();
 
-    // --- ISR latency (timer interrupt hard-IRQ phase) ---
-    //
-    // Measures the time interrupts are disabled during the timer ISR:
-    // entry → tick counter increment → scheduler timer_tick → EOI.
-    // This is the hard-IRQ phase that blocks device interrupts.
-    //
-    // Target from baselines.toml: < 10 µs (37000 cycles).
-    bench_isr_latency();
+    // NOTE: bench_isr_latency() moved to end of sequence because it
+    // crashes under QEMU (page fault at near-null struct offset → double
+    // fault).  All benchmarks after the crash never run, so ISR goes last
+    // to avoid blocking the rest of the scorecard.  See todo.txt
+    // "Cross-Zone Bug Reports" for details.
 
     // --- VFS benchmarks (fs zone) ---
     bench_vfs_stat();
@@ -841,6 +838,19 @@ pub fn run_all() {
     bench_dashboard_api_status();
     bench_dashboard_api_health();
     bench_dashboard_api_metrics();
+
+    // --- ISR latency (timer interrupt hard-IRQ phase) ---
+    //
+    // Measures the time interrupts are disabled during the timer ISR:
+    // entry → tick counter increment → scheduler timer_tick → EOI.
+    // This is the hard-IRQ phase that blocks device interrupts.
+    //
+    // WARNING: This benchmark crashes under QEMU (page fault → double fault).
+    // It runs LAST so all other benchmarks get measured even if ISR crashes.
+    // See todo.txt "Cross-Zone Bug Reports" for details (kernel-core zone bug).
+    //
+    // Target from baselines.toml: < 10 µs (37000 cycles).
+    bench_isr_latency();
 
     // --- Print scorecard summary ---
     print_scorecard();

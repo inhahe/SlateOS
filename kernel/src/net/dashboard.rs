@@ -862,14 +862,27 @@ fn api_health() -> Vec<u8> {
     let task_count = crate::sched::task_list().len();
     let tasks_status = if task_count > 0 { "ok" } else { "critical" };
 
+    // Filesystem health: check block cache dirty ratio.
+    let bcache = crate::fs::cache::stats();
+    let fs_dirty_pct = if bcache.capacity > 0 {
+        bcache.entries_dirty.saturating_mul(100) / bcache.capacity
+    } else {
+        0
+    };
+    let fs_status = if fs_dirty_pct > 90 { "critical" }
+        else if fs_dirty_pct > 70 { "degraded" }
+        else { "ok" };
+
     // Uptime (seconds).
     let uptime_secs = crate::hrtimer::now_ns() / 1_000_000_000;
 
     // Overall status: worst of all individual checks.
-    let overall = if mem_status == "critical" || tasks_status == "critical" {
+    let overall = if mem_status == "critical" || tasks_status == "critical"
+                  || fs_status == "critical"
+    {
         "critical"
     } else if mem_status == "degraded" || net_status == "degraded"
-           || httpd_status == "degraded"
+           || httpd_status == "degraded" || fs_status == "degraded"
     {
         "degraded"
     } else {
@@ -882,13 +895,15 @@ fn api_health() -> Vec<u8> {
             r#""memory":{{"status":"{}","used_pct":{}}},"#,
             r#""network":{{"status":"{}","up":{}}},"#,
             r#""httpd":{{"status":"{}","running":{}}},"#,
-            r#""tasks":{{"status":"{}","count":{}}}}}}}"#,
+            r#""tasks":{{"status":"{}","count":{}}},"#,
+            r#""filesystem":{{"status":"{}","dirty_pct":{}}}}}}}"#,
         ),
         overall, uptime_secs,
         mem_status, mem_pct,
         net_status, net_up,
         httpd_status, httpd_running,
         tasks_status, task_count,
+        fs_status, fs_dirty_pct,
     );
 
     json.into_bytes()
@@ -1677,7 +1692,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(health_str.contains("\"network\""));
         assert!(health_str.contains("\"httpd\""));
         assert!(health_str.contains("\"tasks\""));
+        assert!(health_str.contains("\"filesystem\""));
         assert!(health_str.contains("\"used_pct\""));
+        assert!(health_str.contains("\"dirty_pct\""));
         // Status must be one of the three valid values.
         assert!(
             health_str.contains("\"ok\"")

@@ -1520,8 +1520,8 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Category filtering, hotkey activation (Super+Space)
 - [x] Ctrl+R run dialog (run_dialog.rs: text input, 50-entry history, fuzzy autocomplete, path resolution, Browse)
 - [ ] Sound mixer (per-app volume, show currently-playing apps first)
-- [ ] Light / dark / custom theme support
-- [ ] Theme color API for applications
+- [x] Light / dark / custom theme support (theme.rs: ThemeMode, 4 built-in themes, ThemeManager)
+- [x] Theme color API for applications (ThemeColors helper, semantic roles, derived states)
 - [ ] Multi-monitor support (deferred but planned)
 
 ### 3.5 GUI toolkit / widget API
@@ -1625,7 +1625,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] File type detection (18+ extensions), icon assignment
   - [x] View modes (Details/List/Icons), sort by name/size/date/type
   - [x] Toolbar, sidebar with quick-access locations, status bar
-  - [ ] Path bar with autocomplete
+  - [x] Path bar with autocomplete (pathbar.rs: breadcrumb + edit mode, Tab completion, overflow, validation)
   - [ ] Thumbnails (images, video, PDF)
   - [ ] Custom columns per file type, app-extensible columns
   - [ ] Drop zones for drag-and-drop (empty space = this dir, folder = into folder)

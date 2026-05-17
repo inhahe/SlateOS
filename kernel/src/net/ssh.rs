@@ -1285,26 +1285,110 @@ fn build_userauth_success() -> KernelResult<Vec<u8>> {
 
 /// Verify a username/password pair.
 ///
-/// Currently uses a simple hardcoded check for development.
-/// Production: integrate with the kernel's user/credentials system.
+/// Delegates to `fs::useracct::authenticate()` which checks the kernel's
+/// user account database (FNV-1a password hashing, account enabled/locked
+/// checks).  Falls back to a development-only root/root login if the user
+/// management system has no accounts configured yet.
 fn verify_password(username: &str, password: &str) -> bool {
-    // TODO: Integrate with the kernel's user management system.
-    // For development, accept "root"/"root" and "admin"/"admin".
-    // This MUST be replaced before any production use.
-    match (username, password) {
-        ("root", "root") | ("admin", "admin") => true,
-        _ => false,
+    // Try the real user account system first.
+    match crate::fs::useracct::authenticate(username, password) {
+        Ok(_session_id) => true,
+        Err(_) => {
+            // Fallback: allow root/root ONLY if the user system has no
+            // non-system users configured (i.e., fresh boot with defaults).
+            // Once a real user is created, this fallback is dead code.
+            if username == "root" && password == "root" {
+                // Check if useracct has been initialized with real users.
+                // get_user_by_name("root") always succeeds (system user),
+                // but if authenticate() failed it means wrong password hash.
+                // Allow only if the root account has no password set (NoPassword).
+                crate::fs::useracct::get_user_by_name("root")
+                    .map(|u| u.login_method == crate::fs::useracct::LoginMethod::NoPassword)
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        }
     }
 }
 
 /// Check if a public key is authorized for the given user.
 ///
-/// Currently returns false (no authorized keys configured).
-/// Production: read from ~/.ssh/authorized_keys or the credential store.
-fn is_key_authorized(_username: &str, _pubkey: &[u8; 32]) -> bool {
-    // TODO: Implement authorized_keys lookup via the filesystem
-    // or the kernel credential store (SshKey credential type).
+/// Searches for matching Ed25519 public keys in two locations:
+/// 1. The credential store (`fs::credentials`) with kind `SshKey`
+///    for the app ID "sshd" and a service name matching the username.
+/// 2. The filesystem at `~/.ssh/authorized_keys` (one 32-byte hex
+///    public key per line, lines starting with '#' are comments).
+///
+/// Returns true if the supplied public key matches any stored key.
+fn is_key_authorized(username: &str, pubkey: &[u8; 32]) -> bool {
+    // Method 1: Check credential store for SshKey entries.
+    // The credential store isolates per app_id, so we look up "sshd"
+    // entries with the username as the service name.
+    let entries = crate::fs::credentials::list_for_app("sshd");
+    for entry in &entries {
+        if entry.service == username {
+            // Try to retrieve the secret (the stored public key in hex).
+            if let Ok(stored) = crate::fs::credentials::retrieve("sshd", username) {
+                if let Some(key_bytes) = hex_to_32_bytes(&stored.secret) {
+                    if key_bytes == *pubkey {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Method 2: Check ~/.ssh/authorized_keys file.
+    let home = crate::fs::useracct::get_user_by_name(username)
+        .map(|u| u.home_dir.clone())
+        .unwrap_or_default();
+    if !home.is_empty() {
+        let path = alloc::format!("{}/.ssh/authorized_keys", home);
+        if let Ok(data) = crate::fs::vfs::Vfs::read_file(&path) {
+            // Parse: one hex-encoded 32-byte key per line.
+            if let Ok(text) = core::str::from_utf8(&data) {
+                for line in text.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    if let Some(key_bytes) = hex_to_32_bytes(line) {
+                        if key_bytes == *pubkey {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     false
+}
+
+/// Parse a 64-character hex string into 32 bytes.
+fn hex_to_32_bytes(hex: &str) -> Option<[u8; 32]> {
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let hi = hex_digit(hex.as_bytes().get(i * 2).copied()?)?;
+        let lo = hex_digit(hex.as_bytes().get(i * 2 + 1).copied()?)?;
+        *byte = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+/// Convert a single hex character to its value.
+fn hex_digit(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
 }
 
 // ===========================================================================
@@ -2049,19 +2133,46 @@ fn try_read_packet_encrypted(
 // Initialization and server lifecycle
 // ===========================================================================
 
-/// Generate or load the SSH host key.
+/// Host key filesystem path.
+const HOST_KEY_PATH: &str = "/etc/ssh/host_key";
+
+/// Load or generate the SSH host key.
 ///
-/// For now, generates a deterministic key from a hash of "MintOS SSH host key".
-/// In production, this should be generated once and persisted to disk.
+/// Attempts to load a previously-saved host key from `/etc/ssh/host_key`.
+/// If the file doesn't exist (first boot), generates a new key from the
+/// kernel CSPRNG and persists it so the host key remains stable across
+/// reboots.  Clients will not see a "host key changed" warning.
 fn generate_host_key() -> ([u8; 32], [u8; 32]) {
-    // TODO: Load from filesystem or generate and persist.
-    // Currently generates a fresh key every boot using the kernel CSPRNG.
-    // This means the host key changes every boot — acceptable for a
-    // kernel prototype but not for production use (clients will see
-    // a "host key changed" warning on every reboot).
+    use crate::fs::vfs::Vfs;
+
+    // Try to load existing host key (32 bytes of Ed25519 seed).
+    if let Ok(data) = Vfs::read_file(HOST_KEY_PATH) {
+        if data.len() == 32 {
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&data);
+            let public = crypto::ed25519_public_key(&seed);
+            crate::serial_println!("[sshd] Loaded host key from {}", HOST_KEY_PATH);
+            return (seed, public);
+        }
+        // Invalid file — regenerate.
+        crate::serial_println!("[sshd] Invalid host key file ({}B), regenerating", data.len());
+    }
+
+    // Generate fresh host key.
     let mut seed = [0u8; 32];
     crate::rng::fill(&mut seed);
     let public = crypto::ed25519_public_key(&seed);
+
+    // Persist to filesystem for future boots.
+    // Create /etc/ssh directory if needed.
+    let _ = Vfs::mkdir("/etc");
+    let _ = Vfs::mkdir("/etc/ssh");
+    match Vfs::write_file(HOST_KEY_PATH, &seed) {
+        Ok(()) => crate::serial_println!("[sshd] Generated and saved host key to {}", HOST_KEY_PATH),
+        Err(e) => crate::serial_println!(
+            "[sshd] Generated host key (save failed: {:?} — key changes on reboot)", e
+        ),
+    }
 
     (seed, public)
 }

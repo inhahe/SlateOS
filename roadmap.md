@@ -1582,15 +1582,48 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Dark theme (Catppuccin Mocha)
   - [ ] Syntax highlighting (token-based coloring)
   - [ ] Port Helix or integrate tree-sitter for advanced editing
-- [ ] Process explorer:
+- [-] Process explorer:
+  - [x] Sortable process table (PID, name, status, CPU%, memory, threads, priority, user)
+  - [x] Color-coded status, tree view with parent-child indentation
+  - [x] System overview tab: CPU history graph, memory bars, per-core utilization, uptime
+  - [x] Network tab: connections table, bandwidth graph
+  - [x] Details panel: threads, handles, capabilities, environment, command line
+  - [x] Toolbar: end process, new task, refresh, view mode toggle, filter
   - [ ] Identify process by clicking window, kill it
-  - [ ] Find by name, show subprocesses/threads/libraries/capabilities
-  - [ ] Pause, resume, kill, change priority, restart
   - [ ] Show what's blocking a process, what's waiting on its locks
-  - [ ] System resource graphs (CPU, RAM, disk, network over time)
-- [ ] Photo/video viewer
+- [-] Photo/video viewer:
+  - [x] Image format detection (BMP/PNG/JPEG/GIF magic bytes, header parsing for dimensions)
+  - [x] Zoom 25-400% (fit/actual/manual), pan, rotation (90° increments), flip H/V
+  - [x] Directory browsing with next/prev/first/last navigation
+  - [x] Slideshow mode (3/5/10/30s auto-advance, pause/resume, random order)
+  - [x] Info panel (dimensions, format, size, date, EXIF fields)
+  - [x] Thumbnail strip, toolbar (13 buttons), keyboard shortcuts (F5/F11/+/-/arrows)
+  - [ ] Video playback
 - [ ] Music player
-- [ ] Settings/configuration UI (comprehensive, centralized, Windows-inspired layout) — Python/fastpy candidate
+- [-] Terminal emulator (graphical):
+  - [x] VT100/xterm CSI sequences (cursor movement, erase, insert/delete, scroll, modes)
+  - [x] SGR colors (8-color, 256-color, truecolor), bold/dim/italic/underline/blink/inverse
+  - [x] OSC title setting, DEC private modes (DECCKM, DECTCEM, alt screen, bracketed paste)
+  - [x] Scrollback buffer (10k lines), scroll regions (DECSTBM)
+  - [x] UTF-8 multi-byte accumulator, cursor styles (block/underline/bar)
+  - [x] Keyboard translation (special keys → escape sequences, Ctrl+letter)
+  - [x] Selection support, visual bell, configurable tab stops, color scheme
+  - [ ] PTY integration with child process
+- [-] Calculator:
+  - [x] Standard and Scientific modes
+  - [x] Recursive descent expression parser (proper operator precedence)
+  - [x] Trig functions (sin/cos/tan/asin/acos/atan) with degree/radian toggle
+  - [x] ln, log10, sqrt, pow, factorial, pi, e, abs, floor, ceil, mod
+  - [x] History (last 20), memory operations (MS/MR/M+/M-/MC)
+  - [x] Keyboard shortcuts, error handling (div by zero, overflow, domain errors)
+- [-] Settings/configuration UI (comprehensive, centralized):
+  - [x] 8 category sidebar (System/Network/Personalization/Apps/Accounts/Privacy/Accessibility/Update)
+  - [x] Display page: resolution, refresh rate, scaling, night light
+  - [x] Sound page: output/input device, volume, system sounds, per-app volume
+  - [x] Themes page: light/dark/system, accent color picker (12 colors), transparency, animations
+  - [x] Network page: adapter status, IP config (DHCP/static), DNS, proxy
+  - [x] Search bar, toggle switches, sliders, dropdowns, dark theme
+  - [ ] All remaining settings pages (accounts, privacy, accessibility, update)
 - [ ] System information explorer (hardware info + OS info + tuning params) — Python/fastpy candidate
 - [ ] Backup program (snapshot-based, with all common backup types) — Python/fastpy candidate
 - [ ] Background file indexer (configurable paths/extensions, off by default) — Python/fastpy candidate

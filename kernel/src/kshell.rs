@@ -34728,6 +34728,10 @@ fn cmd_httpd(args: &str) {
                 if httpd::is_tls_running() { "running" } else { "stopped" }
             );
             shell_println!("  Port:         {}", httpd::tls_port());
+            shell_println!("");
+            shell_println!("Statistics");
+            shell_println!("  Requests:     {}", httpd::request_count());
+            shell_println!("  304 hits:     {}", httpd::not_modified_count());
         }
         "root" => {
             let path = parts.get(1).copied().unwrap_or("");

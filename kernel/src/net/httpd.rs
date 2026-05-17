@@ -188,6 +188,9 @@ fn mime_for_path(path: &str) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// Parsed HTTP request.
+/// Maximum number of headers to parse per request.
+const MAX_HEADERS: usize = 32;
+
 struct HttpRequest {
     /// HTTP method (GET, HEAD, etc.).
     method: String,
@@ -196,6 +199,11 @@ struct HttpRequest {
     /// HTTP version string.
     #[allow(dead_code)]
     version: String,
+    /// If-None-Match header value (for ETag conditional requests).
+    if_none_match: Option<String>,
+    /// Accept-Encoding header value (for future compression support).
+    #[allow(dead_code)]
+    accept_encoding: Option<String>,
 }
 
 /// Parse an HTTP request from raw bytes.
@@ -224,10 +232,39 @@ fn parse_request(data: &[u8]) -> Option<HttpRequest> {
     // Normalize the path to prevent traversal.
     let normalized = normalize_path(&decoded);
 
+    // Parse headers we care about.
+    let mut if_none_match = None;
+    let mut accept_encoding = None;
+    let mut header_count = 0;
+
+    for line in text.lines().skip(1) {
+        if line.is_empty() || line == "\r" {
+            break; // End of headers.
+        }
+        if header_count >= MAX_HEADERS {
+            break; // Safety limit.
+        }
+        header_count += 1;
+
+        if let Some(colon) = line.find(':') {
+            let name = line[..colon].trim();
+            let value = line[colon.saturating_add(1)..].trim();
+
+            // Case-insensitive header matching.
+            if name.eq_ignore_ascii_case("If-None-Match") {
+                if_none_match = Some(String::from(value));
+            } else if name.eq_ignore_ascii_case("Accept-Encoding") {
+                accept_encoding = Some(String::from(value));
+            }
+        }
+    }
+
     Some(HttpRequest {
         method,
         path: normalized,
         version,
+        if_none_match,
+        accept_encoding,
     })
 }
 
@@ -290,23 +327,81 @@ fn normalize_path(path: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// ETag generation (FNV-1a 64-bit hash)
+// ---------------------------------------------------------------------------
+
+/// FNV-1a 64-bit hash of a byte slice.
+///
+/// Fast non-cryptographic hash used for HTTP ETag generation.  FNV-1a
+/// produces well-distributed hashes for content fingerprinting and is
+/// deterministic: same content always produces the same ETag.
+#[allow(clippy::arithmetic_side_effects)]
+fn fnv1a_64(data: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for &byte in data {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+/// Generate an ETag string from body content.
+///
+/// Returns a strong ETag in the format `"fnv1a-<hex>"`.  The ETag
+/// changes whenever the content changes, enabling 304 Not Modified
+/// responses for conditional requests.
+fn etag_for_body(body: &[u8]) -> String {
+    let hash = fnv1a_64(body);
+    format!("\"fnv1a-{:016x}\"", hash)
+}
+
+// ---------------------------------------------------------------------------
+// Request statistics
+// ---------------------------------------------------------------------------
+
+/// Atomic request counter.
+static REQUEST_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Atomic 304 Not Modified counter (ETag cache hits).
+static NOT_MODIFIED_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Get the total number of requests served (HTTP + HTTPS).
+pub fn request_count() -> u64 {
+    REQUEST_COUNT.load(Ordering::Relaxed)
+}
+
+/// Get the number of 304 Not Modified responses (ETag cache hits).
+pub fn not_modified_count() -> u64 {
+    NOT_MODIFIED_COUNT.load(Ordering::Relaxed)
+}
+
+// ---------------------------------------------------------------------------
 // HTTP response building
 // ---------------------------------------------------------------------------
 
-/// Build an HTTP response with status, headers, and optional body.
+/// Build an HTTP response with status, headers, ETag, and body.
 #[allow(clippy::arithmetic_side_effects)]
 fn build_response(status: u16, reason: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
+    let etag = etag_for_body(body);
     let resp = format!(
         "HTTP/1.1 {} {}\r\n\
          Server: {}\r\n\
          Content-Type: {}\r\n\
          Content-Length: {}\r\n\
+         ETag: {}\r\n\
+         Cache-Control: no-cache\r\n\
          Connection: close\r\n\
          \r\n",
         status, reason,
         SERVER_NAME,
         content_type,
         body.len(),
+        etag,
     );
 
     let mut bytes = resp.into_bytes();
@@ -327,6 +422,21 @@ fn build_head_response(status: u16, reason: &str, content_type: &str, content_le
         SERVER_NAME,
         content_type,
         content_length,
+    );
+    resp.into_bytes()
+}
+
+/// Build a 304 Not Modified response with matching ETag.
+fn not_modified_response(etag: &str) -> Vec<u8> {
+    let resp = format!(
+        "HTTP/1.1 304 Not Modified\r\n\
+         Server: {}\r\n\
+         ETag: {}\r\n\
+         Cache-Control: no-cache\r\n\
+         Connection: close\r\n\
+         \r\n",
+        SERVER_NAME,
+        etag,
     );
     resp.into_bytes()
 }
@@ -492,14 +602,23 @@ fn handle_connection(conn_handle: usize) {
     let _ = tcp::close(conn_handle);
 }
 
-/// Serve a file from the VFS.
-fn serve_file(_conn_handle: usize, vfs_path: &str, method: &str) -> Vec<u8> {
+/// Serve a file from the VFS with ETag support.
+///
+/// If the client provides an `If-None-Match` header matching the file's
+/// current content hash, returns 304 Not Modified instead of the full file.
+fn serve_file(vfs_path: &str, method: &str, if_none_match: &Option<String>) -> Vec<u8> {
     use crate::fs::vfs::Vfs;
 
     match Vfs::read_file(vfs_path) {
         Ok(data) => {
             if data.len() > MAX_BODY_SIZE {
                 return error_response(413, "Payload Too Large");
+            }
+
+            // ETag conditional response: avoid resending unchanged files.
+            if etag_matches(if_none_match, &data) {
+                NOT_MODIFIED_COUNT.fetch_add(1, Ordering::Relaxed);
+                return not_modified_response(&etag_for_body(&data));
             }
 
             let content_type = mime_for_path(vfs_path);
@@ -711,14 +830,46 @@ fn contains_header_end(buf: &[u8]) -> bool {
     buf.windows(4).any(|w| w == b"\r\n\r\n")
 }
 
+/// Check if a client's If-None-Match header matches the computed ETag.
+///
+/// The client sends an ETag from a previous response.  If the content
+/// hasn't changed, the server returns 304 Not Modified instead of the
+/// full response body — saving bandwidth and latency.
+fn etag_matches(if_none_match: &Option<String>, body: &[u8]) -> bool {
+    if let Some(inm) = if_none_match {
+        let computed = etag_for_body(body);
+        // RFC 7232 §3.2: weak comparison ignores W/ prefix and compares
+        // opaque-tag.  We only generate strong ETags, so exact match suffices.
+        // Also handle comma-separated ETag lists (rarer but spec-valid).
+        for candidate in inm.split(',') {
+            let trimmed = candidate.trim();
+            // Strip weak indicator if present.
+            let tag = if trimmed.starts_with("W/") {
+                &trimmed[2..]
+            } else {
+                trimmed
+            };
+            if tag == computed {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Process an HTTP request and return the response bytes.
 ///
 /// This is the shared logic for both plain HTTP and HTTPS.
 /// Handles WebSocket detection (skipped for HTTPS), dashboard API,
-/// and VFS file serving.
+/// and VFS file serving.  Supports ETag conditional requests: if the
+/// client sends `If-None-Match` matching the current content hash,
+/// a 304 Not Modified response is returned instead of the full body.
 #[allow(clippy::arithmetic_side_effects)]
 fn process_http_request(request_data: &[u8]) -> Vec<u8> {
     use crate::fs::vfs::{Vfs, EntryType};
+
+    // Track request count.
+    REQUEST_COUNT.fetch_add(1, Ordering::Relaxed);
 
     // Parse the HTTP request.
     let req = match parse_request(request_data) {
@@ -738,6 +889,12 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
     // Dashboard API and HTML — intercept before VFS serving.
     if req.path.starts_with("/api/") || req.path == "/dashboard" || req.path == "/dashboard/" {
         if let Some((content_type, body)) = super::dashboard::handle_api_request(&req.path) {
+            // ETag check for dashboard API (especially useful for the
+            // auto-refresh dashboard that polls every 3 seconds).
+            if etag_matches(&req.if_none_match, &body) {
+                NOT_MODIFIED_COUNT.fetch_add(1, Ordering::Relaxed);
+                return not_modified_response(&etag_for_body(&body));
+            }
             let response = if req.method == "HEAD" {
                 build_head_response(200, "OK", &content_type, body.len())
             } else {
@@ -770,10 +927,15 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
             };
 
             if Vfs::stat(&index_path).is_ok() {
-                serve_file(0, &index_path, &req.method)
+                serve_file(&index_path, &req.method, &req.if_none_match)
             } else {
                 match directory_listing(&vfs_path, &req.path) {
                     Ok(body) => {
+                        // ETag check for directory listings.
+                        if etag_matches(&req.if_none_match, &body) {
+                            NOT_MODIFIED_COUNT.fetch_add(1, Ordering::Relaxed);
+                            return not_modified_response(&etag_for_body(&body));
+                        }
                         if req.method == "HEAD" {
                             build_head_response(200, "OK", "text/html; charset=utf-8", body.len())
                         } else {
@@ -784,7 +946,7 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
                 }
             }
         }
-        Ok(_) => serve_file(0, &vfs_path, &req.method),
+        Ok(_) => serve_file(&vfs_path, &req.method, &req.if_none_match),
         Err(KernelError::NotFound) => error_response(404, "Not Found"),
         Err(KernelError::PermissionDenied) => error_response(403, "Forbidden"),
         Err(_) => error_response(500, "Internal Server Error"),
@@ -986,7 +1148,71 @@ pub fn self_test() -> KernelResult<()> {
     assert!(resp3_str.starts_with("HTTP/1.1 400 Bad Request\r\n"));
     serial_println!("[httpd]   Malformed request handling: OK");
 
-    serial_println!("[httpd] Self-test PASSED (12 tests)");
+    // Test 13: FNV-1a hash determinism and uniqueness.
+    let h1 = fnv1a_64(b"hello");
+    let h2 = fnv1a_64(b"hello");
+    let h3 = fnv1a_64(b"world");
+    assert_eq!(h1, h2, "FNV hash must be deterministic");
+    assert_ne!(h1, h3, "Different inputs should produce different hashes");
+    assert_ne!(fnv1a_64(b""), fnv1a_64(b"\0"), "Empty vs null must differ");
+    serial_println!("[httpd]   FNV-1a hash: OK");
+
+    // Test 14: ETag generation.
+    let body = b"Hello, World!";
+    let etag1 = etag_for_body(body);
+    let etag2 = etag_for_body(body);
+    let etag3 = etag_for_body(b"Different content");
+    assert_eq!(etag1, etag2, "Same content must produce same ETag");
+    assert_ne!(etag1, etag3, "Different content must produce different ETag");
+    assert!(etag1.starts_with('"'), "ETag must be quoted");
+    assert!(etag1.ends_with('"'), "ETag must be quoted");
+    assert!(etag1.contains("fnv1a-"), "ETag must contain algorithm prefix");
+    serial_println!("[httpd]   ETag generation: OK");
+
+    // Test 15: ETag conditional matching.
+    let body = b"Test content for ETag";
+    let etag = etag_for_body(body);
+    let inm = Some(etag.clone());
+    assert!(etag_matches(&inm, body), "Matching ETag should return true");
+    assert!(!etag_matches(&inm, b"Changed content"), "Changed content should not match");
+    assert!(!etag_matches(&None, body), "No If-None-Match should not match");
+    // Comma-separated list (multiple ETags).
+    let multi_inm = Some(format!("\"other\", {}, \"another\"", etag));
+    assert!(etag_matches(&multi_inm, body), "ETag in comma list should match");
+    serial_println!("[httpd]   ETag conditional matching: OK");
+
+    // Test 16: Response includes ETag header.
+    let resp = build_response(200, "OK", "text/plain", b"ETag test body");
+    let resp_str = core::str::from_utf8(&resp).unwrap_or("");
+    assert!(resp_str.contains("ETag: \"fnv1a-"), "Response must include ETag header");
+    assert!(resp_str.contains("Cache-Control: no-cache"), "Response must include Cache-Control");
+    serial_println!("[httpd]   ETag in response: OK");
+
+    // Test 17: 304 Not Modified response format.
+    let etag = etag_for_body(b"some content");
+    let resp304 = not_modified_response(&etag);
+    let resp304_str = core::str::from_utf8(&resp304).unwrap_or("");
+    assert!(resp304_str.starts_with("HTTP/1.1 304 Not Modified\r\n"));
+    assert!(resp304_str.contains(&format!("ETag: {}", etag)));
+    assert!(!resp304_str.contains("Content-Length:"), "304 should not have Content-Length");
+    serial_println!("[httpd]   304 Not Modified response: OK");
+
+    // Test 18: Request header parsing (If-None-Match).
+    let req = parse_request(
+        b"GET /index.html HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"fnv1a-abc123\"\r\n\r\n"
+    );
+    assert!(req.is_some());
+    let r = req.unwrap();
+    assert_eq!(r.if_none_match.as_deref(), Some("\"fnv1a-abc123\""));
+    serial_println!("[httpd]   If-None-Match header parsing: OK");
+
+    // Test 19: Request statistics tracking.
+    let before = request_count();
+    let _ = process_http_request(b"GET / HTTP/1.1\r\n\r\n");
+    assert!(request_count() > before, "Request counter should increment");
+    serial_println!("[httpd]   Request statistics: OK");
+
+    serial_println!("[httpd] Self-test PASSED (19 tests)");
     Ok(())
 }
 

@@ -371,6 +371,71 @@ pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) ->
 }
 
 // ---------------------------------------------------------------------------
+// Scorecard — automated baseline comparison
+// ---------------------------------------------------------------------------
+
+/// A single scorecard entry comparing a benchmark against its target.
+struct ScoreEntry {
+    name: &'static str,
+    measured_ns: u64,
+    target_ns: u64,
+    passed: bool,
+}
+
+/// Global scorecard for collecting benchmark pass/fail results.
+///
+/// Individual benchmark functions call `score()` to record their result.
+/// The scorecard is printed at the end of `run_all()` for quick
+/// regression detection.
+static SCORECARD: Mutex<alloc::vec::Vec<ScoreEntry>> = Mutex::new(alloc::vec::Vec::new());
+
+/// Record a benchmark result on the global scorecard.
+///
+/// Call from within benchmark functions after comparing against the target.
+/// The scorecard summary is printed at the end of `run_all()`.
+fn score(name: &'static str, result: &BenchResult, target_ns: u64) {
+    let passed = result.min_ns <= target_ns;
+    SCORECARD.lock().push(ScoreEntry {
+        name,
+        measured_ns: result.min_ns,
+        target_ns,
+        passed,
+    });
+}
+
+/// Print the scorecard summary showing which benchmarks met targets.
+#[allow(clippy::arithmetic_side_effects)]
+fn print_scorecard() {
+    let entries = SCORECARD.lock();
+    let total = entries.len();
+    let passed = entries.iter().filter(|e| e.passed).count();
+    let failed = total.saturating_sub(passed);
+
+    serial_println!("[bench] === Scorecard: {}/{} passed ===", passed, total);
+
+    if failed > 0 {
+        serial_println!("[bench] ABOVE TARGET:");
+        for entry in &*entries {
+            if !entry.passed {
+                let pct = if entry.target_ns > 0 {
+                    entry.measured_ns.saturating_mul(100) / entry.target_ns
+                } else {
+                    0
+                };
+                serial_println!(
+                    "[bench]   {} : {}ns (target {}ns, {}%)",
+                    entry.name, entry.measured_ns, entry.target_ns, pct
+                );
+            }
+        }
+    }
+
+    if failed == 0 && total > 0 {
+        serial_println!("[bench] All benchmarks within target.");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Standard kernel benchmarks
 // ---------------------------------------------------------------------------
 
@@ -380,6 +445,8 @@ pub fn run_with_cache_info<F: FnMut()>(name: &str, iterations: u32, mut f: F) ->
 /// serial for comparison against `bench/baselines.toml`.
 pub fn run_all() {
     serial_println!("[bench] === Kernel micro-benchmarks ===");
+    // Clear scorecard from any previous run.
+    SCORECARD.lock().clear();
 
     // Note: iteration counts are kept modest because these run during
     // boot under QEMU emulation.  For real hardware benchmarks, increase
@@ -394,16 +461,17 @@ pub fn run_all() {
             unsafe { frame::free_frame(f).expect("bench: free"); }
         });
 
-        let target_cycles = 3700u64; // From baselines.toml
-        if result.min_cycles <= target_cycles {
+        let target_ns = 1000u64; // From baselines.toml
+        score("page_alloc_free", &result, target_ns);
+        if result.min_ns <= target_ns {
             serial_println!(
-                "[bench]   page_alloc_free: PASS (min {} <= target {})",
-                result.min_cycles, target_cycles
+                "[bench]   page_alloc_free: PASS (min {}ns <= target {}ns)",
+                result.min_ns, target_ns
             );
         } else {
             serial_println!(
-                "[bench]   page_alloc_free: ABOVE TARGET (min {} > target {})",
-                result.min_cycles, target_cycles
+                "[bench]   page_alloc_free: ABOVE TARGET (min {}ns > target {}ns)",
+                result.min_ns, target_ns
             );
         }
     }
@@ -489,6 +557,7 @@ pub fn run_all() {
         // Target is 200ns per single alloc.  This benchmark measures
         // alloc+free, so target is 2× = 400ns for the cycle.
         let target_cycle_ns = 400u64;
+        score("heap_alloc_free_64", &result, target_cycle_ns);
         if result.min_ns <= target_cycle_ns {
             serial_println!(
                 "[bench]   heap_alloc_free_64: PASS (min {}ns <= alloc+free target {}ns)",
@@ -733,6 +802,9 @@ pub fn run_all() {
     bench_http_mime_type();
     bench_http_percent_decode();
 
+    // --- Print scorecard summary ---
+    print_scorecard();
+
     serial_println!("[bench] === Benchmarks complete ===");
 }
 
@@ -950,6 +1022,7 @@ fn bench_syscall_dispatch() {
     // Target: < 200 ns.  Linux getpid is ~100 ns INCLUDING ring
     // transition — dispatch-only should be well under that.
     let target_ns = 200u64;
+    score("syscall_dispatch", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   syscall_dispatch: PASS (min {}ns <= target {}ns)",
@@ -997,6 +1070,7 @@ fn bench_ipc_channel() {
 
     // Target: < 2 µs round-trip (Fuchsia: ~1.5 µs, L4: ~0.5-1 µs).
     let target_ns = 2000u64;
+    score("ipc_channel", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   ipc_channel_roundtrip: PASS (min {}ns <= target {}ns)",
@@ -1227,6 +1301,7 @@ fn bench_ipc_pipe() {
 
     // Target: comparable to channel roundtrip (~1-2 µs).
     let target_ns = 3000u64;
+    score("ipc_pipe", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   ipc_pipe_roundtrip: PASS (min {}ns <= target {}ns)",
@@ -1409,6 +1484,7 @@ fn bench_ipc_futex() {
     // Target: < 500 ns.  This is a hash lookup + empty list check.
     // Linux uncontended futex_wake: ~200-500ns.
     let target_ns = 500u64;
+    score("futex_wake_empty", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   futex_wake_empty: PASS (min {}ns <= target {}ns)",
@@ -1700,7 +1776,17 @@ fn bench_io_ring_nop() {
     );
 
     // Target: < 200ns per SQE (Linux io_uring: 100-200ns).
+    let result = BenchResult {
+        name: String::from("io_ring_nop_submit"),
+        iterations,
+        min_cycles: min_per_sqe,
+        mean_cycles: mean_per_sqe,
+        max_cycles: min_per_sqe, // no max tracked per-SQE
+        min_ns,
+        mean_ns,
+    };
     let target_ns = 200u64;
+    score("io_ring_nop", &result, target_ns);
     if min_ns <= target_ns {
         serial_println!(
             "[bench]   io_ring_nop_submit: PASS (min {}ns <= target {}ns)",
@@ -1824,6 +1910,7 @@ fn bench_page_fault() {
 
     // Target: < 10 µs (Linux anonymous page fault: ~2-5 µs).
     let target_ns = 10_000u64;
+    score("page_fault", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   page_fault_anonymous: PASS (min {}ns <= target {}ns)",
@@ -1964,6 +2051,7 @@ fn bench_vfs_stat() {
     });
 
     let target_ns = 700u64;
+    score("vfs_stat_root", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   vfs_stat_root: PASS (min {}ns <= target {}ns)",
@@ -2891,6 +2979,7 @@ fn bench_vfs_stat_deep() {
     });
 
     let target_ns = 1400u64; // 2 components × 700ns target
+    score("vfs_stat_deep", &result, target_ns);
     if result.min_ns <= target_ns {
         serial_println!(
             "[bench]   vfs_stat_deep_2comp: PASS (min {}ns <= target {}ns)",

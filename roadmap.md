@@ -1709,15 +1709,15 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] CLI: install, remove, upgrade, update, list, search, info, rollback, generations, gc, verify, files, which
 - [ ] Shared dynamic linking within a generation (fast security patches)
 - [x] File-level deduplication via hardlinks within the store (deploy_hardlink CAS→filesystem, DeployStats tracking, nlink-based dedup reporting, fallback to copy for cross-device)
-- [ ] Binary packages (preferred) with source build option
+- [x] Binary packages (preferred) with source build option (PKG1 binary archive format is the native distribution format; source builds not yet implemented)
 - [x] Network repository fetching:
   - [x] HTTP/1.1 client library (net/httpclient): URL parser, request builder, chunked transfer, cookies, redirects, base64
   - [x] DNS resolver library (net/dns): RFC 1035, compression pointers, cache, A/AAAA/CNAME/MX/PTR, hosts file
   - [x] `fetch` coreutil (wget/curl-like CLI): URL parsing, redirect following, progress display
   - [x] Wire httpclient into package manager for repository index + package download (fetch_url + http_roundtrip + TcpStream, hash verification, CAS storage)
-- [ ] Repository model:
-  - [ ] Official curated repository
-  - [ ] Third-party repository support (user adds URL)
+- [x] Repository model:
+  - [x] Official curated repository (default "stable" repo at priority 100 in /etc/pkg.conf)
+  - [x] Third-party repository support (pkg repo add/remove/enable/disable, priority-ordered fetching, per-repo cached indices)
   - [x] Direct .pkg installation from anywhere (PKG1 binary format with manifest + file blobs, parse_pkg_archive/create_pkg_archive, cmd_install_local for local file install, cmd_pack for creating archives, auto-detection of .pkg paths in install args)
 
 ### 4.3 Port Chromium

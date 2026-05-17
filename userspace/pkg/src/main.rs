@@ -53,8 +53,7 @@ const REPO_DIR: &str = "/var/pkg/repos";
 /// Default repository URL (placeholder — will point to actual repo server).
 const DEFAULT_REPO: &str = "https://repo.ouros.org/stable";
 
-/// Config file location (used when network fetching is implemented).
-#[allow(dead_code)]
+/// Config file location.
 const CONFIG_PATH: &str = "/etc/pkg.conf";
 
 // ============================================================================
@@ -581,6 +580,200 @@ fn parse_file_entry(value: &str) -> Option<PackageFile> {
 }
 
 // ============================================================================
+// Repository configuration
+// ============================================================================
+
+/// A configured package repository.
+#[derive(Clone, Debug)]
+struct RepoConfig {
+    /// Short name for the repository (e.g. "stable", "community").
+    name: String,
+    /// Base URL for the repository (e.g. "https://repo.ouros.org/stable").
+    url: String,
+    /// Priority: lower numbers are preferred. Official repos use 100, user
+    /// repos default to 500.
+    priority: u32,
+    /// Whether this repository is enabled.
+    enabled: bool,
+}
+
+/// Complete package manager configuration loaded from /etc/pkg.conf.
+struct PkgConfig {
+    repos: Vec<RepoConfig>,
+}
+
+impl PkgConfig {
+    /// Load configuration from the config file, falling back to the default
+    /// single repository if the file doesn't exist or can't be parsed.
+    fn load() -> Self {
+        if let Ok(text) = fs::read_to_string(CONFIG_PATH) {
+            if let Some(config) = Self::parse(&text) {
+                return config;
+            }
+            eprintln!("pkg: warning: failed to parse {CONFIG_PATH}, using defaults");
+        }
+        Self::default()
+    }
+
+    /// Default config with just the official repository.
+    fn default() -> Self {
+        Self {
+            repos: vec![RepoConfig {
+                name: "stable".to_string(),
+                url: DEFAULT_REPO.to_string(),
+                priority: 100,
+                enabled: true,
+            }],
+        }
+    }
+
+    /// Parse config from YAML-ish text format.
+    ///
+    /// Format:
+    /// ```yaml
+    /// # OurOS package manager configuration
+    /// repo: stable
+    ///   url: https://repo.ouros.org/stable
+    ///   priority: 100
+    ///   enabled: yes
+    ///
+    /// repo: community
+    ///   url: https://community.ouros.org/packages
+    ///   priority: 500
+    ///   enabled: yes
+    /// ```
+    fn parse(text: &str) -> Option<Self> {
+        let mut repos = Vec::new();
+        let mut current_name: Option<String> = None;
+        let mut current_url = String::new();
+        let mut current_priority = 500u32;
+        let mut current_enabled = true;
+
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            if let Some(rest) = trimmed.strip_prefix("repo:") {
+                // Save previous repo
+                if let Some(ref name) = current_name {
+                    if !current_url.is_empty() {
+                        repos.push(RepoConfig {
+                            name: name.clone(),
+                            url: current_url.clone(),
+                            priority: current_priority,
+                            enabled: current_enabled,
+                        });
+                    }
+                }
+                current_name = Some(rest.trim().to_string());
+                current_url.clear();
+                current_priority = 500;
+                current_enabled = true;
+            } else if let Some((key, val)) = trimmed.split_once(':') {
+                let key = key.trim();
+                let val = val.trim();
+                match key {
+                    "url" => current_url = val.to_string(),
+                    "priority" => current_priority = val.parse().unwrap_or(500),
+                    "enabled" => current_enabled = val == "yes" || val == "true" || val == "1",
+                    _ => {} // ignore unknown keys for forward compat
+                }
+            }
+        }
+
+        // Save last repo
+        if let Some(ref name) = current_name {
+            if !current_url.is_empty() {
+                repos.push(RepoConfig {
+                    name: name.clone(),
+                    url: current_url,
+                    priority: current_priority,
+                    enabled: current_enabled,
+                });
+            }
+        }
+
+        if repos.is_empty() {
+            return None;
+        }
+
+        Some(Self { repos })
+    }
+
+    /// Serialize config to text format for saving.
+    fn serialize(&self) -> String {
+        let mut out = String::new();
+        out.push_str("# OurOS package manager configuration\n");
+        out.push_str("# Repositories are checked in priority order (lower = preferred).\n\n");
+
+        for repo in &self.repos {
+            out.push_str(&format!("repo: {}\n", repo.name));
+            out.push_str(&format!("  url: {}\n", repo.url));
+            out.push_str(&format!("  priority: {}\n", repo.priority));
+            out.push_str(&format!(
+                "  enabled: {}\n",
+                if repo.enabled { "yes" } else { "no" }
+            ));
+            out.push('\n');
+        }
+
+        out
+    }
+
+    /// Save configuration to the config file.
+    fn save(&self) -> io::Result<()> {
+        if let Some(parent) = Path::new(CONFIG_PATH).parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(CONFIG_PATH, self.serialize())
+    }
+
+    /// Get all enabled repositories sorted by priority (lower first).
+    fn enabled_repos(&self) -> Vec<&RepoConfig> {
+        let mut repos: Vec<&RepoConfig> = self.repos.iter().filter(|r| r.enabled).collect();
+        repos.sort_by_key(|r| r.priority);
+        repos
+    }
+
+    /// Add a new repository. Returns error if name already exists.
+    fn add_repo(&mut self, name: &str, url: &str, priority: u32) -> Result<(), String> {
+        if self.repos.iter().any(|r| r.name == name) {
+            return Err(format!("repository '{name}' already exists"));
+        }
+        self.repos.push(RepoConfig {
+            name: name.to_string(),
+            url: url.to_string(),
+            priority,
+            enabled: true,
+        });
+        Ok(())
+    }
+
+    /// Remove a repository by name.
+    fn remove_repo(&mut self, name: &str) -> Result<(), String> {
+        let initial_len = self.repos.len();
+        self.repos.retain(|r| r.name != name);
+        if self.repos.len() == initial_len {
+            return Err(format!("repository '{name}' not found"));
+        }
+        Ok(())
+    }
+
+    /// Enable or disable a repository.
+    fn set_enabled(&mut self, name: &str, enabled: bool) -> Result<(), String> {
+        for repo in &mut self.repos {
+            if repo.name == name {
+                repo.enabled = enabled;
+                return Ok(());
+            }
+        }
+        Err(format!("repository '{name}' not found"))
+    }
+}
+
+// ============================================================================
 // Content-Addressed Store
 // ============================================================================
 
@@ -1078,27 +1271,67 @@ impl PackageDb {
         Ok(ids)
     }
 
-    /// Load available packages from cached repository metadata.
+    /// Load available packages from all cached repository indices.
+    ///
+    /// Aggregates packages from all enabled repositories. When the same package
+    /// appears in multiple repos, the version from the higher-priority (lower
+    /// number) repository is preferred.
     fn load_repo_index(&self) -> io::Result<Vec<PackageManifest>> {
-        let index_path = self.repo_dir.join("index");
-        if !index_path.exists() {
-            return Ok(Vec::new());
-        }
-        let text = fs::read_to_string(&index_path)?;
-        let mut packages = Vec::new();
+        let config = PkgConfig::load();
+        let repos = config.enabled_repos();
+        let mut all_packages = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
 
-        // Index format: packages separated by blank lines
-        for chunk in text.split("\n\n") {
-            let chunk = chunk.trim();
-            if chunk.is_empty() {
+        // Load from each repo in priority order
+        for repo in &repos {
+            let index_path = self.repo_index_path(&repo.name);
+            if !index_path.exists() {
+                // Fall back to legacy "index" file for backward compat
                 continue;
             }
-            if let Some(manifest) = PackageManifest::parse(chunk) {
-                packages.push(manifest);
+            let text = match fs::read_to_string(&index_path) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            for chunk in text.split("\n\n") {
+                let chunk = chunk.trim();
+                if chunk.is_empty() {
+                    continue;
+                }
+                if let Some(manifest) = PackageManifest::parse(chunk) {
+                    // Higher-priority repos take precedence for same package name
+                    let key = format!("{}:{}", manifest.name, manifest.version);
+                    if !seen.contains(&key) {
+                        seen.insert(key);
+                        all_packages.push(manifest);
+                    }
+                }
             }
         }
 
-        Ok(packages)
+        // Also check legacy "index" file if no per-repo indices found
+        if all_packages.is_empty() {
+            let legacy_path = self.repo_dir.join("index");
+            if legacy_path.exists() {
+                let text = fs::read_to_string(&legacy_path)?;
+                for chunk in text.split("\n\n") {
+                    let chunk = chunk.trim();
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    if let Some(manifest) = PackageManifest::parse(chunk) {
+                        all_packages.push(manifest);
+                    }
+                }
+            }
+        }
+
+        Ok(all_packages)
+    }
+
+    /// Path to a repo-specific cached index file.
+    fn repo_index_path(&self, repo_name: &str) -> PathBuf {
+        self.repo_dir.join(format!("{repo_name}.index"))
     }
 
     /// Find a package in the repo index by name.
@@ -2075,60 +2308,231 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
 fn cmd_update(db: &PackageDb) {
     db.ensure_dirs();
 
-    let repo_url = DEFAULT_REPO;
-    let index_url = format!("{repo_url}/index");
-    println!("Fetching repository index from {index_url}...");
+    let config = PkgConfig::load();
+    let repos = config.enabled_repos();
 
-    match fetch_url(&index_url) {
-        Ok(body) => {
-            let index_path = db.repo_dir.join("index");
-            match fs::write(&index_path, &body) {
-                Ok(()) => {
-                    let entry_count = count_index_entries(&index_path);
-                    println!(
-                        "Repository index updated: {} ({} entries)",
-                        format_size(body.len() as u64),
-                        entry_count
-                    );
+    if repos.is_empty() {
+        eprintln!("pkg: no repositories configured");
+        eprintln!("pkg: add one with 'pkg repo add <name> <url>'");
+        process::exit(1);
+    }
+
+    let mut total_entries = 0usize;
+    let mut failures = 0u32;
+
+    for repo in &repos {
+        let index_url = format!("{}/index", repo.url);
+        println!("Fetching {} ({})...", repo.name, index_url);
+
+        match fetch_url(&index_url) {
+            Ok(body) => {
+                let index_path = db.repo_index_path(&repo.name);
+                match fs::write(&index_path, &body) {
+                    Ok(()) => {
+                        let entry_count = count_index_entries(&index_path);
+                        total_entries += entry_count;
+                        println!(
+                            "  {} updated: {} ({} packages)",
+                            repo.name,
+                            format_size(body.len() as u64),
+                            entry_count
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("  {} write error: {e}", repo.name);
+                        failures += 1;
+                    }
                 }
-                Err(e) => {
-                    eprintln!("pkg: failed to write index to {}: {e}", index_path.display());
-                    process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("  {} fetch failed: {e}", repo.name);
+                // Check for cached data
+                let index_path = db.repo_index_path(&repo.name);
+                if index_path.exists() {
+                    let cached_count = count_index_entries(&index_path);
+                    total_entries += cached_count;
+                    println!("  {} using cache ({} packages)", repo.name, cached_count);
+                } else {
+                    failures += 1;
                 }
             }
         }
-        Err(e) => {
-            eprintln!("pkg: failed to fetch repository index: {e}");
-            // Fall back to showing local status if available
-            let index_path = db.repo_dir.join("index");
-            if index_path.exists() {
-                if let Ok(meta) = fs::metadata(&index_path) {
-                    println!(
-                        "Using cached index: {} ({} entries)",
-                        format_size(meta.len()),
-                        count_index_entries(&index_path)
-                    );
-                }
-            } else {
-                eprintln!("pkg: no cached index available");
-                process::exit(1);
-            }
+    }
+
+    if failures == repos.len() as u32 {
+        // All repos failed — try legacy index as last resort
+        let legacy_path = db.repo_dir.join("index");
+        if legacy_path.exists() {
+            let legacy_count = count_index_entries(&legacy_path);
+            println!(
+                "\nAll repositories failed. Using legacy cached index ({} packages).",
+                legacy_count
+            );
+        } else {
+            eprintln!("\npkg: all repository fetches failed");
+            process::exit(1);
+        }
+    } else {
+        println!(
+            "\nDone. {} repository(ies) updated, {} total packages available.",
+            repos.len() as u32 - failures,
+            total_entries
+        );
+        if failures > 0 {
+            eprintln!("  ({failures} repository(ies) failed — using cached data where available)");
         }
     }
 }
 
-/// Download a package archive from the repository and store it in the CAS.
+/// Manage repository configuration.
 ///
+/// Subcommands:
+///   pkg repo list              — show configured repositories
+///   pkg repo add <name> <url>  — add a third-party repository
+///   pkg repo remove <name>     — remove a repository
+///   pkg repo enable <name>     — enable a disabled repository
+///   pkg repo disable <name>    — disable a repository without removing it
+fn cmd_repo(args: &[String]) {
+    if args.is_empty() {
+        cmd_repo_list();
+        return;
+    }
+
+    match args[0].as_str() {
+        "list" | "ls" => cmd_repo_list(),
+        "add" => {
+            if args.len() < 3 {
+                eprintln!("Usage: pkg repo add <name> <url> [priority]");
+                process::exit(1);
+            }
+            let name = &args[1];
+            let url = &args[2];
+            let priority = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(500);
+
+            let mut config = PkgConfig::load();
+            match config.add_repo(name, url, priority) {
+                Ok(()) => {
+                    if let Err(e) = config.save() {
+                        eprintln!("pkg: failed to save config: {e}");
+                        process::exit(1);
+                    }
+                    println!("Added repository '{name}' ({url}, priority {priority})");
+                    println!("Run 'pkg update' to fetch the index.");
+                }
+                Err(e) => {
+                    eprintln!("pkg: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+        "remove" | "rm" => {
+            if args.len() < 2 {
+                eprintln!("Usage: pkg repo remove <name>");
+                process::exit(1);
+            }
+            let name = &args[1];
+
+            let mut config = PkgConfig::load();
+            match config.remove_repo(name) {
+                Ok(()) => {
+                    if let Err(e) = config.save() {
+                        eprintln!("pkg: failed to save config: {e}");
+                        process::exit(1);
+                    }
+                    println!("Removed repository '{name}'");
+                    // Also remove cached index
+                    let db = PackageDb::new();
+                    let index_path = db.repo_index_path(name);
+                    let _ = fs::remove_file(index_path);
+                }
+                Err(e) => {
+                    eprintln!("pkg: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+        "enable" => {
+            if args.len() < 2 {
+                eprintln!("Usage: pkg repo enable <name>");
+                process::exit(1);
+            }
+            let name = &args[1];
+            let mut config = PkgConfig::load();
+            match config.set_enabled(name, true) {
+                Ok(()) => {
+                    if let Err(e) = config.save() {
+                        eprintln!("pkg: failed to save config: {e}");
+                        process::exit(1);
+                    }
+                    println!("Enabled repository '{name}'");
+                }
+                Err(e) => {
+                    eprintln!("pkg: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+        "disable" => {
+            if args.len() < 2 {
+                eprintln!("Usage: pkg repo disable <name>");
+                process::exit(1);
+            }
+            let name = &args[1];
+            let mut config = PkgConfig::load();
+            match config.set_enabled(name, false) {
+                Ok(()) => {
+                    if let Err(e) = config.save() {
+                        eprintln!("pkg: failed to save config: {e}");
+                        process::exit(1);
+                    }
+                    println!("Disabled repository '{name}'");
+                }
+                Err(e) => {
+                    eprintln!("pkg: {e}");
+                    process::exit(1);
+                }
+            }
+        }
+        other => {
+            eprintln!("pkg: unknown repo subcommand: {other}");
+            eprintln!("Usage: pkg repo [list|add|remove|enable|disable]");
+            process::exit(1);
+        }
+    }
+}
+
+fn cmd_repo_list() {
+    let config = PkgConfig::load();
+
+    if config.repos.is_empty() {
+        println!("No repositories configured.");
+        println!("Add one with: pkg repo add <name> <url>");
+        return;
+    }
+
+    println!(
+        "{:<20} {:<8} {:<8} {}",
+        "REPOSITORY", "PRIO", "STATUS", "URL"
+    );
+    for repo in &config.repos {
+        let status = if repo.enabled { "enabled" } else { "disabled" };
+        println!(
+            "{:<20} {:<8} {:<8} {}",
+            repo.name, repo.priority, status, repo.url
+        );
+    }
+}
+
+/// Download a package archive from repositories and store it in the CAS.
+///
+/// Tries each enabled repository in priority order until the download succeeds.
 /// Returns the SHA-256 hash of the downloaded content. Verifies the hash against
-/// `expected_hash` if provided.
+/// the manifest's expected hash.
 fn cmd_download(db: &PackageDb, name: &str, version: &str) -> Result<String, String> {
     db.ensure_dirs();
 
-    let repo_url = DEFAULT_REPO;
-    let pkg_url = format!("{repo_url}/packages/{name}-{version}.pkg");
-    println!("Downloading {name} {version} from {pkg_url}...");
-
-    let body = fetch_url(&pkg_url).map_err(|e| format!("download failed: {e}"))?;
+    let config = PkgConfig::load();
+    let repos = config.enabled_repos();
 
     // Look up expected hash from the repository index
     let expected_hash = db
@@ -2143,29 +2547,47 @@ fn cmd_download(db: &PackageDb, name: &str, version: &str) -> Result<String, Str
             }
         });
 
-    // Store in CAS — this computes the SHA-256 as a side effect
-    let hash = db
-        .cas
-        .put(&body)
-        .map_err(|e| format!("failed to store package in CAS: {e}"))?;
+    // Try each repository in priority order
+    let mut last_error = String::from("no repositories configured");
+    for repo in &repos {
+        let pkg_url = format!("{}/packages/{name}-{version}.pkg", repo.url);
+        println!("Trying {name} {version} from {} ({pkg_url})...", repo.name);
 
-    // Verify hash against the index manifest if we have an expected hash
-    if let Some(ref expected) = expected_hash {
-        if !expected.is_empty() && hash != *expected {
-            // Remove the bad blob
-            let _ = db.cas.remove(&hash);
-            return Err(format!(
-                "hash mismatch for {name}-{version}: expected {expected}, got {hash}"
-            ));
+        match fetch_url(&pkg_url) {
+            Ok(body) => {
+                // Store in CAS — this computes the SHA-256 as a side effect
+                let hash = db
+                    .cas
+                    .put(&body)
+                    .map_err(|e| format!("failed to store package in CAS: {e}"))?;
+
+                // Verify hash against the index manifest if we have an expected hash
+                if let Some(ref expected) = expected_hash {
+                    if !expected.is_empty() && hash != *expected {
+                        let _ = db.cas.remove(&hash);
+                        // Don't give up — might be in another repo with the right content
+                        last_error = format!(
+                            "hash mismatch from {}: expected {expected}, got {hash}",
+                            repo.name
+                        );
+                        continue;
+                    }
+                }
+
+                println!(
+                    "Downloaded {name} {version}: {} (sha256: {:.12}...)",
+                    format_size(body.len() as u64),
+                    hash
+                );
+                return Ok(hash);
+            }
+            Err(e) => {
+                last_error = format!("{}: {e}", repo.name);
+            }
         }
     }
 
-    println!(
-        "Downloaded {name} {version}: {} (sha256: {:.12}...)",
-        format_size(body.len() as u64),
-        hash
-    );
-    Ok(hash)
+    Err(format!("download failed from all repositories: {last_error}"))
 }
 
 /// Fetch a package and store it in CAS without installing.
@@ -2856,6 +3278,7 @@ Commands:
   upgrade [pkg...]       Upgrade packages (all if none specified)
   fetch <pkg>...         Download packages to CAS without installing
   pack <manifest>        Create a .pkg archive from a manifest and source files
+  repo [subcommand]      Manage package repositories
   list [--installed]     List packages
   search <query>         Search available packages
   info <pkg>             Show package details
@@ -2870,6 +3293,18 @@ Commands:
 Options:
   --dry-run              Show what would be done without making changes
   --output, -o <file>    Output path for 'pack' command
+
+Repository Management:
+  pkg repo list                  List configured repositories
+  pkg repo add <name> <url>      Add a third-party repository (priority 500)
+  pkg repo add <name> <url> N    Add with custom priority (lower = preferred)
+  pkg repo remove <name>         Remove a repository
+  pkg repo enable <name>         Re-enable a disabled repository
+  pkg repo disable <name>        Disable without removing
+
+  Config file: {CONFIG_PATH}
+  Repositories are tried in priority order when downloading packages.
+  Official repos default to priority 100, user-added repos to 500.
 
 Local Installation:
   pkg install ./path/to/package.pkg
@@ -3031,6 +3466,7 @@ fn main() {
                 .map(|s| Path::new(s.as_str()));
             cmd_pack(manifest_path, output);
         }
+        "repo" | "repository" => cmd_repo(&rest_filtered),
         "help" | "--help" | "-h" => print_usage(),
         _ => {
             eprintln!("pkg: unknown command: {command}");

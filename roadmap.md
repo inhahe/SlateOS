@@ -1166,7 +1166,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] HTTP/1.1 server (httpd): GET/HEAD file serving from VFS, directory listing with HTML, MIME type detection (~30 extensions), percent-decoding, path normalization with traversal prevention, configurable document root and port; HTTPS via TLS 1.3 (Ed25519 self-signed cert, start_tls/tick_tls/stop_tls); shared request processing for HTTP+HTTPS; ETag conditional requests (FNV-1a content hash, If-None-Match→304 Not Modified); Range requests (RFC 7233, 206 Partial Content, bytes=N-M/N-/-N); Accept-Ranges header; per-IP token bucket rate limiting (16 slots, 30 req/s, 60 burst, 429 Too Many Requests); gzip compression (RFC 1952, DEFLATE for text/html, application/json, text/css, application/javascript, image/svg; Content-Encoding + Vary headers; >256B threshold, fallback when compression doesn't help); request statistics (count, 304 hits, 206 ranges, 429 limited); access log ring buffer (64 entries, method/path/status/size/duration_us with hrtimer-based request timing); `httpd` kshell command (start/stop/tls/tls-stop/status/root/log/ratelimit); integrated into net::poll() tick loop; 36 self-tests
   - [x] WebSocket (RFC 6455): server-side upgrade from HTTP, SHA-1 handshake key derivation, frame parsing (text/binary/close/ping/pong, masked + unmasked), frame building (server never masks), configurable message handler callback with default echo handler, integrated into httpd (auto-detects Upgrade requests); `ws` kshell command; 12 self-tests
   - [x] DHCP server (dhcpd, RFC 2131): IP pool management (add/remove pools, /24 subnets, configurable range), lease tracking with expiry (MAC→IP bindings, 1hr default), DHCP message parsing (DISCOVER/REQUEST/RELEASE with options 50/51/53/54), response building (OFFER/ACK/NAK with subnet mask/router/DNS/lease-time options), process_request() for UDP port 67 integration; `dhcpd` kshell command (start/stop/status/leases/test); 10 self-tests
-  - [x] System management dashboard (JSON API + HTML SPA): /api/status, /api/tasks, /api/network, /api/memory, /api/httpd (server stats + gzip + access log), /api/dns (cache stats), /api/firewall (rules, conntrack), /api/bench (scorecard), /api/health (aggregated ok/degraded/critical), /api/ipv6 (SLAAC, DHCPv6), /api/containers, /api/tcp (per-connection detail: RTT, cwnd, ssthresh, MSS, buffer sizes, feature flags; per-listener: port, backlog; subsystem stats), /api/scheduler (per-CPU utilization/ctx switches/preemptions, load average, work steals, tasks spawned/exited), /api/swap (zram/disk devices, compression ratio/savings, reclaimable page count), /metrics (Prometheus text exposition — 42 metric families covering system/memory/heap/tasks/TCP/HTTP/DNS/swap/scheduler/per-CPU/firewall/containers) endpoints with real-time data; HTML dashboard at /dashboard with auto-refresh (3s), GitHub-dark theme, memory/swap bars, task table, TCP stack card, scheduler per-CPU card, TCP listeners table, swap/zram card with compression stats, benchmark results; `dashboard` kshell command (16 subcommands including tcp/sched/swap); 18 self-tests
+  - [x] System management dashboard (JSON API + HTML SPA): /api/status, /api/tasks, /api/network, /api/memory, /api/httpd (server stats + gzip + access log), /api/dns (cache stats), /api/firewall (rules, conntrack), /api/bench (scorecard), /api/health (aggregated ok/degraded/critical), /api/ipv6 (SLAAC, DHCPv6), /api/containers, /api/tcp (per-connection detail: RTT, cwnd, ssthresh, MSS, buffer sizes, feature flags; per-listener: port, backlog; subsystem stats), /api/scheduler (per-CPU utilization/ctx switches/preemptions, load average, work steals, tasks spawned/exited), /api/swap (zram/disk devices, compression ratio/savings, reclaimable page count), /api/fs (mount table with options, block cache stats: reads/hits/misses/writes/writebacks/readaheads/dirty/capacity/hit-rate), /metrics (Prometheus text exposition — 50 metric families covering system/memory/heap/tasks/TCP/HTTP/DNS/swap/scheduler/per-CPU/firewall/containers/block-cache) endpoints with real-time data; HTML dashboard at /dashboard with auto-refresh (3s), GitHub-dark theme, memory/swap bars, task table, TCP stack card, scheduler per-CPU card, TCP listeners table, mount table, filesystem card with cache stats, swap/zram card with compression stats, benchmark results; `dashboard` kshell command (17 subcommands including tcp/sched/swap/fs); 19 self-tests
   - [x] SSH-2 server (RFC 4253/4252/4254): curve25519-sha256 key exchange (RFC 8731), ssh-ed25519 host keys (RFC 8709), chacha20-poly1305@openssh.com AEAD cipher, password+publickey authentication, channel multiplexing, shell integration via kshell::capture_command(), LF→CRLF terminal output conversion; crypto module: SHA-512 (FIPS 180-4), Ed25519 signatures (RFC 8032) with extended Edwards coordinates, X25519 ECDH; `sshd` kshell command (start/stop/status/port/test); 9 SSH self-tests + 5 Ed25519 self-tests
   - [x] Cryptographic benchmarks: SHA-256 (64B/1KiB), SHA-512 (64B), HMAC-SHA256, ChaCha20 (1KiB), Poly1305 (1KiB), ChaCha20-Poly1305 AEAD (1KiB), X25519 key exchange, Ed25519 sign/verify; baselines in bench/baselines.toml with OpenSSL references and QEMU measured values
   - [x] HTTP/dashboard benchmarks: request parsing, MIME lookup, percent-decode, ETag computation (FNV-1a 4KiB), response building (plain + gzip), gzip 1KiB/8KiB, dashboard API status/health/metrics generation; baselines with targets in bench/baselines.toml
@@ -1496,7 +1496,12 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Keyboard shortcuts (Alt+F4, Super, Super+D, Super+Arrows, Ctrl+Super+Arrows)
 - [x] Theme system (Catppuccin Mocha default palette)
 - [x] Z-order stacking and window focus tracking
-- [ ] Desktop with draggable icons (snap-to-grid or free placement)
+- [x] Desktop with draggable icons (snap-to-grid or free placement)
+  - [x] Grid snapping (configurable 80x90 cells), free placement + auto-arrange modes
+  - [x] Rubber-band selection, Ctrl+Click toggle, Ctrl+A select all
+  - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
+  - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
+  - [x] Double-click activate, right-click context menu, F2 rename, Delete
 - [ ] Taskbar enhancements:
   - [ ] Pinned apps on left, running apps on right, divider between sections
   - [ ] Drag to reorder, drag to/from desktop and start menu
@@ -1538,21 +1543,21 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Radio buttons
   - [x] Treeview (tree.rs: expand/collapse, selection, keyboard nav, connection lines, scroll)
   - [x] Tabs view (tabs.rs: close buttons, dirty indicator, overflow scroll, Ctrl+Tab nav)
-  - [ ] Grid view
   - [x] Scroll bars (ScrollView widget)
   - [x] Context menus (menu.rs: Action/Separator/Submenu, keyboard nav, edge-flip, checkmarks)
   - [x] Tooltips (menu.rs: hover delay, auto-position, max-width wrap)
-  - [ ] Color picker
+  - [x] Color picker (colorpicker.rs: HSV square+hue bar, RGB/HSV sliders, hex input, alpha, 48 presets, eyedropper, recent colors)
+  - [x] Grid view (grid.rs: virtual-scrolled grid, icon+label cells, multi-select, rubber-band, type-ahead, drag)
   - [ ] Modal and non-modal dialogs, alert popups
 - [x] Render tree abstraction (backend-agnostic drawing primitives)
   - [x] RenderCommand enum: FillRect, StrokeRect, Text, Image, Line, BoxShadow
   - [x] Clip/translate stack (PushClip/PopClip, PushTranslate/PopTranslate)
   - [x] RenderTree with command list and viewport
 - [x] Additional widgets: Separator, ProgressBar, Slider, Image, Container
-- [ ] Text views:
-  - [ ] Simple text (plain text, ANSI colors, single font)
-  - [ ] Rich text (fonts, sizes, colors, inline images — NOT HTML)
-  - [ ] Scroll-to-bottom / stay-at-bottom when new text added
+- [x] Text views (textview.rs):
+  - [x] SimpleTextView: plain text + full ANSI SGR parser (4/8/24-bit color), selection, search, max lines
+  - [x] RichTextView: headings, lists, code blocks, links, word wrap, inline images (placeholder)
+  - [x] Scroll-to-bottom / stay-at-bottom when new text added (auto-scroll on append)
 - [-] Advanced features:
   - [x] Clipboard (multi-format: text, HTML, image, structured data, history)
     - [x] System clipboard service with 7 formats (PlainText/RichText/Html/ImagePng/ImageBmp/FilePaths/Custom)

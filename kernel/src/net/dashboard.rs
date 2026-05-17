@@ -22,6 +22,7 @@
 //! | `/api/containers`  | JSON: active container list with details         |
 //! | `/api/tcp`         | JSON: TCP stats, per-connection detail, listeners|
 //! | `/api/scheduler`   | JSON: per-CPU utilization, context switches      |
+//! | `/api/swap`        | JSON: swap/zram devices, compression stats       |
 //! | `/metrics`         | Prometheus text format (~40 metrics) for monitoring |
 //!
 //! ## Integration
@@ -126,6 +127,9 @@ pub fn handle_api_request(path: &str) -> Option<(String, Vec<u8>)> {
         }
         "/api/scheduler" => {
             Some((String::from("application/json"), api_scheduler()))
+        }
+        "/api/swap" => {
+            Some((String::from("application/json"), api_swap()))
         }
         "/metrics" => {
             Some((String::from("text/plain; version=0.0.4; charset=utf-8"), api_metrics()))
@@ -692,6 +696,58 @@ fn api_scheduler() -> Vec<u8> {
             ),
             cpu, total, idle, util_pct, ctx, vol, pre,
         );
+    }
+
+    json.push_str("]}");
+    json.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
+// /api/swap — swap/zram device info and compression stats
+// ---------------------------------------------------------------------------
+
+fn api_swap() -> Vec<u8> {
+    use crate::mm::swap;
+
+    let available = swap::is_available();
+    let free = swap::free_slots();
+    let used = swap::used_slots();
+    let reclaimable = swap::reclaimable_count();
+    let (total_bytes, used_bytes, _device_count) = swap::summary();
+    let compression = swap::compression_stats();
+    let devices = swap::list_devices();
+
+    let ratio = compression.ratio_percent();
+    let saved = compression.bytes_saved();
+
+    let mut json = format!(
+        concat!(
+            r#"{{"available":{},"total_bytes":{},"used_bytes":{},"#,
+            r#""free_slots":{},"used_slots":{},"reclaimable_pages":{},"#,
+            r#""compression":{{"compressed_bytes":{},"uncompressed_bytes":{},"#,
+            r#""compressed_pages":{},"uncompressed_pages":{},"#,
+            r#""ratio_pct":{},"bytes_saved":{}}}"#,
+        ),
+        available, total_bytes, used_bytes,
+        free, used, reclaimable,
+        compression.compressed_bytes, compression.uncompressed_bytes,
+        compression.compressed_count, compression.uncompressed_count,
+        ratio, saved,
+    );
+
+    json.push_str(",\"devices\":[");
+    for (i, dev) in devices.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push_str(&format!(
+            r#"{{"name":"{}","type":"{}","total_slots":{},"used_slots":{},"priority":{}}}"#,
+            json_escape(&dev.name),
+            dev.device_type,
+            dev.total_slots,
+            dev.used_slots,
+            dev.priority,
+        ));
     }
 
     json.push_str("]}");
@@ -1393,6 +1449,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(handle_api_request("/api/containers").is_some());
         assert!(handle_api_request("/api/tcp").is_some());
         assert!(handle_api_request("/api/scheduler").is_some());
+        assert!(handle_api_request("/api/swap").is_some());
         assert!(handle_api_request("/metrics").is_some());
         assert!(handle_api_request("/not-an-api").is_none());
         assert!(handle_api_request("/api/nonexistent").is_none());
@@ -1580,6 +1637,20 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!("[dashboard]   API scheduler: OK ({} bytes)", sched.len());
     }
 
-    serial_println!("[dashboard] Self-test PASSED (17 tests)");
+    // Test 18: API swap returns valid JSON with compression stats.
+    {
+        let swap = api_swap();
+        assert!(!swap.is_empty());
+        assert_eq!(swap[0], b'{');
+        assert_eq!(swap[swap.len().saturating_sub(1)], b'}');
+        let swap_str = core::str::from_utf8(&swap).unwrap_or("");
+        assert!(swap_str.contains("\"available\""));
+        assert!(swap_str.contains("\"compression\""));
+        assert!(swap_str.contains("\"devices\""));
+        assert!(swap_str.contains("\"reclaimable_pages\""));
+        serial_println!("[dashboard]   API swap: OK ({} bytes)", swap.len());
+    }
+
+    serial_println!("[dashboard] Self-test PASSED (18 tests)");
     Ok(())
 }

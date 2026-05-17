@@ -1698,7 +1698,13 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Region selector (dark overlay, crosshair, dimension labels)
   - [x] Annotation tools (rectangle, arrow, text, highlight) with undo
   - [x] Preview window, hotkeys (PrintScreen variants), auto-filename
-- [ ] Backup program (snapshot-based, with all common backup types) — Python/fastpy candidate
+- [x] Backup program (snapshot-based, with all common backup types) — Rust userspace binary
+  - [x] Full and incremental backup with SHA-256 content hashing
+  - [x] Manifest-based tracking (file, directory, symlink entries)
+  - [x] Restore with selective file filtering
+  - [x] Verify command with integrity checking
+  - [x] List, show, and delete backup management
+  - [x] --exclude flag for skip patterns
 - [ ] Background file indexer (configurable paths/extensions, off by default) — Python/fastpy candidate
 
 ### 4.2 Package manager — Python/fastpy candidate

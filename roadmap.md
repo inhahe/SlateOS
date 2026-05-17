@@ -1166,7 +1166,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] HTTP/1.1 server (httpd): GET/HEAD file serving from VFS, directory listing with HTML, MIME type detection (~30 extensions), percent-decoding, path normalization with traversal prevention, configurable document root and port; HTTPS via TLS 1.3 (Ed25519 self-signed cert, start_tls/tick_tls/stop_tls); shared request processing for HTTP+HTTPS; ETag conditional requests (FNV-1a content hash, If-None-Match→304 Not Modified); Range requests (RFC 7233, 206 Partial Content, bytes=N-M/N-/-N); Accept-Ranges header; per-IP token bucket rate limiting (16 slots, 30 req/s, 60 burst, 429 Too Many Requests); gzip compression (RFC 1952, DEFLATE for text/html, application/json, text/css, application/javascript, image/svg; Content-Encoding + Vary headers; >256B threshold, fallback when compression doesn't help); request statistics (count, 304 hits, 206 ranges, 429 limited); access log ring buffer (64 entries, method/path/status/size/duration_us with hrtimer-based request timing); `httpd` kshell command (start/stop/tls/tls-stop/status/root/log/ratelimit); integrated into net::poll() tick loop; 36 self-tests
   - [x] WebSocket (RFC 6455): server-side upgrade from HTTP, SHA-1 handshake key derivation, frame parsing (text/binary/close/ping/pong, masked + unmasked), frame building (server never masks), configurable message handler callback with default echo handler, integrated into httpd (auto-detects Upgrade requests); `ws` kshell command; 12 self-tests
   - [x] DHCP server (dhcpd, RFC 2131): IP pool management (add/remove pools, /24 subnets, configurable range), lease tracking with expiry (MAC→IP bindings, 1hr default), DHCP message parsing (DISCOVER/REQUEST/RELEASE with options 50/51/53/54), response building (OFFER/ACK/NAK with subnet mask/router/DNS/lease-time options), process_request() for UDP port 67 integration; `dhcpd` kshell command (start/stop/status/leases/test); 10 self-tests
-  - [x] System management dashboard (JSON API + HTML SPA): /api/status, /api/tasks (with CPU ticks, schedule count), /api/network, /api/memory, /api/httpd (server stats + gzip compression counters + access log with per-request duration), /api/dns (cache hits/misses/evictions), /api/firewall (rules, conntrack), /api/bench (benchmark scorecard with pass/fail, targets), /api/health (aggregated health check with ok/degraded/critical status), /api/ipv6 (link-local, SLAAC addresses, router, RDNSS, DHCPv6 state), /api/containers (active list with namespace IDs, cgroup, process count), /metrics (Prometheus text exposition format — 42 metric families covering system/memory/heap/tasks/TCP/HTTP/DNS/swap/scheduler/per-CPU/firewall/containers) endpoints with real-time data; HTML dashboard at /dashboard with auto-refresh JavaScript (3s interval), GitHub-dark theme, memory usage bars, task table with scheduling metrics, TCP connections, HTTP server stats with gzip savings, DNS cache stats, firewall status, IPv6 status card, container status card, benchmark results table; integrated into httpd routing; `dashboard` kshell command (status/tasks/network/memory/httpd/dns/fw/bench/health/ipv6/containers/metrics/test); 15 self-tests
+  - [x] System management dashboard (JSON API + HTML SPA): /api/status, /api/tasks, /api/network, /api/memory, /api/httpd (server stats + gzip + access log), /api/dns (cache stats), /api/firewall (rules, conntrack), /api/bench (scorecard), /api/health (aggregated ok/degraded/critical), /api/ipv6 (SLAAC, DHCPv6), /api/containers, /api/tcp (per-connection detail: RTT, cwnd, ssthresh, MSS, buffer sizes, feature flags; per-listener: port, backlog; subsystem stats), /api/scheduler (per-CPU utilization/ctx switches/preemptions, load average, work steals, tasks spawned/exited), /api/swap (zram/disk devices, compression ratio/savings, reclaimable page count), /metrics (Prometheus text exposition — 42 metric families covering system/memory/heap/tasks/TCP/HTTP/DNS/swap/scheduler/per-CPU/firewall/containers) endpoints with real-time data; HTML dashboard at /dashboard with auto-refresh (3s), GitHub-dark theme, memory/swap bars, task table, TCP stack card, scheduler per-CPU card, TCP listeners table, swap/zram card with compression stats, benchmark results; `dashboard` kshell command (16 subcommands including tcp/sched/swap); 18 self-tests
   - [x] SSH-2 server (RFC 4253/4252/4254): curve25519-sha256 key exchange (RFC 8731), ssh-ed25519 host keys (RFC 8709), chacha20-poly1305@openssh.com AEAD cipher, password+publickey authentication, channel multiplexing, shell integration via kshell::capture_command(), LF→CRLF terminal output conversion; crypto module: SHA-512 (FIPS 180-4), Ed25519 signatures (RFC 8032) with extended Edwards coordinates, X25519 ECDH; `sshd` kshell command (start/stop/status/port/test); 9 SSH self-tests + 5 Ed25519 self-tests
   - [x] Cryptographic benchmarks: SHA-256 (64B/1KiB), SHA-512 (64B), HMAC-SHA256, ChaCha20 (1KiB), Poly1305 (1KiB), ChaCha20-Poly1305 AEAD (1KiB), X25519 key exchange, Ed25519 sign/verify; baselines in bench/baselines.toml with OpenSSL references and QEMU measured values
   - [x] HTTP/dashboard benchmarks: request parsing, MIME lookup, percent-decode, ETag computation (FNV-1a 4KiB), response building (plain + gzip), gzip 1KiB/8KiB, dashboard API status/health/metrics generation; baselines with targets in bench/baselines.toml
@@ -1472,6 +1472,8 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Compositing pipeline: double-buffered framebuffer, alpha blending, damage tracking
   - [x] Render engine: execute guitk RenderCommands (rect fill/stroke, text, lines, clip/translate)
   - [x] Bitmap font rendering (monospace, A-Z/a-z/0-9/punctuation)
+  - [x] Font rendering library (gui/font): built-in 8x16 monospace, text layout with word wrap, glyph rendering to ARGB
+  - [x] Window client library (gui/window): WindowBuilder, EventLoop, 16 event types, CursorShape, compositor protocol
   - [x] Input routing: hit testing, keyboard→focused, mouse→under-cursor
   - [x] Window decorations: title bar with buttons, borders, shadow
   - [x] Drag operations: window move (title bar), resize (8 edges/corners)
@@ -1500,8 +1502,17 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [ ] Drag to reorder, drag to/from desktop and start menu
   - [ ] Optional app name alongside icon
   - [ ] Aero-style blurry transparency
-- [ ] System tray (drag icons in/out, start-in-tray option)
+- [-] System tray:
+  - [x] Notification area with quick settings popups (volume, network, calendar)
+  - [x] 6 system icons (volume/network/battery/bluetooth/notifications/power)
+  - [x] Badge indicators, tooltip support
+  - [ ] Drag icons in/out, start-in-tray option
 - [ ] Notification pane (per-app disable option)
+- [x] Application launcher (Spotlight/Alfred-style):
+  - [x] Fuzzy search with as-you-type filtering, configurable fuzziness threshold
+  - [x] Frecency scoring (combines match quality with launch frequency/recency)
+  - [x] 18 built-in application entries, keyboard navigation (arrows, Enter, Escape)
+  - [x] Category filtering, hotkey activation (Super+Space)
 - [ ] Ctrl+R run dialog (completion, recent commands)
 - [ ] Sound mixer (per-app volume, show currently-playing apps first)
 - [ ] Light / dark / custom theme support
@@ -1641,7 +1652,11 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Info panel (dimensions, format, size, date, EXIF fields)
   - [x] Thumbnail strip, toolbar (13 buttons), keyboard shortcuts (F5/F11/+/-/arrows)
   - [ ] Video playback
-- [ ] Music player
+- [x] Music player:
+  - [x] Audio format detection (WAV/MP3/FLAC/OGG header parsing, metadata extraction)
+  - [x] Playlist management (create/edit/reorder/shuffle, repeat modes, M3U import/export)
+  - [x] Three-tab UI: Now Playing (progress, controls, album art), Library (artists/albums/songs), Playlists
+  - [x] Playback controls, volume slider, seek bar, keyboard shortcuts
 - [-] Terminal emulator (graphical):
   - [x] VT100/xterm CSI sequences (cursor movement, erase, insert/delete, scroll, modes)
   - [x] SGR colors (8-color, 256-color, truecolor), bold/dim/italic/underline/blink/inverse
@@ -1690,7 +1705,11 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [ ] Shared dynamic linking within a generation (fast security patches)
 - [ ] File-level deduplication via hardlinks within the store
 - [ ] Binary packages (preferred) with source build option
-- [ ] Network repository fetching (currently manual index placement)
+- [-] Network repository fetching:
+  - [x] HTTP/1.1 client library (net/httpclient): URL parser, request builder, chunked transfer, cookies, redirects, base64
+  - [x] DNS resolver library (net/dns): RFC 1035, compression pointers, cache, A/AAAA/CNAME/MX/PTR, hosts file
+  - [x] `fetch` coreutil (wget/curl-like CLI): URL parsing, redirect following, progress display
+  - [ ] Wire httpclient into package manager for repository index + package download
 - [ ] Repository model:
   - [ ] Official curated repository
   - [ ] Third-party repository support (user adds URL)

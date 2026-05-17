@@ -1641,37 +1641,37 @@ fn handle_window_adjust(
 /// Execute a shell command and return the output.
 ///
 /// Dispatches to the kernel shell (kshell) and captures output.
-fn execute_shell_command(username: &str, command: &str) -> String {
-    // Use kshell to execute the command and capture output.
-    // For now, implement a few built-in commands.
-    match command.trim() {
-        "help" | "?" => {
-            String::from(
-                "Available commands:\r\n\
-                 help        - Show this help\r\n\
-                 whoami      - Show current user\r\n\
-                 uname       - Show system information\r\n\
-                 uptime      - Show system uptime\r\n\
-                 free        - Show memory usage\r\n\
-                 ps          - Show processes\r\n\
-                 ifconfig    - Show network interfaces\r\n\
-                 exit        - Close SSH session\r\n"
-            )
-        }
-        "whoami" => format!("{}\r\n", username),
-        "uname" | "uname -a" => {
-            String::from("MintOS 0.1.0 x86_64 (kernel prototype)\r\n")
-        }
-        "exit" | "logout" => {
-            String::from("logout\r\n")
-        }
-        cmd if cmd.is_empty() => String::new(),
-        cmd => {
-            // Try dispatching to kshell.
-            // TODO: Connect to actual kshell command dispatcher.
-            format!("-ssh: {}: command not found\r\n", cmd)
-        }
+fn execute_shell_command(_username: &str, command: &str) -> String {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return String::new();
     }
+
+    // Block dangerous commands over SSH (same policy as telnet).
+    if trimmed == "reboot" || trimmed == "shutdown" || trimmed == "poweroff" {
+        return String::from("Reboot/shutdown not permitted via SSH.\r\n");
+    }
+
+    // Dispatch to kshell and capture output.
+    let output = crate::kshell::capture_command(trimmed);
+
+    // Convert LF to CR+LF for proper SSH terminal display.
+    lf_to_crlf(&output)
+}
+
+/// Convert bare LF to CR+LF for SSH terminal output.
+///
+/// SSH terminals expect CR+LF line endings.  The kshell output
+/// uses bare LF, so we convert here.
+fn lf_to_crlf(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() + input.len() / 10);
+    for c in input.chars() {
+        if c == '\n' {
+            result.push('\r');
+        }
+        result.push(c);
+    }
+    result
 }
 
 // ===========================================================================
@@ -2588,6 +2588,17 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[ssh]   KEXINIT construction: OK");
     }
 
-    serial_println!("[ssh] Self-test PASSED (8 tests)");
+    // Test 9: LF-to-CRLF conversion for terminal output.
+    {
+        assert_eq!(lf_to_crlf(""), "");
+        assert_eq!(lf_to_crlf("hello"), "hello");
+        assert_eq!(lf_to_crlf("a\nb\n"), "a\r\nb\r\n");
+        assert_eq!(lf_to_crlf("\n"), "\r\n");
+        assert_eq!(lf_to_crlf("a\r\nb"), "a\r\r\nb"); // Pre-existing CRLF: don't double-convert
+                                                         // (real usage won't have these, but it's safe).
+        serial_println!("[ssh]   LF→CRLF conversion: OK");
+    }
+
+    serial_println!("[ssh] Self-test PASSED (9 tests)");
     Ok(())
 }

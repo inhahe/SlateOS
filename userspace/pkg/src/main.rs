@@ -1001,6 +1001,94 @@ impl ContentStore {
         Ok(stats)
     }
 
+    /// Deploy files with config file protection for upgrades.
+    ///
+    /// Config files listed in the manifest's `conffiles` field are checked
+    /// against their previously-deployed hash. If the user modified the file,
+    /// the new version is saved as `<path>.pkg-new` instead of overwriting.
+    fn deploy_package_files_upgrade(
+        &self,
+        manifest: &PackageManifest,
+        old_file_hashes: &[(String, String)],
+    ) -> io::Result<DeployStats> {
+        let mut stats = DeployStats::default();
+
+        // Build lookup of old hashes by path
+        let old_hashes: BTreeMap<&str, &str> = old_file_hashes
+            .iter()
+            .map(|(path, hash)| (path.as_str(), hash.as_str()))
+            .collect();
+
+        let conffile_set: HashSet<&str> = manifest.conffiles.iter().map(|s| s.as_str()).collect();
+
+        for file in &manifest.files {
+            if file.hash.is_empty() {
+                continue;
+            }
+
+            let dst = Path::new(&file.dst);
+
+            // Check if this is a config file that might be user-modified
+            if conffile_set.contains(file.dst.as_str()) {
+                if let Some(&old_hash) = old_hashes.get(file.dst.as_str()) {
+                    match ConfigFileTracker::deploy_config(self, &file.hash, dst, old_hash) {
+                        Ok(replaced) => {
+                            stats.deployed += 1;
+                            stats.total_bytes += file.size;
+                            if !replaced {
+                                stats.config_preserved += 1;
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  warning: failed to deploy config {}: {e}",
+                                file.dst
+                            );
+                            stats.failed += 1;
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // Normal file deployment
+            match self.deploy_hardlink(&file.hash, dst) {
+                Ok(()) => {
+                    stats.deployed += 1;
+                    stats.total_bytes += file.size;
+                    if let Ok(meta) = fs::metadata(self.blob_path(&file.hash)) {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::MetadataExt;
+                            if meta.nlink() > 1 {
+                                stats.dedup_bytes += file.size;
+                            }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = meta;
+                        }
+                    }
+
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = fs::set_permissions(dst, fs::Permissions::from_mode(file.mode));
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  warning: failed to deploy {}: {e}",
+                        file.dst
+                    );
+                    stats.failed += 1;
+                }
+            }
+        }
+
+        Ok(stats)
+    }
+
     /// Remove deployed files for a package (cleanup on remove/rollback).
     fn undeploy_package_files(&self, file_hashes: &[(String, String)]) -> u64 {
         let mut removed = 0u64;
@@ -1031,6 +1119,8 @@ struct DeployStats {
     total_bytes: u64,
     /// Bytes saved through hardlink deduplication.
     dedup_bytes: u64,
+    /// Number of config files preserved (user-modified, new version saved as .pkg-new).
+    config_preserved: u64,
 }
 
 // ============================================================================
@@ -1942,6 +2032,20 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
         .as_secs();
 
     for manifest in &resolved {
+        // Run pre-install hook if defined
+        if !manifest.hook_pre_install.is_empty() {
+            let ver_str = manifest.version.to_string();
+            match PackageHooks::run(&manifest.hook_pre_install, &manifest.name, &ver_str) {
+                Ok(true) => println!("  pre-install hook OK for {}", manifest.name),
+                Ok(false) => {} // no hook
+                Err(e) => {
+                    eprintln!("pkg: {}: pre-install hook failed: {e}", manifest.name);
+                    eprintln!("pkg: skipping {}", manifest.name);
+                    continue;
+                }
+            }
+        }
+
         // Ensure the package archive is available in CAS. If not, try to
         // download it from the repository.
         if !manifest.archive_hash.is_empty() && !db.cas.has(&manifest.archive_hash) {
@@ -2019,6 +2123,19 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
             }
         } else {
             println!("  Installed {} {} (metadata only)", manifest.name, manifest.version);
+        }
+
+        // Run post-install hook if defined
+        if !manifest.hook_post_install.is_empty() {
+            let ver_str = manifest.version.to_string();
+            match PackageHooks::run(&manifest.hook_post_install, &manifest.name, &ver_str) {
+                Ok(true) => println!("  post-install hook OK for {}", manifest.name),
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("  warning: {}: post-install hook failed: {e}", manifest.name);
+                    // Post-install hook failure is not fatal — package is already installed
+                }
+            }
         }
     }
 
@@ -2110,6 +2227,26 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
     let mut new_gen = db.next_generation(&desc);
 
     for name in packages {
+        // Run pre-remove hook if we can find the manifest in CAS
+        if let Some(pkg) = current.packages.get(name) {
+            if let Ok(manifest_data) = db.cas.get(&pkg.manifest_hash) {
+                if let Ok(text) = String::from_utf8(manifest_data) {
+                    if let Some(manifest) = PackageManifest::parse(&text) {
+                        if !manifest.hook_pre_remove.is_empty() {
+                            let ver_str = pkg.version.to_string();
+                            match PackageHooks::run(&manifest.hook_pre_remove, name, &ver_str) {
+                                Ok(true) => println!("  pre-remove hook OK for {name}"),
+                                Ok(false) => {}
+                                Err(e) => {
+                                    eprintln!("  warning: {name}: pre-remove hook failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Undeploy files from the filesystem before removing from generation
         if let Some(pkg) = current.packages.get(name) {
             let removed = db.cas.undeploy_package_files(&pkg.file_hashes);
@@ -2120,6 +2257,26 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
             }
         }
         new_gen.packages.remove(name);
+
+        // Run post-remove hook
+        if let Some(pkg) = current.packages.get(name) {
+            if let Ok(manifest_data) = db.cas.get(&pkg.manifest_hash) {
+                if let Ok(text) = String::from_utf8(manifest_data) {
+                    if let Some(manifest) = PackageManifest::parse(&text) {
+                        if !manifest.hook_post_remove.is_empty() {
+                            let ver_str = pkg.version.to_string();
+                            match PackageHooks::run(&manifest.hook_post_remove, name, &ver_str) {
+                                Ok(true) => println!("  post-remove hook OK for {name}"),
+                                Ok(false) => {}
+                                Err(e) => {
+                                    eprintln!("  warning: {name}: post-remove hook failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     match db.save_generation(&new_gen) {
@@ -2670,43 +2827,173 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         .unwrap_or_default()
         .as_secs();
 
+    let mut total_config_preserved = 0u64;
+
     for (name, _, new_ver) in &upgrades {
-        if let Some(manifest) = available
+        let manifest = match available
             .iter()
             .find(|p| p.name == *name && &p.version == *new_ver)
         {
-            let manifest_data = manifest.serialize();
-            let manifest_hash = match db.cas.put(manifest_data.as_bytes()) {
-                Ok(h) => h,
+            Some(m) => m,
+            None => continue,
+        };
+
+        // Run pre-install hook (used for upgrades too)
+        if !manifest.hook_pre_install.is_empty() {
+            let ver_str = manifest.version.to_string();
+            match PackageHooks::run(&manifest.hook_pre_install, &manifest.name, &ver_str) {
+                Ok(true) => println!("  pre-install hook OK for {}", manifest.name),
+                Ok(false) => {}
                 Err(e) => {
-                    eprintln!("pkg: failed to store manifest for {name}: {e}");
+                    eprintln!("pkg: {}: pre-install hook failed: {e}", manifest.name);
+                    eprintln!("pkg: skipping {}", manifest.name);
                     continue;
                 }
-            };
+            }
+        }
 
-            let old_explicit = new_gen
-                .packages
-                .get(*name)
-                .map_or(true, |p| p.explicit);
+        // Download archive if needed
+        if !manifest.archive_hash.is_empty() && !db.cas.has(&manifest.archive_hash) {
+            let version_str = manifest.version.to_string();
+            match cmd_download(db, &manifest.name, &version_str) {
+                Ok(hash) => {
+                    if hash != manifest.archive_hash {
+                        eprintln!(
+                            "pkg: hash mismatch for {}: expected {}, got {}",
+                            manifest.name, manifest.archive_hash, hash
+                        );
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("pkg: failed to download {}: {e}", manifest.name);
+                    eprintln!("pkg: continuing with manifest-only upgrade");
+                }
+            }
+        }
 
-            let file_hashes: Vec<(String, String)> = manifest
-                .files
-                .iter()
-                .map(|f| (f.dst.clone(), f.hash.clone()))
-                .collect();
+        // Store the manifest itself in CAS
+        let manifest_data = manifest.serialize();
+        let manifest_hash = match db.cas.put(manifest_data.as_bytes()) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("pkg: failed to store manifest for {name}: {e}");
+                continue;
+            }
+        };
 
-            new_gen.packages.insert(
-                name.to_string(),
-                InstalledPackage {
-                    version: manifest.version.clone(),
-                    manifest_hash,
-                    file_hashes,
-                    installed_at: now,
-                    explicit: old_explicit,
-                },
-            );
+        let old_explicit = new_gen
+            .packages
+            .get(*name)
+            .map_or(true, |p| p.explicit);
 
-            println!("  Upgrading {name} to {}...", manifest.version);
+        // Get old file hashes for config-aware deployment
+        let old_file_hashes: Vec<(String, String)> = current
+            .packages
+            .get(*name)
+            .map(|p| p.file_hashes.clone())
+            .unwrap_or_default();
+
+        let new_file_hashes: Vec<(String, String)> = manifest
+            .files
+            .iter()
+            .map(|f| (f.dst.clone(), f.hash.clone()))
+            .collect();
+
+        // Remove files from the old version that are not in the new version.
+        // Build a set of new destination paths for quick lookup.
+        let new_dsts: HashSet<&str> = manifest
+            .files
+            .iter()
+            .map(|f| f.dst.as_str())
+            .collect();
+
+        let mut removed_stale = 0u64;
+        for (old_dst, _) in &old_file_hashes {
+            if !new_dsts.contains(old_dst.as_str()) {
+                let dst = Path::new(old_dst);
+                if dst.exists() {
+                    if fs::remove_file(dst).is_ok() {
+                        removed_stale += 1;
+                    }
+                    if let Some(parent) = dst.parent() {
+                        let _ = fs::remove_dir(parent);
+                    }
+                }
+            }
+        }
+
+        // Deploy new files with config-aware upgrade logic
+        if !manifest.files.is_empty() && !manifest.archive_hash.is_empty() {
+            match db.cas.deploy_package_files_upgrade(manifest, &old_file_hashes) {
+                Ok(stats) => {
+                    let mut extras = Vec::new();
+                    if stats.dedup_bytes > 0 {
+                        extras.push(format!("{} saved via dedup", format_size(stats.dedup_bytes)));
+                    }
+                    if stats.config_preserved > 0 {
+                        extras.push(format!("{} config(s) preserved", stats.config_preserved));
+                        total_config_preserved += stats.config_preserved;
+                    }
+                    if removed_stale > 0 {
+                        extras.push(format!("{removed_stale} stale file(s) removed"));
+                    }
+                    let extra_str = if extras.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", extras.join(", "))
+                    };
+                    println!(
+                        "  Upgraded {} to {}: {} files, {}{}",
+                        manifest.name,
+                        manifest.version,
+                        stats.deployed,
+                        format_size(stats.total_bytes),
+                        extra_str
+                    );
+                    if stats.failed > 0 {
+                        eprintln!("    {} file(s) failed to deploy", stats.failed);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("  warning: file deployment error for {}: {e}", manifest.name);
+                }
+            }
+        } else {
+            if removed_stale > 0 {
+                println!(
+                    "  Upgraded {} to {} (metadata only, {removed_stale} stale file(s) removed)",
+                    manifest.name, manifest.version
+                );
+            } else {
+                println!(
+                    "  Upgraded {} to {} (metadata only)",
+                    manifest.name, manifest.version
+                );
+            }
+        }
+
+        new_gen.packages.insert(
+            name.to_string(),
+            InstalledPackage {
+                version: manifest.version.clone(),
+                manifest_hash,
+                file_hashes: new_file_hashes,
+                installed_at: now,
+                explicit: old_explicit,
+            },
+        );
+
+        // Run post-install hook (used for upgrades too)
+        if !manifest.hook_post_install.is_empty() {
+            let ver_str = manifest.version.to_string();
+            match PackageHooks::run(&manifest.hook_post_install, &manifest.name, &ver_str) {
+                Ok(true) => println!("  post-install hook OK for {}", manifest.name),
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("  warning: {}: post-install hook failed: {e}", manifest.name);
+                }
+            }
         }
     }
 
@@ -2721,6 +3008,12 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
                 &desc,
             );
             println!("\nDone. Generation {} created.", new_gen.id);
+            if total_config_preserved > 0 {
+                println!(
+                    "  {total_config_preserved} config file(s) preserved — \
+                     new versions saved as .pkg-new"
+                );
+            }
         }
         Err(e) => {
             eprintln!("pkg: failed to save generation: {e}");

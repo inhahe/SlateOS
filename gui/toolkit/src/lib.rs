@@ -24,6 +24,8 @@
 //! ```
 
 pub mod color;
+pub mod dialog;
+pub mod dnd;
 pub mod event;
 pub mod layout;
 pub mod render;

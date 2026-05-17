@@ -1532,10 +1532,26 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [ ] Simple text (plain text, ANSI colors, single font)
   - [ ] Rich text (fonts, sizes, colors, inline images — NOT HTML)
   - [ ] Scroll-to-bottom / stay-at-bottom when new text added
-- [ ] Advanced features:
-  - [ ] Clipboard (multi-format: text, HTML, image, structured data, history)
-  - [ ] Drag-and-drop (OLE-style multi-format data transfer)
-  - [ ] File picker / save dialog (reuses file explorer component)
+- [-] Advanced features:
+  - [x] Clipboard (multi-format: text, HTML, image, structured data, history)
+    - [x] System clipboard service with 7 formats (PlainText/RichText/Html/ImagePng/ImageBmp/FilePaths/Custom)
+    - [x] History (50 entries), pinning, search, format conversion (HTML→text, RTF→text)
+    - [x] Sensitive mode (auto-clear 30s, excluded from history), change subscriptions
+  - [x] Drag-and-drop (OLE-style multi-format data transfer)
+    - [x] DataObject with multi-format storage, DataFormat enum (7 standard + Custom)
+    - [x] DragDropManager state machine (Idle→Dragging→OverTarget)
+    - [x] Drop target registration, hit testing, format compatibility, effect negotiation
+    - [x] Drag threshold, cancel support, DragEvent lifecycle events
+  - [x] File picker / save dialog (reuses file explorer component)
+    - [x] Open/Save/SelectFolder modes with builder API
+    - [x] Directory navigation (back/forward/up), quick-access sidebar
+    - [x] Sortable file list, extension filters, auto-extension append
+    - [x] Keyboard navigation, dark theme rendering
+  - [x] Notification system (gui/notifications daemon)
+    - [x] Toast notifications (top-right, max 4, auto-dismiss by priority)
+    - [x] Notification center (grouped by app, clear all, read/unread)
+    - [x] Do Not Disturb (manual + scheduled, critical bypass)
+    - [x] Per-app settings, progress bars, action buttons
   - [ ] DPI/scaling awareness, automatic image scaling
   - [ ] Enable/disable controls with optional reason tooltip
   - [ ] SVG rendering support

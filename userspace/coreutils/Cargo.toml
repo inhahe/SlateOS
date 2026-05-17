@@ -2,7 +2,7 @@
 name = "coreutils"
 version = "0.1.0"
 edition = "2024"
-description = "Coreutils for OurOS (69 total)"
+description = "Coreutils for OurOS (71 total)"
 
 # Standalone crate — not part of the kernel workspace.
 [workspace]
@@ -263,3 +263,11 @@ path = "src/bin/cal.rs"
 [[bin]]
 name = "time"
 path = "src/bin/time_cmd.rs"
+
+[[bin]]
+name = "sed"
+path = "src/bin/sed.rs"
+
+[[bin]]
+name = "awk"
+path = "src/bin/awk.rs"

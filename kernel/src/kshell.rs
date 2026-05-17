@@ -34949,6 +34949,30 @@ fn cmd_dashboard(args: &str) {
                 }
             }
         }
+        "tcp" => {
+            let data = dashboard::handle_api_request("/api/tcp");
+            if let Some((_ct, body)) = data {
+                if let Ok(s) = core::str::from_utf8(&body) {
+                    crate::serial_println!("{}", s);
+                }
+            }
+        }
+        "scheduler" | "sched" => {
+            let data = dashboard::handle_api_request("/api/scheduler");
+            if let Some((_ct, body)) = data {
+                if let Ok(s) = core::str::from_utf8(&body) {
+                    crate::serial_println!("{}", s);
+                }
+            }
+        }
+        "swap" => {
+            let data = dashboard::handle_api_request("/api/swap");
+            if let Some((_ct, body)) = data {
+                if let Ok(s) = core::str::from_utf8(&body) {
+                    crate::serial_println!("{}", s);
+                }
+            }
+        }
         "test" => {
             match dashboard::self_test() {
                 Ok(()) => crate::serial_println!("[dashboard] Self-test passed."),
@@ -34956,20 +34980,23 @@ fn cmd_dashboard(args: &str) {
             }
         }
         _ => {
-            crate::serial_println!("Usage: dashboard [status|tasks|network|memory|httpd|dns|fw|bench|health|ipv6|containers|metrics|test]");
-            crate::serial_println!("  status   - System overview (default)");
-            crate::serial_println!("  tasks    - Task list (JSON)");
-            crate::serial_println!("  network  - Network info (JSON)");
-            crate::serial_println!("  memory   - Memory stats (JSON)");
-            crate::serial_println!("  httpd    - HTTP server stats + access log (JSON)");
-            crate::serial_println!("  dns      - DNS cache stats (JSON)");
-            crate::serial_println!("  fw       - Firewall status + rules (JSON)");
-            crate::serial_println!("  bench    - Benchmark scorecard (JSON)");
-            crate::serial_println!("  health   - Aggregated health check (JSON)");
-            crate::serial_println!("  ipv6     - IPv6 addresses + SLAAC + DHCPv6 (JSON)");
+            crate::serial_println!("Usage: dashboard [status|tasks|network|memory|httpd|dns|fw|bench|health|ipv6|containers|tcp|sched|swap|metrics|test]");
+            crate::serial_println!("  status     - System overview (default)");
+            crate::serial_println!("  tasks      - Task list (JSON)");
+            crate::serial_println!("  network    - Network info (JSON)");
+            crate::serial_println!("  memory     - Memory stats (JSON)");
+            crate::serial_println!("  httpd      - HTTP server stats + access log (JSON)");
+            crate::serial_println!("  dns        - DNS cache stats (JSON)");
+            crate::serial_println!("  fw         - Firewall status + rules (JSON)");
+            crate::serial_println!("  bench      - Benchmark scorecard (JSON)");
+            crate::serial_println!("  health     - Aggregated health check (JSON)");
+            crate::serial_println!("  ipv6       - IPv6 addresses + SLAAC + DHCPv6 (JSON)");
             crate::serial_println!("  containers - Active containers (JSON)");
-            crate::serial_println!("  metrics  - Prometheus-format metrics");
-            crate::serial_println!("  test     - Run dashboard self-test");
+            crate::serial_println!("  tcp        - TCP connections + listeners + stats (JSON)");
+            crate::serial_println!("  sched      - Scheduler per-CPU stats (JSON)");
+            crate::serial_println!("  swap       - Swap/zram devices + compression (JSON)");
+            crate::serial_println!("  metrics    - Prometheus-format metrics");
+            crate::serial_println!("  test       - Run dashboard self-test");
             crate::serial_println!("Web dashboard available at http://<ip>/dashboard");
         }
     }

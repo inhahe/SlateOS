@@ -53,6 +53,20 @@ pub extern "C" fn _Unwind_GetIP(_context: *mut _Unwind_Context) -> usize {
     0
 }
 
+/// Find the start address of the function enclosing the given IP.
+/// Stub: returns 0 (unknown — disables symbol_address in backtrace).
+#[unsafe(no_mangle)]
+pub extern "C" fn _Unwind_FindEnclosingFunction(_pc: *mut c_void) -> *mut c_void {
+    core::ptr::null_mut()
+}
+
+/// Get the canonical frame address from an unwind context.
+/// Stub: returns 0 (unknown).
+#[unsafe(no_mangle)]
+pub extern "C" fn _Unwind_GetCFA(_context: *mut _Unwind_Context) -> usize {
+    0
+}
+
 // -----------------------------------------------------------------------
 // Linux syscall() stub
 //
@@ -199,6 +213,38 @@ pub extern "C" fn pthread_attr_getstack(
         unsafe { *stacksize = 0; }
     }
     0
+}
+
+// -----------------------------------------------------------------------
+// POSIX function stubs
+//
+// Functions that Nushell (via std or dependency crates) references but
+// that our POSIX layer doesn't provide yet.  These should be moved to
+// proper implementations in the posix crate as the OS matures.
+// -----------------------------------------------------------------------
+
+/// Opaque sigset_t — matches musl's representation.
+#[repr(C)]
+pub struct sigset_t {
+    _bits: [u64; 16],
+}
+
+/// Set the default signal mask for a spawn attributes object.
+/// Stub: returns 0 (success, no-op — signals not yet implemented).
+#[unsafe(no_mangle)]
+pub extern "C" fn posix_spawnattr_setsigdefault(
+    _attr: *mut c_void,
+    _sigdefault: *const sigset_t,
+) -> i32 {
+    0 // success, no-op
+}
+
+/// Send a signal to a process group.
+/// Stub: returns -1 with errno=ENOSYS (signals not yet implemented).
+#[unsafe(no_mangle)]
+pub extern "C" fn killpg(_pgrp: i32, _sig: i32) -> i32 {
+    // TODO: implement once POSIX signal support exists
+    -1 // failure — ENOSYS
 }
 
 // -----------------------------------------------------------------------

@@ -1035,6 +1035,36 @@ update(); setInterval(update, 3000);
 }
 
 // ---------------------------------------------------------------------------
+// Benchmark helpers (public for bench module)
+// ---------------------------------------------------------------------------
+
+/// Generate the /api/status JSON response.  Exposed for benchmarking.
+///
+/// Measures the cost of collecting system state (uptime, memory, CPU)
+/// and serializing it to JSON.
+#[inline(never)]
+pub fn bench_api_status() -> Vec<u8> {
+    api_status()
+}
+
+/// Generate the /api/health JSON response.  Exposed for benchmarking.
+///
+/// Measures the cost of the aggregated health check across all subsystems.
+#[inline(never)]
+pub fn bench_api_health() -> Vec<u8> {
+    api_health()
+}
+
+/// Generate the Prometheus /metrics text response.  Exposed for benchmarking.
+///
+/// Measures the cost of formatting all 22 Prometheus metrics with
+/// TYPE/HELP annotations.
+#[inline(never)]
+pub fn bench_api_metrics() -> Vec<u8> {
+    api_metrics()
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 

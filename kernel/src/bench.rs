@@ -831,8 +831,16 @@ pub fn run_all() {
     bench_http_parse_request();
     bench_http_mime_type();
     bench_http_percent_decode();
+    bench_http_etag();
+    bench_http_build_response();
+    bench_http_build_response_gzip();
     bench_http_gzip_1k();
     bench_http_gzip_8k();
+
+    // --- Dashboard API benchmarks ---
+    bench_dashboard_api_status();
+    bench_dashboard_api_health();
+    bench_dashboard_api_metrics();
 
     // --- Print scorecard summary ---
     print_scorecard();
@@ -3359,6 +3367,155 @@ fn bench_http_gzip_8k() {
     );
     // Target: 1ms — larger content takes proportionally longer.
     score("http_gzip_8KiB", &result, 1_000_000);
+}
+
+/// Benchmark HTTP ETag computation.
+///
+/// Measures the FNV-1a hash + hex formatting that runs on every response.
+/// This is on the critical path for both plain and gzip responses.
+fn bench_http_etag() {
+    use crate::net::httpd;
+
+    // 4 KiB body — typical small page or JSON API response.
+    let body: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+
+    let result = run("http_etag_4KiB", 2000, || {
+        let _ = core::hint::black_box(httpd::bench_etag(&body));
+    });
+
+    serial_println!(
+        "[bench]   http_etag_4KiB: min {}ns ({}cy)",
+        result.min_ns, result.min_cycles
+    );
+    // Target: 5000ns — FNV-1a over 4 KiB + hex format + String alloc.
+    score("http_etag_4KiB", &result, 5000);
+}
+
+/// Benchmark full HTTP response construction (headers + body, no gzip).
+///
+/// Measures the complete response building path: ETag hash, header
+/// formatting via format!(), Vec concatenation.  This is the code path
+/// for every non-compressed response served.
+fn bench_http_build_response() {
+    use crate::net::httpd;
+
+    // Build a 1 KiB HTML body — typical small page.
+    let body: Vec<u8> = b"<html><body><h1>Hello</h1><p>World</p></body></html>\n"
+        .iter()
+        .cycle()
+        .take(1024)
+        .copied()
+        .collect();
+
+    let result = run("http_build_response_1KiB", 1000, || {
+        let _ = core::hint::black_box(httpd::bench_build_response(&body));
+    });
+
+    serial_println!(
+        "[bench]   http_build_response_1KiB: min {}ns ({}cy)",
+        result.min_ns, result.min_cycles
+    );
+    // Target: 20000ns — dominated by format!() header + ETag hash + Vec::extend.
+    score("http_build_response_1KiB", &result, 20000);
+}
+
+/// Benchmark full gzip-compressed HTTP response construction.
+///
+/// Measures the complete compressed response path: gzip compression,
+/// ETag hash (on original body), header formatting, Vec concatenation.
+/// This is the hot path for text/html and application/json responses
+/// when the client sends Accept-Encoding: gzip.
+fn bench_http_build_response_gzip() {
+    use crate::net::httpd;
+
+    // 1 KiB HTML body (same as build_response benchmark for comparison).
+    let body: Vec<u8> = b"<html><body><h1>Hello</h1><p>World</p></body></html>\n"
+        .iter()
+        .cycle()
+        .take(1024)
+        .copied()
+        .collect();
+
+    let result = run("http_build_response_gzip_1KiB", 500, || {
+        let _ = core::hint::black_box(httpd::bench_build_response_gzip(&body));
+    });
+
+    // Report response sizes.
+    let plain = httpd::bench_build_response(&body);
+    let gzip = httpd::bench_build_response_gzip(&body);
+    serial_println!(
+        "[bench]   http_build_response_gzip_1KiB: min {}ns ({}cy), plain {}B vs gzip {}B",
+        result.min_ns, result.min_cycles, plain.len(), gzip.len()
+    );
+    // Target: 250000ns — gzip dominates (200us) + response building (~20us).
+    score("http_build_response_gzip_1KiB", &result, 250_000);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard API benchmarks (net zone)
+// ---------------------------------------------------------------------------
+
+/// Benchmark /api/status JSON generation.
+///
+/// Measures the cost of collecting system state (uptime, memory, CPU count,
+/// task count, scheduler ticks) and formatting it as JSON.  This endpoint
+/// is polled every 3 seconds by the dashboard auto-refresh.
+fn bench_dashboard_api_status() {
+    use crate::net::dashboard;
+
+    let result = run("dashboard_api_status", 1000, || {
+        let _ = core::hint::black_box(dashboard::bench_api_status());
+    });
+
+    serial_println!(
+        "[bench]   dashboard_api_status: min {}ns ({}cy), ~{}B",
+        result.min_ns, result.min_cycles,
+        dashboard::bench_api_status().len()
+    );
+    // Target: 10000ns — a few atomic reads + format!() JSON.
+    score("dashboard_api_status", &result, 10000);
+}
+
+/// Benchmark /api/health JSON generation.
+///
+/// Measures the cost of the aggregated health check that queries memory,
+/// networking, HTTP server, and DNS subsystems to produce an overall
+/// health status (ok/degraded/critical).
+fn bench_dashboard_api_health() {
+    use crate::net::dashboard;
+
+    let result = run("dashboard_api_health", 1000, || {
+        let _ = core::hint::black_box(dashboard::bench_api_health());
+    });
+
+    serial_println!(
+        "[bench]   dashboard_api_health: min {}ns ({}cy), ~{}B",
+        result.min_ns, result.min_cycles,
+        dashboard::bench_api_health().len()
+    );
+    // Target: 15000ns — queries several subsystems + JSON format.
+    score("dashboard_api_health", &result, 15000);
+}
+
+/// Benchmark /metrics Prometheus text exposition format generation.
+///
+/// Measures the cost of formatting all 22 Prometheus metrics with
+/// TYPE and HELP annotations.  This is polled by monitoring stacks
+/// (Prometheus, Grafana, etc.).
+fn bench_dashboard_api_metrics() {
+    use crate::net::dashboard;
+
+    let result = run("dashboard_api_metrics", 500, || {
+        let _ = core::hint::black_box(dashboard::bench_api_metrics());
+    });
+
+    serial_println!(
+        "[bench]   dashboard_api_metrics: min {}ns ({}cy), ~{}B",
+        result.min_ns, result.min_cycles,
+        dashboard::bench_api_metrics().len()
+    );
+    // Target: 30000ns — 22 metrics with format!() + string concatenation.
+    score("dashboard_api_metrics", &result, 30000);
 }
 
 // ---------------------------------------------------------------------------

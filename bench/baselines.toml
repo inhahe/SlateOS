@@ -642,6 +642,66 @@ Runs once per request on the URI path.  Cost scales with the \
 number of percent-encoded sequences.  Most paths have zero \
 encodings (fast path: just copy bytes)."""
 
+[http_etag_4KiB]
+description = "ETag computation (FNV-1a hash + hex format) for 4 KiB body"
+target_ns   = 5000
+source      = "FNV-1a over 4096 bytes + format! hex string + String allocation"
+notes       = """
+Runs once per HTTP response (both plain and gzip paths).  FNV-1a \
+is byte-at-a-time — not SIMD-accelerated — but the 64-bit multiply \
+chain is efficient on x86_64.  4 KiB = 4096 iterations of XOR+mul."""
+
+[http_build_response_1KiB]
+description = "Full HTTP response construction (headers + 1 KiB body, no compression)"
+target_ns   = 20000
+source      = "ETag hash + format!() header (~300 bytes) + Vec::extend body"
+notes       = """
+The uncompressed response path: etag_for_body() → format!() for \
+8 header fields → Vec<u8> concatenation.  Dominated by the format! \
+macro (multiple integer-to-string conversions) and String allocation. \
+Runs on every non-compressed response."""
+
+[http_build_response_gzip_1KiB]
+description = "Full gzip-compressed HTTP response (headers + 1 KiB body)"
+target_ns   = 250000
+source      = "gzip compress (~200us) + ETag hash + format!() header + Vec::extend"
+notes       = """
+The compressed response path: gzip() → etag_for_body() → format!() \
+for 10 header fields → Vec concatenation.  Gzip dominates (~90% of \
+total cost).  This is the hot path for text/html responses when \
+clients send Accept-Encoding: gzip."""
+
+# -------------------------------------------------------------------------
+# Dashboard API baselines (target performance)
+# -------------------------------------------------------------------------
+
+[dashboard_api_status]
+description = "/api/status JSON generation (system state snapshot)"
+target_ns   = 10000
+source      = "Atomic reads (uptime, memory, CPU) + format!() JSON"
+notes       = """
+Polled every 3 seconds by the dashboard auto-refresh JavaScript. \
+Cost is dominated by format!() macro overhead — the actual data \
+gathering is all atomic loads.  ~300 bytes output."""
+
+[dashboard_api_health]
+description = "/api/health aggregated health check"
+target_ns   = 15000
+source      = "Queries memory, net interface, httpd, DNS + JSON format"
+notes       = """
+Aggregates health from multiple subsystems to produce an overall \
+ok/degraded/critical status.  More expensive than /api/status because \
+it queries more subsystems and evaluates threshold conditions."""
+
+[dashboard_api_metrics]
+description = "/metrics Prometheus text exposition (22 metrics)"
+target_ns   = 30000
+source      = "22 metric lines with TYPE/HELP annotations + string concat"
+notes       = """
+Prometheus-compatible scrape endpoint.  Output is ~2.5 KiB of \
+text/plain.  Dominated by 22 format!() calls and string \
+concatenation.  Scraped every 15-60 seconds by monitoring stacks."""
+
 # -------------------------------------------------------------------------
 # VFS deep-path baselines (target performance)
 # -------------------------------------------------------------------------

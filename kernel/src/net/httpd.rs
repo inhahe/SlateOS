@@ -1617,6 +1617,32 @@ pub fn bench_percent_decode(s: &str) -> String {
     percent_decode(s)
 }
 
+/// Build a complete HTTP response (headers + body).  Exposed for benchmarking.
+///
+/// Measures the full response construction path: ETag hash, header formatting,
+/// body append.  This is on the hot path for every HTTP response served.
+#[inline(never)]
+pub fn bench_build_response(body: &[u8]) -> Vec<u8> {
+    build_response(200, "OK", "text/html; charset=utf-8", body)
+}
+
+/// Build a gzip-compressed HTTP response.  Exposed for benchmarking.
+///
+/// Measures: gzip compression + ETag hash + header formatting + body append.
+/// This is the hot path for compressed responses (most text/* and application/*).
+#[inline(never)]
+pub fn bench_build_response_gzip(body: &[u8]) -> Vec<u8> {
+    build_response_gzip(200, "OK", "text/html; charset=utf-8", body)
+}
+
+/// Compute an ETag for a body.  Exposed for benchmarking.
+///
+/// Measures the FNV-1a hash + hex formatting that runs once per response.
+#[inline(never)]
+pub fn bench_etag(body: &[u8]) -> String {
+    etag_for_body(body)
+}
+
 // ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------

@@ -34666,18 +34666,22 @@ fn cmd_httpd(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "" | "help" => {
-            shell_println!("httpd — HTTP/1.1 file server");
-            shell_println!("  start [port]           Start the server (default: 8080)");
-            shell_println!("  stop                   Stop the server");
+            shell_println!("httpd — HTTP/1.1 file server with optional HTTPS");
+            shell_println!("  start [port]           Start HTTP server (default: 8080)");
+            shell_println!("  stop                   Stop HTTP server");
+            shell_println!("  tls [port]             Start HTTPS/TLS server (default: 443)");
+            shell_println!("  tls-stop               Stop HTTPS/TLS server");
             shell_println!("  status                 Show server status");
             shell_println!("  root [path]            Get/set document root");
             shell_println!("  test                   Run self-tests");
             shell_println!("");
             shell_println!("Examples:");
-            shell_println!("  httpd start            Start on port 8080");
-            shell_println!("  httpd start 80         Start on port 80");
+            shell_println!("  httpd start            Start HTTP on port 8080");
+            shell_println!("  httpd start 80         Start HTTP on port 80");
+            shell_println!("  httpd tls              Start HTTPS on port 443");
+            shell_println!("  httpd tls 8443         Start HTTPS on port 8443");
             shell_println!("  httpd root /www        Serve files from /www");
-            shell_println!("  httpd stop             Stop the server");
+            shell_println!("  httpd stop             Stop HTTP server");
         }
         "start" => {
             let port_str = parts.get(1).copied().unwrap_or("8080");
@@ -34695,6 +34699,22 @@ fn cmd_httpd(args: &str) {
             httpd::stop();
             shell_println!("HTTP server stopped");
         }
+        "tls" => {
+            let port_str = parts.get(1).copied().unwrap_or("443");
+            let port: u16 = port_str.parse().unwrap_or(0);
+            if port == 0 {
+                shell_println!("Invalid port: {}", port_str);
+                return;
+            }
+            match httpd::start_tls(port) {
+                Ok(()) => shell_println!("HTTPS server started on port {}", port),
+                Err(e) => shell_println!("Failed to start TLS: {:?}", e),
+            }
+        }
+        "tls-stop" | "tlsstop" => {
+            httpd::stop_tls();
+            shell_println!("HTTPS server stopped");
+        }
         "status" | "stats" => {
             shell_println!("HTTP Server");
             shell_println!("  Status:       {}",
@@ -34702,6 +34722,12 @@ fn cmd_httpd(args: &str) {
             );
             shell_println!("  Port:         {}", httpd::port());
             shell_println!("  Document root: {}", *crate::net::httpd::DOC_ROOT.lock());
+            shell_println!("");
+            shell_println!("HTTPS Server");
+            shell_println!("  Status:       {}",
+                if httpd::is_tls_running() { "running" } else { "stopped" }
+            );
+            shell_println!("  Port:         {}", httpd::tls_port());
         }
         "root" => {
             let path = parts.get(1).copied().unwrap_or("");

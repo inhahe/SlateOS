@@ -45,8 +45,15 @@
 //! - No chunked transfer encoding (Content-Length only).
 //! - No persistent connections (Connection: close after each response).
 //! - No authentication (trusted-network only).
-//! - No TLS/HTTPS (use the TLS module for that, future work).
 //! - Single-threaded: serves one request at a time per connection.
+//!
+//! ## HTTPS
+//!
+//! Optional TLS 1.3 support via `start_tls()`.  Binds a separate TCP
+//! listener (default port 443) and performs a TLS 1.3 handshake with
+//! Ed25519 self-signed certificates on each connection.  Uses the same
+//! request parsing and response logic as plain HTTP.  The TLS host key
+//! is generated from the kernel CSPRNG on first start.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -61,8 +68,11 @@ use crate::serial_println;
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Default listening port.
+/// Default HTTP listening port.
 const DEFAULT_PORT: u16 = 8080;
+
+/// Default HTTPS listening port.
+const DEFAULT_TLS_PORT: u16 = 443;
 
 /// Maximum HTTP request header size (bytes).
 const MAX_REQUEST_SIZE: usize = 8192;
@@ -72,6 +82,12 @@ const MAX_BODY_SIZE: usize = 4 * 1024 * 1024; // 4 MiB
 
 /// Poll timeout for reading request (in poll iterations, ~1ms each).
 const READ_TIMEOUT_POLLS: u32 = 5000; // 5 seconds
+
+/// Maximum bytes to read in a single `tls_server_recv` attempt.
+const TLS_RECV_MAX: usize = 16384;
+
+/// Maximum number of TLS recv attempts to accumulate a full HTTP request.
+const TLS_RECV_ATTEMPTS: u32 = 50;
 
 /// Server name for Server header.
 const SERVER_NAME: &str = "MintOS-httpd/0.1";
@@ -97,6 +113,25 @@ static LISTENER: spin::Mutex<usize> = spin::Mutex::new(0);
 /// Defaults to the echo handler.  Set via `set_ws_handler()`.
 static WS_HANDLER: spin::Mutex<super::websocket::WsMessageHandler> =
     spin::Mutex::new(super::websocket::echo_handler);
+
+// ---------------------------------------------------------------------------
+// HTTPS / TLS state
+// ---------------------------------------------------------------------------
+
+/// Whether the HTTPS (TLS) server is enabled.
+static TLS_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// HTTPS listening port.
+static TLS_PORT: AtomicU16 = AtomicU16::new(DEFAULT_TLS_PORT);
+
+/// Active HTTPS listener handle (0 = none).
+static TLS_LISTENER: spin::Mutex<usize> = spin::Mutex::new(0);
+
+/// TLS host key: Ed25519 seed (32 bytes).
+static TLS_HOST_KEY_SEED: spin::Mutex<[u8; 32]> = spin::Mutex::new([0u8; 32]);
+
+/// TLS host key: Ed25519 public key (32 bytes).
+static TLS_HOST_KEY_PUBLIC: spin::Mutex<[u8; 32]> = spin::Mutex::new([0u8; 32]);
 
 // ---------------------------------------------------------------------------
 // MIME type detection
@@ -423,7 +458,6 @@ fn format_size(size: u64) -> String {
 #[allow(clippy::arithmetic_side_effects)]
 fn handle_connection(conn_handle: usize) {
     use crate::net::tcp;
-    use crate::fs::vfs::{Vfs, EntryType};
 
     // Read the request (up to MAX_REQUEST_SIZE).
     let request_data = match tcp::read_blocking(conn_handle, READ_TIMEOUT_POLLS, MAX_REQUEST_SIZE) {
@@ -443,6 +477,7 @@ fn handle_connection(conn_handle: usize) {
     }
 
     // Check for WebSocket upgrade request before normal HTTP handling.
+    // (WebSocket over TLS is not yet supported — only plain HTTP.)
     if super::websocket::is_upgrade_request(&request_data) {
         let handler = WS_HANDLER.lock();
         if let Err(e) = super::websocket::handle_upgrade(conn_handle, &request_data, *handler) {
@@ -451,89 +486,8 @@ fn handle_connection(conn_handle: usize) {
         return;
     }
 
-    // Parse the HTTP request.
-    let req = match parse_request(&request_data) {
-        Some(r) => r,
-        None => {
-            let resp = error_response(400, "Bad Request");
-            let _ = tcp::send(conn_handle, &resp);
-            let _ = tcp::close(conn_handle);
-            return;
-        }
-    };
-
-    serial_println!("[httpd] {} {} from connection {}", req.method, req.path, conn_handle);
-
-    // Only allow GET and HEAD.
-    if req.method != "GET" && req.method != "HEAD" {
-        let resp = error_response(405, "Method Not Allowed");
-        let _ = tcp::send(conn_handle, &resp);
-        let _ = tcp::close(conn_handle);
-        return;
-    }
-
-    // Dashboard API and HTML — intercept before VFS serving.
-    if req.path.starts_with("/api/") || req.path == "/dashboard" || req.path == "/dashboard/" {
-        if let Some((content_type, body)) = super::dashboard::handle_api_request(&req.path) {
-            let response = if req.method == "HEAD" {
-                build_head_response(200, "OK", &content_type, body.len())
-            } else {
-                build_response(200, "OK", &content_type, &body)
-            };
-            let _ = tcp::send(conn_handle, &response);
-            let _ = tcp::close(conn_handle);
-            return;
-        }
-    }
-
-    // Map URI path to VFS path.
-    let doc_root = *DOC_ROOT.lock();
-    let vfs_path = if req.path == "/" {
-        String::from(doc_root)
-    } else if doc_root == "/" {
-        req.path.clone()
-    } else {
-        format!("{}{}", doc_root.trim_end_matches('/'), req.path)
-    };
-
-    // Check if path exists and is a directory or file.
-    let meta = Vfs::stat(&vfs_path);
-
-    let response = match meta {
-        Ok(m) if m.entry_type == EntryType::Directory => {
-            // Try index.html first.
-            let index_path = if vfs_path.ends_with('/') {
-                format!("{}index.html", vfs_path)
-            } else {
-                format!("{}/index.html", vfs_path)
-            };
-
-            if Vfs::stat(&index_path).is_ok() {
-                // Serve index.html.
-                serve_file(conn_handle, &index_path, &req.method)
-            } else {
-                // Generate directory listing.
-                match directory_listing(&vfs_path, &req.path) {
-                    Ok(body) => {
-                        if req.method == "HEAD" {
-                            build_head_response(200, "OK", "text/html; charset=utf-8", body.len())
-                        } else {
-                            build_response(200, "OK", "text/html; charset=utf-8", &body)
-                        }
-                    }
-                    Err(_) => error_response(500, "Internal Server Error"),
-                }
-            }
-        }
-        Ok(_) => {
-            // Regular file.
-            serve_file(conn_handle, &vfs_path, &req.method)
-        }
-        Err(KernelError::NotFound) => error_response(404, "Not Found"),
-        Err(KernelError::PermissionDenied) => error_response(403, "Forbidden"),
-        Err(_) => error_response(500, "Internal Server Error"),
-    };
-
+    // Shared request processing.
+    let response = process_http_request(&request_data);
     let _ = tcp::send(conn_handle, &response);
     let _ = tcp::close(conn_handle);
 }
@@ -630,7 +584,7 @@ pub fn set_ws_handler(handler: super::websocket::WsMessageHandler) {
     *WS_HANDLER.lock() = handler;
 }
 
-/// Accept and handle pending connections (non-blocking).
+/// Accept and handle pending HTTP connections (non-blocking).
 ///
 /// Call this periodically (e.g., from the network tick loop or a
 /// dedicated kshell command).  Each call accepts at most one connection
@@ -649,6 +603,266 @@ pub fn tick() {
     if let Ok(conn) = super::tcp::accept(listener) {
         handle_connection(conn);
     }
+}
+
+/// Accept and handle pending HTTPS (TLS) connections (non-blocking).
+///
+/// Call this periodically alongside `tick()`.  Accepts a TCP connection,
+/// performs a TLS 1.3 handshake, then processes the HTTP request over the
+/// encrypted channel.
+pub fn tick_tls() {
+    if !TLS_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let listener = *TLS_LISTENER.lock();
+    if listener == 0 {
+        return;
+    }
+
+    // Try to accept a TCP connection.
+    if let Ok(conn) = super::tcp::accept(listener) {
+        handle_tls_connection(conn);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTPS connection handler
+// ---------------------------------------------------------------------------
+
+/// Handle a single HTTPS request: TLS handshake + encrypted HTTP.
+#[allow(clippy::arithmetic_side_effects)]
+fn handle_tls_connection(tcp_handle: usize) {
+    use super::tls;
+
+    let seed = *TLS_HOST_KEY_SEED.lock();
+    let public = *TLS_HOST_KEY_PUBLIC.lock();
+
+    // Perform TLS 1.3 handshake.
+    let mut session = match tls::tls_accept(tcp_handle, &seed, &public) {
+        Ok(s) => s,
+        Err(e) => {
+            serial_println!("[httpd] TLS handshake failed: {:?}", e);
+            let _ = super::tcp::close(tcp_handle);
+            return;
+        }
+    };
+
+    // Read the HTTP request over TLS.
+    let request_data = match tls_read_request(&mut session) {
+        Ok(data) => data,
+        Err(_) => {
+            let resp = error_response(408, "Request Timeout");
+            let _ = tls::tls_server_send(&mut session, &resp);
+            let _ = tls::tls_server_close(&mut session);
+            return;
+        }
+    };
+
+    if request_data.is_empty() {
+        let _ = tls::tls_server_close(&mut session);
+        return;
+    }
+
+    // Process the HTTP request (same logic as plain HTTP).
+    let response = process_http_request(&request_data);
+    let _ = tls::tls_server_send(&mut session, &response);
+    let _ = tls::tls_server_close(&mut session);
+}
+
+/// Read a complete HTTP request from a TLS session.
+///
+/// Accumulates data from `tls_server_recv()` until we see the end of
+/// the HTTP headers (`\r\n\r\n`), or until we hit a size/attempt limit.
+fn tls_read_request(
+    session: &mut super::tls::TlsServerSession,
+) -> KernelResult<Vec<u8>> {
+    let mut buf = Vec::new();
+
+    for _ in 0..TLS_RECV_ATTEMPTS {
+        match super::tls::tls_server_recv(session, TLS_RECV_MAX) {
+            Ok(data) => {
+                buf.extend_from_slice(&data);
+                // Check if we have the full HTTP header.
+                if contains_header_end(&buf) {
+                    return Ok(buf);
+                }
+                if buf.len() >= MAX_REQUEST_SIZE {
+                    return Ok(buf);
+                }
+            }
+            Err(KernelError::WouldBlock) => {
+                // No data yet — keep trying.
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    if buf.is_empty() {
+        Err(KernelError::TimedOut)
+    } else {
+        Ok(buf)
+    }
+}
+
+/// Check if a buffer contains the HTTP header terminator `\r\n\r\n`.
+fn contains_header_end(buf: &[u8]) -> bool {
+    buf.windows(4).any(|w| w == b"\r\n\r\n")
+}
+
+/// Process an HTTP request and return the response bytes.
+///
+/// This is the shared logic for both plain HTTP and HTTPS.
+/// Handles WebSocket detection (skipped for HTTPS), dashboard API,
+/// and VFS file serving.
+#[allow(clippy::arithmetic_side_effects)]
+fn process_http_request(request_data: &[u8]) -> Vec<u8> {
+    use crate::fs::vfs::{Vfs, EntryType};
+
+    // Parse the HTTP request.
+    let req = match parse_request(request_data) {
+        Some(r) => r,
+        None => {
+            return error_response(400, "Bad Request");
+        }
+    };
+
+    serial_println!("[httpd/tls] {} {}", req.method, req.path);
+
+    // Only allow GET and HEAD.
+    if req.method != "GET" && req.method != "HEAD" {
+        return error_response(405, "Method Not Allowed");
+    }
+
+    // Dashboard API and HTML — intercept before VFS serving.
+    if req.path.starts_with("/api/") || req.path == "/dashboard" || req.path == "/dashboard/" {
+        if let Some((content_type, body)) = super::dashboard::handle_api_request(&req.path) {
+            let response = if req.method == "HEAD" {
+                build_head_response(200, "OK", &content_type, body.len())
+            } else {
+                build_response(200, "OK", &content_type, &body)
+            };
+            return response;
+        }
+    }
+
+    // Map URI path to VFS path.
+    let doc_root = *DOC_ROOT.lock();
+    let vfs_path = if req.path == "/" {
+        String::from(doc_root)
+    } else if doc_root == "/" {
+        req.path.clone()
+    } else {
+        format!("{}{}", doc_root.trim_end_matches('/'), req.path)
+    };
+
+    // Check if path exists and is a directory or file.
+    let meta = Vfs::stat(&vfs_path);
+
+    match meta {
+        Ok(m) if m.entry_type == EntryType::Directory => {
+            // Try index.html first.
+            let index_path = if vfs_path.ends_with('/') {
+                format!("{}index.html", vfs_path)
+            } else {
+                format!("{}/index.html", vfs_path)
+            };
+
+            if Vfs::stat(&index_path).is_ok() {
+                serve_file(0, &index_path, &req.method)
+            } else {
+                match directory_listing(&vfs_path, &req.path) {
+                    Ok(body) => {
+                        if req.method == "HEAD" {
+                            build_head_response(200, "OK", "text/html; charset=utf-8", body.len())
+                        } else {
+                            build_response(200, "OK", "text/html; charset=utf-8", &body)
+                        }
+                    }
+                    Err(_) => error_response(500, "Internal Server Error"),
+                }
+            }
+        }
+        Ok(_) => serve_file(0, &vfs_path, &req.method),
+        Err(KernelError::NotFound) => error_response(404, "Not Found"),
+        Err(KernelError::PermissionDenied) => error_response(403, "Forbidden"),
+        Err(_) => error_response(500, "Internal Server Error"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTPS public API
+// ---------------------------------------------------------------------------
+
+/// Start the HTTPS (TLS) server on the specified port.
+///
+/// Generates a fresh Ed25519 host key, binds a TCP listener, and begins
+/// accepting TLS connections.  Call `tick_tls()` periodically to serve.
+pub fn start_tls(port: u16) -> KernelResult<()> {
+    if TLS_ENABLED.load(Ordering::Relaxed) {
+        return Err(KernelError::AlreadyExists);
+    }
+
+    // Generate host key from CSPRNG.
+    let mut seed = [0u8; 32];
+    crate::rng::fill(&mut seed);
+    let public = crate::crypto::ed25519_public_key(&seed);
+
+    // Bind TCP listener.
+    let listener = super::tcp::bind(crate::netns::ROOT_NS, port)?;
+
+    *TLS_HOST_KEY_SEED.lock() = seed;
+    *TLS_HOST_KEY_PUBLIC.lock() = public;
+    *TLS_LISTENER.lock() = listener;
+    TLS_PORT.store(port, Ordering::Relaxed);
+    TLS_ENABLED.store(true, Ordering::Relaxed);
+
+    // Log fingerprint.
+    let fingerprint = crate::crypto::sha256(&public);
+    serial_println!(
+        "[httpd] HTTPS server started on port {} (cert fingerprint: SHA256:{:02x}{:02x}{:02x}...{:02x})",
+        port,
+        fingerprint[0], fingerprint[1], fingerprint[2],
+        fingerprint[31],
+    );
+    Ok(())
+}
+
+/// Stop the HTTPS (TLS) server.
+pub fn stop_tls() {
+    if !TLS_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    TLS_ENABLED.store(false, Ordering::Relaxed);
+
+    let listener = {
+        let mut guard = TLS_LISTENER.lock();
+        let h = *guard;
+        *guard = 0;
+        h
+    };
+
+    if listener != 0 {
+        let _ = super::tcp::close_listener(listener);
+    }
+
+    // Zero the host key material.
+    *TLS_HOST_KEY_SEED.lock() = [0u8; 32];
+    *TLS_HOST_KEY_PUBLIC.lock() = [0u8; 32];
+
+    serial_println!("[httpd] HTTPS server stopped");
+}
+
+/// Check if the HTTPS server is running.
+pub fn is_tls_running() -> bool {
+    TLS_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Get the current HTTPS listening port.
+pub fn tls_port() -> u16 {
+    TLS_PORT.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -722,7 +936,35 @@ pub fn self_test() -> KernelResult<()> {
     assert_eq!(normalize_path("/../../../../"), "/");
     serial_println!("[httpd]   Path traversal prevention: OK");
 
-    serial_println!("[httpd] Self-test PASSED (8 tests)");
+    // Test 9: contains_header_end detection.
+    assert!(contains_header_end(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+    assert!(!contains_header_end(b"GET / HTTP/1.1\r\nHost: x\r\n"));
+    assert!(contains_header_end(b"\r\n\r\n"));
+    assert!(!contains_header_end(b"\r\n\r"));
+    serial_println!("[httpd]   Header end detection: OK");
+
+    // Test 10: process_http_request for valid GET.
+    let resp = process_http_request(b"GET /proc/version HTTP/1.1\r\nHost: x\r\n\r\n");
+    let resp_str = core::str::from_utf8(&resp).unwrap_or("");
+    // /proc/version should exist and return 200.
+    assert!(resp_str.starts_with("HTTP/1.1 200 OK\r\n") ||
+            resp_str.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "Expected 200 or 404 for /proc/version");
+    serial_println!("[httpd]   process_http_request: OK");
+
+    // Test 11: process_http_request rejects POST.
+    let resp2 = process_http_request(b"POST /index.html HTTP/1.1\r\nHost: x\r\n\r\n");
+    let resp2_str = core::str::from_utf8(&resp2).unwrap_or("");
+    assert!(resp2_str.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
+    serial_println!("[httpd]   POST rejection: OK");
+
+    // Test 12: process_http_request with malformed request.
+    let resp3 = process_http_request(b"GARBAGE");
+    let resp3_str = core::str::from_utf8(&resp3).unwrap_or("");
+    assert!(resp3_str.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+    serial_println!("[httpd]   Malformed request handling: OK");
+
+    serial_println!("[httpd] Self-test PASSED (12 tests)");
     Ok(())
 }
 

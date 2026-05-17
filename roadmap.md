@@ -1392,6 +1392,14 @@ _Port ext4 first. Don't write a custom filesystem._
 - [x] Startup app list (simple serial list, separate from service manager)
   - [x] Disk-idle heuristic for "app is loaded, start next one" (2-3 sec timeout via blkdev::is_idle_for)
   - [x] Explicit readiness notification API
+- [x] Login manager / display manager (init/login):
+  - [x] User accounts: uid, username, display name, password hash (SHA-256+salt), avatar, admin flag
+  - [x] YAML user database (/etc/users.yaml), default root + guest accounts
+  - [x] Login UI: avatar circles, password field, power menu, clock, error messages
+  - [x] Authentication with 5-failure lockout (5 min), auto-login, guest login
+  - [x] Session management: environment setup (HOME/USER/SHELL/PATH/XDG), session tracking
+  - [x] Lock screen: owner-only unlock, idle timeout, 30s dim warning, Super+L
+  - [x] Accessibility: high contrast, large text, on-screen keyboard, screen reader
 
 ### 2.7 Shell and basic userspace tools
 - [ ] Port bash (POSIX compatibility)
@@ -1517,8 +1525,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Input fields (single-line TextInput, multiline TextArea)
   - [x] Checkboxes, tristate checkboxes (Unchecked/Checked/Indeterminate)
   - [x] Radio buttons
-  - [ ] Treeview, tristate checkbox treeview
-  - [ ] Tabs view, grid view
+  - [x] Treeview (tree.rs: expand/collapse, selection, keyboard nav, connection lines, scroll)
+  - [x] Tabs view (tabs.rs: close buttons, dirty indicator, overflow scroll, Ctrl+Tab nav)
+  - [ ] Grid view
   - [x] Scroll bars (ScrollView widget)
   - [ ] Tooltips
   - [ ] Color picker
@@ -1658,6 +1667,12 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Expand/collapse tree nodes, search across categories
   - [x] Export to text, copy to clipboard
   - [ ] Live hardware querying (currently uses representative stub data)
+- [x] Screenshot utility:
+  - [x] 5 capture modes (full screen, window, region selection, delayed, pick window)
+  - [x] BMP encoder (32-bit BGRA, overflow-safe dimension checks)
+  - [x] Region selector (dark overlay, crosshair, dimension labels)
+  - [x] Annotation tools (rectangle, arrow, text, highlight) with undo
+  - [x] Preview window, hotkeys (PrintScreen variants), auto-filename
 - [ ] Backup program (snapshot-based, with all common backup types) — Python/fastpy candidate
 - [ ] Background file indexer (configurable paths/extensions, off by default) — Python/fastpy candidate
 

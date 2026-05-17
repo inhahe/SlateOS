@@ -12,6 +12,8 @@ exclude = [
     "userspace/ticker",
     # --- shell (osb2) ---
     "userspace/shell",
+    # --- coreutils (osb2) ---
+    "userspace/coreutils",
     "posix",
     # --- toolchain (osb2) ---
     "toolchain/stubs",

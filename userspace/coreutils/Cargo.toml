@@ -1,0 +1,21 @@
+[package]
+name = "coreutils"
+version = "0.1.0"
+edition = "2024"
+description = "Basic userspace utilities (cat, echo, ls, mkdir, head, wc, cp, rm)"
+
+# Standalone crate — not part of the kernel workspace.
+[workspace]
+
+# Each binary is a separate file in src/bin/.
+# Build all:   cargo +nightly build -Zbuild-std=... --release
+# Build one:   cargo +nightly build -Zbuild-std=... --release --bin cat
+
+[profile.release]
+opt-level = "s"       # Optimize for size — embedded in kernel image.
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

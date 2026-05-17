@@ -1,11 +1,5 @@
-# Build configuration for userspace shell binary.
-#
-# Uses our custom target spec (x86_64-ouros.json) which pretends to be
-# linux-musl so Rust std's unix backend works, but links against our
-# POSIX library (provided as libc.a in the sysroot).
-#
-# Build with:
-#   cargo +nightly build -Zbuild-std=core,alloc,std,panic_abort --release
+# Build configuration for coreutils binaries.
+# Uses the custom OS target with Rust std.
 
 [build]
 target = "../../toolchain/x86_64-ouros.json"

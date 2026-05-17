@@ -1400,6 +1400,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Session management: environment setup (HOME/USER/SHELL/PATH/XDG), session tracking
   - [x] Lock screen: owner-only unlock, idle timeout, 30s dim warning, Super+L
   - [x] Accessibility: high contrast, large text, on-screen keyboard, screen reader
+- [x] Cron daemon (time-based task scheduler) — Rust userspace binary
+  - [x] Standard crontab syntax (min/hour/day/month/weekday with *, ranges, steps, lists)
+  - [x] Special time strings (@reboot, @hourly, @daily, @weekly, @monthly, @yearly)
+  - [x] Daemon mode with per-minute wake, automatic crontab reload
+  - [x] Per-user crontabs (/var/spool/cron/) and system cron.d directory
+  - [x] Execution logging, next-execution preview, status reporting
+  - [x] CLI: add/remove/list entries, run-pending, log viewer
 
 ### 2.7 Shell and basic userspace tools
 - [ ] Port bash (POSIX compatibility)

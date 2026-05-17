@@ -2763,6 +2763,204 @@ fn cmd_which(db: &PackageDb, path: &str) {
     process::exit(1);
 }
 
+// ============================================================================
+// Shared dynamic linking — reverse dependencies and library tracking
+// ============================================================================
+
+/// Find all packages that depend on a given package (reverse dependencies).
+fn cmd_rdeps(db: &PackageDb, target: &str) {
+    let current = db.current_generation();
+
+    // Check the target exists
+    if !current.packages.contains_key(target) {
+        eprintln!("pkg: {target}: not installed");
+        process::exit(1);
+    }
+
+    let available = db.load_repo_index().unwrap_or_default();
+
+    let mut rdeps: Vec<(&str, &Version)> = Vec::new();
+
+    for (name, pkg) in &current.packages {
+        // Find this package's manifest to read its deps
+        if let Some(manifest) = available.iter().find(|m| m.name == *name) {
+            for dep in &manifest.depends {
+                if dep.name == target {
+                    rdeps.push((name.as_str(), &pkg.version));
+                    break;
+                }
+            }
+        } else {
+            // Try to load manifest from CAS
+            if let Ok(data) = db.cas.get(&pkg.manifest_hash) {
+                if let Ok(text) = String::from_utf8(data) {
+                    if let Some(manifest) = PackageManifest::parse(&text) {
+                        for dep in &manifest.depends {
+                            if dep.name == target {
+                                rdeps.push((name.as_str(), &pkg.version));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if rdeps.is_empty() {
+        println!("{target}: no installed packages depend on it");
+    } else {
+        println!("Packages depending on {target}:");
+        rdeps.sort_by_key(|(name, _)| *name);
+        for (name, ver) in &rdeps {
+            let explicit = current
+                .packages
+                .get(*name)
+                .map_or(false, |p| p.explicit);
+            let marker = if explicit { "" } else { " (dependency)" };
+            println!("  {name} {ver}{marker}");
+        }
+        println!("\n{} package(s) depend on {target}", rdeps.len());
+    }
+}
+
+/// List all shared libraries (.dso files) installed in the current generation.
+fn cmd_libs(db: &PackageDb) {
+    let current = db.current_generation();
+
+    let mut libs: Vec<(String, String, String)> = Vec::new(); // (lib_path, pkg_name, version)
+
+    for (name, pkg) in &current.packages {
+        for (path, _hash) in &pkg.file_hashes {
+            if path.ends_with(".dso") || path.ends_with(".so") || is_shared_lib_path(path) {
+                libs.push((path.clone(), name.clone(), pkg.version.to_string()));
+            }
+        }
+    }
+
+    if libs.is_empty() {
+        println!("No shared libraries installed.");
+        return;
+    }
+
+    libs.sort();
+
+    println!(
+        "{:<50} {:<20} {}",
+        "LIBRARY", "PACKAGE", "VERSION"
+    );
+    for (path, pkg, ver) in &libs {
+        println!("{:<50} {:<20} {ver}", path, pkg);
+    }
+    println!("\n{} shared library(ies) installed.", libs.len());
+}
+
+/// Check if a file path looks like a shared library.
+fn is_shared_lib_path(path: &str) -> bool {
+    // Match patterns like: libfoo.dso, libfoo.so, libfoo.so.1, libfoo.so.1.2.3
+    if let Some(filename) = path.rsplit('/').next() {
+        if filename.starts_with("lib") {
+            if filename.contains(".dso") || filename.contains(".so") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Upgrade a shared library and report which packages are affected.
+///
+/// This is a specialized upgrade that:
+/// 1. Upgrades only the specified library package
+/// 2. Reports all reverse dependencies that will now use the new version
+/// 3. Creates a new generation (existing dynamically-linked binaries auto-use the new lib)
+fn cmd_upgrade_lib(db: &PackageDb, lib_name: &str, dry_run: bool) {
+    let current = db.current_generation();
+
+    if !current.packages.contains_key(lib_name) {
+        eprintln!("pkg: {lib_name}: not installed");
+        process::exit(1);
+    }
+
+    let available = match db.load_repo_index() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("pkg: failed to load repo index: {e}");
+            eprintln!("pkg: try 'pkg update' first");
+            process::exit(1);
+        }
+    };
+
+    // Check if there's an upgrade available
+    let installed_ver = &current.packages[lib_name].version;
+    let latest = available
+        .iter()
+        .filter(|p| p.name == lib_name)
+        .max_by(|a, b| a.version.cmp(&b.version));
+
+    let latest = match latest {
+        Some(m) if m.version > *installed_ver => m,
+        _ => {
+            println!("{lib_name} {installed_ver}: already at latest version");
+            return;
+        }
+    };
+
+    // Find all reverse dependencies
+    let mut affected: Vec<String> = Vec::new();
+    for (name, _pkg) in &current.packages {
+        if name == lib_name {
+            continue;
+        }
+        // Check if this package depends on the library being upgraded
+        let depends_on_lib = available
+            .iter()
+            .find(|m| m.name == *name)
+            .map(|m| m.depends.iter().any(|d| d.name == lib_name))
+            .unwrap_or(false);
+
+        if depends_on_lib {
+            affected.push(name.clone());
+        }
+    }
+
+    // Count shared library files in the new version
+    let lib_files: Vec<&PackageFile> = latest
+        .files
+        .iter()
+        .filter(|f| is_shared_lib_path(&f.dst) || f.dst.ends_with(".dso"))
+        .collect();
+
+    println!("Library upgrade: {lib_name} {installed_ver} → {}", latest.version);
+    if !lib_files.is_empty() {
+        println!("\n  Shared library files:");
+        for f in &lib_files {
+            println!("    {}", f.dst);
+        }
+    }
+
+    if affected.is_empty() {
+        println!("\n  No installed packages depend on {lib_name}.");
+    } else {
+        affected.sort();
+        println!("\n  Packages that will use the new library ({}):", affected.len());
+        for name in &affected {
+            if let Some(pkg) = current.packages.get(name) {
+                println!("    {name} {}", pkg.version);
+            }
+        }
+    }
+
+    if dry_run {
+        println!("\n(dry run — no changes made)");
+        return;
+    }
+
+    // Perform the upgrade — delegate to cmd_upgrade with just this package
+    let names = vec![lib_name.to_string()];
+    cmd_upgrade(db, &names, false);
+}
+
 fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
     let current = db.current_generation();
     let available = match db.load_repo_index() {
@@ -4584,6 +4782,9 @@ Commands:
   verify [pkg...]        Verify installed package integrity
   files <pkg>            List files owned by a package
   which <path>           Show which package owns a file
+  rdeps <pkg>            Show packages that depend on a package
+  libs                   List installed shared libraries
+  upgrade-lib <pkg>      Upgrade a shared library and report affected packages
   help                   Show this help
 
 Options:
@@ -4625,6 +4826,16 @@ Package Snapshots:
   Snapshots are lightweight text files listing every installed package,
   version, and dependency status. Use them to reproduce a known-good
   state on another machine or to restore after a system reset.
+
+Shared Dynamic Libraries:
+  pkg libs                     List all shared libraries (.dso files) installed
+  pkg rdeps <package>          Show which packages depend on a library
+  pkg upgrade-lib <library>    Upgrade a library and report affected packages
+
+  Within a generation, applications share .dso files. A security update
+  rebuilds the shared library and creates a new generation where all
+  dependent apps automatically use the patched version. Rollback reverts
+  to the previous generation (and the old library version).
 
 Generation System:
   Each install/remove/upgrade creates a new generation. Generations
@@ -4774,6 +4985,21 @@ fn main() {
         "repo" | "repository" => cmd_repo(&rest_filtered),
         "log" | "history" => cmd_log(&rest_filtered),
         "snapshot" | "snap" => cmd_snapshot(&db, &rest_filtered, dry_run),
+        "rdeps" | "reverse-deps" | "dependents" => {
+            if rest_filtered.is_empty() {
+                eprintln!("pkg: rdeps requires a package name");
+                process::exit(1);
+            }
+            cmd_rdeps(&db, &rest_filtered[0]);
+        }
+        "libs" | "libraries" => cmd_libs(&db),
+        "upgrade-lib" => {
+            if rest_filtered.is_empty() {
+                eprintln!("pkg: upgrade-lib requires a library package name");
+                process::exit(1);
+            }
+            cmd_upgrade_lib(&db, &rest_filtered[0], dry_run);
+        }
         "help" | "--help" | "-h" => print_usage(),
         _ => {
             eprintln!("pkg: unknown command: {command}");

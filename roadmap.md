@@ -1707,7 +1707,11 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Show requested capabilities before install (Android-style) — manifest capabilities field
 - [x] Dependency resolution with version constraints (>=, <=, ^, ==, *)
 - [x] CLI: install, remove, upgrade, update, list, search, info, rollback, generations, gc, verify, files, which
-- [ ] Shared dynamic linking within a generation (fast security patches)
+- [x] Shared dynamic linking within a generation (fast security patches)
+  - [x] Reverse dependency query (rdeps): find all packages depending on a library
+  - [x] Library listing (libs): enumerate all installed .dso/.so shared libraries
+  - [x] Library-aware upgrade (upgrade-lib): upgrade library, report affected dependents, single-generation atomic switch
+  - [x] Shared library path detection (is_shared_lib_path) for .dso/.so files
 - [x] File-level deduplication via hardlinks within the store (deploy_hardlink CAS→filesystem, DeployStats tracking, nlink-based dedup reporting, fallback to copy for cross-device)
 - [x] Binary packages (preferred) with source build option (PKG1 binary archive format is the native distribution format; source builds not yet implemented)
 - [x] Network repository fetching:

@@ -7,6 +7,9 @@ description = "OurOS package manager — content-addressed store with atomic gen
 # Standalone crate — not part of the kernel workspace.
 [workspace]
 
+[dependencies]
+httpclient = { path = "../../net/httpclient" }
+
 [profile.release]
 opt-level = "s"
 lto = false

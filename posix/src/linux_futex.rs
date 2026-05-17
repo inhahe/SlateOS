@@ -5,7 +5,6 @@
 //! synchronization primitives (mutexes, condition variables, etc.).
 
 use crate::errno;
-use crate::types::TimeT;
 
 // ---------------------------------------------------------------------------
 // Futex operations

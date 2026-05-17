@@ -2037,6 +2037,7 @@ pub extern "C" fn umask(cmask: ModeT) -> ModeT {
 ///
 /// Not a POSIX function, but useful for internal callers that need
 /// to apply the mask (e.g., open, mkdir) without side effects.
+#[allow(dead_code)]
 pub(crate) fn get_umask() -> ModeT {
     // SAFETY: Single-threaded access.
     unsafe { core::ptr::addr_of!(UMASK_VALUE).read() }

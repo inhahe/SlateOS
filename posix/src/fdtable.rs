@@ -571,6 +571,7 @@ pub fn copy_fd_path(src_fd: i32, dst_fd: i32) {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(unused_must_use)]
 mod tests {
     use super::*;
 

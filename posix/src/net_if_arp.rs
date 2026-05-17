@@ -75,9 +75,11 @@ pub const ARPOP_RREQUEST: u16 = 3;
 pub const ARPOP_RREPLY: u16 = 4;
 
 /// InARP request (RFC 2390).
+#[allow(non_upper_case_globals)]
 pub const ARPOP_InREQUEST: u16 = 8;
 
 /// InARP reply (RFC 2390).
+#[allow(non_upper_case_globals)]
 pub const ARPOP_InREPLY: u16 = 9;
 
 /// ARP NAK (RFC 1577, ATM).

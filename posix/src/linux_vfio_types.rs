@@ -56,6 +56,7 @@ pub const VFIO_DEVICE_RESET: u32 = 0x3B6F;
 /// Type1 IOMMU (AMD-Vi, Intel VT-d).
 pub const VFIO_TYPE1_IOMMU: u32 = 1;
 /// Type1v2 IOMMU (with dirty tracking).
+#[allow(non_upper_case_globals)]
 pub const VFIO_TYPE1v2_IOMMU: u32 = 3;
 /// No-IOMMU mode (unsafe, for development).
 pub const VFIO_NOIOMMU_IOMMU: u32 = 8;

@@ -12,8 +12,6 @@
 //! sanitizers, crash handlers, and debugging libraries) that call
 //! the glibc/BSD backtrace API.
 
-use crate::errno;
-
 // ---------------------------------------------------------------------------
 // backtrace
 // ---------------------------------------------------------------------------

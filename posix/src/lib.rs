@@ -207,6 +207,8 @@
     clippy::wildcard_imports,         // syscall constant imports
     clippy::doc_markdown,             // POSIX identifiers (O_CREAT, x86_64) used extensively in docs
     clippy::large_stack_arrays,       // Dir pool is intentionally large (~544 KiB)
+    non_upper_case_globals,           // POSIX globals: environ, stdin, stdout, optarg, etc.
+    non_snake_case,                   // POSIX/C functions: S_ISREG, _Unwind_Resume, etc.
 )]
 
 // Panic handler for no_std staticlib.

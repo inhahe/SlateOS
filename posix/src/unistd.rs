@@ -1898,7 +1898,7 @@ pub extern "C" fn get_current_dir_name() -> *mut u8 {
 
     // Allocate and copy.
     let alloc_size = len.wrapping_add(1); // Include null terminator.
-    let ptr = unsafe { crate::malloc::malloc(alloc_size) };
+    let ptr = crate::malloc::malloc(alloc_size);
     if ptr.is_null() {
         return core::ptr::null_mut();
     }

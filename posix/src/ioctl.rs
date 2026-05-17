@@ -1079,9 +1079,9 @@ mod tests {
     /// Other tests may close or overwrite these fds; this restores
     /// the expected state before tests that depend on console fds.
     fn ensure_std_fds() {
-        fdtable::install_fd(0, HandleKind::Console, 0);
-        fdtable::install_fd(1, HandleKind::Console, 1);
-        fdtable::install_fd(2, HandleKind::Console, 2);
+        let _ = fdtable::install_fd(0, HandleKind::Console, 0);
+        let _ = fdtable::install_fd(1, HandleKind::Console, 1);
+        let _ = fdtable::install_fd(2, HandleKind::Console, 2);
     }
 
     #[test]

@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 
 /// Unknown connector.
+#[allow(non_upper_case_globals)]
 pub const DRM_MODE_CONNECTOR_Unknown: u32 = 0;
 /// VGA connector.
 pub const DRM_MODE_CONNECTOR_VGA: u32 = 1;
@@ -20,20 +21,24 @@ pub const DRM_MODE_CONNECTOR_DVID: u32 = 3;
 /// DVI-A connector.
 pub const DRM_MODE_CONNECTOR_DVIA: u32 = 4;
 /// Composite video.
+#[allow(non_upper_case_globals)]
 pub const DRM_MODE_CONNECTOR_Composite: u32 = 5;
 /// S-Video.
 pub const DRM_MODE_CONNECTOR_SVIDEO: u32 = 6;
 /// LVDS (laptop panel).
 pub const DRM_MODE_CONNECTOR_LVDS: u32 = 7;
 /// Component video.
+#[allow(non_upper_case_globals)]
 pub const DRM_MODE_CONNECTOR_Component: u32 = 8;
 /// DisplayPort.
+#[allow(non_upper_case_globals)]
 pub const DRM_MODE_CONNECTOR_DisplayPort: u32 = 10;
 /// HDMI-A.
 pub const DRM_MODE_CONNECTOR_HDMIA: u32 = 11;
 /// HDMI-B.
 pub const DRM_MODE_CONNECTOR_HDMIB: u32 = 12;
 /// eDP (embedded DisplayPort).
+#[allow(non_upper_case_globals)]
 pub const DRM_MODE_CONNECTOR_eDP: u32 = 14;
 /// Virtual (e.g., for remote display).
 pub const DRM_MODE_CONNECTOR_VIRTUAL: u32 = 15;

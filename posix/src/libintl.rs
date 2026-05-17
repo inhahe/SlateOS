@@ -124,7 +124,7 @@ static mut CURRENT_DOMAIN: [u8; 256] = {
 pub extern "C" fn textdomain(domainname: *const u8) -> *const u8 {
     if domainname.is_null() {
         // Return current domain.
-        return unsafe { (&raw const CURRENT_DOMAIN).cast::<u8>() };
+        return (&raw const CURRENT_DOMAIN).cast::<u8>();
     }
 
     // Copy the new domain name into static storage.

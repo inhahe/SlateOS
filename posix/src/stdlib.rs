@@ -1227,7 +1227,7 @@ pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
 /// `template` must be a writable null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn mkstemps(template: *mut u8, suffixlen: i32) -> i32 {
-    mkostemps(template, suffixlen, 0)
+    unsafe { mkostemps(template, suffixlen, 0) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1842,8 +1842,7 @@ static mut L64A_BUF: [u8; 7] = [0; 7];
 /// Returns "" for n == 0.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn l64a(n: i64) -> *const u8 {
-    // SAFETY: single-threaded access to static buffer.
-    let buf = unsafe { &raw mut L64A_BUF };
+    let buf = &raw mut L64A_BUF;
 
     if n == 0 {
         unsafe { (*buf)[0] = 0; }

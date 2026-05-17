@@ -72,7 +72,7 @@ pub type TdestroyFn = extern "C" fn(*mut u8);
 // ---------------------------------------------------------------------------
 
 fn alloc_node(key: *const u8) -> *mut Node {
-    let ptr = unsafe { crate::malloc::malloc(core::mem::size_of::<Node>()) };
+    let ptr = crate::malloc::malloc(core::mem::size_of::<Node>());
     if ptr.is_null() {
         return core::ptr::null_mut();
     }

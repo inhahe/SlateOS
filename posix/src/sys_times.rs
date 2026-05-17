@@ -29,6 +29,7 @@ pub struct Tms {
 }
 
 /// Clock ticks per second (matches `_SC_CLK_TCK`).
+#[allow(dead_code)]
 const CLK_TCK: i64 = 100;
 
 // ---------------------------------------------------------------------------

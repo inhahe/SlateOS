@@ -2038,9 +2038,9 @@ mod tests {
     /// expected state before each build_fd_map test.
     fn ensure_std_fds() {
         use crate::fdtable::{install_fd, HandleKind};
-        install_fd(0, HandleKind::Console, 0);
-        install_fd(1, HandleKind::Console, 1);
-        install_fd(2, HandleKind::Console, 2);
+        let _ = install_fd(0, HandleKind::Console, 0);
+        let _ = install_fd(1, HandleKind::Console, 1);
+        let _ = install_fd(2, HandleKind::Console, 2);
     }
 
     #[test]

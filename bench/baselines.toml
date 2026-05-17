@@ -694,14 +694,14 @@ ok/degraded/critical status.  More expensive than /api/status because \
 it queries more subsystems and evaluates threshold conditions."""
 
 [dashboard_api_metrics]
-description = "/metrics Prometheus text exposition (~40 metrics + per-CPU labels)"
-target_ns   = 50000
-source      = "~40 metric families covering system, TCP, swap, scheduler, per-CPU ticks"
+description = "/metrics Prometheus text exposition (~50 metrics + per-CPU labels)"
+target_ns   = 55000
+source      = "~50 metric families covering system, TCP, swap, scheduler, block cache, per-CPU ticks"
 notes       = """
-Prometheus-compatible scrape endpoint.  Output is ~5-6 KiB of text/plain.  \
-Collects data from 8 subsystems: frame allocator, heap, scheduler, network \
-interface, TCP, HTTP server, DNS, swap/zram, firewall, and containers.  \
-Per-CPU metrics emit labeled lines (os_cpu_total_ticks{cpu="N"}).  \
+Prometheus-compatible scrape endpoint.  Output is ~6-7 KiB of text/plain.  \
+Collects data from 9 subsystems: frame allocator, heap, scheduler, network \
+interface, TCP, HTTP server, DNS, swap/zram, firewall, containers, and \
+block cache.  Per-CPU metrics emit labeled lines (os_cpu_total_ticks{cpu="N"}).  \
 Scraped every 15-60 seconds by monitoring stacks."""
 
 # -------------------------------------------------------------------------

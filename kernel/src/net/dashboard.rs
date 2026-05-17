@@ -23,7 +23,8 @@
 //! | `/api/tcp`         | JSON: TCP stats, per-connection detail, listeners|
 //! | `/api/scheduler`   | JSON: per-CPU utilization, context switches      |
 //! | `/api/swap`        | JSON: swap/zram devices, compression stats       |
-//! | `/metrics`         | Prometheus text format (~40 metrics) for monitoring |
+//! | `/api/fs`          | JSON: mount table, block cache stats             |
+//! | `/metrics`         | Prometheus text format (~50 metrics) for monitoring |
 //!
 //! ## Integration
 //!
@@ -130,6 +131,9 @@ pub fn handle_api_request(path: &str) -> Option<(String, Vec<u8>)> {
         }
         "/api/swap" => {
             Some((String::from("application/json"), api_swap()))
+        }
+        "/api/fs" => {
+            Some((String::from("application/json"), api_fs()))
         }
         "/metrics" => {
             Some((String::from("text/plain; version=0.0.4; charset=utf-8"), api_metrics()))
@@ -755,6 +759,73 @@ fn api_swap() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// /api/fs
+// ---------------------------------------------------------------------------
+
+/// Filesystem API endpoint: mount table and block cache statistics.
+///
+/// Returns JSON with:
+/// - `mounts`: array of mounted filesystems with path, type, and options
+/// - `cache`: block cache statistics (hits, misses, reads, writes, etc.)
+fn api_fs() -> Vec<u8> {
+    use core::fmt::Write;
+
+    let mounts = crate::fs::vfs::Vfs::mounts_full();
+    let cache = crate::fs::cache::stats();
+
+    let mut json = String::with_capacity(512);
+    json.push_str(r#"{"mounts":["#);
+
+    for (i, (path, fs_type, opts)) in mounts.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        let _ = write!(
+            json,
+            concat!(
+                r#"{{"path":"{}","fs_type":"{}","read_only":{},"#,
+                r#""noatime":{},"noexec":{},"nosuid":{}}}"#,
+            ),
+            json_escape(path),
+            json_escape(fs_type),
+            opts.read_only,
+            opts.noatime,
+            opts.noexec,
+            opts.nosuid,
+        );
+    }
+
+    let hit_rate_pct = if cache.hits.saturating_add(cache.misses) > 0 {
+        cache.hits.saturating_mul(100) / cache.hits.saturating_add(cache.misses)
+    } else {
+        0
+    };
+
+    let _ = write!(
+        json,
+        concat!(
+            r#"],"cache":{{"reads":{},"hits":{},"misses":{},"#,
+            r#""writes":{},"writebacks":{},"readaheads":{},"#,
+            r#""expired_flushes":{},"entries_used":{},"#,
+            r#""entries_dirty":{},"capacity":{},"hit_rate_pct":{}}}}}"#,
+        ),
+        cache.reads,
+        cache.hits,
+        cache.misses,
+        cache.writes,
+        cache.writebacks,
+        cache.readaheads,
+        cache.expired_flushes,
+        cache.entries_used,
+        cache.entries_dirty,
+        cache.capacity,
+        hit_rate_pct,
+    );
+
+    json.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
 // /api/health
 // ---------------------------------------------------------------------------
 
@@ -831,9 +902,9 @@ fn api_health() -> Vec<u8> {
 ///
 /// Exports key system metrics in Prometheus exposition format for
 /// integration with monitoring stacks (Prometheus, Grafana, etc.).
-/// Currently exposes ~40 metrics covering system, memory, heap, tasks,
+/// Currently exposes ~50 metrics covering system, memory, heap, tasks,
 /// network, TCP, HTTP, DNS, swap/zram, scheduler, firewall, containers,
-/// and per-CPU utilization.
+/// block cache, and per-CPU utilization.
 fn api_metrics() -> Vec<u8> {
     use super::httpd;
     use core::fmt::Write;
@@ -1002,6 +1073,25 @@ fn api_metrics() -> Vec<u8> {
     prom_gauge(&mut t, "os_containers_active",
         "Active container count.", ct_active);
 
+    // -- Block cache -----------------------------------------------------------
+    let bcache = crate::fs::cache::stats();
+    prom_counter(&mut t, "os_bcache_reads_total",
+        "Block cache read requests.", bcache.reads);
+    prom_counter(&mut t, "os_bcache_hits_total",
+        "Block cache hits.", bcache.hits);
+    prom_counter(&mut t, "os_bcache_misses_total",
+        "Block cache misses.", bcache.misses);
+    prom_counter(&mut t, "os_bcache_writes_total",
+        "Block cache write requests.", bcache.writes);
+    prom_counter(&mut t, "os_bcache_writebacks_total",
+        "Block cache dirty writebacks.", bcache.writebacks);
+    prom_gauge(&mut t, "os_bcache_entries_used",
+        "Block cache entries in use.", bcache.entries_used);
+    prom_gauge(&mut t, "os_bcache_entries_dirty",
+        "Block cache dirty entries.", bcache.entries_dirty);
+    prom_gauge(&mut t, "os_bcache_capacity",
+        "Block cache capacity.", bcache.capacity);
+
     t.into_bytes()
 }
 
@@ -1136,6 +1226,10 @@ tr:hover td { background: #1c2128; }
     <h2>Swap / zram</h2>
     <div id="swap-stats"></div>
   </div>
+  <div class="card">
+    <h2>Filesystem</h2>
+    <div id="fs-stats"></div>
+  </div>
 </div>
 
 <div class="grid" style="margin-top:16px">
@@ -1154,6 +1248,14 @@ tr:hover td { background: #1c2128; }
   <table>
     <thead><tr><th>Port</th><th>Backlog</th><th>Capacity</th></tr></thead>
     <tbody id="listener-body"></tbody>
+  </table>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <h2>Mount Table</h2>
+  <table>
+    <thead><tr><th>Path</th><th>Type</th><th>Options</th></tr></thead>
+    <tbody id="mount-body"></tbody>
   </table>
 </div>
 
@@ -1200,7 +1302,7 @@ function bar(pct, cls) {
 
 async function update() {
   try {
-    var [sr,tr,nr,mr,hr,dr,fr,br,v6r,ctr,tcpr,schr,swr] = await Promise.all([
+    var [sr,tr,nr,mr,hr,dr,fr,br,v6r,ctr,tcpr,schr,swr,fsr] = await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/tasks').then(r=>r.json()),
       fetch('/api/network').then(r=>r.json()),
@@ -1214,6 +1316,7 @@ async function update() {
       fetch('/api/tcp').then(r=>r.json()),
       fetch('/api/scheduler').then(r=>r.json()),
       fetch('/api/swap').then(r=>r.json()),
+      fetch('/api/fs').then(r=>r.json()),
     ]);
     var memPct = sr.memory.total_bytes>0 ?
       Math.round(sr.memory.used_bytes*100/sr.memory.total_bytes) : 0;
@@ -1342,6 +1445,28 @@ async function update() {
       schh+=stat('CPU '+c.cpu, c.utilization_pct+'% ('+c.ctx_switches+' ctx, '+c.preemptions+' preempt)', uc);
     });
     document.getElementById('sched-stats').innerHTML=schh;
+    // Filesystem card.
+    var fc=fsr.cache;
+    var fcHitPct=fc.hits+fc.misses>0?Math.round(fc.hits*100/(fc.hits+fc.misses)):0;
+    var fsh=stat('Mounts', fsr.mounts.length) +
+      stat('Cache Entries', fc.entries_used+' / '+fc.capacity) +
+      stat('Dirty', fc.entries_dirty, fc.entries_dirty>0?'warn':'') +
+      stat('Reads', fc.reads) +
+      stat('Hit Rate', fcHitPct+'%', fcHitPct>80?'ok':(fc.reads>0?'warn':'')) +
+      stat('Writebacks', fc.writebacks) +
+      stat('Readaheads', fc.readaheads) +
+      stat('Expired Flushes', fc.expired_flushes);
+    document.getElementById('fs-stats').innerHTML=fsh;
+    // Mount table.
+    var mb=''; fsr.mounts.forEach(function(m){
+      var o=[];
+      if(m.read_only)o.push('ro'); else o.push('rw');
+      if(m.noatime)o.push('noatime');
+      if(m.noexec)o.push('noexec');
+      if(m.nosuid)o.push('nosuid');
+      mb+='<tr><td>'+m.path+'</td><td>'+m.fs_type+'</td><td>'+o.join(', ')+'</td></tr>';
+    });
+    document.getElementById('mount-body').innerHTML=mb||'<tr><td colspan="3" style="color:#484f58">No mounts</td></tr>';
     function nsFmt(ns){if(ns>=1000000)return (ns/1000000).toFixed(1)+'ms';if(ns>=1000)return (ns/1000).toFixed(1)+'us';return ns+'ns';}
     var bs=br.summary;
     document.getElementById('bench-summary').textContent=bs.total>0?
@@ -1476,6 +1601,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(handle_api_request("/api/tcp").is_some());
         assert!(handle_api_request("/api/scheduler").is_some());
         assert!(handle_api_request("/api/swap").is_some());
+        assert!(handle_api_request("/api/fs").is_some());
         assert!(handle_api_request("/metrics").is_some());
         assert!(handle_api_request("/not-an-api").is_none());
         assert!(handle_api_request("/api/nonexistent").is_none());
@@ -1591,6 +1717,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(metrics_str.contains("os_cpu_idle_ticks{cpu=\"0\"}"));
         // Firewall conntrack.
         assert!(metrics_str.contains("os_firewall_conntrack_entries "));
+        // Block cache metrics.
+        assert!(metrics_str.contains("# TYPE os_bcache_reads_total counter"));
+        assert!(metrics_str.contains("os_bcache_hits_total "));
+        assert!(metrics_str.contains("os_bcache_entries_used "));
+        assert!(metrics_str.contains("os_bcache_capacity "));
         // Each metric line should end with a number (no trailing whitespace).
         // Lines with labels like {cpu="0"} have the value after the closing brace.
         let has_numeric_values = metrics_str.lines()
@@ -1601,8 +1732,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let type_lines = metrics_str.lines()
             .filter(|l| l.starts_with("# TYPE "))
             .count();
-        assert!(type_lines >= 35,
-            "Expected at least 35 metric families, got {}", type_lines);
+        assert!(type_lines >= 43,
+            "Expected at least 43 metric families, got {}", type_lines);
         serial_println!("[dashboard]   Prometheus metrics: OK ({} bytes, {} families)",
             metrics.len(), type_lines);
     }
@@ -1677,6 +1808,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!("[dashboard]   API swap: OK ({} bytes)", swap.len());
     }
 
-    serial_println!("[dashboard] Self-test PASSED (18 tests)");
+    // Test 19: API fs returns valid JSON with mounts and cache.
+    {
+        let fs = api_fs();
+        assert!(!fs.is_empty());
+        assert_eq!(fs[0], b'{');
+        assert_eq!(fs[fs.len().saturating_sub(1)], b'}');
+        let fs_str = core::str::from_utf8(&fs).unwrap_or("");
+        assert!(fs_str.contains("\"mounts\""));
+        assert!(fs_str.contains("\"cache\""));
+        assert!(fs_str.contains("\"reads\""));
+        assert!(fs_str.contains("\"hits\""));
+        assert!(fs_str.contains("\"misses\""));
+        assert!(fs_str.contains("\"capacity\""));
+        assert!(fs_str.contains("\"hit_rate_pct\""));
+        // At least one mount should exist (rootfs).
+        assert!(fs_str.contains("\"path\""));
+        assert!(fs_str.contains("\"fs_type\""));
+        serial_println!("[dashboard]   API fs: OK ({} bytes)", fs.len());
+    }
+
+    serial_println!("[dashboard] Self-test PASSED (19 tests)");
     Ok(())
 }

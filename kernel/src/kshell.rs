@@ -34973,6 +34973,14 @@ fn cmd_dashboard(args: &str) {
                 }
             }
         }
+        "fs" | "filesystem" => {
+            let data = dashboard::handle_api_request("/api/fs");
+            if let Some((_ct, body)) = data {
+                if let Ok(s) = core::str::from_utf8(&body) {
+                    crate::serial_println!("{}", s);
+                }
+            }
+        }
         "test" => {
             match dashboard::self_test() {
                 Ok(()) => crate::serial_println!("[dashboard] Self-test passed."),
@@ -34980,7 +34988,7 @@ fn cmd_dashboard(args: &str) {
             }
         }
         _ => {
-            crate::serial_println!("Usage: dashboard [status|tasks|network|memory|httpd|dns|fw|bench|health|ipv6|containers|tcp|sched|swap|metrics|test]");
+            crate::serial_println!("Usage: dashboard [status|tasks|network|memory|httpd|dns|fw|bench|health|ipv6|containers|tcp|sched|swap|fs|metrics|test]");
             crate::serial_println!("  status     - System overview (default)");
             crate::serial_println!("  tasks      - Task list (JSON)");
             crate::serial_println!("  network    - Network info (JSON)");
@@ -34995,6 +35003,7 @@ fn cmd_dashboard(args: &str) {
             crate::serial_println!("  tcp        - TCP connections + listeners + stats (JSON)");
             crate::serial_println!("  sched      - Scheduler per-CPU stats (JSON)");
             crate::serial_println!("  swap       - Swap/zram devices + compression (JSON)");
+            crate::serial_println!("  fs         - Filesystem mounts + block cache (JSON)");
             crate::serial_println!("  metrics    - Prometheus-format metrics");
             crate::serial_println!("  test       - Run dashboard self-test");
             crate::serial_println!("Web dashboard available at http://<ip>/dashboard");

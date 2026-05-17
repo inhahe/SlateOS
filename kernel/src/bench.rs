@@ -3499,7 +3499,7 @@ fn bench_dashboard_api_health() {
 
 /// Benchmark /metrics Prometheus text exposition format generation.
 ///
-/// Measures the cost of formatting ~40 Prometheus metrics (including
+/// Measures the cost of formatting ~50 Prometheus metrics (including
 /// per-CPU labeled metrics) with TYPE and HELP annotations.  This is
 /// polled by monitoring stacks (Prometheus, Grafana, etc.).
 fn bench_dashboard_api_metrics() {
@@ -3514,10 +3514,10 @@ fn bench_dashboard_api_metrics() {
         result.min_ns, result.min_cycles,
         dashboard::bench_api_metrics().len()
     );
-    // Target: 50000ns — ~40 metrics with per-CPU labels, TCP stats, swap,
-    // scheduler stats, firewall.  Raised from 30000ns after expanding from
-    // 22 → ~40 metrics with additional subsystem data collection.
-    score("dashboard_api_metrics", &result, 50000);
+    // Target: 55000ns — ~50 metrics with per-CPU labels, TCP stats, swap,
+    // scheduler stats, block cache, firewall.  Raised from 50000ns after
+    // adding 8 block cache metric families.
+    score("dashboard_api_metrics", &result, 55000);
 }
 
 // ---------------------------------------------------------------------------

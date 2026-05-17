@@ -13,6 +13,7 @@
 //! | `/api/tasks`       | JSON: list of active tasks with details       |
 //! | `/api/network`     | JSON: interface info, TCP connections, stats  |
 //! | `/api/memory`      | JSON: frame allocator, heap, swap stats       |
+//! | `/api/httpd`       | JSON: HTTP server stats, recent access log    |
 //!
 //! ## Integration
 //!
@@ -89,6 +90,9 @@ pub fn handle_api_request(path: &str) -> Option<(String, Vec<u8>)> {
         }
         "/api/memory" => {
             Some((String::from("application/json"), api_memory()))
+        }
+        "/api/httpd" => {
+            Some((String::from("application/json"), api_httpd()))
         }
         _ => None,
     }
@@ -247,6 +251,51 @@ fn api_memory() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// /api/httpd
+// ---------------------------------------------------------------------------
+
+fn api_httpd() -> Vec<u8> {
+    use super::httpd;
+
+    let running = httpd::is_running();
+    let port = httpd::port();
+    let tls_running = httpd::is_tls_running();
+    let tls_port = httpd::tls_port();
+    let requests = httpd::request_count();
+    let not_modified = httpd::not_modified_count();
+    let partial = httpd::partial_count();
+
+    let mut json = format!(
+        concat!(
+            r#"{{"server":{{"http_running":{},"http_port":{},"#,
+            r#""tls_running":{},"tls_port":{}}},"#,
+            r#""stats":{{"requests":{},"not_modified_304":{},"partial_206":{}}},"#,
+            r#""access_log":["#,
+        ),
+        running, port,
+        tls_running, tls_port,
+        requests, not_modified, partial,
+    );
+
+    let entries = httpd::recent_access_log(20);
+    for (i, e) in entries.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push_str(&format!(
+            r#"{{"method":"{}","path":"{}","status":{},"body_size":{}}}"#,
+            json_escape(&e.method),
+            json_escape(&e.path),
+            e.status,
+            e.body_size,
+        ));
+    }
+
+    json.push_str("]}");
+    json.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
 // HTML dashboard
 // ---------------------------------------------------------------------------
 
@@ -327,6 +376,21 @@ tr:hover td { background: #1c2128; }
   </table>
 </div>
 
+<div class="grid" style="margin-top:16px">
+  <div class="card">
+    <h2>HTTP Server</h2>
+    <div id="httpd-stats"></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Recent HTTP Requests</h2>
+  <table>
+    <thead><tr><th>Method</th><th>Path</th><th>Status</th><th>Size</th></tr></thead>
+    <tbody id="httpd-log"></tbody>
+  </table>
+</div>
+
 <script>
 function fmt(b) {
   if (b >= 1073741824) return (b/1073741824).toFixed(1)+' GiB';
@@ -354,11 +418,12 @@ function bar(pct, cls) {
 
 async function update() {
   try {
-    var [sr,tr,nr,mr] = await Promise.all([
+    var [sr,tr,nr,mr,hr] = await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/tasks').then(r=>r.json()),
       fetch('/api/network').then(r=>r.json()),
       fetch('/api/memory').then(r=>r.json()),
+      fetch('/api/httpd').then(r=>r.json()),
     ]);
     var memPct = sr.memory.total_bytes>0 ?
       Math.round(sr.memory.used_bytes*100/sr.memory.total_bytes) : 0;
@@ -390,6 +455,17 @@ async function update() {
         '</td><td>'+c.state+'</td></tr>';
     });
     document.getElementById('tcp-body').innerHTML=cb||'<tr><td colspan="3" style="color:#484f58">No active connections</td></tr>';
+    document.getElementById('httpd-stats').innerHTML =
+      stat('HTTP', hr.server.http_running?'Running (port '+hr.server.http_port+')':'Stopped', hr.server.http_running?'ok':'') +
+      stat('HTTPS', hr.server.tls_running?'Running (port '+hr.server.tls_port+')':'Stopped', hr.server.tls_running?'ok':'') +
+      stat('Requests', hr.stats.requests) +
+      stat('304 Not Modified', hr.stats.not_modified_304, hr.stats.not_modified_304>0?'ok':'') +
+      stat('206 Partial', hr.stats.partial_206);
+    var lb=''; hr.access_log.slice().reverse().forEach(function(e){
+      var sc=e.status>=400?'warn':(e.status===304?'ok':'');
+      lb+='<tr><td>'+e.method+'</td><td>'+e.path+'</td><td><span class="stat-value'+(sc?' '+sc:'')+'">'+e.status+'</span></td><td>'+fmt(e.body_size)+'</td></tr>';
+    });
+    document.getElementById('httpd-log').innerHTML=lb||'<tr><td colspan="4" style="color:#484f58">No requests yet</td></tr>';
     document.getElementById('refresh').textContent='updated '+new Date().toLocaleTimeString();
   } catch(e) {
     document.getElementById('refresh').textContent='error: '+e.message;
@@ -472,11 +548,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(handle_api_request("/api/tasks").is_some());
         assert!(handle_api_request("/api/network").is_some());
         assert!(handle_api_request("/api/memory").is_some());
+        assert!(handle_api_request("/api/httpd").is_some());
         assert!(handle_api_request("/not-an-api").is_none());
         assert!(handle_api_request("/api/nonexistent").is_none());
         serial_println!("[dashboard]   API routing: OK");
     }
 
-    serial_println!("[dashboard] Self-test PASSED (7 tests)");
+    // Test 8: API httpd returns valid JSON with expected structure.
+    {
+        let httpd = api_httpd();
+        assert!(!httpd.is_empty());
+        assert_eq!(httpd[0], b'{');
+        assert_eq!(httpd[httpd.len().saturating_sub(1)], b'}');
+        let httpd_str = core::str::from_utf8(&httpd).unwrap_or("");
+        // Should contain server, stats, and access_log fields.
+        assert!(httpd_str.contains("\"server\""));
+        assert!(httpd_str.contains("\"stats\""));
+        assert!(httpd_str.contains("\"access_log\""));
+        assert!(httpd_str.contains("\"requests\""));
+        serial_println!("[dashboard]   API httpd: OK ({} bytes)", httpd.len());
+    }
+
+    serial_println!("[dashboard] Self-test PASSED (8 tests)");
     Ok(())
 }

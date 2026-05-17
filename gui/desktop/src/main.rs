@@ -14,6 +14,8 @@
 
 #[allow(dead_code)]
 mod icons;
+#[allow(dead_code)]
+mod run_dialog;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

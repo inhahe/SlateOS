@@ -33,6 +33,7 @@ pub mod layout;
 pub mod menu;
 pub mod modal;
 pub mod render;
+pub mod signal;
 pub mod style;
 pub mod tabs;
 pub mod textview;

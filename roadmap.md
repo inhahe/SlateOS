@@ -1407,6 +1407,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Per-user crontabs (/var/spool/cron/) and system cron.d directory
   - [x] Execution logging, next-execution preview, status reporting
   - [x] CLI: add/remove/list entries, run-pending, log viewer
+- [x] Syslog daemon (JSON-lines log aggregation) — Rust userspace binary
+  - [x] JSON-lines structured log format (ts, level, service, msg, extras)
+  - [x] Log rotation (5 MiB per file, 10 rotated files max)
+  - [x] Query/filter by level, service, message content, time range
+  - [x] Tail and live-follow modes
+  - [x] Log statistics with level and service breakdowns
+  - [x] Clean/prune old entries by age
 
 ### 2.7 Shell and basic userspace tools
 - [ ] Port bash (POSIX compatibility)

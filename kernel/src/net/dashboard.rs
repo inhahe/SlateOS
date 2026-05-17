@@ -20,6 +20,8 @@
 //! | `/api/health`      | JSON: aggregated health check for monitoring    |
 //! | `/api/ipv6`        | JSON: IPv6 addresses, SLAAC, DHCPv6 status      |
 //! | `/api/containers`  | JSON: active container list with details         |
+//! | `/api/tcp`         | JSON: TCP stats, per-connection detail, listeners|
+//! | `/api/scheduler`   | JSON: per-CPU utilization, context switches      |
 //! | `/metrics`         | Prometheus text format (~40 metrics) for monitoring |
 //!
 //! ## Integration
@@ -118,6 +120,12 @@ pub fn handle_api_request(path: &str) -> Option<(String, Vec<u8>)> {
         }
         "/api/containers" => {
             Some((String::from("application/json"), api_containers()))
+        }
+        "/api/tcp" => {
+            Some((String::from("application/json"), api_tcp()))
+        }
+        "/api/scheduler" => {
+            Some((String::from("application/json"), api_scheduler()))
         }
         "/metrics" => {
             Some((String::from("text/plain; version=0.0.4; charset=utf-8"), api_metrics()))
@@ -574,6 +582,123 @@ fn api_containers() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// /api/tcp — detailed TCP connection and listener info
+// ---------------------------------------------------------------------------
+
+fn api_tcp() -> Vec<u8> {
+    let tcp_stats = super::tcp::stats();
+    let tcp_conns = super::tcp::all_connections();
+    let (listeners, listener_count) = super::tcp::all_listeners();
+
+    let mut json = String::from("{\"stats\":");
+    json.push_str(&format!(
+        concat!(
+            r#"{{"active":{},"established":{},"syn_sent":{},"#,
+            r#""time_wait":{},"close_wait":{},"listeners":{},"#,
+            r#""rx_bytes":{},"tx_bytes":{}}}"#,
+        ),
+        tcp_stats.active_connections, tcp_stats.established,
+        tcp_stats.syn_sent, tcp_stats.time_wait, tcp_stats.close_wait,
+        tcp_stats.listeners, tcp_stats.total_rx_bytes, tcp_stats.total_tx_bytes,
+    ));
+
+    json.push_str(",\"connections\":[");
+    for (i, conn) in tcp_conns.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push_str(&format!(
+            concat!(
+                r#"{{"local_port":{},"remote_ip":"{}","remote_port":{},"#,
+                r#""state":"{}","ns_id":{},"srtt_us":{},"rto_ms":{},"#,
+                r#""cwnd":{},"ssthresh":{},"snd_wnd":{},"eff_mss":{},"#,
+                r#""rx_buffered":{},"tx_buffered":{},"#,
+                r#""ecn":{},"sack":{},"wscale":{},"ts":{},"#,
+                r#""keepalive":{},"nagle":{}}}"#,
+            ),
+            conn.local_port,
+            conn.remote_ip,
+            conn.remote_port,
+            tcp_state_str(conn.state),
+            conn.ns_id,
+            conn.srtt_ns / 1000, // convert to microseconds for readability
+            conn.rto_ns / 1_000_000, // convert to milliseconds
+            conn.cwnd, conn.ssthresh, conn.snd_wnd, conn.eff_mss,
+            conn.rx_buffered, conn.tx_buffered,
+            conn.ecn_ok, conn.sack_ok, conn.wscale_ok, conn.ts_ok,
+            conn.keepalive, conn.nagle,
+        ));
+    }
+
+    json.push_str("],\"listeners\":[");
+    for i in 0..listener_count {
+        if i > 0 {
+            json.push(',');
+        }
+        if let Some(l) = listeners.get(i) {
+            json.push_str(&format!(
+                r#"{{"port":{},"backlog_used":{},"backlog_max":{}}}"#,
+                l.port, l.backlog_used, l.backlog_max,
+            ));
+        }
+    }
+
+    json.push_str("]}");
+    json.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
+// /api/scheduler — detailed scheduler stats and per-CPU data
+// ---------------------------------------------------------------------------
+
+fn api_scheduler() -> Vec<u8> {
+    use core::fmt::Write;
+
+    let stats = crate::sched::sched_stats();
+    let num_cpus = stats.num_cpus;
+
+    let mut json = String::with_capacity(1024);
+    json.push_str(&format!(
+        concat!(
+            r#"{{"num_cpus":{},"total_ctx_switches":{},"#,
+            r#""total_work_steals":{},"tasks_spawned":{},"#,
+            r#""tasks_exited":{},"load_avg_x100":{}"#,
+        ),
+        num_cpus, stats.total_ctx_switches,
+        stats.total_work_steals, stats.total_tasks_spawned,
+        stats.total_tasks_exited, stats.load_avg_x100,
+    ));
+
+    json.push_str(",\"cpus\":[");
+    for cpu in 0..num_cpus {
+        if cpu > 0 {
+            json.push(',');
+        }
+        let (total, idle) = stats.cpu_ticks.get(cpu).copied().unwrap_or((0, 0));
+        let ctx = stats.ctx_switches.get(cpu).copied().unwrap_or(0);
+        let vol = stats.voluntary_switches.get(cpu).copied().unwrap_or(0);
+        let pre = stats.preemptions.get(cpu).copied().unwrap_or(0);
+        // Compute utilization percentage (0-100) from total vs idle ticks.
+        let util_pct = if total > 0 {
+            total.saturating_sub(idle).saturating_mul(100) / total
+        } else {
+            0
+        };
+        let _ = write!(json,
+            concat!(
+                r#"{{"cpu":{},"total_ticks":{},"idle_ticks":{},"#,
+                r#""utilization_pct":{},"ctx_switches":{},"#,
+                r#""voluntary":{},"preemptions":{}}}"#,
+            ),
+            cpu, total, idle, util_pct, ctx, vol, pre,
+        );
+    }
+
+    json.push_str("]}");
+    json.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
 // /api/health
 // ---------------------------------------------------------------------------
 
@@ -953,6 +1078,25 @@ tr:hover td { background: #1c2128; }
   </div>
 </div>
 
+<div class="grid" style="margin-top:16px">
+  <div class="card">
+    <h2>TCP Stack</h2>
+    <div id="tcp-stats"></div>
+  </div>
+  <div class="card">
+    <h2>Scheduler</h2>
+    <div id="sched-stats"></div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px;margin-bottom:16px">
+  <h2>TCP Listeners</h2>
+  <table>
+    <thead><tr><th>Port</th><th>Backlog</th><th>Capacity</th></tr></thead>
+    <tbody id="listener-body"></tbody>
+  </table>
+</div>
+
 <div class="card" style="margin-bottom:16px">
   <h2>Benchmarks <span id="bench-summary" style="font-size:12px;color:#8b949e;text-transform:none;letter-spacing:0"></span></h2>
   <table>
@@ -996,7 +1140,7 @@ function bar(pct, cls) {
 
 async function update() {
   try {
-    var [sr,tr,nr,mr,hr,dr,fr,br,v6r,ctr] = await Promise.all([
+    var [sr,tr,nr,mr,hr,dr,fr,br,v6r,ctr,tcpr,schr] = await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/tasks').then(r=>r.json()),
       fetch('/api/network').then(r=>r.json()),
@@ -1007,6 +1151,8 @@ async function update() {
       fetch('/api/bench').then(r=>r.json()),
       fetch('/api/ipv6').then(r=>r.json()),
       fetch('/api/containers').then(r=>r.json()),
+      fetch('/api/tcp').then(r=>r.json()),
+      fetch('/api/scheduler').then(r=>r.json()),
     ]);
     var memPct = sr.memory.total_bytes>0 ?
       Math.round(sr.memory.used_bytes*100/sr.memory.total_bytes) : 0;
@@ -1085,6 +1231,35 @@ async function update() {
       ctr.containers.forEach(function(c){var sc=c.state==='running'?'ok':(c.state==='failed'?'warn':'');cth+=stat(c.name,c.state+(c.nr_procs!==undefined?' ('+c.nr_procs+' procs)':''),sc);});
     }
     document.getElementById('ct-stats').innerHTML=cth;
+    // TCP stats card.
+    var ts=tcpr.stats;
+    document.getElementById('tcp-stats').innerHTML =
+      stat('Active', ts.active, ts.active>0?'ok':'') +
+      stat('Established', ts.established, ts.established>0?'ok':'') +
+      stat('SYN Sent', ts.syn_sent, ts.syn_sent>0?'warn':'') +
+      stat('TIME_WAIT', ts.time_wait) +
+      stat('CLOSE_WAIT', ts.close_wait, ts.close_wait>0?'warn':'') +
+      stat('Listeners', ts.listeners) +
+      stat('RX Buffered', fmt(ts.rx_bytes)) +
+      stat('TX Buffered', fmt(ts.tx_bytes));
+    // TCP listeners table.
+    var lb2=''; tcpr.listeners.forEach(function(l){
+      lb2+='<tr><td>'+l.port+'</td><td>'+l.backlog_used+'</td><td>'+l.backlog_max+'</td></tr>';
+    });
+    document.getElementById('listener-body').innerHTML=lb2||'<tr><td colspan="3" style="color:#484f58">No active listeners</td></tr>';
+    // Scheduler card.
+    var loadAvg=(schr.load_avg_x100/100).toFixed(2);
+    var schh=stat('CPUs', schr.num_cpus) +
+      stat('Load Avg', loadAvg, parseFloat(loadAvg)>schr.num_cpus?'warn':'ok') +
+      stat('Ctx Switches', schr.total_ctx_switches) +
+      stat('Work Steals', schr.total_work_steals) +
+      stat('Tasks Spawned', schr.tasks_spawned) +
+      stat('Tasks Exited', schr.tasks_exited);
+    schr.cpus.forEach(function(c){
+      var uc=c.utilization_pct>90?'warn':(c.utilization_pct>0?'ok':'');
+      schh+=stat('CPU '+c.cpu, c.utilization_pct+'% ('+c.ctx_switches+' ctx, '+c.preemptions+' preempt)', uc);
+    });
+    document.getElementById('sched-stats').innerHTML=schh;
     function nsFmt(ns){if(ns>=1000000)return (ns/1000000).toFixed(1)+'ms';if(ns>=1000)return (ns/1000).toFixed(1)+'us';return ns+'ns';}
     var bs=br.summary;
     document.getElementById('bench-summary').textContent=bs.total>0?
@@ -1216,6 +1391,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(handle_api_request("/api/health").is_some());
         assert!(handle_api_request("/api/ipv6").is_some());
         assert!(handle_api_request("/api/containers").is_some());
+        assert!(handle_api_request("/api/tcp").is_some());
+        assert!(handle_api_request("/api/scheduler").is_some());
         assert!(handle_api_request("/metrics").is_some());
         assert!(handle_api_request("/not-an-api").is_none());
         assert!(handle_api_request("/api/nonexistent").is_none());
@@ -1373,6 +1550,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!("[dashboard]   API containers: OK ({} bytes)", ct.len());
     }
 
-    serial_println!("[dashboard] Self-test PASSED (15 tests)");
+    // Test 16: API tcp returns valid JSON with stats, connections, listeners.
+    {
+        let tcp = api_tcp();
+        assert!(!tcp.is_empty());
+        assert_eq!(tcp[0], b'{');
+        assert_eq!(tcp[tcp.len().saturating_sub(1)], b'}');
+        let tcp_str = core::str::from_utf8(&tcp).unwrap_or("");
+        assert!(tcp_str.contains("\"stats\""));
+        assert!(tcp_str.contains("\"connections\""));
+        assert!(tcp_str.contains("\"listeners\""));
+        assert!(tcp_str.contains("\"active\""));
+        assert!(tcp_str.contains("\"established\""));
+        serial_println!("[dashboard]   API tcp: OK ({} bytes)", tcp.len());
+    }
+
+    // Test 17: API scheduler returns valid JSON with per-CPU data.
+    {
+        let sched = api_scheduler();
+        assert!(!sched.is_empty());
+        assert_eq!(sched[0], b'{');
+        assert_eq!(sched[sched.len().saturating_sub(1)], b'}');
+        let sched_str = core::str::from_utf8(&sched).unwrap_or("");
+        assert!(sched_str.contains("\"num_cpus\""));
+        assert!(sched_str.contains("\"total_ctx_switches\""));
+        assert!(sched_str.contains("\"cpus\""));
+        assert!(sched_str.contains("\"utilization_pct\""));
+        assert!(sched_str.contains("\"preemptions\""));
+        serial_println!("[dashboard]   API scheduler: OK ({} bytes)", sched.len());
+    }
+
+    serial_println!("[dashboard] Self-test PASSED (17 tests)");
     Ok(())
 }

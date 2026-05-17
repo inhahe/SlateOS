@@ -17,30 +17,40 @@ Read the relevant design files before implementing any subsystem. Do not guess a
 
 Three Claude sessions work on this repo concurrently. The architecture below ensures **zero shared-file contention** — no session ever blocks waiting for another to release a file. Follow these rules strictly.
 
+### Session Identity
+
+| Session name | Branch prefix | Current zone(s) |
+|---|---|---|
+| **os** | `session-a/` | kernel-core, kernel-ipc, kernel-security, kernel-process, drivers, fs, net |
+| **osb** | `session-b/` | posix |
+| **osb2** | `session-c/` | *(newly added — assign zone before starting work)* |
+
+When you start working, identify which session you are (check your branch prefix or working directory context). Only work in zones assigned to your session. If you need to move to a different zone, update this table first (or ask the human operator).
+
 ### Module Ownership Boundaries
 
 The codebase is split into non-overlapping ownership zones. Each session works in exactly one zone at a time. **Never edit a file outside your assigned zone.**
 
 Zones (adjust as the project grows):
 
-| Zone | Covers | Typical paths |
-|------|--------|---------------|
-| **kernel-core** | boot, GDT/IDT, interrupts, memory manager, page allocator, heap, scheduler | `kernel/src/boot/`, `kernel/src/mm/`, `kernel/src/sched/` |
-| **kernel-ipc** | syscall dispatch, channels, pipes, shared memory, futexes, io_uring, IOCP | `kernel/src/ipc/`, `kernel/src/syscall/` |
-| **kernel-security** | capabilities, process namespaces, CFI setup, IOMMU | `kernel/src/cap/`, `kernel/src/security/` |
-| **kernel-process** | process/thread lifecycle, ELF loader, exception handling | `kernel/src/proc/` |
-| **drivers** | driver framework, USB, storage, network, keyboard, display, virtio | `drivers/` |
-| **fs** | VFS, ext4 port, FAT32, recycle bin, change notifications | `fs/` |
-| **net** | TCP/IP stack, UDP, DNS, DHCP, sockets, firewall | `net/` |
-| **posix** | POSIX compatibility layer, libc translation | `posix/` |
-| **init** | service manager, init, startup sequencing | `init/` |
-| **shell** | shell, coreutils, terminal emulator | `userspace/shell/`, `userspace/term/` |
-| **gui-core** | compositor, DRM/KMS, GPU drivers, 2D drawing | `gui/compositor/`, `gui/gpu/` |
-| **gui-toolkit** | widget library, layout engine, styling, clipboard, drag-drop | `gui/toolkit/` |
-| **desktop** | window manager, taskbar, start menu, system tray, themes | `gui/desktop/` |
-| **apps** | file explorer, process explorer, settings, text editor, etc. | `apps/` |
-| **pkg** | package manager, content-addressed store, generations | `pkg/` |
-| **bench** | all benchmarks and performance infrastructure | `bench/` |
+| Zone | Covers | Typical paths | Session |
+|------|--------|---------------|---------|
+| **kernel-core** | boot, GDT/IDT, interrupts, memory manager, page allocator, heap, scheduler | `kernel/src/boot/`, `kernel/src/mm/`, `kernel/src/sched/` | os |
+| **kernel-ipc** | syscall dispatch, channels, pipes, shared memory, futexes, io_uring, IOCP | `kernel/src/ipc/`, `kernel/src/syscall/` | os |
+| **kernel-security** | capabilities, process namespaces, CFI setup, IOMMU | `kernel/src/cap/`, `kernel/src/security/` | os |
+| **kernel-process** | process/thread lifecycle, ELF loader, exception handling | `kernel/src/proc/` | os |
+| **drivers** | driver framework, USB, storage, network, keyboard, display, virtio | `drivers/` | os |
+| **fs** | VFS, ext4 port, FAT32, recycle bin, change notifications | `fs/` | os |
+| **net** | TCP/IP stack, UDP, DNS, DHCP, sockets, firewall | `net/` | os |
+| **posix** | POSIX compatibility layer, libc translation | `posix/` | osb |
+| **init** | service manager, init, startup sequencing | `init/` | osb2 |
+| **shell** | shell, coreutils, terminal emulator | `userspace/shell/`, `userspace/term/` | osb2 |
+| **gui-core** | compositor, DRM/KMS, GPU drivers, 2D drawing | `gui/compositor/`, `gui/gpu/` | osb2 |
+| **gui-toolkit** | widget library, layout engine, styling, clipboard, drag-drop | `gui/toolkit/` | osb2 |
+| **desktop** | window manager, taskbar, start menu, system tray, themes | `gui/desktop/` | osb2 |
+| **apps** | file explorer, process explorer, settings, text editor, etc. | `apps/` | osb2 |
+| **pkg** | package manager, content-addressed store, generations | `pkg/` | osb2 |
+| **bench** | all benchmarks and performance infrastructure | `bench/` | *(any session, for its own zone's benchmarks)* |
 
 ### Shared File Contention — Eliminated by Design
 
@@ -151,7 +161,7 @@ Do not edit during normal development. Only the human operator edits this file.
 
 ### Branch Strategy
 
-Each session works on its own branch: `session-a/<feature>`, `session-b/<feature>`, and `session-c/<feature>`. Merge to `main` only when the feature compiles and passes tests. If using git worktrees, each session gets its own worktree.
+Each session works on its own branch using its session name as prefix: `os/<feature>`, `osb/<feature>`, `osb2/<feature>`. Merge to `main` only when the feature compiles and passes tests. If using git worktrees, each session gets its own worktree.
 
 Before merging to main:
 - `git pull --rebase origin main`

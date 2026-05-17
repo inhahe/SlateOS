@@ -380,6 +380,14 @@ static NOT_MODIFIED_COUNT: core::sync::atomic::AtomicU64 =
 static PARTIAL_COUNT: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
+/// Atomic gzip-compressed response counter.
+static GZIP_COUNT: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Atomic total bytes saved by gzip compression.
+static GZIP_BYTES_SAVED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// Maximum entries in the access log ring buffer.
 const ACCESS_LOG_SIZE: usize = 64;
 
@@ -474,6 +482,16 @@ pub fn request_count() -> u64 {
 /// Get the number of 304 Not Modified responses (ETag cache hits).
 pub fn not_modified_count() -> u64 {
     NOT_MODIFIED_COUNT.load(Ordering::Relaxed)
+}
+
+/// Get the number of gzip-compressed responses served.
+pub fn gzip_count() -> u64 {
+    GZIP_COUNT.load(Ordering::Relaxed)
+}
+
+/// Get the total bytes saved by gzip compression.
+pub fn gzip_bytes_saved() -> u64 {
+    GZIP_BYTES_SAVED.load(Ordering::Relaxed)
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +672,11 @@ fn build_response_gzip(status: u16, reason: &str, content_type: &str, body: &[u8
     if compressed.len() >= body.len() {
         return build_response(status, reason, content_type, body);
     }
+
+    // Track compression stats.
+    GZIP_COUNT.fetch_add(1, Ordering::Relaxed);
+    let saved = body.len().saturating_sub(compressed.len()) as u64;
+    GZIP_BYTES_SAVED.fetch_add(saved, Ordering::Relaxed);
 
     let etag = etag_for_body(body); // ETag based on original content
     let resp = format!(

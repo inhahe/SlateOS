@@ -34736,6 +34736,8 @@ fn cmd_httpd(args: &str) {
             shell_println!("  304 hits:     {}", httpd::not_modified_count());
             shell_println!("  206 ranges:   {}", httpd::partial_count());
             shell_println!("  429 limited:  {}", httpd::rate_limited_count());
+            shell_println!("  Gzip served:  {}", httpd::gzip_count());
+            shell_println!("  Gzip saved:   {} bytes", httpd::gzip_bytes_saved());
             shell_println!("");
             shell_println!("Rate Limiting");
             shell_println!("  Enabled:      {}", httpd::rate_limit_enabled());

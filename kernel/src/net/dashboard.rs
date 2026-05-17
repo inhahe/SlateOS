@@ -286,20 +286,22 @@ fn api_httpd() -> Vec<u8> {
     let partial = httpd::partial_count();
     let rate_limited = httpd::rate_limited_count();
     let rl_enabled = httpd::rate_limit_enabled();
+    let gzip_compressed = httpd::gzip_count();
+    let gzip_saved = httpd::gzip_bytes_saved();
 
     let mut json = format!(
         concat!(
             r#"{{"server":{{"http_running":{},"http_port":{},"#,
             r#""tls_running":{},"tls_port":{}}},"#,
             r#""stats":{{"requests":{},"not_modified_304":{},"partial_206":{},"#,
-            r#""rate_limited_429":{}}},"#,
+            r#""rate_limited_429":{},"gzip_compressed":{},"gzip_bytes_saved":{}}},"#,
             r#""rate_limit":{{"enabled":{}}},"#,
             r#""access_log":["#,
         ),
         running, port,
         tls_running, tls_port,
         requests, not_modified, partial,
-        rate_limited,
+        rate_limited, gzip_compressed, gzip_saved,
         rl_enabled,
     );
 
@@ -606,6 +608,8 @@ async function update() {
       stat('304 Not Modified', hr.stats.not_modified_304, hr.stats.not_modified_304>0?'ok':'') +
       stat('206 Partial', hr.stats.partial_206) +
       stat('429 Rate Limited', hr.stats.rate_limited_429, hr.stats.rate_limited_429>0?'warn':'') +
+      stat('Gzip Compressed', hr.stats.gzip_compressed, hr.stats.gzip_compressed>0?'ok':'') +
+      stat('Gzip Saved', fmt(hr.stats.gzip_bytes_saved), hr.stats.gzip_bytes_saved>0?'ok':'') +
       stat('Rate Limiting', hr.rate_limit.enabled?'Enabled':'Disabled');
     var lb=''; hr.access_log.slice().reverse().forEach(function(e){
       var sc=e.status>=400?'warn':(e.status===304?'ok':'');
@@ -737,6 +741,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(httpd_str.contains("\"server\""));
         assert!(httpd_str.contains("\"stats\""));
         assert!(httpd_str.contains("\"access_log\""));
+        assert!(httpd_str.contains("\"gzip_compressed\""));
+        assert!(httpd_str.contains("\"gzip_bytes_saved\""));
         serial_println!("[dashboard]   API httpd: OK ({} bytes)", httpd.len());
     }
 

@@ -831,6 +831,8 @@ pub fn run_all() {
     bench_http_parse_request();
     bench_http_mime_type();
     bench_http_percent_decode();
+    bench_http_gzip_1k();
+    bench_http_gzip_8k();
 
     // --- Print scorecard summary ---
     print_scorecard();
@@ -3293,6 +3295,70 @@ fn bench_http_percent_decode() {
         result.min_ns, result.min_cycles
     );
     score("http_percent_decode", &result, 20000);
+}
+
+/// Benchmark gzip compression for 1 KiB HTML-like content.
+///
+/// Measures the time to gzip-compress a typical HTML page body, which
+/// is now on the HTTP response hot path when clients send Accept-Encoding.
+fn bench_http_gzip_1k() {
+    use crate::fs::compress;
+
+    // Build a 1 KiB body that resembles HTML (varied text).
+    let mut body = Vec::with_capacity(1024);
+    for _ in 0..16 {
+        body.extend_from_slice(b"<div class=\"item\"><h3>Title</h3><p>Content goes here.</p></div>\n");
+    }
+    // Truncate or pad to exactly 1024 bytes.
+    body.truncate(1024);
+    while body.len() < 1024 {
+        body.push(b' ');
+    }
+
+    let result = run("http_gzip_1KiB", 500, || {
+        let _ = core::hint::black_box(compress::gzip(&body));
+    });
+
+    // Report compressed size for reference.
+    let compressed = compress::gzip(&body);
+    serial_println!(
+        "[bench]   http_gzip_1KiB: min {}ns ({}cy), {}B → {}B",
+        result.min_ns, result.min_cycles, body.len(), compressed.len()
+    );
+    // Target: 200us — gzip is expensive but only runs once per response.
+    score("http_gzip_1KiB", &result, 200_000);
+}
+
+/// Benchmark gzip compression for 8 KiB dashboard HTML.
+///
+/// The dashboard HTML is ~10 KiB, so this measures a realistic
+/// compression workload for the auto-refresh API.
+fn bench_http_gzip_8k() {
+    use crate::fs::compress;
+
+    // Build an 8 KiB body with JSON-like content.
+    let mut body = Vec::with_capacity(8192);
+    for i in 0..128u32 {
+        let line = alloc::format!(
+            r#"{{"id":{},"name":"task_{}","state":"running","cpu":0,"ticks":{}}}"#,
+            i, i, i.saturating_mul(100)
+        );
+        body.extend_from_slice(line.as_bytes());
+        body.push(b'\n');
+    }
+    body.truncate(8192);
+
+    let result = run("http_gzip_8KiB", 200, || {
+        let _ = core::hint::black_box(compress::gzip(&body));
+    });
+
+    let compressed = compress::gzip(&body);
+    serial_println!(
+        "[bench]   http_gzip_8KiB: min {}ns ({}cy), {}B → {}B",
+        result.min_ns, result.min_cycles, body.len(), compressed.len()
+    );
+    // Target: 1ms — larger content takes proportionally longer.
+    score("http_gzip_8KiB", &result, 1_000_000);
 }
 
 // ---------------------------------------------------------------------------

@@ -359,3 +359,7 @@ path = "src/bin/tsort.rs"
 [[bin]]
 name = "renice"
 path = "src/bin/renice.rs"
+
+[[bin]]
+name = "fetch"
+path = "src/bin/fetch.rs"

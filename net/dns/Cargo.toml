@@ -1,0 +1,20 @@
+[package]
+name = "dns"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS DNS Resolver — stub DNS client for hostname resolution"
+
+[workspace]
+
+[lib]
+name = "dns"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

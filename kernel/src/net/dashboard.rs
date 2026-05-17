@@ -1132,6 +1132,10 @@ tr:hover td { background: #1c2128; }
     <h2>Containers</h2>
     <div id="ct-stats"></div>
   </div>
+  <div class="card">
+    <h2>Swap / zram</h2>
+    <div id="swap-stats"></div>
+  </div>
 </div>
 
 <div class="grid" style="margin-top:16px">
@@ -1196,7 +1200,7 @@ function bar(pct, cls) {
 
 async function update() {
   try {
-    var [sr,tr,nr,mr,hr,dr,fr,br,v6r,ctr,tcpr,schr] = await Promise.all([
+    var [sr,tr,nr,mr,hr,dr,fr,br,v6r,ctr,tcpr,schr,swr] = await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/tasks').then(r=>r.json()),
       fetch('/api/network').then(r=>r.json()),
@@ -1209,6 +1213,7 @@ async function update() {
       fetch('/api/containers').then(r=>r.json()),
       fetch('/api/tcp').then(r=>r.json()),
       fetch('/api/scheduler').then(r=>r.json()),
+      fetch('/api/swap').then(r=>r.json()),
     ]);
     var memPct = sr.memory.total_bytes>0 ?
       Math.round(sr.memory.used_bytes*100/sr.memory.total_bytes) : 0;
@@ -1287,6 +1292,27 @@ async function update() {
       ctr.containers.forEach(function(c){var sc=c.state==='running'?'ok':(c.state==='failed'?'warn':'');cth+=stat(c.name,c.state+(c.nr_procs!==undefined?' ('+c.nr_procs+' procs)':''),sc);});
     }
     document.getElementById('ct-stats').innerHTML=cth;
+    // Swap card.
+    var swh='';
+    if(!swr.available){swh=stat('Status','Swap not available');}
+    else{
+      swh=stat('Used', fmt(swr.used_bytes)+' / '+fmt(swr.total_bytes));
+      var swPct=swr.total_bytes>0?Math.round(swr.used_bytes*100/swr.total_bytes):0;
+      swh+=bar(swPct);
+      swh+=stat('Slots', swr.used_slots+' / '+(swr.used_slots+swr.free_slots));
+      swh+=stat('Reclaimable', swr.reclaimable_pages+' pages');
+      var c=swr.compression;
+      if(c.compressed_pages>0||c.uncompressed_pages>0){
+        swh+=stat('Compressed', fmt(c.compressed_bytes)+' ('+c.compressed_pages+' pages)');
+        swh+=stat('Uncompressed', fmt(c.uncompressed_bytes)+' logical');
+        swh+=stat('Ratio', c.ratio_pct+'%', c.ratio_pct<80?'ok':'');
+        swh+=stat('Saved', fmt(c.bytes_saved), c.bytes_saved>0?'ok':'');
+      }
+      swr.devices.forEach(function(d){
+        swh+=stat(d.name+' ('+d.type+')', d.used_slots+'/'+d.total_slots+' slots, pri='+d.priority);
+      });
+    }
+    document.getElementById('swap-stats').innerHTML=swh;
     // TCP stats card.
     var ts=tcpr.stats;
     document.getElementById('tcp-stats').innerHTML =

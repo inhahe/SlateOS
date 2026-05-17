@@ -260,6 +260,18 @@ Remaining net improvements (diminishing returns):
 
 ## Cross-Zone Bug Reports
 
+- bench_isr_latency() page fault → double fault (kernel-core zone):
+  The ISR latency benchmark crashes with "Page Fault (#PF) at
+  0xffffffff8000f19e, address=0x8, error=0x2" which is a write to
+  near-null (struct offset 0x8 of a null pointer).  This cascades to
+  a Double Fault at 0xffffffff80d47ac3.  The crash occurs BEFORE the
+  HTTP/dashboard/crypto benchmarks in the runner sequence, so those
+  benchmarks never get measured under QEMU boot.  The ISR benchmark
+  is in kernel-core zone (kernel/src/bench.rs, bench_isr_latency fn).
+  Impact: all bench zone measurements that run after ISR are blocked.
+  Workaround: none currently — the benchmark ordering would need to
+  be rearranged or the ISR benchmark fixed.
+
 - Boot hangs after mm::integ_test test 9 ("Cgroup per-frame tracking: OK").
   The next test (test 10: cgroup charge/uncharge, frame.rs ~line 2740)
   calls cgroup::create() + set_mem_limit() which sets CGROUP_MEM_ACTIVE=true.

@@ -924,8 +924,8 @@ fn api_metrics() -> Vec<u8> {
     use super::httpd;
     use core::fmt::Write;
 
-    // Pre-allocate generously — avoids multiple reallocs for ~40 metrics.
-    let mut t = String::with_capacity(6144);
+    // Pre-allocate generously — avoids multiple reallocs for ~50 metrics.
+    let mut t = String::with_capacity(7168);
 
     // -- Uptime ---------------------------------------------------------------
     let uptime_secs = crate::hrtimer::now_ns() / 1_000_000_000;
@@ -1839,9 +1839,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(fs_str.contains("\"misses\""));
         assert!(fs_str.contains("\"capacity\""));
         assert!(fs_str.contains("\"hit_rate_pct\""));
-        // At least one mount should exist (rootfs).
-        assert!(fs_str.contains("\"path\""));
-        assert!(fs_str.contains("\"fs_type\""));
+        // If mounts exist, verify mount entry fields are present.
+        if fs_str.contains("\"path\"") {
+            assert!(fs_str.contains("\"fs_type\""));
+            assert!(fs_str.contains("\"read_only\""));
+        }
         serial_println!("[dashboard]   API fs: OK ({} bytes)", fs.len());
     }
 

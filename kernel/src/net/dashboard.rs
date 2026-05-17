@@ -170,12 +170,20 @@ fn api_tasks() -> Vec<u8> {
         let name_str = core::str::from_utf8(name_bytes).unwrap_or("?");
 
         json.push_str(&format!(
-            r#"{{"id":{},"name":"{}","priority":{},"state":"{}","cpu":{}}}"#,
+            concat!(
+                r#"{{"id":{},"name":"{}","priority":{},"state":"{}","cpu":{},"#,
+                r#""total_ticks":{},"schedule_count":{},"total_wait_ticks":{},"#,
+                r#""throttled":{}}}"#,
+            ),
             task.id,
             json_escape(name_str),
             task.priority,
             task.state,  // TaskState implements Display
             task.last_cpu,
+            task.total_ticks,
+            task.schedule_count,
+            task.total_wait_ticks,
+            task.throttled,
         ));
     }
 
@@ -436,7 +444,7 @@ tr:hover td { background: #1c2128; }
 <div class="card" style="margin-bottom:16px">
   <h2>Tasks</h2>
   <table>
-    <thead><tr><th>ID</th><th>Name</th><th>Priority</th><th>State</th><th>CPU</th></tr></thead>
+    <thead><tr><th>ID</th><th>Name</th><th>Pri</th><th>State</th><th>CPU</th><th>Ticks</th><th>Sched</th></tr></thead>
     <tbody id="task-body"></tbody>
   </table>
 </div>
@@ -530,7 +538,8 @@ async function update() {
       stat('DNS', nr.interface.dns);
     var tb=''; tr.forEach(function(t){
       tb+='<tr><td>'+t.id+'</td><td>'+t.name+'</td><td>'+t.priority+
-        '</td><td>'+badge(t.state)+'</td><td>'+t.cpu+'</td></tr>';
+        '</td><td>'+badge(t.state)+'</td><td>'+t.cpu+'</td><td>'+
+        t.total_ticks+'</td><td>'+t.schedule_count+'</td></tr>';
     });
     document.getElementById('task-body').innerHTML=tb;
     var cb=''; nr.tcp_connections.forEach(function(c){

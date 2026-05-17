@@ -2,7 +2,7 @@
 name = "coreutils"
 version = "0.1.0"
 edition = "2024"
-description = "Coreutils for OurOS (60 total)"
+description = "Coreutils for OurOS (69 total)"
 
 # Standalone crate — not part of the kernel workspace.
 [workspace]
@@ -227,3 +227,39 @@ path = "src/bin/sha256sum.rs"
 [[bin]]
 name = "tty"
 path = "src/bin/tty.rs"
+
+[[bin]]
+name = "diff"
+path = "src/bin/diff.rs"
+
+[[bin]]
+name = "cmp"
+path = "src/bin/cmp.rs"
+
+[[bin]]
+name = "od"
+path = "src/bin/od.rs"
+
+[[bin]]
+name = "strings"
+path = "src/bin/strings.rs"
+
+[[bin]]
+name = "uptime"
+path = "src/bin/uptime.rs"
+
+[[bin]]
+name = "free"
+path = "src/bin/free.rs"
+
+[[bin]]
+name = "unexpand"
+path = "src/bin/unexpand.rs"
+
+[[bin]]
+name = "cal"
+path = "src/bin/cal.rs"
+
+[[bin]]
+name = "time"
+path = "src/bin/time_cmd.rs"

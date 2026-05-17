@@ -24,9 +24,11 @@
 //! ```
 
 pub mod color;
+pub mod colorpicker;
 pub mod dialog;
 pub mod dnd;
 pub mod event;
+pub mod grid;
 pub mod layout;
 pub mod menu;
 pub mod render;

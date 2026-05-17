@@ -1,0 +1,20 @@
+[package]
+name = "osfont"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS Font Library — bitmap and outline font rendering"
+
+[workspace]
+
+[lib]
+name = "osfont"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

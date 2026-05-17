@@ -1,0 +1,16 @@
+[package]
+name = "clipboard"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS Clipboard Service — multi-format clipboard with history"
+
+[workspace]
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

@@ -1,0 +1,19 @@
+[package]
+name = "notifications"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS Notification Daemon — system notification management and display"
+
+[workspace]
+
+[dependencies]
+guitk = { path = "../toolkit" }
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

@@ -2,7 +2,7 @@
 name = "coreutils"
 version = "0.1.0"
 edition = "2024"
-description = "Basic userspace utilities (cat, echo, ls, mkdir, head, wc, cp, rm, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr)"
+description = "Basic userspace utilities (46 total: cat, echo, ls, mkdir, head, wc, cp, rm, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs)"
 
 # Standalone crate — not part of the kernel workspace.
 [workspace]
@@ -111,3 +111,63 @@ path = "src/bin/cut.rs"
 [[bin]]
 name = "tr"
 path = "src/bin/tr.rs"
+
+[[bin]]
+name = "chmod"
+path = "src/bin/chmod.rs"
+
+[[bin]]
+name = "chown"
+path = "src/bin/chown.rs"
+
+[[bin]]
+name = "id"
+path = "src/bin/id.rs"
+
+[[bin]]
+name = "whoami"
+path = "src/bin/whoami.rs"
+
+[[bin]]
+name = "hostname"
+path = "src/bin/hostname.rs"
+
+[[bin]]
+name = "readlink"
+path = "src/bin/readlink.rs"
+
+[[bin]]
+name = "realpath"
+path = "src/bin/realpath.rs"
+
+[[bin]]
+name = "stat"
+path = "src/bin/stat.rs"
+
+[[bin]]
+name = "printf"
+path = "src/bin/printf.rs"
+
+[[bin]]
+name = "test"
+path = "src/bin/test.rs"
+
+[[bin]]
+name = "kill"
+path = "src/bin/kill.rs"
+
+[[bin]]
+name = "dd"
+path = "src/bin/dd.rs"
+
+[[bin]]
+name = "df"
+path = "src/bin/df.rs"
+
+[[bin]]
+name = "du"
+path = "src/bin/du.rs"
+
+[[bin]]
+name = "xargs"
+path = "src/bin/xargs.rs"

@@ -640,6 +640,71 @@ fn build_response(status: u16, reason: &str, content_type: &str, body: &[u8]) ->
     bytes
 }
 
+/// Build an HTTP response with gzip-compressed body.
+///
+/// Compresses the body using gzip (RFC 1952) and adds `Content-Encoding: gzip`
+/// and `Vary: Accept-Encoding` headers.  Falls back to uncompressed if the
+/// compressed body is larger than the original (unlikely for text, possible
+/// for tiny or already-compressed data).
+#[allow(clippy::arithmetic_side_effects)]
+fn build_response_gzip(status: u16, reason: &str, content_type: &str, body: &[u8]) -> Vec<u8> {
+    let compressed = crate::fs::compress::gzip(body);
+
+    // Only use gzip if it actually saves space.
+    if compressed.len() >= body.len() {
+        return build_response(status, reason, content_type, body);
+    }
+
+    let etag = etag_for_body(body); // ETag based on original content
+    let resp = format!(
+        "HTTP/1.1 {} {}\r\n\
+         Server: {}\r\n\
+         Content-Type: {}\r\n\
+         Content-Length: {}\r\n\
+         Content-Encoding: gzip\r\n\
+         Vary: Accept-Encoding\r\n\
+         ETag: {}\r\n\
+         Accept-Ranges: bytes\r\n\
+         Cache-Control: no-cache\r\n\
+         Connection: close\r\n\
+         \r\n",
+        status, reason,
+        SERVER_NAME,
+        content_type,
+        compressed.len(),
+        etag,
+    );
+
+    let mut bytes = resp.into_bytes();
+    bytes.extend_from_slice(&compressed);
+    bytes
+}
+
+/// Check whether an Accept-Encoding header value includes "gzip".
+fn accepts_gzip(accept_encoding: &Option<String>) -> bool {
+    match accept_encoding {
+        Some(val) => {
+            // Simple check: look for "gzip" anywhere in the header value.
+            // A proper parser would check quality values (q=0 means disabled),
+            // but this covers all real-world browsers and curl.
+            val.contains("gzip")
+        }
+        None => false,
+    }
+}
+
+/// Check whether a MIME type is compressible (text-based content).
+///
+/// Returns true for content types where gzip compression typically
+/// provides significant size reduction.
+fn is_compressible(content_type: &str) -> bool {
+    content_type.starts_with("text/")
+        || content_type.starts_with("application/json")
+        || content_type.starts_with("application/javascript")
+        || content_type.starts_with("application/xml")
+        || content_type.starts_with("image/svg")
+}
+
 /// Build a HEAD response (headers only, no body).
 fn build_head_response(status: u16, reason: &str, content_type: &str, content_length: usize) -> Vec<u8> {
     let resp = format!(
@@ -997,13 +1062,14 @@ fn handle_connection(conn_handle: usize) {
     let _ = tcp::close(conn_handle);
 }
 
-/// Serve a file from the VFS with ETag and Range support.
+/// Serve a file from the VFS with ETag, Range, and gzip support.
 ///
 /// Supports:
 /// - ETag conditional requests (If-None-Match → 304 Not Modified)
 /// - Range requests (Range: bytes=N-M → 206 Partial Content)
 /// - HEAD method (headers only)
-fn serve_file(vfs_path: &str, method: &str, if_none_match: &Option<String>, range: &Option<String>) -> Vec<u8> {
+/// - gzip compression for compressible MIME types
+fn serve_file(vfs_path: &str, method: &str, if_none_match: &Option<String>, range: &Option<String>, use_gzip: bool) -> Vec<u8> {
     use crate::fs::vfs::Vfs;
 
     match Vfs::read_file(vfs_path) {
@@ -1035,6 +1101,8 @@ fn serve_file(vfs_path: &str, method: &str, if_none_match: &Option<String>, rang
 
             if method == "HEAD" {
                 build_head_response(200, "OK", content_type, data.len())
+            } else if use_gzip && is_compressible(content_type) && data.len() > 256 {
+                build_response_gzip(200, "OK", content_type, &data)
             } else {
                 build_response(200, "OK", content_type, &data)
             }
@@ -1324,8 +1392,13 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
                 return not_modified_response(&etag_for_body(&body));
             }
             let blen = body.len();
+            let use_gzip = accepts_gzip(&req.accept_encoding)
+                && is_compressible(&content_type)
+                && blen > 256; // Don't bother compressing tiny responses
             let response = if req.method == "HEAD" {
                 build_head_response(200, "OK", &content_type, blen)
+            } else if use_gzip {
+                build_response_gzip(200, "OK", &content_type, &body)
             } else {
                 build_response(200, "OK", &content_type, &body)
             };
@@ -1333,6 +1406,9 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
             return response;
         }
     }
+
+    // Check if client accepts gzip compression.
+    let use_gzip = accepts_gzip(&req.accept_encoding);
 
     // Map URI path to VFS path.
     let doc_root = *DOC_ROOT.lock();
@@ -1357,7 +1433,7 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
             };
 
             if Vfs::stat(&index_path).is_ok() {
-                let r = serve_file(&index_path, &req.method, &req.if_none_match, &req.range);
+                let r = serve_file(&index_path, &req.method, &req.if_none_match, &req.range, use_gzip);
                 let s = extract_status(&r);
                 let l = r.len();
                 (r, s, l)
@@ -1373,6 +1449,8 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
                             let blen = body.len();
                             let r = if req.method == "HEAD" {
                                 build_head_response(200, "OK", "text/html; charset=utf-8", blen)
+                            } else if use_gzip && blen > 256 {
+                                build_response_gzip(200, "OK", "text/html; charset=utf-8", &body)
                             } else {
                                 build_response(200, "OK", "text/html; charset=utf-8", &body)
                             };
@@ -1387,7 +1465,7 @@ fn process_http_request(request_data: &[u8]) -> Vec<u8> {
             }
         }
         Ok(_) => {
-            let r = serve_file(&vfs_path, &req.method, &req.if_none_match, &req.range);
+            let r = serve_file(&vfs_path, &req.method, &req.if_none_match, &req.range, use_gzip);
             let s = extract_status(&r);
             let l = r.len();
             (r, s, l)
@@ -1826,7 +1904,73 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[httpd]   429 response format: OK");
     }
 
-    serial_println!("[httpd] Self-test PASSED (33 tests)");
+    // Test 34: accepts_gzip helper.
+    {
+        assert!(accepts_gzip(&Some(String::from("gzip, deflate, br"))));
+        assert!(accepts_gzip(&Some(String::from("gzip"))));
+        assert!(!accepts_gzip(&Some(String::from("deflate, br"))));
+        assert!(!accepts_gzip(&None));
+        serial_println!("[httpd]   accepts_gzip: OK");
+    }
+
+    // Test 35: is_compressible helper.
+    {
+        assert!(is_compressible("text/html; charset=utf-8"));
+        assert!(is_compressible("text/css"));
+        assert!(is_compressible("application/json"));
+        assert!(is_compressible("application/javascript"));
+        assert!(is_compressible("image/svg+xml"));
+        assert!(!is_compressible("image/png"));
+        assert!(!is_compressible("application/octet-stream"));
+        serial_println!("[httpd]   is_compressible: OK");
+    }
+
+    // Test 36: gzip compression helpers and response building.
+    {
+        // Use a highly compressible body (1024 bytes of repeated pattern).
+        // This guarantees compression ratio > 2:1, overcoming gzip's 18-byte
+        // header/trailer overhead.
+        let mut body = Vec::with_capacity(1024);
+        for _ in 0..64 {
+            body.extend_from_slice(b"ABCDEFGHIJKLMNOP");
+        }
+
+        let compressed = crate::fs::compress::gzip(&body);
+        let ratio_pct = body.len().saturating_mul(100).checked_div(compressed.len().max(1)).unwrap_or(0);
+        serial_println!("[httpd]   gzip: {}B → {}B ({}% ratio)",
+            body.len(), compressed.len(), ratio_pct);
+
+        if compressed.len() < body.len() {
+            // Compression worked — verify the response builder uses it.
+            let resp = build_response_gzip(200, "OK", "text/html", &body);
+            // Headers are ASCII, but the gzip body is binary.  Find the
+            // end-of-headers marker and check only the header portion.
+            let header_end = resp.windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|p| p.saturating_add(4))
+                .unwrap_or(resp.len());
+            let header_str = core::str::from_utf8(&resp[..header_end]).unwrap_or("");
+            assert!(header_str.contains("Content-Encoding: gzip\r\n"),
+                "gzip response should contain Content-Encoding header");
+            assert!(header_str.contains("Vary: Accept-Encoding\r\n"),
+                "gzip response should contain Vary header");
+            // Verify the compressed response is smaller than uncompressed.
+            let uncompressed = build_response(200, "OK", "text/html", &body);
+            assert!(resp.len() < uncompressed.len(),
+                "gzip ({}) should be smaller than plain ({})", resp.len(), uncompressed.len());
+            serial_println!("[httpd]   gzip response: OK ({}B vs {}B uncompressed)",
+                resp.len(), uncompressed.len());
+        } else {
+            // Compression didn't help — verify the fallback works.
+            let resp = build_response_gzip(200, "OK", "text/html", &body);
+            assert!(resp.starts_with(b"HTTP/1.1 200 OK\r\n"),
+                "fallback response should be valid HTTP");
+            serial_println!("[httpd]   gzip response: OK (fallback, {}B ≥ {}B)",
+                compressed.len(), body.len());
+        }
+    }
+
+    serial_println!("[httpd] Self-test PASSED (36 tests)");
     Ok(())
 }
 

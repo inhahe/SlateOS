@@ -18,6 +18,7 @@
 //! | `/api/firewall`    | JSON: firewall status, rules, conntrack count |
 //! | `/api/bench`       | JSON: benchmark scorecard (pass/fail, targets)  |
 //! | `/api/health`      | JSON: aggregated health check for monitoring    |
+//! | `/metrics`         | Prometheus text format metrics for monitoring   |
 //!
 //! ## Integration
 //!
@@ -109,6 +110,9 @@ pub fn handle_api_request(path: &str) -> Option<(String, Vec<u8>)> {
         }
         "/api/health" => {
             Some((String::from("application/json"), api_health()))
+        }
+        "/metrics" => {
+            Some((String::from("text/plain; version=0.0.4; charset=utf-8"), api_metrics()))
         }
         _ => None,
     }
@@ -495,6 +499,130 @@ fn api_health() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
+// /metrics (Prometheus text format)
+// ---------------------------------------------------------------------------
+
+/// Prometheus-compatible metrics endpoint (text/plain, version 0.0.4).
+///
+/// Exports key system metrics in Prometheus exposition format for
+/// integration with monitoring stacks (Prometheus, Grafana, etc.).
+fn api_metrics() -> Vec<u8> {
+    use super::httpd;
+
+    let uptime_ns = crate::hrtimer::now_ns();
+    let uptime_secs = uptime_ns / 1_000_000_000;
+
+    // Memory.
+    let (total_frames, free_frames) = crate::mm::frame::stats()
+        .map(|s| (s.total_frames, s.free_frames))
+        .unwrap_or((0, 0));
+    let used_frames = total_frames.saturating_sub(free_frames);
+    let page_size = 16384u64;
+    let total_mem = (total_frames as u64).saturating_mul(page_size);
+    let used_mem = (used_frames as u64).saturating_mul(page_size);
+
+    // Heap.
+    let heap = crate::mm::heap::stats();
+
+    // Tasks.
+    let task_count = crate::sched::task_list().len();
+
+    // Network.
+    let net_stats = crate::net::interface::stats();
+
+    // HTTP.
+    let http_requests = httpd::request_count();
+    let http_304 = httpd::not_modified_count();
+    let http_206 = httpd::partial_count();
+    let http_429 = httpd::rate_limited_count();
+    let http_gzip = httpd::gzip_count();
+    let http_gzip_saved = httpd::gzip_bytes_saved();
+
+    // DNS.
+    let dns = super::dns::cache_stats();
+
+    let text = format!(
+        concat!(
+            "# HELP os_uptime_seconds System uptime in seconds.\n",
+            "# TYPE os_uptime_seconds gauge\n",
+            "os_uptime_seconds {}\n",
+            "# HELP os_memory_total_bytes Total physical memory in bytes.\n",
+            "# TYPE os_memory_total_bytes gauge\n",
+            "os_memory_total_bytes {}\n",
+            "# HELP os_memory_used_bytes Used physical memory in bytes.\n",
+            "# TYPE os_memory_used_bytes gauge\n",
+            "os_memory_used_bytes {}\n",
+            "# HELP os_memory_frames_total Total physical frames.\n",
+            "# TYPE os_memory_frames_total gauge\n",
+            "os_memory_frames_total {}\n",
+            "# HELP os_memory_frames_used Used physical frames.\n",
+            "# TYPE os_memory_frames_used gauge\n",
+            "os_memory_frames_used {}\n",
+            "# HELP os_heap_bytes_in_use Kernel heap bytes in use.\n",
+            "# TYPE os_heap_bytes_in_use gauge\n",
+            "os_heap_bytes_in_use {}\n",
+            "# HELP os_heap_peak_bytes Peak kernel heap usage.\n",
+            "# TYPE os_heap_peak_bytes gauge\n",
+            "os_heap_peak_bytes {}\n",
+            "# HELP os_tasks_total Active task count.\n",
+            "# TYPE os_tasks_total gauge\n",
+            "os_tasks_total {}\n",
+            "# HELP os_net_rx_bytes_total Network bytes received.\n",
+            "# TYPE os_net_rx_bytes_total counter\n",
+            "os_net_rx_bytes_total {}\n",
+            "# HELP os_net_tx_bytes_total Network bytes transmitted.\n",
+            "# TYPE os_net_tx_bytes_total counter\n",
+            "os_net_tx_bytes_total {}\n",
+            "# HELP os_net_rx_packets_total Network packets received.\n",
+            "# TYPE os_net_rx_packets_total counter\n",
+            "os_net_rx_packets_total {}\n",
+            "# HELP os_net_tx_packets_total Network packets transmitted.\n",
+            "# TYPE os_net_tx_packets_total counter\n",
+            "os_net_tx_packets_total {}\n",
+            "# HELP os_http_requests_total HTTP requests served.\n",
+            "# TYPE os_http_requests_total counter\n",
+            "os_http_requests_total {}\n",
+            "# HELP os_http_304_total HTTP 304 Not Modified responses.\n",
+            "# TYPE os_http_304_total counter\n",
+            "os_http_304_total {}\n",
+            "# HELP os_http_206_total HTTP 206 Partial Content responses.\n",
+            "# TYPE os_http_206_total counter\n",
+            "os_http_206_total {}\n",
+            "# HELP os_http_429_total HTTP 429 Rate Limited responses.\n",
+            "# TYPE os_http_429_total counter\n",
+            "os_http_429_total {}\n",
+            "# HELP os_http_gzip_total Gzip-compressed responses served.\n",
+            "# TYPE os_http_gzip_total counter\n",
+            "os_http_gzip_total {}\n",
+            "# HELP os_http_gzip_bytes_saved_total Bytes saved by gzip compression.\n",
+            "# TYPE os_http_gzip_bytes_saved_total counter\n",
+            "os_http_gzip_bytes_saved_total {}\n",
+            "# HELP os_dns_cache_hits_total DNS cache hits.\n",
+            "# TYPE os_dns_cache_hits_total counter\n",
+            "os_dns_cache_hits_total {}\n",
+            "# HELP os_dns_cache_misses_total DNS cache misses.\n",
+            "# TYPE os_dns_cache_misses_total counter\n",
+            "os_dns_cache_misses_total {}\n",
+            "# HELP os_dns_cache_entries Current DNS cache entries.\n",
+            "# TYPE os_dns_cache_entries gauge\n",
+            "os_dns_cache_entries {}\n",
+        ),
+        uptime_secs,
+        total_mem, used_mem,
+        total_frames, used_frames,
+        heap.bytes_in_use, heap.peak_bytes_in_use,
+        task_count,
+        net_stats.rx_bytes, net_stats.tx_bytes,
+        net_stats.rx_packets, net_stats.tx_packets,
+        http_requests, http_304, http_206, http_429,
+        http_gzip, http_gzip_saved,
+        dns.hits, dns.misses, dns.entries,
+    );
+
+    text.into_bytes()
+}
+
+// ---------------------------------------------------------------------------
 // HTML dashboard
 // ---------------------------------------------------------------------------
 
@@ -800,6 +928,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(handle_api_request("/api/firewall").is_some());
         assert!(handle_api_request("/api/bench").is_some());
         assert!(handle_api_request("/api/health").is_some());
+        assert!(handle_api_request("/metrics").is_some());
         assert!(handle_api_request("/not-an-api").is_none());
         assert!(handle_api_request("/api/nonexistent").is_none());
         serial_println!("[dashboard]   API routing: OK");
@@ -884,6 +1013,26 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         serial_println!("[dashboard]   API health: OK ({} bytes)", health.len());
     }
 
-    serial_println!("[dashboard] Self-test PASSED (12 tests)");
+    // Test 13: Prometheus metrics endpoint returns valid exposition format.
+    {
+        let metrics = api_metrics();
+        assert!(!metrics.is_empty());
+        let metrics_str = core::str::from_utf8(&metrics).unwrap_or("");
+        // Must contain TYPE and HELP annotations.
+        assert!(metrics_str.contains("# TYPE os_uptime_seconds gauge"));
+        assert!(metrics_str.contains("# HELP os_memory_total_bytes"));
+        assert!(metrics_str.contains("os_http_requests_total "));
+        assert!(metrics_str.contains("os_dns_cache_entries "));
+        assert!(metrics_str.contains("os_tasks_total "));
+        assert!(metrics_str.contains("os_net_rx_bytes_total "));
+        // Each metric line should end with a number (no trailing whitespace).
+        let has_numeric_values = metrics_str.lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .all(|l| l.split_whitespace().last().map_or(false, |v| v.parse::<u64>().is_ok()));
+        assert!(has_numeric_values, "All metric lines must have numeric values");
+        serial_println!("[dashboard]   Prometheus metrics: OK ({} bytes)", metrics.len());
+    }
+
+    serial_println!("[dashboard] Self-test PASSED (13 tests)");
     Ok(())
 }

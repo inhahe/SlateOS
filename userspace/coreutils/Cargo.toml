@@ -2,7 +2,7 @@
 name = "coreutils"
 version = "0.1.0"
 edition = "2024"
-description = "Coreutils for OurOS (73 total)"
+description = "Coreutils for OurOS (75 total)"
 
 # Standalone crate — not part of the kernel workspace.
 [workspace]
@@ -279,3 +279,11 @@ path = "src/bin/ed.rs"
 [[bin]]
 name = "more"
 path = "src/bin/more.rs"
+
+[[bin]]
+name = "sh"
+path = "src/bin/sh.rs"
+
+[[bin]]
+name = "tar"
+path = "src/bin/tar.rs"

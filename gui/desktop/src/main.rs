@@ -92,6 +92,8 @@ mod power_settings;
 mod network_indicator;
 #[allow(dead_code)]
 mod storage_settings;
+#[allow(dead_code)]
+mod privacy_settings;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

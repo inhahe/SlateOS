@@ -1615,7 +1615,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] DPI/scaling awareness, automatic image scaling (scaling.rs: LogicalPixel/PhysicalPixel, ScaleContext, per-monitor, image scale helpers)
   - [x] Enable/disable controls with optional reason tooltip (disabled.rs: groups, conditional enable, form validation)
   - [x] SVG rendering support (svg.rs: path commands, shapes, transforms, scanline AA rasterizer, Bézier flattening)
-  - [ ] Context menu extension API (capability-gated, lazy-loading, 200ms timeout)
+  - [x] Context menu extension API (context_ext.rs: capability-gated, lazy-loading, 200ms timeout, glob matching)
 - [x] Credential manager service (gui/credentials):
   - [x] Central credential storage (6 types: Password/Token/Certificate/SshKey/ApiKey/Custom)
   - [x] XOR stream cipher encryption with SHA-256-derived session key
@@ -1641,9 +1641,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 ### 3.7 File type associations
 - [x] Extension → default app mapping (fs::associations registry with MIME→app priority system, extension override, kshell `assoc` command)
 - [x] MIME type detection (fs::mime: ~40 magic signatures, ~100 extensions, from_bytes/from_extension/detect/category API, kshell `mime` command)
-- [ ] Per-app icons per extension
-- [ ] Easily discoverable UI to change associations
-- [ ] Fallback to previous app when handler is uninstalled
+- [x] Per-app icons per extension (associations.rs: per-type icon_id, app icons in UI)
+- [x] Easily discoverable UI to change associations (associations.rs: settings page with search, categories, expand-to-change)
+- [x] Fallback to previous app when handler is uninstalled (handle_uninstall with 3-deep history)
 - [ ] File extensions: .nx (executable), .dso (shared library), .slib (static library)
 
 ---

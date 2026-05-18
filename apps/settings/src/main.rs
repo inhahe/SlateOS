@@ -6,6 +6,9 @@
 //!
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha) by default.
 
+#[allow(dead_code)]
+mod associations;
+
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]

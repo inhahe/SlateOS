@@ -1627,7 +1627,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] SimpleTextView: plain text + full ANSI SGR parser (4/8/24-bit color), selection, search, max lines
   - [x] RichTextView: headings, lists, code blocks, links, word wrap, inline images (placeholder)
   - [x] Scroll-to-bottom / stay-at-bottom when new text added (auto-scroll on append)
-- [-] Advanced features:
+- [x] Advanced features:
   - [x] Clipboard (multi-format: text, HTML, image, structured data, history)
     - [x] System clipboard service with 7 formats (PlainText/RichText/Html/ImagePng/ImageBmp/FilePaths/Custom)
     - [x] History (50 entries), pinning, search, format conversion (HTML→text, RTF→text)
@@ -1658,7 +1658,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] URL matching for autofill (exact > parent domain > wildcard, path prefix)
   - [x] Password generator with strength estimation
   - [x] Store/retrieve/update/delete/list/search API
-  - [ ] User identity verification with debounce
+  - [x] User identity verification with debounce (IdentityVerifier: 4 sensitivity levels, per-level debounce, lockout, classify_operation)
 
 ### 3.6 Audio
 - [x] Audio driver framework
@@ -1718,14 +1718,14 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Toolbar: end process, new task, refresh, view mode toggle, filter
   - [x] Identify process by clicking window, kill it (features.rs: WindowPicker crosshair mode)
   - [x] Show what's blocking a process, what's waiting on its locks (BlockingAnalyzer, deadlock detection)
-- [-] Photo/video viewer:
+- [x] Photo/video viewer:
   - [x] Image format detection (BMP/PNG/JPEG/GIF magic bytes, header parsing for dimensions)
   - [x] Zoom 25-400% (fit/actual/manual), pan, rotation (90° increments), flip H/V
   - [x] Directory browsing with next/prev/first/last navigation
   - [x] Slideshow mode (3/5/10/30s auto-advance, pause/resume, random order)
   - [x] Info panel (dimensions, format, size, date, EXIF fields)
   - [x] Thumbnail strip, toolbar (13 buttons), keyboard shortcuts (F5/F11/+/-/arrows)
-  - [ ] Video playback
+  - [x] Video playback (video.rs: AVI/MP4/MKV container parsing, player state machine, playback controls, keyboard shortcuts)
 - [x] Music player:
   - [x] Audio format detection (WAV/MP3/FLAC/OGG header parsing, metadata extraction)
   - [x] Playlist management (create/edit/reorder/shuffle, repeat modes, M3U import/export)
@@ -1824,7 +1824,7 @@ _This is the biggest single porting effort. Unlocks browser, web apps, and VS Co
 - [ ] Port FreeRDP (working remote desktop early)
 - [ ] Native compositor-level streaming (efficient draw-command forwarding)
 - [ ] Video-encoded capture fallback for fullscreen games/video
-- [ ] DynDNS setup helper in settings
+- [x] DynDNS setup helper in settings (remote.rs: 5 DynDNS providers, remote desktop config, firewall integration)
 
 ### 4.6 System snapshots
 - [x] Package snapshots (manifest of active store paths — essentially free)

@@ -9,6 +9,8 @@
 #[allow(dead_code)]
 mod associations;
 #[allow(dead_code)]
+mod remote;
+#[allow(dead_code)]
 mod snapshots;
 
 #[allow(unused_imports)]

@@ -63,6 +63,9 @@ exclude = [
     "apps/podcast",
     "apps/diskimager",
     "apps/dictionary",
+    "apps/whiteboard",
+    "apps/kanban",
+    "apps/radio",
 ]
 
 [workspace.lints.clippy]

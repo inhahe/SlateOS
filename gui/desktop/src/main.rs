@@ -16,6 +16,8 @@
 mod icons;
 #[allow(dead_code)]
 mod run_dialog;
+#[allow(dead_code)]
+mod taskbar;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

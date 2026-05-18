@@ -1667,6 +1667,11 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Storage management settings (storage_settings.rs: 10-category disk usage breakdown, Storage Sense auto-cleanup, retention periods, save locations, reclaimable space estimates, low-space warnings)
 - [x] Privacy and permissions settings (privacy_settings.rs: 10 permission types, global toggles, per-app allow/deny, activity log, telemetry control, access count tracking)
 - [x] Update settings (update_settings.rs: update status tracking, available/installed update management, scheduling with active hours/deferral, history with rollback, metered connection awareness)
+- [x] Notification settings (notification_settings.rs: banner style/position, per-app prefs with mute/unmute, auto-dismiss delay, history retention, sound config, lock screen, grouping modes, interaction tracking)
+- [x] Appearance settings (appearance_settings.rs: light/dark/system theme, 14 accent colors + custom, transparency levels, animation speed, font settings, window corners, taskbar style, cursor/icon size, DPI scaling)
+- [x] Language and region settings (language_settings.rs: 20 languages with BCP 47 tags, date/time/number formats, measurement system, temperature units, 12 currencies with formatting)
+- [x] Startup app settings (startup_settings.rs: startup app management with impact assessment, boot time measurement, auto-disable failing apps, delay config, sorted/filtered app list)
+- [x] Date and time settings (datetime_settings.rs: 20 timezones with DST, NTP sync config with status, additional world clocks, taskbar clock display options)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1884,6 +1889,9 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Credential manager (apps/credmanager: password vault, login/note/card/identity/SSH entries, generator with entropy, audit, folders/tags, auto-lock, 122 tests)
 - [x] VPN manager (apps/vpnmanager: OpenVPN/WireGuard/IPSec/L2TP/PPTP/SSTP protocols, kill switch, split tunneling, connection logs, profile import/export, DNS override, 135 tests)
 - [x] Contacts/address book (apps/contacts: vCard 3.0 import/export, groups with colors, favorites, birthday tracking, duplicate detection with merge, multi-field search, social accounts, 181 tests)
+- [x] Hex editor (apps/hexeditor: multi-tab, hex/ASCII view, nibble editing, insert/overwrite, search, bookmarks, data inspector with 20 types, undo/redo, byte frequency analysis, structure templates, 152 tests)
+- [x] Disk defragmenter (apps/defrag: visual block map, 4 optimization modes, SSD detection with TRIM, scheduling, exclude patterns, pause/resume, before/after stats, 114 tests)
+- [x] Remote desktop viewer (apps/remotedesktop: RDP/VNC/SSH protocols, connection profiles, clipboard sync, file transfer, quality presets, multi-monitor, performance overlay, hotkeys, 103 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

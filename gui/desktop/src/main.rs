@@ -108,6 +108,12 @@ mod startup_settings;
 mod datetime_settings;
 #[allow(dead_code)]
 mod accessibility_settings;
+#[allow(dead_code)]
+mod network_settings;
+#[allow(dead_code)]
+mod default_apps;
+#[allow(dead_code)]
+mod backup_settings;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

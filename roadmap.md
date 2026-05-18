@@ -1622,6 +1622,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] About dialog (about.rs: system info with overview/hardware/software/licenses tabs, uptime/memory formatting)
 - [x] User account management (user_accounts.rs: admin/standard/guest types, avatars, login options, activity log, user switching)
 - [x] Taskbar auto-hide (taskbar_autohide.rs: slide animation, edge trigger, peek mode, lock/unlock, per-edge support)
+- [x] Input method manager (input_method.rs: keyboard layout switching, 5 built-in layouts, tray indicator, preview, per-app memory)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1820,6 +1821,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Startup apps manager (apps/startupmanager: enable/disable, impact assessment, import/export, sortable table, 82 tests)
 - [x] Disk usage analyzer (apps/diskanalyzer: WinDirStat-style treemap, extension breakdown, squarified layout, drill-down, 77 tests)
 - [x] Color picker (apps/colorpicker: eyedropper, RGB/HSL/HSV/CMYK, WCAG contrast checker, palettes, history, hex input)
+- [x] File association manager (apps/fileassoc: 50 built-in types, 12 apps, category sidebar, search, Open With dialog, import/export)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

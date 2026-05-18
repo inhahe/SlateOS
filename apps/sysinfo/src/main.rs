@@ -14,6 +14,9 @@
 //! through OurOS syscalls; stubbed with representative data for initial
 //! development.
 
+#[allow(dead_code)]
+pub mod hwquery;
+
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]

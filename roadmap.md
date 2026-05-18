@@ -1537,6 +1537,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] mktemp/id/groups/whoami: temp files and user identity (secure temp creation, UID/GID display, group membership)
   - [x] ipcalc: IP subnet calculator (IPv4/IPv6, CIDR, netmask, network/broadcast/hosts, class detect, private ranges, split)
   - [x] seq/yes/expr: number sequences, repeated output, expression evaluator (arithmetic, comparison, regex, substr, index)
+  - [x] wall/write/mesg: terminal messaging (broadcast to all terminals, send to specific user, control message permission)
+  - [x] lsmod/modprobe/insmod/rmmod: kernel module management (dependency resolution, /proc/modules parsing, name normalization)
+  - [x] sha256sum/md5sum/sha1sum/sha512sum: cryptographic checksums (full MD5/SHA-1/SHA-256/SHA-512, FIPS 180-4 vectors, GNU/BSD formats, --check)
+  - [x] stat/touch/ln/readlink/realpath/mkfifo: file operations (format specifiers, date parsing, hard/symlinks, canonicalization, FIFO creation)
+  - [x] last/lastb/lastlog: login records viewer (wtmp/btmp/lastlog parsing, 384-byte utmp records, user/terminal filtering)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

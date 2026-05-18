@@ -1701,8 +1701,8 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Network tab: connections table, bandwidth graph
   - [x] Details panel: threads, handles, capabilities, environment, command line
   - [x] Toolbar: end process, new task, refresh, view mode toggle, filter
-  - [ ] Identify process by clicking window, kill it
-  - [ ] Show what's blocking a process, what's waiting on its locks
+  - [x] Identify process by clicking window, kill it (features.rs: WindowPicker crosshair mode)
+  - [x] Show what's blocking a process, what's waiting on its locks (BlockingAnalyzer, deadlock detection)
 - [-] Photo/video viewer:
   - [x] Image format detection (BMP/PNG/JPEG/GIF magic bytes, header parsing for dimensions)
   - [x] Zoom 25-400% (fit/actual/manual), pan, rotation (90° increments), flip H/V
@@ -1817,9 +1817,9 @@ _This is the biggest single porting effort. Unlocks browser, web apps, and VS Co
   - [x] Snapshot diff: compare current installed state against a saved snapshot (added/removed/changed)
   - [x] Snapshot apply: install/remove/upgrade packages to match a snapshot (with dry-run support)
   - [x] Parse/serialize round-trip format with version header and comment metadata
-- [ ] Mutable data snapshots (CoW at filesystem level, 64 KiB block default)
-- [ ] Snapshot tree (branch like VMs, select what to include)
-- [ ] Rollback any OS update, permanently disable it or retry later
+- [x] Mutable data snapshots (snapshots.rs: CoW block store, 64 KiB blocks, content-addressed dedup)
+- [x] Snapshot tree (branch like VMs, select what to include — parent/child with ASCII visualization)
+- [x] Rollback any OS update, permanently disable it or retry later (RollbackManager, pre-update snapshots)
 
 ### 4.7 Service discovery / RPC
 - [x] D-Bus-like named service registry (binary protocol, not XML)

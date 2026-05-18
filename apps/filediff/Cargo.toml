@@ -1,0 +1,19 @@
+[package]
+name = "filediff"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS File Diff/Compare Tool — side-by-side, unified, and inline diff views with merge support"
+
+[workspace]
+
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

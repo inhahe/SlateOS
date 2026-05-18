@@ -20,6 +20,9 @@ use guitk::render::{RenderTree, RenderCommand, FontWeightHint};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
+#[allow(dead_code)]
+mod video;
+
 use std::path::{Path, PathBuf};
 
 // ============================================================================

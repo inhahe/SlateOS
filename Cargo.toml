@@ -20,6 +20,8 @@ exclude = [
     # --- apps (osb2) ---
     "apps/hexeditor",
     "apps/contacts",
+    "apps/remotedesktop",
+    "apps/defrag",
 ]
 
 [workspace.lints.clippy]

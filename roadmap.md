@@ -1664,6 +1664,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Network tray indicator (network_indicator.rs: connection type display, WiFi flyout with signal bars, airplane mode, transfer rate formatting, keyboard navigation, rate history sparkline)
 - [x] Storage management settings (storage_settings.rs: 10-category disk usage breakdown, Storage Sense auto-cleanup, retention periods, save locations, reclaimable space estimates, low-space warnings)
 - [x] Privacy and permissions settings (privacy_settings.rs: 10 permission types, global toggles, per-app allow/deny, activity log, telemetry control, access count tracking)
+- [x] Update settings (update_settings.rs: update status tracking, available/installed update management, scheduling with active hours/deferral, history with rollback, metered connection awareness)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1879,6 +1880,8 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Weather dashboard (apps/weather: current/hourly/daily forecast, alerts, locations, temp graph, air quality, unit settings)
 - [x] Partition manager (apps/partmanager: visual disk map, GPT/MBR, create/delete/resize/format with pending queue, SMART health, multi-disk sidebar, 101 tests)
 - [x] Credential manager (apps/credmanager: password vault, login/note/card/identity/SSH entries, generator with entropy, audit, folders/tags, auto-lock, 122 tests)
+- [x] VPN manager (apps/vpnmanager: OpenVPN/WireGuard/IPSec/L2TP/PPTP/SSTP protocols, kill switch, split tunneling, connection logs, profile import/export, DNS override, 135 tests)
+- [x] Contacts/address book (apps/contacts: vCard 3.0 import/export, groups with colors, favorites, birthday tracking, duplicate detection with merge, multi-field search, social accounts, 181 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

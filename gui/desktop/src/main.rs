@@ -96,6 +96,12 @@ mod storage_settings;
 mod privacy_settings;
 #[allow(dead_code)]
 mod update_settings;
+#[allow(dead_code)]
+mod notification_settings;
+#[allow(dead_code)]
+mod appearance_settings;
+#[allow(dead_code)]
+mod language_settings;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

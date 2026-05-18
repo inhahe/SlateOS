@@ -66,6 +66,13 @@ exclude = [
     "apps/whiteboard",
     "apps/kanban",
     "apps/radio",
+    # --- osb2 batch 6 ---
+    "apps/worldclock",
+    "apps/minesweeper",
+    "apps/flashcards",
+    "apps/habits",
+    "apps/mindmap",
+    "apps/finance",
 ]
 
 [workspace.lints.clippy]

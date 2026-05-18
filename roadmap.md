@@ -1527,10 +1527,10 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
   - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
   - [x] Double-click activate, right-click context menu, F2 rename, Delete
-- [ ] Taskbar enhancements:
-  - [ ] Pinned apps on left, running apps on right, divider between sections
-  - [ ] Drag to reorder, drag to/from desktop and start menu
-  - [ ] Optional app name alongside icon
+- [-] Taskbar enhancements:
+  - [x] Pinned apps on left, running apps on right, divider between sections
+  - [x] Drag to reorder, drag to/from desktop and start menu
+  - [x] Optional app name alongside icon
   - [ ] Aero-style blurry transparency
 - [-] System tray:
   - [x] Notification area with quick settings popups (volume, network, calendar)

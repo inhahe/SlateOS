@@ -1,0 +1,18 @@
+[package]
+name = "comm"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS sorted file comparison utility"
+
+[workspace]
+
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

@@ -17,6 +17,9 @@ exclude = [
     "posix",
     # --- toolchain (osb2) ---
     "toolchain/stubs",
+    # --- apps (osb2) ---
+    "apps/hexeditor",
+    "apps/contacts",
 ]
 
 [workspace.lints.clippy]

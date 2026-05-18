@@ -1664,7 +1664,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Per-app icons per extension (associations.rs: per-type icon_id, app icons in UI)
 - [x] Easily discoverable UI to change associations (associations.rs: settings page with search, categories, expand-to-change)
 - [x] Fallback to previous app when handler is uninstalled (handle_uninstall with 3-deep history)
-- [ ] File extensions: .nx (executable), .dso (shared library), .slib (static library)
+- [x] File extensions: .nx (executable), .dso (shared library), .slib (static library) — defined in filetypes.rs with magic bytes
 
 ---
 
@@ -1681,7 +1681,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Toolbar, sidebar with quick-access locations, status bar
   - [x] Path bar with autocomplete (pathbar.rs: breadcrumb + edit mode, Tab completion, overflow, validation)
   - [x] Thumbnails (thumbs.rs: LRU cache, BMP/PNG/GIF/JPEG parsing, downscale, text preview, folder preview, batch queue)
-  - [ ] Custom columns per file type, app-extensible columns
+  - [x] Custom columns per file type, app-extensible columns (columns.rs: 5 providers, auto-detect, sort/resize/reorder)
   - [x] Drop zones for drag-and-drop (dropzone.rs: hit-testing, operation selection, nested prevention, feedback)
   - [x] Atomic copy/move/delete with undo, resume on interruption (fileops.rs: journal, recycle bin, conflict policies, progress)
 - [-] Text editor:

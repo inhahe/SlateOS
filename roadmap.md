@@ -1623,6 +1623,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] User account management (user_accounts.rs: admin/standard/guest types, avatars, login options, activity log, user switching)
 - [x] Taskbar auto-hide (taskbar_autohide.rs: slide animation, edge trigger, peek mode, lock/unlock, per-edge support)
 - [x] Input method manager (input_method.rs: keyboard layout switching, 5 built-in layouts, tray indicator, preview, per-app memory)
+- [x] Window rules engine (window_rules.rs: match by title/process/class, 17 action types, priority evaluation, first-match and merge-all modes, remembered state, one-shot rules, config persistence)
+- [x] Touchpad and gesture settings (touchpad.rs: scroll direction, tap config, multi-finger swipe bindings, pinch actions, palm rejection, typing disable, acceleration profiles, device detection)
+- [x] Screen recording infrastructure (screen_capture.rs: region/window/fullscreen capture, frame rate config, audio capture, countdown, pause/resume, recording stats, history, indicator overlay)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1822,6 +1825,11 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Disk usage analyzer (apps/diskanalyzer: WinDirStat-style treemap, extension breakdown, squarified layout, drill-down, 77 tests)
 - [x] Color picker (apps/colorpicker: eyedropper, RGB/HSL/HSV/CMYK, WCAG contrast checker, palettes, history, hex input)
 - [x] File association manager (apps/fileassoc: 50 built-in types, 12 apps, category sidebar, search, Open With dialog, import/export)
+- [x] Clipboard manager (apps/clipmanager: 500-entry history, dedup, search, type/tag filters, pin, templates, code snippet detection, export/import, 80 tests)
+- [x] Network connections manager (apps/netmanager: interface list, IP config, DNS, WiFi scanning, VPN, traffic graph, diagnostics, 78 tests)
+- [x] Archive manager (apps/archivemanager: ZIP/TAR/GZ/BZ2/7Z formats, tree-view browser, extract/create/add/remove, compression levels, password, split archives)
+- [x] Sound recorder (apps/soundrecorder: WAV output, waveform visualization, VU meter, markers, trim, quality presets, noise gate, playback, auto-save, 122 tests)
+- [x] Sticky notes (apps/stickynotes: 8 colors, drag/resize, rich text, search, pin/archive, categories, auto-save, export)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

@@ -1611,7 +1611,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
     - [x] Per-app settings, progress bars, action buttons
   - [x] DPI/scaling awareness, automatic image scaling (scaling.rs: LogicalPixel/PhysicalPixel, ScaleContext, per-monitor, image scale helpers)
   - [ ] Enable/disable controls with optional reason tooltip
-  - [ ] SVG rendering support
+  - [x] SVG rendering support (svg.rs: path commands, shapes, transforms, scanline AA rasterizer, Bézier flattening)
   - [ ] Context menu extension API (capability-gated, lazy-loading, 200ms timeout)
 - [x] Credential manager service (gui/credentials):
   - [x] Central credential storage (6 types: Password/Token/Certificate/SshKey/ApiKey/Custom)
@@ -1716,7 +1716,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Themes page: light/dark/system, accent color picker (12 colors), transparency, animations
   - [x] Network page: adapter status, IP config (DHCP/static), DNS, proxy
   - [x] Search bar, toggle switches, sliders, dropdowns, dark theme
-  - [ ] All remaining settings pages (accounts, privacy, accessibility, update)
+  - [x] All remaining settings pages (accounts, privacy, accessibility, update)
 - [-] System information explorer:
   - [x] Tree navigation (21 categories: Hardware Resources, Components, Software Environment)
   - [x] Property tables for each category (CPU, memory, storage, display, network, PCI, etc.)

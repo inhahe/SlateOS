@@ -78,6 +78,8 @@ mod context_ext;
 mod widgets;
 #[allow(dead_code)]
 mod login_screen;
+#[allow(dead_code)]
+mod session_mgr;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

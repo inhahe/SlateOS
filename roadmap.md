@@ -1581,11 +1581,11 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Drag-and-drop repositioning with ghost indicator, multi-select drag
   - [x] Default icons (This PC, Recycle Bin, Documents, Home), icon types (9 variants)
   - [x] Double-click activate, right-click context menu, F2 rename, Delete
-- [-] Taskbar enhancements:
+- [x] Taskbar enhancements:
   - [x] Pinned apps on left, running apps on right, divider between sections
   - [x] Drag to reorder, drag to/from desktop and start menu
   - [x] Optional app name alongside icon
-  - [ ] Aero-style blurry transparency
+  - [x] Aero-style blurry transparency (blur.rs: 3-pass box blur, 5 presets, BlurManager with dirty cache, rounded corners)
 - [-] System tray:
   - [x] Notification area with quick settings popups (volume, network, calendar)
   - [x] 6 system icons (volume/network/battery/bluetooth/notifications/power)
@@ -1765,12 +1765,12 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Network page: adapter status, IP config (DHCP/static), DNS, proxy
   - [x] Search bar, toggle switches, sliders, dropdowns, dark theme
   - [x] All remaining settings pages (accounts, privacy, accessibility, update)
-- [-] System information explorer:
+- [x] System information explorer:
   - [x] Tree navigation (21 categories: Hardware Resources, Components, Software Environment)
   - [x] Property tables for each category (CPU, memory, storage, display, network, PCI, etc.)
   - [x] Expand/collapse tree nodes, search across categories
   - [x] Export to text, copy to clipboard
-  - [ ] Live hardware querying (currently uses representative stub data)
+  - [x] Live hardware querying (hwquery.rs: HardwareProvider trait, SyscallProvider from /sys/hardware/*, FallbackProvider, RefreshManager with per-category TTL)
 - [x] Screenshot utility:
   - [x] 5 capture modes (full screen, window, region selection, delayed, pick window)
   - [x] BMP encoder (32-bit BGRA, overflow-safe dimension checks)

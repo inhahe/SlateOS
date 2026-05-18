@@ -1619,6 +1619,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Window peek preview (window_peek.rs: taskbar hover thumbnails, close buttons, fade animation, multi-window layout)
 - [x] Virtual desktop overview (overview.rs: Exposé/Mission Control grid layout, search, lane view, keyboard/mouse nav, animations)
 - [x] Display settings and color calibration (display_settings.rs: night light, gamma curves, color profiles, test patterns, per-display config)
+- [x] About dialog (about.rs: system info with overview/hardware/software/licenses tabs, uptime/memory formatting)
+- [x] User account management (user_accounts.rs: admin/standard/guest types, avatars, login options, activity log, user switching)
+- [x] Taskbar auto-hide (taskbar_autohide.rs: slide animation, edge trigger, peek mode, lock/unlock, per-edge support)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1816,6 +1819,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Network speed test (apps/speedtest: speedometer arc gauge, latency/download/upload phases, throughput graph, history, server selection, 59 tests)
 - [x] Startup apps manager (apps/startupmanager: enable/disable, impact assessment, import/export, sortable table, 82 tests)
 - [x] Disk usage analyzer (apps/diskanalyzer: WinDirStat-style treemap, extension breakdown, squarified layout, drill-down, 77 tests)
+- [x] Color picker (apps/colorpicker: eyedropper, RGB/HSL/HSV/CMYK, WCAG contrast checker, palettes, history, hex input)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

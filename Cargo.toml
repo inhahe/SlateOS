@@ -58,6 +58,7 @@ exclude = [
     "apps/charmap",
     "apps/camera",
     "apps/netscan",
+    "apps/pomodoro",
 ]
 
 [workspace.lints.clippy]

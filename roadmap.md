@@ -1603,7 +1603,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
     - [x] Notification center (grouped by app, clear all, read/unread)
     - [x] Do Not Disturb (manual + scheduled, critical bypass)
     - [x] Per-app settings, progress bars, action buttons
-  - [ ] DPI/scaling awareness, automatic image scaling
+  - [x] DPI/scaling awareness, automatic image scaling (scaling.rs: LogicalPixel/PhysicalPixel, ScaleContext, per-monitor, image scale helpers)
   - [ ] Enable/disable controls with optional reason tooltip
   - [ ] SVG rendering support
   - [ ] Context menu extension API (capability-gated, lazy-loading, 200ms timeout)
@@ -1654,7 +1654,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [ ] Thumbnails (images, video, PDF)
   - [ ] Custom columns per file type, app-extensible columns
   - [ ] Drop zones for drag-and-drop (empty space = this dir, folder = into folder)
-  - [ ] Atomic copy/move/delete with undo, resume on interruption
+  - [x] Atomic copy/move/delete with undo, resume on interruption (fileops.rs: journal, recycle bin, conflict policies, progress)
 - [-] Text editor:
   - [x] Multi-tab document editing with tab bar
   - [x] Cursor movement, selection, clipboard (cut/copy/paste)

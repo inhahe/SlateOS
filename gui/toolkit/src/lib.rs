@@ -38,6 +38,7 @@ pub mod render;
 pub mod scaling;
 pub mod signal;
 pub mod style;
+pub mod svg;
 pub mod tabs;
 pub mod textview;
 pub mod theme;

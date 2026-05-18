@@ -449,6 +449,193 @@ pub struct AppVolume {
 }
 
 // ============================================================================
+// Accounts types
+// ============================================================================
+
+/// Type of user account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountType {
+    Admin,
+    Standard,
+    Child,
+}
+
+impl AccountType {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Admin => "Administrator",
+            Self::Standard => "Standard",
+            Self::Child => "Child",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::Admin => COL_ACCENT,
+            Self::Standard => COL_GREEN,
+            Self::Child => COL_PEACH,
+        }
+    }
+}
+
+/// A user account entry.
+#[derive(Clone, Debug)]
+pub struct UserAccount {
+    pub name: String,
+    pub email: String,
+    pub account_type: AccountType,
+    pub login_count: u32,
+    pub last_login: String,
+    pub is_current: bool,
+}
+
+// ============================================================================
+// Privacy types
+// ============================================================================
+
+/// Per-app permission entry.
+#[derive(Clone, Debug)]
+pub struct AppPermission {
+    pub app_name: String,
+    pub allowed: bool,
+}
+
+/// Diagnostic data collection level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticLevel {
+    None,
+    Basic,
+    Full,
+}
+
+impl DiagnosticLevel {
+    const ALL: &[Self] = &[Self::None, Self::Basic, Self::Full];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Basic => "Basic",
+            Self::Full => "Full",
+        }
+    }
+}
+
+// ============================================================================
+// Accessibility types
+// ============================================================================
+
+/// Color filter mode for visual accessibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorFilter {
+    None,
+    Grayscale,
+    Deuteranopia,
+    Protanopia,
+    Tritanopia,
+}
+
+impl ColorFilter {
+    const ALL: &[Self] = &[
+        Self::None,
+        Self::Grayscale,
+        Self::Deuteranopia,
+        Self::Protanopia,
+        Self::Tritanopia,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Grayscale => "Grayscale",
+            Self::Deuteranopia => "Deuteranopia",
+            Self::Protanopia => "Protanopia",
+            Self::Tritanopia => "Tritanopia",
+        }
+    }
+}
+
+/// Cursor size option.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorSize {
+    Small,
+    Medium,
+    Large,
+    XLarge,
+}
+
+impl CursorSize {
+    const ALL: &[Self] = &[Self::Small, Self::Medium, Self::Large, Self::XLarge];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Small => "Small",
+            Self::Medium => "Medium",
+            Self::Large => "Large",
+            Self::XLarge => "Extra Large",
+        }
+    }
+}
+
+/// Narrator verbosity level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NarratorVerbosity {
+    Low,
+    Medium,
+    High,
+}
+
+impl NarratorVerbosity {
+    const ALL: &[Self] = &[Self::Low, Self::Medium, Self::High];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
+    }
+}
+
+// ============================================================================
+// Update types
+// ============================================================================
+
+/// Status of an installed update.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateStatus {
+    Installed,
+    Failed,
+    Pending,
+}
+
+impl UpdateStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Installed => "Installed",
+            Self::Failed => "Failed",
+            Self::Pending => "Pending",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::Installed => COL_GREEN,
+            Self::Failed => COL_RED,
+            Self::Pending => COL_PEACH,
+        }
+    }
+}
+
+/// A historical update entry.
+#[derive(Clone, Debug)]
+pub struct UpdateEntry {
+    pub date: String,
+    pub kb_number: String,
+    pub description: String,
+    pub status: UpdateStatus,
+}
+
+// ============================================================================
 // Main application state
 // ============================================================================
 
@@ -502,6 +689,50 @@ pub struct SettingsState {
     pub proxy_address: String,
     pub proxy_port: String,
 
+    // Accounts settings
+    pub user_accounts: Vec<UserAccount>,
+    pub selected_account: usize,
+    pub auto_login_enabled: bool,
+
+    // Privacy settings
+    pub location_enabled: bool,
+    pub location_apps: Vec<AppPermission>,
+    pub camera_enabled: bool,
+    pub camera_apps: Vec<AppPermission>,
+    pub microphone_enabled: bool,
+    pub microphone_apps: Vec<AppPermission>,
+    pub background_apps: Vec<AppPermission>,
+    pub diagnostic_level: DiagnosticLevel,
+
+    // Accessibility settings
+    pub text_size_percent: u16, // 50-250
+    pub high_contrast: bool,
+    pub cursor_size: CursorSize,
+    pub reduce_animations: bool,
+    pub color_filter: ColorFilter,
+    pub reduce_transparency: bool,
+    pub mono_audio: bool,
+    pub visual_alerts: bool,
+    pub sticky_keys: bool,
+    pub filter_keys: bool,
+    pub toggle_keys: bool,
+    pub onscreen_keyboard: bool,
+    pub pointer_size: u8, // 1-5
+    pub mouse_keys: bool,
+    pub narrator_enabled: bool,
+    pub narrator_rate: f32, // 0.0-1.0
+    pub narrator_verbosity: NarratorVerbosity,
+
+    // Update settings
+    pub os_version: String,
+    pub update_history: Vec<UpdateEntry>,
+    pub auto_update_enabled: bool,
+    pub active_hours_start: u8, // 0-23
+    pub active_hours_end: u8,   // 0-23
+    pub defer_feature_days: u16,
+    pub defer_quality_days: u16,
+    pub checking_for_updates: bool,
+
     // Dropdown state
     pub open_dropdown: Option<DropdownId>,
     pub dropdown_scroll: f32,
@@ -516,6 +747,10 @@ pub enum DropdownId {
     OutputDevice,
     InputDevice,
     IpConfig,
+    DiagnosticLevel,
+    ColorFilter,
+    CursorSize,
+    NarratorVerbosity,
 }
 
 impl SettingsState {
@@ -598,6 +833,119 @@ impl SettingsState {
             proxy_enabled: false,
             proxy_address: String::new(),
             proxy_port: String::new(),
+
+            // Accounts defaults
+            user_accounts: vec![
+                UserAccount {
+                    name: "Alice".into(),
+                    email: "alice@example.com".into(),
+                    account_type: AccountType::Admin,
+                    login_count: 142,
+                    last_login: "2026-05-17 09:34".into(),
+                    is_current: true,
+                },
+                UserAccount {
+                    name: "Bob".into(),
+                    email: "bob@example.com".into(),
+                    account_type: AccountType::Standard,
+                    login_count: 56,
+                    last_login: "2026-05-16 18:20".into(),
+                    is_current: false,
+                },
+                UserAccount {
+                    name: "Charlie".into(),
+                    email: "charlie@example.com".into(),
+                    account_type: AccountType::Child,
+                    login_count: 23,
+                    last_login: "2026-05-15 14:05".into(),
+                    is_current: false,
+                },
+            ],
+            selected_account: 0,
+            auto_login_enabled: false,
+
+            // Privacy defaults
+            location_enabled: true,
+            location_apps: vec![
+                AppPermission { app_name: "Maps".into(), allowed: true },
+                AppPermission { app_name: "Weather".into(), allowed: true },
+                AppPermission { app_name: "Camera".into(), allowed: false },
+                AppPermission { app_name: "Browser".into(), allowed: true },
+            ],
+            camera_enabled: true,
+            camera_apps: vec![
+                AppPermission { app_name: "Video Chat".into(), allowed: true },
+                AppPermission { app_name: "Browser".into(), allowed: true },
+                AppPermission { app_name: "Social Media".into(), allowed: false },
+            ],
+            microphone_enabled: true,
+            microphone_apps: vec![
+                AppPermission { app_name: "Video Chat".into(), allowed: true },
+                AppPermission { app_name: "Voice Recorder".into(), allowed: true },
+                AppPermission { app_name: "Browser".into(), allowed: false },
+            ],
+            background_apps: vec![
+                AppPermission { app_name: "Email".into(), allowed: true },
+                AppPermission { app_name: "Music Player".into(), allowed: true },
+                AppPermission { app_name: "Updater".into(), allowed: true },
+                AppPermission { app_name: "Social Media".into(), allowed: false },
+                AppPermission { app_name: "News Reader".into(), allowed: false },
+            ],
+            diagnostic_level: DiagnosticLevel::Basic,
+
+            // Accessibility defaults
+            text_size_percent: 100,
+            high_contrast: false,
+            cursor_size: CursorSize::Small,
+            reduce_animations: false,
+            color_filter: ColorFilter::None,
+            reduce_transparency: false,
+            mono_audio: false,
+            visual_alerts: false,
+            sticky_keys: false,
+            filter_keys: false,
+            toggle_keys: false,
+            onscreen_keyboard: false,
+            pointer_size: 1,
+            mouse_keys: false,
+            narrator_enabled: false,
+            narrator_rate: 0.5,
+            narrator_verbosity: NarratorVerbosity::Medium,
+
+            // Update defaults
+            os_version: "OurOS 1.0.0 Build 2600".into(),
+            update_history: vec![
+                UpdateEntry {
+                    date: "2026-05-15".into(),
+                    kb_number: "KB5032100".into(),
+                    description: "Security update for kernel".into(),
+                    status: UpdateStatus::Installed,
+                },
+                UpdateEntry {
+                    date: "2026-05-10".into(),
+                    kb_number: "KB5031980".into(),
+                    description: "Cumulative update for .NET runtime".into(),
+                    status: UpdateStatus::Installed,
+                },
+                UpdateEntry {
+                    date: "2026-05-08".into(),
+                    kb_number: "KB5031875".into(),
+                    description: "Driver update for GPU".into(),
+                    status: UpdateStatus::Failed,
+                },
+                UpdateEntry {
+                    date: "2026-05-01".into(),
+                    kb_number: "KB5031700".into(),
+                    description: "Feature update: compositor improvements".into(),
+                    status: UpdateStatus::Installed,
+                },
+            ],
+            auto_update_enabled: true,
+            active_hours_start: 8,
+            active_hours_end: 22,
+            defer_feature_days: 0,
+            defer_quality_days: 0,
+            checking_for_updates: false,
 
             // Dropdown state
             open_dropdown: None,
@@ -884,6 +1232,18 @@ impl SettingsState {
             SettingsPage::Colors => self.render_colors_page(tree, x, start_y),
             SettingsPage::NetworkStatus => self.render_network_page(tree, x, start_y),
             SettingsPage::Proxy => self.render_proxy_page(tree, x, start_y),
+            SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
+                self.render_accounts_page(tree, x, start_y);
+            }
+            SettingsPage::Permissions | SettingsPage::Capabilities => {
+                self.render_privacy_page(tree, x, start_y);
+            }
+            SettingsPage::Visual | SettingsPage::Audio | SettingsPage::Interaction => {
+                self.render_accessibility_page(tree, x, start_y);
+            }
+            SettingsPage::SystemUpdates | SettingsPage::Recovery | SettingsPage::Snapshots => {
+                self.render_update_page(tree, x, start_y);
+            }
             _ => self.render_placeholder_page(tree, x, start_y),
         }
     }
@@ -1238,6 +1598,551 @@ impl SettingsState {
         }
     }
 
+    // --- Accounts page ---
+
+    fn render_accounts_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
+        let mut y = start_y;
+        let right_x = x + 350.0;
+
+        match self.current_page {
+            SettingsPage::LoginOptions => {
+                // Login Options sub-page
+                y = render_section_header(tree, x, y, "Login Options");
+
+                render_setting_row(tree, x, y, "Auto-login on startup", 0.0);
+                render_toggle(tree, right_x, y + 12.0, self.auto_login_enabled);
+                y += ITEM_HEIGHT;
+
+                // Password change button
+                render_setting_row(tree, x, y, "Password", 0.0);
+                self.render_button(tree, right_x, y + 6.0, "Change Password", COL_ACCENT);
+                y += ITEM_HEIGHT + SECTION_SPACING;
+
+                // Account picture
+                y = render_section_header(tree, x, y, "Account Picture");
+                tree.text(x, y + 4.0, "Choose a picture for your account:", COL_SUBTEXT0, 13.0);
+                y += 28.0;
+
+                // Picture selection grid (placeholder icons)
+                let icon_size = 48.0;
+                let icon_spacing = 12.0;
+                let icons = ["\u{1F464}", "\u{1F468}", "\u{1F469}", "\u{1F474}", "\u{1F475}", "\u{1F476}"];
+                for (idx, icon) in icons.iter().enumerate() {
+                    let ix = x + (idx as f32) * (icon_size + icon_spacing);
+                    let is_selected = idx == 0; // first is default selected
+                    let bg = if is_selected { COL_SURFACE1 } else { COL_SURFACE0 };
+                    fill_rounded(tree, ix, y, icon_size, icon_size, bg, 8.0);
+                    if is_selected {
+                        tree.push(RenderCommand::StrokeRect {
+                            x: ix,
+                            y,
+                            width: icon_size,
+                            height: icon_size,
+                            color: COL_ACCENT,
+                            line_width: 2.0,
+                            corner_radii: CornerRadii::all(8.0),
+                        });
+                    }
+                    tree.text(ix + 12.0, y + 12.0, icon, COL_TEXT, 20.0);
+                }
+                return;
+            }
+            _ => {} // UserAccounts (default)
+        }
+
+        // User account list
+        y = render_section_header(tree, x, y, "User Accounts");
+
+        for (idx, account) in self.user_accounts.iter().enumerate() {
+            let row_y = y;
+            let is_selected = idx == self.selected_account;
+            let row_bg = if is_selected { COL_SURFACE0 } else { Color::TRANSPARENT };
+            fill_rounded(tree, x - 8.0, row_y, 620.0, 60.0, row_bg, 8.0);
+
+            // Avatar placeholder
+            let avatar_size = 40.0;
+            fill_rounded(tree, x + 4.0, row_y + 10.0, avatar_size, avatar_size, COL_SURFACE2, avatar_size / 2.0);
+            tree.text(x + 16.0, row_y + 20.0, "\u{1F464}", COL_TEXT, 16.0);
+
+            // Name and email
+            text_bold(tree, x + 56.0, row_y + 12.0, &account.name, COL_TEXT, 14.0);
+            tree.text(x + 56.0, row_y + 32.0, &account.email, COL_SUBTEXT0, 12.0);
+
+            // Account type badge
+            let badge_color = account.account_type.color();
+            let badge_label = account.account_type.label();
+            let badge_x = right_x;
+            fill_rounded(tree, badge_x, row_y + 18.0, 90.0, 22.0, badge_color, 4.0);
+            tree.text(badge_x + 8.0, row_y + 22.0, badge_label, COL_CRUST, 11.0);
+
+            // Current user indicator
+            if account.is_current {
+                tree.text(badge_x + 100.0, row_y + 22.0, "(You)", COL_ACCENT, 11.0);
+            }
+
+            y += 64.0;
+        }
+        y += SECTION_SPACING;
+
+        // Add/Remove buttons
+        self.render_button(tree, x, y, "+ Add Account", COL_ACCENT);
+        self.render_button(tree, x + 140.0, y, "- Remove Account", COL_RED);
+        y += 44.0 + SECTION_SPACING;
+
+        // Current user details
+        if let Some(account) = self.user_accounts.get(self.selected_account) {
+            y = render_section_header(tree, x, y, "Account Details");
+
+            render_setting_row(tree, x, y, "Name", 0.0);
+            tree.text(right_x, y + 14.0, &account.name, COL_TEXT, 13.0);
+            y += ITEM_HEIGHT;
+
+            render_setting_row(tree, x, y, "Email", 0.0);
+            tree.text(right_x, y + 14.0, &account.email, COL_TEXT, 13.0);
+            y += ITEM_HEIGHT;
+
+            render_setting_row(tree, x, y, "Account Type", 0.0);
+            tree.text(right_x, y + 14.0, account.account_type.label(), account.account_type.color(), 13.0);
+            y += ITEM_HEIGHT;
+
+            render_setting_row(tree, x, y, "Login Count", 0.0);
+            let login_str = format!("{}", account.login_count);
+            tree.text(right_x, y + 14.0, &login_str, COL_TEXT, 13.0);
+            y += ITEM_HEIGHT;
+
+            render_setting_row(tree, x, y, "Last Login", 0.0);
+            tree.text(right_x, y + 14.0, &account.last_login, COL_TEXT, 13.0);
+            y += ITEM_HEIGHT;
+
+            // Family safety for child accounts
+            if account.account_type == AccountType::Child {
+                y += SECTION_SPACING;
+                y = render_section_header(tree, x, y, "Family Safety");
+                tree.text(x, y + 4.0, "Screen time limits and content filters are active", COL_SUBTEXT0, 13.0);
+                y += 24.0;
+                self.render_button(tree, x, y, "Manage Family Settings", COL_PEACH);
+            }
+        }
+    }
+
+    // --- Privacy page ---
+
+    fn render_privacy_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
+        let mut y = start_y;
+        let right_x = x + 350.0;
+
+        match self.current_page {
+            SettingsPage::Capabilities => {
+                // App permissions summary sub-page
+                y = render_section_header(tree, x, y, "App Permissions Summary");
+                tree.text(x, y + 4.0, "Overview of which apps have access to sensitive resources:", COL_SUBTEXT0, 13.0);
+                y += 32.0;
+
+                // Summary table header
+                text_bold(tree, x, y, "App", COL_TEXT, 13.0);
+                text_bold(tree, x + 200.0, y, "Location", COL_TEXT, 13.0);
+                text_bold(tree, x + 290.0, y, "Camera", COL_TEXT, 13.0);
+                text_bold(tree, x + 370.0, y, "Mic", COL_TEXT, 13.0);
+                text_bold(tree, x + 440.0, y, "Background", COL_TEXT, 13.0);
+                y += 24.0;
+
+                // Divider
+                tree.push(RenderCommand::Line {
+                    x1: x, y1: y, x2: x + 560.0, y2: y,
+                    color: COL_SURFACE1, width: 1.0,
+                });
+                y += 8.0;
+
+                // Build summary from all apps mentioned
+                let all_apps = ["Maps", "Weather", "Camera", "Browser", "Video Chat",
+                    "Social Media", "Voice Recorder", "Email", "Music Player"];
+                for app_name in all_apps {
+                    let loc = self.location_apps.iter().find(|a| a.app_name == app_name);
+                    let cam = self.camera_apps.iter().find(|a| a.app_name == app_name);
+                    let mic = self.microphone_apps.iter().find(|a| a.app_name == app_name);
+                    let bg = self.background_apps.iter().find(|a| a.app_name == app_name);
+
+                    tree.text(x, y + 4.0, app_name, COL_TEXT, 12.0);
+
+                    let check = "\u{2713}";
+                    let cross = "\u{2717}";
+
+                    // Location
+                    if let Some(p) = loc {
+                        let (sym, col) = if p.allowed { (check, COL_GREEN) } else { (cross, COL_RED) };
+                        tree.text(x + 220.0, y + 4.0, sym, col, 13.0);
+                    } else {
+                        tree.text(x + 220.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+                    }
+                    // Camera
+                    if let Some(p) = cam {
+                        let (sym, col) = if p.allowed { (check, COL_GREEN) } else { (cross, COL_RED) };
+                        tree.text(x + 310.0, y + 4.0, sym, col, 13.0);
+                    } else {
+                        tree.text(x + 310.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+                    }
+                    // Mic
+                    if let Some(p) = mic {
+                        let (sym, col) = if p.allowed { (check, COL_GREEN) } else { (cross, COL_RED) };
+                        tree.text(x + 385.0, y + 4.0, sym, col, 13.0);
+                    } else {
+                        tree.text(x + 385.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+                    }
+                    // Background
+                    if let Some(p) = bg {
+                        let (sym, col) = if p.allowed { (check, COL_GREEN) } else { (cross, COL_RED) };
+                        tree.text(x + 465.0, y + 4.0, sym, col, 13.0);
+                    } else {
+                        tree.text(x + 465.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
+                    }
+
+                    y += 28.0;
+                }
+                return;
+            }
+            _ => {} // Permissions (default)
+        }
+
+        // Location access
+        y = render_section_header(tree, x, y, "Location");
+        render_setting_row(tree, x, y, "Allow apps to access location", 0.0);
+        render_toggle(tree, right_x, y + 12.0, self.location_enabled);
+        y += ITEM_HEIGHT;
+
+        if self.location_enabled {
+            for app in &self.location_apps {
+                tree.text(x + 16.0, y + 14.0, &app.app_name, COL_SUBTEXT1, 13.0);
+                render_toggle(tree, right_x, y + 12.0, app.allowed);
+                y += ITEM_HEIGHT - 8.0;
+            }
+        }
+        y += SECTION_SPACING;
+
+        // Camera access
+        y = render_section_header(tree, x, y, "Camera");
+        render_setting_row(tree, x, y, "Allow apps to access camera", 0.0);
+        render_toggle(tree, right_x, y + 12.0, self.camera_enabled);
+        y += ITEM_HEIGHT;
+
+        if self.camera_enabled {
+            for app in &self.camera_apps {
+                tree.text(x + 16.0, y + 14.0, &app.app_name, COL_SUBTEXT1, 13.0);
+                render_toggle(tree, right_x, y + 12.0, app.allowed);
+                y += ITEM_HEIGHT - 8.0;
+            }
+        }
+        y += SECTION_SPACING;
+
+        // Microphone access
+        y = render_section_header(tree, x, y, "Microphone");
+        render_setting_row(tree, x, y, "Allow apps to access microphone", 0.0);
+        render_toggle(tree, right_x, y + 12.0, self.microphone_enabled);
+        y += ITEM_HEIGHT;
+
+        if self.microphone_enabled {
+            for app in &self.microphone_apps {
+                tree.text(x + 16.0, y + 14.0, &app.app_name, COL_SUBTEXT1, 13.0);
+                render_toggle(tree, right_x, y + 12.0, app.allowed);
+                y += ITEM_HEIGHT - 8.0;
+            }
+        }
+        y += SECTION_SPACING;
+
+        // Background apps
+        y = render_section_header(tree, x, y, "Background Apps");
+        tree.text(x, y + 4.0, "Choose which apps can run in the background:", COL_SUBTEXT0, 13.0);
+        y += 28.0;
+
+        for app in &self.background_apps {
+            tree.text(x + 16.0, y + 14.0, &app.app_name, COL_SUBTEXT1, 13.0);
+            render_toggle(tree, right_x, y + 12.0, app.allowed);
+            y += ITEM_HEIGHT - 8.0;
+        }
+        y += SECTION_SPACING;
+
+        // Diagnostics
+        y = render_section_header(tree, x, y, "Diagnostics & Data");
+        render_setting_row(tree, x, y, "Diagnostic data collection", 0.0);
+        render_dropdown_button(tree, right_x, y, self.diagnostic_level.label(), DROPDOWN_WIDTH);
+        y += ITEM_HEIGHT + SECTION_SPACING;
+
+        // Activity history
+        y = render_section_header(tree, x, y, "Activity History");
+        tree.text(x, y + 4.0, "Clear your activity history stored on this device.", COL_SUBTEXT0, 13.0);
+        y += 28.0;
+        self.render_button(tree, x, y, "Clear Activity History", COL_RED);
+    }
+
+    // --- Accessibility page ---
+
+    fn render_accessibility_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
+        let mut y = start_y;
+        let right_x = x + 350.0;
+
+        match self.current_page {
+            SettingsPage::Audio => {
+                // Audio accessibility sub-page
+                y = render_section_header(tree, x, y, "Audio Accessibility");
+
+                render_setting_row(tree, x, y, "Mono audio", 0.0);
+                render_toggle(tree, right_x, y + 12.0, self.mono_audio);
+                y += ITEM_HEIGHT;
+
+                render_setting_row(tree, x, y, "Visual alerts for sounds", 0.0);
+                render_toggle(tree, right_x, y + 12.0, self.visual_alerts);
+                y += ITEM_HEIGHT + SECTION_SPACING;
+
+                // Narrator
+                y = render_section_header(tree, x, y, "Narrator");
+                render_setting_row(tree, x, y, "Enable Narrator", 0.0);
+                render_toggle(tree, right_x, y + 12.0, self.narrator_enabled);
+                y += ITEM_HEIGHT;
+
+                if self.narrator_enabled {
+                    render_setting_row(tree, x, y, "Voice Rate", 0.0);
+                    render_slider(tree, right_x, y, self.narrator_rate);
+                    tree.text(right_x, y + 36.0, "Slow", COL_SUBTEXT0, 11.0);
+                    tree.text(right_x + SLIDER_WIDTH - 24.0, y + 36.0, "Fast", COL_SUBTEXT0, 11.0);
+                    y += ITEM_HEIGHT + 16.0;
+
+                    render_setting_row(tree, x, y, "Verbosity", 0.0);
+                    render_dropdown_button(tree, right_x, y, self.narrator_verbosity.label(), DROPDOWN_WIDTH);
+                }
+                return;
+            }
+            SettingsPage::Interaction => {
+                // Input/Interaction accessibility sub-page
+                y = render_section_header(tree, x, y, "Keyboard");
+
+                render_setting_row(tree, x, y, "Sticky Keys", 0.0);
+                render_toggle(tree, right_x, y + 12.0, self.sticky_keys);
+                y += ITEM_HEIGHT;
+                tree.text(x + 16.0, y - 4.0, "Press modifier keys one at a time", COL_SUBTEXT0, 11.0);
+                y += 12.0;
+
+                render_setting_row(tree, x, y, "Filter Keys", 0.0);
+                render_toggle(tree, right_x, y + 12.0, self.filter_keys);
+                y += ITEM_HEIGHT;
+                tree.text(x + 16.0, y - 4.0, "Ignore brief or repeated keystrokes", COL_SUBTEXT0, 11.0);
+                y += 12.0;
+
+                render_setting_row(tree, x, y, "Toggle Keys", 0.0);
+                render_toggle(tree, right_x, y + 12.0, self.toggle_keys);
+                y += ITEM_HEIGHT;
+                tree.text(x + 16.0, y - 4.0, "Play a sound when pressing Caps/Num/Scroll Lock", COL_SUBTEXT0, 11.0);
+                y += 12.0;
+
+                render_setting_row(tree, x, y, "On-Screen Keyboard", 0.0);
+                render_toggle(tree, right_x, y + 12.0, self.onscreen_keyboard);
+                y += ITEM_HEIGHT + SECTION_SPACING;
+
+                // Mouse
+                y = render_section_header(tree, x, y, "Mouse & Pointer");
+
+                render_setting_row(tree, x, y, "Pointer Size", 0.0);
+                // Render pointer size as segmented buttons (1-5)
+                for i in 1u8..=5 {
+                    let btn_x = right_x + ((i - 1) as f32) * 40.0;
+                    let is_active = i == self.pointer_size;
+                    let btn_bg = if is_active { COL_ACCENT } else { COL_SURFACE1 };
+                    let btn_fg = if is_active { COL_CRUST } else { COL_SUBTEXT0 };
+                    fill_rounded(tree, btn_x, y + 10.0, 32.0, 26.0, btn_bg, 4.0);
+                    let size_label = format!("{}", i);
+                    tree.text(btn_x + 12.0, y + 16.0, &size_label, btn_fg, 12.0);
+                }
+                y += ITEM_HEIGHT;
+
+                render_setting_row(tree, x, y, "Mouse Keys (numpad controls pointer)", 0.0);
+                render_toggle(tree, right_x, y + 12.0, self.mouse_keys);
+                return;
+            }
+            _ => {} // Visual (default)
+        }
+
+        // Display section
+        y = render_section_header(tree, x, y, "Display");
+
+        render_setting_row(tree, x, y, "Text Size", 0.0);
+        let text_size_norm = (self.text_size_percent as f32 - 50.0) / 200.0;
+        render_slider(tree, right_x, y, text_size_norm);
+        let size_label = format!("{}%", self.text_size_percent);
+        tree.text(right_x + SLIDER_WIDTH + 12.0, y + 14.0, &size_label, COL_SUBTEXT0, 12.0);
+        y += ITEM_HEIGHT;
+        // Range labels
+        tree.text(right_x, y - 8.0, "50%", COL_SUBTEXT0, 11.0);
+        tree.text(right_x + SLIDER_WIDTH - 28.0, y - 8.0, "250%", COL_SUBTEXT0, 11.0);
+        y += 8.0;
+
+        render_setting_row(tree, x, y, "High Contrast", 0.0);
+        render_toggle(tree, right_x, y + 12.0, self.high_contrast);
+        y += ITEM_HEIGHT;
+
+        render_setting_row(tree, x, y, "Cursor Size", 0.0);
+        render_dropdown_button(tree, right_x, y, self.cursor_size.label(), DROPDOWN_WIDTH);
+        y += ITEM_HEIGHT;
+
+        render_setting_row(tree, x, y, "Reduce Animations", 0.0);
+        render_toggle(tree, right_x, y + 12.0, self.reduce_animations);
+        y += ITEM_HEIGHT + SECTION_SPACING;
+
+        // Visual section
+        y = render_section_header(tree, x, y, "Color & Transparency");
+
+        render_setting_row(tree, x, y, "Color Filters", 0.0);
+        render_dropdown_button(tree, right_x, y, self.color_filter.label(), DROPDOWN_WIDTH);
+        y += ITEM_HEIGHT;
+
+        render_setting_row(tree, x, y, "Reduce Transparency", 0.0);
+        render_toggle(tree, right_x, y + 12.0, self.reduce_transparency);
+        y += ITEM_HEIGHT;
+
+        // Color filter preview
+        if self.color_filter != ColorFilter::None {
+            y += 8.0;
+            fill_rounded(tree, x, y, 300.0, 40.0, COL_SURFACE0, 6.0);
+            tree.text(x + 12.0, y + 12.0, "Color filter active: ", COL_SUBTEXT0, 12.0);
+            tree.text(x + 150.0, y + 12.0, self.color_filter.label(), COL_ACCENT, 12.0);
+        }
+    }
+
+    // --- Update page ---
+
+    fn render_update_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
+        let mut y = start_y;
+        let right_x = x + 350.0;
+
+        match self.current_page {
+            SettingsPage::Recovery => {
+                // Recovery sub-page
+                y = render_section_header(tree, x, y, "Recovery Options");
+                tree.text(x, y + 4.0, "If your PC isn't working well, recovering may help.", COL_SUBTEXT0, 13.0);
+                y += 32.0;
+
+                // Go back option
+                fill_rounded(tree, x, y, 580.0, 80.0, COL_SURFACE0, 8.0);
+                text_bold(tree, x + 16.0, y + 12.0, "Go Back to Previous Version", COL_TEXT, 14.0);
+                tree.text(x + 16.0, y + 34.0, "Revert to the previous OS build. Available for 10 days", COL_SUBTEXT0, 12.0);
+                tree.text(x + 16.0, y + 50.0, "after an update.", COL_SUBTEXT0, 12.0);
+                self.render_button(tree, x + 440.0, y + 28.0, "Go Back", COL_PEACH);
+                y += 96.0;
+
+                // Fresh start
+                fill_rounded(tree, x, y, 580.0, 80.0, COL_SURFACE0, 8.0);
+                text_bold(tree, x + 16.0, y + 12.0, "Fresh Start", COL_TEXT, 14.0);
+                tree.text(x + 16.0, y + 34.0, "Reinstall the OS while keeping your personal files.", COL_SUBTEXT0, 12.0);
+                tree.text(x + 16.0, y + 50.0, "All apps and settings will be removed.", COL_SUBTEXT0, 12.0);
+                self.render_button(tree, x + 440.0, y + 28.0, "Reset", COL_RED);
+                return;
+            }
+            SettingsPage::Snapshots => {
+                // Snapshots sub-page (system restore points)
+                y = render_section_header(tree, x, y, "System Snapshots");
+                tree.text(x, y + 4.0, "Package generation snapshots for safe rollback:", COL_SUBTEXT0, 13.0);
+                y += 32.0;
+
+                let snapshots = [
+                    ("Gen 42", "2026-05-17 09:00", "Current"),
+                    ("Gen 41", "2026-05-15 14:30", "After KB5032100"),
+                    ("Gen 40", "2026-05-10 11:00", "After KB5031980"),
+                    ("Gen 39", "2026-05-01 08:45", "After compositor update"),
+                ];
+
+                for (name, date, desc) in snapshots {
+                    let is_current = desc == "Current";
+                    let bg = if is_current { COL_SURFACE1 } else { COL_SURFACE0 };
+                    fill_rounded(tree, x, y, 580.0, 48.0, bg, 6.0);
+
+                    text_bold(tree, x + 12.0, y + 8.0, name, COL_TEXT, 13.0);
+                    tree.text(x + 12.0, y + 28.0, desc, COL_SUBTEXT0, 11.0);
+                    tree.text(right_x, y + 16.0, date, COL_SUBTEXT0, 12.0);
+
+                    if is_current {
+                        tree.text(x + 520.0, y + 16.0, "\u{2713}", COL_GREEN, 16.0);
+                    }
+
+                    y += 56.0;
+                }
+                return;
+            }
+            _ => {} // SystemUpdates (default)
+        }
+
+        // Version info
+        y = render_section_header(tree, x, y, "System Information");
+        fill_rounded(tree, x, y, 580.0, 60.0, COL_SURFACE0, 8.0);
+        text_bold(tree, x + 16.0, y + 12.0, "OurOS", COL_TEXT, 16.0);
+        tree.text(x + 16.0, y + 36.0, &self.os_version, COL_SUBTEXT0, 13.0);
+        y += 72.0;
+
+        // Check for updates
+        let btn_label = if self.checking_for_updates {
+            "Checking..."
+        } else {
+            "Check for Updates"
+        };
+        self.render_button(tree, x, y, btn_label, COL_ACCENT);
+        if !self.checking_for_updates {
+            tree.text(x + 160.0, y + 10.0, "Your device is up to date", COL_GREEN, 13.0);
+        }
+        y += 44.0 + SECTION_SPACING;
+
+        // Auto-update
+        y = render_section_header(tree, x, y, "Update Preferences");
+        render_setting_row(tree, x, y, "Automatic updates", 0.0);
+        render_toggle(tree, right_x, y + 12.0, self.auto_update_enabled);
+        y += ITEM_HEIGHT;
+
+        // Active hours
+        render_setting_row(tree, x, y, "Active hours (no restart)", 0.0);
+        let hours_label = format!("{:02}:00 - {:02}:00", self.active_hours_start, self.active_hours_end);
+        tree.text(right_x, y + 14.0, &hours_label, COL_TEXT, 13.0);
+        y += ITEM_HEIGHT + SECTION_SPACING;
+
+        // Advanced deferral
+        y = render_section_header(tree, x, y, "Advanced");
+        render_setting_row(tree, x, y, "Defer feature updates (days)", 0.0);
+        let defer_feat_norm = self.defer_feature_days as f32 / 365.0;
+        render_slider(tree, right_x, y, defer_feat_norm);
+        let feat_label = format!("{} days", self.defer_feature_days);
+        tree.text(right_x + SLIDER_WIDTH + 12.0, y + 14.0, &feat_label, COL_SUBTEXT0, 12.0);
+        y += ITEM_HEIGHT;
+
+        render_setting_row(tree, x, y, "Defer quality updates (days)", 0.0);
+        let defer_qual_norm = self.defer_quality_days as f32 / 30.0;
+        render_slider(tree, right_x, y, defer_qual_norm);
+        let qual_label = format!("{} days", self.defer_quality_days);
+        tree.text(right_x + SLIDER_WIDTH + 12.0, y + 14.0, &qual_label, COL_SUBTEXT0, 12.0);
+        y += ITEM_HEIGHT + SECTION_SPACING;
+
+        // Update history
+        y = render_section_header(tree, x, y, "Update History");
+        for entry in &self.update_history {
+            fill_rounded(tree, x, y, 580.0, 44.0, COL_SURFACE0, 6.0);
+
+            tree.text(x + 12.0, y + 8.0, &entry.kb_number, COL_TEXT, 13.0);
+            tree.text(x + 120.0, y + 8.0, &entry.description, COL_SUBTEXT0, 12.0);
+            tree.text(x + 12.0, y + 26.0, &entry.date, COL_OVERLAY0, 11.0);
+
+            // Status badge
+            let status_color = entry.status.color();
+            let status_label = entry.status.label();
+            fill_rounded(tree, x + 490.0, y + 12.0, 72.0, 20.0, status_color, 4.0);
+            tree.text(x + 500.0, y + 15.0, status_label, COL_CRUST, 11.0);
+
+            y += 52.0;
+        }
+    }
+
+    // --- Helper: render a button ---
+
+    #[allow(dead_code)]
+    fn render_button(&self, tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) {
+        let btn_w = label.len() as f32 * 8.0 + 24.0;
+        let btn_h = 32.0;
+        fill_rounded(tree, x, y, btn_w, btn_h, color, 6.0);
+        tree.text(x + 12.0, y + 8.0, label, COL_CRUST, 13.0);
+    }
+
     // --- Placeholder for unimplemented pages ---
 
     fn render_placeholder_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
@@ -1313,6 +2218,26 @@ impl SettingsState {
                 ];
                 let sel = if self.ip_config_mode == IpConfigMode::Dhcp { 0 } else { 1 };
                 (items, sel, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 300.0)
+            }
+            DropdownId::DiagnosticLevel => {
+                let items: Vec<String> = DiagnosticLevel::ALL.iter().map(|d| d.label().to_string()).collect();
+                let sel = DiagnosticLevel::ALL.iter().position(|d| *d == self.diagnostic_level).unwrap_or(0);
+                (items, sel, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 200.0)
+            }
+            DropdownId::ColorFilter => {
+                let items: Vec<String> = ColorFilter::ALL.iter().map(|f| f.label().to_string()).collect();
+                let sel = ColorFilter::ALL.iter().position(|f| *f == self.color_filter).unwrap_or(0);
+                (items, sel, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 200.0)
+            }
+            DropdownId::CursorSize => {
+                let items: Vec<String> = CursorSize::ALL.iter().map(|c| c.label().to_string()).collect();
+                let sel = CursorSize::ALL.iter().position(|c| *c == self.cursor_size).unwrap_or(0);
+                (items, sel, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 160.0)
+            }
+            DropdownId::NarratorVerbosity => {
+                let items: Vec<String> = NarratorVerbosity::ALL.iter().map(|v| v.label().to_string()).collect();
+                let sel = NarratorVerbosity::ALL.iter().position(|v| *v == self.narrator_verbosity).unwrap_or(0);
+                (items, sel, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 250.0)
             }
         };
 
@@ -1541,6 +2466,18 @@ impl SettingsState {
             SettingsPage::Proxy => {
                 self.handle_proxy_click(mx, my, right_x);
             }
+            SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
+                self.handle_accounts_click(mx, my, right_x);
+            }
+            SettingsPage::Permissions => {
+                self.handle_privacy_click(mx, my, right_x);
+            }
+            SettingsPage::Visual | SettingsPage::Audio | SettingsPage::Interaction => {
+                self.handle_accessibility_click(mx, my, right_x);
+            }
+            SettingsPage::SystemUpdates => {
+                self.handle_update_click(mx, my, right_x);
+            }
             _ => {}
         }
 
@@ -1724,6 +2661,183 @@ impl SettingsState {
         }
     }
 
+    fn handle_accounts_click(&mut self, _mx: f32, my: f32, _right_x: f32) {
+        let base_y = HEADER_HEIGHT + 8.0;
+
+        match self.current_page {
+            SettingsPage::LoginOptions => {
+                let toggle_y = base_y + 24.0 + 12.0;
+                if my >= toggle_y && my < toggle_y + ITEM_HEIGHT {
+                    self.auto_login_enabled = !self.auto_login_enabled;
+                }
+            }
+            _ => {
+                // Account list selection
+                let list_y = base_y + 24.0 + 12.0;
+                for (idx, _) in self.user_accounts.iter().enumerate() {
+                    let row_y = list_y + (idx as f32) * 64.0;
+                    if my >= row_y && my < row_y + 60.0 {
+                        self.selected_account = idx;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_privacy_click(&mut self, mx: f32, my: f32, right_x: f32) {
+        let base_y = HEADER_HEIGHT + 8.0;
+        let section_y = base_y + 24.0 + 12.0;
+
+        // Location master toggle
+        if my >= section_y && my < section_y + ITEM_HEIGHT
+            && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+        {
+            self.location_enabled = !self.location_enabled;
+            return;
+        }
+
+        // Per-app toggles for location
+        if self.location_enabled {
+            let mut y = section_y + ITEM_HEIGHT;
+            for app in &mut self.location_apps {
+                if my >= y && my < y + ITEM_HEIGHT - 8.0
+                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                {
+                    app.allowed = !app.allowed;
+                    return;
+                }
+                y += ITEM_HEIGHT - 8.0;
+            }
+        }
+    }
+
+    fn handle_accessibility_click(&mut self, mx: f32, my: f32, right_x: f32) {
+        let base_y = HEADER_HEIGHT + 8.0;
+
+        match self.current_page {
+            SettingsPage::Audio => {
+                let section_y = base_y + 24.0 + 12.0;
+                // Mono audio toggle
+                if my >= section_y && my < section_y + ITEM_HEIGHT
+                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                {
+                    self.mono_audio = !self.mono_audio;
+                    return;
+                }
+                // Visual alerts toggle
+                let va_y = section_y + ITEM_HEIGHT;
+                if my >= va_y && my < va_y + ITEM_HEIGHT
+                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                {
+                    self.visual_alerts = !self.visual_alerts;
+                    return;
+                }
+                // Narrator toggle
+                let narrator_section_y = va_y + ITEM_HEIGHT + SECTION_SPACING + 24.0 + 12.0;
+                if my >= narrator_section_y && my < narrator_section_y + ITEM_HEIGHT
+                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                {
+                    self.narrator_enabled = !self.narrator_enabled;
+                }
+            }
+            SettingsPage::Interaction => {
+                let section_y = base_y + 24.0 + 12.0;
+                let mut y = section_y;
+                // Sticky keys
+                if my >= y && my < y + ITEM_HEIGHT
+                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                {
+                    self.sticky_keys = !self.sticky_keys;
+                    return;
+                }
+                y += ITEM_HEIGHT + 12.0;
+                // Filter keys
+                if my >= y && my < y + ITEM_HEIGHT
+                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                {
+                    self.filter_keys = !self.filter_keys;
+                    return;
+                }
+                y += ITEM_HEIGHT + 12.0;
+                // Toggle keys
+                if my >= y && my < y + ITEM_HEIGHT
+                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                {
+                    self.toggle_keys = !self.toggle_keys;
+                    return;
+                }
+                y += ITEM_HEIGHT + 12.0;
+                // On-screen keyboard
+                if my >= y && my < y + ITEM_HEIGHT
+                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                {
+                    self.onscreen_keyboard = !self.onscreen_keyboard;
+                }
+            }
+            _ => {
+                // Visual page
+                let section_y = base_y + 24.0 + 12.0;
+                let mut y = section_y + ITEM_HEIGHT; // skip text size slider row
+                y += 8.0; // range labels
+
+                // High contrast toggle
+                if my >= y && my < y + ITEM_HEIGHT
+                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                {
+                    self.high_contrast = !self.high_contrast;
+                    return;
+                }
+                y += ITEM_HEIGHT;
+                // Cursor size dropdown
+                if my >= y && my < y + ITEM_HEIGHT {
+                    self.open_dropdown = Some(DropdownId::CursorSize);
+                    return;
+                }
+                y += ITEM_HEIGHT;
+                // Reduce animations
+                if my >= y && my < y + ITEM_HEIGHT
+                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                {
+                    self.reduce_animations = !self.reduce_animations;
+                    return;
+                }
+                y += ITEM_HEIGHT + SECTION_SPACING + 24.0 + 12.0;
+                // Color filter dropdown
+                if my >= y && my < y + ITEM_HEIGHT {
+                    self.open_dropdown = Some(DropdownId::ColorFilter);
+                    return;
+                }
+                y += ITEM_HEIGHT;
+                // Reduce transparency
+                if my >= y && my < y + ITEM_HEIGHT
+                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                {
+                    self.reduce_transparency = !self.reduce_transparency;
+                }
+            }
+        }
+    }
+
+    fn handle_update_click(&mut self, _mx: f32, my: f32, right_x: f32) {
+        let base_y = HEADER_HEIGHT + 8.0;
+
+        // Version info section takes 72px, then check button at y + 72
+        let check_btn_y = base_y + 24.0 + 12.0 + 72.0;
+        if my >= check_btn_y && my < check_btn_y + 32.0 {
+            self.checking_for_updates = !self.checking_for_updates;
+            return;
+        }
+
+        // Auto-update toggle
+        let prefs_y = check_btn_y + 44.0 + SECTION_SPACING + 24.0 + 12.0;
+        if my >= prefs_y && my < prefs_y + ITEM_HEIGHT {
+            self.auto_update_enabled = !self.auto_update_enabled;
+        }
+
+        let _ = right_x;
+    }
+
     /// Apply a dropdown selection.
     pub fn apply_dropdown_selection(&mut self, index: usize) {
         let dropdown_id = match self.open_dropdown {
@@ -1763,6 +2877,26 @@ impl SettingsState {
                 } else {
                     IpConfigMode::Static
                 };
+            }
+            DropdownId::DiagnosticLevel => {
+                if let Some(level) = DiagnosticLevel::ALL.get(index) {
+                    self.diagnostic_level = *level;
+                }
+            }
+            DropdownId::ColorFilter => {
+                if let Some(filter) = ColorFilter::ALL.get(index) {
+                    self.color_filter = *filter;
+                }
+            }
+            DropdownId::CursorSize => {
+                if let Some(size) = CursorSize::ALL.get(index) {
+                    self.cursor_size = *size;
+                }
+            }
+            DropdownId::NarratorVerbosity => {
+                if let Some(verbosity) = NarratorVerbosity::ALL.get(index) {
+                    self.narrator_verbosity = *verbosity;
+                }
             }
         }
 

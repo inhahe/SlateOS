@@ -1586,11 +1586,11 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] Drag to reorder, drag to/from desktop and start menu
   - [x] Optional app name alongside icon
   - [x] Aero-style blurry transparency (blur.rs: 3-pass box blur, 5 presets, BlurManager with dirty cache, rounded corners)
-- [-] System tray:
+- [x] System tray:
   - [x] Notification area with quick settings popups (volume, network, calendar)
   - [x] 6 system icons (volume/network/battery/bluetooth/notifications/power)
   - [x] Badge indicators, tooltip support
-  - [ ] Drag icons in/out, start-in-tray option
+  - [x] Drag icons in/out, start-in-tray option (tray_dnd.rs: TrayDragSource, TrayDropTarget, TrayIconArrangement, StartInTrayConfig, TrayContextMenu)
 - [x] Notification pane (notif_pane.rs: slide-out history, quick settings, per-app toggle/priority/sound/banner)
 - [x] Application launcher (Spotlight/Alfred-style):
   - [x] Fuzzy search with as-you-type filtering, configurable fuzziness threshold
@@ -1698,7 +1698,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver desktop._
 
 ### 4.1 Core applications
-- [-] File explorer:
+- [x] File explorer:
   - [x] Navigation with back/forward history, breadcrumb address bar
   - [x] Detail view with columns (name, size, modified, type)
   - [x] File type detection (18+ extensions), icon assignment
@@ -1719,7 +1719,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Dark theme (Catppuccin Mocha)
   - [x] Syntax highlighting (highlight.rs: 8 languages, 19 token types, multi-line state, Catppuccin theme)
   - [ ] Port Helix or integrate tree-sitter for advanced editing
-- [-] Process explorer:
+- [x] Process explorer:
   - [x] Sortable process table (PID, name, status, CPU%, memory, threads, priority, user)
   - [x] Color-coded status, tree view with parent-child indentation
   - [x] System overview tab: CPU history graph, memory bars, per-core utilization, uptime
@@ -1741,7 +1741,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Playlist management (create/edit/reorder/shuffle, repeat modes, M3U import/export)
   - [x] Three-tab UI: Now Playing (progress, controls, album art), Library (artists/albums/songs), Playlists
   - [x] Playback controls, volume slider, seek bar, keyboard shortcuts
-- [-] Terminal emulator (graphical):
+- [x] Terminal emulator (graphical):
   - [x] VT100/xterm CSI sequences (cursor movement, erase, insert/delete, scroll, modes)
   - [x] SGR colors (8-color, 256-color, truecolor), bold/dim/italic/underline/blink/inverse
   - [x] OSC title setting, DEC private modes (DECCKM, DECTCEM, alt screen, bracketed paste)
@@ -1749,7 +1749,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] UTF-8 multi-byte accumulator, cursor styles (block/underline/bar)
   - [x] Keyboard translation (special keys → escape sequences, Ctrl+letter)
   - [x] Selection support, visual bell, configurable tab stops, color scheme
-  - [ ] PTY integration with child process
+  - [x] PTY integration with child process (pty.rs: PtyPair, ByteChannel, cooked/raw mode, line discipline, PtyManager, ChildProcess)
 - [x] Calculator:
   - [x] Standard and Scientific modes
   - [x] Recursive descent expression parser (proper operator precedence)
@@ -2090,7 +2090,7 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
 - [x] Workload type selection (populates tuning presets, changeable later) — WorkloadType enum (Desktop/Server/Development/Gaming) with fs::fspolicy integration
 - [x] Swap file sizing — swap_mib field in PartitionPlan (None = file-based via fs::swapcfg)
 - [x] Post-reboot setup: audio device, timezone, user/password, WiFi, theme, browser choice — FirstBoot phase in InstallSession with all fields
-- [ ] Unattended install via YAML configuration file
+- [x] Unattended install via YAML configuration file (apps/installer: InstallConfig, YAML parser, validation, InstallPlan, CLI)
 - [ ] GRUB integration for dual-boot (add menu entry, don't replace GRUB)
 
 ---

@@ -15,6 +15,8 @@
 #[allow(dead_code)]
 mod blur;
 #[allow(dead_code)]
+mod multimon;
+#[allow(dead_code)]
 mod icons;
 #[allow(dead_code)]
 mod notif_pane;

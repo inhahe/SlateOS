@@ -82,6 +82,10 @@ mod login_screen;
 mod session_mgr;
 #[allow(dead_code)]
 mod focus_assist;
+#[allow(dead_code)]
+mod mouse_settings;
+#[allow(dead_code)]
+mod sound_settings;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

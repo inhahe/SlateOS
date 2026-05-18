@@ -1656,6 +1656,8 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Context menu extension system (context_ext.rs: capability-gated registration, per-app limits, lazy loading, rate-limit tracking, builtin items for file/dir/desktop, settings panel with search/filter)
 - [x] Desktop widget system (widgets.rs: grid layout, 13 built-in types — clock/weather/sysmon/calendar/notes/RSS/music/photo/world clock/reminders/disk/network/battery, add/remove/move/resize, hit-testing, picker, edit mode)
 - [x] Login screen greeter (login_screen.rs: user list with avatars, password entry, autologin, shake animation, lockout after max attempts, power menu, accessibility, keyboard layout indicator, gradient backgrounds)
+- [x] Session and workspace management (session_mgr.rs: workspace CRUD, window snapshot/apply, session save/restore, workspace picker overlay with search and keyboard navigation)
+- [x] Focus Assist / Do Not Disturb (focus_assist.rs: Off/PriorityOnly/AlarmsOnly/TotalSilence modes, auto-rules — schedule/fullscreen/presentation/gaming/battery, per-app overrides, tray indicator, settings panel)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)

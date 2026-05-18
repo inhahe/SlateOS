@@ -58,6 +58,10 @@ mod user_accounts;
 mod taskbar_autohide;
 #[allow(dead_code)]
 mod input_method;
+#[allow(dead_code)]
+mod window_rules;
+#[allow(dead_code)]
+mod touchpad;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

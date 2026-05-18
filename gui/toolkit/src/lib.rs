@@ -26,6 +26,7 @@
 pub mod color;
 pub mod colorpicker;
 pub mod dialog;
+pub mod disabled;
 pub mod dnd;
 pub mod event;
 pub mod grid;

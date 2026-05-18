@@ -15,6 +15,8 @@
 #[allow(dead_code)]
 mod icons;
 #[allow(dead_code)]
+mod notif_pane;
+#[allow(dead_code)]
 mod run_dialog;
 #[allow(dead_code)]
 mod taskbar;

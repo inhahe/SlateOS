@@ -1546,7 +1546,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] 6 system icons (volume/network/battery/bluetooth/notifications/power)
   - [x] Badge indicators, tooltip support
   - [ ] Drag icons in/out, start-in-tray option
-- [ ] Notification pane (per-app disable option)
+- [x] Notification pane (notif_pane.rs: slide-out history, quick settings, per-app toggle/priority/sound/banner)
 - [x] Application launcher (Spotlight/Alfred-style):
   - [x] Fuzzy search with as-you-type filtering, configurable fuzziness threshold
   - [x] Frecency scoring (combines match quality with launch frequency/recency)
@@ -1613,7 +1613,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
     - [x] Do Not Disturb (manual + scheduled, critical bypass)
     - [x] Per-app settings, progress bars, action buttons
   - [x] DPI/scaling awareness, automatic image scaling (scaling.rs: LogicalPixel/PhysicalPixel, ScaleContext, per-monitor, image scale helpers)
-  - [ ] Enable/disable controls with optional reason tooltip
+  - [x] Enable/disable controls with optional reason tooltip (disabled.rs: groups, conditional enable, form validation)
   - [x] SVG rendering support (svg.rs: path commands, shapes, transforms, scanline AA rasterizer, Bézier flattening)
   - [ ] Context menu extension API (capability-gated, lazy-loading, 200ms timeout)
 - [x] Credential manager service (gui/credentials):

@@ -86,6 +86,10 @@ mod focus_assist;
 mod mouse_settings;
 #[allow(dead_code)]
 mod sound_settings;
+#[allow(dead_code)]
+mod power_settings;
+#[allow(dead_code)]
+mod network_indicator;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

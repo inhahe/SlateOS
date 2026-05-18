@@ -73,6 +73,13 @@ exclude = [
     "apps/habits",
     "apps/mindmap",
     "apps/finance",
+    # --- osb2 batch 7 ---
+    "apps/chess",
+    "apps/sudoku",
+    "apps/tetris",
+    "apps/snake",
+    "apps/game2048",
+    "apps/typingtutor",
 ]
 
 [workspace.lints.clippy]

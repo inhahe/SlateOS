@@ -23,6 +23,11 @@ exclude = [
     "apps/remotedesktop",
     "apps/defrag",
     "apps/benchmark",
+    "apps/screenrecorder",
+    "apps/paint",
+    "apps/markdowneditor",
+    "apps/spreadsheet",
+    "apps/videoplayer",
 ]
 
 [workspace.lints.clippy]

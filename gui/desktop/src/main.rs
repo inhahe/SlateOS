@@ -44,6 +44,10 @@ mod animations;
 mod snap;
 #[allow(dead_code)]
 mod clipboard_viewer;
+#[allow(dead_code)]
+mod window_peek;
+#[allow(dead_code)]
+mod overview;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

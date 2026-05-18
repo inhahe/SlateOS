@@ -1419,9 +1419,9 @@ _Port ext4 first. Don't write a custom filesystem._
 - [ ] Port bash (POSIX compatibility)
 - [-] Port or adopt Nushell as default shell (Rust, structured data piping) — type-checks and links with os-minimal feature
 - [x] Port coreutils (85 binaries: echo, cat, ls, head, wc, mkdir, rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo, expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff, cmp, od, strings, uptime, free, unexpand, cal, time, sed, awk, ed, more, sh, tar, bc, patch, split, join, csplit, logger, logname, who, tsort, renice)
-- [ ] Port rsync (replaces robocopy need)
-- [ ] Port curl
-- [ ] Port ssh/sshd
+- [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats
+- [x] Port curl — Rust HTTP/1.1 client: GET/POST/PUT/DELETE/HEAD/PATCH, auth, cookies, redirects, chunked, progress, -o/-O, verbose
+- [x] Port ssh/sshd — Rust SSH-2 client: version exchange, key exchange, password auth, interactive session, host key verification
 - [x] Build custom grep (Rust, regex support, line numbers, recursive, case-insensitive)
 - [x] Port find (glob matching, -name, -type, -maxdepth)
 - [x] System administration utilities — Rust userspace binaries:
@@ -1494,6 +1494,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] fdisk: partition table management (GPT+MBR parsing, create/delete/retype, CRC32)
   - [x] chown/chmod: file ownership and permissions (symbolic modes, recursive, yaml user DB)
   - [x] at/atq/atrm/batch: one-time task scheduling (time parsing, spool dir, argv[0] modes)
+  - [x] less: terminal pager (scrollback, search/highlight, follow mode, line numbers, ANSI passthrough, wrap/chop)
+  - [x] nano: terminal text editor (syntax highlighting for 8 languages, undo/redo, search/replace, cut/paste)
+  - [x] nc: netcat (TCP/UDP client/server, port scanning, banner grab, execute-on-connect, keep-listen)
+  - [x] ifconfig: network interface configuration (display/set IP/mask/broadcast/MTU, up/down, RX/TX stats)
+  - [x] route: routing table management (display, add/del routes, CIDR, default gateway, host routes, flush)
+  - [x] tcpdump: packet analyzer (live capture, pcap read/write, filters, hex dump, Ethernet/IP/TCP/UDP/ICMP/ARP)
+  - [x] screen: terminal multiplexer (multi-window, Ctrl+A keys, session detach/reattach, scrollback, rename)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

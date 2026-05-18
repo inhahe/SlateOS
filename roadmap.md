@@ -1435,6 +1435,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ip: network interface and route configuration (link up/down, addr/route management, ARP, DNS)
   - [x] useradm: user account management (add/del/mod/passwd/lock/unlock, /etc/users.yaml, SHA-256)
   - [x] monctl: monitor power control (off/on/standby/suspend, brightness, DPMS timers)
+  - [x] sysctl: view/modify kernel parameters via /proc/sys/ and /sys/kernel/ (dot notation, config loading)
+  - [x] lsblk: block device lister (tree/flat, filesystem info, mount points, JSON output)
+  - [x] powerctl: power management (shutdown/reboot/suspend/hibernate, schedule, battery status)
+  - [x] nslookup: DNS lookup (RFC 1035 packets, A/AAAA/MX/TXT/NS/CNAME/PTR, reverse, custom server)
+  - [x] netstat: network connection stats (/proc/net/tcp/udp, TCP states, protocol stats, routing, JSON)
+  - [x] hwclock: hardware clock management (RTC read/write, hctosys/systohc, timezone, SNTP client)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

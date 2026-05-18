@@ -16,6 +16,8 @@
 //! Uses the guitk library for UI rendering.
 
 #[allow(dead_code)]
+mod columns;
+#[allow(dead_code)]
 mod dropzone;
 #[allow(dead_code)]
 mod fileops;

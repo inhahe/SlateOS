@@ -17,6 +17,9 @@
 //! Renders via the guitk RenderTree, producing Text and FillRect commands
 //! for each visible cell in the terminal grid.
 
+#[allow(dead_code)]
+pub mod pty;
+
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]

@@ -1,0 +1,18 @@
+[package]
+name = "tee"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS tee - read stdin, write to stdout and files"
+
+[workspace]
+
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

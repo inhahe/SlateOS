@@ -50,6 +50,10 @@ mod window_peek;
 mod overview;
 #[allow(dead_code)]
 mod display_settings;
+#[allow(dead_code)]
+mod about;
+#[allow(dead_code)]
+mod user_accounts;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

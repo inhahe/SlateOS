@@ -1948,6 +1948,9 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Email client (apps/email: MIME parsing with multipart, RFC 5322 address parser, IMAP/SMTP protocol commands, base64/quoted-printable encoding, mailbox management, composition with reply/forward, attachments, filter rules, signatures, multi-panel UI, 45 tests)
 - [x] File search (apps/filesearch: glob pattern matching, simple regex engine, file type categorization with 11 categories and 100+ extensions, file index, search filters, history with bookmarks, duplicate detection, statistics, multi-panel UI, 40 tests)
 - [x] Notes & Wiki (apps/notes: plain text/markdown/checklist/table note types, notebook organization with nesting, tagging, full-text search, wiki-style linking, version history, 8 templates, export to text/md/html, favorites/pinning, word count/reading time, multi-panel UI, 71 tests)
+- [x] Presentation/Slides (apps/slides: slide elements with text boxes/shapes/images, 6 slide layouts, 3 themes, slide sorter view, transitions, speaker notes, undo/redo, HTML export, multi-panel UI, 65 tests)
+- [x] Photo Manager (apps/photomanager: EXIF metadata parsing with 20+ tags, albums and smart albums with rule-based filtering, thumbnail grid/single/timeline/slideshow views, star ratings, color labels, tagging, duplicate detection via perceptual hash, batch operations, multi-panel UI, 62 tests)
+- [x] Media Converter (apps/mediaconvert: batch format conversion for audio/video/image, 9 audio + 7 video + 8 image formats, codec selection, quality presets, conversion profiles, batch queue with progress, output naming templates, history, multi-panel UI, 46 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

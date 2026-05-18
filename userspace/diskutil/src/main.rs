@@ -1,0 +1,1726 @@
+//! OurOS Disk Utility
+//!
+//! Comprehensive disk management tool for listing devices, displaying detailed
+//! information, formatting partitions, verifying/repairing filesystems,
+//! benchmarking I/O performance, querying S.M.A.R.T. status, and issuing TRIM.
+//!
+//! Reads from `/sys/block/`, `/proc/partitions`, and `/proc/mounts`.
+//! Write operations (format, repair, trim) use OurOS syscalls in the FS range
+//! (600-799).
+//!
+//! # Usage
+//!
+//! ```text
+//! diskutil list                    List all disks and partitions
+//! diskutil info <device>           Detailed device information
+//! diskutil format <device> <fs>    Format a partition (ext4, fat32, tmpfs)
+//! diskutil verify <device>         Check filesystem integrity (read-only)
+//! diskutil repair <device>         Attempt filesystem repair
+//! diskutil usage <path>            Disk space usage for a mount point
+//! diskutil benchmark <device>      Sequential read/write speed test
+//! diskutil smart <device>          Show S.M.A.R.T. status
+//! diskutil trim <device>           Issue TRIM/discard to SSD
+//! diskutil partitions <device>     List partition table (MBR or GPT)
+//! ```
+
+use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::io::{Read, Write};
+use std::process;
+use std::time::Instant;
+
+// ============================================================================
+// Syscall interface
+// ============================================================================
+
+// Filesystem ioctl syscalls (fs zone, 600-799 range).
+#[allow(dead_code)]
+const SYS_FS_IOCTL: u64 = 650;
+#[allow(dead_code)]
+const SYS_FS_FORMAT: u64 = 651;
+#[allow(dead_code)]
+const SYS_FS_VERIFY: u64 = 652;
+#[allow(dead_code)]
+const SYS_FS_REPAIR: u64 = 653;
+#[allow(dead_code)]
+const SYS_FS_TRIM: u64 = 654;
+#[allow(dead_code)]
+const SYS_FS_STATFS: u64 = 655;
+
+/// Invoke a syscall with up to 5 arguments.
+///
+/// The kernel receives arguments in: rdi, rsi, rdx, r10, r8.
+#[cfg(target_arch = "x86_64")]
+unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: Caller ensures arguments are valid pointers/values for the
+    // given syscall number. The kernel validates all inputs and returns
+    // a negative errno on failure.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            in("r8") a5,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Invoke a syscall with 3 arguments.
+#[cfg(target_arch = "x86_64")]
+unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    // SAFETY: Delegated to syscall5 with zero-filled trailing args.
+    unsafe { syscall5(nr, a1, a2, a3, 0, 0) }
+}
+
+/// Invoke a syscall with 2 arguments.
+#[cfg(target_arch = "x86_64")]
+unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
+    // SAFETY: Delegated to syscall5 with zero-filled trailing args.
+    unsafe { syscall5(nr, a1, a2, 0, 0, 0) }
+}
+
+/// Make a null-terminated C string from a Rust string slice.
+fn c_str(s: &str) -> Vec<u8> {
+    let mut v = s.as_bytes().to_vec();
+    v.push(0);
+    v
+}
+
+/// Translate a negative syscall return into a human-readable error.
+fn syscall_error_msg(ret: i64) -> String {
+    match ret {
+        -1 => "operation not permitted".to_string(),
+        -2 => "no such file or directory".to_string(),
+        -5 => "I/O error".to_string(),
+        -12 => "out of memory".to_string(),
+        -13 => "permission denied".to_string(),
+        -16 => "device busy".to_string(),
+        -19 => "no such device".to_string(),
+        -22 => "invalid argument".to_string(),
+        -28 => "no space left on device".to_string(),
+        -30 => "read-only filesystem".to_string(),
+        -38 => "function not implemented".to_string(),
+        other => format!("error {other}"),
+    }
+}
+
+// ============================================================================
+// Filesystem / sysfs helpers
+// ============================================================================
+
+/// Read a file and return its trimmed contents, or None on failure.
+fn read_file(path: &str) -> Option<String> {
+    fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+}
+
+/// Read a file and parse it as u64, or return 0.
+fn read_u64(path: &str) -> u64 {
+    read_file(path)
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Read a file and parse it as a boolean flag (1 = true).
+fn read_bool(path: &str) -> bool {
+    read_file(path).is_some_and(|s| s == "1")
+}
+
+// ============================================================================
+// Size formatting
+// ============================================================================
+
+/// Format a byte count as a human-readable string (e.g. "1.5G").
+fn format_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    const TIB: u64 = 1024 * GIB;
+
+    if bytes >= TIB {
+        let whole = bytes / TIB;
+        let frac = ((bytes % TIB) * 10) / TIB;
+        if frac > 0 {
+            format!("{whole}.{frac}T")
+        } else {
+            format!("{whole}T")
+        }
+    } else if bytes >= GIB {
+        let whole = bytes / GIB;
+        let frac = ((bytes % GIB) * 10) / GIB;
+        if frac > 0 {
+            format!("{whole}.{frac}G")
+        } else {
+            format!("{whole}G")
+        }
+    } else if bytes >= MIB {
+        let whole = bytes / MIB;
+        let frac = ((bytes % MIB) * 10) / MIB;
+        if frac > 0 {
+            format!("{whole}.{frac}M")
+        } else {
+            format!("{whole}M")
+        }
+    } else if bytes >= KIB {
+        let whole = bytes / KIB;
+        let frac = ((bytes % KIB) * 10) / KIB;
+        if frac > 0 {
+            format!("{whole}.{frac}K")
+        } else {
+            format!("{whole}K")
+        }
+    } else {
+        format!("{bytes}B")
+    }
+}
+
+/// Format bytes per second as a throughput string (e.g. "152.3 MB/s").
+fn format_throughput(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1_000_000_000.0 {
+        format!("{:.1} GB/s", bytes_per_sec / 1_000_000_000.0)
+    } else if bytes_per_sec >= 1_000_000.0 {
+        format!("{:.1} MB/s", bytes_per_sec / 1_000_000.0)
+    } else if bytes_per_sec >= 1_000.0 {
+        format!("{:.1} KB/s", bytes_per_sec / 1_000.0)
+    } else {
+        format!("{:.0} B/s", bytes_per_sec)
+    }
+}
+
+// ============================================================================
+// Block device data
+// ============================================================================
+
+/// A block device (disk or partition) discovered from sysfs or procfs.
+#[allow(dead_code)]
+struct BlockDevice {
+    /// Kernel name (e.g. "sda", "sda1", "nvme0n1").
+    name: String,
+    /// Size in 512-byte sectors.
+    size_sectors: u64,
+    /// "disk" or "part".
+    dev_type: String,
+    /// Filesystem type if known (e.g. "ext4", "fat32").
+    fstype: String,
+    /// Filesystem label if known.
+    label: String,
+    /// Filesystem UUID if known.
+    uuid: String,
+    /// Mount point if currently mounted.
+    mountpoint: String,
+    /// Device model string.
+    model: String,
+    /// Device serial number.
+    serial: String,
+    /// Firmware revision string.
+    firmware: String,
+    /// Read-only flag.
+    read_only: bool,
+    /// Removable media flag.
+    removable: bool,
+    /// Whether this appears to be an SSD (rotational == 0).
+    is_ssd: bool,
+    /// Logical sector size in bytes (typically 512).
+    logical_sector_size: u64,
+    /// Physical sector size in bytes (typically 512 or 4096).
+    physical_sector_size: u64,
+    /// Child partitions (only populated for disks).
+    children: Vec<BlockDevice>,
+}
+
+impl BlockDevice {
+    /// Size in bytes (each sector is 512 bytes in /sys and /proc).
+    fn size_bytes(&self) -> u64 {
+        self.size_sectors.saturating_mul(512)
+    }
+}
+
+// ============================================================================
+// Mount table parsing
+// ============================================================================
+
+/// Parse /proc/mounts and build a map of kernel device name -> mount point.
+fn parse_mounts() -> HashMap<String, String> {
+    let mut mounts = HashMap::new();
+
+    let content = match read_file("/proc/mounts") {
+        Some(c) => c,
+        None => return mounts,
+    };
+
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            let dev = parts[0];
+            let mount = parts[1];
+            // Strip "/dev/" prefix to get the kernel name.
+            let name = dev.strip_prefix("/dev/").unwrap_or(dev);
+            mounts.insert(name.to_string(), mount.to_string());
+        }
+    }
+
+    mounts
+}
+
+/// Parse /proc/mounts and build a map of mount point -> (device, fstype, options).
+fn parse_mounts_by_path() -> HashMap<String, (String, String, String)> {
+    let mut mounts = HashMap::new();
+
+    let content = match read_file("/proc/mounts") {
+        Some(c) => c,
+        None => return mounts,
+    };
+
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 4 {
+            let dev = parts[0].to_string();
+            let mount = parts[1].to_string();
+            let fstype = parts[2].to_string();
+            let opts = parts[3].to_string();
+            mounts.insert(mount, (dev, fstype, opts));
+        }
+    }
+
+    mounts
+}
+
+// ============================================================================
+// Filesystem info lookup
+// ============================================================================
+
+/// Read filesystem type, label, and UUID for a device from sysfs and /dev/disk/.
+fn read_fsinfo(dev_name: &str, parent_name: Option<&str>) -> (String, String, String) {
+    let paths_to_try: Vec<String> = if let Some(parent) = parent_name {
+        vec![
+            format!("/sys/block/{parent}/{dev_name}"),
+            format!("/sys/block/{dev_name}"),
+        ]
+    } else {
+        vec![format!("/sys/block/{dev_name}")]
+    };
+
+    let mut fstype = String::new();
+    let mut label = String::new();
+    let mut uuid = String::new();
+
+    for base in &paths_to_try {
+        if fstype.is_empty() {
+            if let Some(ft) = read_file(&format!("{base}/fstype")) {
+                if !ft.is_empty() {
+                    fstype = ft;
+                }
+            }
+        }
+        if label.is_empty() {
+            if let Some(lb) = read_file(&format!("{base}/label")) {
+                if !lb.is_empty() {
+                    label = lb;
+                }
+            }
+        }
+        if uuid.is_empty() {
+            if let Some(id) = read_file(&format!("{base}/uuid")) {
+                if !id.is_empty() {
+                    uuid = id;
+                }
+            }
+        }
+    }
+
+    // Fall back to /dev/disk/by-uuid and /dev/disk/by-label symlinks.
+    if uuid.is_empty() {
+        if let Ok(entries) = fs::read_dir("/dev/disk/by-uuid") {
+            for entry in entries.flatten() {
+                if let Ok(target) = fs::read_link(entry.path()) {
+                    let target_name = target
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    if target_name == dev_name {
+                        if let Some(u) = entry.file_name().to_str() {
+                            uuid = u.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if label.is_empty() {
+        if let Ok(entries) = fs::read_dir("/dev/disk/by-label") {
+            for entry in entries.flatten() {
+                if let Ok(target) = fs::read_link(entry.path()) {
+                    let target_name = target
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("");
+                    if target_name == dev_name {
+                        if let Some(l) = entry.file_name().to_str() {
+                            label = l.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (fstype, label, uuid)
+}
+
+// ============================================================================
+// Block device scanning
+// ============================================================================
+
+/// Scan /sys/block/ for disks and their partitions.
+fn scan_devices(mounts: &HashMap<String, String>) -> Vec<BlockDevice> {
+    let mut devices = Vec::new();
+
+    let block_dir = "/sys/block";
+    let entries = match fs::read_dir(block_dir) {
+        Ok(e) => e,
+        Err(_) => return devices,
+    };
+
+    for entry in entries.flatten() {
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+
+        // Skip loop and ram devices with zero size.
+        if name.starts_with("loop") || name.starts_with("ram") {
+            let sz = read_u64(&format!("{block_dir}/{name}/size"));
+            if sz == 0 {
+                continue;
+            }
+        }
+
+        let dev_path = format!("{block_dir}/{name}");
+        let size_sectors = read_u64(&format!("{dev_path}/size"));
+        let read_only = read_bool(&format!("{dev_path}/ro"));
+        let removable = read_bool(&format!("{dev_path}/removable"));
+        let model = read_file(&format!("{dev_path}/device/model")).unwrap_or_default();
+        let serial = read_file(&format!("{dev_path}/device/serial")).unwrap_or_default();
+        let firmware = read_file(&format!("{dev_path}/device/firmware_rev"))
+            .or_else(|| read_file(&format!("{dev_path}/device/rev")))
+            .unwrap_or_default();
+        let mountpoint = mounts.get(&name).cloned().unwrap_or_default();
+        let is_ssd = read_file(&format!("{dev_path}/queue/rotational"))
+            .is_some_and(|v| v == "0");
+        let logical_sector_size =
+            read_u64(&format!("{dev_path}/queue/logical_block_size"));
+        let physical_sector_size =
+            read_u64(&format!("{dev_path}/queue/physical_block_size"));
+
+        let (fstype, label, uuid) = read_fsinfo(&name, None);
+
+        let children = scan_partitions(&dev_path, &name, mounts);
+
+        devices.push(BlockDevice {
+            name,
+            size_sectors,
+            dev_type: "disk".to_string(),
+            fstype,
+            label,
+            uuid,
+            mountpoint,
+            model,
+            serial,
+            firmware,
+            read_only,
+            removable,
+            is_ssd,
+            logical_sector_size,
+            physical_sector_size,
+            children,
+        });
+    }
+
+    devices.sort_by(|a, b| a.name.cmp(&b.name));
+    devices
+}
+
+/// Scan partitions of a disk from /sys/block/<disk>/<partition>/.
+fn scan_partitions(
+    disk_path: &str,
+    disk_name: &str,
+    mounts: &HashMap<String, String>,
+) -> Vec<BlockDevice> {
+    let mut parts = Vec::new();
+
+    let entries = match fs::read_dir(disk_path) {
+        Ok(e) => e,
+        Err(_) => return parts,
+    };
+
+    for entry in entries.flatten() {
+        let part_name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+
+        // Partitions are subdirectories starting with the parent disk name.
+        if !part_name.starts_with(disk_name) {
+            continue;
+        }
+
+        let part_path = format!("{disk_path}/{part_name}");
+
+        // Verify it is actually a partition directory.
+        let is_partition = fs::metadata(&format!("{part_path}/partition")).is_ok()
+            || fs::metadata(&format!("{part_path}/size")).is_ok();
+        if !is_partition {
+            continue;
+        }
+
+        let size_sectors = read_u64(&format!("{part_path}/size"));
+        let read_only = read_bool(&format!("{part_path}/ro"));
+        let mountpoint = mounts.get(&part_name).cloned().unwrap_or_default();
+
+        let (fstype, label, uuid) = read_fsinfo(&part_name, Some(disk_name));
+
+        parts.push(BlockDevice {
+            name: part_name,
+            size_sectors,
+            dev_type: "part".to_string(),
+            fstype,
+            label,
+            uuid,
+            mountpoint,
+            model: String::new(),
+            serial: String::new(),
+            firmware: String::new(),
+            read_only,
+            removable: false,
+            is_ssd: false,
+            logical_sector_size: 0,
+            physical_sector_size: 0,
+            children: Vec::new(),
+        });
+    }
+
+    parts.sort_by(|a, b| a.name.cmp(&b.name));
+    parts
+}
+
+/// Fallback: scan /proc/partitions when /sys/block is unavailable.
+fn scan_proc_partitions(mounts: &HashMap<String, String>) -> Vec<BlockDevice> {
+    let content = match read_file("/proc/partitions") {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    let mut entries: Vec<(String, u64)> = Vec::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("major") || line.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+
+        let name = parts[3].to_string();
+        // /proc/partitions gives 1024-byte blocks; convert to 512-byte sectors.
+        let blocks: u64 = parts[2].parse().unwrap_or(0);
+        let sectors = blocks.saturating_mul(2);
+
+        entries.push((name, sectors));
+    }
+
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut disks: Vec<BlockDevice> = Vec::new();
+    let mut i = 0;
+
+    while i < entries.len() {
+        let (ref disk_name, disk_sectors) = entries[i];
+        let (fstype, label, uuid) = read_fsinfo(disk_name, None);
+        let mountpoint = mounts.get(disk_name).cloned().unwrap_or_default();
+
+        let mut children = Vec::new();
+        let mut j = i + 1;
+        while j < entries.len() && entries[j].0.starts_with(disk_name.as_str()) {
+            let (ref part_name, part_sectors) = entries[j];
+            let part_mp = mounts.get(part_name).cloned().unwrap_or_default();
+            let (pfs, plb, puu) = read_fsinfo(part_name, Some(disk_name));
+
+            children.push(BlockDevice {
+                name: part_name.clone(),
+                size_sectors: part_sectors,
+                dev_type: "part".to_string(),
+                fstype: pfs,
+                label: plb,
+                uuid: puu,
+                mountpoint: part_mp,
+                model: String::new(),
+                serial: String::new(),
+                firmware: String::new(),
+                read_only: false,
+                removable: false,
+                is_ssd: false,
+                logical_sector_size: 0,
+                physical_sector_size: 0,
+                children: Vec::new(),
+            });
+            j += 1;
+        }
+
+        disks.push(BlockDevice {
+            name: disk_name.clone(),
+            size_sectors: disk_sectors,
+            dev_type: "disk".to_string(),
+            fstype,
+            label,
+            uuid,
+            mountpoint,
+            model: String::new(),
+            serial: String::new(),
+            firmware: String::new(),
+            read_only: false,
+            removable: false,
+            is_ssd: false,
+            logical_sector_size: 0,
+            physical_sector_size: 0,
+            children,
+        });
+
+        i = j;
+    }
+
+    disks
+}
+
+/// Retrieve all block devices, preferring sysfs with procfs fallback.
+fn get_all_devices() -> Vec<BlockDevice> {
+    let mounts = parse_mounts();
+    let mut devices = scan_devices(&mounts);
+    if devices.is_empty() {
+        devices = scan_proc_partitions(&mounts);
+    }
+    devices
+}
+
+/// Find a specific device by kernel name (e.g. "sda", "sda1", "nvme0n1p1").
+/// Strips a leading "/dev/" if present.
+fn find_device(name: &str) -> Option<BlockDevice> {
+    let name = name.strip_prefix("/dev/").unwrap_or(name);
+    let devices = get_all_devices();
+
+    for dev in devices {
+        if dev.name == name {
+            return Some(dev);
+        }
+        for child in dev.children {
+            if child.name == name {
+                return Some(child);
+            }
+        }
+    }
+
+    None
+}
+
+/// Find a disk (parent) device by kernel name, returning it with children.
+fn find_disk(name: &str) -> Option<BlockDevice> {
+    let name = name.strip_prefix("/dev/").unwrap_or(name);
+    let devices = get_all_devices();
+
+    for dev in devices {
+        if dev.name == name {
+            return Some(dev);
+        }
+    }
+
+    None
+}
+
+// ============================================================================
+// JSON helpers
+// ============================================================================
+
+/// Escape a string for safe inclusion in JSON output.
+#[allow(dead_code)]
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < '\x20' => {
+                // Control characters: emit as \uXXXX.
+                let code = c as u32;
+                out.push_str(&format!("\\u{code:04x}"));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+// ============================================================================
+// Subcommand: list
+// ============================================================================
+
+/// List all disks and partitions in a table.
+fn cmd_list() {
+    let devices = get_all_devices();
+
+    if devices.is_empty() {
+        eprintln!("No block devices found (is /sys/block or /proc/partitions available?)");
+        process::exit(1);
+    }
+
+    // Header.
+    println!(
+        "{:<12} {:>8} {:<6} {:<8} {:<6} {:<4} {}",
+        "DEVICE", "SIZE", "TYPE", "FSTYPE", "RO", "SSD", "MOUNTPOINT"
+    );
+    println!(
+        "{:<12} {:>8} {:<6} {:<8} {:<6} {:<4} {}",
+        "------", "----", "----", "------", "--", "---", "----------"
+    );
+
+    for dev in &devices {
+        let ssd_str = if dev.is_ssd { "yes" } else { "no" };
+        println!(
+            "{:<12} {:>8} {:<6} {:<8} {:<6} {:<4} {}",
+            dev.name,
+            format_size(dev.size_bytes()),
+            dev.dev_type,
+            if dev.fstype.is_empty() { "-" } else { &dev.fstype },
+            if dev.read_only { "yes" } else { "no" },
+            ssd_str,
+            if dev.mountpoint.is_empty() { "-" } else { &dev.mountpoint },
+        );
+
+        for (idx, child) in dev.children.iter().enumerate() {
+            let is_last = idx == dev.children.len() - 1;
+            let prefix = if is_last { "\u{2514}\u{2500} " } else { "\u{251c}\u{2500} " };
+            let display_name = format!("{prefix}{}", child.name);
+            println!(
+                "{:<12} {:>8} {:<6} {:<8} {:<6} {:<4} {}",
+                display_name,
+                format_size(child.size_bytes()),
+                child.dev_type,
+                if child.fstype.is_empty() { "-" } else { &child.fstype },
+                if child.read_only { "yes" } else { "no" },
+                "-",
+                if child.mountpoint.is_empty() {
+                    "-"
+                } else {
+                    &child.mountpoint
+                },
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Subcommand: info
+// ============================================================================
+
+/// Show detailed information about a disk or partition.
+fn cmd_info(device_name: &str) {
+    // First try as a full disk (with children) so we can display partition info.
+    if let Some(dev) = find_disk(device_name) {
+        print_device_info(&dev);
+        return;
+    }
+
+    // Try as a partition.
+    if let Some(dev) = find_device(device_name) {
+        print_device_info(&dev);
+        return;
+    }
+
+    eprintln!("error: device '{}' not found", device_name);
+    eprintln!("  Try 'diskutil list' to see available devices.");
+    process::exit(1);
+}
+
+fn print_device_info(dev: &BlockDevice) {
+    println!("=== Device: /dev/{} ===", dev.name);
+    println!();
+    println!("  Type:               {}", dev.dev_type);
+    println!("  Size:               {} ({} bytes)", format_size(dev.size_bytes()), dev.size_bytes());
+    println!("  Sectors:            {} (512-byte)", dev.size_sectors);
+
+    if dev.logical_sector_size > 0 {
+        println!("  Logical sector:     {} bytes", dev.logical_sector_size);
+    }
+    if dev.physical_sector_size > 0 {
+        println!("  Physical sector:    {} bytes", dev.physical_sector_size);
+    }
+
+    if !dev.model.is_empty() {
+        println!("  Model:              {}", dev.model);
+    }
+    if !dev.serial.is_empty() {
+        println!("  Serial:             {}", dev.serial);
+    }
+    if !dev.firmware.is_empty() {
+        println!("  Firmware:           {}", dev.firmware);
+    }
+
+    println!("  Read-only:          {}", if dev.read_only { "yes" } else { "no" });
+    println!("  Removable:          {}", if dev.removable { "yes" } else { "no" });
+    println!("  SSD:                {}", if dev.is_ssd { "yes" } else { "no" });
+
+    if !dev.fstype.is_empty() {
+        println!("  Filesystem:         {}", dev.fstype);
+    }
+    if !dev.label.is_empty() {
+        println!("  Label:              {}", dev.label);
+    }
+    if !dev.uuid.is_empty() {
+        println!("  UUID:               {}", dev.uuid);
+    }
+    if !dev.mountpoint.is_empty() {
+        println!("  Mount point:        {}", dev.mountpoint);
+    }
+
+    // Show scheduler info if available.
+    let sched_path = format!("/sys/block/{}/queue/scheduler", dev.name);
+    if let Some(sched) = read_file(&sched_path) {
+        if !sched.is_empty() {
+            println!("  I/O scheduler:      {}", sched);
+        }
+    }
+
+    if !dev.children.is_empty() {
+        println!();
+        println!("  Partitions ({}):", dev.children.len());
+        println!(
+            "    {:<14} {:>10} {:<8} {:<8} {}",
+            "NAME", "SIZE", "FSTYPE", "LABEL", "MOUNTPOINT"
+        );
+        for child in &dev.children {
+            println!(
+                "    {:<14} {:>10} {:<8} {:<8} {}",
+                child.name,
+                format_size(child.size_bytes()),
+                if child.fstype.is_empty() { "-" } else { &child.fstype },
+                if child.label.is_empty() { "-" } else { &child.label },
+                if child.mountpoint.is_empty() { "-" } else { &child.mountpoint },
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Subcommand: format
+// ============================================================================
+
+/// Format a partition with the specified filesystem type.
+fn cmd_format(device_name: &str, fstype: &str) {
+    let dev_name = device_name.strip_prefix("/dev/").unwrap_or(device_name);
+
+    // Validate filesystem type.
+    match fstype {
+        "ext4" | "fat32" | "vfat" | "tmpfs" => {}
+        other => {
+            eprintln!("error: unsupported filesystem type '{other}'");
+            eprintln!("  Supported types: ext4, fat32, tmpfs");
+            process::exit(1);
+        }
+    }
+
+    // Verify the device exists.
+    if find_device(dev_name).is_none() {
+        eprintln!("error: device '{}' not found", dev_name);
+        process::exit(1);
+    }
+
+    // Check if the device is currently mounted.
+    let mounts = parse_mounts();
+    if mounts.contains_key(dev_name) {
+        eprintln!("error: /dev/{} is currently mounted", dev_name);
+        eprintln!("  Unmount it first with: mount -u /dev/{}", dev_name);
+        process::exit(1);
+    }
+
+    println!("Formatting /dev/{} as {}...", dev_name, fstype);
+
+    let dev_cstr = c_str(&format!("/dev/{dev_name}"));
+    let fs_cstr = c_str(fstype);
+
+    let ret = unsafe {
+        syscall3(
+            SYS_FS_FORMAT,
+            dev_cstr.as_ptr() as u64,
+            fs_cstr.as_ptr() as u64,
+            0, // flags (reserved)
+        )
+    };
+
+    if ret < 0 {
+        eprintln!("error: format failed: {}", syscall_error_msg(ret));
+        process::exit(1);
+    }
+
+    println!("Successfully formatted /dev/{} as {}", dev_name, fstype);
+}
+
+// ============================================================================
+// Subcommand: verify
+// ============================================================================
+
+/// Check filesystem integrity (read-only).
+fn cmd_verify(device_name: &str) {
+    let dev_name = device_name.strip_prefix("/dev/").unwrap_or(device_name);
+
+    let dev = match find_device(dev_name) {
+        Some(d) => d,
+        None => {
+            eprintln!("error: device '{}' not found", dev_name);
+            process::exit(1);
+        }
+    };
+
+    if dev.fstype.is_empty() {
+        eprintln!("warning: no filesystem type detected on /dev/{}", dev_name);
+        eprintln!("  The device may be unformatted or the filesystem is unrecognized.");
+    }
+
+    println!("Verifying filesystem on /dev/{}...", dev_name);
+    if !dev.fstype.is_empty() {
+        println!("  Filesystem type: {}", dev.fstype);
+    }
+    println!("  Mode: read-only check");
+
+    let dev_cstr = c_str(&format!("/dev/{dev_name}"));
+
+    // flags=0 means read-only check
+    let ret = unsafe {
+        syscall2(
+            SYS_FS_VERIFY,
+            dev_cstr.as_ptr() as u64,
+            0, // flags: 0 = read-only
+        )
+    };
+
+    if ret < 0 {
+        eprintln!("Verification FAILED: {}", syscall_error_msg(ret));
+        process::exit(1);
+    }
+
+    println!("Verification complete: filesystem is clean.");
+}
+
+// ============================================================================
+// Subcommand: repair
+// ============================================================================
+
+/// Attempt to repair a filesystem.
+fn cmd_repair(device_name: &str) {
+    let dev_name = device_name.strip_prefix("/dev/").unwrap_or(device_name);
+
+    if find_device(dev_name).is_none() {
+        eprintln!("error: device '{}' not found", dev_name);
+        process::exit(1);
+    }
+
+    // Ensure not mounted.
+    let mounts = parse_mounts();
+    if mounts.contains_key(dev_name) {
+        eprintln!("error: /dev/{} is currently mounted", dev_name);
+        eprintln!("  Unmount it first before attempting repair.");
+        process::exit(1);
+    }
+
+    println!("Repairing filesystem on /dev/{}...", dev_name);
+    println!("  WARNING: This may modify on-disk data.");
+
+    let dev_cstr = c_str(&format!("/dev/{dev_name}"));
+
+    // flags=1 means write-mode repair
+    let ret = unsafe {
+        syscall2(
+            SYS_FS_REPAIR,
+            dev_cstr.as_ptr() as u64,
+            1, // flags: 1 = allow writes for repair
+        )
+    };
+
+    if ret < 0 {
+        eprintln!("Repair FAILED: {}", syscall_error_msg(ret));
+        process::exit(1);
+    }
+
+    println!("Repair complete.");
+}
+
+// ============================================================================
+// Subcommand: usage
+// ============================================================================
+
+/// Statfs result structure for the SYS_FS_STATFS syscall.
+#[repr(C)]
+#[allow(dead_code)]
+struct StatfsResult {
+    /// Total data blocks in filesystem.
+    total_blocks: u64,
+    /// Free blocks in filesystem.
+    free_blocks: u64,
+    /// Free blocks available to unprivileged user.
+    avail_blocks: u64,
+    /// Total file nodes in filesystem.
+    total_inodes: u64,
+    /// Free file nodes in filesystem.
+    free_inodes: u64,
+    /// Filesystem block size.
+    block_size: u64,
+}
+
+/// Show disk space usage for a mount point or path.
+fn cmd_usage(path: &str) {
+    // Try to find which mount point covers this path.
+    let mounts_by_path = parse_mounts_by_path();
+
+    // Find the longest mount-point prefix that matches.
+    let mut best_mount = String::new();
+    let mut best_dev = String::new();
+    let mut best_fstype = String::new();
+
+    for (mount, (dev, fstype, _opts)) in &mounts_by_path {
+        if path.starts_with(mount.as_str()) && mount.len() > best_mount.len() {
+            best_mount.clone_from(mount);
+            best_dev.clone_from(dev);
+            best_fstype.clone_from(fstype);
+        }
+    }
+
+    if best_mount.is_empty() {
+        // If no mount found, treat path as "/" by default.
+        best_mount = "/".to_string();
+        if let Some((dev, fstype, _opts)) = mounts_by_path.get("/") {
+            best_dev.clone_from(dev);
+            best_fstype.clone_from(fstype);
+        }
+    }
+
+    println!("Disk usage for: {}", path);
+    println!("  Mount point:   {}", best_mount);
+    if !best_dev.is_empty() {
+        println!("  Device:        {}", best_dev);
+    }
+    if !best_fstype.is_empty() {
+        println!("  Filesystem:    {}", best_fstype);
+    }
+    println!();
+
+    // Issue statfs syscall on the path.
+    let mut result = StatfsResult {
+        total_blocks: 0,
+        free_blocks: 0,
+        avail_blocks: 0,
+        total_inodes: 0,
+        free_inodes: 0,
+        block_size: 0,
+    };
+
+    let path_cstr = c_str(path);
+
+    let ret = unsafe {
+        syscall2(
+            SYS_FS_STATFS,
+            path_cstr.as_ptr() as u64,
+            &mut result as *mut StatfsResult as u64,
+        )
+    };
+
+    if ret < 0 {
+        // If the syscall is not available, try to read from /proc/mounts
+        // and /sys/block for an estimate.
+        eprintln!(
+            "  (statfs syscall unavailable: {}; showing estimate from sysfs)",
+            syscall_error_msg(ret)
+        );
+        show_usage_estimate(path, &best_dev);
+        return;
+    }
+
+    let block_size = if result.block_size > 0 {
+        result.block_size
+    } else {
+        4096
+    };
+
+    let total_bytes = result.total_blocks.saturating_mul(block_size);
+    let free_bytes = result.free_blocks.saturating_mul(block_size);
+    let avail_bytes = result.avail_blocks.saturating_mul(block_size);
+    let used_bytes = total_bytes.saturating_sub(free_bytes);
+
+    let used_pct = if total_bytes > 0 {
+        ((used_bytes as f64 / total_bytes as f64) * 100.0) as u64
+    } else {
+        0
+    };
+
+    println!("  Total:         {}", format_size(total_bytes));
+    println!("  Used:          {} ({}%)", format_size(used_bytes), used_pct);
+    println!("  Free:          {}", format_size(free_bytes));
+    println!("  Available:     {}", format_size(avail_bytes));
+
+    if result.total_inodes > 0 {
+        let used_inodes = result.total_inodes.saturating_sub(result.free_inodes);
+        let inode_pct = ((used_inodes as f64 / result.total_inodes as f64) * 100.0) as u64;
+        println!();
+        println!(
+            "  Inodes:        {} / {} ({}% used)",
+            used_inodes, result.total_inodes, inode_pct
+        );
+    }
+
+    // Render a simple bar chart.
+    println!();
+    print_usage_bar(used_pct);
+}
+
+/// Show an estimated usage when statfs is not available, using sysfs data.
+fn show_usage_estimate(path: &str, dev_name: &str) {
+    let dev_name = dev_name.strip_prefix("/dev/").unwrap_or(dev_name);
+
+    if let Some(dev) = find_device(dev_name) {
+        println!("  Total:         {}", format_size(dev.size_bytes()));
+        println!("  (exact usage data not available without statfs)");
+    } else {
+        println!("  Could not determine usage for '{}'", path);
+    }
+}
+
+/// Print a horizontal bar showing percent usage.
+fn print_usage_bar(pct: u64) {
+    let bar_width: u64 = 40;
+    let filled = (pct.saturating_mul(bar_width)) / 100;
+    let empty = bar_width.saturating_sub(filled);
+
+    let bar_char = if pct >= 90 {
+        '!'
+    } else if pct >= 75 {
+        '#'
+    } else {
+        '='
+    };
+
+    let label = if pct >= 90 {
+        "CRITICAL"
+    } else if pct >= 75 {
+        "WARNING"
+    } else {
+        "OK"
+    };
+
+    print!("  [");
+    for _ in 0..filled {
+        print!("{bar_char}");
+    }
+    for _ in 0..empty {
+        print!(" ");
+    }
+    println!("] {}% {}", pct, label);
+}
+
+// ============================================================================
+// Subcommand: benchmark
+// ============================================================================
+
+/// Run a sequential I/O benchmark on a device (via its mount point).
+fn cmd_benchmark(device_name: &str) {
+    let dev_name = device_name.strip_prefix("/dev/").unwrap_or(device_name);
+
+    // Find where the device is mounted so we can write a test file.
+    let mounts = parse_mounts();
+
+    let mount_point = match mounts.get(dev_name) {
+        Some(mp) => mp.clone(),
+        None => {
+            // If the device itself is not in the mount table, check children.
+            let devices = get_all_devices();
+            let mut found = None;
+            'outer: for d in &devices {
+                if d.name == dev_name {
+                    if !d.mountpoint.is_empty() {
+                        found = Some(d.mountpoint.clone());
+                        break;
+                    }
+                    for c in &d.children {
+                        if !c.mountpoint.is_empty() {
+                            found = Some(c.mountpoint.clone());
+                            break 'outer;
+                        }
+                    }
+                }
+                for c in &d.children {
+                    if c.name == dev_name && !c.mountpoint.is_empty() {
+                        found = Some(c.mountpoint.clone());
+                        break 'outer;
+                    }
+                }
+            }
+
+            match found {
+                Some(mp) => mp,
+                None => {
+                    eprintln!("error: /dev/{} is not mounted", dev_name);
+                    eprintln!("  Mount it first, then re-run the benchmark.");
+                    eprintln!("  (The benchmark writes a temporary file to the mount point.)");
+                    process::exit(1);
+                }
+            }
+        }
+    };
+
+    println!("=== Disk Benchmark: /dev/{} ===", dev_name);
+    println!("  Mount point: {}", mount_point);
+    println!();
+
+    let test_file = format!("{}/.diskutil_benchmark_tmp", mount_point);
+
+    // Benchmark parameters.
+    // Write 64 MiB in 1 MiB chunks for sequential write test.
+    let chunk_size: usize = 1024 * 1024; // 1 MiB
+    let total_size: usize = 64 * chunk_size; // 64 MiB
+    let chunk_count = total_size / chunk_size;
+
+    // Generate a data pattern (sequential bytes to avoid compression effects).
+    let mut pattern = vec![0u8; chunk_size];
+    for (i, byte) in pattern.iter_mut().enumerate() {
+        *byte = (i & 0xFF) as u8;
+    }
+
+    // -- Sequential Write --
+    println!("  Sequential write ({} x 1 MiB)...", chunk_count);
+
+    let write_result = benchmark_write(&test_file, &pattern, chunk_count);
+
+    match write_result {
+        Ok((duration_secs, bytes_written)) => {
+            let throughput = bytes_written as f64 / duration_secs;
+            println!(
+                "    Write: {} in {:.2}s = {}",
+                format_size(bytes_written as u64),
+                duration_secs,
+                format_throughput(throughput)
+            );
+        }
+        Err(e) => {
+            eprintln!("    Write FAILED: {}", e);
+            // Clean up and bail.
+            let _ = fs::remove_file(&test_file);
+            process::exit(1);
+        }
+    }
+
+    // -- Sequential Read --
+    println!("  Sequential read ({} x 1 MiB)...", chunk_count);
+
+    let read_result = benchmark_read(&test_file, chunk_size, chunk_count);
+
+    match read_result {
+        Ok((duration_secs, bytes_read)) => {
+            let throughput = bytes_read as f64 / duration_secs;
+            println!(
+                "    Read:  {} in {:.2}s = {}",
+                format_size(bytes_read as u64),
+                duration_secs,
+                format_throughput(throughput)
+            );
+        }
+        Err(e) => {
+            eprintln!("    Read FAILED: {}", e);
+        }
+    }
+
+    // Clean up.
+    if let Err(e) = fs::remove_file(&test_file) {
+        eprintln!("  warning: could not remove test file: {}", e);
+    }
+
+    println!();
+    println!("  Benchmark complete.");
+}
+
+/// Write `chunk_count` copies of `pattern` to a file, return (seconds, bytes_written).
+fn benchmark_write(
+    path: &str,
+    pattern: &[u8],
+    chunk_count: usize,
+) -> Result<(f64, usize), String> {
+    let mut file = fs::File::create(path).map_err(|e| format!("create: {e}"))?;
+
+    let start = Instant::now();
+
+    let mut total_bytes = 0usize;
+    for _ in 0..chunk_count {
+        file.write_all(pattern).map_err(|e| format!("write: {e}"))?;
+        total_bytes += pattern.len();
+    }
+
+    file.flush().map_err(|e| format!("flush: {e}"))?;
+    // Ensure data hits the storage device, not just the page cache.
+    file.sync_all().map_err(|e| format!("sync: {e}"))?;
+
+    let elapsed = start.elapsed();
+    let secs = elapsed.as_secs_f64();
+
+    Ok((secs, total_bytes))
+}
+
+/// Read `chunk_count` chunks of `chunk_size` from a file, return (seconds, bytes_read).
+fn benchmark_read(
+    path: &str,
+    chunk_size: usize,
+    chunk_count: usize,
+) -> Result<(f64, usize), String> {
+    let mut file = fs::File::open(path).map_err(|e| format!("open: {e}"))?;
+    let mut buf = vec![0u8; chunk_size];
+
+    let start = Instant::now();
+
+    let mut total_bytes = 0usize;
+    for _ in 0..chunk_count {
+        let n = file.read(&mut buf).map_err(|e| format!("read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        total_bytes += n;
+    }
+
+    let elapsed = start.elapsed();
+    let secs = elapsed.as_secs_f64();
+
+    Ok((secs, total_bytes))
+}
+
+// ============================================================================
+// Subcommand: smart
+// ============================================================================
+
+/// Show S.M.A.R.T. status for a disk.
+fn cmd_smart(device_name: &str) {
+    let dev_name = device_name.strip_prefix("/dev/").unwrap_or(device_name);
+
+    let dev = match find_disk(dev_name) {
+        Some(d) => d,
+        None => match find_device(dev_name) {
+            Some(d) => d,
+            None => {
+                eprintln!("error: device '{}' not found", dev_name);
+                process::exit(1);
+            }
+        },
+    };
+
+    println!("=== S.M.A.R.T. Status: /dev/{} ===", dev.name);
+    println!();
+
+    if !dev.model.is_empty() {
+        println!("  Model:          {}", dev.model);
+    }
+    if !dev.serial.is_empty() {
+        println!("  Serial:         {}", dev.serial);
+    }
+    if !dev.firmware.is_empty() {
+        println!("  Firmware:       {}", dev.firmware);
+    }
+
+    println!("  Type:           {}", if dev.is_ssd { "SSD" } else { "HDD" });
+    println!();
+
+    // Read SMART attributes from /sys/block/<dev>/device/ subdirectories.
+    // OurOS exposes these in a simplified sysfs interface.
+    let smart_base = format!("/sys/block/{}/device", dev.name);
+
+    let smart_attrs: &[(&str, &str)] = &[
+        ("smart/status", "Overall status"),
+        ("smart/temperature", "Temperature"),
+        ("smart/power_on_hours", "Power-on hours"),
+        ("smart/power_cycle_count", "Power cycle count"),
+        ("smart/reallocated_sectors", "Reallocated sectors"),
+        ("smart/pending_sectors", "Pending sectors"),
+        ("smart/uncorrectable_errors", "Uncorrectable errors"),
+        ("smart/wear_leveling_count", "Wear leveling count"),
+        ("smart/percentage_used", "Percentage used"),
+        ("smart/available_spare", "Available spare"),
+        ("smart/data_units_read", "Data units read"),
+        ("smart/data_units_written", "Data units written"),
+    ];
+
+    let mut any_found = false;
+
+    for (attr_path, label) in smart_attrs {
+        let full_path = format!("{smart_base}/{attr_path}");
+        if let Some(val) = read_file(&full_path) {
+            if !val.is_empty() {
+                println!("  {:<24} {}", format!("{}:", label), val);
+                any_found = true;
+            }
+        }
+    }
+
+    if !any_found {
+        println!("  S.M.A.R.T. data not available.");
+        println!("  (The kernel may not expose SMART attributes for this device,");
+        println!("   or the device does not support S.M.A.R.T.)");
+    }
+
+    // Also check for the overall health indicator.
+    let health_path = format!("{smart_base}/smart/status");
+    if let Some(status) = read_file(&health_path) {
+        println!();
+        if status.to_ascii_lowercase().contains("pass")
+            || status.to_ascii_lowercase().contains("ok")
+            || status.to_ascii_lowercase().contains("good")
+        {
+            println!("  Health: PASSED");
+        } else if status.to_ascii_lowercase().contains("fail") {
+            println!("  Health: FAILED -- Back up your data immediately!");
+        } else {
+            println!("  Health: {}", status);
+        }
+    }
+}
+
+// ============================================================================
+// Subcommand: trim
+// ============================================================================
+
+/// Issue TRIM/discard command to an SSD.
+fn cmd_trim(device_name: &str) {
+    let dev_name = device_name.strip_prefix("/dev/").unwrap_or(device_name);
+
+    let dev = match find_device(dev_name) {
+        Some(d) => d,
+        None => {
+            eprintln!("error: device '{}' not found", dev_name);
+            process::exit(1);
+        }
+    };
+
+    if !dev.is_ssd {
+        eprintln!("warning: /dev/{} does not appear to be an SSD (rotational != 0)", dev.name);
+        eprintln!("  TRIM is typically only meaningful for SSDs.");
+        eprintln!("  Proceeding anyway...");
+    }
+
+    // Check discard_granularity to confirm TRIM support.
+    let discard_gran = read_u64(&format!(
+        "/sys/block/{}/queue/discard_granularity",
+        dev.name
+    ));
+    if discard_gran == 0 {
+        eprintln!("error: /dev/{} does not support TRIM (discard_granularity = 0)", dev.name);
+        process::exit(1);
+    }
+
+    println!("Issuing TRIM to /dev/{}...", dev.name);
+    println!("  Size: {}", format_size(dev.size_bytes()));
+
+    let dev_cstr = c_str(&format!("/dev/{}", dev.name));
+
+    // Trim the entire device: offset=0, length=total size.
+    let ret = unsafe {
+        syscall3(
+            SYS_FS_TRIM,
+            dev_cstr.as_ptr() as u64,
+            0, // offset
+            dev.size_bytes(),
+        )
+    };
+
+    if ret < 0 {
+        eprintln!("TRIM failed: {}", syscall_error_msg(ret));
+        process::exit(1);
+    }
+
+    println!("TRIM complete.");
+}
+
+// ============================================================================
+// Subcommand: partitions
+// ============================================================================
+
+/// List the partition table of a disk.
+fn cmd_partitions(device_name: &str) {
+    let dev_name = device_name.strip_prefix("/dev/").unwrap_or(device_name);
+
+    let dev = match find_disk(dev_name) {
+        Some(d) => d,
+        None => {
+            eprintln!("error: device '{}' not found (or it is a partition, not a disk)", dev_name);
+            eprintln!("  Provide a whole-disk device name (e.g. sda, nvme0n1).");
+            process::exit(1);
+        }
+    };
+
+    println!("=== Partition Table: /dev/{} ===", dev.name);
+    println!("  Disk size: {}", format_size(dev.size_bytes()));
+    println!();
+
+    // Try to detect partition table type from sysfs.
+    let table_type = detect_partition_table_type(&dev.name);
+    println!("  Table type:  {}", table_type);
+    println!();
+
+    if dev.children.is_empty() {
+        println!("  (no partitions found)");
+        return;
+    }
+
+    println!(
+        "  {:<4} {:<14} {:>12} {:>12} {:>10} {:<8} {}",
+        "#", "NAME", "START", "END", "SIZE", "FSTYPE", "LABEL"
+    );
+    println!(
+        "  {:<4} {:<14} {:>12} {:>12} {:>10} {:<8} {}",
+        "-", "----", "-----", "---", "----", "------", "-----"
+    );
+
+    for (idx, child) in dev.children.iter().enumerate() {
+        // Read partition start offset from sysfs.
+        let start_sectors = read_u64(&format!(
+            "/sys/block/{}/{}/start",
+            dev.name, child.name
+        ));
+        let end_sectors = start_sectors.saturating_add(child.size_sectors).saturating_sub(1);
+
+        let part_num = idx.saturating_add(1);
+
+        println!(
+            "  {:<4} {:<14} {:>12} {:>12} {:>10} {:<8} {}",
+            part_num,
+            child.name,
+            start_sectors,
+            end_sectors,
+            format_size(child.size_bytes()),
+            if child.fstype.is_empty() { "-" } else { &child.fstype },
+            if child.label.is_empty() { "-" } else { &child.label },
+        );
+    }
+
+    // Show disk GUID if GPT.
+    if table_type == "GPT" {
+        let guid_path = format!("/sys/block/{}/device/wwid", dev.name);
+        if let Some(guid) = read_file(&guid_path) {
+            if !guid.is_empty() {
+                println!();
+                println!("  Disk GUID: {}", guid);
+            }
+        }
+    }
+}
+
+/// Detect whether a disk uses MBR or GPT by reading sysfs hints or
+/// examining the partition layout.
+fn detect_partition_table_type(disk_name: &str) -> &'static str {
+    // Check /sys/block/<disk>/device/partition_table_type if our kernel exposes it.
+    let ptt_path = format!("/sys/block/{disk_name}/device/partition_table_type");
+    if let Some(ptt) = read_file(&ptt_path) {
+        let lower = ptt.to_ascii_lowercase();
+        if lower.contains("gpt") {
+            return "GPT";
+        }
+        if lower.contains("mbr") || lower.contains("dos") {
+            return "MBR";
+        }
+    }
+
+    // Heuristic: if any partition number > 4, it is likely GPT (MBR only
+    // supports 4 primary partitions natively, though logical partitions exist).
+    // Also, NVMe devices almost always use GPT.
+    if disk_name.starts_with("nvme") {
+        return "GPT (assumed)";
+    }
+
+    // Check partition numbers via sysfs.
+    let block_path = format!("/sys/block/{disk_name}");
+    if let Ok(entries) = fs::read_dir(&block_path) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with(disk_name) {
+                // Extract the numeric suffix.
+                let suffix = &name_str[disk_name.len()..];
+                // NVMe partitions have a 'p' prefix before the number.
+                let suffix = suffix.strip_prefix('p').unwrap_or(suffix);
+                if let Ok(num) = suffix.parse::<u32>() {
+                    if num > 4 {
+                        return "GPT (inferred)";
+                    }
+                }
+            }
+        }
+    }
+
+    "Unknown"
+}
+
+// ============================================================================
+// Usage / help
+// ============================================================================
+
+fn print_usage() {
+    println!("OurOS Disk Utility v0.1.0");
+    println!();
+    println!("Disk management, diagnostics, and benchmarking.");
+    println!();
+    println!("USAGE:");
+    println!("  diskutil <command> [arguments]");
+    println!();
+    println!("COMMANDS:");
+    println!("  list                      List all disks and partitions");
+    println!("  info <device>             Detailed device information");
+    println!("  format <device> <fstype>  Format a partition (ext4, fat32, tmpfs)");
+    println!("  verify <device>           Check filesystem integrity (read-only)");
+    println!("  repair <device>           Attempt filesystem repair");
+    println!("  usage <path>              Disk space usage for a mount point");
+    println!("  benchmark <device>        Sequential read/write speed test");
+    println!("  smart <device>            Show S.M.A.R.T. status");
+    println!("  trim <device>             Issue TRIM/discard to SSD");
+    println!("  partitions <device>       List partition table (MBR or GPT)");
+    println!();
+    println!("EXAMPLES:");
+    println!("  diskutil list");
+    println!("  diskutil info sda");
+    println!("  diskutil info /dev/nvme0n1");
+    println!("  diskutil format /dev/sda1 ext4");
+    println!("  diskutil verify sda1");
+    println!("  diskutil usage /home");
+    println!("  diskutil benchmark sda");
+    println!("  diskutil smart sda");
+    println!("  diskutil trim nvme0n1");
+    println!("  diskutil partitions sda");
+    println!();
+    println!("DEVICE NAMES:");
+    println!("  Devices can be specified with or without the /dev/ prefix.");
+    println!("  Examples: sda, sda1, nvme0n1, nvme0n1p1, vda, /dev/sda");
+}
+
+// ============================================================================
+// Main dispatch
+// ============================================================================
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 {
+        print_usage();
+        process::exit(0);
+    }
+
+    let command = args[1].as_str();
+
+    match command {
+        "list" | "ls" => {
+            cmd_list();
+        }
+
+        "info" | "show" => {
+            if args.len() < 3 {
+                eprintln!("error: 'info' requires a device name");
+                eprintln!("  Usage: diskutil info <device>");
+                process::exit(1);
+            }
+            cmd_info(&args[2]);
+        }
+
+        "format" | "mkfs" => {
+            if args.len() < 4 {
+                eprintln!("error: 'format' requires a device name and filesystem type");
+                eprintln!("  Usage: diskutil format <device> <fstype>");
+                eprintln!("  Types: ext4, fat32, tmpfs");
+                process::exit(1);
+            }
+            cmd_format(&args[2], &args[3]);
+        }
+
+        "verify" | "check" | "fsck" => {
+            if args.len() < 3 {
+                eprintln!("error: 'verify' requires a device name");
+                eprintln!("  Usage: diskutil verify <device>");
+                process::exit(1);
+            }
+            cmd_verify(&args[2]);
+        }
+
+        "repair" | "fix" => {
+            if args.len() < 3 {
+                eprintln!("error: 'repair' requires a device name");
+                eprintln!("  Usage: diskutil repair <device>");
+                process::exit(1);
+            }
+            cmd_repair(&args[2]);
+        }
+
+        "usage" | "df" => {
+            if args.len() < 3 {
+                // Default to root filesystem.
+                cmd_usage("/");
+            } else {
+                cmd_usage(&args[2]);
+            }
+        }
+
+        "benchmark" | "bench" => {
+            if args.len() < 3 {
+                eprintln!("error: 'benchmark' requires a device name");
+                eprintln!("  Usage: diskutil benchmark <device>");
+                process::exit(1);
+            }
+            cmd_benchmark(&args[2]);
+        }
+
+        "smart" => {
+            if args.len() < 3 {
+                eprintln!("error: 'smart' requires a device name");
+                eprintln!("  Usage: diskutil smart <device>");
+                process::exit(1);
+            }
+            cmd_smart(&args[2]);
+        }
+
+        "trim" | "discard" => {
+            if args.len() < 3 {
+                eprintln!("error: 'trim' requires a device name");
+                eprintln!("  Usage: diskutil trim <device>");
+                process::exit(1);
+            }
+            cmd_trim(&args[2]);
+        }
+
+        "partitions" | "parts" | "parttable" => {
+            if args.len() < 3 {
+                eprintln!("error: 'partitions' requires a device name");
+                eprintln!("  Usage: diskutil partitions <device>");
+                process::exit(1);
+            }
+            cmd_partitions(&args[2]);
+        }
+
+        "--help" | "-h" | "help" => {
+            print_usage();
+        }
+
+        unknown => {
+            eprintln!("error: unknown command '{unknown}'");
+            eprintln!("  Run 'diskutil --help' for usage.");
+            process::exit(1);
+        }
+    }
+}

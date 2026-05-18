@@ -1551,7 +1551,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Signals and slots (signal.rs: Signal<T>, connect/emit/disconnect, re-entrancy safe, EventBus named registry, SignalGroup)
 - [x] Core widgets:
   - [x] Buttons (text), labels
-  - [ ] Menus
+  - [x] Menu bar (menubar.rs: top-level labels, dropdown, hot-tracking, submenus, mnemonics, accelerators)
   - [x] Input fields (single-line TextInput, multiline TextArea)
   - [x] Checkboxes, tristate checkboxes (Unchecked/Checked/Indeterminate)
   - [x] Radio buttons
@@ -1652,7 +1652,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Language detection (12 languages from extension)
   - [x] Line numbers (gutter), scroll support, status bar
   - [x] Dark theme (Catppuccin Mocha)
-  - [ ] Syntax highlighting (token-based coloring)
+  - [x] Syntax highlighting (highlight.rs: 8 languages, 19 token types, multi-line state, Catppuccin theme)
   - [ ] Port Helix or integrate tree-sitter for advanced editing
 - [-] Process explorer:
   - [x] Sortable process table (PID, name, status, CPU%, memory, threads, priority, user)

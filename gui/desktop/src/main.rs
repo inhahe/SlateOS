@@ -62,6 +62,8 @@ mod input_method;
 mod window_rules;
 #[allow(dead_code)]
 mod touchpad;
+#[allow(dead_code)]
+mod screen_capture;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

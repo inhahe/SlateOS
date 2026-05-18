@@ -1532,6 +1532,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] tsort: topological sort (Kahn's algorithm, cycle detection, BTreeMap graph, pair input)
   - [x] look: sorted file prefix search (binary search, -d alphanumeric, -f case-insensitive, -t termination)
   - [x] objdump/nm/size: ELF analysis tools (disassembly, headers, symbols, relocations, Berkeley/SysV size formats)
+  - [x] cpio: archive utility (newc SVR4 format, copy-out/in/pass-through, files/dirs/symlinks, glob extraction, block counting)
+  - [x] patch: diff applier (unified/context/normal formats, fuzz matching, strip, reverse, backup, dry-run, whitespace ignore)
+  - [x] mktemp/id/groups/whoami: temp files and user identity (secure temp creation, UID/GID display, group membership)
+  - [x] ipcalc: IP subnet calculator (IPv4/IPv6, CIDR, netmask, network/broadcast/hosts, class detect, private ranges, split)
+  - [x] seq/yes/expr: number sequences, repeated output, expression evaluator (arithmetic, comparison, regex, substr, index)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

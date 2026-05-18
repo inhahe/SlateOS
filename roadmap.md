@@ -1479,6 +1479,16 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] uniq: adjacent duplicate filter (count, repeated-only, field/char skip, group mode)
   - [x] tr: character translation/deletion/squeezing (POSIX classes, ranges, binary-safe)
   - [x] strings: printable string finder in binaries (multi-encoding, offset, min length)
+  - [x] hexdump/xxd: hex/octal/decimal/ASCII file dump (canonical, reverse, C include)
+  - [x] file: file type identification via magic numbers (40+ formats, MIME types, text heuristic)
+  - [x] cmp: byte-by-byte file comparison (verbose octal, silent mode, skip/limit)
+  - [x] comm: sorted file column comparison (suppress columns, case-insensitive)
+  - [x] paste: line merge from files (cycling delimiters, serial mode, NUL-terminated)
+  - [x] nl: line numbering (section headers, regex patterns, format styles)
+  - [x] expand/unexpand: tab/space conversion (custom tab stops, argv[0] mode detect)
+  - [x] fold: line wrapping (column-aware tab expansion, word break, byte mode)
+  - [x] split: file splitting (line/byte/count modes, alpha/numeric suffixes)
+  - [x] join: sorted file join (field selection, outer join, output format, header)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)
@@ -1740,14 +1750,14 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Keyboard translation (special keys → escape sequences, Ctrl+letter)
   - [x] Selection support, visual bell, configurable tab stops, color scheme
   - [ ] PTY integration with child process
-- [-] Calculator:
+- [x] Calculator:
   - [x] Standard and Scientific modes
   - [x] Recursive descent expression parser (proper operator precedence)
   - [x] Trig functions (sin/cos/tan/asin/acos/atan) with degree/radian toggle
   - [x] ln, log10, sqrt, pow, factorial, pi, e, abs, floor, ceil, mod
   - [x] History (last 20), memory operations (MS/MR/M+/M-/MC)
   - [x] Keyboard shortcuts, error handling (div by zero, overflow, domain errors)
-- [-] Settings/configuration UI (comprehensive, centralized):
+- [x] Settings/configuration UI (comprehensive, centralized):
   - [x] 8 category sidebar (System/Network/Personalization/Apps/Accounts/Privacy/Accessibility/Update)
   - [x] Display page: resolution, refresh rate, scaling, night light
   - [x] Sound page: output/input device, volume, system sounds, per-app volume

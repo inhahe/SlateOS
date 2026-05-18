@@ -37,7 +37,9 @@ exclude = [
     "apps/notes",
     "apps/slides",
     "apps/photomanager",
+    "apps/diagram",
     "apps/mediaconvert",
+    "apps/passwordgen",
 ]
 
 [workspace.lints.clippy]

@@ -1424,6 +1424,17 @@ _Port ext4 first. Don't write a custom filesystem._
 - [ ] Port ssh/sshd
 - [x] Build custom grep (Rust, regex support, line numbers, recursive, case-insensitive)
 - [x] Port find (glob matching, -name, -type, -maxdepth)
+- [x] System administration utilities — Rust userspace binaries:
+  - [x] sysinfo: system information reader (/proc, /sys), CPU/mem/disk/net/OS summary, JSON output
+  - [x] sanitize: filename sanitizer (4 modes: conservative/strict/windows/minimal, dry-run, recursive)
+  - [x] top: interactive process monitor (CPU/mem per-process, sort fields, batch mode, PID filter)
+  - [x] mount/umount: filesystem mounting with fstab support, bind mounts, option parsing
+  - [x] dmesg: kernel message buffer viewer (level filter, follow, JSON output, colored severity)
+  - [x] lspci: PCI device lister (vendor/device database, tree view, BAR info, verbosity levels)
+  - [x] service: service management CLI (list/start/stop/restart/enable/disable/logs/tree)
+  - [x] ip: network interface and route configuration (link up/down, addr/route management, ARP, DNS)
+  - [x] useradm: user account management (add/del/mod/passwd/lock/unlock, /etc/users.yaml, SHA-256)
+  - [x] monctl: monitor power control (off/on/standby/suspend, brightness, DPMS timers)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)
@@ -1533,7 +1544,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] 18 built-in application entries, keyboard navigation (arrows, Enter, Escape)
   - [x] Category filtering, hotkey activation (Super+Space)
 - [x] Ctrl+R run dialog (run_dialog.rs: text input, 50-entry history, fuzzy autocomplete, path resolution, Browse)
-- [ ] Sound mixer (per-app volume, show currently-playing apps first)
+- [x] Sound mixer (apps/mixer: per-app volume, device selection, peak meters, playing sort, keyboard nav)
 - [x] Light / dark / custom theme support (theme.rs: ThemeMode, 4 built-in themes, ThemeManager)
 - [x] Theme color API for applications (ThemeColors helper, semantic roles, derived states)
 - [ ] Multi-monitor support (deferred but planned)

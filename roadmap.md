@@ -1658,6 +1658,12 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Login screen greeter (login_screen.rs: user list with avatars, password entry, autologin, shake animation, lockout after max attempts, power menu, accessibility, keyboard layout indicator, gradient backgrounds)
 - [x] Session and workspace management (session_mgr.rs: workspace CRUD, window snapshot/apply, session save/restore, workspace picker overlay with search and keyboard navigation)
 - [x] Focus Assist / Do Not Disturb (focus_assist.rs: Off/PriorityOnly/AlarmsOnly/TotalSilence modes, auto-rules — schedule/fullscreen/presentation/gaming/battery, per-app overrides, tray indicator, settings panel)
+- [x] Mouse and keyboard settings (mouse_settings.rs: pointer speed/acceleration profiles, scroll modes, button mapping, cursor appearance, keyboard repeat rate/delay, 5-section expandable UI, dirty/revert)
+- [x] Sound settings (sound_settings.rs: audio device management, master/per-app volume, 12 system sound events, spatial audio modes, microphone config, noise suppression/echo cancel, 5-tab panel)
+- [x] Power and battery settings (power_settings.rs: 4 power plans, screen/sleep/hibernate timeouts, lid/button actions, battery health monitoring, charge history, brightness control, fast startup/WoL toggles)
+- [x] Network tray indicator (network_indicator.rs: connection type display, WiFi flyout with signal bars, airplane mode, transfer rate formatting, keyboard navigation, rate history sparkline)
+- [x] Storage management settings (storage_settings.rs: 10-category disk usage breakdown, Storage Sense auto-cleanup, retention periods, save locations, reclaimable space estimates, low-space warnings)
+- [x] Privacy and permissions settings (privacy_settings.rs: 10 permission types, global toggles, per-app allow/deny, activity log, telemetry control, access count tracking)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1871,6 +1877,8 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] System restore (apps/systemrestore: tree-based snapshots, scheduling, retention, comparison, export/import, storage management)
 - [x] Unit converter (apps/unitconverter: 12 categories, base-unit conversion, history, favorites, formula display)
 - [x] Weather dashboard (apps/weather: current/hourly/daily forecast, alerts, locations, temp graph, air quality, unit settings)
+- [x] Partition manager (apps/partmanager: visual disk map, GPT/MBR, create/delete/resize/format with pending queue, SMART health, multi-disk sidebar, 101 tests)
+- [x] Credential manager (apps/credmanager: password vault, login/note/card/identity/SSH entries, generator with entropy, audit, folders/tags, auto-lock, 122 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

@@ -1511,6 +1511,10 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ssh-keygen: Ed25519 SSH key generation (curve25519 math, SHA-256 fingerprints, OpenSSH format, PEM keys)
   - [x] arp: ARP cache management (/proc/net/arp, add/delete/probe, interface filter, flag decoding)
   - [x] whois: WHOIS domain/IP/ASN lookup (50+ TLD server database, referral following, TCP query)
+  - [x] zip/unzip: ZIP archive create/extract (DEFLATE, CRC32, argv[0] mode, recursive, levels 0-9)
+  - [x] readelf: ELF binary inspector (header/sections/segments/symbols/relocs/dynamic/notes, ELF32+ELF64)
+  - [x] ldd: shared library dependency lister (DT_NEEDED, recursive resolution, RPATH/RUNPATH/LD_LIBRARY_PATH)
+  - [x] stty: terminal settings (termios ioctls, all flag categories, baud rates, raw/cooked/sane, control chars)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

@@ -1610,6 +1610,10 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Wallpaper manager (wallpaper.rs: solid/image/slideshow/dynamic modes, ImageFit, shuffle, history, time-of-day gradients, config persistence)
 - [x] Power management and screen saver (power.rs: 4 profiles, 5 screen saver styles, battery monitoring, idle timeouts, inhibitors, lid/button actions)
 - [x] Calendar widget and clock (calendar.rs: month grid, event store, recurring events, reminders with snooze, 12h/24h clock, timezone display)
+- [x] Accessibility features (a11y.rs: screen magnifier 4 shapes, high contrast 4 modes, color vision filters, sticky/filter/mouse keys, cursor customization, focus indicator)
+- [x] Resource monitor widget (resmon.rs: compact/expanded sparklines, CPU/memory/disk/network tracking, 64-sample circular buffers, bar graphs)
+- [x] Global hotkey manager (hotkeys.rs: HotkeyRegistry, 22 action types, 20+ default bindings, conflict detection, config persistence, settings panel)
+- [x] Animation system (animations.rs: 9 easing functions, window open/close/minimize/snap animations, desktop slide transitions, color interpolation, fade overlays, reduced-motion support)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)

@@ -1680,6 +1680,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Startup app settings (startup_settings.rs: startup app management with impact assessment, boot time measurement, auto-disable failing apps, delay config, sorted/filtered app list)
 - [x] Date and time settings (datetime_settings.rs: 20 timezones with DST, NTP sync config with status, additional world clocks, taskbar clock display options)
 - [x] Accessibility settings (accessibility_settings.rs: high contrast/color filters, text scaling, cursor indicators, sticky/filter/mouse keys, visual alerts, screen reader config, magnifier with lens modes, 5-tab settings UI)
+- [x] Network settings (network_settings.rs: WiFi scanning/profiles, Ethernet config, IPv4 DHCP/static, DNS with DoH, proxy, firewall rules, airplane mode, 6-tab panel)
+- [x] Default apps settings (default_apps.rs: 12 content categories, 10 built-in apps, per-category/extension handlers, app register/unregister, 3-tab panel)
+- [x] Backup settings (backup_settings.rs: full/incremental/differential/mirror, 5 frequencies, local/network targets, source/exclusion management, retention policies, history, 5-tab panel)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1902,6 +1905,8 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Remote desktop viewer (apps/remotedesktop: RDP/VNC/SSH protocols, connection profiles, clipboard sync, file transfer, quality presets, multi-monitor, performance overlay, hotkeys, 103 tests)
 - [x] System benchmark (apps/benchmark: CPU/memory/disk/graphics benchmarks, score calculation, result history, comparison, hardware detection, progress tracking, 93 tests)
 - [x] Screen recorder (apps/screenrecorder: region/window/fullscreen capture, H.264/VP9/AV1 encoding, audio sources, hotkeys, timer/schedule, annotations, watermark, auto-upload, webcam overlay, 113 tests)
+- [x] Paint/drawing application (apps/paint: pencil/line/rect/ellipse/polygon/fill/eraser/spray/text/eyedropper tools, layers with opacity, selection, transforms, BMP save/load, zoom 25-800%, grid overlay, undo/redo, keyboard shortcuts, 155 tests)
+- [x] Markdown editor (apps/markdowneditor: split view editor/preview, full markdown parser with tables/task lists/code blocks, syntax highlighting, live preview, multi-tab, find/replace, HTML export, TOC sidebar, templates, auto-save, undo/redo, 171 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

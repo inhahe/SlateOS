@@ -72,6 +72,12 @@ mod bluetooth;
 mod file_drop;
 #[allow(dead_code)]
 mod osd;
+#[allow(dead_code)]
+mod context_ext;
+#[allow(dead_code)]
+mod widgets;
+#[allow(dead_code)]
+mod login_screen;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

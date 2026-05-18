@@ -1652,6 +1652,10 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Print manager (print_manager.rs: printer CRUD, paper sizes, orientation, quality, color modes, job lifecycle with submit/cancel/pause/resume, spooler control, queue management, print dialog)
 - [x] Bluetooth settings (bluetooth.rs: adapter power, discovery, pairing, connect/disconnect, auto-connect, file transfer OBEX, signal bars, battery tracking, device type icons, settings UI)
 - [x] File drag-and-drop overlay (file_drop.rs: DragDataType, DropEffect, target hit-testing, Ctrl copy override, visual cursors, target highlight rendering, drag threshold)
+- [x] On-screen display overlays (osd.rs: volume/brightness sliders, media track, keyboard lock, device events, screenshots, mic mute, network, battery; fade animations, configurable position/timeout, settings UI)
+- [x] Context menu extension system (context_ext.rs: capability-gated registration, per-app limits, lazy loading, rate-limit tracking, builtin items for file/dir/desktop, settings panel with search/filter)
+- [x] Desktop widget system (widgets.rs: grid layout, 13 built-in types — clock/weather/sysmon/calendar/notes/RSS/music/photo/world clock/reminders/disk/network/battery, add/remove/move/resize, hit-testing, picker, edit mode)
+- [x] Login screen greeter (login_screen.rs: user list with avatars, password entry, autologin, shake animation, lockout after max attempts, power menu, accessibility, keyboard layout indicator, gradient backgrounds)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1859,6 +1863,9 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] PDF viewer (apps/pdfviewer: multi-tab, bookmarks, search, annotations, zoom modes, page rotation, print settings, dark mode, 102 tests)
 - [x] Device manager (apps/devicemanager: device tree with 8 categories, driver info, resource view, search/filter, hardware report export, 105 tests)
 - [x] Alarm clock (apps/alarmclock: alarms with repeat/snooze, multiple timers, stopwatch with laps and stats, progress ring, AM/PM+24h, 135 tests)
+- [x] Unit converter (apps/unitconverter: 12 categories, conversions through base unit, affine temperature handling, history, favorites)
+- [x] Weather dashboard (apps/weather: current conditions, hourly/daily forecast, alerts, locations, temperature graph, air quality, configurable units)
+- [x] System restore manager (apps/systemrestore: snapshot tree, create/restore/compare, scheduling, retention policies, timeline view, export/import, storage management)
 - [x] System restore (apps/systemrestore: tree-based snapshots, scheduling, retention, comparison, export/import, storage management)
 - [x] Unit converter (apps/unitconverter: 12 categories, base-unit conversion, history, favorites, formula display)
 - [x] Weather dashboard (apps/weather: current/hourly/daily forecast, alerts, locations, temp graph, air quality, unit settings)

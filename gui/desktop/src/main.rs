@@ -70,6 +70,8 @@ mod print_manager;
 mod bluetooth;
 #[allow(dead_code)]
 mod file_drop;
+#[allow(dead_code)]
+mod osd;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

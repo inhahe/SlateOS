@@ -16,11 +16,11 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEventKind};
+use guitk::layout::FlexDirection;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
-use guitk::style::{CornerRadii, Edges, Style};
-use guitk::widget::{Widget, WidgetId, WidgetTree};
+use guitk::style::CornerRadii;
+use guitk::widget::{Widget, WidgetTree};
 
 use std::collections::VecDeque;
 use std::fmt::Write as FmtWrite;

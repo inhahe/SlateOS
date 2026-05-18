@@ -48,6 +48,10 @@ exclude = [
     "apps/jsonviewer",
     "apps/qrcode",
     "apps/snippets",
+    "apps/logviewer",
+    # --- osb2 batch 4 ---
+    "apps/tmux",
+    "apps/reminders",
 ]
 
 [workspace.lints.clippy]

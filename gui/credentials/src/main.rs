@@ -1150,6 +1150,348 @@ impl CredentialStore {
 }
 
 // ---------------------------------------------------------------------------
+// Identity Verification with Debounce
+// ---------------------------------------------------------------------------
+
+/// Sensitivity level for credential operations.
+/// Higher sensitivity requires more recent verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SensitivityLevel {
+    /// Reading metadata (list, search) — no verification needed.
+    Low,
+    /// Retrieving decrypted credentials — verification needed.
+    Medium,
+    /// Modifying or deleting credentials — verification needed.
+    High,
+    /// Changing master password, exporting store — strictest verification.
+    Critical,
+}
+
+impl SensitivityLevel {
+    /// Returns the default debounce window for this sensitivity level.
+    /// More sensitive operations have shorter debounce windows.
+    fn default_debounce_secs(self) -> u64 {
+        match self {
+            Self::Low => 0,       // No verification required
+            Self::Medium => 60,   // 1 minute
+            Self::High => 30,     // 30 seconds
+            Self::Critical => 0,  // Always re-verify
+        }
+    }
+}
+
+/// Result of an identity verification check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerificationResult {
+    /// Verification passed (either fresh or within debounce window).
+    Verified,
+    /// Verification is required — the caller must prompt the user.
+    VerificationRequired {
+        /// Why verification is needed.
+        reason: String,
+        /// The sensitivity level that triggered the check.
+        level: SensitivityLevel,
+    },
+    /// Verification failed (wrong password).
+    Failed,
+    /// Temporarily locked out due to too many failed attempts.
+    LockedOut { retry_after_secs: u64 },
+}
+
+/// Configuration for the identity verification system.
+#[derive(Debug, Clone)]
+pub struct VerificationConfig {
+    /// Debounce window per sensitivity level (seconds).
+    /// If the user verified within this many seconds, skip re-verification.
+    pub debounce_secs: [u64; 4], // indexed by SensitivityLevel ordinal
+    /// Maximum failed verification attempts before lockout.
+    pub max_attempts: u32,
+    /// Lockout duration in seconds.
+    pub lockout_secs: u64,
+    /// Whether to require verification for medium-sensitivity operations.
+    pub require_for_medium: bool,
+    /// Whether to require verification for high-sensitivity operations.
+    pub require_for_high: bool,
+    /// Whether verification is globally enabled.
+    pub enabled: bool,
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            debounce_secs: [
+                SensitivityLevel::Low.default_debounce_secs(),
+                SensitivityLevel::Medium.default_debounce_secs(),
+                SensitivityLevel::High.default_debounce_secs(),
+                SensitivityLevel::Critical.default_debounce_secs(),
+            ],
+            max_attempts: 3,
+            lockout_secs: 30,
+            require_for_medium: true,
+            require_for_high: true,
+            enabled: true,
+        }
+    }
+}
+
+impl VerificationConfig {
+    /// Get the debounce window for a given sensitivity level.
+    fn debounce_for(&self, level: SensitivityLevel) -> u64 {
+        let idx = level as usize;
+        if idx < self.debounce_secs.len() {
+            self.debounce_secs[idx]
+        } else {
+            0
+        }
+    }
+}
+
+/// Tracks identity verification state with per-level debounce.
+#[derive(Debug)]
+pub struct IdentityVerifier {
+    /// Configuration for verification behavior.
+    config: VerificationConfig,
+    /// Timestamp of last successful verification per sensitivity level.
+    /// Verification at a higher level also counts for lower levels.
+    last_verified: [u64; 4],
+    /// Consecutive failed attempts in the current session.
+    failed_attempts: u32,
+    /// Timestamp when lockout expires (0 = no lockout).
+    lockout_until: u64,
+    /// Total successful verifications (for audit/metrics).
+    total_verifications: u64,
+    /// Total failed verifications (for audit/metrics).
+    total_failures: u64,
+}
+
+impl IdentityVerifier {
+    /// Create a new verifier with default configuration.
+    pub fn new() -> Self {
+        Self {
+            config: VerificationConfig::default(),
+            last_verified: [0; 4],
+            failed_attempts: 0,
+            lockout_until: 0,
+            total_verifications: 0,
+            total_failures: 0,
+        }
+    }
+
+    /// Create a new verifier with custom configuration.
+    pub fn with_config(config: VerificationConfig) -> Self {
+        Self {
+            config,
+            last_verified: [0; 4],
+            failed_attempts: 0,
+            lockout_until: 0,
+            total_verifications: 0,
+            total_failures: 0,
+        }
+    }
+
+    /// Check whether verification is needed for the given sensitivity level.
+    ///
+    /// Returns `Verified` if within the debounce window, or
+    /// `VerificationRequired` if the user must re-authenticate.
+    pub fn check(&self, level: SensitivityLevel, now: u64) -> VerificationResult {
+        // If verification is globally disabled, always pass
+        if !self.config.enabled {
+            return VerificationResult::Verified;
+        }
+
+        // Low sensitivity never requires verification
+        if level == SensitivityLevel::Low {
+            return VerificationResult::Verified;
+        }
+
+        // Check if this level is configured to require verification
+        if level == SensitivityLevel::Medium && !self.config.require_for_medium {
+            return VerificationResult::Verified;
+        }
+        if level == SensitivityLevel::High && !self.config.require_for_high {
+            return VerificationResult::Verified;
+        }
+
+        // Check lockout
+        if now < self.lockout_until {
+            return VerificationResult::LockedOut {
+                retry_after_secs: self.lockout_until.saturating_sub(now),
+            };
+        }
+
+        // Critical always requires fresh verification
+        if level == SensitivityLevel::Critical {
+            return VerificationResult::VerificationRequired {
+                reason: "This operation requires identity verification.".to_string(),
+                level,
+            };
+        }
+
+        // Check debounce: was there a recent verification at this level or higher?
+        let debounce_window = self.config.debounce_for(level);
+        let level_idx = level as usize;
+
+        // Check this level and all higher levels (a Critical verification
+        // satisfies Medium and High checks too)
+        for check_idx in level_idx..self.last_verified.len() {
+            let last = self.last_verified[check_idx];
+            if last > 0 && now.saturating_sub(last) < debounce_window {
+                return VerificationResult::Verified;
+            }
+        }
+
+        // No recent verification — require one
+        let reason = match level {
+            SensitivityLevel::Medium => {
+                "Viewing credential secrets requires identity verification.".to_string()
+            }
+            SensitivityLevel::High => {
+                "Modifying credentials requires identity verification.".to_string()
+            }
+            _ => "Identity verification required.".to_string(),
+        };
+
+        VerificationResult::VerificationRequired { reason, level }
+    }
+
+    /// Record a successful verification.
+    ///
+    /// Verifying at a given level also satisfies all lower levels.
+    pub fn record_success(&mut self, level: SensitivityLevel, now: u64) {
+        let level_idx = level as usize;
+        // Set the timestamp for this level and all lower levels
+        for idx in 0..=level_idx {
+            self.last_verified[idx] = now;
+        }
+        self.failed_attempts = 0;
+        self.total_verifications = self.total_verifications.saturating_add(1);
+    }
+
+    /// Record a failed verification attempt.
+    ///
+    /// Returns the resulting lockout state.
+    pub fn record_failure(&mut self, now: u64) -> VerificationResult {
+        self.failed_attempts = self.failed_attempts.saturating_add(1);
+        self.total_failures = self.total_failures.saturating_add(1);
+
+        if self.failed_attempts >= self.config.max_attempts {
+            self.lockout_until = now.saturating_add(self.config.lockout_secs);
+            self.failed_attempts = 0;
+            VerificationResult::LockedOut {
+                retry_after_secs: self.config.lockout_secs,
+            }
+        } else {
+            VerificationResult::Failed
+        }
+    }
+
+    /// Verify the user's identity by checking their master password against
+    /// the stored hash. On success, records the verification with debounce.
+    pub fn verify(
+        &mut self,
+        password: &str,
+        master_password_hash: &[u8; 32],
+        level: SensitivityLevel,
+        now: u64,
+    ) -> VerificationResult {
+        // Check lockout first
+        if now < self.lockout_until {
+            return VerificationResult::LockedOut {
+                retry_after_secs: self.lockout_until.saturating_sub(now),
+            };
+        }
+
+        let attempt_hash = sha256(password.as_bytes());
+        if attempt_hash == *master_password_hash {
+            self.record_success(level, now);
+            VerificationResult::Verified
+        } else {
+            self.record_failure(now)
+        }
+    }
+
+    /// Clear all verification state (e.g., on store lock).
+    pub fn clear(&mut self) {
+        self.last_verified = [0; 4];
+        // Don't clear failed_attempts or lockout — those persist across locks
+    }
+
+    /// Get the debounce configuration.
+    pub fn config(&self) -> &VerificationConfig {
+        &self.config
+    }
+
+    /// Update the debounce window for a specific sensitivity level.
+    pub fn set_debounce(&mut self, level: SensitivityLevel, seconds: u64) {
+        let idx = level as usize;
+        if idx < self.config.debounce_secs.len() {
+            self.config.debounce_secs[idx] = seconds;
+        }
+    }
+
+    /// Enable or disable verification globally.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.config.enabled = enabled;
+    }
+
+    /// Get verification statistics.
+    pub fn stats(&self) -> (u64, u64) {
+        (self.total_verifications, self.total_failures)
+    }
+
+    /// Check if currently locked out.
+    pub fn is_locked_out(&self, now: u64) -> bool {
+        now < self.lockout_until
+    }
+
+    /// Seconds remaining in lockout (0 if not locked out).
+    pub fn lockout_remaining(&self, now: u64) -> u64 {
+        if now < self.lockout_until {
+            self.lockout_until.saturating_sub(now)
+        } else {
+            0
+        }
+    }
+
+    /// Seconds since last verification at the given level.
+    /// Returns `None` if never verified at that level.
+    pub fn time_since_verification(&self, level: SensitivityLevel, now: u64) -> Option<u64> {
+        let idx = level as usize;
+        if idx < self.last_verified.len() && self.last_verified[idx] > 0 {
+            Some(now.saturating_sub(self.last_verified[idx]))
+        } else {
+            None
+        }
+    }
+}
+
+/// Classify a credential operation by its sensitivity level.
+pub fn classify_operation(request: &CredentialRequest) -> SensitivityLevel {
+    match request {
+        // Read-only metadata operations
+        CredentialRequest::IsLocked
+        | CredentialRequest::List { .. }
+        | CredentialRequest::Search { .. }
+        | CredentialRequest::SetTimeout { .. } => SensitivityLevel::Low,
+
+        // Viewing decrypted secrets
+        CredentialRequest::Retrieve { .. }
+        | CredentialRequest::RetrieveByTarget { .. }
+        | CredentialRequest::AutofillQuery { .. } => SensitivityLevel::Medium,
+
+        // Modifying credentials
+        CredentialRequest::Store { .. }
+        | CredentialRequest::Update { .. }
+        | CredentialRequest::Delete { .. }
+        | CredentialRequest::Lock
+        | CredentialRequest::Unlock { .. } => SensitivityLevel::High,
+
+        // Critical security operations
+        CredentialRequest::SetMasterPassword { .. } => SensitivityLevel::Critical,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Utility Functions
 // ---------------------------------------------------------------------------
 
@@ -1643,5 +1985,348 @@ mod tests {
         // Exact domain should come first (higher priority)
         assert_eq!(results[0].name, "Exact");
         assert_eq!(results[1].name, "Wildcard");
+    }
+
+    // -- Identity Verification with Debounce tests --
+
+    #[test]
+    fn test_verifier_low_sensitivity_always_passes() {
+        let verifier = IdentityVerifier::new();
+        let result = verifier.check(SensitivityLevel::Low, 1000);
+        assert_eq!(result, VerificationResult::Verified);
+    }
+
+    #[test]
+    fn test_verifier_medium_requires_verification_initially() {
+        let verifier = IdentityVerifier::new();
+        let result = verifier.check(SensitivityLevel::Medium, 1000);
+        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+    }
+
+    #[test]
+    fn test_verifier_high_requires_verification_initially() {
+        let verifier = IdentityVerifier::new();
+        let result = verifier.check(SensitivityLevel::High, 1000);
+        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+    }
+
+    #[test]
+    fn test_verifier_critical_always_requires_verification() {
+        let mut verifier = IdentityVerifier::new();
+        // Even after a recent verification, Critical always requires fresh
+        verifier.record_success(SensitivityLevel::Critical, 1000);
+        let result = verifier.check(SensitivityLevel::Critical, 1001);
+        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+    }
+
+    #[test]
+    fn test_verifier_debounce_medium_within_window() {
+        let mut verifier = IdentityVerifier::new();
+        // Default medium debounce = 60s
+        verifier.record_success(SensitivityLevel::Medium, 1000);
+        // 30 seconds later — within debounce window
+        let result = verifier.check(SensitivityLevel::Medium, 1030);
+        assert_eq!(result, VerificationResult::Verified);
+    }
+
+    #[test]
+    fn test_verifier_debounce_medium_expired() {
+        let mut verifier = IdentityVerifier::new();
+        verifier.record_success(SensitivityLevel::Medium, 1000);
+        // 61 seconds later — past 60s debounce window
+        let result = verifier.check(SensitivityLevel::Medium, 1061);
+        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+    }
+
+    #[test]
+    fn test_verifier_debounce_high_within_window() {
+        let mut verifier = IdentityVerifier::new();
+        // Default high debounce = 30s
+        verifier.record_success(SensitivityLevel::High, 1000);
+        let result = verifier.check(SensitivityLevel::High, 1020);
+        assert_eq!(result, VerificationResult::Verified);
+    }
+
+    #[test]
+    fn test_verifier_debounce_high_expired() {
+        let mut verifier = IdentityVerifier::new();
+        verifier.record_success(SensitivityLevel::High, 1000);
+        // 31 seconds later — past 30s debounce
+        let result = verifier.check(SensitivityLevel::High, 1031);
+        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+    }
+
+    #[test]
+    fn test_verifier_higher_level_satisfies_lower() {
+        let mut verifier = IdentityVerifier::new();
+        // Verify at High level
+        verifier.record_success(SensitivityLevel::High, 1000);
+        // Medium should also be satisfied (High > Medium)
+        let result = verifier.check(SensitivityLevel::Medium, 1010);
+        assert_eq!(result, VerificationResult::Verified);
+    }
+
+    #[test]
+    fn test_verifier_lower_level_does_not_satisfy_higher() {
+        let mut verifier = IdentityVerifier::new();
+        // Verify at Medium level
+        verifier.record_success(SensitivityLevel::Medium, 1000);
+        // High should still require verification (Medium < High)
+        let result = verifier.check(SensitivityLevel::High, 1010);
+        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+    }
+
+    #[test]
+    fn test_verifier_password_verification_success() {
+        let mut verifier = IdentityVerifier::new();
+        let master_hash = sha256(b"correct_password");
+        let result = verifier.verify("correct_password", &master_hash, SensitivityLevel::Medium, 1000);
+        assert_eq!(result, VerificationResult::Verified);
+    }
+
+    #[test]
+    fn test_verifier_password_verification_failure() {
+        let mut verifier = IdentityVerifier::new();
+        let master_hash = sha256(b"correct_password");
+        let result = verifier.verify("wrong_password", &master_hash, SensitivityLevel::Medium, 1000);
+        assert_eq!(result, VerificationResult::Failed);
+    }
+
+    #[test]
+    fn test_verifier_lockout_after_max_attempts() {
+        let mut verifier = IdentityVerifier::new();
+        let master_hash = sha256(b"correct_password");
+        // 3 failed attempts
+        verifier.verify("wrong1", &master_hash, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, SensitivityLevel::Medium, 1001);
+        let result = verifier.verify("wrong3", &master_hash, SensitivityLevel::Medium, 1002);
+        assert!(matches!(result, VerificationResult::LockedOut { .. }));
+    }
+
+    #[test]
+    fn test_verifier_lockout_blocks_check() {
+        let mut verifier = IdentityVerifier::new();
+        let master_hash = sha256(b"correct_password");
+        // Trigger lockout
+        verifier.verify("wrong1", &master_hash, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, SensitivityLevel::Medium, 1001);
+        verifier.verify("wrong3", &master_hash, SensitivityLevel::Medium, 1002);
+        // Even check() should report lockout
+        let result = verifier.check(SensitivityLevel::Medium, 1005);
+        assert!(matches!(result, VerificationResult::LockedOut { .. }));
+    }
+
+    #[test]
+    fn test_verifier_lockout_expires() {
+        let mut verifier = IdentityVerifier::new();
+        let master_hash = sha256(b"correct_password");
+        // Trigger lockout (default 30s)
+        verifier.verify("wrong1", &master_hash, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, SensitivityLevel::Medium, 1001);
+        verifier.verify("wrong3", &master_hash, SensitivityLevel::Medium, 1002);
+        // After lockout expires (30s), should be able to verify again
+        let result = verifier.verify("correct_password", &master_hash, SensitivityLevel::Medium, 1035);
+        assert_eq!(result, VerificationResult::Verified);
+    }
+
+    #[test]
+    fn test_verifier_success_resets_failed_count() {
+        let mut verifier = IdentityVerifier::new();
+        let master_hash = sha256(b"correct_password");
+        // 2 failed attempts
+        verifier.verify("wrong1", &master_hash, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, SensitivityLevel::Medium, 1001);
+        // Success resets counter
+        verifier.verify("correct_password", &master_hash, SensitivityLevel::Medium, 1002);
+        // Another failure should not trigger lockout (counter was reset)
+        let result = verifier.verify("wrong3", &master_hash, SensitivityLevel::Medium, 1003);
+        assert_eq!(result, VerificationResult::Failed);
+    }
+
+    #[test]
+    fn test_verifier_disabled_bypasses_all() {
+        let mut config = VerificationConfig::default();
+        config.enabled = false;
+        let verifier = IdentityVerifier::with_config(config);
+        // Even Critical should pass when disabled
+        let result = verifier.check(SensitivityLevel::Critical, 1000);
+        assert_eq!(result, VerificationResult::Verified);
+    }
+
+    #[test]
+    fn test_verifier_medium_requirement_can_be_disabled() {
+        let mut config = VerificationConfig::default();
+        config.require_for_medium = false;
+        let verifier = IdentityVerifier::with_config(config);
+        let result = verifier.check(SensitivityLevel::Medium, 1000);
+        assert_eq!(result, VerificationResult::Verified);
+    }
+
+    #[test]
+    fn test_verifier_high_requirement_can_be_disabled() {
+        let mut config = VerificationConfig::default();
+        config.require_for_high = false;
+        let verifier = IdentityVerifier::with_config(config);
+        let result = verifier.check(SensitivityLevel::High, 1000);
+        assert_eq!(result, VerificationResult::Verified);
+    }
+
+    #[test]
+    fn test_verifier_custom_debounce() {
+        let mut verifier = IdentityVerifier::new();
+        verifier.set_debounce(SensitivityLevel::Medium, 120); // 2 minutes
+        verifier.record_success(SensitivityLevel::Medium, 1000);
+        // 90 seconds later — within custom 120s window
+        let result = verifier.check(SensitivityLevel::Medium, 1090);
+        assert_eq!(result, VerificationResult::Verified);
+        // 121 seconds later — past custom window
+        let result = verifier.check(SensitivityLevel::Medium, 1121);
+        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+    }
+
+    #[test]
+    fn test_verifier_clear_resets_timestamps() {
+        let mut verifier = IdentityVerifier::new();
+        verifier.record_success(SensitivityLevel::High, 1000);
+        verifier.clear();
+        // Should require verification again after clear
+        let result = verifier.check(SensitivityLevel::Medium, 1010);
+        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+    }
+
+    #[test]
+    fn test_verifier_stats() {
+        let mut verifier = IdentityVerifier::new();
+        let master_hash = sha256(b"correct_password");
+        verifier.verify("correct_password", &master_hash, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong", &master_hash, SensitivityLevel::Medium, 1001);
+        verifier.verify("correct_password", &master_hash, SensitivityLevel::Medium, 1002);
+        let (successes, failures) = verifier.stats();
+        assert_eq!(successes, 2);
+        assert_eq!(failures, 1);
+    }
+
+    #[test]
+    fn test_verifier_lockout_remaining() {
+        let mut verifier = IdentityVerifier::new();
+        let master_hash = sha256(b"correct_password");
+        verifier.verify("wrong1", &master_hash, SensitivityLevel::Medium, 1000);
+        verifier.verify("wrong2", &master_hash, SensitivityLevel::Medium, 1001);
+        verifier.verify("wrong3", &master_hash, SensitivityLevel::Medium, 1002);
+        // Lockout duration is 30s from timestamp 1002
+        assert!(verifier.is_locked_out(1010));
+        assert_eq!(verifier.lockout_remaining(1010), 22); // 1032 - 1010
+        assert!(!verifier.is_locked_out(1035));
+        assert_eq!(verifier.lockout_remaining(1035), 0);
+    }
+
+    #[test]
+    fn test_verifier_time_since_verification() {
+        let mut verifier = IdentityVerifier::new();
+        assert_eq!(verifier.time_since_verification(SensitivityLevel::Medium, 1000), None);
+        verifier.record_success(SensitivityLevel::Medium, 1000);
+        assert_eq!(verifier.time_since_verification(SensitivityLevel::Medium, 1045), Some(45));
+    }
+
+    #[test]
+    fn test_classify_operation_low() {
+        let request = CredentialRequest::IsLocked;
+        assert_eq!(classify_operation(&request), SensitivityLevel::Low);
+
+        let request = CredentialRequest::List { filter: ListFilter::default() };
+        assert_eq!(classify_operation(&request), SensitivityLevel::Low);
+
+        let request = CredentialRequest::Search { query: "test".to_string() };
+        assert_eq!(classify_operation(&request), SensitivityLevel::Low);
+    }
+
+    #[test]
+    fn test_classify_operation_medium() {
+        let request = CredentialRequest::Retrieve { id: 1 };
+        assert_eq!(classify_operation(&request), SensitivityLevel::Medium);
+
+        let request = CredentialRequest::AutofillQuery { url: "https://example.com".to_string() };
+        assert_eq!(classify_operation(&request), SensitivityLevel::Medium);
+    }
+
+    #[test]
+    fn test_classify_operation_high() {
+        let request = CredentialRequest::Delete { id: 1 };
+        assert_eq!(classify_operation(&request), SensitivityLevel::High);
+
+        let request = CredentialRequest::Store {
+            name: "test".to_string(),
+            credential_type: CredentialType::Password,
+            username: None,
+            target: "test.com".to_string(),
+            data: vec![],
+            tags: vec![],
+        };
+        assert_eq!(classify_operation(&request), SensitivityLevel::High);
+    }
+
+    #[test]
+    fn test_classify_operation_critical() {
+        let request = CredentialRequest::SetMasterPassword {
+            old_password: Some("old".to_string()),
+            new_password: "new".to_string(),
+        };
+        assert_eq!(classify_operation(&request), SensitivityLevel::Critical);
+    }
+
+    #[test]
+    fn test_sensitivity_level_ordering() {
+        assert!(SensitivityLevel::Low < SensitivityLevel::Medium);
+        assert!(SensitivityLevel::Medium < SensitivityLevel::High);
+        assert!(SensitivityLevel::High < SensitivityLevel::Critical);
+    }
+
+    #[test]
+    fn test_verification_result_reason_messages() {
+        let verifier = IdentityVerifier::new();
+        if let VerificationResult::VerificationRequired { reason, level } =
+            verifier.check(SensitivityLevel::Medium, 1000)
+        {
+            assert!(reason.contains("secrets"));
+            assert_eq!(level, SensitivityLevel::Medium);
+        } else {
+            panic!("expected VerificationRequired");
+        }
+
+        if let VerificationResult::VerificationRequired { reason, level } =
+            verifier.check(SensitivityLevel::High, 1000)
+        {
+            assert!(reason.contains("Modifying"));
+            assert_eq!(level, SensitivityLevel::High);
+        } else {
+            panic!("expected VerificationRequired");
+        }
+    }
+
+    #[test]
+    fn test_verifier_set_enabled_toggle() {
+        let mut verifier = IdentityVerifier::new();
+        // Initially enabled — requires verification
+        assert!(matches!(
+            verifier.check(SensitivityLevel::High, 1000),
+            VerificationResult::VerificationRequired { .. }
+        ));
+        // Disable
+        verifier.set_enabled(false);
+        assert_eq!(verifier.check(SensitivityLevel::High, 1000), VerificationResult::Verified);
+        // Re-enable
+        verifier.set_enabled(true);
+        assert!(matches!(
+            verifier.check(SensitivityLevel::High, 1000),
+            VerificationResult::VerificationRequired { .. }
+        ));
+    }
+
+    #[test]
+    fn test_default_debounce_values() {
+        assert_eq!(SensitivityLevel::Low.default_debounce_secs(), 0);
+        assert_eq!(SensitivityLevel::Medium.default_debounce_secs(), 60);
+        assert_eq!(SensitivityLevel::High.default_debounce_secs(), 30);
+        assert_eq!(SensitivityLevel::Critical.default_debounce_secs(), 0);
     }
 }

@@ -1501,6 +1501,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] route: routing table management (display, add/del routes, CIDR, default gateway, host routes, flush)
   - [x] tcpdump: packet analyzer (live capture, pcap read/write, filters, hex dump, Ethernet/IP/TCP/UDP/ICMP/ARP)
   - [x] screen: terminal multiplexer (multi-window, Ctrl+A keys, session detach/reattach, scrollback, rename)
+  - [x] scp: secure file copy (SSH-style remote path parsing, recursive directory transfer, local copy mode)
+  - [x] dig: DNS lookup utility (RFC 1035 packet building/parsing, A/AAAA/MX/NS/CNAME/TXT/SOA/PTR, +short)
+  - [x] htop: interactive process viewer (per-core CPU bars, memory/swap gauges, tree view, sort, search filter)
+  - [x] su/sudo: user switching (SHA-256 password auth, argv[0] mode detection, -c command execution)
+  - [x] man: manual page viewer (troff-subset formatter, 21 embedded man pages, section support, keyword search)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

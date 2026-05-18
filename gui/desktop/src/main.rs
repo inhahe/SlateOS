@@ -48,6 +48,8 @@ mod clipboard_viewer;
 mod window_peek;
 #[allow(dead_code)]
 mod overview;
+#[allow(dead_code)]
+mod display_settings;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

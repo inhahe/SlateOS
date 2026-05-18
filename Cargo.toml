@@ -31,6 +31,8 @@ exclude = [
     "apps/calendar",
     "apps/ircclient",
     "apps/rssreader",
+    "apps/torrent",
+    "apps/email",
 ]
 
 [workspace.lints.clippy]

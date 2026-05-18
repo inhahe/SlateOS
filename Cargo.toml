@@ -54,6 +54,10 @@ exclude = [
     "apps/reminders",
     "apps/undelete",
     "apps/renamer",
+    # --- osb2 batch 5 ---
+    "apps/charmap",
+    "apps/camera",
+    "apps/netscan",
 ]
 
 [workspace.lints.clippy]

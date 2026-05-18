@@ -114,6 +114,8 @@ mod network_settings;
 mod default_apps;
 #[allow(dead_code)]
 mod backup_settings;
+#[allow(dead_code)]
+mod device_settings;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

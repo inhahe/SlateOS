@@ -35,6 +35,7 @@ pub mod menubar;
 pub mod modal;
 pub mod pathbar;
 pub mod render;
+pub mod scaling;
 pub mod signal;
 pub mod style;
 pub mod tabs;

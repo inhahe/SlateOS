@@ -1616,6 +1616,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Animation system (animations.rs: 9 easing functions, window open/close/minimize/snap animations, desktop slide transitions, color interpolation, fade overlays, reduced-motion support)
 - [x] Snap zones (snap.rs: 7 layout presets, edge/corner detection, zone picker popup, snap history for restore-on-unsnap)
 - [x] Clipboard history viewer (clipboard_viewer.rs: Super+V popup, format filters, search, pin support, size/age display)
+- [x] Window peek preview (window_peek.rs: taskbar hover thumbnails, close buttons, fade animation, multi-window layout)
+- [x] Virtual desktop overview (overview.rs: Exposé/Mission Control grid layout, search, lane view, keyboard/mouse nav, animations)
+- [x] Display settings and color calibration (display_settings.rs: night light, gamma curves, color profiles, test patterns, per-display config)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1811,6 +1814,8 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Font manager (apps/fontmanager: category sidebar, font list, preview panel, install/uninstall, rendering settings, 19 default fonts)
 - [x] Task scheduler (apps/taskscheduler: cron expression parsing, retry policies, execution history, task CRUD, config persistence, 99 tests)
 - [x] Network speed test (apps/speedtest: speedometer arc gauge, latency/download/upload phases, throughput graph, history, server selection, 59 tests)
+- [x] Startup apps manager (apps/startupmanager: enable/disable, impact assessment, import/export, sortable table, 82 tests)
+- [x] Disk usage analyzer (apps/diskanalyzer: WinDirStat-style treemap, extension breakdown, squarified layout, drill-down, 77 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

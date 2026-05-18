@@ -1,0 +1,19 @@
+[package]
+name = "diskcleanup"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS Disk Cleanup — find and remove temporary files, caches, and other reclaimable space"
+
+[workspace]
+
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

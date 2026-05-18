@@ -26,6 +26,12 @@ mod run_dialog;
 mod taskbar;
 #[allow(dead_code)]
 mod tray_dnd;
+#[allow(dead_code)]
+mod power;
+#[allow(dead_code)]
+mod wallpaper;
+#[allow(dead_code)]
+mod calendar;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

@@ -1607,6 +1607,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Light / dark / custom theme support (theme.rs: ThemeMode, 4 built-in themes, ThemeManager)
 - [x] Theme color API for applications (ThemeColors helper, semantic roles, derived states)
 - [x] Multi-monitor support (multimon.rs: MonitorLayout, MonitorManager, 4 arrange modes, hot-plug, config persistence, WindowPlacement)
+- [x] Wallpaper manager (wallpaper.rs: solid/image/slideshow/dynamic modes, ImageFit, shuffle, history, time-of-day gradients, config persistence)
+- [x] Power management and screen saver (power.rs: 4 profiles, 5 screen saver styles, battery monitoring, idle timeouts, inhibitors, lid/button actions)
+- [x] Calendar widget and clock (calendar.rs: month grid, event store, recurring events, reminders with snooze, 12h/24h clock, timezone display)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1796,6 +1799,10 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Persistent flat-file index with metadata (size, mtime, extension)
   - [x] Config file at /etc/indexer.conf with enable/disable, path management
   - [x] Status reporting, statistics with extension breakdown
+- [x] Lock screen (apps/lockscreen: clock/date display, password entry, shake animation, attempt tracking with progressive lockout, multi-user support)
+- [x] Disk cleanup utility (apps/diskcleanup: 9 cleanup categories, scanner, executor with dry-run, scheduled cleanup, history, progress UI)
+- [x] Emoji picker (apps/emojipicker: category tabs, search, 6-column grid, skin tone selector, 82 emoji, recent tracking)
+- [x] Font manager (apps/fontmanager: category sidebar, font list, preview panel, install/uninstall, rendering settings, 19 default fonts)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

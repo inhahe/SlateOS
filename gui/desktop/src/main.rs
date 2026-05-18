@@ -116,6 +116,8 @@ mod default_apps;
 mod backup_settings;
 #[allow(dead_code)]
 mod device_settings;
+#[allow(dead_code)]
+mod security_dialog;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

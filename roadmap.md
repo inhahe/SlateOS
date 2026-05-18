@@ -1614,6 +1614,8 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Resource monitor widget (resmon.rs: compact/expanded sparklines, CPU/memory/disk/network tracking, 64-sample circular buffers, bar graphs)
 - [x] Global hotkey manager (hotkeys.rs: HotkeyRegistry, 22 action types, 20+ default bindings, conflict detection, config persistence, settings panel)
 - [x] Animation system (animations.rs: 9 easing functions, window open/close/minimize/snap animations, desktop slide transitions, color interpolation, fade overlays, reduced-motion support)
+- [x] Snap zones (snap.rs: 7 layout presets, edge/corner detection, zone picker popup, snap history for restore-on-unsnap)
+- [x] Clipboard history viewer (clipboard_viewer.rs: Super+V popup, format filters, search, pin support, size/age display)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1807,6 +1809,8 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Disk cleanup utility (apps/diskcleanup: 9 cleanup categories, scanner, executor with dry-run, scheduled cleanup, history, progress UI)
 - [x] Emoji picker (apps/emojipicker: category tabs, search, 6-column grid, skin tone selector, 82 emoji, recent tracking)
 - [x] Font manager (apps/fontmanager: category sidebar, font list, preview panel, install/uninstall, rendering settings, 19 default fonts)
+- [x] Task scheduler (apps/taskscheduler: cron expression parsing, retry policies, execution history, task CRUD, config persistence, 99 tests)
+- [x] Network speed test (apps/speedtest: speedometer arc gauge, latency/download/upload phases, throughput graph, history, server selection, 59 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

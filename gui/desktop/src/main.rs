@@ -102,6 +102,8 @@ mod notification_settings;
 mod appearance_settings;
 #[allow(dead_code)]
 mod language_settings;
+#[allow(dead_code)]
+mod startup_settings;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

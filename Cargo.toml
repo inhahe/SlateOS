@@ -22,6 +22,7 @@ exclude = [
     "apps/contacts",
     "apps/remotedesktop",
     "apps/defrag",
+    "apps/benchmark",
 ]
 
 [workspace.lints.clippy]

@@ -1601,7 +1601,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Sound mixer (apps/mixer: per-app volume, device selection, peak meters, playing sort, keyboard nav)
 - [x] Light / dark / custom theme support (theme.rs: ThemeMode, 4 built-in themes, ThemeManager)
 - [x] Theme color API for applications (ThemeColors helper, semantic roles, derived states)
-- [ ] Multi-monitor support (deferred but planned)
+- [x] Multi-monitor support (multimon.rs: MonitorLayout, MonitorManager, 4 arrange modes, hot-plug, config persistence, WindowPlacement)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -2091,7 +2091,7 @@ _Depends on: Phase 4 (working daily-driver desktop). Goal: competitive OS._
 - [x] Swap file sizing — swap_mib field in PartitionPlan (None = file-based via fs::swapcfg)
 - [x] Post-reboot setup: audio device, timezone, user/password, WiFi, theme, browser choice — FirstBoot phase in InstallSession with all fields
 - [x] Unattended install via YAML configuration file (apps/installer: InstallConfig, YAML parser, validation, InstallPlan, CLI)
-- [ ] GRUB integration for dual-boot (add menu entry, don't replace GRUB)
+- [x] GRUB integration for dual-boot (grub.rs: GrubDetector, entry generation, /etc/grub.d/40_ouros lifecycle, UUID validation)
 
 ---
 

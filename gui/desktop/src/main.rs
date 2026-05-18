@@ -32,6 +32,10 @@ mod power;
 mod wallpaper;
 #[allow(dead_code)]
 mod calendar;
+#[allow(dead_code)]
+mod a11y;
+#[allow(dead_code)]
+mod resmon;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

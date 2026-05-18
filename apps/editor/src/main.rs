@@ -14,6 +14,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+#[allow(dead_code)]
+mod highlight;
+
 use guitk::color::Color;
 use guitk::render::RenderTree;
 

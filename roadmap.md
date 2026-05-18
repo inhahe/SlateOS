@@ -1506,6 +1506,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] htop: interactive process viewer (per-core CPU bars, memory/swap gauges, tree view, sort, search filter)
   - [x] su/sudo: user switching (SHA-256 password auth, argv[0] mode detection, -c command execution)
   - [x] man: manual page viewer (troff-subset formatter, 21 embedded man pages, section support, keyword search)
+  - [x] gzip: DEFLATE compression/decompression (RFC 1951/1952, gzip/gunzip/zcat argv[0], levels 1-9, CRC32)
+  - [x] vi: minimal vi text editor (normal/insert/visual/command modes, movement, dd/yy/p, undo/redo, search, substitute)
+  - [x] ssh-keygen: Ed25519 SSH key generation (curve25519 math, SHA-256 fingerprints, OpenSSH format, PEM keys)
+  - [x] arp: ARP cache management (/proc/net/arp, add/delete/probe, interface filter, flag decoding)
+  - [x] whois: WHOIS domain/IP/ASN lookup (50+ TLD server database, referral following, TCP query)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

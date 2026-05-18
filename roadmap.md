@@ -1626,6 +1626,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Window rules engine (window_rules.rs: match by title/process/class, 17 action types, priority evaluation, first-match and merge-all modes, remembered state, one-shot rules, config persistence)
 - [x] Touchpad and gesture settings (touchpad.rs: scroll direction, tap config, multi-finger swipe bindings, pinch actions, palm rejection, typing disable, acceleration profiles, device detection)
 - [x] Screen recording infrastructure (screen_capture.rs: region/window/fullscreen capture, frame rate config, audio capture, countdown, pause/resume, recording stats, history, indicator overlay)
+- [x] Print manager (print_manager.rs: printer CRUD, paper sizes, orientation, quality, color modes, job lifecycle with submit/cancel/pause/resume, spooler control, queue management, print dialog)
+- [x] Bluetooth settings (bluetooth.rs: adapter power, discovery, pairing, connect/disconnect, auto-connect, file transfer OBEX, signal bars, battery tracking, device type icons, settings UI)
+- [x] File drag-and-drop overlay (file_drop.rs: DragDataType, DropEffect, target hit-testing, Ctrl copy override, visual cursors, target highlight rendering, drag threshold)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1830,6 +1833,9 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Archive manager (apps/archivemanager: ZIP/TAR/GZ/BZ2/7Z formats, tree-view browser, extract/create/add/remove, compression levels, password, split archives)
 - [x] Sound recorder (apps/soundrecorder: WAV output, waveform visualization, VU meter, markers, trim, quality presets, noise gate, playback, auto-save, 122 tests)
 - [x] Sticky notes (apps/stickynotes: 8 colors, drag/resize, rich text, search, pin/archive, categories, auto-save, export)
+- [x] PDF viewer (apps/pdfviewer: multi-tab, bookmarks, search, annotations, zoom modes, page rotation, print settings, dark mode, 102 tests)
+- [x] Device manager (apps/devicemanager: device tree with 8 categories, driver info, resource view, search/filter, hardware report export, 105 tests)
+- [x] Alarm clock (apps/alarmclock: alarms with repeat/snooze, multiple timers, stopwatch with laps and stats, progress ring, AM/PM+24h, 135 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

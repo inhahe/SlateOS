@@ -1,8 +1,8 @@
 [package]
-name = "strace"
+name = "lvm"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS strace - system call tracing (strace/ltrace)"
+description = "OurOS lvm - logical volume management (pvcreate/vgcreate/lvcreate/pvs/vgs/lvs)"
 
 [workspace]
 

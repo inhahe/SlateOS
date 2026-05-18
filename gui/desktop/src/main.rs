@@ -13,6 +13,8 @@
 //! Uses the guitk library for UI rendering.
 
 #[allow(dead_code)]
+mod blur;
+#[allow(dead_code)]
 mod icons;
 #[allow(dead_code)]
 mod notif_pane;
@@ -20,6 +22,8 @@ mod notif_pane;
 mod run_dialog;
 #[allow(dead_code)]
 mod taskbar;
+#[allow(dead_code)]
+mod tray_dnd;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

@@ -54,6 +54,8 @@ mod display_settings;
 mod about;
 #[allow(dead_code)]
 mod user_accounts;
+#[allow(dead_code)]
+mod taskbar_autohide;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

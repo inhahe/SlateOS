@@ -40,6 +40,11 @@ exclude = [
     "apps/diagram",
     "apps/mediaconvert",
     "apps/passwordgen",
+    "apps/dbviewer",
+    "apps/filediff",
+    "apps/automator",
+    "apps/sysmonitor",
+    "apps/regextester",
 ]
 
 [workspace.lints.clippy]

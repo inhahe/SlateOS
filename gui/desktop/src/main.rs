@@ -106,6 +106,8 @@ mod language_settings;
 mod startup_settings;
 #[allow(dead_code)]
 mod datetime_settings;
+#[allow(dead_code)]
+mod accessibility_settings;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

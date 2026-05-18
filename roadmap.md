@@ -1672,6 +1672,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Language and region settings (language_settings.rs: 20 languages with BCP 47 tags, date/time/number formats, measurement system, temperature units, 12 currencies with formatting)
 - [x] Startup app settings (startup_settings.rs: startup app management with impact assessment, boot time measurement, auto-disable failing apps, delay config, sorted/filtered app list)
 - [x] Date and time settings (datetime_settings.rs: 20 timezones with DST, NTP sync config with status, additional world clocks, taskbar clock display options)
+- [x] Accessibility settings (accessibility_settings.rs: high contrast/color filters, text scaling, cursor indicators, sticky/filter/mouse keys, visual alerts, screen reader config, magnifier with lens modes, 5-tab settings UI)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1892,6 +1893,8 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Hex editor (apps/hexeditor: multi-tab, hex/ASCII view, nibble editing, insert/overwrite, search, bookmarks, data inspector with 20 types, undo/redo, byte frequency analysis, structure templates, 152 tests)
 - [x] Disk defragmenter (apps/defrag: visual block map, 4 optimization modes, SSD detection with TRIM, scheduling, exclude patterns, pause/resume, before/after stats, 114 tests)
 - [x] Remote desktop viewer (apps/remotedesktop: RDP/VNC/SSH protocols, connection profiles, clipboard sync, file transfer, quality presets, multi-monitor, performance overlay, hotkeys, 103 tests)
+- [x] System benchmark (apps/benchmark: CPU/memory/disk/graphics benchmarks, score calculation, result history, comparison, hardware detection, progress tracking, 93 tests)
+- [x] Screen recorder (apps/screenrecorder: region/window/fullscreen capture, H.264/VP9/AV1 encoding, audio sources, hotkeys, timer/schedule, annotations, watermark, auto-upload, webcam overlay, 113 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

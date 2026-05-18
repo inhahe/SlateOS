@@ -1714,6 +1714,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
 - [x] Network settings (network_settings.rs: WiFi scanning/profiles, Ethernet config, IPv4 DHCP/static, DNS with DoH, proxy, firewall rules, airplane mode, 6-tab panel)
 - [x] Default apps settings (default_apps.rs: 12 content categories, 10 built-in apps, per-category/extension handlers, app register/unregister, 3-tab panel)
 - [x] Backup settings (backup_settings.rs: full/incremental/differential/mirror, 5 frequencies, local/network targets, source/exclusion management, retention policies, history, 5-tab panel)
+- [x] Device settings (device_settings.rs: 10 device categories, 6 device statuses, 5 driver states, power management, device preferences, hardware report export, 4-tab panel, 20 tests)
 
 ### 3.5 GUI toolkit / widget API
 - [x] Layout engine (Flexbox/Grid-based, not CSS — native implementation)
@@ -1938,6 +1939,11 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Screen recorder (apps/screenrecorder: region/window/fullscreen capture, H.264/VP9/AV1 encoding, audio sources, hotkeys, timer/schedule, annotations, watermark, auto-upload, webcam overlay, 113 tests)
 - [x] Paint/drawing application (apps/paint: pencil/line/rect/ellipse/polygon/fill/eraser/spray/text/eyedropper tools, layers with opacity, selection, transforms, BMP save/load, zoom 25-800%, grid overlay, undo/redo, keyboard shortcuts, 155 tests)
 - [x] Markdown editor (apps/markdowneditor: split view editor/preview, full markdown parser with tables/task lists/code blocks, syntax highlighting, live preview, multi-tab, find/replace, HTML export, TOC sidebar, templates, auto-save, undo/redo, 171 tests)
+- [x] Spreadsheet (apps/spreadsheet: formula engine with 30+ functions, cell formatting, multi-sheet, clipboard, undo/redo, CSV import/export, find/replace, freeze panes, 188 tests)
+- [x] Video player (apps/videoplayer: MP4/MKV/WebM/AVI containers, H.264/H.265/VP9/AV1 codecs, playlist, SRT/WebVTT subtitles, audio track selection, 10-band equalizer, video adjustments, bookmarks, chapters, 7-tab UI, 95 tests)
+- [x] RSS reader (apps/rssreader: Atom/RSS feed parser, article management, OPML import/export, feed categories, unread tracking, search, multi-panel UI)
+- [x] Calendar (apps/calendar: month/week/day/year/agenda views, ICS import/export, recurring events with 7 patterns, reminders, 10 event categories, mini-calendar sidebar, 55 tests)
+- [x] IRC client (apps/ircclient: full IRC protocol parser, CTCP support, channel management, user prefix modes, 12 slash commands, multi-panel UI with sidebar/chat/nick list, numeric reply handling, 40 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

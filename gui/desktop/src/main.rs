@@ -90,6 +90,8 @@ mod sound_settings;
 mod power_settings;
 #[allow(dead_code)]
 mod network_indicator;
+#[allow(dead_code)]
+mod storage_settings;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

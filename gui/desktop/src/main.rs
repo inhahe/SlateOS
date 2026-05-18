@@ -68,6 +68,8 @@ mod screen_capture;
 mod print_manager;
 #[allow(dead_code)]
 mod bluetooth;
+#[allow(dead_code)]
+mod file_drop;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

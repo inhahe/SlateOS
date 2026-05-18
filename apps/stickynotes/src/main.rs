@@ -1026,7 +1026,7 @@ pub fn serialize_notes(store: &NoteStore) -> String {
             .replace('\\', "\\\\")
             .replace('|', "\\p")
             .replace('\n', "\\n");
-        let title_str = note.title.replace('|', "\\p").replace('\\', "\\\\");
+        let title_str = note.title.replace('\\', "\\\\").replace('|', "\\p");
         lines.push(format!(
             "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             note.id,
@@ -1078,7 +1078,7 @@ pub fn deserialize_notes(data: &str) -> Option<NoteStore> {
             continue;
         }
         let id: NoteId = parts[0].parse().ok()?;
-        let title = parts[1].replace("\\p", "|").replace("\\\\", "\\");
+        let title = parts[1].replace("\\\\", "\x00").replace("\\p", "|").replace('\x00', "\\");
         let x: f32 = parts[2].parse().ok()?;
         let y: f32 = parts[3].parse().ok()?;
         let width: f32 = parts[4].parse().ok()?;
@@ -1090,9 +1090,10 @@ pub fn deserialize_notes(data: &str) -> Option<NoteStore> {
         let font_size_str = parts[10];
         let tags_str = parts[11];
         let body_str = parts[12]
+            .replace("\\\\", "\x00")
             .replace("\\n", "\n")
             .replace("\\p", "|")
-            .replace("\\\\", "\\");
+            .replace('\x00', "\\");
 
         let color_index = NoteColorIndex::from_usize(color_idx).unwrap_or(NoteColorIndex::Yellow);
         let font_size = FontSizePreset::from_str(font_size_str).unwrap_or(FontSizePreset::Medium);

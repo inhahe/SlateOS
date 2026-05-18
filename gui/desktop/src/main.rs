@@ -80,6 +80,8 @@ mod widgets;
 mod login_screen;
 #[allow(dead_code)]
 mod session_mgr;
+#[allow(dead_code)]
+mod focus_assist;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

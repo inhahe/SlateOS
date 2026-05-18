@@ -36,6 +36,10 @@ mod calendar;
 mod a11y;
 #[allow(dead_code)]
 mod resmon;
+#[allow(dead_code)]
+mod hotkeys;
+#[allow(dead_code)]
+mod animations;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

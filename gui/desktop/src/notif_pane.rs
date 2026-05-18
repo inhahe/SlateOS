@@ -1558,7 +1558,7 @@ mod tests {
 
     #[test]
     fn time_group_older() {
-        let now = 1_000_000;
+        let now = 2_000_000;
         let two_weeks_ago = now - 14 * SECS_PER_DAY;
         assert_eq!(TimeGroup::classify(two_weeks_ago, now), TimeGroup::Older);
     }

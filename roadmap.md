@@ -1550,6 +1550,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] install: copy files with attributes (octal/symbolic mode parsing, backup, compare, strip, ownership, -D parent creation)
   - [x] shuf/factor/numfmt: randomization and number tools (Fisher-Yates shuffle, prime factorization, SI/IEC unit conversion)
   - [x] tput/reset/clear: terminal capability tools (built-in terminfo database, parameterized string expansion, terminal reset)
+  - [x] m4: macro processor (define/undefine, ifdef/ifelse, translit, eval with full precedence, divert/undivert, changequote, include)
+  - [x] locale/localedef/getconf: locale and system config (12 locales, LC_* data, 25 getconf variables, PAGE_SIZE=16384)
+  - [x] pv/truncate/shred/fuser: pipe/file management (progress bar, rate limit, secure overwrite, process finder via /proc)
+  - [x] xdg-open/xdg-mime/mimeopen: file association (200+ MIME types, 25+ magic signatures, mimeapps.list, .desktop files)
+  - [x] nproc/arch/pathchk/logname/users/tty: simple system info (CPU count, architecture, path validation, login/tty)
+  - [x] getopt/cksum/sync/printenv: shell scripting helpers (enhanced getopt, POSIX CRC, filesystem sync, env display)
+  - [x] dc: desk calculator (reverse Polish notation, registers, conditionals, base conversion, modular exponentiation)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

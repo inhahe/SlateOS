@@ -1944,6 +1944,10 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] RSS reader (apps/rssreader: Atom/RSS feed parser, article management, OPML import/export, feed categories, unread tracking, search, multi-panel UI)
 - [x] Calendar (apps/calendar: month/week/day/year/agenda views, ICS import/export, recurring events with 7 patterns, reminders, 10 event categories, mini-calendar sidebar, 55 tests)
 - [x] IRC client (apps/ircclient: full IRC protocol parser, CTCP support, channel management, user prefix modes, 12 slash commands, multi-panel UI with sidebar/chat/nick list, numeric reply handling, 40 tests)
+- [x] Torrent client (apps/torrent: bencode parser/encoder, SHA-1 implementation, .torrent file parsing, magnet link support BEP 9, peer wire protocol BEP 3, piece management with rarest-first, tracker announce/scrape, bandwidth limiting, speed tracking, multi-tab UI, 50 tests)
+- [x] Email client (apps/email: MIME parsing with multipart, RFC 5322 address parser, IMAP/SMTP protocol commands, base64/quoted-printable encoding, mailbox management, composition with reply/forward, attachments, filter rules, signatures, multi-panel UI, 45 tests)
+- [x] File search (apps/filesearch: glob pattern matching, simple regex engine, file type categorization with 11 categories and 100+ extensions, file index, search filters, history with bookmarks, duplicate detection, statistics, multi-panel UI, 40 tests)
+- [x] Notes & Wiki (apps/notes: plain text/markdown/checklist/table note types, notebook organization with nesting, tagging, full-text search, wiki-style linking, version history, 8 templates, export to text/md/html, favorites/pinning, word count/reading time, multi-panel UI, 71 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

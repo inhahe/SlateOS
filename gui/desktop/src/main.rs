@@ -64,6 +64,10 @@ mod window_rules;
 mod touchpad;
 #[allow(dead_code)]
 mod screen_capture;
+#[allow(dead_code)]
+mod print_manager;
+#[allow(dead_code)]
+mod bluetooth;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

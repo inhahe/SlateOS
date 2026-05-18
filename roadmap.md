@@ -1519,6 +1519,13 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] sftp: SFTP file transfer client (protocol v3, interactive+batch, get/put/mget/mput, glob, progress)
   - [x] jq: JSON processor (full parser, filter engine with dot/pipe/index/select/map/sort_by/group_by, arithmetic/comparison/boolean ops, if-then-else, @base64/@html/@uri/@csv/@tsv, object/array construction, recursive descent)
   - [x] telnet: interactive terminal client (IAC command parsing, DO/DONT/WILL/WONT negotiation, NAWS, SGA/ECHO, escape commands, line/character mode)
+  - [x] passwd: password management (SHA-256 hashing, /etc/shadow read/write, strength checking, lock/unlock/expire, password aging)
+  - [x] bc: arbitrary-precision calculator (BigInt limbs, fixed-point decimal, variables, user functions, control flow, ibase/obase, -l math library)
+  - [x] column: columnate text formatter (fill columns/rows, table mode, custom separators, right-align, column hiding, JSON output, East Asian width)
+  - [x] pgrep/pkill: process grep/kill (regex matching, cmdline/UID/PPID/terminal filters, newest/oldest, signal sending, inverse match)
+  - [x] tac/rev: reverse line/character printer (custom separators, regex split, before/after mode, Unicode reversal)
+  - [x] logger: syslog message logger (facility.severity, BSD/RFC 3339 format, JSON-lines, size limits, tag/PID, stdin/file input)
+  - [x] timeout/nohup/nice/renice: process control (time-limited execution, hangup immunity, priority adjustment, duration parsing)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

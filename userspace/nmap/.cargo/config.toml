@@ -1,0 +1,27 @@
+# Build configuration for the nmap userspace binary.
+#
+# Default target is the custom OurOS bare-metal target.
+# For running the test suite on the host:
+#
+#   Windows (MSVC): copy src/ + Cargo.toml to a temp dir (no .cargo/config.toml)
+#   and run: cargo +nightly-x86_64-pc-windows-msvc test
+#
+# The `build-std` + `json-target-spec` flags in [unstable] are required for
+# the custom x86_64-ouros target but conflict with host-native `cargo test`.
+# All tests are pure-Rust logic (no OurOS syscalls), so they run fine on the
+# host without the custom target config.
+
+[build]
+target = "../../toolchain/x86_64-ouros.json"
+
+[unstable]
+build-std = ["core", "alloc", "std", "panic_abort"]
+json-target-spec = true
+
+[target.x86_64-ouros]
+linker = "rust-lld"
+rustflags = [
+    "-C", "link-arg=-L../../toolchain/sysroot/lib",
+    "-C", "link-arg=-lstubs",
+    "-C", "link-arg=--allow-multiple-definition",
+]

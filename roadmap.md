@@ -1951,6 +1951,8 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Presentation/Slides (apps/slides: slide elements with text boxes/shapes/images, 6 slide layouts, 3 themes, slide sorter view, transitions, speaker notes, undo/redo, HTML export, multi-panel UI, 65 tests)
 - [x] Photo Manager (apps/photomanager: EXIF metadata parsing with 20+ tags, albums and smart albums with rule-based filtering, thumbnail grid/single/timeline/slideshow views, star ratings, color labels, tagging, duplicate detection via perceptual hash, batch operations, multi-panel UI, 62 tests)
 - [x] Media Converter (apps/mediaconvert: batch format conversion for audio/video/image, 9 audio + 7 video + 8 image formats, codec selection, quality presets, conversion profiles, batch queue with progress, output naming templates, history, multi-panel UI, 46 tests)
+- [x] Diagram Editor (apps/diagram: 10 node types, connection types with arrows, snap-to-grid, alignment tools, grouping, layers, zoom/pan, 7 templates, SVG/JSON export, undo/redo, multi-select, auto-layout, multi-panel UI, 84 tests)
+- [x] Password Generator (apps/passwordgen: configurable password/passphrase/PIN/pronounceable generation, strength analysis with entropy and crack time estimation, pattern detection, breach check, policy compliance, bulk generation, multi-panel UI, 40 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

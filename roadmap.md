@@ -1660,9 +1660,9 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] View modes (Details/List/Icons), sort by name/size/date/type
   - [x] Toolbar, sidebar with quick-access locations, status bar
   - [x] Path bar with autocomplete (pathbar.rs: breadcrumb + edit mode, Tab completion, overflow, validation)
-  - [ ] Thumbnails (images, video, PDF)
+  - [x] Thumbnails (thumbs.rs: LRU cache, BMP/PNG/GIF/JPEG parsing, downscale, text preview, folder preview, batch queue)
   - [ ] Custom columns per file type, app-extensible columns
-  - [ ] Drop zones for drag-and-drop (empty space = this dir, folder = into folder)
+  - [x] Drop zones for drag-and-drop (dropzone.rs: hit-testing, operation selection, nested prevention, feedback)
   - [x] Atomic copy/move/delete with undo, resume on interruption (fileops.rs: journal, recycle bin, conflict policies, progress)
 - [-] Text editor:
   - [x] Multi-tab document editing with tab bar

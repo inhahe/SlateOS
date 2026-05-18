@@ -1,0 +1,36 @@
+.TH CHOWN 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+chown \- change file owner and group
+.SH SYNOPSIS
+.B chown
+[\fIOPTIONS\fR] [\fIOWNER\fR][:\fIGROUP\fR] \fIFILE\fR...
+.SH DESCRIPTION
+Change the user and/or group ownership of each FILE to OWNER and/or GROUP.
+.SH OPTIONS
+.TP
+\fB\-R\fR, \fB\-\-recursive\fR
+Operate on files and directories recursively.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Output a diagnostic for every file processed.
+.TP
+\fB\-c\fR, \fB\-\-changes\fR
+Like verbose but report only when a change is made.
+.TP
+\fB\-f\fR, \fB\-\-silent\fR, \fB\-\-quiet\fR
+Suppress most error messages.
+.TP
+\fB\-h\fR, \fB\-\-no\-dereference\fR
+Affect symbolic links instead of the files they point to.
+.SH EXAMPLES
+.nf
+chown alice file.txt         Change owner to alice
+chown alice:staff dir/       Change owner and group
+chown :www-data web/         Change group only
+chown -R root:root /etc/     Recursive chown
+.fi
+.SH SEE ALSO
+.BR chmod (1),
+.BR chgrp (1)
+.SH AUTHOR
+OurOS Contributors.

@@ -1,0 +1,57 @@
+.TH MAN 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+man \- display manual pages
+.SH SYNOPSIS
+.B man
+[\fIOPTIONS\fR] [\fISECTION\fR] \fINAME\fR
+.SH DESCRIPTION
+Display the manual page for the given NAME.  If SECTION is provided,
+only search that section.  Otherwise, search all sections and display
+the first match.
+.PP
+The \fBman\fR utility formats and displays the on-line manual pages.
+It searches embedded pages first, then the MANPATH directories.
+Pages are rendered with ANSI colour and piped through \fBless\fR(1)
+if available.
+.SH OPTIONS
+.TP
+\fB\-k\fR \fIKEYWORD\fR
+Search man page names and descriptions for KEYWORD (like \fBapropos\fR).
+.TP
+\fB\-f\fR \fINAME\fR
+Display one-line description of NAME (like \fBwhatis\fR).
+.TP
+\fB\-a\fR
+Display all matching pages, not just the first.
+.TP
+\fB\-w\fR
+Print the location of the man page instead of displaying it.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show usage information.
+.TP
+\fB\-\-version\fR
+Show version.
+.SH ENVIRONMENT
+.TP
+\fBMANPATH\fR
+Colon-separated list of directories to search for man pages.
+Defaults to /usr/share/man:/usr/local/share/man.
+.TP
+\fBTERM\fR
+Used to determine if colour output is appropriate.
+.SH EXAMPLES
+.nf
+man ls                    View the ls manual
+man 1 grep                View grep in section 1
+man -k network            Search for network-related pages
+man -f mount              Show one-line description
+man -a kill               Show all sections for kill
+man -w ssh                Print man page file path
+.fi
+.SH SEE ALSO
+.BR apropos (1),
+.BR whatis (1),
+.BR less (1)
+.SH AUTHOR
+OurOS Contributors.

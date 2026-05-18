@@ -1,0 +1,66 @@
+.TH GREP 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+grep \- print lines that match patterns
+.SH SYNOPSIS
+.B grep
+[\fIOPTIONS\fR] \fIPATTERN\fR [\fIFILE\fR...]
+.SH DESCRIPTION
+Search for PATTERN in each FILE.  When FILE is \-, read standard input.
+By default, grep prints the matching lines.
+.SH OPTIONS
+.TP
+\fB\-i\fR, \fB\-\-ignore\-case\fR
+Ignore case distinctions in patterns and data.
+.TP
+\fB\-v\fR, \fB\-\-invert\-match\fR
+Select non-matching lines.
+.TP
+\fB\-c\fR, \fB\-\-count\fR
+Print only a count of matching lines per file.
+.TP
+\fB\-l\fR, \fB\-\-files\-with\-matches\fR
+Print only names of files with matches.
+.TP
+\fB\-n\fR, \fB\-\-line\-number\fR
+Prefix each line of output with the 1-based line number.
+.TP
+\fB\-r\fR, \fB\-R\fR, \fB\-\-recursive\fR
+Recursively search subdirectories.
+.TP
+\fB\-E\fR, \fB\-\-extended\-regexp\fR
+Interpret PATTERN as an extended regular expression (ERE).
+.TP
+\fB\-F\fR, \fB\-\-fixed\-strings\fR
+Interpret PATTERN as a fixed string.
+.TP
+\fB\-w\fR, \fB\-\-word\-regexp\fR
+Match only whole words.
+.TP
+\fB\-x\fR, \fB\-\-line\-regexp\fR
+Match only whole lines.
+.TP
+\fB\-A\fR \fINUM\fR
+Print NUM lines of trailing context after matches.
+.TP
+\fB\-B\fR \fINUM\fR
+Print NUM lines of leading context before matches.
+.TP
+\fB\-C\fR \fINUM\fR
+Print NUM lines of context around matches.
+.TP
+\fB\-\-color\fR[=\fIWHEN\fR]
+Highlight matching text; WHEN is 'always', 'auto', or 'never'.
+.SH EXAMPLES
+.nf
+grep "error" log.txt         Search for "error"
+grep -rn "TODO" src/         Recursive search with line numbers
+grep -i "hello" *.txt        Case-insensitive search
+grep -v "^#" config          Show non-comment lines
+grep -c "fail" test.log      Count matching lines
+.fi
+.SH SEE ALSO
+.BR find (1),
+.BR sed (1),
+.BR awk (1)
+.SH AUTHOR
+OurOS Contributors.

@@ -1,0 +1,46 @@
+.TH PING 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+ping \- send ICMP ECHO_REQUEST to network hosts
+.SH SYNOPSIS
+.B ping
+[\fIOPTIONS\fR] \fIDESTINATION\fR
+.SH DESCRIPTION
+Send ICMP ECHO_REQUEST packets to a network host and display round-trip
+time statistics.  Useful for diagnosing network connectivity problems.
+.SH OPTIONS
+.TP
+\fB\-c\fR \fICOUNT\fR
+Stop after sending COUNT packets.
+.TP
+\fB\-i\fR \fIINTERVAL\fR
+Wait INTERVAL seconds between sending each packet (default 1).
+.TP
+\fB\-t\fR \fITTL\fR
+Set the IP Time to Live.
+.TP
+\fB\-s\fR \fISIZE\fR
+Specify the number of data bytes to send (default 56).
+.TP
+\fB\-w\fR \fIDEADLINE\fR
+Specify a timeout, in seconds, before ping exits.
+.TP
+\fB\-q\fR
+Quiet output.  Only display the summary.
+.TP
+\fB\-4\fR
+Use IPv4 only.
+.TP
+\fB\-6\fR
+Use IPv6 only.
+.SH EXAMPLES
+.nf
+ping example.com            Ping a host
+ping -c 5 192.168.1.1      Send 5 packets
+ping -i 0.2 -c 100 host    Fast ping (200ms interval)
+.fi
+.SH SEE ALSO
+.BR traceroute (1),
+.BR netstat (1),
+.BR ifconfig (8)
+.SH AUTHOR
+OurOS Contributors.

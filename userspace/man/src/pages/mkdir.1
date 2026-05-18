@@ -1,0 +1,29 @@
+.TH MKDIR 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+mkdir \- make directories
+.SH SYNOPSIS
+.B mkdir
+[\fIOPTIONS\fR] \fIDIRECTORY\fR...
+.SH DESCRIPTION
+Create the DIRECTORY(ies), if they do not already exist.
+.SH OPTIONS
+.TP
+\fB\-p\fR, \fB\-\-parents\fR
+No error if existing, make parent directories as needed.
+.TP
+\fB\-m\fR, \fB\-\-mode\fR=\fIMODE\fR
+Set file mode (as in chmod), not a=rwx - umask.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Print a message for each created directory.
+.SH EXAMPLES
+.nf
+mkdir dir1               Create a single directory
+mkdir -p a/b/c           Create nested directories
+mkdir -m 700 private     Create with restricted permissions
+.fi
+.SH SEE ALSO
+.BR rmdir (1),
+.BR chmod (1)
+.SH AUTHOR
+OurOS Contributors.

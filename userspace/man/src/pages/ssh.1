@@ -1,0 +1,59 @@
+.TH SSH 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+ssh \- OpenSSH remote login client
+.SH SYNOPSIS
+.B ssh
+[\fIOPTIONS\fR] [\fIUSER\fR@]\fIHOSTNAME\fR [\fICOMMAND\fR]
+.SH DESCRIPTION
+ssh (Secure Shell) is a program for logging into a remote machine and for
+executing commands on a remote machine.  It provides secure encrypted
+communications between two untrusted hosts over an insecure network.
+.SH OPTIONS
+.TP
+\fB\-p\fR \fIPORT\fR
+Port to connect to on the remote host (default 22).
+.TP
+\fB\-i\fR \fIIDENTITY_FILE\fR
+Select a file from which the identity (private key) for public key
+authentication is read.
+.TP
+\fB\-l\fR \fIUSER\fR
+Specify the user to log in as on the remote machine.
+.TP
+\fB\-L\fR \fI[BIND:]PORT:HOST:HOSTPORT\fR
+Local port forwarding.
+.TP
+\fB\-R\fR \fI[BIND:]PORT:HOST:HOSTPORT\fR
+Remote port forwarding.
+.TP
+\fB\-D\fR \fI[BIND:]PORT\fR
+Dynamic application-level port forwarding (SOCKS proxy).
+.TP
+\fB\-N\fR
+Do not execute a remote command (useful for port forwarding).
+.TP
+\fB\-f\fR
+Go to background just before command execution.
+.TP
+\fB\-v\fR
+Verbose mode (for debugging).  Multiple \fB\-v\fR increases verbosity.
+.TP
+\fB\-X\fR
+Enable X11 forwarding.
+.TP
+\fB\-o\fR \fIOPTION\fR
+Set configuration option (e.g. StrictHostKeyChecking=no).
+.SH EXAMPLES
+.nf
+ssh user@host                 Log in to remote host
+ssh -p 2222 user@host         Connect on non-standard port
+ssh user@host ls /tmp         Run a remote command
+ssh -L 8080:localhost:80 host Local port forward
+ssh -i ~/.ssh/mykey host      Use specific identity file
+.fi
+.SH SEE ALSO
+.BR scp (1),
+.BR ssh-keygen (1),
+.BR ssh_config (5)
+.SH AUTHOR
+OurOS Contributors.

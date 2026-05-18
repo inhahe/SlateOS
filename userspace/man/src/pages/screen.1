@@ -1,0 +1,67 @@
+.TH SCREEN 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+screen \- terminal multiplexer
+.SH SYNOPSIS
+.B screen
+[\fIOPTIONS\fR] [\fICOMMAND\fR [\fIARGS\fR]]
+.SH DESCRIPTION
+screen is a full-screen window manager that multiplexes a physical
+terminal between several processes (typically interactive shells).
+Each virtual terminal provides the functions of a standard terminal.
+.PP
+Programs continue to run when their window is not visible, even if
+the user disconnects.
+.SH OPTIONS
+.TP
+\fB\-S\fR \fINAME\fR
+Name the session for easy reattachment.
+.TP
+\fB\-r\fR [\fINAME\fR]
+Reattach to a detached session.
+.TP
+\fB\-d\fR
+Detach a running session.
+.TP
+\fB\-d \-r\fR [\fINAME\fR]
+Detach and reattach (steal) a session.
+.TP
+\fB\-ls\fR, \fB\-list\fR
+List all sessions.
+.TP
+\fB\-x\fR
+Attach to an already-attached session (multi-display mode).
+.TP
+\fB\-dm\fR
+Start in detached mode.
+.SH "KEY BINDINGS"
+The default command character is \fBCtrl-a\fR.
+.TP
+\fBCtrl-a c\fR
+Create a new window.
+.TP
+\fBCtrl-a n\fR / \fBCtrl-a p\fR
+Switch to next / previous window.
+.TP
+\fBCtrl-a d\fR
+Detach from the session.
+.TP
+\fBCtrl-a k\fR
+Kill the current window.
+.TP
+\fBCtrl-a "\fR
+List all windows for selection.
+.TP
+\fBCtrl-a [\fR
+Enter copy/scrollback mode.
+.SH EXAMPLES
+.nf
+screen                    Start a new session
+screen -S work            Named session
+screen -r work            Reattach to "work"
+screen -ls                List sessions
+screen -d -r stuck        Force reattach
+.fi
+.SH SEE ALSO
+.BR tmux (1)
+.SH AUTHOR
+OurOS Contributors.

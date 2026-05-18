@@ -1,0 +1,59 @@
+.TH CURL 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+curl \- transfer a URL
+.SH SYNOPSIS
+.B curl
+[\fIOPTIONS\fR] \fIURL\fR...
+.SH DESCRIPTION
+Transfer data from or to a server using one of the supported protocols
+(HTTP, HTTPS, FTP).  curl is designed to work without user interaction.
+.SH OPTIONS
+.TP
+\fB\-o\fR \fIFILE\fR
+Write output to FILE instead of stdout.
+.TP
+\fB\-O\fR
+Write output to a file named as the remote file.
+.TP
+\fB\-L\fR
+Follow redirects.
+.TP
+\fB\-s\fR, \fB\-\-silent\fR
+Silent mode, do not show progress meter or error messages.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Make the operation more talkative.
+.TP
+\fB\-H\fR \fIHEADER\fR
+Pass custom header to the server (e.g. "Content-Type: application/json").
+.TP
+\fB\-d\fR \fIDATA\fR
+Send DATA in a POST request.
+.TP
+\fB\-X\fR \fIMETHOD\fR
+Specify request method (GET, POST, PUT, DELETE, etc.).
+.TP
+\fB\-u\fR \fIUSER:PASSWORD\fR
+Server user and password for authentication.
+.TP
+\fB\-k\fR, \fB\-\-insecure\fR
+Allow insecure server connections when using TLS.
+.TP
+\fB\-I\fR, \fB\-\-head\fR
+Fetch headers only.
+.TP
+\fB\-\-connect\-timeout\fR \fISECONDS\fR
+Maximum time for the connection phase.
+.SH EXAMPLES
+.nf
+curl https://example.com           Fetch a web page
+curl -o page.html https://ex.com   Save to file
+curl -LO https://host/file.tar.gz Download following redirects
+curl -X POST -d '{"k":"v"}' url   POST JSON data
+curl -sI https://example.com      Fetch headers silently
+.fi
+.SH SEE ALSO
+.BR wget (1),
+.BR ssh (1)
+.SH AUTHOR
+OurOS Contributors.

@@ -1,0 +1,49 @@
+.TH PS 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+ps \- report a snapshot of current processes
+.SH SYNOPSIS
+.B ps
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+Display information about active processes.  Without options, ps shows
+processes owned by the current user in the current terminal.
+.SH OPTIONS
+.TP
+\fB\-e\fR, \fB\-A\fR
+Select all processes.
+.TP
+\fB\-f\fR
+Full-format listing (UID, PID, PPID, C, STIME, TTY, TIME, CMD).
+.TP
+\fB\-l\fR
+Long format (F, S, UID, PID, PPID, C, PRI, NI, SZ, WCHAN, TTY, TIME, CMD).
+.TP
+\fB\-u\fR \fIUSER\fR
+Select processes by effective user name or ID.
+.TP
+\fB\-p\fR \fIPID\fR
+Select by process ID.
+.TP
+\fB\-o\fR \fIFORMAT\fR
+User-defined format.  Recognised columns: pid, ppid, uid, user,
+comm, args, %cpu, %mem, vsz, rss, stat, tty, time.
+.TP
+\fB\-\-sort\fR \fIKEY\fR
+Sort output by KEY (e.g. \fB\-\-sort=-%mem\fR).
+.TP
+\fBaux\fR
+BSD-style listing of all processes with extended info.
+.SH EXAMPLES
+.nf
+ps                   Show current user's processes
+ps -ef               Full listing of all processes
+ps aux               BSD-style all processes
+ps -p 1234           Show process with PID 1234
+ps -o pid,comm,%mem  Custom format
+.fi
+.SH SEE ALSO
+.BR top (1),
+.BR kill (1),
+.BR htop (1)
+.SH AUTHOR
+OurOS Contributors.

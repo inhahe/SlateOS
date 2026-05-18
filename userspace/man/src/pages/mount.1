@@ -1,0 +1,48 @@
+.TH MOUNT 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+mount \- mount a filesystem
+.SH SYNOPSIS
+.B mount
+[\fIOPTIONS\fR] \fIDEVICE\fR \fIMOUNTPOINT\fR
+.br
+.B mount
+[\fIOPTIONS\fR] \fB\-a\fR
+.SH DESCRIPTION
+Attach the filesystem found on DEVICE at the directory MOUNTPOINT.
+Only the superuser or users with the appropriate capability may mount
+filesystems.
+.PP
+Without arguments, \fBmount\fR lists all currently mounted filesystems.
+.SH OPTIONS
+.TP
+\fB\-t\fR \fITYPE\fR
+Specify the filesystem type (e.g. ext4, fat32, tmpfs).
+.TP
+\fB\-o\fR \fIOPTIONS\fR
+Mount options, comma-separated (e.g. ro, noexec, nosuid).
+.TP
+\fB\-a\fR
+Mount all filesystems listed in /etc/fstab.
+.TP
+\fB\-r\fR, \fB\-\-read\-only\fR
+Mount the filesystem read-only.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Verbose mode.
+.TP
+\fB\-\-bind\fR
+Bind mount: make a directory available at another location.
+.SH EXAMPLES
+.nf
+mount                         List mounted filesystems
+mount /dev/sda1 /mnt          Mount a partition
+mount -t ext4 /dev/sdb1 /data Mount ext4 filesystem
+mount -o ro /dev/sr0 /cdrom   Mount read-only
+mount -a                      Mount all from /etc/fstab
+.fi
+.SH SEE ALSO
+.BR umount (8),
+.BR fstab (5),
+.BR df (1)
+.SH AUTHOR
+OurOS Contributors.

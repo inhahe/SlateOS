@@ -1,0 +1,36 @@
+.TH MV 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+mv \- move (rename) files
+.SH SYNOPSIS
+.B mv
+[\fIOPTIONS\fR] \fISOURCE\fR \fIDEST\fR
+.br
+.B mv
+[\fIOPTIONS\fR] \fISOURCE\fR... \fIDIRECTORY\fR
+.SH DESCRIPTION
+Rename SOURCE to DEST, or move SOURCE(s) to DIRECTORY.
+.SH OPTIONS
+.TP
+\fB\-i\fR, \fB\-\-interactive\fR
+Prompt before overwrite.
+.TP
+\fB\-f\fR, \fB\-\-force\fR
+Do not prompt before overwriting.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Explain what is being done.
+.TP
+\fB\-n\fR, \fB\-\-no\-clobber\fR
+Do not overwrite an existing file.
+.SH EXAMPLES
+.nf
+mv old.txt new.txt       Rename a file
+mv file1 file2 /tmp/    Move files to /tmp
+mv -i *.log archive/    Interactive move
+.fi
+.SH SEE ALSO
+.BR cp (1),
+.BR rm (1),
+.BR rename (1)
+.SH AUTHOR
+OurOS Contributors.

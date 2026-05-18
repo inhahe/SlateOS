@@ -1,0 +1,48 @@
+.TH CP 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+cp \- copy files and directories
+.SH SYNOPSIS
+.B cp
+[\fIOPTIONS\fR] \fISOURCE\fR \fIDEST\fR
+.br
+.B cp
+[\fIOPTIONS\fR] \fISOURCE\fR... \fIDIRECTORY\fR
+.SH DESCRIPTION
+Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
+.SH OPTIONS
+.TP
+\fB\-r\fR, \fB\-R\fR, \fB\-\-recursive\fR
+Copy directories recursively.
+.TP
+\fB\-i\fR, \fB\-\-interactive\fR
+Prompt before overwrite.
+.TP
+\fB\-f\fR, \fB\-\-force\fR
+If an existing destination file cannot be opened, remove it and try again.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Explain what is being done.
+.TP
+\fB\-p\fR, \fB\-\-preserve\fR
+Preserve mode, ownership, and timestamps.
+.TP
+\fB\-a\fR, \fB\-\-archive\fR
+Same as \fB\-rpd\fR (recursive, preserve, no dereference).
+.TP
+\fB\-l\fR, \fB\-\-link\fR
+Hard-link files instead of copying.
+.TP
+\fB\-s\fR, \fB\-\-symbolic\-link\fR
+Make symbolic links instead of copying.
+.SH EXAMPLES
+.nf
+cp file1 file2           Copy file1 to file2
+cp -r dir1/ dir2/        Recursively copy a directory
+cp -iv *.txt /backup/    Interactive verbose copy
+.fi
+.SH SEE ALSO
+.BR mv (1),
+.BR rm (1),
+.BR ln (1)
+.SH AUTHOR
+OurOS Contributors.

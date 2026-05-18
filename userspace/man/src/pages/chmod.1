@@ -1,0 +1,35 @@
+.TH CHMOD 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+chmod \- change file mode bits
+.SH SYNOPSIS
+.B chmod
+[\fIOPTIONS\fR] \fIMODE\fR \fIFILE\fR...
+.SH DESCRIPTION
+Change the mode (permissions) of each FILE to MODE.  MODE can be
+specified symbolically (u+x, go-w) or as an octal number (755).
+.SH OPTIONS
+.TP
+\fB\-R\fR, \fB\-\-recursive\fR
+Change files and directories recursively.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Output a diagnostic for every file processed.
+.TP
+\fB\-c\fR, \fB\-\-changes\fR
+Like verbose but report only when a change is made.
+.TP
+\fB\-f\fR, \fB\-\-silent\fR, \fB\-\-quiet\fR
+Suppress most error messages.
+.SH EXAMPLES
+.nf
+chmod 755 script.sh         Make executable by all
+chmod u+x program           Add execute for owner
+chmod -R go-w project/      Remove group/other write recursively
+chmod a=r readonly.txt      Read-only for everyone
+.fi
+.SH SEE ALSO
+.BR chown (1),
+.BR ls (1),
+.BR stat (1)
+.SH AUTHOR
+OurOS Contributors.

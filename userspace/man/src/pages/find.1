@@ -1,0 +1,57 @@
+.TH FIND 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+find \- search for files in a directory hierarchy
+.SH SYNOPSIS
+.B find
+[\fIPATH\fR...] [\fIEXPRESSION\fR]
+.SH DESCRIPTION
+Search for files matching the given criteria in the specified directory
+hierarchy.  If no PATH is given, the current directory is used.
+.SH OPTIONS
+.TP
+\fB\-name\fR \fIPATTERN\fR
+Base of file name matches shell glob PATTERN.
+.TP
+\fB\-iname\fR \fIPATTERN\fR
+Like \fB\-name\fR but case-insensitive.
+.TP
+\fB\-type\fR \fIC\fR
+File is of type C: \fBf\fR (regular file), \fBd\fR (directory),
+\fBl\fR (symbolic link), \fBp\fR (named pipe), \fBs\fR (socket).
+.TP
+\fB\-size\fR \fIN\fR[\fBcwbkMG\fR]
+File uses N units of space.
+.TP
+\fB\-mtime\fR \fIN\fR
+File was modified N*24 hours ago.
+.TP
+\fB\-newer\fR \fIFILE\fR
+File was modified more recently than FILE.
+.TP
+\fB\-maxdepth\fR \fIN\fR
+Descend at most N directory levels.
+.TP
+\fB\-mindepth\fR \fIN\fR
+Do not apply tests at levels less than N.
+.TP
+\fB\-exec\fR \fICOMMAND\fR {} \e;
+Execute COMMAND for each matched file.
+.TP
+\fB\-print\fR
+Print the full file name (default action).
+.TP
+\fB\-delete\fR
+Delete matched files.
+.SH EXAMPLES
+.nf
+find . -name "*.rs"                  Find Rust source files
+find /var -type f -size +10M         Files larger than 10MB
+find . -mtime -7 -name "*.log"      Logs modified in last week
+find /tmp -type f -exec rm {} \e;    Delete all files in /tmp
+.fi
+.SH SEE ALSO
+.BR locate (1),
+.BR ls (1),
+.BR grep (1)
+.SH AUTHOR
+OurOS Contributors.

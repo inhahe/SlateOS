@@ -1,0 +1,58 @@
+.TH LS 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+ls \- list directory contents
+.SH SYNOPSIS
+.B ls
+[\fIOPTIONS\fR] [\fIFILE\fR...]
+.SH DESCRIPTION
+List information about the FILEs (the current directory by default).
+Sort entries alphabetically unless a sort option is given.
+.PP
+If no FILE is specified, list the contents of the current directory.
+If FILE is a regular file, display information about that file.
+.SH OPTIONS
+.TP
+\fB\-a\fR, \fB\-\-all\fR
+Do not ignore entries starting with .
+.TP
+\fB\-l\fR
+Use a long listing format showing permissions, owner, size, and date.
+.TP
+\fB\-h\fR, \fB\-\-human\-readable\fR
+With \fB\-l\fR, print sizes in human-readable format (e.g. 1K, 234M).
+.TP
+\fB\-R\fR, \fB\-\-recursive\fR
+List subdirectories recursively.
+.TP
+\fB\-r\fR, \fB\-\-reverse\fR
+Reverse order while sorting.
+.TP
+\fB\-S\fR
+Sort by file size, largest first.
+.TP
+\fB\-t\fR
+Sort by modification time, newest first.
+.TP
+\fB\-1\fR
+List one file per line.
+.TP
+\fB\-F\fR, \fB\-\-classify\fR
+Append indicator (one of */=>@|) to entries.
+.TP
+\fB\-d\fR, \fB\-\-directory\fR
+List directories themselves, not their contents.
+.TP
+\fB\-\-color\fR[=\fIWHEN\fR]
+Colorize the output; WHEN can be 'always', 'auto', or 'never'.
+.SH EXAMPLES
+.nf
+ls                   List current directory
+ls -la               Long format, including hidden files
+ls -lhS /tmp         Long format, human sizes, sorted by size
+ls -R /usr           Recursive listing
+.fi
+.SH SEE ALSO
+.BR dir (1),
+.BR find (1)
+.SH AUTHOR
+OurOS Contributors.

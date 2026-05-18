@@ -1,0 +1,42 @@
+.TH UMOUNT 8 "2026-05-18" "OurOS" "System Administration"
+.SH NAME
+umount \- unmount file systems
+.SH SYNOPSIS
+.B umount
+[\fIOPTIONS\fR] \fIDIR\fR|\fIDEVICE\fR
+.br
+.B umount
+\fB\-a\fR [\fIOPTIONS\fR]
+.SH DESCRIPTION
+Detach the filesystem mounted at DIR or identified by DEVICE.  The
+filesystem must not be in use (no open files, no process working
+directories inside the mount).
+.SH OPTIONS
+.TP
+\fB\-a\fR
+Unmount all mounted filesystems (from /proc/mounts).
+.TP
+\fB\-f\fR, \fB\-\-force\fR
+Force unmount (may cause data loss on some filesystems).
+.TP
+\fB\-l\fR, \fB\-\-lazy\fR
+Lazy unmount: detach the filesystem from the hierarchy now and clean
+up references when no longer busy.
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Verbose mode.
+.TP
+\fB\-t\fR \fITYPE\fR
+Only unmount filesystems of the given type.
+.SH EXAMPLES
+.nf
+umount /mnt               Unmount /mnt
+umount /dev/sda1           Unmount by device
+umount -a                  Unmount all
+umount -l /mnt/busy        Lazy unmount busy filesystem
+.fi
+.SH SEE ALSO
+.BR mount (1),
+.BR fstab (5)
+.SH AUTHOR
+OurOS Contributors.

@@ -1,0 +1,41 @@
+.TH DF 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+df \- report file system disk space usage
+.SH SYNOPSIS
+.B df
+[\fIOPTIONS\fR] [\fIFILE\fR...]
+.SH DESCRIPTION
+Display information about the file system on which each FILE resides,
+or all file systems by default.  Disk space is shown in 1K blocks
+unless \fB\-h\fR is used.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-human\-readable\fR
+Print sizes in human-readable format (e.g. 1K, 234M, 2G).
+.TP
+\fB\-T\fR, \fB\-\-print\-type\fR
+Print file system type.
+.TP
+\fB\-i\fR, \fB\-\-inodes\fR
+List inode information instead of block usage.
+.TP
+\fB\-a\fR, \fB\-\-all\fR
+Include pseudo, duplicate, inaccessible file systems.
+.TP
+\fB\-t\fR \fITYPE\fR
+Limit listing to file systems of type TYPE.
+.TP
+\fB\-x\fR \fITYPE\fR
+Limit listing to file systems not of type TYPE.
+.SH EXAMPLES
+.nf
+df                   Show all mounted filesystems
+df -h                Human-readable sizes
+df -Th               Include filesystem types
+df /home             Show filesystem containing /home
+.fi
+.SH SEE ALSO
+.BR du (1),
+.BR mount (1)
+.SH AUTHOR
+OurOS Contributors.

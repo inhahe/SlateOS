@@ -1,0 +1,38 @@
+.TH DU 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+du \- estimate file space usage
+.SH SYNOPSIS
+.B du
+[\fIOPTIONS\fR] [\fIFILE\fR...]
+.SH DESCRIPTION
+Summarize disk usage of the set of FILEs, recursing into directories.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-human\-readable\fR
+Print sizes in human-readable format (e.g. 1K, 234M, 2G).
+.TP
+\fB\-s\fR, \fB\-\-summarize\fR
+Display only a total for each argument.
+.TP
+\fB\-a\fR, \fB\-\-all\fR
+Write counts for all files, not just directories.
+.TP
+\fB\-d\fR, \fB\-\-max\-depth\fR=\fIN\fR
+Print total for a directory only if it is N or fewer levels deep.
+.TP
+\fB\-c\fR, \fB\-\-total\fR
+Produce a grand total.
+.TP
+\fB\-\-exclude\fR=\fIPATTERN\fR
+Exclude files matching PATTERN.
+.SH EXAMPLES
+.nf
+du -sh /home/user        Summary of home directory
+du -h --max-depth=1 .    Show immediate subdirectory sizes
+du -ch *.log             Sizes of log files with total
+.fi
+.SH SEE ALSO
+.BR df (1),
+.BR ls (1)
+.SH AUTHOR
+OurOS Contributors.

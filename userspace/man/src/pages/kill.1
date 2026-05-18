@@ -1,0 +1,42 @@
+.TH KILL 1 "2026-05-18" "OurOS" "User Commands"
+.SH NAME
+kill \- send a signal to a process
+.SH SYNOPSIS
+.B kill
+[\fIOPTIONS\fR] \fIPID\fR...
+.SH DESCRIPTION
+Send a signal to the specified process(es).  The default signal is
+SIGTERM (15), which requests graceful termination.
+.PP
+On OurOS, process lifecycle is primarily managed through IPC messages
+rather than Unix signals.  The \fBkill\fR command translates signal
+numbers into the appropriate IPC shutdown/terminate messages.
+.SH OPTIONS
+.TP
+\fB\-s\fR \fISIGNAL\fR
+Specify the signal to send by name.
+.TP
+\fB\-l\fR
+List all available signal names.
+.TP
+\fB\-9\fR
+Send SIGKILL (force kill, cannot be caught).
+.TP
+\fB\-15\fR
+Send SIGTERM (graceful termination, default).
+.TP
+\fB\-\fR\fINUM\fR
+Send signal number NUM.
+.SH EXAMPLES
+.nf
+kill 1234              Send SIGTERM to process 1234
+kill -9 1234           Force kill process 1234
+kill -s HUP 5678      Send SIGHUP to reload config
+kill -l                List all signals
+.fi
+.SH SEE ALSO
+.BR ps (1),
+.BR killall (1),
+.BR signal (7)
+.SH AUTHOR
+OurOS Contributors.

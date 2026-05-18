@@ -1859,6 +1859,9 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] PDF viewer (apps/pdfviewer: multi-tab, bookmarks, search, annotations, zoom modes, page rotation, print settings, dark mode, 102 tests)
 - [x] Device manager (apps/devicemanager: device tree with 8 categories, driver info, resource view, search/filter, hardware report export, 105 tests)
 - [x] Alarm clock (apps/alarmclock: alarms with repeat/snooze, multiple timers, stopwatch with laps and stats, progress ring, AM/PM+24h, 135 tests)
+- [x] System restore (apps/systemrestore: tree-based snapshots, scheduling, retention, comparison, export/import, storage management)
+- [x] Unit converter (apps/unitconverter: 12 categories, base-unit conversion, history, favorites, formula display)
+- [x] Weather dashboard (apps/weather: current/hourly/daily forecast, alerts, locations, temp graph, air quality, unit settings)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

@@ -1441,6 +1441,9 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] nslookup: DNS lookup (RFC 1035 packets, A/AAAA/MX/TXT/NS/CNAME/PTR, reverse, custom server)
   - [x] netstat: network connection stats (/proc/net/tcp/udp, TCP states, protocol stats, routing, JSON)
   - [x] hwclock: hardware clock management (RTC read/write, hctosys/systohc, timezone, SNTP client)
+  - [x] crontab: user crontab management (edit/list/remove/validate/install, cron syntax validation)
+  - [x] fw: firewall rule management (allow/deny by port/IP, policy, logging, persistence, JSON output)
+  - [x] diskutil: disk management (list/info/format/verify/repair/TRIM, benchmark, S.M.A.R.T., partitions)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

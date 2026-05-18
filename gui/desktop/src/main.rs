@@ -40,6 +40,10 @@ mod resmon;
 mod hotkeys;
 #[allow(dead_code)]
 mod animations;
+#[allow(dead_code)]
+mod snap;
+#[allow(dead_code)]
+mod clipboard_viewer;
 
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, Modifiers};

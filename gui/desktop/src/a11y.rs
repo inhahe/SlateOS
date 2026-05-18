@@ -13,7 +13,7 @@
 //! - Focus indicator enhancement (extra-visible keyboard focus ring)
 
 use guitk::color::Color;
-use guitk::render::{FontWeightHint, RenderCommand};
+use guitk::render::RenderCommand;
 use guitk::style::CornerRadii;
 
 // ============================================================================

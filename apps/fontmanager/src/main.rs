@@ -253,6 +253,12 @@ pub struct FontCollection {
     next_id: u64,
 }
 
+impl Default for FontCollection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FontCollection {
     /// Create an empty font collection.
     pub fn new() -> Self {
@@ -611,6 +617,12 @@ pub struct FontManagerState {
     /// Window dimensions.
     pub window_width: f32,
     pub window_height: f32,
+}
+
+impl Default for FontManagerState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FontManagerState {

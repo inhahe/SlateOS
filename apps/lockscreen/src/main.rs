@@ -146,19 +146,14 @@ const HINT_THRESHOLD: u32 = 3;
 // ============================================================================
 
 /// Top-level state of the lock screen.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LockScreenState {
     /// Showing the clock/date (idle). User clicks or presses a key to enter
     /// password mode.
+    #[default]
     Clock,
     /// User is entering their password.
     PasswordEntry,
-}
-
-impl Default for LockScreenState {
-    fn default() -> Self {
-        Self::Clock
-    }
 }
 
 // ============================================================================
@@ -211,15 +206,15 @@ fn compute_initials(name: &str) -> String {
     }
     let mut parts = trimmed.split_whitespace();
     let mut result = String::with_capacity(2);
-    if let Some(first) = parts.next() {
-        if let Some(ch) = first.chars().next() {
-            result.push(ch.to_ascii_uppercase());
-        }
+    if let Some(first) = parts.next()
+        && let Some(ch) = first.chars().next()
+    {
+        result.push(ch.to_ascii_uppercase());
     }
-    if let Some(second) = parts.next() {
-        if let Some(ch) = second.chars().next() {
-            result.push(ch.to_ascii_uppercase());
-        }
+    if let Some(second) = parts.next()
+        && let Some(ch) = second.chars().next()
+    {
+        result.push(ch.to_ascii_uppercase());
     }
     if result.is_empty() {
         "?".to_string()
@@ -312,14 +307,8 @@ fn sha256_hash(data: &[u8]) -> [u8; 32] {
         let mut w = [0u32; 64];
 
         // First 16 words directly from the block.
-        for i in 0..16 {
-            let base = i * 4;
-            w[i] = u32::from_be_bytes([
-                block[base],
-                block[base + 1],
-                block[base + 2],
-                block[base + 3],
-            ]);
+        for (i, chunk) in block.chunks_exact(4).take(16).enumerate() {
+            w[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
 
         // Extend to 64 words.
@@ -616,11 +605,11 @@ impl LockoutTimer {
 /// Determine the lockout duration for a given number of failed attempts.
 /// Returns `None` if no lockout is triggered at this attempt count.
 fn lockout_duration_for_attempts(failed_attempts: u32) -> Option<u64> {
-    if failed_attempts > 0 && failed_attempts % LOCKOUT_TIER_3_ATTEMPTS == 0 {
+    if failed_attempts > 0 && failed_attempts.is_multiple_of(LOCKOUT_TIER_3_ATTEMPTS) {
         Some(LOCKOUT_TIER_3_SECS)
-    } else if failed_attempts > 0 && failed_attempts % LOCKOUT_TIER_2_ATTEMPTS == 0 {
+    } else if failed_attempts > 0 && failed_attempts.is_multiple_of(LOCKOUT_TIER_2_ATTEMPTS) {
         Some(LOCKOUT_TIER_2_SECS)
-    } else if failed_attempts > 0 && failed_attempts % LOCKOUT_TIER_1_ATTEMPTS == 0 {
+    } else if failed_attempts > 0 && failed_attempts.is_multiple_of(LOCKOUT_TIER_1_ATTEMPTS) {
         Some(LOCKOUT_TIER_1_SECS)
     } else {
         None
@@ -645,10 +634,10 @@ fn build_accessibility_text(lock_screen: &LockScreen) -> String {
                     lock_screen.time.format_hhmm()
                 }
             ));
-            if lock_screen.config.show_date {
-                if let Some(ref date) = lock_screen.date {
-                    parts.push(format!("Date: {}.", date.format_long()));
-                }
+            if lock_screen.config.show_date
+                && let Some(ref date) = lock_screen.date
+            {
+                parts.push(format!("Date: {}.", date.format_long()));
             }
             parts.push("Press any key or click to unlock.".to_string());
         }
@@ -672,10 +661,10 @@ fn build_accessibility_text(lock_screen: &LockScreen) -> String {
                 if lock_screen.show_error {
                     parts.push("Incorrect password.".to_string());
                 }
-                if lock_screen.failed_attempts >= HINT_THRESHOLD {
-                    if let Some(ref hint) = user.password_hint {
-                        parts.push(format!("Hint: {hint}."));
-                    }
+                if lock_screen.failed_attempts >= HINT_THRESHOLD
+                    && let Some(ref hint) = user.password_hint
+                {
+                    parts.push(format!("Hint: {hint}."));
                 }
             }
             parts.push("Press Enter to submit, Escape to return to clock.".to_string());
@@ -874,7 +863,7 @@ impl LockScreen {
 
         let is_valid = self.validator
             .as_ref()
-            .map_or(false, |v| v.validate(&self.password_buffer));
+            .is_some_and(|v| v.validate(&self.password_buffer));
 
         if is_valid {
             self.failed_attempts = 0;
@@ -945,10 +934,10 @@ impl LockScreen {
                     _ => {
                         self.enter_password_mode();
                         // If the key was a printable character, also type it.
-                        if let Some(ch) = key.text {
-                            if !ch.is_control() {
-                                self.type_char(ch);
-                            }
+                        if let Some(ch) = key.text
+                            && !ch.is_control()
+                        {
+                            self.type_char(ch);
                         }
                         EventResult::Consumed
                     }
@@ -973,10 +962,10 @@ impl LockScreen {
                         EventResult::Consumed
                     }
                     _ => {
-                        if let Some(ch) = key.text {
-                            if !ch.is_control() {
-                                self.type_char(ch);
-                            }
+                        if let Some(ch) = key.text
+                            && !ch.is_control()
+                        {
+                            self.type_char(ch);
                         }
                         EventResult::Consumed
                     }
@@ -1005,11 +994,11 @@ impl LockScreen {
                             return EventResult::Consumed;
                         }
                         // Check if click is on a user in the user list.
-                        if self.is_multi_user() {
-                            if let Some(idx) = self.user_list_hit_test(mouse.x, mouse.y) {
-                                self.select_user(idx);
-                                return EventResult::Consumed;
-                            }
+                        if self.is_multi_user()
+                            && let Some(idx) = self.user_list_hit_test(mouse.x, mouse.y)
+                        {
+                            self.select_user(idx);
+                            return EventResult::Consumed;
                         }
                         EventResult::Consumed
                     }
@@ -1148,24 +1137,24 @@ impl LockScreen {
         });
 
         // Date display.
-        if self.config.show_date {
-            if let Some(ref date) = self.date {
-                let date_str = date.format_long();
-                let date_char_width = DATE_FONT_SIZE * 0.55;
-                let date_width = date_str.len() as f32 * date_char_width;
-                let date_x = cx - date_width / 2.0;
-                let date_y = CLOCK_Y + CLOCK_FONT_SIZE + 12.0;
+        if self.config.show_date
+            && let Some(ref date) = self.date
+        {
+            let date_str = date.format_long();
+            let date_char_width = DATE_FONT_SIZE * 0.55;
+            let date_width = date_str.len() as f32 * date_char_width;
+            let date_x = cx - date_width / 2.0;
+            let date_y = CLOCK_Y + CLOCK_FONT_SIZE + 12.0;
 
-                tree.push(RenderCommand::Text {
-                    x: date_x,
-                    y: date_y,
-                    text: date_str,
-                    color: theme::SUBTEXT,
-                    font_size: DATE_FONT_SIZE,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                });
-            }
+            tree.push(RenderCommand::Text {
+                x: date_x,
+                y: date_y,
+                text: date_str,
+                color: theme::SUBTEXT,
+                font_size: DATE_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+            });
         }
 
         // "Click or press any key" hint at the bottom.
@@ -1266,24 +1255,24 @@ impl LockScreen {
         }
 
         // Password hint (shown after HINT_THRESHOLD failed attempts).
-        if self.failed_attempts >= HINT_THRESHOLD && !self.lockout.is_active() {
-            if let Some(ref hint) = self.active_user().password_hint {
-                let hint_str = format!("Hint: {hint}");
-                let hint_char_width = HINT_FONT_SIZE * 0.55;
-                let hint_width = hint_str.len() as f32 * hint_char_width;
-                let hint_x = cx - hint_width / 2.0;
-                let hint_y = field_y + PASSWORD_FIELD_HEIGHT + 52.0;
+        if self.failed_attempts >= HINT_THRESHOLD && !self.lockout.is_active()
+            && let Some(ref hint) = self.active_user().password_hint
+        {
+            let hint_str = format!("Hint: {hint}");
+            let hint_char_width = HINT_FONT_SIZE * 0.55;
+            let hint_width = hint_str.len() as f32 * hint_char_width;
+            let hint_x = cx - hint_width / 2.0;
+            let hint_y = field_y + PASSWORD_FIELD_HEIGHT + 52.0;
 
-                tree.push(RenderCommand::Text {
-                    x: hint_x,
-                    y: hint_y,
-                    text: hint_str,
-                    color: theme::SUBTEXT,
-                    font_size: HINT_FONT_SIZE,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                });
-            }
+            tree.push(RenderCommand::Text {
+                x: hint_x,
+                y: hint_y,
+                text: hint_str,
+                color: theme::SUBTEXT,
+                font_size: HINT_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+            });
         }
 
         // Multi-user list.

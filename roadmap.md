@@ -1526,6 +1526,12 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] tac/rev: reverse line/character printer (custom separators, regex split, before/after mode, Unicode reversal)
   - [x] logger: syslog message logger (facility.severity, BSD/RFC 3339 format, JSON-lines, size limits, tag/PID, stdin/file input)
   - [x] timeout/nohup/nice/renice: process control (time-limited execution, hangup immunity, priority adjustment, duration parsing)
+  - [x] ftp: interactive FTP client (USER/PASS login, PORT/PASV data, ASCII/binary transfer, mget/mput with glob, resume, progress)
+  - [x] chroot: change root directory (root check, --userspec, --groups, user/group resolution, privilege drop)
+  - [x] fmt: text paragraph formatter (reflow to width, crown/tagged margin, split-only, uniform spacing, prefix, goal width)
+  - [x] tsort: topological sort (Kahn's algorithm, cycle detection, BTreeMap graph, pair input)
+  - [x] look: sorted file prefix search (binary search, -d alphanumeric, -f case-insensitive, -t termination)
+  - [x] objdump/nm/size: ELF analysis tools (disassembly, headers, symbols, relocations, Berkeley/SysV size formats)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

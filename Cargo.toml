@@ -45,6 +45,9 @@ exclude = [
     "apps/automator",
     "apps/sysmonitor",
     "apps/regextester",
+    "apps/jsonviewer",
+    "apps/qrcode",
+    "apps/snippets",
 ]
 
 [workspace.lints.clippy]

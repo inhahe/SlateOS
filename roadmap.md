@@ -270,7 +270,7 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] Kshell `capreq`/`cr` command (list/approve/deny/handler/test)
   - [x] Self-test (7 tests: auto-deny, pending, approve, deny, cancel, limits, unregister)
   - [x] Syscall interface (SYS_CAP_REQUEST, SYS_CAP_REQUEST_STATUS, SYS_CAP_REQUEST_CANCEL)
-  - [ ] GUI security dialog integration
+  - [x] GUI security dialog integration (security_dialog.rs: UAC-style modal prompt, risk-level assessment, remember decisions, queue system, keyboard nav, 26 tests)
 - [x] Enable Intel CET (shadow stack + indirect branch tracking) on supporting hardware
   - [x] CPUID detection of SHSTK and IBT support
   - [x] MSR configuration (IA32_S_CET, IA32_U_CET, PL0/PL3 SSP)

@@ -11,6 +11,9 @@
 //! through OurOS syscalls; the structs here define the presentation
 //! layer while the OS provides the actual process/system information.
 
+#[allow(dead_code)]
+mod features;
+
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};

@@ -8,6 +8,8 @@
 
 #[allow(dead_code)]
 mod associations;
+#[allow(dead_code)]
+mod snapshots;
 
 #[allow(unused_imports)]
 use guitk::color::Color;

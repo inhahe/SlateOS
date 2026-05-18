@@ -1489,6 +1489,11 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] fold: line wrapping (column-aware tab expansion, word break, byte mode)
   - [x] split: file splitting (line/byte/count modes, alpha/numeric suffixes)
   - [x] join: sorted file join (field selection, outer join, output format, header)
+  - [x] mkfs: filesystem creation (ext4/fat32, label, journal size, bad-block check, argv[0])
+  - [x] fsck: filesystem check/repair (6-phase progress, auto-repair, fstab batch, exit codes)
+  - [x] fdisk: partition table management (GPT+MBR parsing, create/delete/retype, CRC32)
+  - [x] chown/chmod: file ownership and permissions (symbolic modes, recursive, yaml user DB)
+  - [x] at/atq/atrm/batch: one-time task scheduling (time parsing, spool dir, argv[0] modes)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

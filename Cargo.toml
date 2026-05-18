@@ -52,6 +52,8 @@ exclude = [
     # --- osb2 batch 4 ---
     "apps/tmux",
     "apps/reminders",
+    "apps/undelete",
+    "apps/renamer",
 ]
 
 [workspace.lints.clippy]

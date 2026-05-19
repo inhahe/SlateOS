@@ -80,6 +80,13 @@ exclude = [
     "apps/snake",
     "apps/game2048",
     "apps/typingtutor",
+    # --- osb2 batch 8 ---
+    "apps/checkers",
+    "apps/reversi",
+    "apps/ebook",
+    "apps/stopwatch",
+    "apps/compass",
+    "apps/metronome",
 ]
 
 [workspace.lints.clippy]

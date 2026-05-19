@@ -101,6 +101,8 @@ exclude = [
     "apps/life",
     "apps/maze",
     "apps/battleship",
+    "apps/tictactoe",
+    "apps/mandelbrot",
 ]
 
 [workspace.lints.clippy]

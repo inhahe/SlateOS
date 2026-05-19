@@ -2016,6 +2016,12 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Snake (apps/snake: 20x20 grid, 3 difficulty levels, direction queue for high-speed input, wrap mode toggle, bonus food, wall/self collision, streak multiplier scoring, high score tracking, gradient snake coloring, 105 tests)
 - [x] 2048 (apps/game2048: classic 4x4 tile-merging puzzle, slide/merge mechanics, undo, win detection with continue option, game over detection, best score tracking, WASD and arrow key controls, 80+ tests)
 - [x] Typing Tutor (apps/typingtutor: 14 lessons across 8 categories, WPM/accuracy tracking, progress bar, color-coded character feedback, backspace correction, session results with rating, statistics dashboard, category filtering, 70+ tests)
+- [x] Checkers (apps/checkers: American draughts on 8x8 board, regular and king pieces, mandatory jumps, multi-jump chains, minimax AI, legal move highlighting, piece counts, game over detection, 80+ tests)
+- [x] Reversi (apps/reversi: full Othello with 8-direction flipping, legal move dots, pass detection, minimax AI depth 4 with corner/edge bonuses, algebraic notation history, score display, 81 tests)
+- [x] Ebook Reader (apps/ebook: library with 5 sample books, paginated reading view, 3 font sizes, bookmarks, TOC from chapter separators, text search with next/prev, dark/sepia themes, progress tracking, 80+ tests)
+- [x] Compass (apps/compass: circular compass rose with degree markings, 16-point cardinal directions, waypoint system with Haversine distance, magnetic declination, coordinate entry, km/miles toggle, 111 tests)
+- [x] Stopwatch (apps/stopwatch: precision stopwatch with lap timing, split times, best/worst/average stats, countdown timer mode, session history, 75+ tests)
+- [x] Metronome (apps/metronome: BPM control 20-300, 9 time signatures, 4 subdivisions, tap tempo, accent patterns, practice mode with auto BPM increment, visual beat indicators, 80+ tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

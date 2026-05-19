@@ -94,6 +94,13 @@ exclude = [
     "apps/crossword",
     "apps/wordsearch",
     "apps/pipes",
+    # --- osb2 batch 10 ---
+    "apps/breakout",
+    "apps/sokoban",
+    "apps/gomoku",
+    "apps/life",
+    "apps/maze",
+    "apps/battleship",
 ]
 
 [workspace.lints.clippy]

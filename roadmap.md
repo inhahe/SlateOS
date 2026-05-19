@@ -2028,6 +2028,14 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Crossword (apps/crossword: 3 built-in puzzles, across/down clue panels, check/reveal helpers, direction toggle, timer tracking, completion detection, 80+ tests)
 - [x] Word Search (apps/wordsearch: 15x15 grid, words in all 8 directions, 5 word categories, 3 difficulty levels, hint system, cursor selection, deterministic generation, 103 tests)
 - [x] Pipes (apps/pipes: pipe rotation puzzle connecting source to drain, BFS flood-fill validation, 3 difficulty levels, board generation with scrambled rotations, 80+ tests)
+- [x] Breakout (apps/breakout: brick-breaking game with paddle, ball physics, angle-based reflection, power-ups, level progression, 3 lives, 104 tests)
+- [x] Sokoban (apps/sokoban: 15 box-pushing puzzles, undo system, move/push counters, level select, win detection, 105 tests)
+- [x] Gomoku (apps/gomoku: 15x15 five-in-a-row with minimax AI depth 3-4, star points, pattern evaluation, undo, score tracking, 102 tests)
+- [x] Battleship (apps/battleship: 10x10 naval combat with hunt/target AI, ship placement phase, hit/miss/sink detection, stats panel, 93 tests)
+- [x] Game of Life (apps/life: 80x60 toroidal grid, 10 preset patterns, play/pause/step, adjustable speed, mouse/keyboard editing, 80+ tests)
+- [x] Maze (apps/maze: recursive backtracker generation, BFS solver, 3 difficulty sizes, trail visualization, solution reveal, 80+ tests)
+- [x] Tic-Tac-Toe (apps/tictactoe: 3x3 grid with perfect minimax AI, score tracking, click/keyboard placement, 80+ tests)
+- [x] Mandelbrot (apps/mandelbrot: fractal explorer with zoom/pan, 5 color schemes, preset locations, adjustable iterations/resolution, 80+ tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

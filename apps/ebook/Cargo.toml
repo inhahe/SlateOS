@@ -1,0 +1,19 @@
+[package]
+name = "ebook"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS Ebook Reader — plain-text ebook reader with library, bookmarks, and search"
+
+[workspace]
+
+[dependencies]
+guitk = { path = "../../gui/toolkit" }
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

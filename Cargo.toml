@@ -87,6 +87,13 @@ exclude = [
     "apps/stopwatch",
     "apps/compass",
     "apps/metronome",
+    # --- osb2 batch 9 ---
+    "apps/connect4",
+    "apps/hangman",
+    "apps/simon",
+    "apps/crossword",
+    "apps/wordsearch",
+    "apps/pipes",
 ]
 
 [workspace.lints.clippy]

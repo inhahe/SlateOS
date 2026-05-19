@@ -2048,6 +2048,12 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Mahjong Solitaire (apps/mahjong: tile matching puzzle with layered turtle layout, 144 tiles, hints, shuffle, undo, 100+ tests)
 - [x] Tower of Hanoi (apps/towers: classic disk-moving puzzle, 3-8 disks, undo, best scores per size, 55+ tests)
 - [x] Lights Out (apps/lightsout: grid toggle puzzle, 3x3/5x5/7x7 sizes, solvable generation, best scores, 60+ tests)
+- [x] Dots and Boxes (apps/dots: 2-player/vs-AI dot-connecting game, 3x3/4x4/5x5 grids, greedy AI, box claiming, extra turns, mouse+keyboard, 148 tests)
+- [x] Memory Match (apps/memory: card matching game, 4x4/4x6/6x6 grids, turn counting, best scores, mouse+keyboard, 25+ tests)
+- [x] Flood-It (apps/flood: color flood puzzle, 4 board sizes (8-18), 6 colors, optimal move tracking, best scores, 30+ tests)
+- [x] Nim (apps/nim: mathematical strategy game, 5 presets, normal/misère variants, optimal AI with nim-sum/XOR, undo, 30+ tests)
+- [x] Klotski (apps/klotski: sliding block puzzle, 7 classic Huarong Dao puzzles, 4 block types, move counter, undo, 116 tests)
+- [x] Rush Hour (apps/rush: vehicle sliding puzzle, 20 levels across 4 difficulties, horizontal/vertical vehicles, move counter, undo, 100+ tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

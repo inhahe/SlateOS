@@ -2036,6 +2036,12 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Maze (apps/maze: recursive backtracker generation, BFS solver, 3 difficulty sizes, trail visualization, solution reveal, 80+ tests)
 - [x] Tic-Tac-Toe (apps/tictactoe: 3x3 grid with perfect minimax AI, score tracking, click/keyboard placement, 80+ tests)
 - [x] Mandelbrot (apps/mandelbrot: fractal explorer with zoom/pan, 5 color schemes, preset locations, adjustable iterations/resolution, 80+ tests)
+- [x] Pong (apps/pong: classic two-paddle ball game with AI opponent, speed increases, first to 11 wins, 30+ tests)
+- [x] Sliding Puzzle (apps/sliding: 8/15/24-puzzle with 3x3/4x4/5x5 sizes, mouse+keyboard, best scores, 70+ tests)
+- [x] Solitaire (apps/solitaire: Klondike card game, full undo, keyboard navigation, stock/waste/foundation/tableau, 114 tests)
+- [x] Nonogram (apps/nonogram: picture logic puzzle, 10 built-in puzzles across 5x5/10x10/15x15 grids, check mode, timer, 113 tests)
+- [x] Asteroids (apps/asteroids: space shooter with ship rotation/thrust, 3 asteroid sizes, wave system, particles, lives, high score, 117 tests)
+- [x] Pacman (apps/pacman: maze chase with 4 AI ghosts (Blinky/Pinky/Inky/Clyde), power pellets, ghost modes, tunnel wrap, lives, levels, 99 tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

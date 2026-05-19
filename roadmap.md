@@ -2042,6 +2042,12 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Nonogram (apps/nonogram: picture logic puzzle, 10 built-in puzzles across 5x5/10x10/15x15 grids, check mode, timer, 113 tests)
 - [x] Asteroids (apps/asteroids: space shooter with ship rotation/thrust, 3 asteroid sizes, wave system, particles, lives, high score, 117 tests)
 - [x] Pacman (apps/pacman: maze chase with 4 AI ghosts (Blinky/Pinky/Inky/Clyde), power pellets, ghost modes, tunnel wrap, lives, levels, 99 tests)
+- [x] FreeCell (apps/freecell: card game with 4 free cells, 4 foundations, auto-move, full undo, keyboard navigation, 142 tests)
+- [x] Yahtzee (apps/yahtzee: 5-dice game with 13 scoring categories, upper bonus, Yahtzee bonus, joker rule, high scores, 167 tests)
+- [x] Hearts (apps/hearts: 4-player trick-taking card game with AI opponents, pass phase, shoot the moon, 100+ tests)
+- [x] Mahjong Solitaire (apps/mahjong: tile matching puzzle with layered turtle layout, 144 tiles, hints, shuffle, undo, 100+ tests)
+- [x] Tower of Hanoi (apps/towers: classic disk-moving puzzle, 3-8 disks, undo, best scores per size, 55+ tests)
+- [x] Lights Out (apps/lightsout: grid toggle puzzle, 3x3/5x5/7x7 sizes, solvable generation, best scores, 60+ tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

@@ -117,6 +117,13 @@ exclude = [
     "apps/mahjong",
     "apps/towers",
     "apps/lightsout",
+    # --- osb2 batch 13 ---
+    "apps/dots",
+    "apps/memory",
+    "apps/flood",
+    "apps/nim",
+    "apps/klotski",
+    "apps/rush",
 ]
 
 [workspace.lints.clippy]

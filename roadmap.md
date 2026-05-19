@@ -2010,6 +2010,12 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Habit Tracker (apps/habits: daily/weekly habit tracking with check-in toggles, 9 categories with icons, streak tracking (current/best), completion rates (7d/30d/all-time), 364-day contribution heatmap, archive/restore, statistics dashboard, category filtering, 5 sample habits with simulated history, 116 tests)
 - [x] Mind Map (apps/mindmap: radial node layout with central root, add child/sibling/edit/delete subtree, expand/collapse branches, zoom/pan navigation, node coloring with 8 colors, search with highlighting, undo/redo, reparent nodes, auto-layout, keyboard-driven interaction, 70+ tests)
 - [x] Personal Finance (apps/finance: budget tracking across 12 expense categories, 5 screens (dashboard/transactions/budgets/accounts/reports), multiple account types, transaction entry with amount/category/date, budget progress bars, expense breakdown chart, savings rate calculation, category filtering, search, 60+ tests)
+- [x] Chess (apps/chess: full chess engine with legal move generation, castling, en passant, pawn promotion, check/checkmate/stalemate detection, minimax AI with alpha-beta pruning, algebraic notation move history, captured pieces display, 80+ tests)
+- [x] Sudoku (apps/sudoku: puzzle generator with unique-solution guarantee, 3 difficulty levels, pencil marks/notes, hint system, undo/redo, conflict highlighting, backtracking solver, timer, completion detection, 80+ tests)
+- [x] Tetris (apps/tetris: 10x20 playfield, 7 standard tetrominoes with SRS rotation and wall kicks, 7-bag randomizer, hold piece, next preview, line clearing with scoring, ghost piece, level progression, lock delay, T-spin detection, 80+ tests)
+- [x] Snake (apps/snake: 20x20 grid, 3 difficulty levels, direction queue for high-speed input, wrap mode toggle, bonus food, wall/self collision, streak multiplier scoring, high score tracking, gradient snake coloring, 105 tests)
+- [x] 2048 (apps/game2048: classic 4x4 tile-merging puzzle, slide/merge mechanics, undo, win detection with continue option, game over detection, best score tracking, WASD and arrow key controls, 80+ tests)
+- [x] Typing Tutor (apps/typingtutor: 14 lessons across 8 categories, WPM/accuracy tracking, progress bar, color-coded character feedback, backspace correction, session results with rating, statistics dashboard, category filtering, 70+ tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

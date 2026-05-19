@@ -2022,6 +2022,12 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Compass (apps/compass: circular compass rose with degree markings, 16-point cardinal directions, waypoint system with Haversine distance, magnetic declination, coordinate entry, km/miles toggle, 111 tests)
 - [x] Stopwatch (apps/stopwatch: precision stopwatch with lap timing, split times, best/worst/average stats, countdown timer mode, session history, 75+ tests)
 - [x] Metronome (apps/metronome: BPM control 20-300, 9 time signatures, 4 subdivisions, tap tempo, accent patterns, practice mode with auto BPM increment, visual beat indicators, 80+ tests)
+- [x] Connect4 (apps/connect4: 7x6 grid with gravity-based piece dropping, minimax AI with alpha-beta pruning depth 6, win line highlighting, score tracking, move history, 100 tests)
+- [x] Hangman (apps/hangman: 108 words across 5 categories, 3 difficulty levels, progressive hangman figure drawing, hint system, stats tracking with streaks, QWERTY keyboard display, 109 tests)
+- [x] Simon (apps/simon: memory sequence game with colored button pads, progressive difficulty, pattern replay with visual/audio feedback, high score tracking)
+- [x] Crossword (apps/crossword: 3 built-in puzzles, across/down clue panels, check/reveal helpers, direction toggle, timer tracking, completion detection, 80+ tests)
+- [x] Word Search (apps/wordsearch: 15x15 grid, words in all 8 directions, 5 word categories, 3 difficulty levels, hint system, cursor selection, deterministic generation, 103 tests)
+- [x] Pipes (apps/pipes: pipe rotation puzzle connecting source to drain, BFS flood-fill validation, 3 difficulty levels, board generation with scrambled rotations, 80+ tests)
 
 ### 4.2 Package manager — Python/fastpy candidate
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs

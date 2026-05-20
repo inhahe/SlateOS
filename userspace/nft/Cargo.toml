@@ -1,8 +1,8 @@
 [package]
-name = "rsync"
+name = "nft"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS rsync - file synchronization (rsync/scp)"
+description = "OurOS nft - firewall configuration (nft/iptables/ip6tables)"
 
 [workspace]
 

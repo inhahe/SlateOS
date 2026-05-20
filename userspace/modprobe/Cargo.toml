@@ -1,8 +1,8 @@
 [package]
-name = "rsync"
+name = "modprobe"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS rsync - file synchronization (rsync/scp)"
+description = "OurOS modprobe - kernel module tools (modprobe/insmod/rmmod/lsmod/modinfo/depmod)"
 
 [workspace]
 

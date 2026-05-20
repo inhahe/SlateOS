@@ -1,8 +1,8 @@
 [package]
-name = "rsync"
+name = "smartctl"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS rsync - file synchronization (rsync/scp)"
+description = "OurOS smartctl - SMART disk monitoring"
 
 [workspace]
 

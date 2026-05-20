@@ -1,0 +1,18 @@
+[package]
+name = "wpa"
+version = "0.1.0"
+edition = "2024"
+description = "OurOS wpa - WiFi authentication (wpa_supplicant/wpa_cli/wpa_passphrase)"
+
+[workspace]
+
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+panic = "abort"

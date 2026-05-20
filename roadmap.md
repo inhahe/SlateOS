@@ -1615,6 +1615,17 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] nologin/false/true: login refusal and exit-code shells
   - [x] flock/lockfile: advisory file locking from shell scripts
   - [x] bridge/tc/ebtables: L2 bridge management, traffic control (7 qdisc types, filter matching, ethernet bridge filtering, 170 tests)
+  - [x] nsenter: enter namespaces of other processes (8 namespace types, per-ns file overrides)
+  - [x] unshare: create new namespaces (CLONE_NEW* flags, user mapping, mount propagation)
+  - [x] lscpu: CPU architecture info (topology, caches, flags, JSON, vulnerabilities)
+  - [x] lsmem: memory block display (sysfs enumeration, range merging, JSON, summary)
+  - [x] chattr/lsattr: ext4 file attributes (22 flag types, +/-/= specification, recursive)
+  - [x] perf/perf-stat/perf-record/perf-report/perf-top: performance monitoring (14 events, binary perf.data format, 172 tests)
+  - [x] dmsetup/dmstats/kpartx: device mapper control (19 commands, 12 target types, MBR/GPT partition parsing, 190 tests)
+  - [x] capsh/getcap/setcap/getpcaps/captest: capability tools (41 Linux caps, 5 sets, securebits, 194 tests)
+  - [x] lsirq: IRQ information display (/proc/interrupts + softirqs, JSON/pairs output)
+  - [x] irqbalance: IRQ balancing daemon (load imbalance detection, CPU affinity migration)
+  - [x] hardlink: duplicate file deduplication (FNV-1a hashing, byte-verify, dry-run mode)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

@@ -1604,6 +1604,17 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] useradd/userdel/usermod/groupadd/groupdel/groupmod/newgrp: user management (atomic file I/O, UID/GID auto-assign, skel copy, 106 tests)
   - [x] cron/crontab/anacron/at/atd/batch/atq/atrm: job scheduling (cron expressions, time parsing, 8 special strings, 103 tests)
   - [x] cryptsetup/veritysetup/integritysetup: disk encryption (SHA-256, PBKDF2, LUKS header, key slots, cipher benchmark, 144 tests)
+  - [x] pstree: process tree display (Unicode/ASCII tree drawing, PID/UID/threads, compact mode)
+  - [x] findmnt/mountpoint: mounted filesystem finder (/proc/mountinfo, tree/list/JSON/raw/pairs output)
+  - [x] lsns: namespace listing (8 namespace types, JSON output, per-PID filtering)
+  - [x] ldconfig: shared library cache manager (ELF header parsing, soname extraction, /etc/ld.so.conf)
+  - [x] mdadm/mdmon: RAID management (superblock v1.2, RAID 0/1/5/6/10, bitmap tracking, UUID generation, 143 tests)
+  - [x] updatedb/locate/mlocate/plocate: file database (differential path encoding, glob/regex search, PRUNEPATHS/FS/NAMES, 132 tests)
+  - [x] systemctl + 8 personalities: service control (unit file parsing, systemd-analyze/cat/cgls/cgtop/escape/path/notify/tmpfiles, 137 tests)
+  - [x] getent: NSS database lookup (passwd/group/hosts/services/protocols/networks/shadow)
+  - [x] nologin/false/true: login refusal and exit-code shells
+  - [x] flock/lockfile: advisory file locking from shell scripts
+  - [x] bridge/tc/ebtables: L2 bridge management, traffic control (7 qdisc types, filter matching, ethernet bridge filtering, 170 tests)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

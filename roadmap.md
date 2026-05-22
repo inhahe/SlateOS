@@ -2023,6 +2023,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] coinbase-cli: Coinbase crypto CLI (accounts/prices/trades/portfolio, ~151 lines)
   - [x] ethers-cli: Ethereum CLI (multi: cast/anvil, balance/tx/gas/ens, ~175 lines)
   - [x] solana-cli: Solana CLI (balance/transfer/airdrop/validators/deploy, ~163 lines)
+- [x] Batch 62 — Project management tools (8 utilities, 1072 lines):
+  - [x] jira-cli: Jira CLI (issue/sprint/board/project/epic/search, ~158 lines)
+  - [x] linear-cli: Linear CLI (issue/cycle/project/team/search, ~122 lines)
+  - [x] notion-cli: Notion CLI (pages/databases/blocks/search, ~132 lines)
+  - [x] asana-cli: Asana CLI (tasks/projects/sections/teams, ~132 lines)
+  - [x] trello-cli: Trello CLI (boards/lists/cards/members/labels, ~126 lines)
+  - [x] clickup-cli: ClickUp CLI (tasks/spaces/folders/goals/time, ~125 lines)
+  - [x] monday-cli: monday.com CLI (boards/items/groups/columns, ~130 lines)
+  - [x] shortcut-cli: Shortcut CLI (stories/epics/iterations/workflows, ~147 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

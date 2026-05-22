@@ -1895,6 +1895,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] yazi: Blazing fast file manager (3-pane/debug/clear-cache, ~85 lines)
   - [x] fzf: Fuzzy finder (filter/interactive/preview/multi-select, ~140 lines)
   - [x] skim: Fuzzy finder in Rust (filter/interactive/cmd-mode, ~120 lines)
+- [x] Batch 48 — Documentation, process management, and code analysis (tealdeer, miniserve, mprocs, pueue, viddy, difftastic, ast-grep, amber):
+  - [x] tealdeer: Fast tldr client (list/update/cache/pages, ~120 lines)
+  - [x] miniserve: HTTP file server (upload/qrcode/auth/TLS, ~105 lines)
+  - [x] mprocs: Multi-process TUI (config/server/ctl, ~75 lines)
+  - [x] pueue: Task queue manager (add/status/log/groups/parallel, pueue/pueued, ~155 lines)
+  - [x] viddy: Modern watch command (diff/time-travel/bell, ~75 lines)
+  - [x] difftastic: Structural diff (side-by-side/inline/check-only/languages, ~110 lines)
+  - [x] ast-grep: AST search/replace (run/scan/test/new/lsp, ~145 lines)
+  - [x] amber: Code search/replace (preview/json/regex/exclude, ~110 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

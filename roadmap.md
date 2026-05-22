@@ -2095,6 +2095,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] socat-cli: socat relay tool (TCP/UDP/Unix/STDIO/EXEC bidirectional, ~96 lines)
   - [x] tcpdump-cli: tcpdump packet analyzer (interface/verbose/hex/read/write pcap, ~106 lines)
   - [x] mtr-cli: mtr network diagnostic (traceroute+ping, report/json/wide, ~112 lines)
+- [x] Batch 70 — Code quality/linting/formatting tools (8 utilities, ~927 lines):
+  - [x] prettier-cli: Prettier code formatter (write/check/list-different, ~84 lines)
+  - [x] eslint-cli: ESLint JS/TS linter (fix/init/format/quiet, ~89 lines)
+  - [x] black-cli: Black Python formatter (check/diff/line-length, ~82 lines)
+  - [x] ruff-cli: Ruff Python linter/formatter (check/format/rule/fix, ~117 lines)
+  - [x] mypy-cli: mypy Python type checker (strict/show-error-codes, ~68 lines)
+  - [x] pylint-cli: Pylint Python analyzer (score/disable/format, ~72 lines)
+  - [x] rubocop-cli: RuboCop Ruby linter (auto-correct/init/format, ~89 lines)
+  - [x] shellcheck-cli: ShellCheck shell linter (format json/gcc/tty, severity, ~106 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

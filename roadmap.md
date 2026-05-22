@@ -1832,6 +1832,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] ncmpcpp/mpc: NCurses MPD client (status/playlist/search, ~160 lines)
   - [x] aplay/arecord/amixer/alsactl/speaker-test: ALSA sound utilities (~160 lines)
   - [x] jackd/jack_control/jack_lsp/jack_connect etc.: JACK Audio (~170 lines)
+  - [x] **Batch 41 — remote desktop & backup tools (8 utilities, 1020 lines, commit aaaa699f):**
+  - [x] remmina: Remote desktop client (RDP/VNC/SSH/SPICE, ~65 lines)
+  - [x] xrdp/xrdp-sesman/xrdp-keygen/xrdp-sesrun: RDP server (~90 lines)
+  - [x] vncserver/vncviewer/vncpasswd/vncconfig/x0vncserver: TigerVNC (~115 lines)
+  - [x] barriers/barrierc: Software KVM sharing (~70 lines)
+  - [x] borg: BorgBackup deduplicating backup (init/create/list/info/prune, ~120 lines)
+  - [x] duplicity: Encrypted bandwidth-efficient backup (~110 lines)
+  - [x] timeshift: System restore tool (create/restore/list/check, ~95 lines)
+  - [x] snapper2: Filesystem snapshot management (list/create/diff/rollback, ~115 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

@@ -1805,6 +1805,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] k6: Load testing tool (run/inspect/archive, ~120 lines)
   - [x] wrk/wrk2: HTTP benchmarking (~105 lines)
   - [x] ab/siege: Apache benchmark & siege load testing (~170 lines)
+  - [x] **Batch 38 — security/crypto tools (8 utilities, 1182 lines, commit 263ef1c4):**
+  - [x] step/step-ca: Smallstep certificate management (~140 lines)
+  - [x] cfssl/cfssljson/mkbundle/multirootca: CloudFlare PKI/TLS toolkit (~130 lines)
+  - [x] hashcat: Password recovery (benchmark/backend-info, ~105 lines)
+  - [x] john/unshadow/zip2john/rar2john/pdf2john: John the Ripper (~140 lines)
+  - [x] lynis: Security auditing (audit system/show, ~115 lines)
+  - [x] trivy: Vulnerability scanner (image/fs/config/sbom, ~120 lines)
+  - [x] cosign: Container signing/verification (~110 lines)
+  - [x] notation: Notary v2 content signing (sign/verify/cert/key/plugin/policy, ~120 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

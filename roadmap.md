@@ -1886,6 +1886,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] watchexec: File watcher (restart/debounce/filter/clear, ~110 lines)
   - [x] pastel: Color tool (color/list/format/gradient/mix/complement/paint, ~175 lines)
   - [x] grex: Regex generator (digits/words/repetitions/escape, ~110 lines)
+- [x] Batch 47 — Shell history and file navigation tools (mcfly, atuin, broot, nnn, lf, yazi, fzf, skim):
+  - [x] mcfly: Smart shell history search (init/search/train/neural-network, ~100 lines)
+  - [x] atuin: Synced shell history (search/stats/sync/import/history, ~130 lines)
+  - [x] broot: Interactive tree explorer (sizes/dates/git/permissions/whale, ~120 lines)
+  - [x] nnn: Terminal file manager (detail/hidden/user-group modes, ~95 lines)
+  - [x] lf: Terminal file manager (dual-pane/preview/doc, ~105 lines)
+  - [x] yazi: Blazing fast file manager (3-pane/debug/clear-cache, ~85 lines)
+  - [x] fzf: Fuzzy finder (filter/interactive/preview/multi-select, ~140 lines)
+  - [x] skim: Fuzzy finder in Rust (filter/interactive/cmd-mode, ~120 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

@@ -1913,6 +1913,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] cargo-edit: Dependency management (add/rm/upgrade/set-version, ~120 lines)
   - [x] cargo-audit: Security vulnerability scanner (fix/bin/JSON/ignore, ~105 lines)
   - [x] cargo-bloat: Binary size analyzer (crates/time/filter/JSON, ~130 lines)
+- [x] Batch 50 — Git workflow and documentation tools (gitui, tig, git-cliff, git-absorb, git-branchless, git-interactive-rebase-tool, mdbook, mdcat):
+  - [x] gitui: Blazing fast git TUI (status/diff/log/stash panels, ~70 lines)
+  - [x] tig: Text-mode git interface (log/blame/status/stash/refs/grep, ~90 lines)
+  - [x] git-cliff: Changelog generator (conventional commits/bump/context, ~105 lines)
+  - [x] git-absorb: Auto fixup creator (dry-run/and-rebase/whole-file, ~60 lines)
+  - [x] git-branchless: Branchless workflow (smartlog/move/restack/undo, ~115 lines)
+  - [x] git-interactive-rebase-tool: Rebase TUI (pick/reword/squash/drop, ~55 lines)
+  - [x] mdbook: Markdown book builder (init/build/serve/watch/test, ~95 lines)
+  - [x] mdcat: Terminal Markdown renderer (ANSI/pager/detect-terminal, ~80 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

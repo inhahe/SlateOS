@@ -1969,6 +1969,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] consul-cli: Service mesh (members/catalog/kv/services/info, ~140 lines)
   - [x] packer-cli: Image builder (build/validate/inspect/init, ~130 lines)
   - [x] nomad-cli: Workload orchestrator (status/run/stop/plan/node/logs, ~160 lines)
+- [x] Batch 56 — monitoring/observability tools (8 tools, ~1264 lines):
+  - [x] prometheus-cli: Prometheus toolkit (check/query/test/tsdb, ~110 lines)
+  - [x] grafana-cli: Grafana plugin/admin CLI (plugins/admin/server, ~110 lines)
+  - [x] loki-cli: Loki log query CLI (query/labels/series/stats/volume, ~110 lines)
+  - [x] jaeger-cli: Jaeger tracing CLI (services/operations/traces/trace/stats, ~120 lines)
+  - [x] opentelemetry-cli: OTel collector CLI (validate/components/start, ~110 lines)
+  - [x] vector-cli: Data pipeline CLI (validate/list/top/vrl/test, ~140 lines)
+  - [x] datadog-cli: Datadog CLI (metric/event/monitor/dashboard/tag, ~130 lines)
+  - [x] sentry-cli: Sentry CLI (releases/sourcemaps/issues/monitors, ~150 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

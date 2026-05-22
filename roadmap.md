@@ -1996,6 +1996,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] mkcert: Local dev certificate tool (install/uninstall/generate, ~83 lines)
   - [x] cosign-cli: Sigstore container signing (sign/verify/generate-key-pair/tree, ~91 lines)
   - [x] trivy-cli: Container security scanner (image/fs/repo/config/sbom/k8s, ~246 lines)
+- [x] Batch 59 — Cloud platform CLIs (8 utilities, 1739 lines):
+  - [x] aws-cli: AWS CLI (s3/ec2/iam/lambda/sts/logs, ~243 lines)
+  - [x] gcloud-cli: Google Cloud CLI (compute/container/projects/run/auth, ~243 lines)
+  - [x] az-cli: Azure CLI (vm/aks/storage/keyvault/group/account, ~224 lines)
+  - [x] doctl: DigitalOcean CLI (compute/kubernetes/apps/registry, ~204 lines)
+  - [x] flyctl: Fly.io CLI (apps/deploy/status/logs/scale/regions, ~211 lines)
+  - [x] netlify-cli: Netlify CLI (deploy/dev/build/sites/env/functions, ~181 lines)
+  - [x] vercel-cli: Vercel CLI (deploy/dev/build/list/env/domains, ~198 lines)
+  - [x] heroku-cli: Heroku CLI (apps/ps/logs/config/addons/pg/releases, ~235 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

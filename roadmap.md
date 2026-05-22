@@ -1868,6 +1868,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] procs: Modern ps replacement (tree/filter/color themes/config, ~135 lines)
   - [x] bottom: Graphical system monitor (CPU/mem/network/disk/temp charts, ~115 lines)
   - [x] bandwhich: Network bandwidth monitor (per-process/connection/address tables, ~120 lines)
+- [x] Batch 45 — Shell enhancement and network diagnostic tools (zoxide, starship, nushell, xh, dog, gping, trippy, choose):
+  - [x] zoxide: Smart directory jumping (z/zi personalities, shell init/query/import, ~160 lines)
+  - [x] starship: Cross-shell prompt (init/prompt/explain/timings/presets/config, ~180 lines)
+  - [x] nushell: Structured data shell (nu, -c commands, structured table output, ~120 lines)
+  - [x] xh: HTTP client (xh/xhs, verbose/headers/body/curl-mode/auth, ~160 lines)
+  - [x] dog: DNS client (record types/JSON/short/nameserver, ~135 lines)
+  - [x] gping: Graphical ping (TUI graph/simple-graphics/multi-host, ~80 lines)
+  - [x] trippy: Network path tracer (TUI/stream/JSON/CSV/markdown modes, ~120 lines)
+  - [x] choose: Field selector (ranges/negative-indices/separators, ~145 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

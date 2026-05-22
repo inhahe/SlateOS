@@ -1922,6 +1922,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] git-interactive-rebase-tool: Rebase TUI (pick/reword/squash/drop, ~55 lines)
   - [x] mdbook: Markdown book builder (init/build/serve/watch/test, ~95 lines)
   - [x] mdcat: Terminal Markdown renderer (ANSI/pager/detect-terminal, ~80 lines)
+- [x] Batch 51 — Knowledge, shell quality, secrets, and networking (navi, cheat-sh, so, howdoi, shellcheck, shfmt, sops, bore):
+  - [x] navi: Interactive cheatsheet (repo/widget/info/query, ~100 lines)
+  - [x] cheat-sh: Community cheat sheets (list/search/topics, ~95 lines)
+  - [x] so: StackOverflow client (lucky/search-engine/limit, ~75 lines)
+  - [x] howdoi: Instant coding answers (all/link/json/engine, ~85 lines)
+  - [x] shellcheck: Shell script linter (format/severity/exclude/JSON, ~110 lines)
+  - [x] shfmt: Shell script formatter (diff/list/find/simplify/minify, ~80 lines)
+  - [x] sops: Encrypted secrets editor (encrypt/decrypt/rotate/exec, ~100 lines)
+  - [x] bore: TCP tunnel (local/server/secret/port-range, ~75 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

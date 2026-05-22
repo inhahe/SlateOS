@@ -1987,6 +1987,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] act-cli: Local GitHub Actions runner (list/dryrun/execute, ~100 lines)
   - [x] gh-actions-cli: Actions workflow mgmt (list/view/run/logs/cache/secrets, ~170 lines)
   - [x] circleci-cli: CircleCI CLI (config/local/orb/context, ~145 lines)
+- [x] Batch 58 — Security/crypto/networking tools (8 utilities, 1056 lines):
+  - [x] openssl-cli: OpenSSL CLI (genrsa/req/x509/s_client/dgst/rand/enc, ~173 lines)
+  - [x] wireguard-cli: WireGuard VPN (multi: wg/wg-quick, ~135 lines)
+  - [x] nmap-cli: Network scanner (SYN/connect/UDP/version/OS detect, ~89 lines)
+  - [x] wireshark-cli: Wireshark CLI (multi: tshark/editcap/mergecap/capinfos, ~120 lines)
+  - [x] certbot-cli: Let's Encrypt certificate manager (certonly/renew/certificates, ~119 lines)
+  - [x] mkcert: Local dev certificate tool (install/uninstall/generate, ~83 lines)
+  - [x] cosign-cli: Sigstore container signing (sign/verify/generate-key-pair/tree, ~91 lines)
+  - [x] trivy-cli: Container security scanner (image/fs/repo/config/sbom/k8s, ~246 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

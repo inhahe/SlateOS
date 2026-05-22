@@ -2032,6 +2032,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] clickup-cli: ClickUp CLI (tasks/spaces/folders/goals/time, ~125 lines)
   - [x] monday-cli: monday.com CLI (boards/items/groups/columns, ~130 lines)
   - [x] shortcut-cli: Shortcut CLI (stories/epics/iterations/workflows, ~147 lines)
+- [x] Batch 63 — Testing/quality/API tools (8 utilities, 923 lines):
+  - [x] playwright-cli: Playwright E2E testing (test/codegen/screenshot/trace, ~123 lines)
+  - [x] cypress-cli: Cypress E2E testing (run/open/info/cache, ~121 lines)
+  - [x] selenium-cli: Selenium WebDriver (server/sessions/drivers/grid, ~115 lines)
+  - [x] k6-cli: k6 load testing (run/inspect/cloud with metrics, ~112 lines)
+  - [x] artillery-cli: Artillery load testing (run/quick/report, ~112 lines)
+  - [x] lighthouse-cli: Lighthouse web auditing (performance/a11y/seo, ~86 lines)
+  - [x] swagger-cli: OpenAPI/Swagger (validate/bundle/generate/diff, ~123 lines)
+  - [x] postman-cli: Postman/Newman (run/collections/environments/lint, ~131 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

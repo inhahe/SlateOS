@@ -1814,6 +1814,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] trivy: Vulnerability scanner (image/fs/config/sbom, ~120 lines)
   - [x] cosign: Container signing/verification (~110 lines)
   - [x] notation: Notary v2 content signing (sign/verify/cert/key/plugin/policy, ~120 lines)
+  - [x] **Batch 39 — container/IaC/GitOps tools (8 utilities, 1098 lines, commit d23412b1):**
+  - [x] buildah: OCI image builder (build/from/run/commit/push/images, ~110 lines)
+  - [x] skopeo: Container image operations (copy/inspect/list-tags/sync, ~95 lines)
+  - [x] crictl/critest: CRI tools (ps/pods/images/stats/info, ~130 lines)
+  - [x] cni-plugins: CNI network plugins (bridge/host-local/loopback/portmap etc., ~45 lines)
+  - [x] flux: Flux CD GitOps (check/get/reconcile/tree/logs, ~140 lines)
+  - [x] argocd: Argo CD GitOps (app list/get/sync, cluster, login, ~130 lines)
+  - [x] pulumi: Infrastructure as Code (up/preview/destroy/stack/config, ~140 lines)
+  - [x] packer: Machine image builder (build/validate/inspect/init/plugins, ~120 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

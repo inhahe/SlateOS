@@ -1778,6 +1778,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] syncthing: Continuous file synchronization (serve/cli show/generate, ~130 lines)
   - [x] borgmatic: BorgBackup wrapper (init/create/prune/compact/check/list/info, ~120 lines)
   - [x] rest-server: Restic REST backend (listen/path/tls/auth/append-only, ~60 lines)
+  - [x] **Batch 35 — media/document tools (8 utilities, 1142 lines, commit 0fb55b04):**
+  - [x] aria2c: Multi-protocol download utility (HTTP/FTP/BitTorrent, metalink, RPC, ~120 lines)
+  - [x] transmission-daemon/transmission-cli/transmission-remote: BitTorrent client (~140 lines)
+  - [x] yt-dlp/youtube-dl: Video downloader (formats, playlist, extract-audio, ~135 lines)
+  - [x] pandoc: Universal document converter (formats, templates, filters, ~85 lines)
+  - [x] gs/ps2pdf/pdf2ps: PostScript/PDF interpreter (~100 lines)
+  - [x] pdftotext/pdfinfo/pdftoppm/pdfimages/pdfseparate/pdfunite: PDF utilities (~165 lines)
+  - [x] tesseract: OCR engine (languages, OEM/PSM modes, ~90 lines)
+  - [x] exiftool: Metadata reader/writer (JSON/CSV output, tag write/remove, ~120 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

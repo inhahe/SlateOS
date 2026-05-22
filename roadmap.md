@@ -1960,6 +1960,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] diesel-cli: Diesel ORM CLI (setup/migrate/print-schema, ~130 lines)
   - [x] sea-orm-cli: SeaORM CLI (generate entity/migrate, ~140 lines)
   - [x] dbmate: Lightweight migrations (new/up/down/status/dump, ~100 lines)
+- [x] Batch 55 — cloud/infrastructure/DevOps tools (8 tools, ~1615 lines):
+  - [x] terraform-cli: IaC CLI (init/plan/apply/destroy/state/workspace, ~190 lines)
+  - [x] kubectl-cli: Kubernetes CLI (get/describe/logs/apply/top/config, ~200 lines)
+  - [x] helm-cli: Kubernetes package manager (install/upgrade/list/repo/search, ~170 lines)
+  - [x] ansible-cli: Automation CLI (ansible/playbook/galaxy/vault, multi-personality, ~200 lines)
+  - [x] vault-cli: Secrets manager (status/kv/login/token/policy, ~165 lines)
+  - [x] consul-cli: Service mesh (members/catalog/kv/services/info, ~140 lines)
+  - [x] packer-cli: Image builder (build/validate/inspect/init, ~130 lines)
+  - [x] nomad-cli: Workload orchestrator (status/run/stop/plan/node/logs, ~160 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

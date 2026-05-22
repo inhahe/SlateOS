@@ -1940,6 +1940,17 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] woff2: WOFF2 compress/decompress (compress/decompress/info, multi-personality, ~160 lines)
   - [x] imagemagick-cli: Image manipulation (convert/identify/mogrify/composite/montage, multi-personality, ~240 lines)
   - [x] graphviz: Graph visualization (dot/neato/fdp/sfdp/circo/twopi, multi-personality, ~165 lines)
+- [x] Batch 53 — audio/video/media utilities (10 tools, ~2046 lines):
+  - [x] ffmpeg-cli: Media transcoder (ffmpeg/ffprobe/ffplay, multi-personality, ~180 lines)
+  - [x] mediainfo: Media file info (JSON/text/full, ~120 lines)
+  - [x] ytdlp: Video downloader (format-list/extract-audio/embed, ~130 lines)
+  - [x] mpv-cli: Media player (playback/audio/video/subtitle opts, ~120 lines)
+  - [x] spotify-tui: Spotify client (play/search/status/devices, ~160 lines)
+  - [x] obs-cli: OBS controller (recording/streaming/scene/source/screenshot, ~200 lines)
+  - [x] audacity-cli: Audio editor (info/convert/trim/normalize/noise-reduce/spectrum, ~170 lines)
+  - [x] opus-tools: Opus codec (opusenc/opusdec/opusinfo, multi-personality, ~160 lines)
+  - [x] flac-tools: FLAC codec (flac/metaflac, multi-personality, ~180 lines)
+  - [x] vorbis-tools: Vorbis codec (oggenc/oggdec/ogginfo/vorbiscomment, multi-personality, ~200 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

@@ -2005,6 +2005,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] netlify-cli: Netlify CLI (deploy/dev/build/sites/env/functions, ~181 lines)
   - [x] vercel-cli: Vercel CLI (deploy/dev/build/list/env/domains, ~198 lines)
   - [x] heroku-cli: Heroku CLI (apps/ps/logs/config/addons/pg/releases, ~235 lines)
+- [x] Batch 60 — Messaging/communication tools (8 utilities, 1416 lines):
+  - [x] slack-cli: Slack CLI (auth/channels/chat/users/files/search, ~185 lines)
+  - [x] discord-cli: Discord bot CLI (guilds/channels/messages/members/roles, ~190 lines)
+  - [x] matrix-cli: Matrix messaging CLI (rooms/send/sync/invite/join, ~157 lines)
+  - [x] mattermost-cli: Mattermost CLI (mmctl: channel/team/user/post/plugin, ~208 lines)
+  - [x] telegram-cli: Telegram bot CLI (tg: send/getme/updates/chats/photo, ~151 lines)
+  - [x] twilio-cli: Twilio communications CLI (messaging/voice/phone-numbers, ~167 lines)
+  - [x] sendgrid-cli: SendGrid email CLI (send/templates/contacts/stats, ~175 lines)
+  - [x] mailgun-cli: Mailgun email CLI (send/domains/events/routes/lists, ~183 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

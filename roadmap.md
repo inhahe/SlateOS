@@ -1859,6 +1859,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] bat: Cat with syntax highlighting (themes/languages, ~115 lines)
   - [x] eza: Modern ls replacement (long/tree/icons/git, ~105 lines)
   - [x] fd: Fast find alternative (types/extensions/exec, ~95 lines)
+- [x] Batch 44 — Modern Rust CLI tools (ripgrep, delta, hyperfine, tokei, dust, procs, bottom, bandwhich):
+  - [x] ripgrep: Fast recursive search (regex/glob/type filters/JSON output, ~120 lines)
+  - [x] delta: Syntax-highlighting diff pager (side-by-side/line-numbers/themes, ~135 lines)
+  - [x] hyperfine: Command-line benchmarking (warmup/parameter-scan/export, ~90 lines)
+  - [x] tokei: Code statistics (lines/comments/blanks per language, ~100 lines)
+  - [x] dust: Disk usage visualization (bar graphs/file-types/file-count, ~90 lines)
+  - [x] procs: Modern ps replacement (tree/filter/color themes/config, ~135 lines)
+  - [x] bottom: Graphical system monitor (CPU/mem/network/disk/temp charts, ~115 lines)
+  - [x] bandwhich: Network bandwidth monitor (per-process/connection/address tables, ~120 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

@@ -1877,6 +1877,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] gping: Graphical ping (TUI graph/simple-graphics/multi-host, ~80 lines)
   - [x] trippy: Network path tracer (TUI/stream/JSON/CSV/markdown modes, ~120 lines)
   - [x] choose: Field selector (ranges/negative-indices/separators, ~145 lines)
+- [x] Batch 46 — Developer productivity tools (sd, jless, ouch, xsv, just, watchexec, pastel, grex):
+  - [x] sd: Find & replace CLI (preview/string-mode/regex-flags, ~95 lines)
+  - [x] jless: JSON viewer (tree navigation/YAML mode, ~70 lines)
+  - [x] ouch: Compression/decompression (compress/decompress/list, all formats, ~130 lines)
+  - [x] xsv: CSV toolkit (headers/stats/frequency/search/sort/table/join, ~150 lines)
+  - [x] just: Command runner (list/dump/show/evaluate/dry-run/init, ~170 lines)
+  - [x] watchexec: File watcher (restart/debounce/filter/clear, ~110 lines)
+  - [x] pastel: Color tool (color/list/format/gradient/mix/complement/paint, ~175 lines)
+  - [x] grex: Regex generator (digits/words/repetitions/escape, ~110 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

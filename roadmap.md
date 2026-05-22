@@ -1796,6 +1796,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] distcc/distccd/distccmon-text/pump: Distributed compiler (~155 lines)
   - [x] sccache/sccache-dist: Shared compilation cache (~155 lines)
   - [x] mold/ld.mold/ld64.mold: High-performance linker (GC/ICF/stats/perf, ~130 lines)
+  - [x] **Batch 37 — observability & load testing (8 utilities, 1166 lines, commit 468960b3):**
+  - [x] loki/logcli/promtail: Log aggregation system (~130 lines)
+  - [x] tempo: Distributed tracing backend (~55 lines)
+  - [x] jaeger/jaeger-agent/jaeger-collector/jaeger-query: Distributed tracing (~115 lines)
+  - [x] otelcol/otelcol-contrib: OpenTelemetry Collector (~115 lines)
+  - [x] vegeta: HTTP load testing (attack/report/plot/dump, ~110 lines)
+  - [x] k6: Load testing tool (run/inspect/archive, ~120 lines)
+  - [x] wrk/wrk2: HTTP benchmarking (~105 lines)
+  - [x] ab/siege: Apache benchmark & siege load testing (~170 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

@@ -1904,6 +1904,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] difftastic: Structural diff (side-by-side/inline/check-only/languages, ~110 lines)
   - [x] ast-grep: AST search/replace (run/scan/test/new/lsp, ~145 lines)
   - [x] amber: Code search/replace (preview/json/regex/exclude, ~110 lines)
+- [x] Batch 49 — System upgrade and Rust development tools (topgrade, onefetch, silicon, cargo-nextest, cargo-watch, cargo-edit, cargo-audit, cargo-bloat):
+  - [x] topgrade: Upgrade everything (dry-run/cleanup/steps/disable, ~90 lines)
+  - [x] onefetch: Git repo info (ASCII art/language stats/JSON output, ~100 lines)
+  - [x] silicon: Code screenshot generator (themes/fonts/shadow/clipboard, ~90 lines)
+  - [x] cargo-nextest: Next-gen test runner (run/list/archive/show-config, ~105 lines)
+  - [x] cargo-watch: File watcher for cargo (exec/clear/why/features, ~90 lines)
+  - [x] cargo-edit: Dependency management (add/rm/upgrade/set-version, ~120 lines)
+  - [x] cargo-audit: Security vulnerability scanner (fix/bin/JSON/ignore, ~105 lines)
+  - [x] cargo-bloat: Binary size analyzer (crates/time/filter/JSON, ~130 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

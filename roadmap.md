@@ -2014,6 +2014,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] twilio-cli: Twilio communications CLI (messaging/voice/phone-numbers, ~167 lines)
   - [x] sendgrid-cli: SendGrid email CLI (send/templates/contacts/stats, ~175 lines)
   - [x] mailgun-cli: Mailgun email CLI (send/domains/events/routes/lists, ~183 lines)
+- [x] Batch 61 — Payment/fintech/blockchain tools (8 utilities, 1180 lines):
+  - [x] stripe-cli: Stripe CLI (listen/trigger/customers/payments/subscriptions, ~173 lines)
+  - [x] paypal-cli: PayPal CLI (orders/payouts/disputes/invoices, ~144 lines)
+  - [x] square-cli: Square CLI (payments/orders/customers/catalog/inventory, ~115 lines)
+  - [x] braintree-cli: Braintree CLI (transactions/customers/plans/disputes, ~132 lines)
+  - [x] plaid-cli: Plaid financial CLI (accounts/transactions/balances, ~127 lines)
+  - [x] coinbase-cli: Coinbase crypto CLI (accounts/prices/trades/portfolio, ~151 lines)
+  - [x] ethers-cli: Ethereum CLI (multi: cast/anvil, balance/tx/gas/ens, ~175 lines)
+  - [x] solana-cli: Solana CLI (balance/transfer/airdrop/validators/deploy, ~163 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

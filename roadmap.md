@@ -1978,6 +1978,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] vector-cli: Data pipeline CLI (validate/list/top/vrl/test, ~140 lines)
   - [x] datadog-cli: Datadog CLI (metric/event/monitor/dashboard/tag, ~130 lines)
   - [x] sentry-cli: Sentry CLI (releases/sourcemaps/issues/monitors, ~150 lines)
+- [x] Batch 57 — container/CI-CD tools (8 tools, ~1364 lines):
+  - [x] docker-cli: Docker CLI (run/ps/build/images/compose/system, ~220 lines)
+  - [x] podman-cli: Podman rootless container CLI (pod/machine/system, ~130 lines)
+  - [x] buildah-cli: Buildah OCI builder (from/bud/commit/push/images, ~135 lines)
+  - [x] skopeo-cli: Image inspect/copy (inspect/copy/list-tags/sync, ~130 lines)
+  - [x] crane-cli: Registry interaction (ls/digest/manifest/copy/catalog, ~120 lines)
+  - [x] act-cli: Local GitHub Actions runner (list/dryrun/execute, ~100 lines)
+  - [x] gh-actions-cli: Actions workflow mgmt (list/view/run/logs/cache/secrets, ~170 lines)
+  - [x] circleci-cli: CircleCI CLI (config/local/orb/context, ~145 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

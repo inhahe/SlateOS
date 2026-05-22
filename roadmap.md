@@ -2041,6 +2041,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] lighthouse-cli: Lighthouse web auditing (performance/a11y/seo, ~86 lines)
   - [x] swagger-cli: OpenAPI/Swagger (validate/bundle/generate/diff, ~123 lines)
   - [x] postman-cli: Postman/Newman (run/collections/environments/lint, ~131 lines)
+- [x] Batch 64 — Data science / ML / AI tools (8 utilities, ~1416 lines):
+  - [x] jupyter-cli: Jupyter notebook CLI (notebook/lab/nbconvert/kernelspec/execute/server, ~117 lines)
+  - [x] mlflow-cli: MLflow CLI (server/experiments/runs/models/artifacts, ~121 lines)
+  - [x] dvc-cli: DVC CLI (init/add/push/pull/repro/metrics/params, ~145 lines)
+  - [x] wandb-cli: Weights & Biases CLI (login/sync/sweep/agent/artifact/server, ~131 lines)
+  - [x] huggingface-cli: Hugging Face CLI (login/repo/download/upload/scan-cache, ~128 lines)
+  - [x] ollama-cli: Ollama local LLM CLI (serve/run/pull/list/show/create/ps, ~156 lines)
+  - [x] tensorboard-cli: TensorBoard CLI (serve/inspect/export, ~97 lines)
+  - [x] dbt-cli: dbt data build tool CLI (init/run/test/build/docs/seed/snapshot, ~198 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

@@ -1951,6 +1951,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] opus-tools: Opus codec (opusenc/opusdec/opusinfo, multi-personality, ~160 lines)
   - [x] flac-tools: FLAC codec (flac/metaflac, multi-personality, ~180 lines)
   - [x] vorbis-tools: Vorbis codec (oggenc/oggdec/ogginfo/vorbiscomment, multi-personality, ~200 lines)
+- [x] Batch 54 — database/data tools (8 tools, ~1214 lines):
+  - [x] pgcli: PostgreSQL CLI with autocomplete (~80 lines)
+  - [x] litecli: SQLite CLI with autocomplete (~70 lines)
+  - [x] redis-cli: Redis CLI (stat/latency/bigkeys/commands, ~160 lines)
+  - [x] usql: Universal SQL CLI (postgres/mysql/sqlite/sqlserver, ~90 lines)
+  - [x] sqlx-cli: SQLx migrations (database/migrate/prepare, ~120 lines)
+  - [x] diesel-cli: Diesel ORM CLI (setup/migrate/print-schema, ~130 lines)
+  - [x] sea-orm-cli: SeaORM CLI (generate entity/migrate, ~140 lines)
+  - [x] dbmate: Lightweight migrations (new/up/down/status/dump, ~100 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

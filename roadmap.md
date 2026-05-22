@@ -2104,6 +2104,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pylint-cli: Pylint Python analyzer (score/disable/format, ~72 lines)
   - [x] rubocop-cli: RuboCop Ruby linter (auto-correct/init/format, ~89 lines)
   - [x] shellcheck-cli: ShellCheck shell linter (format json/gcc/tty, severity, ~106 lines)
+- [x] Batch 71 — Build systems & package managers (8 utilities, ~1159 lines):
+  - [x] cmake-cli: CMake build system (configure/build/install, ~100 lines)
+  - [x] meson-cli: Meson build system (setup/compile/test/install/introspect, ~107 lines)
+  - [x] bazel-cli: Bazel build system (build/test/run/query/clean/info, ~105 lines)
+  - [x] conan-cli: Conan C/C++ package manager (install/create/search/profile, ~118 lines)
+  - [x] vcpkg-cli: vcpkg C/C++ package manager (install/remove/search/list/integrate, ~112 lines)
+  - [x] cargo-make-cli: cargo-make task runner (list-all-steps/profile/ci-flow, ~95 lines)
+  - [x] just-cli: just command runner (list/show/dry-run/recipes, ~118 lines)
+  - [x] task-cli: Task/Taskfile runner (list/dry/init/parallel, ~108 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

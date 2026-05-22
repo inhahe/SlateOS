@@ -1787,6 +1787,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] pdftotext/pdfinfo/pdftoppm/pdfimages/pdfseparate/pdfunite: PDF utilities (~165 lines)
   - [x] tesseract: OCR engine (languages, OEM/PSM modes, ~90 lines)
   - [x] exiftool: Metadata reader/writer (JSON/CSV output, tag write/remove, ~120 lines)
+  - [x] **Batch 36 — build/dev tools (8 utilities, 1285 lines, commit d7df310f):**
+  - [x] protoc/protoc-gen-rust/protoc-gen-go: Protocol Buffers compiler (~105 lines)
+  - [x] grpcurl/grpc_health_probe/grpc_cli: gRPC development tools (~165 lines)
+  - [x] sphinx-build/sphinx-quickstart/sphinx-apidoc/sphinx-autogen: Documentation generator (~160 lines)
+  - [x] doxygen: C/C++/Rust documentation generator (~90 lines)
+  - [x] ccache: Compiler cache (stats/config/wrapper, ~115 lines)
+  - [x] distcc/distccd/distccmon-text/pump: Distributed compiler (~155 lines)
+  - [x] sccache/sccache-dist: Shared compilation cache (~155 lines)
+  - [x] mold/ld.mold/ld64.mold: High-performance linker (GC/ICF/stats/perf, ~130 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

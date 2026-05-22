@@ -1931,6 +1931,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] shfmt: Shell script formatter (diff/list/find/simplify/minify, ~80 lines)
   - [x] sops: Encrypted secrets editor (encrypt/decrypt/rotate/exec, ~100 lines)
   - [x] bore: TCP tunnel (local/server/secret/port-range, ~75 lines)
+- [x] Batch 52 — image/font/graphics utilities (8 tools, ~1540 lines):
+  - [x] oxipng: PNG optimizer (opt-level/strip/pretend/zopfli/fix, ~100 lines)
+  - [x] svgcleaner: SVG optimizer (remove-comments/defs/shapes/multipass, ~100 lines)
+  - [x] gifski: GIF encoder (fps/quality/fast/once/width/height, ~105 lines)
+  - [x] lottie-player: Lottie renderer (render/convert/info/preview/gif/apng/webp, ~140 lines)
+  - [x] fonttools: Font toolkit (info/subset/merge/convert/inspect/validate/metrics/glyphs/features/kern, ~230 lines)
+  - [x] woff2: WOFF2 compress/decompress (compress/decompress/info, multi-personality, ~160 lines)
+  - [x] imagemagick-cli: Image manipulation (convert/identify/mogrify/composite/montage, multi-personality, ~240 lines)
+  - [x] graphviz: Graph visualization (dot/neato/fdp/sfdp/circo/twopi, multi-personality, ~165 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

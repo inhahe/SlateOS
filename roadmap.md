@@ -1841,6 +1841,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] duplicity: Encrypted bandwidth-efficient backup (~110 lines)
   - [x] timeshift: System restore tool (create/restore/list/check, ~95 lines)
   - [x] snapper2: Filesystem snapshot management (list/create/diff/rollback, ~115 lines)
+  - [x] **Batch 42 — language runtimes (8 utilities, 1156 lines, commit ba817f3b):**
+  - [x] lua/luac/luarocks: Lua scripting language (~120 lines)
+  - [x] perl/cpan/perldoc: Perl interpreter (~100 lines)
+  - [x] php/php-fpm/composer: PHP interpreter and package manager (~155 lines)
+  - [x] R/Rscript: R statistical computing (~105 lines)
+  - [x] julia: Julia programming language (~75 lines)
+  - [x] deno: Deno JavaScript/TypeScript runtime (run/test/fmt/lint, ~110 lines)
+  - [x] bun/bunx: Bun JavaScript runtime (run/test/build/install, ~130 lines)
+  - [x] zig: Zig programming language (build/run/test/fmt/cc, ~110 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

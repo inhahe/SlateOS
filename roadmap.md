@@ -1823,6 +1823,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] argocd: Argo CD GitOps (app list/get/sync, cluster, login, ~130 lines)
   - [x] pulumi: Infrastructure as Code (up/preview/destroy/stack/config, ~140 lines)
   - [x] packer: Machine image builder (build/validate/inspect/init/plugins, ~120 lines)
+  - [x] **Batch 40 — audio/media tools (8 utilities, 1242 lines, commit 0c3cc5bf):**
+  - [x] mpv: Media player (video/audio/subtitles, hwdec, ~90 lines)
+  - [x] sox/soxi/play/rec: Sound eXchange audio processor (~155 lines)
+  - [x] fpcalc: Audio fingerprinting via Chromaprint (~65 lines)
+  - [x] beet: Music library manager (import/list/stats/info, ~115 lines)
+  - [x] cmus/cmus-remote: Console music player (query/play/pause, ~115 lines)
+  - [x] ncmpcpp/mpc: NCurses MPD client (status/playlist/search, ~160 lines)
+  - [x] aplay/arecord/amixer/alsactl/speaker-test: ALSA sound utilities (~160 lines)
+  - [x] jackd/jack_control/jack_lsp/jack_connect etc.: JACK Audio (~170 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

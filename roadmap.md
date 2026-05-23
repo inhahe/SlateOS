@@ -2176,6 +2176,15 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] neo4j-cli: cypher-shell/neo4j-admin (~108 lines)
   - [x] memcached-cli: memcached caching server (~72 lines)
   - [x] valkey-cli: Valkey cli/server/benchmark (~155 lines)
+- [x] Batch 79 — Math/science/data tools (8 utilities, ~938 lines):
+  - [x] gnuplot-cli: gnuplot interactive plotting (~62 lines)
+  - [x] octave-cli: GNU Octave numerical computing (~62 lines)
+  - [x] r-cli: R/Rscript statistical computing (~100 lines)
+  - [x] maxima-cli: Maxima computer algebra (~70 lines)
+  - [x] bc-cli: bc/dc arbitrary precision calculator (~92 lines)
+  - [x] units-cli: GNU Units conversion (~60 lines)
+  - [x] qalc-cli: Qalculate! calculator (~68 lines)
+  - [x] datamash-cli: GNU datamash statistics (~108 lines)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

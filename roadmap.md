@@ -2185,6 +2185,42 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] units-cli: GNU Units conversion (~60 lines)
   - [x] qalc-cli: Qalculate! calculator (~68 lines)
   - [x] datamash-cli: GNU datamash statistics (~108 lines)
+- [x] Batch 80 — Email/messaging/chat tools (8 utilities, ~1277 lines):
+  - [x] mutt-cli: Mutt/NeoMutt email client (mutt, neomutt)
+  - [x] sendmail-cli: sendmail MTA + msmtp SMTP client (sendmail, msmtp)
+  - [x] postfix-cli: Postfix mail server (postfix, postconf, postqueue, postsuper, postalias, postmap)
+  - [x] dovecot-cli: Dovecot IMAP/POP3 server (dovecot, doveconf, doveadm)
+  - [x] fetchmail-cli: fetchmail/getmail mail retrieval (fetchmail, getmail)
+  - [x] notmuch-cli: notmuch email indexer/search
+  - [x] irssi-cli: Irssi IRC client
+  - [x] weechat-cli: WeeChat extensible chat client
+- [x] Batch 81 — Printing/scanning/publishing tools (8 utilities, ~1239 lines):
+  - [x] cups-cli: CUPS server control (cupsctl, cupsenable, cupsdisable, cupsaccept, cupsreject)
+  - [x] lp-cli: print commands (lp, lpr, lpq, lprm, lpstat, lpadmin, lpoptions)
+  - [x] a2ps-cli: any-to-PostScript filter
+  - [x] scribus-cli: Scribus desktop publishing
+  - [x] inkscape-cli: Inkscape SVG editor CLI
+  - [x] potrace-cli: bitmap-to-vector tracing (potrace, mkbitmap)
+  - [x] tesseract-cli: Tesseract OCR engine
+  - [x] ocrmypdf-cli: OCRmyPDF PDF OCR layer
+- [x] Batch 82 — Backup/sync/archival tools (8 utilities, ~1249 lines):
+  - [x] borg-cli: BorgBackup deduplicating archiver
+  - [x] syncthing-cli: Syncthing continuous sync (syncthing, stcli)
+  - [x] unison-cli: Unison bidirectional file synchronizer
+  - [x] rdiff-backup-cli: rdiff-backup reverse differential backup
+  - [x] timeshift-cli: Timeshift system snapshot/restore
+  - [x] bacula-cli: Bacula enterprise backup (bconsole, bscan, bls, bextract)
+  - [x] amanda-cli: Amanda network backup (amdump, amcheck, amrecover, amrestore, amstatus, amreport)
+  - [x] duply-cli: Duply/Duplicity backup wrapper
+- [x] Batch 83 — Virtualization/emulation tools (8 utilities, ~1383 lines):
+  - [x] qemu-cli: QEMU emulator (qemu-system-x86_64, qemu-img, qemu-nbd)
+  - [x] virt-cli: virt-manager tools (virt-install, virt-clone, virt-viewer, virt-xml)
+  - [x] vagrant-cli: Vagrant development environment manager
+  - [x] libvirt-cli: libvirt virsh management CLI
+  - [x] lxc-cli: LXC/LXD container manager (lxc, lxc-create, lxc-start, lxc-stop, lxc-ls, lxc-info)
+  - [x] firecracker-cli: Firecracker microVM (firecracker, jailer)
+  - [x] cloud-init-cli: cloud-init instance initialization
+  - [x] dosbox-cli: DOSBox/DOSBox-X emulator (dosbox, dosbox-x)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

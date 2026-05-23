@@ -2221,6 +2221,42 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] firecracker-cli: Firecracker microVM (firecracker, jailer)
   - [x] cloud-init-cli: cloud-init instance initialization
   - [x] dosbox-cli: DOSBox/DOSBox-X emulator (dosbox, dosbox-x)
+- [x] Batch 84 — Accessibility/input tools (8 utilities, ~1053 lines):
+  - [x] espeak-cli: eSpeak-NG text-to-speech (espeak, espeak-ng)
+  - [x] festival-cli: Festival/Flite TTS (festival, flite, text2wave)
+  - [x] brltty-cli: BRLTTY braille display driver (brltty, brltty-setup, brltty-lsinc)
+  - [x] orca-cli: Orca screen reader
+  - [x] at-spi-cli: AT-SPI2 accessibility tools (at-spi2-registryd, at-spi-bus-launcher, accerciser)
+  - [x] xdotool-cli: X11 automation (xdotool)
+  - [x] xclip-cli: X11 clipboard interface (xclip)
+  - [x] xsel-cli: X11 selection manipulation (xsel)
+- [x] Batch 85 — Font/locale/i18n tools (8 utilities, ~1142 lines):
+  - [x] fontforge-cli: FontForge font editor
+  - [x] locale-cli: locale management (locale, localedef, locale-gen)
+  - [x] iconv-cli: character encoding conversion (iconv)
+  - [x] gettext-cli: GNU gettext i18n tools (gettext, xgettext, msgfmt, msginit, msgmerge, msgcat)
+  - [x] hunspell-cli: Hunspell spell checker
+  - [x] enchant-cli: Enchant spell checking (enchant-2, enchant-lsmod-2)
+  - [x] aspell-cli: GNU Aspell spell checker
+  - [x] ibus-cli: IBus input method framework (ibus, ibus-daemon, ibus-setup)
+- [x] Batch 86 — Desktop configuration/notification tools (8 utilities, ~1099 lines):
+  - [x] dconf-cli: dconf low-level configuration system
+  - [x] gsettings-cli: GSettings desktop configuration
+  - [x] notify-send-cli: desktop notification sender
+  - [x] zenity-cli: GTK/KDE dialog tool (zenity, kdialog)
+  - [x] wmctrl-cli: window manager control
+  - [x] xprop-cli: X11 property tools (xprop, xwininfo)
+  - [x] xrandr-cli: X11 display configuration
+  - [x] xset-cli: X11 settings (xset, xsetroot, xrdb)
+- [x] Batch 87 — 3D/CAD/gaming/graphics tools (8 utilities, ~1095 lines):
+  - [x] blender-cli: Blender 3D creation suite
+  - [x] openscad-cli: OpenSCAD programmatic 3D CAD
+  - [x] freecad-cli: FreeCAD parametric 3D CAD (freecad, freecadcmd)
+  - [x] mesa-cli: Mesa 3D graphics tools (eglinfo, es2_info, es2gears)
+  - [x] vulkan-cli: Vulkan tools (vulkaninfo, vkcube, vkvia)
+  - [x] glxinfo-cli: OpenGL tools (glxinfo, glxgears)
+  - [x] wine-cli: Wine Windows compatibility (wine, wine64, wineserver, wineboot, winecfg, winepath, regedit)
+  - [x] proton-cli: Proton/Steam compatibility (proton, steam)
 - [x] Terminal emulator (basic, serial/framebuffer):
   - [x] VT100/xterm ANSI escape sequence support (cursor movement, scroll regions, insert/delete lines/chars, SGR attributes, 256-color, truecolor, DEC private modes, alt screen buffer, DSR cursor report)
   - [x] Persistent searchable history (Ctrl+R reverse incremental search, history save/load to tmpfs, `history` command with list/search/clear, 512-entry ring buffer, shadow copy for command access), tab completion (command name prefix + filesystem path completion)

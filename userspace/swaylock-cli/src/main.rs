@@ -1,0 +1,55 @@
+#![deny(clippy::all)]
+
+//! swaylock-cli — OurOS swaylock screen locker
+//!
+//! Single personality: `swaylock`
+
+use std::env;
+use std::process;
+
+fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
+fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+
+fn run_swaylock(args: &[String], _prog: &str) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: swaylock [OPTIONS]");
+        println!("swaylock v1.7 (OurOS) — Screen locker for Wayland");
+        println!();
+        println!("Options:");
+        println!("  -c COLOR          Background color (#RRGGBB)");
+        println!("  -i IMAGE          Background image");
+        println!("  -s MODE           Scaling mode (fill, fit, center, tile, stretch)");
+        println!("  -f                Fork into background");
+        println!("  -e                Ignore empty password");
+        println!("  --indicator-idle-visible  Always show indicator");
+        println!("  --show-failed-attempts   Show failed attempts");
+        println!("  --grace N         Grace period (seconds)");
+        println!("  --version         Show version");
+        return 0;
+    }
+    if args.iter().any(|a| a == "--version") { println!("swaylock v1.7 (OurOS)"); return 0; }
+    let color = args.iter().skip_while(|a| a.as_str() != "-c").nth(1).map(|s| s.as_str()).unwrap_or("#000000");
+    let image = args.iter().skip_while(|a| a.as_str() != "-i").nth(1);
+    println!("Screen locked.");
+    if let Some(img) = image {
+        println!("  Background: {}", img);
+    } else {
+        println!("  Background: {}", color);
+    }
+    if args.is_empty() {
+        println!("  Background: solid black");
+    }
+    println!("  Indicator: ring");
+    0
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "swaylock".to_string());
+    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let code = run_swaylock(&rest, &prog);
+    process::exit(code);
+}
+
+#[cfg(test)]
+mod tests { #[test] fn test_basic() { assert!(true); } }

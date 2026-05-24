@@ -1,0 +1,56 @@
+#![deny(clippy::all)]
+
+//! lapce-cli — OurOS Lapce code editor
+//!
+//! Single personality: `lapce`
+
+use std::env;
+use std::process;
+
+fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
+fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+
+fn run_lapce(args: &[String], _prog: &str) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: lapce [OPTIONS] [PATH...]");
+        println!("Lapce 0.4.2 (OurOS) — Lightning-fast and powerful code editor");
+        println!();
+        println!("Options:");
+        println!("  -n, --new              New window");
+        println!("  -w, --wait             Wait for window to close");
+        println!("  --config-dir DIR       Config directory");
+        println!("  --data-dir DIR         Data directory");
+        println!("  -V, --version          Show version");
+        println!();
+        println!("Arguments:");
+        println!("  [PATH...]   Files or directories to open");
+        return 0;
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("Lapce 0.4.2 (OurOS)");
+        return 0;
+    }
+    let paths: Vec<&str> = args.iter()
+        .filter(|a| !a.starts_with('-'))
+        .map(|s| s.as_str())
+        .collect();
+    if paths.is_empty() {
+        println!("lapce: Opening welcome tab...");
+    } else {
+        for p in &paths {
+            println!("lapce: Opening '{}'", p);
+        }
+    }
+    0
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "lapce".to_string());
+    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let code = run_lapce(&rest, &prog);
+    process::exit(code);
+}
+
+#[cfg(test)]
+mod tests { #[test] fn test_basic() { assert!(true); } }

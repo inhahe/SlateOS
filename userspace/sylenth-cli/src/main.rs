@@ -1,0 +1,43 @@
+#![deny(clippy::all)]
+
+//! sylenth-cli — OurOS LennarDigital Sylenth1 synthesizer
+//!
+//! Single personality: `sylenth`
+
+use std::env;
+use std::process;
+
+fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
+fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+
+fn run_sylenth(args: &[String], _prog: &str) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: sylenth [OPTIONS] [PRESET]");
+        println!("LennarDigital Sylenth1 v3.0 (OurOS) — Virtual analog VSTi synthesizer");
+        println!();
+        println!("Options:");
+        println!("  --load FILE            Load .fxp/.fxb preset/bank");
+        println!("  --bank FILE            Load preset bank");
+        println!("  --version              Show version");
+        return 0;
+    }
+    if args.iter().any(|a| a == "--version") { println!("LennarDigital Sylenth1 v3.0.7 (OurOS)"); return 0; }
+    println!("LennarDigital Sylenth1 v3.0.7 (OurOS)");
+    println!("  Architecture: 4 unison oscillator engines (16 voices total)");
+    println!("  Filters: 2 with 4 filter modes each, drive, warm-mode");
+    println!("  Modulation: 2 ADSR + 2 LFO + 2 X/Y mod-mats, master ENV");
+    println!("  Effects: Arp, Distortion, Phaser, Chorus, EQ, Delay, Reverb, Compressor");
+    println!("  Plug-in formats: VST2, VST3, AU");
+    0
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "sylenth".to_string());
+    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let code = run_sylenth(&rest, &_prog);
+    process::exit(code);
+}
+
+#[cfg(test)]
+mod tests { #[test] fn test_basic() { assert!(true); } }

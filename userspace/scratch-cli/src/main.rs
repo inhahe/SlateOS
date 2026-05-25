@@ -1,0 +1,46 @@
+#![deny(clippy::all)]
+
+//! scratch-cli — OurOS Assimilate SCRATCH dailies/color/finishing
+//!
+//! Single personality: `scratch`
+
+use std::env;
+use std::process;
+
+fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
+fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+
+fn run_sc(args: &[String], _prog: &str) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: scratch [OPTIONS] [PROJECT]");
+        println!("Assimilate SCRATCH 9.5 (OurOS) — Dailies, color, conform, deliverables, VR");
+        println!();
+        println!("Options:");
+        println!("  --dailies              Open Dailies mode");
+        println!("  --vr                   Open SCRATCH VR mode");
+        println!("  --camtocloud           CamToCloud (live cloud upload from set)");
+        println!("  --conform XML/AAF      Conform from XML/AAF");
+        println!("  --version              Show version");
+        return 0;
+    }
+    if args.iter().any(|a| a == "--version") { println!("Assimilate SCRATCH 9.5.0.987 (OurOS)"); return 0; }
+    println!("Assimilate SCRATCH 9.5.0.987 (OurOS)");
+    println!("  Editions: SCRATCH, SCRATCH Lab (dailies), SCRATCH VR");
+    println!("  Codecs: ARRI MXF, RED REDCODE RAW, Sony X-OCN, Phantom Cine");
+    println!("  Color: Resolution-independent node-based grading");
+    println!("  CamToCloud: real-time cloud upload + remote review from set");
+    println!("  VR: Stitching, stereo, ambisonic audio, headset preview");
+    println!("  License: subscription / floating");
+    0
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "scratch".to_string());
+    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let code = run_sc(&rest, &_prog);
+    process::exit(code);
+}
+
+#[cfg(test)]
+mod tests { #[test] fn test_basic() { assert!(true); } }

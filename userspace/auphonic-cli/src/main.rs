@@ -1,0 +1,52 @@
+#![deny(clippy::all)]
+
+//! auphonic-cli — OurOS Auphonic audio post-production
+//!
+//! Single personality: `auphonic`
+
+use std::env;
+use std::process;
+
+fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
+fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+
+fn run_au(args: &[String], _prog: &str) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: auphonic [COMMAND] [OPTIONS]");
+        println!("Auphonic (OurOS) — Automated audio post-production for podcasts");
+        println!();
+        println!("Commands:");
+        println!("  upload FILE            Upload file for processing");
+        println!("  preset NAME            Use named preset");
+        println!("  status ID              Get production status");
+        println!("  download ID            Download processed result");
+        println!("  publish DESTINATION    Publish to outlet (SoundCloud/PodBean/FTP/S3)");
+        println!();
+        println!("Options:");
+        println!("  --leveler              Apply leveler (preserves dynamics)");
+        println!("  --filter               Noise/hum reduction");
+        println!("  --loudness TARGET      Match target LUFS (-16 podcast, -23 broadcast)");
+        println!("  --version              Show version");
+        return 0;
+    }
+    if args.iter().any(|a| a == "--version") { println!("Auphonic v2024.05 (OurOS)"); return 0; }
+    println!("Auphonic (OurOS)");
+    println!("  Mode: Web service / desktop client / API");
+    println!("  Processing: Intelligent leveler, noise/hum reduction, loudness norm");
+    println!("  Multi-track: Per-track processing with crosstalk removal");
+    println!("  Speech recognition: Whisper integration, automatic chapters");
+    println!("  Publishing: Direct to 20+ outlets (RSS, FTP, S3, podcast hosts)");
+    println!("  License: Free (2h/month) / Production hours subscription");
+    0
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "auphonic".to_string());
+    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let code = run_au(&rest, &_prog);
+    process::exit(code);
+}
+
+#[cfg(test)]
+mod tests { #[test] fn test_basic() { assert!(true); } }

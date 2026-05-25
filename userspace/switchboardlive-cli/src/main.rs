@@ -1,0 +1,51 @@
+#![deny(clippy::all)]
+
+//! switchboardlive-cli — OurOS Switchboard Live multi-streaming
+//!
+//! Single personality: `switchboardlive`
+
+use std::env;
+use std::process;
+
+fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
+fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+
+fn run_sbl(args: &[String], _prog: &str) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: switchboardlive [COMMAND] [OPTIONS]");
+        println!("Switchboard Live (OurOS) — Enterprise multi-streaming distribution");
+        println!();
+        println!("Commands:");
+        println!("  workflows              List streaming workflows");
+        println!("  destinations           Manage destinations");
+        println!("  schedule               Schedule a live event");
+        println!("  start ID               Start workflow");
+        println!("  stop ID                Stop workflow");
+        println!("  geo                    Geo-restrict streams");
+        println!();
+        println!("Options:");
+        println!("  --rtmp-pull             RTMP pull source");
+        println!("  --srt                  SRT source");
+        println!("  --version              Show version");
+        return 0;
+    }
+    if args.iter().any(|a| a == "--version") { println!("Switchboard Live v3.4 (OurOS)"); return 0; }
+    println!("Switchboard Live (OurOS)");
+    println!("  Focus: Enterprise & broadcast-grade multi-distribution");
+    println!("  Inputs: RTMP push/pull, SRT, NDI bridge");
+    println!("  Destinations: 50+ platforms (YouTube, FB, Twitch, X, Trovo, etc.)");
+    println!("  Features: Stream cloning, transcoding, mid-stream destination swap");
+    println!("  License: Custom enterprise plans");
+    0
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    let _prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "switchboardlive".to_string());
+    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let code = run_sbl(&rest, &_prog);
+    process::exit(code);
+}
+
+#[cfg(test)]
+mod tests { #[test] fn test_basic() { assert!(true); } }

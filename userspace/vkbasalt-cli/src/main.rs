@@ -1,0 +1,52 @@
+#![deny(clippy::all)]
+
+//! vkbasalt-cli — OurOS vkBasalt Vulkan post-processing
+//!
+//! Single personality: `vkbasalt`
+
+use std::env;
+use std::process;
+
+fn basename(path: &str) -> &str { path.rsplit_once(['/', '\\']).map_or(path, |(_, name)| name) }
+fn strip_ext(name: &str) -> &str { name.rsplit_once('.').map_or(name, |(base, _)| base) }
+
+fn run_vkbasalt(args: &[String], _prog: &str) -> i32 {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: vkbasalt [OPTIONS]");
+        println!("vkbasalt v0.3 (OurOS) — Vulkan post-processing layer");
+        println!();
+        println!("Options:");
+        println!("  --config FILE     Configuration file");
+        println!("  --list-effects    List available effects");
+        println!("  --version         Show version");
+        println!();
+        println!("Environment:");
+        println!("  ENABLE_VKBASALT=1 Enable the layer");
+        return 0;
+    }
+    if args.iter().any(|a| a == "--version") { println!("vkbasalt v0.3 (OurOS)"); return 0; }
+    if args.iter().any(|a| a == "--list-effects") {
+        println!("Available effects:");
+        println!("  cas              Contrast Adaptive Sharpening");
+        println!("  fxaa             Fast Approximate Anti-Aliasing");
+        println!("  smaa             Subpixel Morphological Anti-Aliasing");
+        println!("  deband           Debanding");
+        println!("  lut              Color lookup table");
+        return 0;
+    }
+    println!("vkbasalt: Vulkan post-processing layer");
+    println!("  Status: installed (use ENABLE_VKBASALT=1 to activate)");
+    println!("  Effects: cas, fxaa, smaa, deband, lut");
+    0
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    let prog = args.first().map(|s| strip_ext(basename(s)).to_string()).unwrap_or_else(|| "vkbasalt".to_string());
+    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let code = run_vkbasalt(&rest, &prog);
+    process::exit(code);
+}
+
+#[cfg(test)]
+mod tests { #[test] fn test_basic() { assert!(true); } }

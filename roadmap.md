@@ -4528,7 +4528,7 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [ ] GPU acceleration (currently software rasterizer)
   - [ ] DMA-BUF buffer sharing between apps and compositor
   - [ ] Fullscreen bypass (direct scanout for games)
-  - [ ] Native remote desktop streaming (compositor knows draw commands — most efficient option)
+  - [x] Native remote desktop streaming (gui/remote: guiremote crate — compact binary wire format for guitk RenderCommand frames; encoder + streaming-friendly decoder with try_decode_frame returning None on partial input; bounds-checked + size-capped against hostile senders; round-trips all 10 RenderCommand variants including text with optional max-width and FontWeightHint; 19 tests covering full round-trip, per-variant, back-to-back streaming, every error path, multi-byte UTF-8, frame-size sanity)
   - [ ] Video-encoded capture fallback (H.264/VP9 for games/video)
 
 ### 3.4 Window manager / desktop shell

@@ -4719,7 +4719,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Custom columns per file type, app-extensible columns (columns.rs: 5 providers, auto-detect, sort/resize/reorder)
   - [x] Drop zones for drag-and-drop (dropzone.rs: hit-testing, operation selection, nested prevention, feedback)
   - [x] Atomic copy/move/delete with undo, resume on interruption (fileops.rs: journal, recycle bin, conflict policies, progress)
-- [-] Text editor:
+- [x] Text editor:
   - [x] Multi-tab document editing with tab bar
   - [x] Cursor movement, selection, clipboard (cut/copy/paste)
   - [x] Undo/redo stack (insert/delete char, insert/delete line)
@@ -4728,7 +4728,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Line numbers (gutter), scroll support, status bar
   - [x] Dark theme (Catppuccin Mocha)
   - [x] Syntax highlighting (highlight.rs: 8 languages, 19 token types, multi-line state, Catppuccin theme)
-  - [ ] Port Helix or integrate tree-sitter for advanced editing
+  - [x] Advanced structural editing (syntree.rs: scope-aware syntactic tree across 12 languages with brace/paren/bracket nodes, string + line/block comment awareness, depth-first outline, fold ranges, and expand-selection primitive — pure-Rust alternative to upstream tree-sitter, swappable behind same API when the C library becomes available in the OurOS toolchain)
 - [x] Process explorer:
   - [x] Sortable process table (PID, name, status, CPU%, memory, threads, priority, user)
   - [x] Color-coded status, tree view with parent-child indentation

@@ -3,21 +3,9 @@ name = "oswindow"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS Window Library — compositor client for creating windows and receiving events"
-
-[workspace]
-
 [lib]
 name = "oswindow"
 path = "src/lib.rs"
 
 [dependencies]
 guitk = { path = "../toolkit" }
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

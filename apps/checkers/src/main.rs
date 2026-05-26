@@ -421,16 +421,17 @@ impl Board {
 
     /// Generate all jump moves for a piece at `pos`, considering a set of
     /// already-captured positions (for multi-jump chains).
-    fn generate_jumps_for_with_captured(
+    /// `piece` is provided directly because during a chain the piece has
+    /// logically moved but the board hasn't been updated. `origin` is the
+    /// original square the piece started the chain from (still occupied on
+    /// the board but logically vacant).
+    fn generate_jumps_for_chain(
         &self,
         pos: Pos,
+        piece: Piece,
         captured: &[Pos],
+        origin: Option<Pos>,
     ) -> Vec<CheckersMove> {
-        let piece = match self.get(pos) {
-            Some(p) => p,
-            None => return Vec::new(),
-        };
-
         let dirs: Vec<(i8, i8)> = if piece.is_king {
             Self::king_dirs().to_vec()
         } else {
@@ -447,8 +448,15 @@ impl Board {
                     continue;
                 }
                 if let Some(mid_piece) = self.get(mid) {
-                    if mid_piece.side != piece.side && self.get(to).is_none() {
-                        jumps.push(CheckersMove::jump(pos, to, mid));
+                    if mid_piece.side != piece.side {
+                        // Landing square must be empty. It reads as occupied
+                        // if it's the origin square (piece logically left),
+                        // so treat that as empty.
+                        let landing_empty = self.get(to).is_none()
+                            || origin.map_or(false, |o| o == to);
+                        if landing_empty {
+                            jumps.push(CheckersMove::jump(pos, to, mid));
+                        }
                     }
                 }
             }
@@ -457,22 +465,25 @@ impl Board {
     }
 
     /// Recursively build all multi-jump sequences starting from `pos`.
+    /// `origin` is the square the piece started the entire chain from (so
+    /// we know that square is logically vacant even though the board hasn't
+    /// been updated).
     fn build_jump_sequences(
         &self,
         pos: Pos,
         current_chain: &[CheckersMove],
         captured: &[Pos],
         is_king: bool,
+        origin: Pos,
     ) -> Vec<MoveSequence> {
-        // Check if piece got promoted mid-chain: if a man reaches the
-        // promotion row during a multi-jump, the turn ends (American checkers rule).
+        // Determine the piece: on the first call it's on the board; on
+        // recursive calls we reconstruct it from the chain context.
         let piece = if current_chain.is_empty() {
             match self.get(pos) {
                 Some(p) => p,
                 None => return Vec::new(),
             }
         } else {
-            // We are mid-chain; use the original piece type (or king if promoted at start).
             Piece {
                 side: self.side_to_move,
                 is_king,
@@ -486,17 +497,14 @@ impl Board {
                 Side::Black => 0,
             };
             if pos.row == promotion_row {
-                // Turn ends upon promotion; return the chain so far.
                 return vec![MoveSequence::new(current_chain.to_vec())];
             }
         }
 
-        // Temporarily remove captured pieces so jumps don't land on them
-        // We use `captured` list to filter instead of modifying the board.
-        let next_jumps = self.generate_jumps_for_with_captured(pos, captured);
+        let next_jumps =
+            self.generate_jumps_for_chain(pos, piece, captured, Some(origin));
 
         if next_jumps.is_empty() {
-            // No more jumps: return the chain so far (if non-empty)
             if current_chain.is_empty() {
                 return Vec::new();
             }
@@ -511,7 +519,8 @@ impl Board {
             if let Some(cap) = jmp.captured {
                 new_captured.push(cap);
             }
-            let sub = self.build_jump_sequences(jmp.to, &new_chain, &new_captured, is_king);
+            let sub =
+                self.build_jump_sequences(jmp.to, &new_chain, &new_captured, is_king, origin);
             sequences.extend(sub);
         }
         sequences
@@ -533,7 +542,7 @@ impl Board {
                     }
                     // Try jumps
                     let jump_seqs =
-                        self.build_jump_sequences(pos, &[], &[], piece.is_king);
+                        self.build_jump_sequences(pos, &[], &[], piece.is_king, pos);
                     all_jumps.extend(jump_seqs);
 
                     // Collect simple moves only if we might need them
@@ -1932,9 +1941,8 @@ mod tests {
         let mut board = Board::empty();
         board.side_to_move = Side::Black;
         place(&mut board, 0, 1, Side::Red, false);
-        // No black pieces
-        assert_eq!(board.check_result(), GameResult::BlackWins);
-        // Wait - no black pieces means black has 0, so Red wins
+        // No black pieces -> Red wins
+        assert_eq!(board.check_result(), GameResult::RedWins);
     }
 
     #[test]

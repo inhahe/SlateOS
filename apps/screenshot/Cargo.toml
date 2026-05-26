@@ -3,17 +3,5 @@ name = "screenshot"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS Screenshot — screen capture utility with region selection"
-
-[workspace]
-
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

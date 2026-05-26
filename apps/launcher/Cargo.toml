@@ -3,17 +3,5 @@ name = "launcher"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS App Launcher — quick launch dialog with search"
-
-[workspace]
-
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

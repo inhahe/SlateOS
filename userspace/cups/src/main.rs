@@ -3660,9 +3660,9 @@ mod tests {
 
     #[test]
     fn test_print_quality_ipp_code() {
-        assert_eq!(PrintQuality::Draft.ipp_code(), 3);
-        assert_eq!(PrintQuality::Normal.ipp_code(), 4);
-        assert_eq!(PrintQuality::High.ipp_code(), 5);
+        assert_eq!(PrintQuality::Draft._ipp_code(), 3);
+        assert_eq!(PrintQuality::Normal._ipp_code(), 4);
+        assert_eq!(PrintQuality::High._ipp_code(), 5);
     }
 
     // --- ColorMode tests ---
@@ -3730,11 +3730,11 @@ mod tests {
 
     #[test]
     fn test_media_size_dimensions() {
-        assert!((MediaSize::Letter.width_pts() - 612.0).abs() < 0.01);
-        assert!((MediaSize::Letter.height_pts() - 792.0).abs() < 0.01);
-        assert!((MediaSize::A4.width_pts() - 595.28).abs() < 0.01);
-        assert!((MediaSize::A4.height_pts() - 841.89).abs() < 0.01);
-        assert!((MediaSize::Legal.height_pts() - 1008.0).abs() < 0.01);
+        assert!((MediaSize::Letter._width_pts() - 612.0).abs() < 0.01);
+        assert!((MediaSize::Letter._height_pts() - 792.0).abs() < 0.01);
+        assert!((MediaSize::A4._width_pts() - 595.28).abs() < 0.01);
+        assert!((MediaSize::A4._height_pts() - 841.89).abs() < 0.01);
+        assert!((MediaSize::Legal._height_pts() - 1008.0).abs() < 0.01);
     }
 
     // --- MediaSource tests ---
@@ -3787,12 +3787,12 @@ mod tests {
 
     #[test]
     fn test_number_up_value() {
-        assert_eq!(NumberUp::One.value(), 1);
-        assert_eq!(NumberUp::Two.value(), 2);
-        assert_eq!(NumberUp::Four.value(), 4);
-        assert_eq!(NumberUp::Six.value(), 6);
-        assert_eq!(NumberUp::Nine.value(), 9);
-        assert_eq!(NumberUp::Sixteen.value(), 16);
+        assert_eq!(NumberUp::One._value(), 1);
+        assert_eq!(NumberUp::Two._value(), 2);
+        assert_eq!(NumberUp::Four._value(), 4);
+        assert_eq!(NumberUp::Six._value(), 6);
+        assert_eq!(NumberUp::Nine._value(), 9);
+        assert_eq!(NumberUp::Sixteen._value(), 16);
     }
 
     // --- PpdConformance tests ---
@@ -3866,8 +3866,8 @@ mod tests {
     #[test]
     fn test_ppd_option_type_display() {
         assert_eq!(format!("{}", PpdOptionType::PickOne), "PickOne");
-        assert_eq!(format!("{}", PpdOptionType::PickMany), "PickMany");
-        assert_eq!(format!("{}", PpdOptionType::Boolean), "Boolean");
+        assert_eq!(format!("{}", PpdOptionType::_PickMany), "PickMany");
+        assert_eq!(format!("{}", PpdOptionType::_Boolean), "Boolean");
     }
 
     // --- PpdConstraint tests ---
@@ -3888,16 +3888,16 @@ mod tests {
             ("PageSize".to_string(), "A5".to_string()),
             ("InputSlot".to_string(), "Tray2".to_string()),
         ];
-        assert!(c.is_violated(&sel1));
+        assert!(c._is_violated(&sel1));
 
         let sel2 = vec![
             ("PageSize".to_string(), "Letter".to_string()),
             ("InputSlot".to_string(), "Tray2".to_string()),
         ];
-        assert!(!c.is_violated(&sel2));
+        assert!(!c._is_violated(&sel2));
 
         let sel3 = vec![("PageSize".to_string(), "A5".to_string())];
-        assert!(!c.is_violated(&sel3));
+        assert!(!c._is_violated(&sel3));
     }
 
     // --- PpdFile tests ---
@@ -3924,8 +3924,8 @@ mod tests {
         let mut ppd = PpdFile::new("test.ppd");
         let opt = PpdOption::new("PageSize", "Size", PpdOptionType::PickOne, "Letter");
         ppd.add_option(opt);
-        assert!(ppd.find_option("PageSize").is_some());
-        assert!(ppd.find_option("Resolution").is_none());
+        assert!(ppd._find_option("PageSize").is_some());
+        assert!(ppd._find_option("Resolution").is_none());
     }
 
     #[test]
@@ -4153,7 +4153,7 @@ mod tests {
     #[test]
     fn test_print_job_uri() {
         let job = PrintJob::new(42, "MyPrinter", "alice", "test.pdf");
-        assert_eq!(job.job_uri(), "ipp://localhost:631/jobs/42");
+        assert_eq!(job._job_uri(), "ipp://localhost:631/jobs/42");
     }
 
     #[test]
@@ -4247,10 +4247,10 @@ mod tests {
     fn test_printer_set_get_option() {
         let mut p = Printer::new("P", "uri", "drv");
         p.set_option("media", "a4");
-        assert_eq!(p.get_option("media"), Some("a4"));
+        assert_eq!(p._get_option("media"), Some("a4"));
         // Overwrite
         p.set_option("media", "letter");
-        assert_eq!(p.get_option("media"), Some("letter"));
+        assert_eq!(p._get_option("media"), Some("letter"));
         assert_eq!(p.options.len(), 1);
     }
 
@@ -4260,8 +4260,8 @@ mod tests {
         p.set_option("media", "a4");
         p.set_option("quality", "high");
         p.remove_option("media");
-        assert_eq!(p.get_option("media"), None);
-        assert_eq!(p.get_option("quality"), Some("high"));
+        assert_eq!(p._get_option("media"), None);
+        assert_eq!(p._get_option("quality"), Some("high"));
     }
 
     // --- CupsSystem tests ---
@@ -4440,7 +4440,7 @@ mod tests {
     #[test]
     fn test_cups_system_all_active_jobs() {
         let sys = CupsSystem::new();
-        let active = sys.all_active_jobs();
+        let active = sys._all_active_jobs();
         // Job 1 is completed, 2 is processing, 3 is pending
         assert_eq!(active.len(), 2);
     }
@@ -4595,9 +4595,9 @@ mod tests {
         assert_eq!(ppd.model_name, "Test Model");
         assert!(!ppd.options.is_empty());
         // Check it has PageSize option
-        assert!(ppd.find_option("PageSize").is_some());
-        assert!(ppd.find_option("Resolution").is_some());
-        assert!(ppd.find_option("Duplex").is_some());
+        assert!(ppd._find_option("PageSize").is_some());
+        assert!(ppd._find_option("Resolution").is_some());
+        assert!(ppd._find_option("Duplex").is_some());
     }
 
     #[test]
@@ -5262,14 +5262,14 @@ mod tests {
     fn test_ppd_file_color_settings() {
         let ppd = PpdFile::new("test.ppd");
         assert!(ppd.color_device);
-        assert_eq!(ppd.default_color_space, "RGB");
+        assert_eq!(ppd._default_color_space, "RGB");
     }
 
     #[test]
     fn test_ppd_file_format_version() {
         let ppd = PpdFile::new("test.ppd");
         assert_eq!(ppd.format_version, "4.3");
-        assert_eq!(ppd.language_version, "English");
+        assert_eq!(ppd._language_version, "English");
     }
 
     #[test]

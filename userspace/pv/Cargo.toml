@@ -3,16 +3,4 @@ name = "pv"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS pv/truncate/shred/fuser - pipe/file management tools"
-
-[workspace]
-
 [dependencies]
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

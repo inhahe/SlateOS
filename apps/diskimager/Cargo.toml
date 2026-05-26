@@ -3,17 +3,5 @@ name = "diskimager"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS Disk Imager / ISO Tool — create, write, browse, and verify disk images"
-
-[workspace]
-
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

@@ -3,17 +3,5 @@ name = "taskscheduler"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS Task Scheduler — cron-like task scheduling with GUI"
-
-[workspace]
-
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

@@ -3,18 +3,5 @@ name = "desktop"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS desktop shell — window manager, taskbar, system tray"
-
-# Standalone crate — not part of the kernel workspace.
-[workspace]
-
 [dependencies]
 guitk = { path = "../toolkit" }
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

@@ -1,0 +1,19 @@
+# Zone config for apps/ — userspace GUI/CLI applications.
+#
+# Cargo's config search walks up from the current working directory.
+# When you run `cargo build` from inside apps/<name>/, cargo merges
+# this config with the workspace-root .cargo/config.toml. Scalar
+# settings (like `build.target`) here override the kernel-default in
+# the parent; the parent's `[target.x86_64-ouros]` rustflags are
+# additively merged.
+#
+# build-std is set here (not at the workspace root) because cargo
+# *appends* arrays during config merge — if the parent set build-std,
+# the kernel build (which runs from kernel/ and would inherit the
+# parent) would also be forced to rebuild std and fail.
+
+[build]
+target = "../toolchain/x86_64-ouros.json"
+
+[unstable]
+build-std = ["core", "alloc", "std", "panic_abort"]

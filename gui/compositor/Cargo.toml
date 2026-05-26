@@ -3,17 +3,5 @@ name = "compositor"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS Compositor — display server with window compositing and input routing"
-
-[workspace]
-
 [dependencies]
 guitk = { path = "../toolkit" }
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

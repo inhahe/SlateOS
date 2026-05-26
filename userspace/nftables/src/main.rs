@@ -2573,6 +2573,13 @@ fn tokenize(line: &str) -> Vec<String> {
                 current.clear();
             }
             tokens.push(";".to_string());
+        } else if ch == '{' || ch == '}' {
+            // Braces are always separate tokens
+            if !current.is_empty() {
+                tokens.push(current.clone());
+                current.clear();
+            }
+            tokens.push(ch.to_string());
         } else if ch.is_ascii_whitespace() {
             if !current.is_empty() {
                 tokens.push(current.clone());
@@ -2590,11 +2597,21 @@ fn tokenize(line: &str) -> Vec<String> {
 }
 
 /// Split tokens by semicolons into separate command token-lists.
+/// Semicolons inside brace-delimited blocks (`{ }`) are kept as part of
+/// the current command since they act as statement terminators in nftables
+/// block syntax, not command separators.
 fn split_commands(tokens: &[String]) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
     let mut current = Vec::new();
+    let mut brace_depth: u32 = 0;
     for tok in tokens {
-        if tok == ";" {
+        if tok == "{" {
+            brace_depth = brace_depth.saturating_add(1);
+            current.push(tok.clone());
+        } else if tok == "}" {
+            brace_depth = brace_depth.saturating_sub(1);
+            current.push(tok.clone());
+        } else if tok == ";" && brace_depth == 0 {
             if !current.is_empty() {
                 commands.push(current.clone());
                 current.clear();
@@ -3361,7 +3378,7 @@ mod tests {
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(
             &mut rs,
-            "add chain inet filter input type filter hook input priority 0 ; policy accept ;",
+            "add chain inet filter input { type filter hook input priority 0 ; policy accept ; }",
         )
         .unwrap();
         assert!(rs.tables[0].chains[0].is_base());
@@ -3378,7 +3395,7 @@ mod tests {
         run_cmd(&mut rs, "add table ip nat").unwrap();
         run_cmd(
             &mut rs,
-            "add chain ip nat prerouting type nat hook prerouting priority -100 ; policy accept ;",
+            "add chain ip nat prerouting { type nat hook prerouting priority -100 ; policy accept ; }",
         )
         .unwrap();
         let cfg = rs.tables[0].chains[0].base_config.as_ref().unwrap();
@@ -4196,7 +4213,7 @@ mod tests {
         run_cmd(&mut rs, "add table inet filter").unwrap();
         run_cmd(
             &mut rs,
-            "add chain inet filter input type filter hook input priority 0 ; policy accept ;",
+            "add chain inet filter input { type filter hook input priority 0 ; policy accept ; }",
         )
         .unwrap();
         run_cmd(&mut rs, "add rule inet filter input accept").unwrap();
@@ -4645,9 +4662,9 @@ mod tests {
         let flags = Flags::new();
         let batch = "\
 add table inet filter
-add chain inet filter input type filter hook input priority 0 ; policy drop ;
-add chain inet filter forward type filter hook forward priority 0 ; policy drop ;
-add chain inet filter output type filter hook output priority 0 ; policy accept ;
+add chain inet filter input { type filter hook input priority 0 ; policy drop ; }
+add chain inet filter forward { type filter hook forward priority 0 ; policy drop ; }
+add chain inet filter output { type filter hook output priority 0 ; policy accept ; }
 add rule inet filter input ct state established,related accept
 add rule inet filter input iifname \"lo\" accept
 add rule inet filter input tcp dport 22 accept
@@ -4663,7 +4680,7 @@ add rule inet filter input counter drop
 
         let input_chain = &rs.tables[0].chains[0];
         assert_eq!(input_chain.name, "input");
-        assert_eq!(input_chain.rules.len(), 6);
+        assert_eq!(input_chain.rules.len(), 7);
 
         // Check the policy
         let cfg = input_chain.base_config.as_ref().unwrap();

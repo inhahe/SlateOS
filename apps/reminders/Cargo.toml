@@ -2,14 +2,5 @@
 name = "reminders"
 version = "0.1.0"
 edition = "2024"
-
-[workspace]
-
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
-
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"

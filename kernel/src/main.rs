@@ -1808,13 +1808,13 @@ extern "C" fn kmain() -> ! {
     //
     // If init spawning fails, fall back to the kernel debug shell.
     static INIT_ELF: &[u8] = include_bytes!(
-        "../../userspace/init/target/x86_64-unknown-none/release/init"
+        "../../services/init/target/x86_64-unknown-none/release/init"
     );
     static HELLO_ELF: &[u8] = include_bytes!(
-        "../../userspace/hello/target/x86_64-unknown-none/release/hello"
+        "../../services/hello/target/x86_64-unknown-none/release/hello"
     );
     static TICKER_ELF: &[u8] = include_bytes!(
-        "../../userspace/ticker/target/x86_64-unknown-none/release/ticker"
+        "../../services/ticker/target/x86_64-unknown-none/release/ticker"
     );
 
     // Write embedded binaries to the VFS so init can spawn them.

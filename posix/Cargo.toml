@@ -9,21 +9,5 @@ description = "POSIX compatibility library — C-compatible function signatures 
 # `cargo test` only uses the rlib.
 crate-type = ["staticlib", "rlib"]
 
-[profile.release]
-opt-level = 2
-lto = false           # LTO conflicts with code-model in cross-compilation.
-panic = "abort"
-
-[profile.dev]
-# Note: panic = "abort" is NOT set here because it prevents `cargo test`
-# from linking the test harness.  The no_std cross-compilation target
-# (x86_64-unknown-none) defaults to panic = "abort" inherently.
-
-[lints.clippy]
-all = { level = "deny", priority = -1 }
-pedantic = { level = "deny", priority = -1 }
-unwrap_used = "warn"
-expect_used = "warn"
-panic = "warn"
-indexing_slicing = "warn"
-arithmetic_side_effects = "warn"
+[lints]
+workspace = true

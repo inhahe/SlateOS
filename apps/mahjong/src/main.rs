@@ -218,9 +218,12 @@ impl TileKind {
     }
 }
 
-/// Generate the full set of 36 distinct tile types.
+/// Generate all 42 distinct tile types across 7 categories.
+/// Base types (34): 9 Bamboo + 9 Circle + 9 Character + 4 Wind + 3 Dragon.
+/// Bonus types (8): 4 Season + 4 Flower (each unique, but seasons match any
+/// season and flowers match any flower).
 fn all_tile_kinds() -> Vec<TileKind> {
-    let mut kinds = Vec::with_capacity(36);
+    let mut kinds = Vec::with_capacity(42);
     for i in 1..=9 {
         kinds.push(TileKind::Bamboo(i));
     }
@@ -245,14 +248,44 @@ fn all_tile_kinds() -> Vec<TileKind> {
     kinds
 }
 
-/// Generate 144 tiles (4 copies of each of the 36 types).
+/// The 34 base tile types that each appear 4 times.
+fn base_tile_kinds() -> Vec<TileKind> {
+    let mut kinds = Vec::with_capacity(34);
+    for i in 1..=9 {
+        kinds.push(TileKind::Bamboo(i));
+    }
+    for i in 1..=9 {
+        kinds.push(TileKind::Circle(i));
+    }
+    for i in 1..=9 {
+        kinds.push(TileKind::Character(i));
+    }
+    for i in 0..4 {
+        kinds.push(TileKind::Wind(i));
+    }
+    for i in 0..3 {
+        kinds.push(TileKind::Dragon(i));
+    }
+    kinds
+}
+
+/// Generate the traditional 144-tile Mahjong set.
+/// 34 base types x 4 copies each = 136, plus 4 unique seasons and 4 unique
+/// flowers = 144 total.
 fn full_tile_set() -> Vec<TileKind> {
-    let kinds = all_tile_kinds();
+    let base = base_tile_kinds();
     let mut tiles = Vec::with_capacity(144);
-    for kind in &kinds {
+    for kind in &base {
         for _ in 0..4 {
             tiles.push(*kind);
         }
+    }
+    // Seasons and flowers: one copy each (they match any in their group).
+    for i in 0..4 {
+        tiles.push(TileKind::Season(i));
+    }
+    for i in 0..4 {
+        tiles.push(TileKind::Flower(i));
     }
     tiles
 }
@@ -1295,7 +1328,8 @@ mod tests {
     #[test]
     fn all_tile_kinds_count() {
         let kinds = all_tile_kinds();
-        assert_eq!(kinds.len(), 36);
+        // 9 Bamboo + 9 Circle + 9 Character + 4 Wind + 3 Dragon + 4 Season + 4 Flower = 42.
+        assert_eq!(kinds.len(), 42);
     }
 
     #[test]
@@ -1315,12 +1349,24 @@ mod tests {
     }
 
     #[test]
-    fn full_tile_set_four_copies() {
+    fn full_tile_set_four_copies_of_base() {
         let tiles = full_tile_set();
-        let kinds = all_tile_kinds();
-        for kind in &kinds {
+        let base = base_tile_kinds();
+        for kind in &base {
             let count = tiles.iter().filter(|t| *t == kind).count();
-            assert_eq!(count, 4, "Expected 4 copies of {:?}", kind);
+            assert_eq!(count, 4, "Expected 4 copies of base {:?}", kind);
+        }
+    }
+
+    #[test]
+    fn full_tile_set_one_copy_of_bonus() {
+        let tiles = full_tile_set();
+        // Seasons and flowers appear once each.
+        for i in 0..4u8 {
+            let sc = tiles.iter().filter(|t| **t == TileKind::Season(i)).count();
+            assert_eq!(sc, 1, "Expected 1 copy of Season({i})");
+            let fc = tiles.iter().filter(|t| **t == TileKind::Flower(i)).count();
+            assert_eq!(fc, 1, "Expected 1 copy of Flower({i})");
         }
     }
 
@@ -1658,7 +1704,7 @@ mod tests {
             &[TileKind::Bamboo(1), TileKind::Bamboo(2)],
         );
         // The top-layer tile is offset slightly, so click in the overlap area.
-        let (tx0, ty0) = board.tile_screen_pos(0).unwrap();
+        let (_tx0, _ty0) = board.tile_screen_pos(0).unwrap();
         let (tx1, ty1) = board.tile_screen_pos(1).unwrap();
         // Click in the overlap region (upper tile's area).
         let cx = tx1 + TILE_W / 2.0;
@@ -1968,7 +2014,7 @@ mod tests {
     #[test]
     fn app_arrow_keys_move_cursor() {
         let mut app = Mahjong::with_seed(42);
-        let initial = app.cursor.tile_idx;
+        let _initial = app.cursor.tile_idx;
         app.handle_key(&make_key(Key::Right));
         // Cursor may or may not change depending on layout, but shouldn't crash.
         let _ = app.cursor.tile_idx;
@@ -2192,8 +2238,11 @@ mod tests {
         app.status = GameStatus::Playing;
         app.show_hint_pair();
         let cmds = app.render(900.0, 700.0);
+        // Count tile-sized hint rects (TILE_W x TILE_H). The legend also uses
+        // the same green color for small swatches, so filter by size.
         let hint_count = cmds.iter().filter(|c| {
-            matches!(c, RenderCommand::FillRect { color, .. } if *color == TILE_HINT)
+            matches!(c, RenderCommand::FillRect { color, width, height, .. }
+                if *color == TILE_HINT && (*width - TILE_W).abs() < 1.0 && (*height - TILE_H).abs() < 1.0)
         }).count();
         assert_eq!(hint_count, 2);
     }

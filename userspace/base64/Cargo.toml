@@ -3,16 +3,4 @@ name = "base64"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS base64/base32/uuencode/uudecode - encoding tools"
-
-[workspace]
-
 [dependencies]
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

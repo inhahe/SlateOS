@@ -3,10 +3,4915 @@
 version = 4
 
 [[package]]
+name = "a2ps-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ab"
+version = "0.1.0"
+
+[[package]]
+name = "ab-cli"
+version = "0.1.0"
+
+[[package]]
+name = "abaqus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "abduco-cli"
+version = "0.1.0"
+
+[[package]]
+name = "abiword-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ableton-cli"
+version = "0.1.0"
+
+[[package]]
+name = "abstruse-cli"
+version = "0.1.0"
+
+[[package]]
+name = "acceldata-cli"
+version = "0.1.0"
+
+[[package]]
+name = "accerciser-cli"
+version = "0.1.0"
+
+[[package]]
+name = "acl"
+version = "0.1.0"
+
+[[package]]
+name = "acpi"
+version = "0.1.0"
+
+[[package]]
+name = "acpi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "acpid"
+version = "0.1.0"
+
+[[package]]
+name = "acpid-cli"
+version = "0.1.0"
+
+[[package]]
+name = "acronis-cli"
+version = "0.1.0"
+
+[[package]]
+name = "act-cli"
+version = "0.1.0"
+
+[[package]]
+name = "activecampaign-cli"
+version = "0.1.0"
+
+[[package]]
+name = "activemq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ada-cli"
+version = "0.1.0"
+
+[[package]]
+name = "adagios-cli"
+version = "0.1.0"
+
+[[package]]
+name = "admesh-cli"
+version = "0.1.0"
+
+[[package]]
+name = "adminer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "adobe-cli"
+version = "0.1.0"
+
+[[package]]
+name = "adobepodcast-cli"
+version = "0.1.0"
+
+[[package]]
+name = "adp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "adyen-cli"
+version = "0.1.0"
+
+[[package]]
+name = "aerc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "affinity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "affinityphoto-cli"
+version = "0.1.0"
+
+[[package]]
+name = "affirm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "aftereffects-cli"
+version = "0.1.0"
+
+[[package]]
+name = "age"
+version = "0.1.0"
+
+[[package]]
+name = "age-cli"
+version = "0.1.0"
+
+[[package]]
+name = "airbyte-cli"
+version = "0.1.0"
+
+[[package]]
+name = "aircrack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "airflow-cli"
+version = "0.1.0"
+
+[[package]]
+name = "airtable-cli"
+version = "0.1.0"
+
+[[package]]
+name = "airwallex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "akamai-cli"
+version = "0.1.0"
+
+[[package]]
+name = "alacritty-cli"
+version = "0.1.0"
+
+[[package]]
+name = "alarmclock"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "alation-cli"
+version = "0.1.0"
+
+[[package]]
+name = "alertmanager-cli"
+version = "0.1.0"
+
+[[package]]
+name = "alibabacloud-cli"
+version = "0.1.0"
+
+[[package]]
+name = "alitu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "allegro-cli"
+version = "0.1.0"
+
+[[package]]
+name = "alliance-cli"
+version = "0.1.0"
+
+[[package]]
+name = "alloy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "allplan-cli"
+version = "0.1.0"
+
+[[package]]
+name = "alsa-utils"
+version = "0.1.0"
+
+[[package]]
+name = "alteryx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "altium-cli"
+version = "0.1.0"
+
+[[package]]
+name = "amanda-cli"
+version = "0.1.0"
+
+[[package]]
+name = "amass-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ambassador-cli"
+version = "0.1.0"
+
+[[package]]
+name = "amber"
+version = "0.1.0"
+
+[[package]]
+name = "amp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "amplitude-cli"
+version = "0.1.0"
+
+[[package]]
+name = "amqp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "amtool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ancestris-cli"
+version = "0.1.0"
+
+[[package]]
+name = "androidstudio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "angle-grinder-cli"
+version = "0.1.0"
+
+[[package]]
+name = "angr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "anki-cli"
+version = "0.1.0"
+
+[[package]]
+name = "anomalo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ansible"
+version = "0.1.0"
+
+[[package]]
+name = "ansible-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ansys-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ant-cli"
+version = "0.1.0"
+
+[[package]]
+name = "anthropic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "anthy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "anvil-cli"
+version = "0.1.0"
+
+[[package]]
+name = "anyrun-cli"
+version = "0.1.0"
+
+[[package]]
+name = "apache-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ape-cli"
+version = "0.1.0"
+
+[[package]]
+name = "apigee-cli"
+version = "0.1.0"
+
+[[package]]
+name = "apisix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "apk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "apparmor"
+version = "0.1.0"
+
+[[package]]
+name = "apparmor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "appdynamics-cli"
+version = "0.1.0"
+
+[[package]]
+name = "appimage-cli"
+version = "0.1.0"
+
+[[package]]
+name = "appsmith-cli"
+version = "0.1.0"
+
+[[package]]
+name = "aquasec-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ar"
+version = "0.1.0"
+
+[[package]]
+name = "arc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "archicad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "archivemanager"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "ardour-cli"
+version = "0.1.0"
+
+[[package]]
+name = "arduinoide-cli"
+version = "0.1.0"
+
+[[package]]
+name = "argo-workflows-cli"
+version = "0.1.0"
+
+[[package]]
+name = "argocd"
+version = "0.1.0"
+
+[[package]]
+name = "argocd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "argyll-cli"
+version = "0.1.0"
+
+[[package]]
+name = "aria2"
+version = "0.1.0"
+
+[[package]]
+name = "aria2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "arnold-cli"
+version = "0.1.0"
+
+[[package]]
+name = "arp"
+version = "0.1.0"
+
+[[package]]
+name = "arping-cli"
+version = "0.1.0"
+
+[[package]]
+name = "arrow-cli"
+version = "0.1.0"
+
+[[package]]
+name = "artillery-cli"
+version = "0.1.0"
+
+[[package]]
+name = "asana-cli"
+version = "0.1.0"
+
+[[package]]
+name = "asciidoctor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "asdf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "aspell-cli"
+version = "0.1.0"
+
+[[package]]
+name = "assimp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ast-grep"
+version = "0.1.0"
+
+[[package]]
+name = "asteroids"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "astro-cli"
+version = "0.1.0"
+
+[[package]]
+name = "astrometry-cli"
+version = "0.1.0"
+
+[[package]]
+name = "astropy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "at"
+version = "0.1.0"
+
+[[package]]
+name = "at-spi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "at-spi2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "atlan-cli"
+version = "0.1.0"
+
+[[package]]
+name = "atlas-cli"
+version = "0.1.0"
+
+[[package]]
+name = "atril-cli"
+version = "0.1.0"
+
+[[package]]
+name = "attune-cli"
+version = "0.1.0"
+
+[[package]]
+name = "atuin"
+version = "0.1.0"
+
+[[package]]
+name = "atuin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "audacity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "audit"
+version = "0.1.0"
+
+[[package]]
+name = "audit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "augeas-cli"
+version = "0.1.0"
+
+[[package]]
+name = "auphonic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "auth0-cli"
+version = "0.1.0"
+
+[[package]]
+name = "authelia-cli"
+version = "0.1.0"
+
+[[package]]
+name = "authentik-cli"
+version = "0.1.0"
+
+[[package]]
+name = "auto-cpufreq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "autocad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "automator"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "autotune-cli"
+version = "0.1.0"
+
+[[package]]
+name = "avahi"
+version = "0.1.0"
+
+[[package]]
+name = "avahi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "avast-cli"
+version = "0.1.0"
+
+[[package]]
+name = "avid-cli"
+version = "0.1.0"
+
+[[package]]
+name = "avizo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "avrdude-cli"
+version = "0.1.0"
+
+[[package]]
+name = "avro-cli"
+version = "0.1.0"
+
+[[package]]
+name = "aweber-cli"
+version = "0.1.0"
+
+[[package]]
+name = "awk"
+version = "0.1.0"
+
+[[package]]
+name = "aws-cli"
+version = "0.1.0"
+
+[[package]]
+name = "axel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "axiom-cli"
+version = "0.1.0"
+
+[[package]]
+name = "axway-cli"
+version = "0.1.0"
+
+[[package]]
+name = "az-cli"
+version = "0.1.0"
+
+[[package]]
+name = "azion-cli"
+version = "0.1.0"
+
+[[package]]
+name = "azote-cli"
+version = "0.1.0"
+
+[[package]]
+name = "azure-cli"
+version = "0.1.0"
+
+[[package]]
+name = "azuredatastudio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "azuredevops-cli"
+version = "0.1.0"
+
+[[package]]
+name = "backblaze-cli"
+version = "0.1.0"
+
+[[package]]
+name = "backintime-cli"
+version = "0.1.0"
+
+[[package]]
+name = "backup"
+version = "0.1.0"
+
+[[package]]
+name = "backup-app"
+version = "0.1.0"
+
+[[package]]
+name = "backuppc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bacula-cli"
+version = "0.1.0"
+
+[[package]]
+name = "badblocks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bamboo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bamboohr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bandwhich"
+version = "0.1.0"
+
+[[package]]
+name = "bandwhich-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bandwidth-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bareos-cli"
+version = "0.1.0"
+
+[[package]]
+name = "barracuda-cli"
+version = "0.1.0"
+
+[[package]]
+name = "barrier"
+version = "0.1.0"
+
+[[package]]
+name = "base64"
+version = "0.1.0"
+
+[[package]]
+name = "basecamp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "baselight-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bat"
+version = "0.1.0"
+
+[[package]]
+name = "baton-cli"
+version = "0.1.0"
+
+[[package]]
+name = "battery-cli"
+version = "0.1.0"
+
+[[package]]
+name = "battlenet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "battleship"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "bazel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bc"
+version = "0.1.0"
+
+[[package]]
+name = "bc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bcachefs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bcfg2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bcftools-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bedtools-cli"
+version = "0.1.0"
+
+[[package]]
+name = "beekeeper-cli"
+version = "0.1.0"
+
+[[package]]
+name = "beets"
+version = "0.1.0"
+
+[[package]]
+name = "bemenu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "benchmark"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "benthos-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bentoml-cli"
+version = "0.1.0"
+
+[[package]]
+name = "berglas-cli"
+version = "0.1.0"
+
+[[package]]
+name = "betterbird-cli"
+version = "0.1.0"
+
+[[package]]
+name = "betterstack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "betteruptime-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bevy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "beyondidentity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bibtex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bigcommerce-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bigeye-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bigquery-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bill-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bincode-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bind-cli"
+version = "0.1.0"
+
+[[package]]
+name = "binwalk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "birdfont-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bitbucket-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bitcoin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bitdefender-cli"
+version = "0.1.0"
+
+[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+
+[[package]]
+name = "bitwarden-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bitwig-cli"
+version = "0.1.0"
+
+[[package]]
+name = "black-cli"
+version = "0.1.0"
+
+[[package]]
+name = "blast-cli"
+version = "0.1.0"
+
+[[package]]
+name = "blender-cli"
+version = "0.1.0"
+
+[[package]]
+name = "blkid"
+version = "0.1.0"
+
+[[package]]
+name = "blockdev"
+version = "0.1.0"
+
+[[package]]
+name = "bloomreach-cli"
+version = "0.1.0"
+
+[[package]]
+name = "blueberry-cli"
+version = "0.1.0"
+
+[[package]]
+name = "blueman-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bluetooth-sendto-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bluetuith-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bluez"
+version = "0.1.0"
+
+[[package]]
+name = "bluez-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bluez-tools-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bombardier-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bookstack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "boomi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bootctl"
+version = "0.1.0"
+
+[[package]]
+name = "bore"
+version = "0.1.0"
+
+[[package]]
+name = "borg"
+version = "0.1.0"
+
+[[package]]
+name = "borg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "borgbackup"
+version = "0.1.0"
+
+[[package]]
+name = "borgbackup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "borgmatic"
+version = "0.1.0"
+
+[[package]]
+name = "bottles-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bottom"
+version = "0.1.0"
+
+[[package]]
+name = "boulder-cli"
+version = "0.1.0"
+
+[[package]]
+name = "boundary-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bowtie-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bowtie2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bracken-cli"
+version = "0.1.0"
+
+[[package]]
+name = "braintree-cli"
+version = "0.1.0"
+
+[[package]]
+name = "brave-cli"
+version = "0.1.0"
+
+[[package]]
+name = "braze-cli"
+version = "0.1.0"
+
+[[package]]
+name = "breakout"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "brevo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "brex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bricscad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bridge"
+version = "0.1.0"
+
+[[package]]
+name = "bridge-cli"
+version = "0.1.0"
+
+[[package]]
+name = "brlcad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "brltty-cli"
+version = "0.1.0"
+
+[[package]]
+name = "broot"
+version = "0.1.0"
+
+[[package]]
+name = "broot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "brownie-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bruno-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bson-cli"
+version = "0.1.0"
+
+[[package]]
+name = "btmgmt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "btop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "btrfs"
+version = "0.1.0"
+
+[[package]]
+name = "btrfs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bubble-cli"
+version = "0.1.0"
+
+[[package]]
+name = "buck-cli"
+version = "0.1.0"
+
+[[package]]
+name = "budibase-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bugsnag-cli"
+version = "0.1.0"
+
+[[package]]
+name = "buildah"
+version = "0.1.0"
+
+[[package]]
+name = "buildah-cli"
+version = "0.1.0"
+
+[[package]]
+name = "buildbox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "buildkite-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bullet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bun"
+version = "0.1.0"
+
+[[package]]
+name = "bun-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bundler-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bunny-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "burp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bwa-cli"
+version = "0.1.0"
+
+[[package]]
+name = "bzip2"
+version = "0.1.0"
+
+[[package]]
+name = "cachet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cacti-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cadabra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "caddy"
+version = "0.1.0"
+
+[[package]]
+name = "caddy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cage-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cal"
+version = "0.1.0"
+
+[[package]]
+name = "calculator"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "calculix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "calendar"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "calibre-cli"
+version = "0.1.0"
+
+[[package]]
+name = "calico-cli"
+version = "0.1.0"
+
+[[package]]
+name = "calligra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "camera"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "campaignmonitor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "camtasia-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cantor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "canva-cli"
+version = "0.1.0"
+
+[[package]]
+name = "capnp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "capnproto-cli"
+version = "0.1.0"
+
+[[package]]
+name = "capsh"
+version = "0.1.0"
+
+[[package]]
+name = "capstone-cli"
+version = "0.1.0"
+
+[[package]]
+name = "captureone-cli"
+version = "0.1.0"
+
+[[package]]
+name = "carbonblack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cargo-audit"
+version = "0.1.0"
+
+[[package]]
+name = "cargo-bloat"
+version = "0.1.0"
+
+[[package]]
+name = "cargo-edit"
+version = "0.1.0"
+
+[[package]]
+name = "cargo-make-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cargo-nextest"
+version = "0.1.0"
+
+[[package]]
+name = "cargo-watch"
+version = "0.1.0"
+
+[[package]]
+name = "caribou-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cartes-du-ciel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cassandra"
+version = "0.1.0"
+
+[[package]]
+name = "cassandra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cast-cli"
+version = "0.1.0"
+
+[[package]]
+name = "catboost-cli"
+version = "0.1.0"
+
+[[package]]
+name = "catia-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cbor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ccache"
+version = "0.1.0"
+
+[[package]]
+name = "ccze-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cdist-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cdk8s-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cdktf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cdn77-cli"
+version = "0.1.0"
+
+[[package]]
+name = "celery-cli"
+version = "0.1.0"
+
+[[package]]
+name = "celestia-cli"
+version = "0.1.0"
+
+[[package]]
+name = "celigo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cellranger-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cellwriter-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cemu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "census-cli"
+version = "0.1.0"
+
+[[package]]
+name = "centreon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ceph-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ceridian-cli"
+version = "0.1.0"
+
+[[package]]
+name = "certbot"
+version = "0.1.0"
+
+[[package]]
+name = "certbot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cfengine-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cfssl"
+version = "0.1.0"
+
+[[package]]
+name = "cfssl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cgroup"
+version = "0.1.0"
+
+[[package]]
+name = "chafa-cli"
+version = "0.1.0"
+
+[[package]]
+name = "chage"
+version = "0.1.0"
+
+[[package]]
+name = "chamber-cli"
+version = "0.1.0"
+
+[[package]]
+name = "chargebee-cli"
+version = "0.1.0"
+
+[[package]]
+name = "charles-cli"
+version = "0.1.0"
+
+[[package]]
+name = "charmap"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "chattr"
+version = "0.1.0"
+
+[[package]]
+name = "cheat-sh"
+version = "0.1.0"
+
+[[package]]
+name = "checkers"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "checkmk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "checkout-cli"
+version = "0.1.0"
+
+[[package]]
+name = "checkov-cli"
+version = "0.1.0"
+
+[[package]]
+name = "checkpoint-cli"
+version = "0.1.0"
+
+[[package]]
+name = "chef-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cherrytree-cli"
+version = "0.1.0"
+
+[[package]]
+name = "chess"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "choose"
+version = "0.1.0"
+
+[[package]]
+name = "chown"
+version = "0.1.0"
+
+[[package]]
+name = "chpasswd"
+version = "0.1.0"
+
+[[package]]
+name = "chroma-cli"
+version = "0.1.0"
+
+[[package]]
+name = "chromaprint"
+version = "0.1.0"
+
+[[package]]
+name = "chrome-cli"
+version = "0.1.0"
+
+[[package]]
+name = "chronosphere-cli"
+version = "0.1.0"
+
+[[package]]
+name = "chrony"
+version = "0.1.0"
+
+[[package]]
+name = "chroot"
+version = "0.1.0"
+
+[[package]]
+name = "chroot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "chuck-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cilium-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cinema4d-cli"
+version = "0.1.0"
+
+[[package]]
+name = "circleci-cli"
+version = "0.1.0"
+
+[[package]]
+name = "citra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "citrix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "civo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "claws-mail-cli"
+version = "0.1.0"
+
+[[package]]
+name = "clearml-cli"
+version = "0.1.0"
+
+[[package]]
+name = "clerk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "clickhouse"
+version = "0.1.0"
+
+[[package]]
+name = "clickhouse-cli"
+version = "0.1.0"
+
+[[package]]
+name = "clickup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "clipboard"
+version = "0.1.0"
+
+[[package]]
+name = "clipmanager"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "clonezilla-cli"
+version = "0.1.0"
+
+[[package]]
+name = "close-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cloud-hypervisor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cloud-init-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cloudbeaver-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cloudcompare-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cloudflare-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cmake"
+version = "0.1.0"
+
+[[package]]
+name = "cmake-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cml-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cmp"
+version = "0.1.0"
+
+[[package]]
+name = "cmus"
+version = "0.1.0"
+
+[[package]]
+name = "cmus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cni-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cni-plugins"
+version = "0.1.0"
+
+[[package]]
+name = "cockpit-machines-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cockroach-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cockroachdb"
+version = "0.1.0"
+
+[[package]]
+name = "cockroachdb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cocos-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cocotb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "coda-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cohere-cli"
+version = "0.1.0"
+
+[[package]]
+name = "coinbase-cli"
+version = "0.1.0"
+
+[[package]]
+name = "collectd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "collibra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "colord-cli"
+version = "0.1.0"
+
+[[package]]
+name = "colorpicker"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "colourlab-cli"
+version = "0.1.0"
+
+[[package]]
+name = "column"
+version = "0.1.0"
+
+[[package]]
+name = "comm"
+version = "0.1.0"
+
+[[package]]
+name = "compass"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "composer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "compositor"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "comsol-cli"
+version = "0.1.0"
+
+[[package]]
+name = "conan-cli"
+version = "0.1.0"
+
+[[package]]
+name = "concourse-cli"
+version = "0.1.0"
+
+[[package]]
+name = "concur-cli"
+version = "0.1.0"
+
+[[package]]
+name = "conda-cli"
+version = "0.1.0"
+
+[[package]]
+name = "confd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "configcat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "confluence-cli"
+version = "0.1.0"
+
+[[package]]
+name = "confluent-cli"
+version = "0.1.0"
+
+[[package]]
+name = "conjur-cli"
+version = "0.1.0"
+
+[[package]]
+name = "conmon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "connect4"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "constantcontact-cli"
+version = "0.1.0"
+
+[[package]]
+name = "construct-cli"
+version = "0.1.0"
+
+[[package]]
+name = "consul"
+version = "0.1.0"
+
+[[package]]
+name = "consul-cli"
+version = "0.1.0"
+
+[[package]]
+name = "contacts"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "containerd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "contentful-cli"
+version = "0.1.0"
+
+[[package]]
+name = "context-cli"
+version = "0.1.0"
+
+[[package]]
+name = "contour-cli"
+version = "0.1.0"
+
+[[package]]
+name = "convertkit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "copper-cli"
+version = "0.1.0"
+
+[[package]]
+name = "coqui-cli"
+version = "0.1.0"
+
+[[package]]
+name = "coredns-cli"
+version = "0.1.0"
+
+[[package]]
+name = "coredumpctl"
+version = "0.1.0"
+
+[[package]]
+name = "coreutils"
+version = "0.1.0"
+
+[[package]]
+name = "coriolis-cli"
+version = "0.1.0"
+
+[[package]]
+name = "coronarender-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cortex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cortextool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cosign"
+version = "0.1.0"
+
+[[package]]
+name = "cosign-cli"
+version = "0.1.0"
+
+[[package]]
+name = "couchbase-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cpdf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cpio"
+version = "0.1.0"
+
+[[package]]
+name = "cpupower"
+version = "0.1.0"
+
+[[package]]
+name = "cpupower-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cqlsh-cli"
+version = "0.1.0"
+
+[[package]]
+name = "crane-cli"
+version = "0.1.0"
+
+[[package]]
+name = "crda-cli"
+version = "0.1.0"
+
+[[package]]
+name = "credentials"
+version = "0.1.0"
+
+[[package]]
+name = "credmanager"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "creo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cri-o-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cri-tools"
+version = "0.1.0"
+
+[[package]]
+name = "cribl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "crio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cron"
+version = "0.1.0"
+
+[[package]]
+name = "cron-cli"
+version = "0.1.0"
+
+[[package]]
+name = "crond"
+version = "0.1.0"
+
+[[package]]
+name = "crond2"
+version = "0.1.0"
+
+[[package]]
+name = "crontab"
+version = "0.1.0"
+
+[[package]]
+name = "crontab-cli"
+version = "0.1.0"
+
+[[package]]
+name = "crossplane-cli"
+version = "0.1.0"
+
+[[package]]
+name = "crossword"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "crosvm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "crowdstrike-cli"
+version = "0.1.0"
+
+[[package]]
+name = "crun-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cryptsetup"
+version = "0.1.0"
+
+[[package]]
+name = "cryptsetup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "crystal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "csound-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ctags"
+version = "0.1.0"
+
+[[package]]
+name = "cubase-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cubicsdr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cups"
+version = "0.1.0"
+
+[[package]]
+name = "cups-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cura-cli"
+version = "0.1.0"
+
+[[package]]
+name = "curl"
+version = "0.1.0"
+
+[[package]]
+name = "curlie-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cursor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "customerio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cut"
+version = "0.1.0"
+
+[[package]]
+name = "cutadapt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cutter-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cyberark-cli"
+version = "0.1.0"
+
+[[package]]
+name = "cypress-cli"
+version = "0.1.0"
+
+[[package]]
+name = "d-cli"
+version = "0.1.0"
+
+[[package]]
+name = "d3-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dagger-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dagster-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dapr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "darktable-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dasher-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dashlane-cli"
+version = "0.1.0"
+
+[[package]]
+name = "databricks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "datadog-cli"
+version = "0.1.0"
+
+[[package]]
+name = "datafold-cli"
+version = "0.1.0"
+
+[[package]]
+name = "datagrip-cli"
+version = "0.1.0"
+
+[[package]]
+name = "datamash-cli"
+version = "0.1.0"
+
+[[package]]
+name = "date"
+version = "0.1.0"
+
+[[package]]
+name = "davinci-cli"
+version = "0.1.0"
+
+[[package]]
+name = "db2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dbcli-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dbeaver-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dbgate-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dbmate"
+version = "0.1.0"
+
+[[package]]
+name = "dbmate-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dbt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dbus"
+version = "0.1.0"
+
+[[package]]
+name = "dbviewer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "dbvisualizer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dc"
+version = "0.1.0"
+
+[[package]]
+name = "dconf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dcraw-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dd"
+version = "0.1.0"
+
+[[package]]
+name = "deadd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "deel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "deepin-screenshot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "defold-cli"
+version = "0.1.0"
+
+[[package]]
+name = "defrag"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "dehancer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "deja-dup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "delta"
+version = "0.1.0"
+
+[[package]]
+name = "deluge-cli"
+version = "0.1.0"
+
+[[package]]
+name = "deno"
+version = "0.1.0"
+
+[[package]]
+name = "deno-cli"
+version = "0.1.0"
+
+[[package]]
+name = "descope-cli"
+version = "0.1.0"
+
+[[package]]
+name = "descript-cli"
+version = "0.1.0"
+
+[[package]]
+name = "desktop"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "desktop-file-utils-cli"
+version = "0.1.0"
+
+[[package]]
+name = "desmume-cli"
+version = "0.1.0"
+
+[[package]]
+name = "deta-cli"
+version = "0.1.0"
+
+[[package]]
+name = "devcycle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "devicemanager"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "dex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "df"
+version = "0.1.0"
+
+[[package]]
+name = "dhcpcd"
+version = "0.1.0"
+
+[[package]]
+name = "diagram"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "dictionary"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "diesel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "diff"
+version = "0.1.0"
+
+[[package]]
+name = "difftastic"
+version = "0.1.0"
+
+[[package]]
+name = "dig"
+version = "0.1.0"
+
+[[package]]
+name = "digitalocean-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dino-cli"
+version = "0.1.0"
+
+[[package]]
+name = "diptrace-cli"
+version = "0.1.0"
+
+[[package]]
+name = "directus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "direnv-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dirvish-cli"
+version = "0.1.0"
+
+[[package]]
+name = "discord-cli"
+version = "0.1.0"
+
+[[package]]
+name = "diskanalyzer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "diskcleanup"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "diskimager"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "diskonaut-cli"
+version = "0.1.0"
+
+[[package]]
+name = "diskutil"
+version = "0.1.0"
+
+[[package]]
+name = "displaycal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "distcc"
+version = "0.1.0"
+
+[[package]]
+name = "diun-cli"
+version = "0.1.0"
+
+[[package]]
+name = "django-cli"
+version = "0.1.0"
+
+[[package]]
+name = "djvu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dmenu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dmesg"
+version = "0.1.0"
+
+[[package]]
+name = "dmesg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dmidecode"
+version = "0.1.0"
+
+[[package]]
+name = "dmidecode-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dmsetup"
+version = "0.1.0"
+
+[[package]]
+name = "dns"
+version = "0.1.0"
+
+[[package]]
+name = "dnsimple-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dnsmadeeasy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dnsmasq"
+version = "0.1.0"
+
+[[package]]
+name = "dnsmasq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "doas"
+version = "0.1.0"
+
+[[package]]
+name = "docker"
+version = "0.1.0"
+
+[[package]]
+name = "docker-cli"
+version = "0.1.0"
+
+[[package]]
+name = "docspell-cli"
+version = "0.1.0"
+
+[[package]]
+name = "doctl"
+version = "0.1.0"
+
+[[package]]
+name = "doctl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "docusaurus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dog"
+version = "0.1.0"
+
+[[package]]
+name = "dogtail-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dolphin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dolphin-emu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "doppler-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dosbox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dotenvx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dotool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dots"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "dovecot"
+version = "0.1.0"
+
+[[package]]
+name = "dovecot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "doxygen"
+version = "0.1.0"
+
+[[package]]
+name = "doxygen-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dracut-cli"
+version = "0.1.0"
+
+[[package]]
+name = "draftsight-cli"
+version = "0.1.0"
+
+[[package]]
+name = "drake-cli"
+version = "0.1.0"
+
+[[package]]
+name = "drawio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dremio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "drill-cli"
+version = "0.1.0"
+
+[[package]]
+name = "drip-cli"
+version = "0.1.0"
+
+[[package]]
+name = "drone-cli"
+version = "0.1.0"
+
+[[package]]
+name = "druid-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dstat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "du"
+version = "0.1.0"
+
+[[package]]
+name = "duckdb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "duckstation-cli"
+version = "0.1.0"
+
+[[package]]
+name = "duf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dunst-cli"
+version = "0.1.0"
+
+[[package]]
+name = "duo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "duosecurity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "duplicati-cli"
+version = "0.1.0"
+
+[[package]]
+name = "duplicity"
+version = "0.1.0"
+
+[[package]]
+name = "duplicity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "duply-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dust"
+version = "0.1.0"
+
+[[package]]
+name = "dust-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dusty3d-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dvc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dvips-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dxvk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dynadot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dynamics365-cli"
+version = "0.1.0"
+
+[[package]]
+name = "dynatrace-cli"
+version = "0.1.0"
+
+[[package]]
+name = "e2fsprogs"
+version = "0.1.0"
+
+[[package]]
+name = "ea-cli"
+version = "0.1.0"
+
+[[package]]
+name = "eagle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "earlyoom"
+version = "0.1.0"
+
+[[package]]
+name = "earthly-cli"
+version = "0.1.0"
+
+[[package]]
+name = "easydns-cli"
+version = "0.1.0"
+
+[[package]]
+name = "easyeda-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ebook"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "ecamm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ecwid-cli"
+version = "0.1.0"
+
+[[package]]
+name = "edge-cli"
+version = "0.1.0"
+
+[[package]]
+name = "edgio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "editor"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "edius-cli"
+version = "0.1.0"
+
+[[package]]
+name = "eeschema-cli"
+version = "0.1.0"
+
+[[package]]
+name = "efibootmgr"
+version = "0.1.0"
+
+[[package]]
+name = "efibootmgr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "eigen-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ejbca-cli"
+version = "0.1.0"
+
+[[package]]
+name = "eject"
+version = "0.1.0"
+
+[[package]]
+name = "ekiga-cli"
+version = "0.1.0"
+
+[[package]]
+name = "elastic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "elasticsearch"
+version = "0.1.0"
+
+[[package]]
+name = "elasticsearch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "electric-cli"
+version = "0.1.0"
+
+[[package]]
+name = "electrum-cli"
+version = "0.1.0"
+
+[[package]]
+name = "element-cli"
+version = "0.1.0"
+
+[[package]]
+name = "element-desktop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "eleventy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "elixir-cli"
+version = "0.1.0"
+
+[[package]]
+name = "elmer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "email"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "embree-cli"
+version = "0.1.0"
+
+[[package]]
+name = "emissary-cli"
+version = "0.1.0"
+
+[[package]]
+name = "emojipicker"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "emqx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "enchant-cli"
+version = "0.1.0"
+
+[[package]]
+name = "energia-cli"
+version = "0.1.0"
+
+[[package]]
+name = "enscript-cli"
+version = "0.1.0"
+
+[[package]]
+name = "entraid-cli"
+version = "0.1.0"
+
+[[package]]
+name = "env"
+version = "0.1.0"
+
+[[package]]
+name = "env0-cli"
+version = "0.1.0"
+
+[[package]]
+name = "envoy"
+version = "0.1.0"
+
+[[package]]
+name = "envoy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "epicgames-cli"
+version = "0.1.0"
+
+[[package]]
+name = "erlang-cli"
+version = "0.1.0"
+
+[[package]]
+name = "eset-cli"
+version = "0.1.0"
+
+[[package]]
+name = "eslint-cli"
+version = "0.1.0"
+
+[[package]]
+name = "espeak-cli"
+version = "0.1.0"
+
+[[package]]
+name = "espeak-ng-cli"
+version = "0.1.0"
+
+[[package]]
+name = "esphome-cli"
+version = "0.1.0"
+
+[[package]]
+name = "etcd"
+version = "0.1.0"
+
+[[package]]
+name = "etcd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "etckeeper-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ethers-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ethtool"
+version = "0.1.0"
+
+[[package]]
+name = "eventbridge-cli"
+version = "0.1.0"
+
+[[package]]
+name = "evernote-cli"
+version = "0.1.0"
+
+[[package]]
+name = "evidently-cli"
+version = "0.1.0"
+
+[[package]]
+name = "evince-cli"
+version = "0.1.0"
+
+[[package]]
+name = "evolution-cli"
+version = "0.1.0"
+
+[[package]]
+name = "eww-cli"
+version = "0.1.0"
+
+[[package]]
+name = "excalidraw-cli"
+version = "0.1.0"
+
+[[package]]
+name = "exiftool"
+version = "0.1.0"
+
+[[package]]
+name = "exiftool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "exim-cli"
+version = "0.1.0"
+
+[[package]]
+name = "exoscale-cli"
+version = "0.1.0"
+
+[[package]]
+name = "expand"
+version = "0.1.0"
+
+[[package]]
+name = "expensify-cli"
+version = "0.1.0"
+
+[[package]]
+name = "explorer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "eza"
+version = "0.1.0"
+
+[[package]]
+name = "f3d-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fabfilter-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fabric-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fail2ban"
+version = "0.1.0"
+
+[[package]]
+name = "falco-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fancontrol-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fastapi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fastfetch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fastly-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fastqc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fauna-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fcitx5-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fd-find"
+version = "0.1.0"
+
+[[package]]
+name = "fdisk"
+version = "0.1.0"
+
+[[package]]
+name = "fdisk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fdm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "feast-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fenics-cli"
+version = "0.1.0"
+
+[[package]]
+name = "festival-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fetchmail-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ffmpeg"
+version = "0.1.0"
+
+[[package]]
+name = "ffmpeg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ffplay-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fftw-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fiddler-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fido2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "figma-cli"
+version = "0.1.0"
+
+[[package]]
+name = "file"
+version = "0.1.0"
+
+[[package]]
+name = "fileassoc"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "filebeat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "filediff"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "filesearch"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "filmconvert-cli"
+version = "0.1.0"
+
+[[package]]
+name = "filmora-cli"
+version = "0.1.0"
+
+[[package]]
+name = "finalcut-cli"
+version = "0.1.0"
+
+[[package]]
+name = "finance"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "findmnt"
+version = "0.1.0"
+
+[[package]]
+name = "fio"
+version = "0.1.0"
+
+[[package]]
+name = "fio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "firebase-cli"
+version = "0.1.0"
+
+[[package]]
+name = "firebolt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "firecracker-cli"
+version = "0.1.0"
+
+[[package]]
+name = "firefox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "firejail"
+version = "0.1.0"
+
+[[package]]
+name = "fireworks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fivetran-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flac-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flac-tools"
+version = "0.1.0"
+
+[[package]]
+name = "flagsmith-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flame-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flameshot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flannel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flashcards"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "flask-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flatbuffers-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flatpak"
+version = "0.1.0"
+
+[[package]]
+name = "flavours-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flax-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fleet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flexbuffers-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flite-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flock"
+version = "0.1.0"
+
+[[package]]
+name = "flood"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "florence-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flstudio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fluentbit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fluentd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fluidsynth-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flux"
+version = "0.1.0"
+
+[[package]]
+name = "flux-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fly-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flyctl"
+version = "0.1.0"
+
+[[package]]
+name = "flyctl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "flyway-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fmt"
+version = "0.1.0"
+
+[[package]]
+name = "fnott-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fold"
+version = "0.1.0"
+
+[[package]]
+name = "foliate-cli"
+version = "0.1.0"
+
+[[package]]
+name = "font-manager-cli"
+version = "0.1.0"
+
+[[package]]
+name = "font-viewer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fontconfig"
+version = "0.1.0"
+
+[[package]]
+name = "fontconfig-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fontforge-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fontmanager"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "fontmatrix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fonttools"
+version = "0.1.0"
+
+[[package]]
+name = "fonttools-cli"
+version = "0.1.0"
+
+[[package]]
+name = "foot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "foreman-cli"
+version = "0.1.0"
+
+[[package]]
+name = "forge-cli"
+version = "0.1.0"
+
+[[package]]
+name = "forgejo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "forgerock-cli"
+version = "0.1.0"
+
+[[package]]
+name = "forth-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fortinet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "foxdot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fragments-cli"
+version = "0.1.0"
+
+[[package]]
+name = "framer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "free"
+version = "0.1.0"
+
+[[package]]
+name = "freecad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "freecell"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "freeipa-cli"
+version = "0.1.0"
+
+[[package]]
+name = "freemat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "freerdp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "freetype-cli"
+version = "0.1.0"
+
+[[package]]
+name = "freshbooks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "freshdesk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "freshsales-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fritzing-cli"
+version = "0.1.0"
+
+[[package]]
+name = "front-cli"
+version = "0.1.0"
+
+[[package]]
+name = "frontapp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "frontegg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fsck"
+version = "0.1.0"
+
+[[package]]
+name = "fsck-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fscrypt"
+version = "0.1.0"
+
+[[package]]
+name = "fsharp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fstrim"
+version = "0.1.0"
+
+[[package]]
+name = "fstrim-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ftp"
+version = "0.1.0"
+
+[[package]]
+name = "ftpd"
+version = "0.1.0"
+
+[[package]]
+name = "fullstory-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fuse-overlayfs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fuser"
+version = "0.1.0"
+
+[[package]]
+name = "fusion-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fusion360-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fusionauth-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fuzzel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fw"
+version = "0.1.0"
+
+[[package]]
+name = "fwupd"
+version = "0.1.0"
+
+[[package]]
+name = "fwupd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "fzf"
+version = "0.1.0"
+
+[[package]]
+name = "game2048"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "gamemaker-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gamemode-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gamescope-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gams-cli"
+version = "0.1.0"
+
+[[package]]
+name = "garage-cli"
+version = "0.1.0"
+
+[[package]]
+name = "garageband-cli"
+version = "0.1.0"
+
+[[package]]
+name = "garnet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gatekeeper-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gatk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gatling-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gatsby-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gatus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gazebo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gcloud-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gcore-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gcov-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gdal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gdb"
+version = "0.1.0"
+
+[[package]]
+name = "gdb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gdisk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gdu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "geary-cli"
+version = "0.1.0"
+
+[[package]]
+name = "geda-cli"
+version = "0.1.0"
+
+[[package]]
+name = "geneanet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "genius-cli"
+version = "0.1.0"
+
+[[package]]
+name = "geogebra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "geojson-cli"
+version = "0.1.0"
+
+[[package]]
+name = "geoserver-cli"
+version = "0.1.0"
+
+[[package]]
+name = "geotiff-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gephi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gerbv-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gespeaker-cli"
+version = "0.1.0"
+
+[[package]]
+name = "getent"
+version = "0.1.0"
+
+[[package]]
+name = "getmail-cli"
+version = "0.1.0"
+
+[[package]]
+name = "getopt"
+version = "0.1.0"
+
+[[package]]
+name = "getresponse-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gettext-cli"
+version = "0.1.0"
+
+[[package]]
+name = "getty"
+version = "0.1.0"
+
+[[package]]
+name = "ggez-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gh-actions-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ghdl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ghidra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ghost-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ghostscript"
+version = "0.1.0"
+
+[[package]]
+name = "ghostscript-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ghostty-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gifski"
+version = "0.1.0"
+
+[[package]]
+name = "gimp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "git"
+version = "0.1.0"
+
+[[package]]
+name = "git-absorb"
+version = "0.1.0"
+
+[[package]]
+name = "git-branchless"
+version = "0.1.0"
+
+[[package]]
+name = "git-cliff"
+version = "0.1.0"
+
+[[package]]
+name = "git-interactive-rebase-tool"
+version = "0.1.0"
+
+[[package]]
+name = "gitbook-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gitea"
+version = "0.1.0"
+
+[[package]]
+name = "gitea-cli"
+version = "0.1.0"
+
+[[package]]
+name = "github-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gitlab-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gitlab-runner-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gitleaks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gitui"
+version = "0.1.0"
+
+[[package]]
+name = "gladly-cli"
+version = "0.1.0"
+
+[[package]]
+name = "glances-cli"
+version = "0.1.0"
+
+[[package]]
+name = "glide-cli"
+version = "0.1.0"
+
+[[package]]
+name = "glogg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gloo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gluster-cli"
+version = "0.1.0"
+
+[[package]]
+name = "glusterfs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "glxinfo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "glyphslib-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gmsh-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gnome-bluetooth-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gnome-boxes-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gnome-calendar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gnome-disks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gnome-keyring-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gnome-screenshot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gnote-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gnumeric-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gnuplot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gnuradio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "go"
+version = "0.1.0"
+
+[[package]]
+name = "goaccess-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gobuster-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gocd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "godaddy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "godoc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "godot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gog-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gomoku"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "googleworkspace-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gopass-cli"
+version = "0.1.0"
+
+[[package]]
+name = "goproxy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gorgias-cli"
+version = "0.1.0"
+
+[[package]]
+name = "goverlay-cli"
+version = "0.1.0"
+
+[[package]]
+name = "goxel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gparted-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gpg"
+version = "0.1.0"
+
+[[package]]
+name = "gpg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gping"
+version = "0.1.0"
+
+[[package]]
+name = "gprof-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gqrx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gradience-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gradle"
+version = "0.1.0"
+
+[[package]]
+name = "gradle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "grafana"
+version = "0.1.0"
+
+[[package]]
+name = "grafana-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gramps-cli"
+version = "0.1.0"
+
+[[package]]
+name = "graphql-cli"
+version = "0.1.0"
+
+[[package]]
+name = "graphviz"
+version = "0.1.0"
+
+[[package]]
+name = "graphviz-cli"
+version = "0.1.0"
+
+[[package]]
+name = "grass-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gravitee-cli"
+version = "0.1.0"
+
+[[package]]
+name = "graylog-cli"
+version = "0.1.0"
+
+[[package]]
+name = "graywolf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "grbl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "grex"
+version = "0.1.0"
+
+[[package]]
+name = "griddb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gridsome-cli"
+version = "0.1.0"
+
+[[package]]
+name = "grim-cli"
+version = "0.1.0"
+
+[[package]]
+name = "groff-cli"
+version = "0.1.0"
+
+[[package]]
+name = "groove-cli"
+version = "0.1.0"
+
+[[package]]
+name = "groq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "growthbook-cli"
+version = "0.1.0"
+
+[[package]]
+name = "grpc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "grpc-tools"
+version = "0.1.0"
+
+[[package]]
+name = "grpcurl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "grub-cli"
+version = "0.1.0"
+
+[[package]]
+name = "grub2"
+version = "0.1.0"
+
+[[package]]
+name = "grype-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gscan2pdf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gsettings-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gtkwave-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gucharmap-cli"
+version = "0.1.0"
+
+[[package]]
+name = "guiremote"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "guitk"
+version = "0.1.0"
+
+[[package]]
+name = "guix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gusto-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gvisor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "gzip"
+version = "0.1.0"
+
+[[package]]
+name = "h2o-cli"
+version = "0.1.0"
+
+[[package]]
+name = "habits"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "halibut-cli"
+version = "0.1.0"
+
+[[package]]
+name = "handbrake-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hangman"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "hanko-cli"
+version = "0.1.0"
+
+[[package]]
+name = "haproxy"
+version = "0.1.0"
+
+[[package]]
+name = "haproxy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hardhat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hardinfo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hardlink"
+version = "0.1.0"
+
+[[package]]
+name = "harfbuzz-cli"
+version = "0.1.0"
+
+[[package]]
+name = "harness-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hashcat"
+version = "0.1.0"
+
+[[package]]
+name = "hashcat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hatch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "havoc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hddtemp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hdparm"
+version = "0.1.0"
+
+[[package]]
+name = "hdparm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "head"
+version = "0.1.0"
+
+[[package]]
+name = "headscale-cli"
+version = "0.1.0"
+
+[[package]]
+name = "heap-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hearts"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "heidisql-cli"
+version = "0.1.0"
+
+[[package]]
+name = "helix"
+version = "0.1.0"
+
+[[package]]
+name = "helix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "helm"
+version = "0.1.0"
+
+[[package]]
+name = "helm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "helpcrunch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "helpscout-cli"
+version = "0.1.0"
+
+[[package]]
+name = "herbe-cli"
+version = "0.1.0"
+
+[[package]]
+name = "heroic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "heroku-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hetzner-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hevea-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hevo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hexchat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hexdump"
+version = "0.1.0"
+
+[[package]]
+name = "hexeditor"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "hexo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hey-cli"
+version = "0.1.0"
+
+[[package]]
+name = "higan-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hightouch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "himalaya-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hindenburg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hisat2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hive-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hivemq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hiver-cli"
+version = "0.1.0"
+
+[[package]]
+name = "homeassistant-cli"
+version = "0.1.0"
+
+[[package]]
+name = "honeycomb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "horst-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hostapd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hostname"
+version = "0.1.0"
+
+[[package]]
+name = "hostnamectl"
+version = "0.1.0"
+
+[[package]]
+name = "hotjar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "houdini-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hover-cli"
+version = "0.1.0"
+
+[[package]]
+name = "howdoi"
+version = "0.1.0"
+
+[[package]]
+name = "hping-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hplip-cli"
+version = "0.1.0"
+
+[[package]]
+name = "htmldoc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "htop"
+version = "0.1.0"
+
+[[package]]
+name = "htop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "htslib-cli"
+version = "0.1.0"
+
+[[package]]
+name = "httpclient"
+version = "0.1.0"
+
+[[package]]
+name = "httpie-cli"
+version = "0.1.0"
+
+[[package]]
+name = "httping-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hubspot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "huggingface-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hugo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "humio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hunspell-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hurl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hwclock"
+version = "0.1.0"
+
+[[package]]
+name = "hwinfo"
+version = "0.1.0"
+
+[[package]]
+name = "hwinfo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hydra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hydrogen-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hyperfine"
+version = "0.1.0"
+
+[[package]]
+name = "hyperv-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hyprland-cli"
+version = "0.1.0"
+
+[[package]]
+name = "hyprpaper-cli"
+version = "0.1.0"
+
+[[package]]
+name = "i2c-tools-cli"
+version = "0.1.0"
+
+[[package]]
+name = "i3-cli"
+version = "0.1.0"
+
+[[package]]
+name = "iar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ibmcloud-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ibmmq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ibus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "icc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "icinga-cli"
+version = "0.1.0"
+
+[[package]]
+name = "iconv"
+version = "0.1.0"
+
+[[package]]
+name = "iconv-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ifconfig"
+version = "0.1.0"
+
+[[package]]
+name = "iftop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ignition-cli"
+version = "0.1.0"
+
+[[package]]
+name = "illustrator-cli"
+version = "0.1.0"
+
+[[package]]
+name = "imagemagick"
+version = "0.1.0"
+
+[[package]]
+name = "imagemagick-cli"
+version = "0.1.0"
+
+[[package]]
+name = "imageviewer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "impacket-cli"
+version = "0.1.0"
+
+[[package]]
+name = "imply-cli"
+version = "0.1.0"
+
+[[package]]
+name = "indesign-cli"
+version = "0.1.0"
+
+[[package]]
+name = "indexer"
+version = "0.1.0"
+
+[[package]]
+name = "indexer-app"
+version = "0.1.0"
+
+[[package]]
+name = "inetd"
+version = "0.1.0"
+
+[[package]]
+name = "infisical-cli"
+version = "0.1.0"
+
+[[package]]
+name = "influx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "influxdb"
+version = "0.1.0"
+
+[[package]]
+name = "influxdb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "infobip-cli"
+version = "0.1.0"
+
+[[package]]
+name = "informatica-cli"
+version = "0.1.0"
+
+[[package]]
+name = "inkscape-cli"
+version = "0.1.0"
+
+[[package]]
+name = "innernet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "inotify"
+version = "0.1.0"
+
+[[package]]
+name = "insightly-cli"
+version = "0.1.0"
+
+[[package]]
+name = "insomnia-cli"
+version = "0.1.0"
+
+[[package]]
+name = "inspectrum-cli"
+version = "0.1.0"
+
+[[package]]
+name = "install"
+version = "0.1.0"
+
+[[package]]
+name = "installer"
+version = "0.1.0"
+
+[[package]]
+name = "instana-cli"
+version = "0.1.0"
+
+[[package]]
+name = "instatus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "intellij-cli"
+version = "0.1.0"
+
+[[package]]
+name = "intercom-cli"
+version = "0.1.0"
+
+[[package]]
+name = "inventor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "invision-cli"
+version = "0.1.0"
+
+[[package]]
+name = "inxi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ion-cli"
+version = "0.1.0"
+
+[[package]]
+name = "iostat"
+version = "0.1.0"
+
+[[package]]
+name = "iotdb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "iotop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ip"
+version = "0.1.0"
+
+[[package]]
+name = "ipcalc"
+version = "0.1.0"
+
+[[package]]
+name = "iperf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "iperf3"
+version = "0.1.0"
+
+[[package]]
+name = "iperf3-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ipp-usb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ipsec-cli"
+version = "0.1.0"
+
+[[package]]
+name = "iptables"
+version = "0.1.0"
+
+[[package]]
+name = "ircclient"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "irqbalance"
+version = "0.1.0"
+
+[[package]]
+name = "irqbalance-cli"
+version = "0.1.0"
+
+[[package]]
+name = "irsim-cli"
+version = "0.1.0"
+
+[[package]]
+name = "irssi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "iscsi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "istio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "istioctl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "isync-cli"
+version = "0.1.0"
+
+[[package]]
+name = "itamae-cli"
+version = "0.1.0"
+
+[[package]]
+name = "itch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "iterable-cli"
+version = "0.1.0"
+
+[[package]]
+name = "iverilog-cli"
+version = "0.1.0"
+
+[[package]]
+name = "iw"
+version = "0.1.0"
+
+[[package]]
+name = "iw-cli"
+version = "0.1.0"
+
+[[package]]
+name = "iwgtk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jack2"
+version = "0.1.0"
+
+[[package]]
+name = "jaeger"
+version = "0.1.0"
+
+[[package]]
+name = "jaeger-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jami-cli"
+version = "0.1.0"
+
+[[package]]
+name = "java"
+version = "0.1.0"
+
+[[package]]
+name = "javadoc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jekyll-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jellyfin"
+version = "0.1.0"
+
+[[package]]
+name = "jenkins-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jira-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jitsi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jitterbit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jless"
+version = "0.1.0"
+
+[[package]]
+name = "jmeter-cli"
+version = "0.1.0"
+
+[[package]]
+name = "john"
+version = "0.1.0"
+
+[[package]]
+name = "john-cli"
+version = "0.1.0"
+
+[[package]]
+name = "join"
+version = "0.1.0"
+
+[[package]]
+name = "joplin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "journalbeat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "journalctl"
+version = "0.1.0"
+
+[[package]]
+name = "journalctl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jq"
+version = "0.1.0"
+
+[[package]]
+name = "jsdelivr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jsonnet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jsonviewer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "juicefs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "julia"
+version = "0.1.0"
+
+[[package]]
+name = "julia-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jumpcloud-cli"
+version = "0.1.0"
+
+[[package]]
+name = "jupyter-cli"
+version = "0.1.0"
+
+[[package]]
+name = "just"
+version = "0.1.0"
+
+[[package]]
+name = "just-cli"
+version = "0.1.0"
+
+[[package]]
+name = "justworks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "k3s-cli"
+version = "0.1.0"
+
+[[package]]
+name = "k6"
+version = "0.1.0"
+
+[[package]]
+name = "k6-cli"
+version = "0.1.0"
+
+[[package]]
+name = "k9s-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kafka"
+version = "0.1.0"
+
+[[package]]
+name = "kafka-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kafkacat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kafkactl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kakoune"
+version = "0.1.0"
+
+[[package]]
+name = "kakoune-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kalgebra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kanban"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "kanidm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kanshi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kaspersky-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kata-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kayako-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kcat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kcharselect-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kde-partition-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kdenlive-cli"
+version = "0.1.0"
+
+[[package]]
+name = "keepass-cli"
+version = "0.1.0"
+
+[[package]]
+name = "keepassxc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "keil-cli"
+version = "0.1.0"
+
+[[package]]
+name = "keras-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kerberos-cli"
+version = "0.1.0"
 
 [[package]]
 name = "kernel"
@@ -18,13 +4923,7153 @@ dependencies = [
 ]
 
 [[package]]
+name = "kestra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kexec"
+version = "0.1.0"
+
+[[package]]
+name = "kexec-cli"
+version = "0.1.0"
+
+[[package]]
+name = "keycdn-cli"
+version = "0.1.0"
+
+[[package]]
+name = "keychain-cli"
+version = "0.1.0"
+
+[[package]]
+name = "keycloak"
+version = "0.1.0"
+
+[[package]]
+name = "keycloak-cli"
+version = "0.1.0"
+
+[[package]]
+name = "keydb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "keyshot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kgeography-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kibana-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kibot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kicad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kickoff-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kill"
+version = "0.1.0"
+
+[[package]]
+name = "kinde-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kinesis-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kismet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kitty-cli"
+version = "0.1.0"
+
+[[package]]
+name = "klarna-cli"
+version = "0.1.0"
+
+[[package]]
+name = "klaviyo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "klayout-cli"
+version = "0.1.0"
+
+[[package]]
+name = "klotski"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "kmag-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kmail-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kmousetool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "knime-cli"
+version = "0.1.0"
+
+[[package]]
+name = "knot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kompletekontrol-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kong-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kontakt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kopano-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kopia-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kops-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kraken2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "krakend-cli"
+version = "0.1.0"
+
+[[package]]
+name = "krdc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "krita-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ksnip-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kstars-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kube-bench-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kubectl"
+version = "0.1.0"
+
+[[package]]
+name = "kubectl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kubectx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kubeflow-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kubescape-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kuma-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kustomer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kustomize-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kvantum-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kvmtool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kwallet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "kyverno-cli"
+version = "0.1.0"
+
+[[package]]
+name = "labplot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "labview-cli"
+version = "0.1.0"
+
+[[package]]
+name = "labwc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lacework-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ladspa-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lakefs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lame-cli"
+version = "0.1.0"
+
+[[package]]
+name = "laminar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lancedb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lapack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lapce-cli"
+version = "0.1.0"
+
+[[package]]
+name = "laptop-mode-cli"
+version = "0.1.0"
+
+[[package]]
+name = "laptop-mode-tools-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lark-cli"
+version = "0.1.0"
+
+[[package]]
+name = "last"
+version = "0.1.0"
+
+[[package]]
+name = "lastools-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lastpass-cli"
+version = "0.1.0"
+
+[[package]]
+name = "latex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "latex2html-cli"
+version = "0.1.0"
+
+[[package]]
+name = "launchdarkly-cli"
+version = "0.1.0"
+
+[[package]]
+name = "launcher"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "lazydocker"
+version = "0.1.0"
+
+[[package]]
+name = "lazygit"
+version = "0.1.0"
+
+[[package]]
+name = "ldap-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ldconfig"
+version = "0.1.0"
+
+[[package]]
+name = "ldconfig-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ldd"
+version = "0.1.0"
+
+[[package]]
+name = "ldd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ldtk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ledger-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lemonsqueezy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lemur-cli"
+version = "0.1.0"
+
+[[package]]
+name = "less"
+version = "0.1.0"
+
+[[package]]
+name = "lex"
+version = "0.1.0"
+
+[[package]]
+name = "lf"
+version = "0.1.0"
+
+[[package]]
+name = "lf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "libchewing-cli"
+version = "0.1.0"
+
+[[package]]
+name = "libhangul-cli"
+version = "0.1.0"
+
+[[package]]
+name = "libnotify-cli"
+version = "0.1.0"
+
+[[package]]
+name = "libpinyin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "librecad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "librenms-cli"
+version = "0.1.0"
+
+[[package]]
+name = "libreoffice-cli"
+version = "0.1.0"
+
+[[package]]
+name = "libservicebus"
+version = "0.1.0"
+
+[[package]]
+name = "libvirt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "life"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "lightgbm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lighthouse-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lightroom-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lightsout"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "lightstep-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lighttpd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lightup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lightwave-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lightworks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lilypond-cli"
+version = "0.1.0"
+
+[[package]]
+name = "line-cli"
+version = "0.1.0"
+
+[[package]]
+name = "linear-cli"
+version = "0.1.0"
+
+[[package]]
+name = "linkerd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "linode-cli"
+version = "0.1.0"
+
+[[package]]
+name = "linphone-cli"
+version = "0.1.0"
+
+[[package]]
+name = "linux-notification-center-cli"
+version = "0.1.0"
+
+[[package]]
+name = "linuxcnc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "liquibase-cli"
+version = "0.1.0"
+
+[[package]]
+name = "liquidctl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lite-xl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "litecli"
+version = "0.1.0"
+
+[[package]]
+name = "litecli-cli"
+version = "0.1.0"
+
+[[package]]
+name = "littlecms-cli"
+version = "0.1.0"
+
+[[package]]
+name = "liveagent-cli"
+version = "0.1.0"
+
+[[package]]
+name = "livechat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "liveperson-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lm-sensors-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lmms-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lnav-cli"
+version = "0.1.0"
+
+[[package]]
+name = "locale"
+version = "0.1.0"
+
+[[package]]
+name = "locale-cli"
+version = "0.1.0"
+
+[[package]]
+name = "localectl"
+version = "0.1.0"
+
+[[package]]
+name = "lockscreen"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "locust-cli"
+version = "0.1.0"
+
+[[package]]
 name = "log"
-version = "0.4.29"
+version = "0.4.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
+
+[[package]]
+name = "logfmt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "logger"
+version = "0.1.0"
+
+[[package]]
+name = "logic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "logicpro-cli"
+version = "0.1.0"
+
+[[package]]
+name = "login"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "login-cli"
+version = "0.1.0"
+
+[[package]]
+name = "loginctl"
+version = "0.1.0"
+
+[[package]]
+name = "logind"
+version = "0.1.0"
+
+[[package]]
+name = "logisim-cli"
+version = "0.1.0"
+
+[[package]]
+name = "logrotate"
+version = "0.1.0"
+
+[[package]]
+name = "logrotate-cli"
+version = "0.1.0"
+
+[[package]]
+name = "logseq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "logstash-cli"
+version = "0.1.0"
+
+[[package]]
+name = "logtool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "logviewer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "logwatch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "logzio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "loki"
+version = "0.1.0"
+
+[[package]]
+name = "loki-cli"
+version = "0.1.0"
+
+[[package]]
+name = "look"
+version = "0.1.0"
+
+[[package]]
+name = "looker-cli"
+version = "0.1.0"
+
+[[package]]
+name = "loops-cli"
+version = "0.1.0"
+
+[[package]]
+name = "losetup"
+version = "0.1.0"
+
+[[package]]
+name = "lottie-player"
+version = "0.1.0"
+
+[[package]]
+name = "lout-cli"
+version = "0.1.0"
+
+[[package]]
+name = "love-cli"
+version = "0.1.0"
+
+[[package]]
+name = "love2d-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lp"
+version = "0.1.0"
+
+[[package]]
+name = "lp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lsblk"
+version = "0.1.0"
+
+[[package]]
+name = "lsblk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lscpu"
+version = "0.1.0"
+
+[[package]]
+name = "lsirq"
+version = "0.1.0"
+
+[[package]]
+name = "lsmem"
+version = "0.1.0"
+
+[[package]]
+name = "lsmod"
+version = "0.1.0"
+
+[[package]]
+name = "lsns"
+version = "0.1.0"
+
+[[package]]
+name = "lsof"
+version = "0.1.0"
+
+[[package]]
+name = "lspci"
+version = "0.1.0"
+
+[[package]]
+name = "lspci-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lsusb"
+version = "0.1.0"
+
+[[package]]
+name = "lsusb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ltrace-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ltspice-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lua"
+version = "0.1.0"
+
+[[package]]
+name = "lua-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lualatex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "luarocks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "luckybackup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "luigi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lumion-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lutris-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lvm"
+version = "0.1.0"
+
+[[package]]
+name = "lvm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lvm2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lxappearance-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lxc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lxpolkit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lxqt-policykit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lynis"
+version = "0.1.0"
+
+[[package]]
+name = "lytics-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lyx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "lz4"
+version = "0.1.0"
+
+[[package]]
+name = "m17n-cli"
+version = "0.1.0"
+
+[[package]]
+name = "m4"
+version = "0.1.0"
+
+[[package]]
+name = "macaulay2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "macrium-cli"
+version = "0.1.0"
+
+[[package]]
+name = "macroquad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "maddy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mage-cli"
+version = "0.1.0"
+
+[[package]]
+name = "magento-cli"
+version = "0.1.0"
+
+[[package]]
+name = "magic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "magnifier"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "magnifier-cli"
+version = "0.1.0"
+
+[[package]]
+name = "magnus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mahjong"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "mailchimp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mailcow-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mailerlite-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mailersend-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mailgun-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mailjet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mailspring-cli"
+version = "0.1.0"
+
+[[package]]
+name = "maim-cli"
+version = "0.1.0"
+
+[[package]]
+name = "make"
+version = "0.1.0"
+
+[[package]]
+name = "make-cli"
+version = "0.1.0"
+
+[[package]]
+name = "makeindex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mako-cli"
+version = "0.1.0"
+
+[[package]]
+name = "malwarebytes-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mame-cli"
+version = "0.1.0"
+
+[[package]]
+name = "man"
+version = "0.1.0"
+
+[[package]]
+name = "mandelbrot"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "mangohud-cli"
+version = "0.1.0"
+
+[[package]]
+name = "manticore-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mapbox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mapnik-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mapserver-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mapshaper-cli"
+version = "0.1.0"
+
+[[package]]
+name = "marble-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mariadb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "markdowneditor"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "markdownlint-cli"
+version = "0.1.0"
+
+[[package]]
+name = "marketo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "marqo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "marvel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "masscan-cli"
+version = "0.1.0"
+
+[[package]]
+name = "massive-cli"
+version = "0.1.0"
+
+[[package]]
+name = "match3"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "mate-notification-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mate-polkit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "materialize-cli"
+version = "0.1.0"
+
+[[package]]
+name = "materialx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mathematica-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mathomatic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "matillion-cli"
+version = "0.1.0"
+
+[[package]]
+name = "matlab-cli"
+version = "0.1.0"
+
+[[package]]
+name = "matplotlib-cli"
+version = "0.1.0"
+
+[[package]]
+name = "matrix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mattermost"
+version = "0.1.0"
+
+[[package]]
+name = "mattermost-cli"
+version = "0.1.0"
+
+[[package]]
+name = "maven"
+version = "0.1.0"
+
+[[package]]
+name = "max3ds-cli"
+version = "0.1.0"
+
+[[package]]
+name = "maxima-cli"
+version = "0.1.0"
+
+[[package]]
+name = "maya-cli"
+version = "0.1.0"
+
+[[package]]
+name = "maze"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "mbmon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mbrola-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mbutil-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mcafee-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mcelog"
+version = "0.1.0"
+
+[[package]]
+name = "mcfly"
+version = "0.1.0"
+
+[[package]]
+name = "mcfly-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mdadm"
+version = "0.1.0"
+
+[[package]]
+name = "mdadm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mdbook"
+version = "0.1.0"
+
+[[package]]
+name = "mdbook-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mdcat"
+version = "0.1.0"
+
+[[package]]
+name = "mediaconvert"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "mediainfo"
+version = "0.1.0"
+
+[[package]]
+name = "mediainfo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mednafen-cli"
+version = "0.1.0"
+
+[[package]]
+name = "megahit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "meilisearch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "melodyne-cli"
+version = "0.1.0"
+
+[[package]]
+name = "meltano-cli"
+version = "0.1.0"
+
+[[package]]
+name = "memcached"
+version = "0.1.0"
+
+[[package]]
+name = "memcached-cli"
+version = "0.1.0"
+
+[[package]]
+name = "memory"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "memphis-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mercury-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mergerfs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mesa-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mesg"
+version = "0.1.0"
+
+[[package]]
+name = "meshio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "meshlab-cli"
+version = "0.1.0"
+
+[[package]]
+name = "meson"
+version = "0.1.0"
+
+[[package]]
+name = "meson-cli"
+version = "0.1.0"
+
+[[package]]
+name = "messagebird-cli"
+version = "0.1.0"
+
+[[package]]
+name = "metalog-cli"
+version = "0.1.0"
+
+[[package]]
+name = "metamask-cli"
+version = "0.1.0"
+
+[[package]]
+name = "metaplane-cli"
+version = "0.1.0"
+
+[[package]]
+name = "metasploit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "metronome"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "mezmo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mgba-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mgmt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mhddfs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "micro"
+version = "0.1.0"
+
+[[package]]
+name = "micro-cli"
+version = "0.1.0"
+
+[[package]]
+name = "microchipstudio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "microsoft365-cli"
+version = "0.1.0"
+
+[[package]]
+name = "microstation-cli"
+version = "0.1.0"
+
+[[package]]
+name = "milvus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mimic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mimir-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mindmap"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "minesweeper"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "minicom-cli"
+version = "0.1.0"
+
+[[package]]
+name = "minifb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "minikube-cli"
+version = "0.1.0"
+
+[[package]]
+name = "minimap2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "minio"
+version = "0.1.0"
+
+[[package]]
+name = "minio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "miniserve"
+version = "0.1.0"
+
+[[package]]
+name = "minitest-cli"
+version = "0.1.0"
+
+[[package]]
+name = "minuet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "miro-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mise-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mistika-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mistral-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mitmproxy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mixbus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mixer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "mixpanel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mkcert"
+version = "0.1.0"
+
+[[package]]
+name = "mkcert-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mkdocs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mkfs"
+version = "0.1.0"
+
+[[package]]
+name = "mkfs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mkinitcpio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mkinitramfs"
+version = "0.1.0"
+
+[[package]]
+name = "mkswap"
+version = "0.1.0"
+
+[[package]]
+name = "mktemp"
+version = "0.1.0"
+
+[[package]]
+name = "mlflow-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mlrun-cli"
+version = "0.1.0"
+
+[[package]]
+name = "moc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mocha-cli"
+version = "0.1.0"
+
+[[package]]
+name = "modal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "modem-cli"
+version = "0.1.0"
+
+[[package]]
+name = "modo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "modprobe"
+version = "0.1.0"
+
+[[package]]
+name = "modprobe-cli"
+version = "0.1.0"
+
+[[package]]
+name = "modula-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mold"
+version = "0.1.0"
+
+[[package]]
+name = "mollie-cli"
+version = "0.1.0"
+
+[[package]]
+name = "monctl"
+version = "0.1.0"
+
+[[package]]
+name = "monday-cli"
+version = "0.1.0"
+
+[[package]]
+name = "monero-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mongocompass-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mongodb"
+version = "0.1.0"
+
+[[package]]
+name = "mongodb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mongosh-cli"
+version = "0.1.0"
+
+[[package]]
+name = "monit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "monogame-cli"
+version = "0.1.0"
+
+[[package]]
+name = "montecarlo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "moodle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "moosend-cli"
+version = "0.1.0"
+
+[[package]]
+name = "morpheus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mosquitto-cli"
+version = "0.1.0"
+
+[[package]]
+name = "motherduck-cli"
+version = "0.1.0"
+
+[[package]]
+name = "motion-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mount"
+version = "0.1.0"
+
+[[package]]
+name = "mount-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mousetweaks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mozc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mparticle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mpd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mplab-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mprocs"
+version = "0.1.0"
+
+[[package]]
+name = "mproxy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mpv"
+version = "0.1.0"
+
+[[package]]
+name = "mpv-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mpvpaper-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mqtt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "msgpack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "msmtp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mtr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mujoco-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mulesoft-cli"
+version = "0.1.0"
+
+[[package]]
+name = "multimon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "multipath-cli"
+version = "0.1.0"
+
+[[package]]
+name = "multitail-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mumble-cli"
+version = "0.1.0"
+
+[[package]]
+name = "munin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mupdf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mupen64plus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "musescore-cli"
+version = "0.1.0"
+
+[[package]]
+name = "musicplayer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "musikcube-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mutt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mvn-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mycli"
+version = "0.1.0"
+
+[[package]]
+name = "mycli-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mypy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mysql"
+version = "0.1.0"
+
+[[package]]
+name = "mysql-cli"
+version = "0.1.0"
+
+[[package]]
+name = "mysqldump-cli"
+version = "0.1.0"
+
+[[package]]
+name = "n8n-cli"
+version = "0.1.0"
+
+[[package]]
+name = "naemon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nagios-cli"
+version = "0.1.0"
+
+[[package]]
+name = "namecheap-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nannou-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nano"
+version = "0.1.0"
+
+[[package]]
+name = "nanomq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nats"
+version = "0.1.0"
+
+[[package]]
+name = "nats-cli"
+version = "0.1.0"
+
+[[package]]
+name = "navi"
+version = "0.1.0"
+
+[[package]]
+name = "navi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nc"
+version = "0.1.0"
+
+[[package]]
+name = "ncat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ncdu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ncmpcpp"
+version = "0.1.0"
+
+[[package]]
+name = "ncmpcpp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nebula-cli"
+version = "0.1.0"
+
+[[package]]
+name = "neo4j"
+version = "0.1.0"
+
+[[package]]
+name = "neo4j-cli"
+version = "0.1.0"
+
+[[package]]
+name = "neofetch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "neomutt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "neon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "neovim-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nessus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nestopia-cli"
+version = "0.1.0"
+
+[[package]]
+name = "netcat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "netdata-cli"
+version = "0.1.0"
+
+[[package]]
+name = "netgen-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nethogs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "netlify-cli"
+version = "0.1.0"
+
+[[package]]
+name = "netmaker-cli"
+version = "0.1.0"
+
+[[package]]
+name = "netmanager"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "netperf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "netscan"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "netstat"
+version = "0.1.0"
+
+[[package]]
+name = "netsuite-cli"
+version = "0.1.0"
+
+[[package]]
+name = "networkd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "neutron-cli"
+version = "0.1.0"
+
+[[package]]
+name = "newgrp"
+version = "0.1.0"
+
+[[package]]
+name = "newman-cli"
+version = "0.1.0"
+
+[[package]]
+name = "newrelic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nextcloud"
+version = "0.1.0"
+
+[[package]]
+name = "nextcloud-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nextjs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nextpnr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nfs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nfs-utils"
+version = "0.1.0"
+
+[[package]]
+name = "nft"
+version = "0.1.0"
+
+[[package]]
+name = "nftables"
+version = "0.1.0"
+
+[[package]]
+name = "nginx"
+version = "0.1.0"
+
+[[package]]
+name = "nginx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ngspice-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nheko-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nifi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nikto-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nim"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "nim-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ninja"
+version = "0.1.0"
+
+[[package]]
+name = "nix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nixops-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nl"
+version = "0.1.0"
+
+[[package]]
+name = "nm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nmap"
+version = "0.1.0"
+
+[[package]]
+name = "nmap-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nmcli"
+version = "0.1.0"
+
+[[package]]
+name = "nmon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nnn"
+version = "0.1.0"
+
+[[package]]
+name = "nnn-cli"
+version = "0.1.0"
+
+[[package]]
+name = "node"
+version = "0.1.0"
+
+[[package]]
+name = "noloco-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nologin"
+version = "0.1.0"
+
+[[package]]
+name = "nomad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nonogram"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "norton-cli"
+version = "0.1.0"
+
+[[package]]
+name = "notary"
+version = "0.1.0"
+
+[[package]]
+name = "notepadpp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "notes"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "notifications"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "notify-send-cli"
+version = "0.1.0"
+
+[[package]]
+name = "notion-cli"
+version = "0.1.0"
+
+[[package]]
+name = "notmuch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nproc"
+version = "0.1.0"
+
+[[package]]
+name = "ns1-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nsd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nsenter"
+version = "0.1.0"
+
+[[package]]
+name = "nsenter-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nslookup"
+version = "0.1.0"
+
+[[package]]
+name = "nsq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ntopng-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ntp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ntpd"
+version = "0.1.0"
+
+[[package]]
+name = "nuclei-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nuke-cli"
+version = "0.1.0"
+
+[[package]]
+name = "numactl"
+version = "0.1.0"
+
+[[package]]
+name = "numpy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nushell"
+version = "0.1.0"
+
+[[package]]
+name = "nutanix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nutshell-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nuxt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nvme"
+version = "0.1.0"
+
+[[package]]
+name = "nwg-dock-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nwg-launchers-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nwg-look-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nwg-panel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "nxlog-cli"
+version = "0.1.0"
+
+[[package]]
+name = "oath-cli"
+version = "0.1.0"
+
+[[package]]
+name = "obexctl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "objdump"
+version = "0.1.0"
+
+[[package]]
+name = "objdump-cli"
+version = "0.1.0"
+
+[[package]]
+name = "obnam-cli"
+version = "0.1.0"
+
+[[package]]
+name = "obs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "obs-studio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "obs-wlrobs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "observe-cli"
+version = "0.1.0"
+
+[[package]]
+name = "observium-cli"
+version = "0.1.0"
+
+[[package]]
+name = "obsidian-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ocaml-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ocrmypdf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ocserv-cli"
+version = "0.1.0"
+
+[[package]]
+name = "octanerender-cli"
+version = "0.1.0"
+
+[[package]]
+name = "octave-cli"
+version = "0.1.0"
+
+[[package]]
+name = "octoprint-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ode-cli"
+version = "0.1.0"
+
+[[package]]
+name = "odt2txt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "offlineimap-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ogr2ogr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ogre-cli"
+version = "0.1.0"
+
+[[package]]
+name = "oguri-cli"
+version = "0.1.0"
+
+[[package]]
+name = "oh-my-posh-cli"
+version = "0.1.0"
+
+[[package]]
+name = "oha-cli"
+version = "0.1.0"
+
+[[package]]
+name = "okta-cli"
+version = "0.1.0"
+
+[[package]]
+name = "okular-cli"
+version = "0.1.0"
+
+[[package]]
+name = "olive-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ollama-cli"
+version = "0.1.0"
+
+[[package]]
+name = "omnisend-cli"
+version = "0.1.0"
+
+[[package]]
+name = "omnisphere-cli"
+version = "0.1.0"
+
+[[package]]
+name = "onboard-cli"
+version = "0.1.0"
+
+[[package]]
+name = "onefetch"
+version = "0.1.0"
+
+[[package]]
+name = "onelogin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "onepassword-cli"
+version = "0.1.0"
+
+[[package]]
+name = "onlyoffice-cli"
+version = "0.1.0"
+
+[[package]]
+name = "onshape-cli"
+version = "0.1.0"
+
+[[package]]
+name = "op5monitor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openai-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openapi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openbao-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openblas-cli"
+version = "0.1.0"
+
+[[package]]
+name = "opencolorio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openfoam-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openldap-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openocd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openresty-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openroad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openscad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "opensearch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openshift-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openshot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openssl"
+version = "0.1.0"
+
+[[package]]
+name = "openssl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openssl-tool"
+version = "0.1.0"
+
+[[package]]
+name = "opensta-cli"
+version = "0.1.0"
+
+[[package]]
+name = "opentelemetry"
+version = "0.1.0"
+
+[[package]]
+name = "opentelemetry-cli"
+version = "0.1.0"
+
+[[package]]
+name = "opentofu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openvdb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "openvpn"
+version = "0.1.0"
+
+[[package]]
+name = "openvpn-cli"
+version = "0.1.0"
+
+[[package]]
+name = "opera-cli"
+version = "0.1.0"
+
+[[package]]
+name = "opsgenie-cli"
+version = "0.1.0"
+
+[[package]]
+name = "optimizely-cli"
+version = "0.1.0"
+
+[[package]]
+name = "optipng-cli"
+version = "0.1.0"
+
+[[package]]
+name = "optuna-cli"
+version = "0.1.0"
+
+[[package]]
+name = "opus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "opus-tools"
+version = "0.1.0"
+
+[[package]]
+name = "oracle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "orca-cli"
+version = "0.1.0"
+
+[[package]]
+name = "orcad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ory-cli"
+version = "0.1.0"
+
+[[package]]
+name = "osfont"
+version = "0.1.0"
+
+[[package]]
+name = "osm2pgsql-cli"
+version = "0.1.0"
+
+[[package]]
+name = "osmium-cli"
+version = "0.1.0"
+
+[[package]]
+name = "osquery-cli"
+version = "0.1.0"
+
+[[package]]
+name = "osv-scanner-cli"
+version = "0.1.0"
+
+[[package]]
+name = "oswindow"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "otel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "otfcc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "otter-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ouch"
+version = "0.1.0"
+
+[[package]]
+name = "ouros-stubs"
+version = "0.1.0"
+
+[[package]]
+name = "outline-cli"
+version = "0.1.0"
+
+[[package]]
+name = "overskride-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ovh-cli"
+version = "0.1.0"
+
+[[package]]
+name = "owncloud-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "oxipng"
+version = "0.1.0"
+
+[[package]]
+name = "oxipng-cli"
+version = "0.1.0"
+
+[[package]]
+name = "oysterhr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ozone-cli"
+version = "0.1.0"
+
+[[package]]
+name = "packer"
+version = "0.1.0"
+
+[[package]]
+name = "packer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pacman"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "paddle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pads-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pagerduty-cli"
+version = "0.1.0"
+
+[[package]]
+name = "paint"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "paloalto-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pam-cli"
+version = "0.1.0"
+
+[[package]]
+name = "panda3d-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pandas-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pandoc"
+version = "0.1.0"
+
+[[package]]
+name = "pandoc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pandorafms-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pango-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pants-cli"
+version = "0.1.0"
+
+[[package]]
+name = "papaya-cli"
+version = "0.1.0"
+
+[[package]]
+name = "paperless-cli"
+version = "0.1.0"
+
+[[package]]
+name = "parallels-cli"
+version = "0.1.0"
+
+[[package]]
+name = "paraview-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pari-cli"
+version = "0.1.0"
+
+[[package]]
+name = "partclone-cli"
+version = "0.1.0"
+
+[[package]]
+name = "parted"
+version = "0.1.0"
+
+[[package]]
+name = "parted-cli"
+version = "0.1.0"
+
+[[package]]
+name = "partmanager"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "pascal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pass-cli"
+version = "0.1.0"
+
+[[package]]
+name = "passwd"
+version = "0.1.0"
+
+[[package]]
+name = "passwd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "passwordgen"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "paste"
+version = "0.1.0"
+
+[[package]]
+name = "pastel"
+version = "0.1.0"
+
+[[package]]
+name = "pastel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "patch"
+version = "0.1.0"
+
+[[package]]
+name = "patoline-cli"
+version = "0.1.0"
+
+[[package]]
+name = "paw-cli"
+version = "0.1.0"
+
+[[package]]
+name = "paychex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "paycom-cli"
+version = "0.1.0"
+
+[[package]]
+name = "payload-cli"
+version = "0.1.0"
+
+[[package]]
+name = "paylocity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "payoneer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "paypal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pbrt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pcb-rnd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pcbdraw-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pcl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pcsx2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdfarranger-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdfcpu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdfgrep-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdfimages-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdflatex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdfpc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdfseparate-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdftk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdftotext-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdfunite-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdfviewer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "pdm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdns-recursor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pdoc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pelican-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pendo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "penpot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "perf"
+version = "0.1.0"
+
+[[package]]
+name = "perf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "perl"
+version = "0.1.0"
+
+[[package]]
+name = "petsc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pg-dump-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pgadmin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pgbouncer"
+version = "0.1.0"
+
+[[package]]
+name = "pgcli"
+version = "0.1.0"
+
+[[package]]
+name = "pgcli-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pgloader-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pgrep"
+version = "0.1.0"
+
+[[package]]
+name = "phaser-cli"
+version = "0.1.0"
+
+[[package]]
+name = "phoronix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "photomanager"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "photoshop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "php"
+version = "0.1.0"
+
+[[package]]
+name = "phpmyadmin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "phpstan-cli"
+version = "0.1.0"
+
+[[package]]
+name = "phpunit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "picard-cli"
+version = "0.1.0"
+
+[[package]]
+name = "picocom-cli"
+version = "0.1.0"
+
+[[package]]
+name = "picotts-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pidgin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pihole-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pinball"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "pinecone-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ping"
+version = "0.1.0"
+
+[[package]]
+name = "ping-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pingidentity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pinot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pint-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pipedrive-cli"
+version = "0.1.0"
+
+[[package]]
+name = "piper-tts-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pipes"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "pipewire"
+version = "0.1.0"
+
+[[package]]
+name = "pipx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pixelmator-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pixels-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pkg"
+version = "0.1.0"
+dependencies = [
+ "httpclient",
+]
+
+[[package]]
+name = "pkg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pkgconf"
+version = "0.1.0"
+
+[[package]]
+name = "pktgen-cli"
+version = "0.1.0"
+
+[[package]]
+name = "plaid-cli"
+version = "0.1.0"
+
+[[package]]
+name = "planetscale-cli"
+version = "0.1.0"
+
+[[package]]
+name = "platformio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "plausible-cli"
+version = "0.1.0"
+
+[[package]]
+name = "playwright-cli"
+version = "0.1.0"
+
+[[package]]
+name = "plivo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "plymouth"
+version = "0.1.0"
+
+[[package]]
+name = "pmtiles-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pnpm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "podcast"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "podman"
+version = "0.1.0"
+
+[[package]]
+name = "podman-cli"
+version = "0.1.0"
+
+[[package]]
+name = "poetry-cli"
+version = "0.1.0"
+
+[[package]]
+name = "polaris-cli"
+version = "0.1.0"
+
+[[package]]
+name = "polkit"
+version = "0.1.0"
+
+[[package]]
+name = "polkit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "polkit-dumb-agent-cli"
+version = "0.1.0"
+
+[[package]]
+name = "polkit-gnome-cli"
+version = "0.1.0"
+
+[[package]]
+name = "polkit-kde-cli"
+version = "0.1.0"
+
+[[package]]
+name = "polybar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pomfort-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pomodoro"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "pong"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "poppler"
+version = "0.1.0"
+
+[[package]]
+name = "poppler-cli"
+version = "0.1.0"
+
+[[package]]
+name = "porkbun-cli"
+version = "0.1.0"
+
+[[package]]
+name = "portage-cli"
+version = "0.1.0"
+
+[[package]]
+name = "posix"
+version = "0.1.0"
+
+[[package]]
+name = "postcard-cli"
+version = "0.1.0"
+
+[[package]]
+name = "postfix"
+version = "0.1.0"
+
+[[package]]
+name = "postfix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "postgis-cli"
+version = "0.1.0"
+
+[[package]]
+name = "postgresql"
+version = "0.1.0"
+
+[[package]]
+name = "postgresql-cli"
+version = "0.1.0"
+
+[[package]]
+name = "posthog-cli"
+version = "0.1.0"
+
+[[package]]
+name = "postman-cli"
+version = "0.1.0"
+
+[[package]]
+name = "postmark-cli"
+version = "0.1.0"
+
+[[package]]
+name = "potrace-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pound-cli"
+version = "0.1.0"
+
+[[package]]
+name = "povray-cli"
+version = "0.1.0"
+
+[[package]]
+name = "power-profiles-cli"
+version = "0.1.0"
+
+[[package]]
+name = "power-profiles-daemon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "power-supply-cli"
+version = "0.1.0"
+
+[[package]]
+name = "powerbi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "powerctl"
+version = "0.1.0"
+
+[[package]]
+name = "powerdns-cli"
+version = "0.1.0"
+
+[[package]]
+name = "powertop"
+version = "0.1.0"
+
+[[package]]
+name = "powertop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ppsspp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "prefect-cli"
+version = "0.1.0"
+
+[[package]]
+name = "premake-cli"
+version = "0.1.0"
+
+[[package]]
+name = "premiere-cli"
+version = "0.1.0"
+
+[[package]]
+name = "prestashop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "prettier-cli"
+version = "0.1.0"
+
+[[package]]
+name = "prisma-cli"
+version = "0.1.0"
+
+[[package]]
+name = "prismic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "prlimit"
+version = "0.1.0"
+
+[[package]]
+name = "procexplorer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "procreate-cli"
+version = "0.1.0"
+
+[[package]]
+name = "procs"
+version = "0.1.0"
+
+[[package]]
+name = "proj-cli"
+version = "0.1.0"
+
+[[package]]
+name = "prolog-cli"
+version = "0.1.0"
+
+[[package]]
+name = "prometheus"
+version = "0.1.0"
+
+[[package]]
+name = "prometheus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "promql-cli"
+version = "0.1.0"
+
+[[package]]
+name = "promtool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "propelauth-cli"
+version = "0.1.0"
+
+[[package]]
+name = "proteus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "protobuf"
+version = "0.1.0"
+
+[[package]]
+name = "protobuf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "proton-cli"
+version = "0.1.0"
+
+[[package]]
+name = "proton-ge-cli"
+version = "0.1.0"
+
+[[package]]
+name = "protontricks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "protonup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "protools-cli"
+version = "0.1.0"
+
+[[package]]
+name = "proxmox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "proxychains-cli"
+version = "0.1.0"
+
+[[package]]
+name = "prtg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "prusaslicer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ps"
+version = "0.1.0"
+
+[[package]]
+name = "ps2pdf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "psalm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "psensor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "psql-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pstree"
+version = "0.1.0"
+
+[[package]]
+name = "pubsub-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pueue"
+version = "0.1.0"
+
+[[package]]
+name = "pulsar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pulseaudio"
+version = "0.1.0"
+
+[[package]]
+name = "pulsemixer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pulumi"
+version = "0.1.0"
+
+[[package]]
+name = "pulumi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "puppet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pv"
+version = "0.1.0"
+
+[[package]]
+name = "pybullet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pydoc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pyephem-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pygame-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pyinfra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pylint-cli"
+version = "0.1.0"
+
+[[package]]
+name = "pyrra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "python3"
+version = "0.1.0"
+
+[[package]]
+name = "pytorch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qalc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qbittorrent-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qdrant-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qemu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qgis-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qlik-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qpdf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qpdfview-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qrcode"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "qt5ct-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qt6ct-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qtiplot-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qtractor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qualys-cli"
+version = "0.1.0"
+
+[[package]]
+name = "quartus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "qucs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "questdb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "quickbooks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "quip-cli"
+version = "0.1.0"
+
+[[package]]
+name = "quota"
+version = "0.1.0"
+
+[[package]]
+name = "r-base"
+version = "0.1.0"
+
+[[package]]
+name = "r-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rabbitmq"
+version = "0.1.0"
+
+[[package]]
+name = "rabbitmq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rabbitmqctl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "racket-cli"
+version = "0.1.0"
+
+[[package]]
+name = "radare2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "radio"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "rails-cli"
+version = "0.1.0"
+
+[[package]]
+name = "railway-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rake-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ramp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rancher-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ranger-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rapid7-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rapyd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rasdaemon"
+version = "0.1.0"
+
+[[package]]
+name = "rawtherapee-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ray-cli"
+version = "0.1.0"
+
+[[package]]
+name = "raylib-cli"
+version = "0.1.0"
+
+[[package]]
+name = "razorpay-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rbw-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rclone"
+version = "0.1.0"
+
+[[package]]
+name = "rclone-backup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rclone-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rdiff-backup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rdoc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "readelf"
+version = "0.1.0"
+
+[[package]]
+name = "readelf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "reamaze-cli"
+version = "0.1.0"
+
+[[package]]
+name = "reaper-cli"
+version = "0.1.0"
+
+[[package]]
+name = "reason-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rebelle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "recurly-cli"
+version = "0.1.0"
+
+[[package]]
+name = "redcine-cli"
+version = "0.1.0"
+
+[[package]]
+name = "redis"
+version = "0.1.0"
+
+[[package]]
+name = "redis-cli"
+version = "0.1.0"
+
+[[package]]
+name = "redis-cli-tool"
+version = "0.1.0"
+
+[[package]]
+name = "redoc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "redpanda-cli"
+version = "0.1.0"
+
+[[package]]
+name = "redshift-cli"
+version = "0.1.0"
+
+[[package]]
+name = "reduce-cli"
+version = "0.1.0"
+
+[[package]]
+name = "regextester"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "reminders"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "remix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "remmina"
+version = "0.1.0"
+
+[[package]]
+name = "remmina-cli"
+version = "0.1.0"
+
+[[package]]
+name = "remote-cli"
+version = "0.1.0"
+
+[[package]]
+name = "remotedesktop"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "renamer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "render-cli"
+version = "0.1.0"
+
+[[package]]
+name = "renoise-cli"
+version = "0.1.0"
+
+[[package]]
+name = "renpy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "replicate-cli"
+version = "0.1.0"
+
+[[package]]
+name = "resend-cli"
+version = "0.1.0"
+
+[[package]]
+name = "resolvectl"
+version = "0.1.0"
+
+[[package]]
+name = "responder-cli"
+version = "0.1.0"
+
+[[package]]
+name = "restclient-cli"
+version = "0.1.0"
+
+[[package]]
+name = "restic"
+version = "0.1.0"
+
+[[package]]
+name = "restic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "restic-rest-server"
+version = "0.1.0"
+
+[[package]]
+name = "restream-cli"
+version = "0.1.0"
+
+[[package]]
+name = "retdec-cli"
+version = "0.1.0"
+
+[[package]]
+name = "retool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "retroarch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "reversi"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "revit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "revolt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "revolut-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rfkill"
+version = "0.1.0"
+
+[[package]]
+name = "rfkill-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rhino-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rhvoice-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ripgrep"
+version = "0.1.0"
+
+[[package]]
+name = "rippling-cli"
+version = "0.1.0"
+
+[[package]]
+name = "river-cli"
+version = "0.1.0"
+
+[[package]]
+name = "riverside-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rivery-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rizin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rmp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "roam-cli"
+version = "0.1.0"
+
+[[package]]
+name = "roblox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rocketchat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rockstar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rofi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rofi-wayland-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rollbar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "root-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ros-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ros2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rosegarden-cli"
+version = "0.1.0"
+
+[[package]]
+name = "roundcube-cli"
+version = "0.1.0"
+
+[[package]]
+name = "route"
+version = "0.1.0"
+
+[[package]]
+name = "route53-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rpcs3-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rpgmaker-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rsmq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rspec-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rssreader"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "rsync"
+version = "0.1.0"
+
+[[package]]
+name = "rsyslog-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rtl-sdr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rtorrent-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rubocop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ruby"
+version = "0.1.0"
+
+[[package]]
+name = "rudder-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rudderstack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ruff-cli"
+version = "0.1.0"
+
+[[package]]
+name = "runc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rundeck-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rush"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "rustdesk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rustdoc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rustic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "rustup"
+version = "0.1.0"
+
+[[package]]
+name = "rx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "safari-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sage-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sagemath-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sailpoint-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sakura-cli"
+version = "0.1.0"
+
+[[package]]
+name = "salesforce-cli"
+version = "0.1.0"
+
+[[package]]
+name = "salmon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "salome-cli"
+version = "0.1.0"
+
+[[package]]
+name = "salt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "saltstack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "samba"
+version = "0.1.0"
+
+[[package]]
+name = "samba-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sameboy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "samtools-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sane-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sanitize"
+version = "0.1.0"
+
+[[package]]
+name = "sanity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sap-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sas-cli"
+version = "0.1.0"
+
+[[package]]
+name = "satty-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sbctl"
+version = "0.1.0"
+
+[[package]]
+name = "scaleway-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sccache"
+version = "0.1.0"
+
+[[package]]
+name = "schemacrawler-cli"
+version = "0.1.0"
+
+[[package]]
+name = "scheme-cli"
+version = "0.1.0"
+
+[[package]]
+name = "scikit-learn-cli"
+version = "0.1.0"
+
+[[package]]
+name = "scilab-cli"
+version = "0.1.0"
+
+[[package]]
+name = "scim-cli"
+version = "0.1.0"
+
+[[package]]
+name = "scipy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "scons-cli"
+version = "0.1.0"
+
+[[package]]
+name = "scp"
+version = "0.1.0"
+
+[[package]]
+name = "scratch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "screen"
+version = "0.1.0"
+
+[[package]]
+name = "screen-cli"
+version = "0.1.0"
+
+[[package]]
+name = "screenfetch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "screengrab-cli"
+version = "0.1.0"
+
+[[package]]
+name = "screenrecorder"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "screenshot"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "screwdriver-cli"
+version = "0.1.0"
+
+[[package]]
+name = "scribus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "scummvm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sd"
+version = "0.1.0"
+
+[[package]]
+name = "sdl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sdparm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sdr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sea-orm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "seafile-cli"
+version = "0.1.0"
+
+[[package]]
+name = "seahorse-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sealed-secrets-cli"
+version = "0.1.0"
+
+[[package]]
+name = "seaweedfs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "seccomp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "secret-tool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sed"
+version = "0.1.0"
+
+[[package]]
+name = "segger-cli"
+version = "0.1.0"
+
+[[package]]
+name = "segment-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sejda-cli"
+version = "0.1.0"
+
+[[package]]
+name = "seldon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "selenium-cli"
+version = "0.1.0"
+
+[[package]]
+name = "selinux"
+version = "0.1.0"
+
+[[package]]
+name = "selinux-cli"
+version = "0.1.0"
+
+[[package]]
+name = "semaphore-cli"
+version = "0.1.0"
+
+[[package]]
+name = "semaphoreui-cli"
+version = "0.1.0"
+
+[[package]]
+name = "semgrep-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sendgrid-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sendmail-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sensors"
+version = "0.1.0"
+
+[[package]]
+name = "sensors-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sensu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sentinelone-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sentry-cli"
+version = "0.1.0"
+
+[[package]]
+name = "seq"
+version = "0.1.0"
+
+[[package]]
+name = "seqkit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "serum-cli"
+version = "0.1.0"
+
+[[package]]
+name = "service"
+version = "0.1.0"
+
+[[package]]
+name = "servicebus"
+version = "0.1.0"
+
+[[package]]
+name = "servicebus-cli"
+version = "0.1.0"
+
+[[package]]
+name = "servicenow-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ses-cli"
+version = "0.1.0"
+
+[[package]]
+name = "setBfree-cli"
+version = "0.1.0"
+
+[[package]]
+name = "settings"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "sextractor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sfml-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sftp"
+version = "0.1.0"
+
+[[package]]
+name = "sfwbar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sha256sum"
+version = "0.1.0"
+
+[[package]]
+name = "shared-mime-info-cli"
+version = "0.1.0"
+
+[[package]]
+name = "shell"
+version = "0.1.0"
+
+[[package]]
+name = "shellcheck"
+version = "0.1.0"
+
+[[package]]
+name = "shellcheck-cli"
+version = "0.1.0"
+
+[[package]]
+name = "shfmt"
+version = "0.1.0"
+
+[[package]]
+name = "shopify-cli"
+version = "0.1.0"
+
+[[package]]
+name = "shortcut-cli"
+version = "0.1.0"
+
+[[package]]
+name = "shotcut-cli"
+version = "0.1.0"
+
+[[package]]
+name = "shotman-cli"
+version = "0.1.0"
+
+[[package]]
+name = "shotwell-cli"
+version = "0.1.0"
+
+[[package]]
+name = "shuf"
+version = "0.1.0"
+
+[[package]]
+name = "shutter-cli"
+version = "0.1.0"
+
+[[package]]
+name = "siege-cli"
+version = "0.1.0"
+
+[[package]]
+name = "signal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "signal-desktop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "signoz-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sile-cli"
+version = "0.1.0"
+
+[[package]]
+name = "silhouette-cli"
+version = "0.1.0"
+
+[[package]]
+name = "silicon"
+version = "0.1.0"
+
+[[package]]
+name = "simon"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "simple-scan-cli"
+version = "0.1.0"
+
+[[package]]
+name = "simplenote-cli"
+version = "0.1.0"
+
+[[package]]
+name = "simulide-cli"
+version = "0.1.0"
+
+[[package]]
+name = "simulink-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sinch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "singer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "singlestore-cli"
+version = "0.1.0"
+
+[[package]]
+name = "singular-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sioyek-cli"
+version = "0.1.0"
+
+[[package]]
+name = "siril-cli"
+version = "0.1.0"
+
+[[package]]
+name = "skaffold-cli"
+version = "0.1.0"
+
+[[package]]
+name = "skanlite-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sketch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sketchup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "skim"
+version = "0.1.0"
+
+[[package]]
+name = "skipper-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sklearn-cli"
+version = "0.1.0"
+
+[[package]]
+name = "skopeo"
+version = "0.1.0"
+
+[[package]]
+name = "skopeo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "skype-cli"
+version = "0.1.0"
+
+[[package]]
+name = "slack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "slides"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "sliding"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "slirp4netns-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sloth-cli"
+version = "0.1.0"
+
+[[package]]
+name = "slurp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "smallstep-cli"
+version = "0.1.0"
+
+[[package]]
+name = "smartctl"
+version = "0.1.0"
+
+[[package]]
+name = "smartctl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "smartmontools-cli"
+version = "0.1.0"
+
+[[package]]
+name = "smartsheet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "snake"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "snap"
+version = "0.1.0"
+
+[[package]]
+name = "snap-cli"
+version = "0.1.0"
+
+[[package]]
+name = "snapper"
+version = "0.1.0"
+
+[[package]]
+name = "snapper-cli"
+version = "0.1.0"
+
+[[package]]
+name = "snapper2"
+version = "0.1.0"
+
+[[package]]
+name = "snapraid-cli"
+version = "0.1.0"
+
+[[package]]
+name = "snippets"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "snmp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "snowflake-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sns-cli"
+version = "0.1.0"
+
+[[package]]
+name = "snyk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "so"
+version = "0.1.0"
+
+[[package]]
+name = "socat"
+version = "0.1.0"
+
+[[package]]
+name = "socat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "soda-cli"
+version = "0.1.0"
+
+[[package]]
+name = "softether-cli"
+version = "0.1.0"
+
+[[package]]
+name = "softr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sogo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sokoban"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "sokol-cli"
+version = "0.1.0"
+
+[[package]]
+name = "solace-cli"
+version = "0.1.0"
+
+[[package]]
+name = "solana-cli"
+version = "0.1.0"
+
+[[package]]
+name = "solidworks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "solitaire"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "solr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "solvespace-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sonarqube-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sonatype-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sonic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sonic-pi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sonicwall-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sophos-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sops"
+version = "0.1.0"
+
+[[package]]
+name = "sops-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sort"
+version = "0.1.0"
+
+[[package]]
+name = "soundrecorder"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "soundtoys-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sourcegraph-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sox"
+version = "0.1.0"
+
+[[package]]
+name = "sox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "spacelift-cli"
+version = "0.1.0"
+
+[[package]]
+name = "spades"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "spades-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sparkpost-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sparrow-cli"
+version = "0.1.0"
+
+[[package]]
+name = "spatialite-cli"
+version = "0.1.0"
+
+[[package]]
+name = "spectacle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "spectral-cli"
+version = "0.1.0"
+
+[[package]]
+name = "speech-dispatcher-cli"
+version = "0.1.0"
+
+[[package]]
+name = "speechd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "speedtest"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "sphinx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sphinx-doc"
+version = "0.1.0"
 
 [[package]]
 name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+
+[[package]]
+name = "spinnaker-cli"
+version = "0.1.0"
+
+[[package]]
+name = "split"
+version = "0.1.0"
+
+[[package]]
+name = "split-cli"
+version = "0.1.0"
+
+[[package]]
+name = "splunk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "spotify-tui"
+version = "0.1.0"
+
+[[package]]
+name = "spotify-tui-cli"
+version = "0.1.0"
+
+[[package]]
+name = "spreadsheet"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "spss-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sqitch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sqlfluff-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sqlite-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sqlite3"
+version = "0.1.0"
+
+[[package]]
+name = "sqlitebrowser-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sqlmap-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sqlpad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sqlserver-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sqlx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sqs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "squadcast-cli"
+version = "0.1.0"
+
+[[package]]
+name = "square-cli"
+version = "0.1.0"
+
+[[package]]
+name = "squarespace-cli"
+version = "0.1.0"
+
+[[package]]
+name = "squeekboard-cli"
+version = "0.1.0"
+
+[[package]]
+name = "squid"
+version = "0.1.0"
+
+[[package]]
+name = "squid-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ss"
+version = "0.1.0"
+
+[[package]]
+name = "ssh"
+version = "0.1.0"
+
+[[package]]
+name = "ssh-keygen"
+version = "0.1.0"
+
+[[package]]
+name = "sshd"
+version = "0.1.0"
+
+[[package]]
+name = "st-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stackpath-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stackstorm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stalwart-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stanza-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stapler-cli"
+version = "0.1.0"
+
+[[package]]
+name = "star-cli"
+version = "0.1.0"
+
+[[package]]
+name = "starburst-cli"
+version = "0.1.0"
+
+[[package]]
+name = "starship"
+version = "0.1.0"
+
+[[package]]
+name = "starship-cli"
+version = "0.1.0"
+
+[[package]]
+name = "startupmanager"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "stat"
+version = "0.1.0"
+
+[[package]]
+name = "statping-cli"
+version = "0.1.0"
+
+[[package]]
+name = "statsd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "statsig-cli"
+version = "0.1.0"
+
+[[package]]
+name = "statuspage-cli"
+version = "0.1.0"
+
+[[package]]
+name = "steam-cli"
+version = "0.1.0"
+
+[[package]]
+name = "steamtinkerlaunch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stellarium-cli"
+version = "0.1.0"
+
+[[package]]
+name = "step-cli"
+version = "0.1.0"
+
+[[package]]
+name = "step3d-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stickynotes"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "stitch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stm32cubeide-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stopwatch"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "storyblok-cli"
+version = "0.1.0"
+
+[[package]]
+name = "strace"
+version = "0.1.0"
+
+[[package]]
+name = "strace-cli"
+version = "0.1.0"
+
+[[package]]
+name = "strapi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stratis-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stratovirt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "streamlabs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stress-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stride-cli"
+version = "0.1.0"
+
+[[package]]
+name = "strings"
+version = "0.1.0"
+
+[[package]]
+name = "stripe-cli"
+version = "0.1.0"
+
+[[package]]
+name = "strongswan-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stty"
+version = "0.1.0"
+
+[[package]]
+name = "studioone-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stunnel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stylix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "stytch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "su"
+version = "0.1.0"
+
+[[package]]
+name = "subfinder-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sublime-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sudo"
+version = "0.1.0"
+
+[[package]]
+name = "sudoku"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "sugarcrm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sui-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sumologic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sundials-cli"
+version = "0.1.0"
+
+[[package]]
+name = "supabase-cli"
+version = "0.1.0"
+
+[[package]]
+name = "supercluster-cli"
+version = "0.1.0"
+
+[[package]]
+name = "supercollider-cli"
+version = "0.1.0"
+
+[[package]]
+name = "supertokens-cli"
+version = "0.1.0"
+
+[[package]]
+name = "surrealdb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "svelte-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sveltekit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "svgcleaner"
+version = "0.1.0"
+
+[[package]]
+name = "svgo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "svox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "swagger-cli"
+version = "0.1.0"
+
+[[package]]
+name = "swapon"
+version = "0.1.0"
+
+[[package]]
+name = "swappy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "swarp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sway-cli"
+version = "0.1.0"
+
+[[package]]
+name = "swaybg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "swayidle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "swaylock-cli"
+version = "0.1.0"
+
+[[package]]
+name = "swaync-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sweethome3d-cli"
+version = "0.1.0"
+
+[[package]]
+name = "switchboardlive-cli"
+version = "0.1.0"
+
+[[package]]
+name = "swupd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "swww-cli"
+version = "0.1.0"
+
+[[package]]
+name = "syft-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sylenth-cli"
+version = "0.1.0"
+
+[[package]]
+name = "symantec-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sympy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "syncthing"
+version = "0.1.0"
+
+[[package]]
+name = "syncthing-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sysbench-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sysctl"
+version = "0.1.0"
+
+[[package]]
+name = "sysctl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sysdig-cli"
+version = "0.1.0"
+
+[[package]]
+name = "sysinfo"
+version = "0.1.0"
+
+[[package]]
+name = "sysinfo-app"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "syslog-ng-cli"
+version = "0.1.0"
+
+[[package]]
+name = "syslogd"
+version = "0.1.0"
+
+[[package]]
+name = "sysmonitor"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "sysstat"
+version = "0.1.0"
+
+[[package]]
+name = "sysstat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "system-config-printer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "system-log-viewer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "systemctl"
+version = "0.1.0"
+
+[[package]]
+name = "systemctl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "systemd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "systemd-resolved"
+version = "0.1.0"
+
+[[package]]
+name = "systemrestore"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "systray"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "tableau-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tac"
+version = "0.1.0"
+
+[[package]]
+name = "tailscale-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tantivy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tar"
+version = "0.1.0"
+
+[[package]]
+name = "task-cli"
+version = "0.1.0"
+
+[[package]]
+name = "taskscheduler"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "taskset"
+version = "0.1.0"
+
+[[package]]
+name = "tcl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tcpdump"
+version = "0.1.0"
+
+[[package]]
+name = "tcpdump-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tdengine-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tealdeer"
+version = "0.1.0"
+
+[[package]]
+name = "tealium-cli"
+version = "0.1.0"
+
+[[package]]
+name = "teamcity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "teams-cli"
+version = "0.1.0"
+
+[[package]]
+name = "teamwork-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tectonic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tee"
+version = "0.1.0"
+
+[[package]]
+name = "tekton-cli"
+version = "0.1.0"
+
+[[package]]
+name = "telegraf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "telegram-cli"
+version = "0.1.0"
+
+[[package]]
+name = "telegram-desktop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "telesign-cli"
+version = "0.1.0"
+
+[[package]]
+name = "teller-cli"
+version = "0.1.0"
+
+[[package]]
+name = "telnet"
+version = "0.1.0"
+
+[[package]]
+name = "telnyx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tempo"
+version = "0.1.0"
+
+[[package]]
+name = "tempo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "temporal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tenable-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tengine-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tensorboard-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tensorflow-cli"
+version = "0.1.0"
+
+[[package]]
+name = "teradata-cli"
+version = "0.1.0"
+
+[[package]]
+name = "terminal"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "termite-cli"
+version = "0.1.0"
+
+[[package]]
+name = "terraform"
+version = "0.1.0"
+
+[[package]]
+name = "terraform-cli"
+version = "0.1.0"
+
+[[package]]
+name = "terragrunt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "terrset-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tesseract"
+version = "0.1.0"
+
+[[package]]
+name = "tesseract-cli"
+version = "0.1.0"
+
+[[package]]
+name = "testdisk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tetris"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "texlive-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tfsec-cli"
+version = "0.1.0"
+
+[[package]]
+name = "thanos-cli"
+version = "0.1.0"
+
+[[package]]
+name = "thermald"
+version = "0.1.0"
+
+[[package]]
+name = "thermald-cli"
+version = "0.1.0"
+
+[[package]]
+name = "threescale-cli"
+version = "0.1.0"
+
+[[package]]
+name = "thrift-cli"
+version = "0.1.0"
+
+[[package]]
+name = "thruk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "thunder-cli"
+version = "0.1.0"
+
+[[package]]
+name = "thunderbird-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tibco-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tictactoe"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "tidal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tiddlywiki-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tig"
+version = "0.1.0"
+
+[[package]]
+name = "tigerbeetle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tigervnc"
+version = "0.1.0"
+
+[[package]]
+name = "tigervnc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tigris-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tiled-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tilemaker-cli"
+version = "0.1.0"
+
+[[package]]
+name = "timedatectl"
+version = "0.1.0"
+
+[[package]]
+name = "timeout"
+version = "0.1.0"
+
+[[package]]
+name = "timescaledb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "timeshift"
+version = "0.1.0"
+
+[[package]]
+name = "timeshift-cli"
+version = "0.1.0"
+
+[[package]]
+name = "timg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "timidity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tinc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tippecanoe-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tiramisu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tlp"
+version = "0.1.0"
+
+[[package]]
+name = "tlp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tmux"
+version = "0.1.0"
+
+[[package]]
+name = "tmux-app"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "tmux-cli"
+version = "0.1.0"
+
+[[package]]
+name = "toad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tofi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tokei"
+version = "0.1.0"
+
+[[package]]
+name = "tomboy-ng-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tooljet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "top"
+version = "0.1.0"
+
+[[package]]
+name = "topgrade"
+version = "0.1.0"
+
+[[package]]
+name = "tor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "torch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "torrent"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "towers"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "tox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "toxiproxy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tpm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tpm2"
+version = "0.1.0"
+
+[[package]]
+name = "tput"
+version = "0.1.0"
+
+[[package]]
+name = "tr"
+version = "0.1.0"
+
+[[package]]
+name = "traceroute"
+version = "0.1.0"
+
+[[package]]
+name = "traefik"
+version = "0.1.0"
+
+[[package]]
+name = "traefik-cli"
+version = "0.1.0"
+
+[[package]]
+name = "transmission"
+version = "0.1.0"
+
+[[package]]
+name = "transmission-cli"
+version = "0.1.0"
+
+[[package]]
+name = "travisci-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tray-cli"
+version = "0.1.0"
+
+[[package]]
+name = "treasuredata-cli"
+version = "0.1.0"
+
+[[package]]
+name = "trello-cli"
+version = "0.1.0"
+
+[[package]]
+name = "trendmicro-cli"
+version = "0.1.0"
+
+[[package]]
+name = "trezor-cli"
+version = "0.1.0"
+
+[[package]]
+name = "trilium-cli"
+version = "0.1.0"
+
+[[package]]
+name = "trimmomatic-cli"
+version = "0.1.0"
+
+[[package]]
+name = "trinet-cli"
+version = "0.1.0"
+
+[[package]]
+name = "trino-cli"
+version = "0.1.0"
+
+[[package]]
+name = "trippy"
+version = "0.1.0"
+
+[[package]]
+name = "trivy"
+version = "0.1.0"
+
+[[package]]
+name = "trivy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "troff-cli"
+version = "0.1.0"
+
+[[package]]
+name = "truffle-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tsort"
+version = "0.1.0"
+
+[[package]]
+name = "ttfautohint-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ttfdump-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tuned"
+version = "0.1.0"
+
+[[package]]
+name = "tuned-cli"
+version = "0.1.0"
+
+[[package]]
+name = "turbostat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "turso-cli"
+version = "0.1.0"
+
+[[package]]
+name = "twilio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "twinmotion-cli"
+version = "0.1.0"
+
+[[package]]
+name = "twitchstudio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tyk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "tym-cli"
+version = "0.1.0"
+
+[[package]]
+name = "typesense-cli"
+version = "0.1.0"
+
+[[package]]
+name = "typingtutor"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "typst-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ubisoft-cli"
+version = "0.1.0"
+
+[[package]]
+name = "udevadm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "udevd"
+version = "0.1.0"
+
+[[package]]
+name = "udisks"
+version = "0.1.0"
+
+[[package]]
+name = "uim-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ukg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "uname"
+version = "0.1.0"
+
+[[package]]
+name = "unbound"
+version = "0.1.0"
+
+[[package]]
+name = "unbound-cli"
+version = "0.1.0"
+
+[[package]]
+name = "undelete"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "uniq"
+version = "0.1.0"
+
+[[package]]
+name = "unison-cli"
+version = "0.1.0"
+
+[[package]]
+name = "unitconverter"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "units-cli"
+version = "0.1.0"
+
+[[package]]
+name = "unity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "unleash-cli"
+version = "0.1.0"
+
+[[package]]
+name = "unoconv-cli"
+version = "0.1.0"
+
+[[package]]
+name = "unreal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "unrealengine-cli"
+version = "0.1.0"
+
+[[package]]
+name = "unshare"
+version = "0.1.0"
+
+[[package]]
+name = "upcloud-cli"
+version = "0.1.0"
+
+[[package]]
+name = "update-alternatives"
+version = "0.1.0"
+
+[[package]]
+name = "updatedb"
+version = "0.1.0"
+
+[[package]]
+name = "upower"
+version = "0.1.0"
+
+[[package]]
+name = "upower-cli"
+version = "0.1.0"
+
+[[package]]
+name = "upptime-cli"
+version = "0.1.0"
+
+[[package]]
+name = "uptime"
+version = "0.1.0"
+
+[[package]]
+name = "uptime-kuma-cli"
+version = "0.1.0"
+
+[[package]]
+name = "urbackup-cli"
+version = "0.1.0"
+
+[[package]]
+name = "urh-cli"
+version = "0.1.0"
+
+[[package]]
+name = "usd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "useradd"
+version = "0.1.0"
+
+[[package]]
+name = "useradd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "useradm"
+version = "0.1.0"
+
+[[package]]
+name = "usql"
+version = "0.1.0"
+
+[[package]]
+name = "usql-cli"
+version = "0.1.0"
+
+[[package]]
+name = "utm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "uvtool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "v-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vagrant-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vale-cli"
+version = "0.1.0"
+
+[[package]]
+name = "valentina-cli"
+version = "0.1.0"
+
+[[package]]
+name = "valgrind"
+version = "0.1.0"
+
+[[package]]
+name = "valgrind-cli"
+version = "0.1.0"
+
+[[package]]
+name = "valkey-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vals-cli"
+version = "0.1.0"
+
+[[package]]
+name = "varnish"
+version = "0.1.0"
+
+[[package]]
+name = "varnish-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vault"
+version = "0.1.0"
+
+[[package]]
+name = "vault-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vcftools-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vcpkg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vcvrack-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vector-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vectorworks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "veeam-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vega-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vegas-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vegeta"
+version = "0.1.0"
+
+[[package]]
+name = "vegeta-cli"
+version = "0.1.0"
+
+[[package]]
+name = "velero-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vercel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "verilator-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vernemq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vertica-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vespa-cli"
+version = "0.1.0"
+
+[[package]]
+name = "veusz-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vi"
+version = "0.1.0"
+
+[[package]]
+name = "victoria-cli"
+version = "0.1.0"
+
+[[package]]
+name = "victoriametrics-cli"
+version = "0.1.0"
+
+[[package]]
+name = "viddy"
+version = "0.1.0"
+
+[[package]]
+name = "videoplayer"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "vifm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vinagre-cli"
+version = "0.1.0"
+
+[[package]]
+name = "virsh-cli"
+version = "0.1.0"
+
+[[package]]
+name = "virt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "virt-manager-cli"
+version = "0.1.0"
+
+[[package]]
+name = "virt-viewer-cli"
+version = "0.1.0"
+
+[[package]]
+name = "virtinst-cli"
+version = "0.1.0"
+
+[[package]]
+name = "virtualbox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "virtualdj-cli"
+version = "0.1.0"
+
+[[package]]
+name = "virtualenv-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vital-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vitepress-cli"
+version = "0.1.0"
+
+[[package]]
+name = "viu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vivado-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vivaldi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vkbasalt-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vllm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vmix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vmstat"
+version = "0.1.0"
+
+[[package]]
+name = "vmware-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vonage-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vorbis-tools"
+version = "0.1.0"
+
+[[package]]
+name = "vorta-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vpnmanager"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "vray-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vscode-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vuepress-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vulkan-cli"
+version = "0.1.0"
+
+[[package]]
+name = "vultr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "w"
+version = "0.1.0"
+
+[[package]]
+name = "waf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wall"
+version = "0.1.0"
+
+[[package]]
+name = "wandb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wasabi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "watch"
+version = "0.1.0"
+
+[[package]]
+name = "watchexec"
+version = "0.1.0"
+
+[[package]]
+name = "watchguard-cli"
+version = "0.1.0"
+
+[[package]]
+name = "watermill-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wave-cli"
+version = "0.1.0"
+
+[[package]]
+name = "waveform-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wavemon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "waves-cli"
+version = "0.1.0"
+
+[[package]]
+name = "waybar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wayfire-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wayland-info-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wayland-logout-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wayland-utils-cli"
+version = "0.1.0"
+
+[[package]]
+name = "waypipe-cli"
+version = "0.1.0"
+
+[[package]]
+name = "waypoint-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wayst-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wayvnc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wbg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wc"
+version = "0.1.0"
+
+[[package]]
+name = "wdisplays-cli"
+version = "0.1.0"
+
+[[package]]
+name = "weather"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "weave-cli"
+version = "0.1.0"
+
+[[package]]
+name = "weaviate-cli"
+version = "0.1.0"
+
+[[package]]
+name = "webex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "webots-cli"
+version = "0.1.0"
+
+[[package]]
+name = "webtrees-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wechat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "weechat-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wev-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wezterm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wf-recorder-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wfuzz-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wget"
+version = "0.1.0"
+
+[[package]]
+name = "wget2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wgpu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "whatsapp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "whimsical-cli"
+version = "0.1.0"
+
+[[package]]
+name = "whiteboard"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "whitebox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "who"
+version = "0.1.0"
+
+[[package]]
+name = "whois"
+version = "0.1.0"
+
+[[package]]
+name = "wikijs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "windmill-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wine-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wine-gecko-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wine-mono-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wine-staging-cli"
+version = "0.1.0"
+
+[[package]]
+name = "winecfg-cli"
+version = "0.1.0"
+
+[[package]]
+name = "winetricks-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wings3d-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wipefs"
+version = "0.1.0"
+
+[[package]]
+name = "wirecast-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wireguard"
+version = "0.1.0"
+
+[[package]]
+name = "wireguard-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wireguard-tools"
+version = "0.1.0"
+
+[[package]]
+name = "wireproxy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wireshark-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wise-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wiz-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wkhtmltopdf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wl-clipboard-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wl-gammactl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wl-kbptr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wl-mirror-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wl-protocols-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wl-screencast-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wl-screenrec-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wlogout-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wlopm-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wlr-randr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wlrctl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wlsunset-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wmctrl-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wob-cli"
+version = "0.1.0"
+
+[[package]]
+name = "woff2"
+version = "0.1.0"
+
+[[package]]
+name = "woff2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wofi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "woocommerce-cli"
+version = "0.1.0"
+
+[[package]]
+name = "woodpecker-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wordle"
+version = "0.1.0"
+
+[[package]]
+name = "wordsearch"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "workato-cli"
+version = "0.1.0"
+
+[[package]]
+name = "workday-cli"
+version = "0.1.0"
+
+[[package]]
+name = "workos-cli"
+version = "0.1.0"
+
+[[package]]
+name = "worldclock"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "wpa"
+version = "0.1.0"
+
+[[package]]
+name = "wpa-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wpa-supplicant-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wpaperd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wps-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wrangler-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wrike-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wrk"
+version = "0.1.0"
+
+[[package]]
+name = "wrk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wshowkeys-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wsk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wso2-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wtype-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wvkbd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wvware-cli"
+version = "0.1.0"
+
+[[package]]
+name = "wxmaxima-cli"
+version = "0.1.0"
+
+[[package]]
+name = "x11vnc-cli"
+version = "0.1.0"
+
+[[package]]
+name = "x2go-cli"
+version = "0.1.0"
+
+[[package]]
+name = "x86-energy-perf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xargs"
+version = "0.1.0"
+
+[[package]]
+name = "xata-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xattr"
+version = "0.1.0"
+
+[[package]]
+name = "xbox-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xbps-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xcircuit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xclip-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xcode-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xdg"
+version = "0.1.0"
+
+[[package]]
+name = "xdg-dbus-proxy-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xdg-desktop-portal-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xdg-desktop-portal-wlr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xdg-user-dirs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xdg-utils-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xdotool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xelatex-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xen-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xephem-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xero-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xfce-polkit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xfce4-notifyd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xfs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xgboost-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xh"
+version = "0.1.0"
+
+[[package]]
+name = "xh-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xkbcomp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xlsxio-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xmagnify-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xournalpp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xpdf-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xplr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xprop-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xrandr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xrdp"
+version = "0.1.0"
+
+[[package]]
+name = "xreader-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xsane-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xschem-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xsel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xsensors-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xset-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xsplit-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xsv"
+version = "0.1.0"
+
+[[package]]
+name = "xvkbd-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xymon-cli"
+version = "0.1.0"
+
+[[package]]
+name = "xz"
+version = "0.1.0"
+
+[[package]]
+name = "xzoom-cli"
+version = "0.1.0"
+
+[[package]]
+name = "yacas-cli"
+version = "0.1.0"
+
+[[package]]
+name = "yacc"
+version = "0.1.0"
+
+[[package]]
+name = "yad-cli"
+version = "0.1.0"
+
+[[package]]
+name = "yahtzee"
+version = "0.1.0"
+dependencies = [
+ "guitk",
+]
+
+[[package]]
+name = "yambar-cli"
+version = "0.1.0"
+
+[[package]]
+name = "yard-cli"
+version = "0.1.0"
+
+[[package]]
+name = "yarn-cli"
+version = "0.1.0"
+
+[[package]]
+name = "yazi"
+version = "0.1.0"
+
+[[package]]
+name = "yazi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ydotool-cli"
+version = "0.1.0"
+
+[[package]]
+name = "yoshimi-cli"
+version = "0.1.0"
+
+[[package]]
+name = "yosys-cli"
+version = "0.1.0"
+
+[[package]]
+name = "youki-cli"
+version = "0.1.0"
+
+[[package]]
+name = "youtube-dl"
+version = "0.1.0"
+
+[[package]]
+name = "yt-dlp-cli"
+version = "0.1.0"
+
+[[package]]
+name = "ytdlp"
+version = "0.1.0"
+
+[[package]]
+name = "yugabyte-cli"
+version = "0.1.0"
+
+[[package]]
+name = "yuzu-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zabbix-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zapier-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zathura-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zbrush-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zed-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zellij-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zencastr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zendesk-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zendesksell-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zenefits-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zenith-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zenity-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zeplin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zeromq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zerotier-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zettlr-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zfs-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zig"
+version = "0.1.0"
+
+[[package]]
+name = "zig-tools"
+version = "0.1.0"
+
+[[package]]
+name = "zigbee-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zimbra-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zincsearch-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zip"
+version = "0.1.0"
+
+[[package]]
+name = "zipkin-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zitadel-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zmap-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zmq-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zoho-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zola-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zookeeper"
+version = "0.1.0"
+
+[[package]]
+name = "zookeeper-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zoom-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zotero-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zoxide"
+version = "0.1.0"
+
+[[package]]
+name = "zram"
+version = "0.1.0"
+
+[[package]]
+name = "zsnes-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zstd"
+version = "0.1.0"
+
+[[package]]
+name = "zuplo-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zutty-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zuul-ci-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zwave-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zynaddsubfx-cli"
+version = "0.1.0"
+
+[[package]]
+name = "zypper-cli"
+version = "0.1.0"

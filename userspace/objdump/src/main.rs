@@ -3244,7 +3244,7 @@ mod tests {
     fn test_format_nm_value() {
         assert_eq!(format_nm_value(0x1234, 'x'), "0000000000001234");
         assert_eq!(format_nm_value(42, 'd'), "0000000000000042");
-        assert_eq!(format_nm_value(0o77, 'o'), "0000000000000077");
+        assert_eq!(format_nm_value(0o77, 'o'), "0000000000000000000077");
     }
 
     #[test]

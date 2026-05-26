@@ -3,17 +3,4 @@ name = "syslogd"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS system log daemon — JSON-lines log aggregation and query"
-
-# Standalone crate — not part of the kernel workspace.
-[workspace]
-
 [dependencies]
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

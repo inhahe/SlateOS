@@ -2,17 +2,5 @@
 name = "lspci"
 version = "0.1.0"
 edition = "2024"
-description = "OurOS PCI device lister"
-
-[workspace]
-
+description = "OurOS lspci utility"
 [dependencies]
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

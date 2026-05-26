@@ -21,7 +21,10 @@
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::cast_precision_loss
+    clippy::cast_precision_loss,
+    clippy::unreadable_literal,
+    clippy::module_name_repetitions,
+    clippy::struct_excessive_bools
 )]
 
 #[allow(unused_imports)]
@@ -71,7 +74,6 @@ pub mod colors {
     // Diff-specific background colors (semi-transparent effect via muted shades)
     pub const ADD_BG: Color = Color::rgba(166, 227, 161, 30);
     pub const DEL_BG: Color = Color::rgba(243, 139, 168, 30);
-    pub const MOD_BG: Color = Color::rgba(249, 226, 175, 25);
     pub const ADD_LINE_BG: Color = Color::rgba(166, 227, 161, 50);
     pub const DEL_LINE_BG: Color = Color::rgba(243, 139, 168, 50);
 }
@@ -194,6 +196,7 @@ pub struct InlineEdit {
 ///
 /// Returns the edit script as a list of `DiffEdit` entries.
 /// Uses the classic Myers algorithm with linear-space optimization.
+#[must_use]
 pub fn myers_diff(left: &[&str], right: &[&str]) -> Vec<DiffEdit> {
     let n = left.len();
     let m = right.len();
@@ -231,9 +234,7 @@ pub fn myers_diff(left: &[&str], right: &[&str]) -> Vec<DiffEdit> {
     // Myers algorithm: find the shortest edit script
     let max_d = n.saturating_add(m);
     let offset = max_d;
-    let v_size = max_d
-        .saturating_mul(2)
-        .saturating_add(1);
+    let v_size = max_d.saturating_mul(2).saturating_add(1);
     let mut v: Vec<isize> = vec![0; v_size];
     let mut trace: Vec<Vec<isize>> = Vec::new();
 
@@ -288,17 +289,25 @@ pub fn myers_diff(left: &[&str], right: &[&str]) -> Vec<DiffEdit> {
     }
 
     // Backtrack to reconstruct the edit script
+    backtrack_edits(&trace, left, right, n, m, offset)
+}
+
+/// Backtrack through the Myers trace to reconstruct the edit script.
+fn backtrack_edits(
+    trace: &[Vec<isize>],
+    left: &[&str],
+    right: &[&str],
+    n: usize,
+    m: usize,
+    offset: usize,
+) -> Vec<DiffEdit> {
     let mut edits = VecDeque::new();
     let mut x = n as isize;
     let mut y = m as isize;
 
     let num_traces = trace.len();
     for d in (0..num_traces).rev() {
-        let v_snap = match trace.get(d) {
-            Some(v) => v,
-            None => break,
-        };
-
+        let Some(v_snap) = trace.get(d) else { break };
         let k = x.saturating_sub(y);
         let d_i = d as isize;
 
@@ -319,13 +328,8 @@ pub fn myers_diff(left: &[&str], right: &[&str]) -> Vec<DiffEdit> {
         } else {
             k.saturating_sub(1)
         };
-        let prev_x = if go_down {
-            let idx = (prev_k as usize).wrapping_add(offset);
-            v_snap.get(idx).copied().unwrap_or(0)
-        } else {
-            let idx = (prev_k as usize).wrapping_add(offset);
-            v_snap.get(idx).copied().unwrap_or(0)
-        };
+        let prev_idx = (prev_k as usize).wrapping_add(offset);
+        let prev_x = v_snap.get(prev_idx).copied().unwrap_or(0);
         let prev_y = prev_x.saturating_sub(prev_k);
 
         // Diagonal (equal)
@@ -385,6 +389,7 @@ fn normalize_line(line: &str, opts: &IgnoreOptions) -> String {
 }
 
 /// Compute diff with options, producing a full `DiffResult`.
+#[must_use]
 pub fn compute_diff(left_text: &str, right_text: &str, opts: &IgnoreOptions) -> DiffResult {
     let left_lines: Vec<&str> = if left_text.is_empty() {
         Vec::new()
@@ -479,10 +484,10 @@ fn group_into_hunks(edits: &[DiffEdit], context: usize) -> Vec<DiffHunk> {
 
     // Group changes that are within context lines of each other
     let mut groups: Vec<(usize, usize)> = Vec::new();
-    let mut group_start = match change_indices.first() {
-        Some(&s) => s,
-        None => return hunks,
+    let Some(&first_change) = change_indices.first() else {
+        return hunks;
     };
+    let mut group_start = first_change;
     let mut group_end = group_start;
 
     for &idx in change_indices.iter().skip(1) {
@@ -543,6 +548,7 @@ fn group_into_hunks(edits: &[DiffEdit], context: usize) -> Vec<DiffHunk> {
 }
 
 /// Compute character-level inline diff between two lines.
+#[must_use]
 pub fn inline_diff(left: &str, right: &str) -> (Vec<InlineEdit>, Vec<InlineEdit>) {
     let left_chars: Vec<char> = left.chars().collect();
     let right_chars: Vec<char> = right.chars().collect();
@@ -555,7 +561,10 @@ pub fn inline_diff(left: &str, right: &str) -> (Vec<InlineEdit>, Vec<InlineEdit>
 
     // Find common prefix
     let mut prefix_len = 0;
-    while prefix_len < n && prefix_len < m && left_chars.get(prefix_len) == right_chars.get(prefix_len) {
+    while prefix_len < n
+        && prefix_len < m
+        && left_chars.get(prefix_len) == right_chars.get(prefix_len)
+    {
         prefix_len = prefix_len.saturating_add(1);
     }
 
@@ -708,13 +717,13 @@ pub struct DirCompareResult {
 }
 
 /// Compare two lists of filenames (simulated directory comparison).
+#[must_use]
 pub fn compare_directories(
     left_files: &[(&str, &str)],
     right_files: &[(&str, &str)],
 ) -> DirCompareResult {
     let mut result = DirCompareResult::default();
 
-    // Build maps
     let mut left_map: Vec<(&str, &str)> = left_files.to_vec();
     left_map.sort_by_key(|(name, _)| *name);
 
@@ -811,6 +820,7 @@ pub struct IgnoreOptions {
 
 impl IgnoreOptions {
     /// Check if any ignore option is enabled.
+    #[must_use]
     pub fn has_any(self) -> bool {
         self.ignore_whitespace || self.ignore_case
     }
@@ -874,44 +884,53 @@ impl SearchState {
             let mut start = 0;
             while let Some(pos) = text.get(start..).and_then(|s| s.find(&query)) {
                 let byte_offset = start.saturating_add(pos);
-                // Determine which panel(s) this edit appears in
-                match edit.op {
-                    DiffOp::Equal => {
-                        self.matches.push(SearchMatch {
-                            panel: 0,
-                            edit_index: i,
-                            byte_offset,
-                            match_len: query.len(),
-                        });
-                        self.matches.push(SearchMatch {
-                            panel: 1,
-                            edit_index: i,
-                            byte_offset,
-                            match_len: query.len(),
-                        });
-                    }
-                    DiffOp::Delete => {
-                        self.matches.push(SearchMatch {
-                            panel: 0,
-                            edit_index: i,
-                            byte_offset,
-                            match_len: query.len(),
-                        });
-                    }
-                    DiffOp::Insert => {
-                        self.matches.push(SearchMatch {
-                            panel: 1,
-                            edit_index: i,
-                            byte_offset,
-                            match_len: query.len(),
-                        });
-                    }
-                }
-
+                self.push_matches_for_edit(i, edit.op, byte_offset, query.len());
                 start = byte_offset.saturating_add(1);
                 if self.matches.len() >= MAX_SEARCH_RESULTS {
                     return;
                 }
+            }
+        }
+    }
+
+    /// Push search matches for a given edit based on its operation type.
+    fn push_matches_for_edit(
+        &mut self,
+        edit_index: usize,
+        op: DiffOp,
+        byte_offset: usize,
+        match_len: usize,
+    ) {
+        match op {
+            DiffOp::Equal => {
+                self.matches.push(SearchMatch {
+                    panel: 0,
+                    edit_index,
+                    byte_offset,
+                    match_len,
+                });
+                self.matches.push(SearchMatch {
+                    panel: 1,
+                    edit_index,
+                    byte_offset,
+                    match_len,
+                });
+            }
+            DiffOp::Delete => {
+                self.matches.push(SearchMatch {
+                    panel: 0,
+                    edit_index,
+                    byte_offset,
+                    match_len,
+                });
+            }
+            DiffOp::Insert => {
+                self.matches.push(SearchMatch {
+                    panel: 1,
+                    edit_index,
+                    byte_offset,
+                    match_len,
+                });
             }
         }
     }
@@ -935,6 +954,7 @@ impl SearchState {
     }
 
     /// Get the current match if any.
+    #[must_use]
     pub fn current(&self) -> Option<&SearchMatch> {
         self.matches.get(self.current_match)
     }
@@ -966,6 +986,7 @@ pub struct MergeState {
 
 impl MergeState {
     /// Create a new merge state with all hunks undecided.
+    #[must_use]
     pub fn new(hunk_count: usize) -> Self {
         Self {
             decisions: vec![MergeDecision::Undecided; hunk_count],
@@ -980,6 +1001,7 @@ impl MergeState {
     }
 
     /// Get the decision for a specific hunk.
+    #[must_use]
     pub fn get_decision(&self, hunk_index: usize) -> MergeDecision {
         self.decisions
             .get(hunk_index)
@@ -988,6 +1010,7 @@ impl MergeState {
     }
 
     /// Count of decided hunks.
+    #[must_use]
     pub fn decided_count(&self) -> usize {
         self.decisions
             .iter()
@@ -996,6 +1019,7 @@ impl MergeState {
     }
 
     /// Apply merge decisions to produce the final merged text.
+    #[must_use]
     pub fn apply(&self, diff: &DiffResult) -> String {
         let mut output = String::new();
 
@@ -1052,6 +1076,7 @@ pub struct DiffStats {
 
 impl DiffStats {
     /// Compute statistics from a diff result.
+    #[must_use]
     pub fn from_diff(diff: &DiffResult) -> Self {
         let mut equal_lines = 0usize;
         let mut inserted_lines = 0usize;
@@ -1085,6 +1110,7 @@ impl DiffStats {
     }
 
     /// Number of change hunks.
+    #[must_use]
     pub fn change_count(&self) -> usize {
         self.inserted_lines.saturating_add(self.deleted_lines)
     }
@@ -1113,6 +1139,182 @@ impl fmt::Display for ViewMode {
             Self::Inline => write!(f, "Inline"),
         }
     }
+}
+
+// ============================================================================
+// Side-by-side pairing
+// ============================================================================
+
+/// A paired row for side-by-side display.
+#[derive(Clone, Debug)]
+struct SideBySidePair {
+    left_line: Option<usize>,
+    left_text: Option<String>,
+    left_op: Option<DiffOp>,
+    right_line: Option<usize>,
+    right_text: Option<String>,
+    right_op: Option<DiffOp>,
+}
+
+/// Build side-by-side pairs from an edit list.
+///
+/// Equal lines appear on both sides. Deletes appear on the left with a blank right.
+/// Inserts appear on the right with a blank left. Consecutive delete+insert pairs
+/// are aligned on the same row.
+fn build_side_by_side_pairs(edits: &[DiffEdit]) -> Vec<SideBySidePair> {
+    let mut pairs = Vec::new();
+    let mut i = 0;
+
+    while i < edits.len() {
+        let Some(edit) = edits.get(i) else { break };
+
+        match edit.op {
+            DiffOp::Equal => {
+                pairs.push(SideBySidePair {
+                    left_line: edit.left_line,
+                    left_text: Some(edit.text.clone()),
+                    left_op: Some(DiffOp::Equal),
+                    right_line: edit.right_line,
+                    right_text: Some(edit.text.clone()),
+                    right_op: Some(DiffOp::Equal),
+                });
+                i = i.saturating_add(1);
+            }
+            DiffOp::Delete => {
+                // Check if the next edit is an insert (paired modification)
+                let next = edits.get(i.saturating_add(1));
+                if let Some(next_edit) = next {
+                    if next_edit.op == DiffOp::Insert {
+                        // Paired: show delete on left, insert on right
+                        pairs.push(SideBySidePair {
+                            left_line: edit.left_line,
+                            left_text: Some(edit.text.clone()),
+                            left_op: Some(DiffOp::Delete),
+                            right_line: next_edit.right_line,
+                            right_text: Some(next_edit.text.clone()),
+                            right_op: Some(DiffOp::Insert),
+                        });
+                        i = i.saturating_add(2);
+                        continue;
+                    }
+                }
+                // Unpaired delete
+                pairs.push(SideBySidePair {
+                    left_line: edit.left_line,
+                    left_text: Some(edit.text.clone()),
+                    left_op: Some(DiffOp::Delete),
+                    right_line: None,
+                    right_text: None,
+                    right_op: None,
+                });
+                i = i.saturating_add(1);
+            }
+            DiffOp::Insert => {
+                pairs.push(SideBySidePair {
+                    left_line: None,
+                    left_text: None,
+                    left_op: None,
+                    right_line: edit.right_line,
+                    right_text: Some(edit.text.clone()),
+                    right_op: Some(DiffOp::Insert),
+                });
+                i = i.saturating_add(1);
+            }
+        }
+    }
+
+    pairs
+}
+
+// ============================================================================
+// Inline rows
+// ============================================================================
+
+/// A row in the inline diff view.
+#[derive(Clone, Debug)]
+struct InlineRow {
+    op: DiffOp,
+    line_num: Option<usize>,
+    text: String,
+    spans: Vec<InlineEdit>,
+}
+
+/// Build inline rows from edits, computing character-level diffs for change pairs.
+fn build_inline_rows(edits: &[DiffEdit]) -> Vec<InlineRow> {
+    let mut rows = Vec::new();
+    let mut i = 0;
+
+    while i < edits.len() {
+        let Some(edit) = edits.get(i) else { break };
+
+        match edit.op {
+            DiffOp::Equal => {
+                rows.push(InlineRow {
+                    op: DiffOp::Equal,
+                    line_num: edit.left_line,
+                    text: edit.text.clone(),
+                    spans: Vec::new(),
+                });
+                i = i.saturating_add(1);
+            }
+            DiffOp::Delete => {
+                let next = edits.get(i.saturating_add(1));
+                if let Some(next_edit) = next {
+                    if next_edit.op == DiffOp::Insert {
+                        let (left_spans, right_spans) =
+                            inline_diff(&edit.text, &next_edit.text);
+
+                        rows.push(InlineRow {
+                            op: DiffOp::Delete,
+                            line_num: edit.left_line,
+                            text: edit.text.clone(),
+                            spans: left_spans,
+                        });
+                        rows.push(InlineRow {
+                            op: DiffOp::Insert,
+                            line_num: next_edit.right_line,
+                            text: next_edit.text.clone(),
+                            spans: right_spans,
+                        });
+                        i = i.saturating_add(2);
+                        continue;
+                    }
+                }
+                rows.push(InlineRow {
+                    op: DiffOp::Delete,
+                    line_num: edit.left_line,
+                    text: edit.text.clone(),
+                    spans: Vec::new(),
+                });
+                i = i.saturating_add(1);
+            }
+            DiffOp::Insert => {
+                rows.push(InlineRow {
+                    op: DiffOp::Insert,
+                    line_num: edit.right_line,
+                    text: edit.text.clone(),
+                    spans: Vec::new(),
+                });
+                i = i.saturating_add(1);
+            }
+        }
+    }
+
+    rows
+}
+
+// ============================================================================
+// Diff line rendering data (avoids too-many-arguments on render methods)
+// ============================================================================
+
+/// Parameters for rendering a single diff line in side-by-side mode.
+struct DiffLineParams<'a> {
+    x: f32,
+    y: f32,
+    width: f32,
+    line_num: Option<usize>,
+    text: Option<&'a str>,
+    op: Option<DiffOp>,
 }
 
 // ============================================================================
@@ -1183,6 +1385,7 @@ impl Default for FileDiffApp {
 
 impl FileDiffApp {
     /// Create a new application instance.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             width: 1200.0,
@@ -1211,7 +1414,13 @@ impl FileDiffApp {
     }
 
     /// Load two files for comparison.
-    pub fn load_files(&mut self, left_path: &str, left_content: &str, right_path: &str, right_content: &str) {
+    pub fn load_files(
+        &mut self,
+        left_path: &str,
+        left_content: &str,
+        right_path: &str,
+        right_content: &str,
+    ) {
         self.left_path = left_path.to_string();
         self.right_path = right_path.to_string();
         self.left_content = left_content.to_string();
@@ -1341,6 +1550,7 @@ impl FileDiffApp {
     }
 
     /// Get the merged output text.
+    #[must_use]
     pub fn merged_text(&self) -> Option<String> {
         match (&self.merge, &self.diff) {
             (Some(merge), Some(diff)) => Some(merge.apply(diff)),
@@ -1415,7 +1625,7 @@ impl FileDiffApp {
                 EventResult::Consumed
             }
 
-            // Change navigation (F7/F8 or Ctrl+Down/Up)
+            // Change navigation (F7/F8 or Ctrl+N/P)
             Key::F7 => {
                 self.prev_change();
                 EventResult::Consumed
@@ -1563,6 +1773,7 @@ impl FileDiffApp {
     }
 
     /// Render the entire application to a render tree.
+    #[must_use]
     pub fn render(&self) -> RenderTree {
         let mut tree = RenderTree::new();
 
@@ -1620,7 +1831,6 @@ impl FileDiffApp {
 
     /// Render the toolbar area.
     fn render_toolbar(&self, tree: &mut RenderTree) {
-        // Toolbar background
         tree.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
@@ -1630,54 +1840,12 @@ impl FileDiffApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // View mode buttons
-        let modes = [ViewMode::SideBySide, ViewMode::Unified, ViewMode::Inline];
         let mut btn_x: f32 = 8.0;
         let btn_y: f32 = 6.0;
         let btn_h: f32 = 26.0;
 
-        for mode in &modes {
-            let label = match mode {
-                ViewMode::SideBySide => "Side-by-Side",
-                ViewMode::Unified => "Unified",
-                ViewMode::Inline => "Inline",
-            };
-            let btn_w = label.len() as f32 * CHAR_WIDTH + 16.0;
-            let is_active = self.view_mode == *mode;
-
-            tree.push(RenderCommand::FillRect {
-                x: btn_x,
-                y: btn_y,
-                width: btn_w,
-                height: btn_h,
-                color: if is_active {
-                    colors::SURFACE1
-                } else {
-                    colors::SURFACE0
-                },
-                corner_radii: CornerRadii::all(4.0),
-            });
-
-            tree.push(RenderCommand::Text {
-                x: btn_x + 8.0,
-                y: btn_y + 7.0,
-                text: label.to_string(),
-                color: if is_active {
-                    colors::BLUE
-                } else {
-                    colors::TEXT
-                },
-                font_size: UI_FONT_SIZE,
-                font_weight: if is_active {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: None,
-            });
-
-            btn_x += btn_w + 6.0;
-        }
+        // View mode buttons
+        self.render_view_mode_buttons(tree, &mut btn_x, btn_y, btn_h);
 
         // Separator
         btn_x += 8.0;
@@ -1692,35 +1860,7 @@ impl FileDiffApp {
         btn_x += 14.0;
 
         // Navigation buttons
-        let nav_buttons = [
-            ("Prev", "F7"),
-            ("Next", "F8"),
-        ];
-        for (label, shortcut) in &nav_buttons {
-            let full_label = format!("{label} ({shortcut})");
-            let btn_w = full_label.len() as f32 * CHAR_WIDTH + 16.0;
-
-            tree.push(RenderCommand::FillRect {
-                x: btn_x,
-                y: btn_y,
-                width: btn_w,
-                height: btn_h,
-                color: colors::SURFACE0,
-                corner_radii: CornerRadii::all(4.0),
-            });
-
-            tree.push(RenderCommand::Text {
-                x: btn_x + 8.0,
-                y: btn_y + 7.0,
-                text: full_label,
-                color: colors::TEXT,
-                font_size: UI_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-
-            btn_x += btn_w + 6.0;
-        }
+        self.render_nav_buttons(tree, &mut btn_x, btn_y, btn_h);
 
         // Separator
         btn_x += 8.0;
@@ -1735,6 +1875,119 @@ impl FileDiffApp {
         btn_x += 14.0;
 
         // Ignore option toggles
+        self.render_ignore_toggles(tree, &mut btn_x, btn_y, btn_h);
+
+        // Sync scroll indicator (right-aligned)
+        self.render_sync_indicator(tree, btn_y, btn_h);
+
+        // Toolbar bottom border
+        tree.push(RenderCommand::Line {
+            x1: 0.0,
+            y1: TOOLBAR_HEIGHT,
+            x2: self.width,
+            y2: TOOLBAR_HEIGHT,
+            color: colors::SURFACE0,
+            width: 1.0,
+        });
+    }
+
+    /// Render view mode toggle buttons.
+    fn render_view_mode_buttons(
+        &self,
+        tree: &mut RenderTree,
+        btn_x: &mut f32,
+        btn_y: f32,
+        btn_h: f32,
+    ) {
+        let modes = [
+            (ViewMode::SideBySide, "Side-by-Side"),
+            (ViewMode::Unified, "Unified"),
+            (ViewMode::Inline, "Inline"),
+        ];
+
+        for (mode, label) in &modes {
+            let btn_w = label.len() as f32 * CHAR_WIDTH + 16.0;
+            let is_active = self.view_mode == *mode;
+
+            tree.push(RenderCommand::FillRect {
+                x: *btn_x,
+                y: btn_y,
+                width: btn_w,
+                height: btn_h,
+                color: if is_active {
+                    colors::SURFACE1
+                } else {
+                    colors::SURFACE0
+                },
+                corner_radii: CornerRadii::all(4.0),
+            });
+
+            tree.push(RenderCommand::Text {
+                x: *btn_x + 8.0,
+                y: btn_y + 7.0,
+                text: (*label).to_string(),
+                color: if is_active {
+                    colors::BLUE
+                } else {
+                    colors::TEXT
+                },
+                font_size: UI_FONT_SIZE,
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: None,
+            });
+
+            *btn_x += btn_w + 6.0;
+        }
+    }
+
+    /// Render navigation buttons.
+    fn render_nav_buttons(
+        &self,
+        tree: &mut RenderTree,
+        btn_x: &mut f32,
+        btn_y: f32,
+        btn_h: f32,
+    ) {
+        let nav_buttons = [("Prev", "F7"), ("Next", "F8")];
+        for (label, shortcut) in &nav_buttons {
+            let full_label = format!("{label} ({shortcut})");
+            let btn_w = full_label.len() as f32 * CHAR_WIDTH + 16.0;
+
+            tree.push(RenderCommand::FillRect {
+                x: *btn_x,
+                y: btn_y,
+                width: btn_w,
+                height: btn_h,
+                color: colors::SURFACE0,
+                corner_radii: CornerRadii::all(4.0),
+            });
+
+            tree.push(RenderCommand::Text {
+                x: *btn_x + 8.0,
+                y: btn_y + 7.0,
+                text: full_label,
+                color: colors::TEXT,
+                font_size: UI_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+            });
+
+            *btn_x += btn_w + 6.0;
+        }
+    }
+
+    /// Render ignore option toggle buttons.
+    fn render_ignore_toggles(
+        &self,
+        tree: &mut RenderTree,
+        btn_x: &mut f32,
+        btn_y: f32,
+        btn_h: f32,
+    ) {
         let ignore_toggles = [
             ("WS", self.ignore_opts.ignore_whitespace),
             ("Case", self.ignore_opts.ignore_case),
@@ -1744,7 +1997,7 @@ impl FileDiffApp {
             let btn_w = label.len() as f32 * CHAR_WIDTH + 16.0;
 
             tree.push(RenderCommand::FillRect {
-                x: btn_x,
+                x: *btn_x,
                 y: btn_y,
                 width: btn_w,
                 height: btn_h,
@@ -1757,7 +2010,7 @@ impl FileDiffApp {
             });
 
             tree.push(RenderCommand::Text {
-                x: btn_x + 8.0,
+                x: *btn_x + 8.0,
                 y: btn_y + 7.0,
                 text: (*label).to_string(),
                 color: if *active {
@@ -1770,10 +2023,12 @@ impl FileDiffApp {
                 max_width: None,
             });
 
-            btn_x += btn_w + 6.0;
+            *btn_x += btn_w + 6.0;
         }
+    }
 
-        // Sync scroll indicator (right-aligned)
+    /// Render the scroll sync indicator button (right-aligned).
+    fn render_sync_indicator(&self, tree: &mut RenderTree, btn_y: f32, btn_h: f32) {
         let sync_label = if self.sync_scroll {
             "Sync: ON"
         } else {
@@ -1808,16 +2063,6 @@ impl FileDiffApp {
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
-
-        // Toolbar bottom border
-        tree.push(RenderCommand::Line {
-            x1: 0.0,
-            y1: TOOLBAR_HEIGHT,
-            x2: self.width,
-            y2: TOOLBAR_HEIGHT,
-            color: colors::SURFACE0,
-            width: 1.0,
-        });
     }
 
     /// Render side-by-side diff view.
@@ -1833,15 +2078,14 @@ impl FileDiffApp {
         let visible_count = (content_height / LINE_HEIGHT) as usize + 2;
 
         // Left panel header
-        self.render_panel_header(tree, 0.0, content_y, panel_width, &self.left_path, false);
+        render_panel_header(tree, 0.0, content_y, panel_width, &self.left_path);
         // Right panel header
-        self.render_panel_header(
+        render_panel_header(
             tree,
             panel_width + SEPARATOR_WIDTH,
             content_y,
             panel_width,
             &self.right_path,
-            true,
         );
 
         let header_h = LINE_HEIGHT;
@@ -1858,7 +2102,6 @@ impl FileDiffApp {
         });
 
         // Render visible lines
-        // Build side-by-side pairs from edits
         let pairs = build_side_by_side_pairs(&diff.edits);
 
         let end = (first_visible.saturating_add(visible_count)).min(pairs.len());
@@ -1866,31 +2109,27 @@ impl FileDiffApp {
             let y = lines_y + vi as f32 * LINE_HEIGHT;
             if let Some(pair) = pairs.get(pair_idx) {
                 // Left side
-                self.render_diff_line(
-                    tree,
-                    0.0,
+                render_diff_line(tree, &DiffLineParams {
+                    x: 0.0,
                     y,
-                    panel_width,
-                    pair.left_line,
-                    pair.left_text.as_deref(),
-                    pair.left_op,
-                    false,
-                );
+                    width: panel_width,
+                    line_num: pair.left_line,
+                    text: pair.left_text.as_deref(),
+                    op: pair.left_op,
+                });
                 // Right side
-                self.render_diff_line(
-                    tree,
-                    panel_width + SEPARATOR_WIDTH,
+                render_diff_line(tree, &DiffLineParams {
+                    x: panel_width + SEPARATOR_WIDTH,
                     y,
-                    panel_width,
-                    pair.right_line,
-                    pair.right_text.as_deref(),
-                    pair.right_op,
-                    true,
-                );
+                    width: panel_width,
+                    line_num: pair.right_line,
+                    text: pair.right_text.as_deref(),
+                    op: pair.right_op,
+                });
             }
         }
 
-        // Scrollbar
+        // Scrollbars
         self.render_scrollbar(
             tree,
             panel_width - 8.0,
@@ -1924,73 +2163,7 @@ impl FileDiffApp {
         for (vi, edit_idx) in (first_visible..end).enumerate() {
             let y = content_y + vi as f32 * LINE_HEIGHT;
             if let Some(edit) = diff.edits.get(edit_idx) {
-                let (bg_color, prefix, text_color) = match edit.op {
-                    DiffOp::Equal => (colors::BASE, " ", colors::TEXT),
-                    DiffOp::Insert => (colors::ADD_BG, "+", colors::GREEN),
-                    DiffOp::Delete => (colors::DEL_BG, "-", colors::RED),
-                };
-
-                // Background
-                tree.push(RenderCommand::FillRect {
-                    x: 0.0,
-                    y,
-                    width: self.width,
-                    height: LINE_HEIGHT,
-                    color: bg_color,
-                    corner_radii: CornerRadii::ZERO,
-                });
-
-                // Left line number
-                if let Some(ln) = edit.left_line {
-                    let ln_text = format!("{}", ln.saturating_add(1));
-                    tree.push(RenderCommand::Text {
-                        x: PANEL_PADDING,
-                        y: y + 3.0,
-                        text: ln_text,
-                        color: colors::OVERLAY0,
-                        font_size: CONTENT_FONT_SIZE,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(GUTTER_WIDTH - 4.0),
-                    });
-                }
-
-                // Right line number
-                if let Some(rn) = edit.right_line {
-                    let rn_text = format!("{}", rn.saturating_add(1));
-                    tree.push(RenderCommand::Text {
-                        x: GUTTER_WIDTH + PANEL_PADDING,
-                        y: y + 3.0,
-                        text: rn_text,
-                        color: colors::OVERLAY0,
-                        font_size: CONTENT_FONT_SIZE,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(GUTTER_WIDTH - 4.0),
-                    });
-                }
-
-                // Prefix
-                let prefix_x = GUTTER_WIDTH * 2.0 + PANEL_PADDING;
-                tree.push(RenderCommand::Text {
-                    x: prefix_x,
-                    y: y + 3.0,
-                    text: prefix.to_string(),
-                    color: text_color,
-                    font_size: CONTENT_FONT_SIZE,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                });
-
-                // Text content
-                let text_x = prefix_x + CHAR_WIDTH * 2.0;
-                tree.push(RenderCommand::Text {
-                    x: text_x,
-                    y: y + 3.0,
-                    text: edit.text.clone(),
-                    color: text_color,
-                    font_size: CONTENT_FONT_SIZE,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(self.width - text_x - 12.0),
-                });
+                self.render_unified_line(tree, y, edit);
             }
         }
 
@@ -2005,6 +2178,77 @@ impl FileDiffApp {
         );
     }
 
+    /// Render a single unified diff line.
+    fn render_unified_line(&self, tree: &mut RenderTree, y: f32, edit: &DiffEdit) {
+        let (bg_color, prefix, text_color) = match edit.op {
+            DiffOp::Equal => (colors::BASE, " ", colors::TEXT),
+            DiffOp::Insert => (colors::ADD_BG, "+", colors::GREEN),
+            DiffOp::Delete => (colors::DEL_BG, "-", colors::RED),
+        };
+
+        // Background
+        tree.push(RenderCommand::FillRect {
+            x: 0.0,
+            y,
+            width: self.width,
+            height: LINE_HEIGHT,
+            color: bg_color,
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        // Left line number
+        if let Some(ln) = edit.left_line {
+            let ln_text = format!("{}", ln.saturating_add(1));
+            tree.push(RenderCommand::Text {
+                x: PANEL_PADDING,
+                y: y + 3.0,
+                text: ln_text,
+                color: colors::OVERLAY0,
+                font_size: CONTENT_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(GUTTER_WIDTH - 4.0),
+            });
+        }
+
+        // Right line number
+        if let Some(rn) = edit.right_line {
+            let rn_text = format!("{}", rn.saturating_add(1));
+            tree.push(RenderCommand::Text {
+                x: GUTTER_WIDTH + PANEL_PADDING,
+                y: y + 3.0,
+                text: rn_text,
+                color: colors::OVERLAY0,
+                font_size: CONTENT_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(GUTTER_WIDTH - 4.0),
+            });
+        }
+
+        // Prefix
+        let prefix_x = GUTTER_WIDTH * 2.0 + PANEL_PADDING;
+        tree.push(RenderCommand::Text {
+            x: prefix_x,
+            y: y + 3.0,
+            text: prefix.to_string(),
+            color: text_color,
+            font_size: CONTENT_FONT_SIZE,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
+        });
+
+        // Text content
+        let text_x = prefix_x + CHAR_WIDTH * 2.0;
+        tree.push(RenderCommand::Text {
+            x: text_x,
+            y: y + 3.0,
+            text: edit.text.clone(),
+            color: text_color,
+            font_size: CONTENT_FONT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(self.width - text_x - 12.0),
+        });
+    }
+
     /// Render inline diff view with character-level highlighting.
     fn render_inline(
         &self,
@@ -2016,7 +2260,6 @@ impl FileDiffApp {
         let first_visible = self.scroll_left as usize;
         let visible_count = (content_height / LINE_HEIGHT) as usize + 2;
 
-        // Build inline pairs: for each delete+insert pair, compute character diffs
         let inline_rows = build_inline_rows(&diff.edits);
 
         let end = (first_visible.saturating_add(visible_count)).min(inline_rows.len());
@@ -2057,12 +2300,8 @@ impl FileDiffApp {
         });
 
         // Line number
-        let ln_text = if let Some(ln) = row.line_num {
-            format!("{}", ln.saturating_add(1))
-        } else {
-            String::new()
-        };
-        if !ln_text.is_empty() {
+        if let Some(ln) = row.line_num {
+            let ln_text = format!("{}", ln.saturating_add(1));
             tree.push(RenderCommand::Text {
                 x: PANEL_PADDING,
                 y: y + 3.0,
@@ -2075,15 +2314,10 @@ impl FileDiffApp {
         }
 
         // Prefix
-        let prefix = match row.op {
-            DiffOp::Equal => " ",
-            DiffOp::Insert => "+",
-            DiffOp::Delete => "-",
-        };
-        let prefix_color = match row.op {
-            DiffOp::Equal => colors::TEXT,
-            DiffOp::Insert => colors::GREEN,
-            DiffOp::Delete => colors::RED,
+        let (prefix, prefix_color) = match row.op {
+            DiffOp::Equal => (" ", colors::TEXT),
+            DiffOp::Insert => ("+", colors::GREEN),
+            DiffOp::Delete => ("-", colors::RED),
         };
         tree.push(RenderCommand::Text {
             x: GUTTER_WIDTH + PANEL_PADDING,
@@ -2098,7 +2332,6 @@ impl FileDiffApp {
         // Render text with inline highlights
         let text_x = GUTTER_WIDTH + PANEL_PADDING + CHAR_WIDTH * 2.0;
         if row.spans.is_empty() {
-            // No inline spans — just render the whole line
             tree.push(RenderCommand::Text {
                 x: text_x,
                 y: y + 3.0,
@@ -2109,161 +2342,65 @@ impl FileDiffApp {
                 max_width: Some(self.width - text_x - 12.0),
             });
         } else {
-            let mut char_offset: f32 = 0.0;
-            for span in &row.spans {
-                let span_text = row
-                    .text
-                    .get(span.start..span.end)
-                    .unwrap_or("");
-                if span_text.is_empty() {
-                    continue;
-                }
+            self.render_inline_spans(tree, text_x, y, row);
+        }
+    }
 
-                if span.changed {
-                    // Highlight background for changed chars
-                    let span_w = span_text.len() as f32 * CHAR_WIDTH;
-                    let highlight_color = match row.op {
-                        DiffOp::Insert => colors::ADD_LINE_BG,
-                        DiffOp::Delete => colors::DEL_LINE_BG,
-                        DiffOp::Equal => colors::BASE,
-                    };
-                    tree.push(RenderCommand::FillRect {
-                        x: text_x + char_offset,
-                        y,
-                        width: span_w,
-                        height: LINE_HEIGHT,
-                        color: highlight_color,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                }
-
-                tree.push(RenderCommand::Text {
-                    x: text_x + char_offset,
-                    y: y + 3.0,
-                    text: span_text.to_string(),
-                    color: if span.changed {
-                        match row.op {
-                            DiffOp::Insert => colors::GREEN,
-                            DiffOp::Delete => colors::RED,
-                            DiffOp::Equal => colors::TEXT,
-                        }
-                    } else {
-                        colors::TEXT
-                    },
-                    font_size: CONTENT_FONT_SIZE,
-                    font_weight: if span.changed {
-                        FontWeightHint::Bold
-                    } else {
-                        FontWeightHint::Regular
-                    },
-                    max_width: None,
-                });
-
-                char_offset += span_text.len() as f32 * CHAR_WIDTH;
+    /// Render character-level spans for an inline row.
+    fn render_inline_spans(
+        &self,
+        tree: &mut RenderTree,
+        text_x: f32,
+        y: f32,
+        row: &InlineRow,
+    ) {
+        let mut char_offset: f32 = 0.0;
+        for span in &row.spans {
+            let span_text = row.text.get(span.start..span.end).unwrap_or("");
+            if span_text.is_empty() {
+                continue;
             }
-        }
-    }
 
-    /// Render a panel header with file path.
-    fn render_panel_header(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        width: f32,
-        path: &str,
-        _is_right: bool,
-    ) {
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: LINE_HEIGHT,
-            color: colors::CRUST,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let display_path = if path.is_empty() { "(no file)" } else { path };
-        tree.push(RenderCommand::Text {
-            x: x + PANEL_PADDING + 4.0,
-            y: y + 3.0,
-            text: display_path.to_string(),
-            color: colors::SUBTEXT1,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width - 12.0),
-        });
-    }
-
-    /// Render a single diff line (used in side-by-side mode).
-    fn render_diff_line(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        width: f32,
-        line_num: Option<usize>,
-        text: Option<&str>,
-        op: Option<DiffOp>,
-        _is_right: bool,
-    ) {
-        let bg_color = match op {
-            Some(DiffOp::Insert) => colors::ADD_BG,
-            Some(DiffOp::Delete) => colors::DEL_BG,
-            Some(DiffOp::Equal) | None => colors::BASE,
-        };
-
-        // Background
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: LINE_HEIGHT,
-            color: bg_color,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Gutter separator
-        tree.push(RenderCommand::Line {
-            x1: x + GUTTER_WIDTH,
-            y1: y,
-            x2: x + GUTTER_WIDTH,
-            y2: y + LINE_HEIGHT,
-            color: colors::SURFACE0,
-            width: 1.0,
-        });
-
-        // Line number
-        if let Some(ln) = line_num {
-            let ln_text = format!("{}", ln.saturating_add(1));
-            tree.push(RenderCommand::Text {
-                x: x + GUTTER_WIDTH - ln_text.len() as f32 * CHAR_WIDTH - 4.0,
-                y: y + 3.0,
-                text: ln_text,
-                color: colors::OVERLAY0,
-                font_size: CONTENT_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(GUTTER_WIDTH - 4.0),
-            });
-        }
-
-        // Text
-        if let Some(text) = text {
-            let text_color = match op {
-                Some(DiffOp::Insert) => colors::GREEN,
-                Some(DiffOp::Delete) => colors::RED,
-                _ => colors::TEXT,
-            };
+            if span.changed {
+                let span_w = span_text.len() as f32 * CHAR_WIDTH;
+                let highlight_color = match row.op {
+                    DiffOp::Insert => colors::ADD_LINE_BG,
+                    DiffOp::Delete => colors::DEL_LINE_BG,
+                    DiffOp::Equal => colors::BASE,
+                };
+                tree.push(RenderCommand::FillRect {
+                    x: text_x + char_offset,
+                    y,
+                    width: span_w,
+                    height: LINE_HEIGHT,
+                    color: highlight_color,
+                    corner_radii: CornerRadii::ZERO,
+                });
+            }
 
             tree.push(RenderCommand::Text {
-                x: x + GUTTER_WIDTH + PANEL_PADDING,
+                x: text_x + char_offset,
                 y: y + 3.0,
-                text: text.to_string(),
-                color: text_color,
+                text: span_text.to_string(),
+                color: if span.changed {
+                    match row.op {
+                        DiffOp::Insert => colors::GREEN,
+                        DiffOp::Delete => colors::RED,
+                        DiffOp::Equal => colors::TEXT,
+                    }
+                } else {
+                    colors::TEXT
+                },
                 font_size: CONTENT_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - GUTTER_WIDTH - PANEL_PADDING - 12.0),
+                font_weight: if span.changed {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: None,
             });
+
+            char_offset += span_text.len() as f32 * CHAR_WIDTH;
         }
     }
 
@@ -2295,9 +2432,8 @@ impl FileDiffApp {
 
     /// Render directory comparison view.
     fn render_dir_compare(&self, tree: &mut RenderTree, y: f32, height: f32) {
-        let result = match &self.dir_compare {
-            Some(r) => r,
-            None => return,
+        let Some(result) = &self.dir_compare else {
+            return;
         };
 
         // Header
@@ -2312,7 +2448,10 @@ impl FileDiffApp {
 
         let summary = format!(
             "Directory Compare: {} same, {} different, {} left only, {} right only",
-            result.same_count, result.different_count, result.only_left_count, result.only_right_count,
+            result.same_count,
+            result.different_count,
+            result.only_left_count,
+            result.only_right_count,
         );
         tree.push(RenderCommand::Text {
             x: PANEL_PADDING + 4.0,
@@ -2333,44 +2472,7 @@ impl FileDiffApp {
         for (vi, entry_idx) in (first_visible..end).enumerate() {
             let ey = list_y + vi as f32 * LINE_HEIGHT;
             if let Some(entry) = result.entries.get(entry_idx) {
-                let (status_color, status_text) = match entry.status {
-                    FileCompareStatus::Same => (colors::GREEN, "Same"),
-                    FileCompareStatus::Different => (colors::YELLOW, "Diff"),
-                    FileCompareStatus::OnlyLeft => (colors::RED, "Left"),
-                    FileCompareStatus::OnlyRight => (colors::BLUE, "Right"),
-                };
-
-                // Status indicator
-                tree.push(RenderCommand::FillRect {
-                    x: PANEL_PADDING,
-                    y: ey + 2.0,
-                    width: 4.0,
-                    height: LINE_HEIGHT - 4.0,
-                    color: status_color,
-                    corner_radii: CornerRadii::all(2.0),
-                });
-
-                // Status text
-                tree.push(RenderCommand::Text {
-                    x: 14.0,
-                    y: ey + 3.0,
-                    text: status_text.to_string(),
-                    color: status_color,
-                    font_size: CONTENT_FONT_SIZE,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(50.0),
-                });
-
-                // File path
-                tree.push(RenderCommand::Text {
-                    x: 70.0,
-                    y: ey + 3.0,
-                    text: entry.path.clone(),
-                    color: colors::TEXT,
-                    font_size: CONTENT_FONT_SIZE,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(self.width - 80.0),
-                });
+                render_dir_entry(tree, ey, entry);
             }
         }
     }
@@ -2403,7 +2505,7 @@ impl FileDiffApp {
             corner_radii: CornerRadii::all(6.0),
         });
 
-        // Search icon / label
+        // Search label
         tree.push(RenderCommand::Text {
             x: bar_x + 8.0,
             y: bar_y + 10.0,
@@ -2415,20 +2517,17 @@ impl FileDiffApp {
         });
 
         // Query text
-        let query_display = if self.search.query.is_empty() {
-            String::new()
-        } else {
-            self.search.query.clone()
-        };
-        tree.push(RenderCommand::Text {
-            x: bar_x + 48.0,
-            y: bar_y + 10.0,
-            text: query_display,
-            color: colors::TEXT,
-            font_size: CONTENT_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(bar_w - 140.0),
-        });
+        if !self.search.query.is_empty() {
+            tree.push(RenderCommand::Text {
+                x: bar_x + 48.0,
+                y: bar_y + 10.0,
+                text: self.search.query.clone(),
+                color: colors::TEXT,
+                font_size: CONTENT_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(bar_w - 140.0),
+            });
+        }
 
         // Match count
         let match_info = if self.search.matches.is_empty() {
@@ -2489,81 +2588,82 @@ impl FileDiffApp {
         });
         text_x += 100.0;
 
-        // Stats
         if self.diff.is_some() {
-            // Change count and navigation position
-            let change_info = if self.change_indices.is_empty() {
-                "No changes".to_string()
-            } else {
-                format!(
-                    "Change {}/{} ",
-                    self.current_change_index.saturating_add(1),
-                    self.change_indices.len()
-                )
-            };
-            tree.push(RenderCommand::Text {
-                x: text_x,
-                y: text_y,
-                text: change_info,
-                color: colors::PEACH,
-                font_size: UI_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-            text_x += 130.0;
+            self.render_status_stats(tree, &mut text_x, text_y);
+        }
+    }
 
-            // Line stats
-            let stats_text = format!(
-                "+{} -{} ~{:.0}%",
-                self.stats.inserted_lines, self.stats.deleted_lines, self.stats.similarity,
-            );
-            tree.push(RenderCommand::Text {
-                x: text_x,
-                y: text_y,
-                text: stats_text,
-                color: colors::TEXT,
-                font_size: UI_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
-            text_x += 140.0;
+    /// Render statistics section of the status bar.
+    fn render_status_stats(&self, tree: &mut RenderTree, text_x: &mut f32, text_y: f32) {
+        // Change navigation position
+        let change_info = if self.change_indices.is_empty() {
+            "No changes".to_string()
+        } else {
+            format!(
+                "Change {}/{} ",
+                self.current_change_index.saturating_add(1),
+                self.change_indices.len()
+            )
+        };
+        tree.push(RenderCommand::Text {
+            x: *text_x,
+            y: text_y,
+            text: change_info,
+            color: colors::PEACH,
+            font_size: UI_FONT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+        });
+        *text_x += 130.0;
 
-            // Left/right totals
-            let totals_text = format!(
-                "L:{} R:{}",
-                self.stats.left_total, self.stats.right_total,
-            );
-            tree.push(RenderCommand::Text {
-                x: text_x,
-                y: text_y,
-                text: totals_text,
-                color: colors::SUBTEXT0,
-                font_size: UI_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-            });
+        // Line stats
+        let stats_text = format!(
+            "+{} -{} ~{:.0}%",
+            self.stats.inserted_lines, self.stats.deleted_lines, self.stats.similarity,
+        );
+        tree.push(RenderCommand::Text {
+            x: *text_x,
+            y: text_y,
+            text: stats_text,
+            color: colors::TEXT,
+            font_size: UI_FONT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+        });
+        *text_x += 140.0;
 
-            // Merge status (right-aligned)
-            if let Some(ref merge) = self.merge {
-                let total_hunks = merge.decisions.len();
-                if total_hunks > 0 {
-                    let decided = merge.decided_count();
-                    let merge_text = format!("Merge: {decided}/{total_hunks}");
-                    let merge_w = merge_text.len() as f32 * CHAR_WIDTH + 8.0;
-                    tree.push(RenderCommand::Text {
-                        x: self.width - merge_w - 8.0,
-                        y: text_y,
-                        text: merge_text,
-                        color: if decided == total_hunks {
-                            colors::GREEN
-                        } else {
-                            colors::YELLOW
-                        },
-                        font_size: UI_FONT_SIZE,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: None,
-                    });
-                }
+        // Left/right totals
+        let totals_text = format!("L:{} R:{}", self.stats.left_total, self.stats.right_total);
+        tree.push(RenderCommand::Text {
+            x: *text_x,
+            y: text_y,
+            text: totals_text,
+            color: colors::SUBTEXT0,
+            font_size: UI_FONT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: None,
+        });
+
+        // Merge status (right-aligned)
+        if let Some(ref merge) = self.merge {
+            let total_hunks = merge.decisions.len();
+            if total_hunks > 0 {
+                let decided = merge.decided_count();
+                let merge_text = format!("Merge: {decided}/{total_hunks}");
+                let merge_w = merge_text.len() as f32 * CHAR_WIDTH + 8.0;
+                tree.push(RenderCommand::Text {
+                    x: self.width - merge_w - 8.0,
+                    y: text_y,
+                    text: merge_text,
+                    color: if decided == total_hunks {
+                        colors::GREEN
+                    } else {
+                        colors::YELLOW
+                    },
+                    font_size: UI_FONT_SIZE,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
+                });
             }
         }
     }
@@ -2620,171 +2720,134 @@ impl FileDiffApp {
 }
 
 // ============================================================================
-// Side-by-side pairing
+// Free functions for rendering (avoid unused_self and too_many_arguments)
 // ============================================================================
 
-/// A paired row for side-by-side display.
-#[derive(Clone, Debug)]
-struct SideBySidePair {
-    left_line: Option<usize>,
-    left_text: Option<String>,
-    left_op: Option<DiffOp>,
-    right_line: Option<usize>,
-    right_text: Option<String>,
-    right_op: Option<DiffOp>,
+/// Render a panel header with file path.
+fn render_panel_header(tree: &mut RenderTree, x: f32, y: f32, width: f32, path: &str) {
+    tree.push(RenderCommand::FillRect {
+        x,
+        y,
+        width,
+        height: LINE_HEIGHT,
+        color: colors::CRUST,
+        corner_radii: CornerRadii::ZERO,
+    });
+
+    let display_path = if path.is_empty() { "(no file)" } else { path };
+    tree.push(RenderCommand::Text {
+        x: x + PANEL_PADDING + 4.0,
+        y: y + 3.0,
+        text: display_path.to_string(),
+        color: colors::SUBTEXT1,
+        font_size: UI_FONT_SIZE,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(width - 12.0),
+    });
 }
 
-/// Build side-by-side pairs from an edit list.
-///
-/// Equal lines appear on both sides. Deletes appear on the left with a blank right.
-/// Inserts appear on the right with a blank left. Consecutive delete+insert pairs
-/// are aligned on the same row.
-fn build_side_by_side_pairs(edits: &[DiffEdit]) -> Vec<SideBySidePair> {
-    let mut pairs = Vec::new();
-    let mut i = 0;
+/// Render a single diff line (used in side-by-side mode).
+fn render_diff_line(tree: &mut RenderTree, params: &DiffLineParams<'_>) {
+    let bg_color = match params.op {
+        Some(DiffOp::Insert) => colors::ADD_BG,
+        Some(DiffOp::Delete) => colors::DEL_BG,
+        Some(DiffOp::Equal) | None => colors::BASE,
+    };
 
-    while i < edits.len() {
-        let edit = match edits.get(i) {
-            Some(e) => e,
-            None => break,
-        };
+    // Background
+    tree.push(RenderCommand::FillRect {
+        x: params.x,
+        y: params.y,
+        width: params.width,
+        height: LINE_HEIGHT,
+        color: bg_color,
+        corner_radii: CornerRadii::ZERO,
+    });
 
-        match edit.op {
-            DiffOp::Equal => {
-                pairs.push(SideBySidePair {
-                    left_line: edit.left_line,
-                    left_text: Some(edit.text.clone()),
-                    left_op: Some(DiffOp::Equal),
-                    right_line: edit.right_line,
-                    right_text: Some(edit.text.clone()),
-                    right_op: Some(DiffOp::Equal),
-                });
-                i = i.saturating_add(1);
-            }
-            DiffOp::Delete => {
-                // Check if the next edit is an insert (paired modification)
-                let next = edits.get(i.saturating_add(1));
-                if let Some(next_edit) = next {
-                    if next_edit.op == DiffOp::Insert {
-                        // Paired: show delete on left, insert on right
-                        pairs.push(SideBySidePair {
-                            left_line: edit.left_line,
-                            left_text: Some(edit.text.clone()),
-                            left_op: Some(DiffOp::Delete),
-                            right_line: next_edit.right_line,
-                            right_text: Some(next_edit.text.clone()),
-                            right_op: Some(DiffOp::Insert),
-                        });
-                        i = i.saturating_add(2);
-                        continue;
-                    }
-                }
-                // Unpaired delete
-                pairs.push(SideBySidePair {
-                    left_line: edit.left_line,
-                    left_text: Some(edit.text.clone()),
-                    left_op: Some(DiffOp::Delete),
-                    right_line: None,
-                    right_text: None,
-                    right_op: None,
-                });
-                i = i.saturating_add(1);
-            }
-            DiffOp::Insert => {
-                pairs.push(SideBySidePair {
-                    left_line: None,
-                    left_text: None,
-                    left_op: None,
-                    right_line: edit.right_line,
-                    right_text: Some(edit.text.clone()),
-                    right_op: Some(DiffOp::Insert),
-                });
-                i = i.saturating_add(1);
-            }
-        }
+    // Gutter separator
+    tree.push(RenderCommand::Line {
+        x1: params.x + GUTTER_WIDTH,
+        y1: params.y,
+        x2: params.x + GUTTER_WIDTH,
+        y2: params.y + LINE_HEIGHT,
+        color: colors::SURFACE0,
+        width: 1.0,
+    });
+
+    // Line number
+    if let Some(ln) = params.line_num {
+        let ln_text = format!("{}", ln.saturating_add(1));
+        tree.push(RenderCommand::Text {
+            x: params.x + GUTTER_WIDTH - ln_text.len() as f32 * CHAR_WIDTH - 4.0,
+            y: params.y + 3.0,
+            text: ln_text,
+            color: colors::OVERLAY0,
+            font_size: CONTENT_FONT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(GUTTER_WIDTH - 4.0),
+        });
     }
 
-    pairs
-}
-
-// ============================================================================
-// Inline rows
-// ============================================================================
-
-/// A row in the inline diff view.
-#[derive(Clone, Debug)]
-struct InlineRow {
-    op: DiffOp,
-    line_num: Option<usize>,
-    text: String,
-    spans: Vec<InlineEdit>,
-}
-
-/// Build inline rows from edits, computing character-level diffs for change pairs.
-fn build_inline_rows(edits: &[DiffEdit]) -> Vec<InlineRow> {
-    let mut rows = Vec::new();
-    let mut i = 0;
-
-    while i < edits.len() {
-        let edit = match edits.get(i) {
-            Some(e) => e,
-            None => break,
+    // Text
+    if let Some(text) = params.text {
+        let text_color = match params.op {
+            Some(DiffOp::Insert) => colors::GREEN,
+            Some(DiffOp::Delete) => colors::RED,
+            _ => colors::TEXT,
         };
 
-        match edit.op {
-            DiffOp::Equal => {
-                rows.push(InlineRow {
-                    op: DiffOp::Equal,
-                    line_num: edit.left_line,
-                    text: edit.text.clone(),
-                    spans: Vec::new(),
-                });
-                i = i.saturating_add(1);
-            }
-            DiffOp::Delete => {
-                let next = edits.get(i.saturating_add(1));
-                if let Some(next_edit) = next {
-                    if next_edit.op == DiffOp::Insert {
-                        let (left_spans, right_spans) =
-                            inline_diff(&edit.text, &next_edit.text);
-
-                        rows.push(InlineRow {
-                            op: DiffOp::Delete,
-                            line_num: edit.left_line,
-                            text: edit.text.clone(),
-                            spans: left_spans,
-                        });
-                        rows.push(InlineRow {
-                            op: DiffOp::Insert,
-                            line_num: next_edit.right_line,
-                            text: next_edit.text.clone(),
-                            spans: right_spans,
-                        });
-                        i = i.saturating_add(2);
-                        continue;
-                    }
-                }
-                rows.push(InlineRow {
-                    op: DiffOp::Delete,
-                    line_num: edit.left_line,
-                    text: edit.text.clone(),
-                    spans: Vec::new(),
-                });
-                i = i.saturating_add(1);
-            }
-            DiffOp::Insert => {
-                rows.push(InlineRow {
-                    op: DiffOp::Insert,
-                    line_num: edit.right_line,
-                    text: edit.text.clone(),
-                    spans: Vec::new(),
-                });
-                i = i.saturating_add(1);
-            }
-        }
+        tree.push(RenderCommand::Text {
+            x: params.x + GUTTER_WIDTH + PANEL_PADDING,
+            y: params.y + 3.0,
+            text: text.to_string(),
+            color: text_color,
+            font_size: CONTENT_FONT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(params.width - GUTTER_WIDTH - PANEL_PADDING - 12.0),
+        });
     }
+}
 
-    rows
+/// Render a single directory comparison entry.
+fn render_dir_entry(tree: &mut RenderTree, ey: f32, entry: &DirCompareEntry) {
+    let (status_color, status_text) = match entry.status {
+        FileCompareStatus::Same => (colors::GREEN, "Same"),
+        FileCompareStatus::Different => (colors::YELLOW, "Diff"),
+        FileCompareStatus::OnlyLeft => (colors::RED, "Left"),
+        FileCompareStatus::OnlyRight => (colors::BLUE, "Right"),
+    };
+
+    // Status indicator
+    tree.push(RenderCommand::FillRect {
+        x: PANEL_PADDING,
+        y: ey + 2.0,
+        width: 4.0,
+        height: LINE_HEIGHT - 4.0,
+        color: status_color,
+        corner_radii: CornerRadii::all(2.0),
+    });
+
+    // Status text
+    tree.push(RenderCommand::Text {
+        x: 14.0,
+        y: ey + 3.0,
+        text: status_text.to_string(),
+        color: status_color,
+        font_size: CONTENT_FONT_SIZE,
+        font_weight: FontWeightHint::Bold,
+        max_width: Some(50.0),
+    });
+
+    // File path
+    tree.push(RenderCommand::Text {
+        x: 70.0,
+        y: ey + 3.0,
+        text: entry.path.clone(),
+        color: colors::TEXT,
+        font_size: CONTENT_FONT_SIZE,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(1200.0),
+    });
 }
 
 // ============================================================================
@@ -2916,7 +2979,6 @@ mod tests {
         let left = ["a", "b", "c", "d"];
         let right = ["a", "x", "c", "d"];
         let result = myers_diff(&left, &right);
-        // First should be equal "a"
         assert_eq!(result[0].op, DiffOp::Equal);
         assert_eq!(result[0].text, "a");
     }
@@ -2943,7 +3005,11 @@ mod tests {
             ..Default::default()
         };
         let result = compute_diff(left, right, &opts);
-        let equal_count = result.edits.iter().filter(|e| e.op == DiffOp::Equal).count();
+        let equal_count = result
+            .edits
+            .iter()
+            .filter(|e| e.op == DiffOp::Equal)
+            .count();
         assert_eq!(equal_count, 2);
     }
 
@@ -2956,7 +3022,11 @@ mod tests {
             ..Default::default()
         };
         let result = compute_diff(left, right, &opts);
-        let equal_count = result.edits.iter().filter(|e| e.op == DiffOp::Equal).count();
+        let equal_count = result
+            .edits
+            .iter()
+            .filter(|e| e.op == DiffOp::Equal)
+            .count();
         assert_eq!(equal_count, 1);
     }
 
@@ -2969,13 +3039,11 @@ mod tests {
             ..Default::default()
         };
         let result = compute_diff(left, right, &opts);
-        // Blank line differences should be treated as equal
         let change_count = result
             .edits
             .iter()
             .filter(|e| e.op != DiffOp::Equal)
             .count();
-        // With blank lines ignored, most edits should be equal
         assert!(change_count <= 1);
     }
 
@@ -3005,7 +3073,6 @@ mod tests {
         let right = "a\nX\nc\nd\ne\nf\ng\nY\ni\nj";
         let opts = IgnoreOptions::default();
         let result = compute_diff(left, right, &opts);
-        // Two separate changes far apart should give two hunks
         assert!(result.hunks.len() >= 2);
     }
 
@@ -3022,7 +3089,6 @@ mod tests {
     #[test]
     fn test_inline_diff_identical() {
         let (left, right) = inline_diff("hello", "hello");
-        // Entire line is unchanged
         for span in &left {
             assert!(!span.changed);
         }
@@ -3041,7 +3107,6 @@ mod tests {
     #[test]
     fn test_inline_diff_prefix_preserved() {
         let (left, right) = inline_diff("hello world", "hello rust");
-        // Both should have a common prefix "hello "
         if let Some(first) = left.first() {
             assert!(!first.changed);
             assert!(first.end > 0);
@@ -3136,7 +3201,6 @@ mod tests {
             ..Default::default()
         };
         search.search(&diff.edits);
-        // Should find in both lines (one is delete "Hello World", one is insert "hello world")
         assert!(!search.matches.is_empty());
     }
 
@@ -3185,11 +3249,9 @@ mod tests {
         search.search(&diff.edits);
         let count = search.matches.len();
         assert!(count > 0);
-        // Go past end
         for _ in 0..count + 1 {
             search.next_match();
         }
-        // Should have wrapped
         assert!(search.current_match < count);
     }
 
@@ -3345,7 +3407,6 @@ mod tests {
         assert!(!app.change_indices.is_empty());
         let initial = app.current_change_index;
         app.next_change();
-        // Should have moved or wrapped
         assert!(app.current_change_index != initial || app.change_indices.len() <= 1);
     }
 
@@ -3355,7 +3416,6 @@ mod tests {
         app.load_files("a", "a\nb", "b", "a\nX");
         assert!(!app.change_indices.is_empty());
         app.prev_change();
-        // Should wrap to end
         assert_eq!(
             app.current_change_index,
             app.change_indices.len().saturating_sub(1)
@@ -3536,7 +3596,12 @@ mod tests {
     #[test]
     fn test_handle_scroll_down() {
         let mut app = FileDiffApp::new();
-        app.load_files("a", "a\nb\nc\nd\ne\nf\ng\nh", "b", "a\nb\nc\nd\ne\nf\ng\nX");
+        app.load_files(
+            "a",
+            "a\nb\nc\nd\ne\nf\ng\nh",
+            "b",
+            "a\nb\nc\nd\ne\nf\ng\nX",
+        );
         let key = KeyEvent {
             key: Key::Down,
             pressed: true,
@@ -3584,5 +3649,28 @@ mod tests {
         let app = FileDiffApp::default();
         assert!(app.diff.is_none());
         assert_eq!(app.view_mode, ViewMode::SideBySide);
+    }
+
+    // --- Additional search current tests ---
+
+    #[test]
+    fn test_search_current_empty() {
+        let search = SearchState::default();
+        assert!(search.current().is_none());
+    }
+
+    #[test]
+    fn test_search_current_with_results() {
+        let left = "hello";
+        let right = "hello";
+        let opts = IgnoreOptions::default();
+        let diff = compute_diff(left, right, &opts);
+        let mut search = SearchState {
+            query: "hello".to_string(),
+            case_sensitive: true,
+            ..Default::default()
+        };
+        search.search(&diff.edits);
+        assert!(search.current().is_some());
     }
 }

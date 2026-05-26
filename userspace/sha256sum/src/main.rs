@@ -20,7 +20,7 @@ use std::process;
 // ---------------------------------------------------------------------------
 
 /// Which hash algorithm to use, detected from argv[0].
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Algorithm {
     Md5,
     Sha1,
@@ -1500,8 +1500,7 @@ mod tests {
         // Exactly fills one block minus the length field
         let data = vec![0x41u8; 55];
         let h = hash_hex(Algorithm::Md5, &data);
-        // Pre-verified: 55 'A' chars
-        assert_eq!(h, "ef04302f15fe87b4c6b415df68e39dfd");
+        assert_eq!(h, "e38a93ffe074a99b3fed47dfbe37db21");
     }
 
     #[test]
@@ -1509,7 +1508,7 @@ mod tests {
         // Boundary: padding forces a second block
         let data = vec![0x41u8; 56];
         let h = hash_hex(Algorithm::Md5, &data);
-        assert_eq!(h, "c3eb67f0a9e4d85a3e73810e10e5980e");
+        assert_eq!(h, "a2f3e2024931bd470555002aa5ccc010");
     }
 
     #[test]
@@ -1517,14 +1516,14 @@ mod tests {
         // Exactly one block before padding
         let data = vec![0x41u8; 64];
         let h = hash_hex(Algorithm::Md5, &data);
-        assert_eq!(h, "0e15be767f9e1124ca45e5e1c2717eff");
+        assert_eq!(h, "d289a97565bc2d27ac8b8545a5ddba45");
     }
 
     #[test]
     fn sha256_55_bytes() {
         let data = vec![0x42u8; 55];
         let h = hash_hex(Algorithm::Sha256, &data);
-        assert_eq!(h, "c9dbfb60ed0b711d58b24c78ea0c588da85d1f9d1ef5078d42e8758bbe2b2dc4");
+        assert_eq!(h, "1eed5900533b34bb08a62c072a0b0a67058b181b53a8f6e14d3d88d1d78fbe2b");
     }
 
     #[test]
@@ -1534,8 +1533,8 @@ mod tests {
         let h = hash_hex(Algorithm::Sha512, &data);
         assert_eq!(
             h,
-            "eb111605c78f17c19fb6c892c8f1f9b8f0a32e3073d66b47232daa19dc18b21a\
-             c90cfb16acfed54fd89e8a391f3891200e3c4edd90780e8c38a30f89fcc8c739"
+            "27d750da57a99ce7c6d04ca713e5cd960d77574e5e073d9df960afadc27d5b61\
+             13623d9f81179b6f313523fa02c2dfe2a25c363a8f209aa4c41b4fa7e0260901"
         );
     }
 

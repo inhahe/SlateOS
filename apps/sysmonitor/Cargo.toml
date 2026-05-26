@@ -3,17 +3,5 @@ name = "sysmonitor"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS System Monitor — graphical dashboard for CPU, memory, disk, network, and process monitoring"
-
-[workspace]
-
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

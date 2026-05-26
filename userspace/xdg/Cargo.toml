@@ -3,16 +3,4 @@ name = "xdg"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS xdg-open/xdg-mime/mimeopen - file association tools"
-
-[workspace]
-
 [dependencies]
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

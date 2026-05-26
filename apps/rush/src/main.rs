@@ -216,7 +216,7 @@ fn orient_from_byte(b: u8) -> Orientation {
 
 const PUZZLE_1: &[(usize, usize, usize, u8, char)] = &[
     (2, 0, 2, b'H', 'X'), // player car, row 2
-    (0, 0, 3, b'V', 'A'), // truck blocking col 0
+    (0, 0, 2, b'V', 'A'), // car blocking col 0, rows 0-1
     (0, 3, 2, b'H', 'B'),
     (1, 4, 2, b'V', 'C'),
     (3, 2, 2, b'H', 'D'),
@@ -249,19 +249,19 @@ const PUZZLE_3: &[(usize, usize, usize, u8, char)] = &[
 ];
 
 const PUZZLE_4: &[(usize, usize, usize, u8, char)] = &[
-    (2, 0, 2, b'H', 'X'),
+    (2, 1, 2, b'H', 'X'),
     (0, 0, 2, b'H', 'A'),
     (0, 2, 3, b'H', 'B'),
     (1, 0, 2, b'V', 'C'),
-    (1, 4, 2, b'V', 'D'),
-    (0, 5, 3, b'V', 'E'),
-    (3, 1, 2, b'V', 'F'),
-    (3, 2, 2, b'H', 'G'),
-    (3, 4, 3, b'V', 'H'),
+    (1, 5, 2, b'V', 'D'),
+    (3, 0, 3, b'H', 'E'),
+    (3, 3, 2, b'V', 'F'),
+    (5, 4, 2, b'H', 'G'),
+    (3, 5, 2, b'V', 'H'),
 ];
 
 const PUZZLE_5: &[(usize, usize, usize, u8, char)] = &[
-    (2, 2, 2, b'H', 'X'),
+    (2, 1, 2, b'H', 'X'),
     (0, 0, 3, b'V', 'A'),
     (0, 1, 2, b'H', 'B'),
     (0, 5, 2, b'V', 'C'),
@@ -270,7 +270,7 @@ const PUZZLE_5: &[(usize, usize, usize, u8, char)] = &[
     (3, 0, 2, b'H', 'F'),
     (3, 2, 3, b'V', 'G'),
     (4, 4, 2, b'H', 'H'),
-    (5, 0, 3, b'H', 'I'),
+    (5, 0, 2, b'H', 'I'),
     (5, 3, 2, b'H', 'J'),
 ];
 
@@ -289,17 +289,17 @@ const PUZZLE_6: &[(usize, usize, usize, u8, char)] = &[
 ];
 
 const PUZZLE_7: &[(usize, usize, usize, u8, char)] = &[
-    (2, 1, 2, b'H', 'X'),
+    (2, 0, 2, b'H', 'X'),
     (0, 0, 2, b'V', 'A'),
     (0, 1, 2, b'H', 'B'),
-    (0, 4, 3, b'V', 'C'),
-    (1, 1, 2, b'V', 'D'),
+    (0, 4, 2, b'V', 'C'),
+    (0, 5, 2, b'V', 'D'),
     (1, 2, 2, b'H', 'E'),
     (2, 3, 3, b'V', 'F'),
     (3, 0, 3, b'H', 'G'),
     (4, 0, 2, b'V', 'H'),
-    (4, 2, 2, b'H', 'I'),
-    (5, 4, 2, b'H', 'J'),
+    (4, 1, 2, b'H', 'I'),
+    (5, 3, 2, b'H', 'J'),
     (4, 5, 2, b'V', 'K'),
 ];
 
@@ -315,8 +315,8 @@ const PUZZLE_8: &[(usize, usize, usize, u8, char)] = &[
     (3, 3, 3, b'V', 'H'),
     (4, 0, 2, b'V', 'I'),
     (4, 1, 2, b'H', 'J'),
-    (5, 2, 2, b'H', 'K'),
-    (4, 4, 2, b'H', 'L'),
+    (5, 1, 2, b'H', 'K'),
+    (4, 4, 2, b'V', 'L'),
 ];
 
 static PUZZLES: &[PuzzleDef] = &[
@@ -1029,7 +1029,7 @@ impl RushHour {
         let (gx, gy) = grid_origin();
 
         for (vi, v) in self.vehicles.iter().enumerate() {
-            let (cy, cx) = cell_pixel_pos(v.row, v.col);
+            let (cx, cy) = cell_pixel_pos(v.row, v.col);
             let is_selected = vi == self.selected && self.status == GameStatus::Playing;
 
             // Vehicle dimensions
@@ -2540,7 +2540,7 @@ mod tests {
         app.selected = 999; // Invalid to prove click works
         let (gx, gy) = grid_origin();
         let player = &app.vehicles[0];
-        let (cy, cx) = cell_pixel_pos(player.row, player.col);
+        let (cx, cy) = cell_pixel_pos(player.row, player.col);
         let click = mouse_click(gx + cx + CELL_SIZE / 2.0, gy + cy + CELL_SIZE / 2.0);
         app.handle_event(&click);
         assert_eq!(app.selected, 0);
@@ -2555,7 +2555,7 @@ mod tests {
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
                 if occ[r][c].is_none() {
-                    let (cy, cx) = cell_pixel_pos(r, c);
+                    let (cx, cy) = cell_pixel_pos(r, c);
                     let click =
                         mouse_click(gx + cx + CELL_SIZE / 2.0, gy + cy + CELL_SIZE / 2.0);
                     app.handle_event(&click);
@@ -2584,7 +2584,7 @@ mod tests {
         // Click on second vehicle
         if app.vehicles.len() > 1 {
             let v = &app.vehicles[1];
-            let (cy, cx) = cell_pixel_pos(v.row, v.col);
+            let (cx, cy) = cell_pixel_pos(v.row, v.col);
             let click = mouse_click(gx + cx + CELL_SIZE / 2.0, gy + cy + CELL_SIZE / 2.0);
             app.handle_event(&click);
             assert_eq!(app.selected, 0); // unchanged
@@ -2599,7 +2599,7 @@ mod tests {
         let (gx, gy) = grid_origin();
         if app.vehicles.len() > 1 {
             let v = &app.vehicles[1];
-            let (cy, cx) = cell_pixel_pos(v.row, v.col);
+            let (cx, cy) = cell_pixel_pos(v.row, v.col);
             let click = mouse_click(gx + cx + CELL_SIZE / 2.0, gy + cy + CELL_SIZE / 2.0);
             app.handle_event(&click);
             assert_eq!(app.selected, 0);

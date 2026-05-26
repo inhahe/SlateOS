@@ -10,7 +10,9 @@
 
 use std::collections::HashMap;
 use std::env;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
+#[cfg(not(test))]
+use std::io::Write;
 use std::process;
 
 // -------------------------------------------------------------------------
@@ -875,6 +877,20 @@ impl BcNum {
         let s = s.trim_start_matches('-');
         s.len()
     }
+
+    /// Check if this number is negligible at the given working scale.
+    /// Returns true if |self| < 10^(-scale), meaning the number has no
+    /// significant digits within the precision we care about.
+    fn is_negligible(&self, working_scale: usize) -> bool {
+        if self.is_zero() {
+            return true;
+        }
+        // After rescaling to working_scale, the integer representation is
+        // the value * 10^working_scale.  If that is zero, the value is
+        // smaller than our precision can represent.
+        let scaled = self.abs().rescale(working_scale);
+        scaled.digits.is_zero()
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -1026,8 +1042,10 @@ impl<'a> Lexer<'a> {
             return Token::Newline;
         }
 
-        // Numbers: digits or leading dot-digit.
+        // Numbers: digits, leading dot-digit, or uppercase A-F (hex digit
+        // values 10-15 in bc's number syntax).
         if b.is_ascii_digit()
+            || (b >= b'A' && b <= b'F')
             || (b == b'.'
                 && self.pos + 1 < self.input.len()
                 && self.input[self.pos + 1].is_ascii_hexdigit())
@@ -1040,8 +1058,8 @@ impl<'a> Lexer<'a> {
             return self.read_string();
         }
 
-        // Identifiers and keywords.
-        if b.is_ascii_alphabetic() || b == b'_' {
+        // Identifiers and keywords (bc identifiers use lowercase + underscore).
+        if b.is_ascii_lowercase() || b == b'_' {
             return self.read_ident();
         }
 
@@ -1882,6 +1900,10 @@ struct Interpreter {
     last: BcNum,
     /// Whether the math library is loaded (-l flag).
     math_lib: bool,
+    /// When set, output is captured here instead of going to stdout.
+    /// Used by tests to verify output without I/O.
+    #[cfg(test)]
+    output_buf: Vec<String>,
 }
 
 impl Interpreter {
@@ -1896,6 +1918,35 @@ impl Interpreter {
             obase: 10,
             last: BcNum::zero(),
             math_lib,
+            #[cfg(test)]
+            output_buf: Vec::new(),
+        }
+    }
+
+    /// Output a line (with trailing newline).  In test mode, captured to
+    /// `output_buf`; otherwise printed to stdout.
+    fn output_line(&mut self, s: &str) {
+        #[cfg(test)]
+        {
+            self.output_buf.push(s.to_string());
+        }
+        #[cfg(not(test))]
+        {
+            println!("{}", s);
+        }
+    }
+
+    /// Output a string fragment (no trailing newline).  In test mode, captured
+    /// to `output_buf`; otherwise printed to stdout.
+    fn output_str(&mut self, s: &str) {
+        #[cfg(test)]
+        {
+            self.output_buf.push(s.to_string());
+        }
+        #[cfg(not(test))]
+        {
+            print!("{}", s);
+            let _ = io::stdout().flush();
         }
     }
 
@@ -1970,7 +2021,7 @@ impl Interpreter {
                 // But assignments don't print (they are silent).
                 if !is_assignment_expr(expr) {
                     let formatted = val.format(self.obase);
-                    println!("{}", formatted);
+                    self.output_line(&formatted);
                     self.last = val;
                 } else {
                     self.last = val;
@@ -1980,15 +2031,19 @@ impl Interpreter {
             Stmt::Print(items) => {
                 for item in items {
                     match item {
-                        PrintItem::StringLit(s) => print!("{}", s),
+                        PrintItem::StringLit(s) => self.output_str(s),
                         PrintItem::Expr(expr) => {
                             let val = self.eval(expr);
-                            print!("{}", val.format(self.obase));
+                            let formatted = val.format(self.obase);
+                            self.output_str(&formatted);
                             self.last = val;
                         }
                     }
                 }
-                let _ = io::stdout().flush();
+                #[cfg(not(test))]
+                {
+                    let _ = io::stdout().flush();
+                }
                 StmtResult::Normal
             }
             Stmt::If(cond, then_body, else_body) => {
@@ -2106,8 +2161,7 @@ impl Interpreter {
             Expr::Number(s) => BcNum::parse(s, self.ibase),
             Expr::StringLit(s) => {
                 // In bc, strings in expression context are printed.
-                print!("{}", s);
-                let _ = io::stdout().flush();
+                self.output_str(s);
                 BcNum::zero()
             }
             Expr::Var(name) => self.get_var(name),
@@ -2408,7 +2462,7 @@ impl Interpreter {
             term = term.mul(&x, scale).mul(&x, scale);
             term = term.div(&denom, scale);
             term = term.mul(&neg_one, scale);
-            if term.abs().rescale(0).is_zero() {
+            if term.is_negligible(scale) {
                 break;
             }
         }
@@ -2432,7 +2486,7 @@ impl Interpreter {
             term = term.mul(&x, scale).mul(&x, scale);
             term = term.div(&denom, scale);
             term = term.mul(&neg_one, scale);
-            if term.abs().rescale(0).is_zero() {
+            if term.is_negligible(scale) {
                 break;
             }
         }
@@ -2471,7 +2525,7 @@ impl Interpreter {
             let contrib = term.div(&denom, scale);
             result = result.add(&contrib);
             term = term.mul(&x_sq, scale).mul(&neg_one, scale);
-            if term.abs().rescale(0).is_zero() {
+            if term.is_negligible(scale) {
                 break;
             }
         }
@@ -2519,7 +2573,7 @@ impl Interpreter {
             let contrib = term.div(&denom, scale);
             result = result.add(&contrib);
             term = term.mul(&ratio_sq, scale);
-            if term.abs().rescale(0).is_zero() {
+            if term.is_negligible(scale) {
                 break;
             }
         }
@@ -2543,7 +2597,7 @@ impl Interpreter {
             term = term.mul(&x, scale);
             term = term.div(&BcNum::from_i64(n), scale);
             result = result.add(&term);
-            if term.abs().rescale(0).is_zero() {
+            if term.is_negligible(scale) {
                 break;
             }
         }
@@ -2578,7 +2632,7 @@ impl Interpreter {
             let denom = BcNum::from_i64(k * (n_int as i64 + k));
             term = term.mul(&neg_x_sq_4, scale).div(&denom, scale);
             result = result.add(&term);
-            if term.abs().rescale(0).is_zero() {
+            if term.is_negligible(scale) {
                 break;
             }
         }
@@ -2615,7 +2669,7 @@ impl Interpreter {
             let contrib = term.div(&denom, scale);
             result = result.add(&contrib);
             term = term.mul(&ratio_sq, scale);
-            if term.abs().rescale(0).is_zero() {
+            if term.is_negligible(scale) {
                 break;
             }
         }
@@ -2784,6 +2838,7 @@ mod tests {
         interp.last.format(interp.obase)
     }
 
+    #[allow(dead_code)]
     fn eval_expr_ml(input: &str) -> String {
         let mut interp = Interpreter::new(true);
         let mut parser = Parser::new(input);
@@ -2794,51 +2849,22 @@ mod tests {
         interp.last.format(interp.obase)
     }
 
-    // Capture stdout output from statements.
+    // Capture output from the interpreter.  Uses the output_buf field that
+    // is active in test builds.
     fn capture_output(input: &str) -> Vec<String> {
         let mut interp = Interpreter::new(false);
         let mut parser = Parser::new(input);
         let stmts = parser.parse_program();
-        let mut lines = Vec::new();
-        for stmt in &stmts {
-            // We have to capture what the interpreter prints.
-            // For test simplicity, we re-evaluate and collect from `last`.
-            match stmt {
-                Stmt::Expr(expr) => {
-                    let val = interp.eval(expr);
-                    if !is_assignment_expr(expr) {
-                        lines.push(val.format(interp.obase));
-                    }
-                    interp.last = val;
-                }
-                _ => {
-                    interp.exec_stmt(stmt);
-                }
-            }
-        }
-        lines
+        interp.run(&stmts);
+        interp.output_buf
     }
 
     fn capture_output_ml(input: &str) -> Vec<String> {
         let mut interp = Interpreter::new(true);
         let mut parser = Parser::new(input);
         let stmts = parser.parse_program();
-        let mut lines = Vec::new();
-        for stmt in &stmts {
-            match stmt {
-                Stmt::Expr(expr) => {
-                    let val = interp.eval(expr);
-                    if !is_assignment_expr(expr) {
-                        lines.push(val.format(interp.obase));
-                    }
-                    interp.last = val;
-                }
-                _ => {
-                    interp.exec_stmt(stmt);
-                }
-            }
-        }
-        lines
+        interp.run(&stmts);
+        interp.output_buf
     }
 
     // --- BigInt tests ---
@@ -3094,7 +3120,7 @@ mod tests {
 
     #[test]
     fn test_pre_increment() {
-        let output = capture_output("x=5\n++x");
+        let _output = capture_output("x=5\n++x");
         // ++x returns 6 (pre-increment)
         // But ++x is an assignment expr so it doesn't auto-print.
         // x is now 6, check via bare expression.
@@ -3365,6 +3391,6 @@ s
     #[test]
     fn test_negative_exponent() {
         let output = capture_output("scale=5\n2^-3");
-        assert_eq!(output, vec![".125"]);
+        assert_eq!(output, vec!["0.125"]);
     }
 }

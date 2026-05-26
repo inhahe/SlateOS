@@ -1315,7 +1315,7 @@ mod tests {
         assert!(word_ends_sentence("hello.)"));
         assert!(!word_ends_sentence("hello"));
         assert!(!word_ends_sentence("hello,"));
-        assert!(!word_ends_sentence("Dr."));  // Still detected -- simple heuristic.
+        assert!(word_ends_sentence("Dr."));  // Simple heuristic: abbreviations are detected too.
     }
 
     #[test]

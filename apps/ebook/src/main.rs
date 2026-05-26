@@ -204,8 +204,6 @@ pub struct Chapter {
 /// title line is found.
 pub fn parse_chapters(text: &str) -> Vec<Chapter> {
     let mut chapters = Vec::new();
-    #[allow(unused_assignments)]
-    let mut offset: usize = 0;
     let mut chapter_idx: usize = 0;
 
     // Always add the start of the text as chapter 0.
@@ -225,17 +223,16 @@ pub fn parse_chapters(text: &str) -> Vec<Chapter> {
         // Check for `---` separator on its own line.
         if is_separator_line(text, i) {
             // Skip past the separator line.
-            let line_end = find_line_end(text, i);
-            offset = line_end;
-            let title = first_nonblank_line(&text[offset..])
+            let sep_end = find_line_end(text, i);
+            let title = first_nonblank_line(&text[sep_end..])
                 .unwrap_or_else(|| default_chapter_title_leak(chapter_idx));
             chapters.push(Chapter {
                 title: title.to_owned(),
-                byte_offset: offset,
+                byte_offset: sep_end,
                 index: chapter_idx,
             });
             chapter_idx = chapter_idx.saturating_add(1);
-            i = line_end;
+            i = sep_end;
             continue;
         }
 
@@ -246,13 +243,12 @@ pub fn parse_chapters(text: &str) -> Vec<Chapter> {
             while j < len && (bytes.get(j).copied() == Some(b'\n') || bytes.get(j).copied() == Some(b'\r')) {
                 j = j.saturating_add(1);
             }
-            offset = j;
-            if offset < len {
-                let title = first_nonblank_line(&text[offset..])
+            if j < len {
+                let title = first_nonblank_line(&text[j..])
                     .unwrap_or_else(|| default_chapter_title_leak(chapter_idx));
                 chapters.push(Chapter {
                     title: title.to_owned(),
-                    byte_offset: offset,
+                    byte_offset: j,
                     index: chapter_idx,
                 });
                 chapter_idx = chapter_idx.saturating_add(1);

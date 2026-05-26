@@ -1834,7 +1834,7 @@ mod tests {
     #[test]
     fn test_new_game_all_cards_unique() {
         let game = Hearts::new();
-        let mut all_cards = Vec::new();
+        let mut all_cards: Vec<&Card> = Vec::new();
         for hand in &game.hands {
             all_cards.extend(hand.iter());
         }
@@ -2265,13 +2265,16 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_pass_all_have_13_cards() {
+    fn test_execute_pass_preserves_52_cards() {
         let mut game = Hearts::new();
         game.pass_selections = vec![0, 1, 2];
         game.execute_pass();
-        for i in 0..4 {
-            assert_eq!(game.hands[i].len(), 13, "Player {} should have 13 cards after pass", i);
-        }
+        // After passing, AI may have started playing, so count cards in
+        // hands plus any cards already played in the current trick.
+        let hand_total: usize = game.hands.iter().map(|h| h.len()).sum();
+        let trick_cards = game.current_trick.cards.len();
+        assert_eq!(hand_total + trick_cards, 52,
+            "Total cards (hands={} + trick={}) should be 52", hand_total, trick_cards);
     }
 
     // -- Keyboard navigation tests -------------------------------------------

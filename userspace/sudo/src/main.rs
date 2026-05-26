@@ -272,14 +272,9 @@ impl SudoersConfig {
         for d in &self.defaults {
             if d.scope.is_empty() {
                 for (k, v) in &d.settings {
-                    if k == "env_keep" {
-                        for var in v.split_whitespace() {
-                            let var = var.trim_matches('"');
-                            if !result.iter().any(|r| r == var) {
-                                result.push(var.to_string());
-                            }
-                        }
-                    } else if k == "env_keep+=" {
+                    // Handle env_keep, env_keep+=, and env_keep+ (the `+` remains
+                    // when `+=` is split at the first `=`).
+                    if k == "env_keep" || k == "env_keep+=" || k == "env_keep+" {
                         for var in v.split_whitespace() {
                             let var = var.trim_matches('"');
                             if !result.iter().any(|r| r == var) {
@@ -299,7 +294,7 @@ impl SudoersConfig {
         for d in &self.defaults {
             if d.scope.is_empty() {
                 for (k, v) in &d.settings {
-                    if k == "env_check" || k == "env_check+=" {
+                    if k == "env_check" || k == "env_check+=" || k == "env_check+" {
                         for var in v.split_whitespace() {
                             let var = var.trim_matches('"');
                             if !result.iter().any(|r: &String| r == var) {

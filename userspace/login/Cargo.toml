@@ -1,18 +1,6 @@
 [package]
-name = "login"
+name = "login-cli"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS login - user login program"
-
-[workspace]
-
 [dependencies]
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-panic = "abort"

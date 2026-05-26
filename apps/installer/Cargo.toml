@@ -3,9 +3,6 @@ name = "installer"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS Installer — unattended and interactive installation"
-
-[workspace]
-
 [lib]
 name = "installer"
 path = "src/lib.rs"
@@ -13,13 +10,3 @@ path = "src/lib.rs"
 [[bin]]
 name = "installer"
 path = "src/main.rs"
-
-[profile.release]
-opt-level = "s"
-lto = false
-panic = "abort"
-strip = "symbols"
-
-[profile.dev]
-# Note: panic = "abort" is NOT set here so that `cargo test` works with the
-# test harness (which requires panic = "unwind").  Release builds use abort.

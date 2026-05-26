@@ -1,29 +1,65 @@
-# Build configuration for the OS kernel.
-# Target: bare-metal x86_64 (no OS, no std).
+# Workspace-root cargo config.
 #
-# Userspace binaries (init, hello) are excluded from the workspace and
-# built with RUSTFLAGS env override to avoid inheriting these kernel-
-# specific flags.  See scripts/build-userspace.ps1.
+# Defaults are tuned for the kernel (bare-metal x86_64-unknown-none with
+# no build-std, no userspace sysroot). Userspace+apps live in their own
+# zones (apps/, userspace/, gui/, init/, net/) and each has a
+# .cargo/config.toml that overrides target to x86_64-ouros and turns on
+# build-std. Cargo's config search walks up from the invocation cwd, so
+# building from inside a zone picks up the zone config and then this
+# root config — scalar settings (like target) are overridden by the
+# zone config; the kernel-only `[target.x86_64-unknown-none]` rustflags
+# below remain harmless because they only apply when targeting
+# unknown-none.
+#
+# IMPORTANT: do NOT put `[unstable] build-std` here. Cargo's config
+# merge APPENDS arrays — a parent `build-std` would force the kernel
+# build to also rebuild std, which fails because unknown-none has no
+# std support. Keep build-std confined to the zone configs.
 
 [build]
 target = "x86_64-unknown-none"
 
+# Bare-metal x86_64-unknown-none target — used by both the kernel and
+# the bare-metal services in `services/`. Cargo MERGES (appends)
+# rustflags into every crate sharing this triple, so anything kernel-
+# specific that takes a path (linker scripts) MUST live in
+# `kernel/build.rs` instead, where it can use CARGO_MANIFEST_DIR to
+# anchor itself.
+#
+# `code-model=kernel` is safe to set here because services override it
+# with `code-model=large` in their own configs and rustc resolves
+# conflicting `-C code-model` flags by last-wins (zone config rustflags
+# are appended after these, so service overrides take effect).
 [target.x86_64-unknown-none]
-# Use the LLD linker (ships with Rust) for bare-metal linking.
 linker = "rust-lld"
-
-# Custom linker script for kernel memory layout.
 rustflags = [
-    "-C", "link-arg=-Tkernel/linker.ld",
     "-C", "code-model=kernel",
     "-C", "relocation-model=static",
     "-C", "force-frame-pointers=yes",
 ]
 
+# Shared userspace linker flags. Each zone config still has to set
+# `target = "toolchain/x86_64-ouros.json"` to actually activate this
+# block; we keep the rustflags here so the zone configs stay minimal.
+[target.x86_64-ouros]
+linker = "rust-lld"
+rustflags = [
+    "-C", "link-arg=-Ltoolchain/sysroot/lib",
+    "-C", "link-arg=-lstubs",
+    "-C", "link-arg=--allow-multiple-definition",
+]
+
 runner = "scripts/boot-test.sh"
 
 [unstable]
-# build-std is needed if the pre-built core library doesn't work for our target.
-# Uncomment if needed:
-# build-std = ["core", "alloc"]
-# build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true
+
+[alias]
+# Convenience: build any ouros crate from the workspace root without
+# `cd`-ing into a zone. Wraps `cargo build` with the userspace target
+# spec and build-std settings.
+#
+# Example: `cargo +nightly build-ouros -p paloalto-cli --release`
+build-ouros = ["build", "--target=toolchain/x86_64-ouros.json", "-Zbuild-std=core,alloc,std,panic_abort"]
+check-ouros = ["check", "--target=toolchain/x86_64-ouros.json", "-Zbuild-std=core,alloc,std,panic_abort"]
+test-ouros  = ["test",  "--target=toolchain/x86_64-ouros.json", "-Zbuild-std=core,alloc,std,panic_abort"]

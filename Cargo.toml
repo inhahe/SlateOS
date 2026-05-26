@@ -2,128 +2,38 @@
 resolver = "2"
 members = [
     "kernel",
-]
-# Userspace binaries are excluded because they need different rustflags
-# (no code-model=kernel, no kernel linker script).  They are built
-# separately via `cargo build` in their own directories.
-exclude = [
-    "userspace/init",
-    "userspace/hello",
-    "userspace/ticker",
-    # --- shell (osb2) ---
-    "userspace/shell",
-    # --- coreutils (osb2) ---
-    "userspace/coreutils",
+    "apps/*",
+    "gui/*",
+    "init/*",
+    "net/*",
+    "userspace/*",
+    # Bare-metal x86_64-unknown-none targets (no build-std, same target
+    # as the kernel). They live inside this workspace so they share
+    # target/, but their per-crate .cargo/config.toml stays in place to
+    # control linker flags.
     "posix",
-    # --- toolchain (osb2) ---
     "toolchain/stubs",
-    # --- apps (osb2) ---
-    "apps/hexeditor",
-    "apps/contacts",
-    "apps/remotedesktop",
-    "apps/defrag",
-    "apps/benchmark",
-    "apps/screenrecorder",
-    "apps/paint",
-    "apps/markdowneditor",
-    "apps/spreadsheet",
-    "apps/videoplayer",
-    "apps/calendar",
-    "apps/ircclient",
-    "apps/rssreader",
-    "apps/torrent",
-    "apps/email",
-    "apps/filesearch",
-    "apps/notes",
-    "apps/slides",
-    "apps/photomanager",
-    "apps/diagram",
-    "apps/mediaconvert",
-    "apps/passwordgen",
-    "apps/dbviewer",
-    "apps/filediff",
-    "apps/automator",
-    "apps/sysmonitor",
-    "apps/regextester",
-    "apps/jsonviewer",
-    "apps/qrcode",
-    "apps/snippets",
-    "apps/logviewer",
-    # --- osb2 batch 4 ---
-    "apps/tmux",
-    "apps/reminders",
-    "apps/undelete",
-    "apps/renamer",
-    # --- osb2 batch 5 ---
-    "apps/charmap",
-    "apps/camera",
-    "apps/netscan",
-    "apps/pomodoro",
-    "apps/magnifier",
-    "apps/podcast",
-    "apps/diskimager",
-    "apps/dictionary",
-    "apps/whiteboard",
-    "apps/kanban",
-    "apps/radio",
-    # --- osb2 batch 6 ---
-    "apps/worldclock",
-    "apps/minesweeper",
-    "apps/flashcards",
-    "apps/habits",
-    "apps/mindmap",
-    "apps/finance",
-    # --- osb2 batch 7 ---
-    "apps/chess",
-    "apps/sudoku",
-    "apps/tetris",
-    "apps/snake",
-    "apps/game2048",
-    "apps/typingtutor",
-    # --- osb2 batch 8 ---
-    "apps/checkers",
-    "apps/reversi",
-    "apps/ebook",
-    "apps/stopwatch",
-    "apps/compass",
-    "apps/metronome",
-    # --- osb2 batch 9 ---
-    "apps/connect4",
-    "apps/hangman",
-    "apps/simon",
-    "apps/crossword",
-    "apps/wordsearch",
-    "apps/pipes",
-    # --- osb2 batch 10 ---
-    "apps/breakout",
-    "apps/sokoban",
-    "apps/gomoku",
-    "apps/life",
-    "apps/maze",
-    "apps/battleship",
-    "apps/tictactoe",
-    "apps/mandelbrot",
-    # --- osb2 batch 11 ---
-    "apps/pong",
-    "apps/sliding",
-    "apps/solitaire",
-    "apps/nonogram",
-    "apps/asteroids",
-    "apps/pacman",
-    # --- osb2 batch 12 ---
-    "apps/freecell",
-    "apps/yahtzee",
-    "apps/hearts",
-    "apps/mahjong",
-    "apps/towers",
-    "apps/lightsout",
-    # --- osb2 batch 13 ---
-    "apps/dots",
-    "apps/memory",
-    "apps/flood",
-    "apps/nim",
-    "apps/klotski",
-    "apps/rush",
+]
+exclude = [
+    # Bare-metal services (target = x86_64-unknown-none). Living in
+    # `services/` keeps them outside the `userspace/.cargo/config.toml`
+    # build-std blast radius. Each services/* crate is built
+    # independently with its own per-crate .cargo/config.toml.
+    "services",
+    # Empty directory (incomplete crate); skip until populated.
+    "userspace/cylance-cli",
+    # nushell is a self-contained upstream workspace with its own member
+    # list and lockfile. Keep it out of our workspace — build via
+    # `cd nushell && cargo build`.
+    "nushell",
+    # Zone-level cargo config directories — caught by the `*` globs in
+    # `members` above; explicitly exclude them so cargo doesn't try to
+    # read them as crates.
+    "apps/.cargo",
+    "gui/.cargo",
+    "init/.cargo",
+    "net/.cargo",
+    "userspace/.cargo",
 ]
 
 [workspace.lints.clippy]
@@ -135,7 +45,21 @@ panic = "warn"
 indexing_slicing = "warn"
 arithmetic_side_effects = "warn"
 
+# Userspace defaults: size-optimised, abort on panic, stripped.
 [profile.release]
+opt-level = "s"
+lto = false
+panic = "abort"
+strip = "symbols"
+codegen-units = 16
+
+[profile.dev]
+panic = "abort"
+
+# Kernel-specific overrides. cargo does not allow `lto` or `panic` in
+# per-package profile sections (those are workspace-wide), but
+# `opt-level`, `codegen-units`, and `strip` are allowed.
+[profile.release.package.kernel]
 opt-level = 3
-lto = "thin"
 codegen-units = 1
+strip = "none"

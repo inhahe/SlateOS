@@ -16,9 +16,12 @@
 
 #[allow(dead_code)]
 mod highlight;
+#[allow(dead_code)]
+mod syntree;
 
 use guitk::color::Color;
 use guitk::render::RenderTree;
+use syntree::{Pos, SyntaxTree};
 
 use std::collections::VecDeque;
 use std::fs;
@@ -501,6 +504,97 @@ impl Document {
             self.scroll_line = self.cursor_line - visible_lines + 1;
         }
     }
+
+    // ======================================================================
+    // Structural editing (syntree-backed)
+    // ======================================================================
+
+    /// Build a fresh syntactic structure tree for the current buffer state.
+    ///
+    /// The tree is rebuilt on demand rather than cached on the document —
+    /// document edits would invalidate any cached tree, and a full rebuild
+    /// of a typical source file is fast enough that caching is not yet
+    /// worth the bookkeeping complexity. When edits become the bottleneck,
+    /// switch to incremental re-parsing of the affected line range.
+    pub fn build_syntax_tree(&self) -> SyntaxTree {
+        SyntaxTree::build(&self.lines, self.language)
+    }
+
+    /// Returns the depth-first outline of multi-line syntactic scopes.
+    ///
+    /// Each entry is `(depth, header)` where `header` is the trimmed source
+    /// of the line that opens the scope. Suitable for an outline / document-
+    /// symbol panel.
+    pub fn outline(&self) -> Vec<(usize, String)> {
+        self.build_syntax_tree().outline()
+    }
+
+    /// Returns `(start_line, end_line)` pairs for foldable multi-line scopes.
+    pub fn fold_ranges(&self) -> Vec<(usize, usize)> {
+        self.build_syntax_tree().fold_ranges()
+    }
+
+    /// Expand the current selection to the smallest enclosing syntactic
+    /// scope. With no selection, snap to the scope containing the cursor.
+    /// With a selection that already equals an enclosing scope, expand
+    /// outward to that scope's parent. Returns `true` if the selection
+    /// changed.
+    ///
+    /// This is the editor's structural-selection primitive (the
+    /// Ctrl+Shift+A / Alt+Up gesture in IDEs that integrate tree-sitter).
+    pub fn expand_selection(&mut self) -> bool {
+        let tree = self.build_syntax_tree();
+        let (sel_start, sel_end) = self.selection_range();
+        // Find the smallest node enclosing the current selection.
+        let mut idx = tree.enclosing_range(sel_start, sel_end);
+        // If the selection already equals this node's range, expand to its
+        // parent (so repeated invocations grow outward through the tree).
+        let node = &tree.nodes[idx];
+        let at_node_bounds = node.start == sel_start && node.end == sel_end;
+        if at_node_bounds {
+            if let Some(p) = node.parent {
+                idx = p;
+            } else {
+                return false; // already at the root
+            }
+        }
+        let target = &tree.nodes[idx];
+        // Don't snap to the synthetic root if there's nothing useful there.
+        if target.kind == syntree::NodeKind::Root && target.children.is_empty() {
+            return false;
+        }
+        let new_start = target.start;
+        let new_end = target.end;
+        if (new_start, new_end) == (sel_start, sel_end) {
+            return false;
+        }
+        self.set_selection(new_start, new_end);
+        true
+    }
+
+    /// Returns the current selection as a `(start, end)` byte-position pair,
+    /// where `start <= end`. With no selection, both equal the cursor.
+    fn selection_range(&self) -> (Pos, Pos) {
+        let cursor = Pos::new(self.cursor_line, self.cursor_col);
+        match self.selection_anchor {
+            Some((al, ac)) => {
+                let anchor = Pos::new(al, ac);
+                if anchor <= cursor {
+                    (anchor, cursor)
+                } else {
+                    (cursor, anchor)
+                }
+            }
+            None => (cursor, cursor),
+        }
+    }
+
+    /// Set the selection so the anchor is at `start` and the cursor at `end`.
+    fn set_selection(&mut self, start: Pos, end: Pos) {
+        self.selection_anchor = Some((start.line, start.col));
+        self.cursor_line = end.line;
+        self.cursor_col = end.col;
+    }
 }
 
 // ============================================================================
@@ -959,5 +1053,116 @@ fn main() {
     doc.redo();
     println!("  After redo: \"{}\"", doc.lines[0]);
 
+    // Demonstrate structural editing on a small Rust snippet.
+    let mut sample = Document::new();
+    sample.language = Language::Rust;
+    sample.lines = vec![
+        "fn outer() {".to_string(),
+        "    fn inner() {".to_string(),
+        "        let x = 1;".to_string(),
+        "    }".to_string(),
+        "}".to_string(),
+    ];
+    let outline = sample.outline();
+    println!("\nOutline of sample snippet ({} entries):", outline.len());
+    for (depth, header) in &outline {
+        println!("  {}{}", "  ".repeat(*depth), header);
+    }
+    sample.cursor_line = 2;
+    sample.cursor_col = 12;
+    sample.selection_anchor = None;
+    let mut steps = 0;
+    while sample.expand_selection() && steps < 8 {
+        let (s, e) = sample.selection_range();
+        println!(
+            "  expand-selection #{}: ({}:{}) -> ({}:{})",
+            steps + 1,
+            s.line + 1,
+            s.col + 1,
+            e.line + 1,
+            e.col + 1
+        );
+        steps += 1;
+    }
+
     println!("\nText editor ready.");
+}
+
+// ============================================================================
+// Integration tests for syntree-backed Document operations
+// ============================================================================
+
+#[cfg(test)]
+mod doc_syntree_tests {
+    use super::*;
+
+    fn rust_doc(src: &str) -> Document {
+        let mut d = Document::new();
+        d.language = Language::Rust;
+        d.lines = src.lines().map(str::to_string).collect();
+        if d.lines.is_empty() {
+            d.lines.push(String::new());
+        }
+        d
+    }
+
+    #[test]
+    fn outline_lists_top_level_functions() {
+        let d = rust_doc("fn a() {\n    1\n}\n\nfn b() {\n    2\n}\n");
+        let outline = d.outline();
+        // Two multi-line blocks expected.
+        assert!(outline.len() >= 2, "outline = {:?}", outline);
+    }
+
+    #[test]
+    fn expand_selection_grows_to_enclosing_block() {
+        let mut d = rust_doc("fn f() {\n    let x = 1;\n}\n");
+        // Cursor inside the function body.
+        d.cursor_line = 1;
+        d.cursor_col = 8;
+        d.selection_anchor = None;
+        assert!(d.expand_selection());
+        let (s, e) = d.selection_range();
+        // Selection should now span the {...} block.
+        assert_eq!(s.line, 0);
+        assert_eq!(e.line, 2);
+    }
+
+    #[test]
+    fn expand_selection_repeatedly_grows_outward() {
+        let mut d = rust_doc("fn f() {\n    {\n        1\n    }\n}\n");
+        d.cursor_line = 2;
+        d.cursor_col = 8;
+        d.selection_anchor = None;
+        let mut last = d.selection_range();
+        for _ in 0..4 {
+            if !d.expand_selection() {
+                break;
+            }
+            let cur = d.selection_range();
+            // Each step must strictly grow the range.
+            assert!(cur.0 <= last.0 && cur.1 >= last.1 && cur != last);
+            last = cur;
+        }
+    }
+
+    #[test]
+    fn expand_selection_no_op_when_already_at_root() {
+        // A buffer with no scopes: expansion should report no change.
+        let mut d = rust_doc("plain text with no braces\n");
+        d.cursor_line = 0;
+        d.cursor_col = 4;
+        d.selection_anchor = None;
+        assert!(!d.expand_selection());
+    }
+
+    #[test]
+    fn fold_ranges_returned_in_sorted_order() {
+        let d = rust_doc("fn a() {\n    1\n}\nfn b() {\n    2\n}\n");
+        let folds = d.fold_ranges();
+        for w in folds.windows(2) {
+            assert!(w[0] <= w[1]);
+        }
+        assert!(folds.len() >= 2);
+    }
 }

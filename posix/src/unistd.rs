@@ -1635,9 +1635,22 @@ pub struct Sysinfo {
 
 /// Return overall system statistics.
 ///
-/// Fills the `Sysinfo` structure with synthetic values since our
-/// kernel doesn't track all of these yet.  The uptime is derived
-/// from the monotonic clock.
+/// Fills the `Sysinfo` structure from real kernel data on the kernel
+/// target:
+/// - `uptime`: seconds since boot from `SYS_CLOCK_MONOTONIC`.
+/// - `loads`: 1/5/15-minute EWMA load averages from `SYS_LOADAVG`,
+///   rescaled from our internal FSHIFT=11 (×2048) to Linux's FSHIFT=16
+///   (×65536) by left-shifting 5 bits.
+/// - `totalram` / `freeram`: physical page counts from `SYS_PHYS_PAGES_*`
+///   multiplied by `mem_unit` (which is set to our 16 KiB frame size).
+/// - `procs`: 1 (no kernel-side process-count interface yet — this OS
+///   currently runs init as the only userspace process).
+/// - `sharedram` / `bufferram` / `totalswap` / `freeswap` / `totalhigh`
+///   / `freehigh`: 0 (no swap, no buffer-cache accounting, no high-mem
+///   region — we're 64-bit only).
+///
+/// On host builds, returns synthetic values (256 MiB total / 128 MiB free,
+/// zero loads, uptime 0) so unit tests get deterministic output.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -1651,13 +1664,10 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
     let mono_ns = syscall0(SYS_CLOCK_MONOTONIC);
     let uptime = if mono_ns > 0 { mono_ns / 1_000_000_000 } else { 0 };
 
-    // SAFETY: info is verified non-null.
+    // SAFETY: info is verified non-null and points to a valid Sysinfo.
     unsafe {
         let s = &mut *info;
         s.uptime = uptime;
-        s.loads = [0; 3]; // No load tracking yet.
-        s.totalram = 256 * 1024 * 1024; // 256 MiB default.
-        s.freeram = 128 * 1024 * 1024;  // 128 MiB default.
         s.sharedram = 0;
         s.bufferram = 0;
         s.totalswap = 0;
@@ -1666,8 +1676,47 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
         s._pad = [0; 6];
         s.totalhigh = 0;
         s.freehigh = 0;
-        s.mem_unit = 1;
         s._padding = [0; 4];
+
+        #[cfg(target_os = "none")]
+        {
+            // mem_unit = 16384 (frame size).  Linux callers expect
+            // mem_unit to scale totalram/freeram; reporting frames-as-units
+            // avoids u64 multiplication and matches our page-granularity.
+            const FRAME_SIZE: u32 = 16 * 1024;
+            s.mem_unit = FRAME_SIZE;
+
+            // Load averages: kernel returns FSHIFT=11 (×2048); Linux
+            // sysinfo expects FSHIFT=16 (×65536).  Multiply by 32.
+            #[allow(clippy::cast_sign_loss)]
+            let load_for = |idx: u64| -> u64 {
+                let raw = syscall1(SYS_LOADAVG, idx);
+                if raw < 0 { 0 } else { (raw as u64).saturating_mul(32) }
+            };
+            s.loads = [load_for(0), load_for(1), load_for(2)];
+
+            // Physical pages → totalram/freeram (counted in mem_unit-byte units).
+            #[allow(clippy::cast_sign_loss)]
+            let total_pages = {
+                let raw = syscall0(SYS_PHYS_PAGES_TOTAL);
+                if raw < 1 { 1 } else { raw as u64 }
+            };
+            #[allow(clippy::cast_sign_loss)]
+            let free_pages = {
+                let raw = syscall0(SYS_PHYS_PAGES_AVAIL);
+                if raw < 0 { 0 } else { raw as u64 }
+            };
+            s.totalram = total_pages;
+            s.freeram = free_pages;
+        }
+
+        #[cfg(not(target_os = "none"))]
+        {
+            s.loads = [0; 3];
+            s.totalram = 256 * 1024 * 1024;
+            s.freeram = 128 * 1024 * 1024;
+            s.mem_unit = 1;
+        }
     }
 
     0

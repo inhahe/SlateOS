@@ -36,6 +36,10 @@
 //! - Intel VTune — sampling-based hot spot analysis
 //! - DTrace profile provider — timed interrupt sampling
 
+// Diagnostic/profiling subsystem — all public API for tooling and kshell
+// commands; many helpers may not have call sites in production paths yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::serial_println;
 

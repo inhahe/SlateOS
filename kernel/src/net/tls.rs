@@ -43,6 +43,9 @@
 //! - RFC 8439: ChaCha20 and Poly1305 for IETF Protocols
 //! - RFC 7748: Elliptic Curves for Security (X25519)
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::vec::Vec;
 use crate::crypto;
 use crate::error::{KernelError, KernelResult};

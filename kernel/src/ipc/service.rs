@@ -39,6 +39,9 @@
 //! Connect latency: one channel_create (~100-200ns) + one queue push +
 //! one wake.  Total < 1 µs for the fast path.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::string::String;

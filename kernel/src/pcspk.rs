@@ -32,6 +32,11 @@
 //! - Intel 8254 PIT datasheet
 //! - Linux `drivers/input/misc/pcspkr.c`
 
+// PC speaker driver: helpers like `off()`, frequency constants, and
+// debug routines are public API even if production code currently only
+// calls `beep()`.
+#![allow(dead_code)]
+
 use crate::serial_println;
 
 /// PIT channel 2 data port.

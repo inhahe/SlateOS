@@ -40,6 +40,9 @@
 //! - Linux kprobes — dynamic kernel instrumentation
 //! - Valgrind memcheck — shadow memory tracking
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicU8, Ordering};
 use crate::serial_println;
 

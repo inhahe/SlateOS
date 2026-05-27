@@ -71,6 +71,9 @@
 //! A record cache.  [`reverse_resolve6`] queries PTR records in the
 //! `ip6.arpa` domain for IPv6 reverse DNS.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};

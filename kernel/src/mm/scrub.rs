@@ -37,6 +37,10 @@
 //! - Intel SDM Vol. 3B §15.10 — Machine Check Architecture
 //! - ECC Memory Scrubbing: JEDEC DDR4/DDR5 scrub recommendations
 
+// Diagnostic/profiling subsystem — all public API for tooling and kshell
+// commands; many helpers may not have call sites in production paths yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::serial_println;
 use crate::mm::frame::{self, FRAME_SIZE};

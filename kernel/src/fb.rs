@@ -25,6 +25,9 @@
 //! drawn and erased without a backing store.  For the final compositor, a
 //! proper alpha-blended cursor with save/restore will be used.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicI16, AtomicU32, AtomicU64, Ordering};
 

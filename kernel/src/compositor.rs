@@ -28,6 +28,11 @@
 //! scanout buffer on demand, handling overlapping correctly.  A simple
 //! title bar with close/minimize buttons allows basic interaction.
 
+// Window manager API surface (set_pixel, move/raise/list windows, etc.) is
+// exposed for userspace and kshell commands; not every helper is called
+// from kernel-internal paths.
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

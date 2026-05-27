@@ -32,6 +32,9 @@
 //!
 //! Quick-switch: Ctrl+B then 0-9 switches to that session ID directly.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

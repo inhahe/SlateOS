@@ -58,6 +58,12 @@
 //! - RFC 8709: Ed25519 and Ed448 Public Key Algorithms for SSH
 //! - RFC 8731: Secure Shell (SSH) Key Exchange Method Using Curve25519
 
+// SSH server protocol implementation: many constants (algorithm strings,
+// message type codes, packet field accessors) are defined per RFC for
+// completeness even if the current state machine doesn't touch every
+// one yet.
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::vec;

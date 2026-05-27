@@ -27,6 +27,9 @@
 //! - C++ `std::latch` (C++20)
 //! - Linux `struct completion` (one-shot version)
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::waitqueue::WaitQueue;

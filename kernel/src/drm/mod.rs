@@ -37,18 +37,40 @@
 //! - Linux `include/uapi/drm/drm.h`, `drm_mode.h` — userspace ABI
 //! - Wayland protocol spec (for understanding compositor needs)
 
+// The DRM subsystem is built out for completeness against the design spec
+// (atomic modesetting API, EDID parsing, hotplug events, GEM buffer
+// management, plane/encoder/connector enumeration).  Many helpers and
+// fields are exposed for the userspace compositor / hardware backends to
+// consume, but the compositor implementation hasn't wired up every API
+// path yet.  Silence dead_code across the subsystem so legitimate API
+// surface doesn't generate noise.
+#![allow(dead_code)]
+
+#[allow(dead_code)]
 pub mod atomic;
+#[allow(dead_code)]
 pub mod connector;
+#[allow(dead_code)]
 pub mod crtc;
+#[allow(dead_code)]
 pub mod driver;
+#[allow(dead_code)]
 pub mod edid;
+#[allow(dead_code)]
 pub mod encoder;
+#[allow(dead_code)]
 pub mod framebuffer;
+#[allow(dead_code)]
 pub mod gem;
+#[allow(dead_code)]
 pub mod hotplug;
+#[allow(dead_code)]
 pub mod mode;
+#[allow(dead_code)]
 pub mod plane;
+#[allow(dead_code)]
 pub mod property;
+#[allow(dead_code)]
 pub mod syscall;
 
 extern crate alloc;

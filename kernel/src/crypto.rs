@@ -29,6 +29,9 @@
 //! - X25519: RFC 7748 (Elliptic Curves for Security)
 //! - Ed25519: RFC 8032 (Edwards-Curve Digital Signature Algorithm)
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::vec::Vec;
 
 // ---------------------------------------------------------------------------

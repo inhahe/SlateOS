@@ -58,6 +58,9 @@
 //! [`ChannelFull`]: crate::error::KernelError::ChannelFull
 //! [`ChannelClosed`]: crate::error::KernelError::ChannelClosed
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;

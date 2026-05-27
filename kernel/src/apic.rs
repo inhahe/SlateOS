@@ -377,6 +377,7 @@ pub fn timer_jitter() -> Option<TimerJitter> {
 
 /// Get the configured tick rate in Hz.
 #[must_use]
+#[allow(dead_code)] // exposed for kshell `apic` command; not called from kernel hot path
 pub fn tick_rate_hz() -> u32 {
     TICK_RATE_HZ
 }

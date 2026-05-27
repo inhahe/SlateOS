@@ -55,6 +55,9 @@
 //! request parsing and response logic as plain HTTP.  The TLS host key
 //! is generated from the kernel CSPRNG on first start.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;

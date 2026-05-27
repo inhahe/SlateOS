@@ -3147,6 +3147,7 @@ pub fn sleep_ms(ms: u64) {
 ///
 /// - `us` — sleep duration in microseconds (0 = yield)
 #[inline]
+#[allow(dead_code)] // public scheduler API; convenience wrapper around sleep_ns
 pub fn sleep_us(us: u64) {
     sleep_ns(us.saturating_mul(1_000));
 }

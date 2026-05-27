@@ -15,6 +15,9 @@
 //! Dispatch is O(1): a bounds check + array index.  The table is a
 //! flat `[Option<SyscallHandler>; MAX_SYSCALL_NR]` array.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 

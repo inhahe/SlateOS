@@ -47,6 +47,9 @@
 //! - Plan 9 per-process namespaces (the original design)
 //! - Design spec: "Per-process namespaces" in design.txt
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

@@ -43,6 +43,10 @@
 //! - Linux `include/trace/events/kmem.h` — memory tracepoints
 //! - Linux ftrace ring buffer — lock-free per-CPU event recording
 
+// Diagnostic/profiling subsystem — all public API for tooling and kshell
+// commands; many helpers may not have call sites in production paths yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::mm::frame_owner::Owner;
 use crate::serial_println;

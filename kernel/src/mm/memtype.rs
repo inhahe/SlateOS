@@ -41,6 +41,10 @@
 //! uncharge(MemType::PageTable, 1);
 //! ```
 
+// Diagnostic/profiling subsystem — all public API for tooling and kshell
+// commands; many helpers may not have call sites in production paths yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------

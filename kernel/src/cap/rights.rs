@@ -63,6 +63,7 @@ impl Rights {
     pub const ALL: Self = Self(u64::MAX);
 
     /// No rights.
+    #[allow(dead_code)] // public API; convenience constant for capability creation
     pub const NONE: Self = Self(0);
 
     /// Typical read-only: read + wait + duplicate.
@@ -79,6 +80,7 @@ impl Rights {
 
     /// Create an empty rights set.
     #[must_use]
+    #[allow(dead_code)] // public API; constructor for capability creation
     pub const fn empty() -> Self {
         Self(0)
     }
@@ -118,6 +120,7 @@ impl Rights {
 
     /// Remove specific rights from this set.
     #[must_use]
+    #[allow(dead_code)] // public API; counterpart to union/intersect for capability narrowing
     pub const fn remove(self, other: Self) -> Self {
         Self(self.0 & !other.0)
     }

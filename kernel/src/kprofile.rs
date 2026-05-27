@@ -28,6 +28,10 @@
 //! Total overhead per measurement: ~30 cycles (negligible for any path
 //! taking hundreds of cycles or more).
 
+// Diagnostic/profiling subsystem — all public API for tooling and kshell
+// commands; many helpers may not have call sites in production paths yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Named profiling slots.

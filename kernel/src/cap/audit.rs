@@ -273,6 +273,7 @@ pub fn disable() {
 
 /// Whether auditing is enabled.
 #[must_use]
+#[allow(dead_code)] // public API for kshell/tests; production paths use record() directly
 pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }

@@ -38,6 +38,9 @@
 //! the lock internally, so callers do not need to worry about
 //! synchronization.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::vec::Vec;
 use core::fmt;
 use core::ptr;

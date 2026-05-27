@@ -3,6 +3,12 @@
 //! Each syscall has a unique number.  Numbers are grouped by subsystem
 //! to avoid merge conflicts when multiple sessions work in parallel.
 //!
+//! Many constants here are defined ahead of being wired into the
+//! dispatch table — that's intentional. This file is the source of
+//! truth for the ABI numbering, so we allow dead_code at module scope.
+
+#![allow(dead_code)]
+//!
 //! ## Ranges
 //!
 //! | Range     | Owner           | Purpose                        |

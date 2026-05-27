@@ -22,6 +22,9 @@
 //! The ring buffer is single-producer (ISR) / multi-consumer (tasks) using
 //! atomic head/tail.  All ISR-side code uses only atomic operations.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicI16, AtomicU8, AtomicU32, Ordering};
 
 use crate::port;

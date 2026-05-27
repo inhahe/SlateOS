@@ -32,6 +32,9 @@
 //!
 //! `SERVICE_LIMITS` does not call into rlimits, scheduler, or service registry.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;

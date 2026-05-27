@@ -28,8 +28,6 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
-use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
 use super::{ResourceType, Rights};
 
 // ---------------------------------------------------------------------------
@@ -332,55 +330,6 @@ impl CapTable {
         }
         count
     }
-}
-
-// ---------------------------------------------------------------------------
-// Global table (temporary — until per-process tables)
-// ---------------------------------------------------------------------------
-
-/// Global capability table ID counter.
-static NEXT_TABLE_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Global registry of all capability tables, keyed by task/process ID.
-///
-/// In the future, each process will own its `CapTable` directly in
-/// its PCB.  For now, we store them in a global map keyed by an ID.
-static TABLES: Mutex<BTreeMap<u64, CapTable>> = Mutex::new(BTreeMap::new());
-
-/// Create a new capability table and return its ID.
-///
-/// Called when a new task or process is created.
-pub fn create_table() -> u64 {
-    let id = NEXT_TABLE_ID.fetch_add(1, Ordering::Relaxed);
-    let table = CapTable::new();
-    let mut tables = TABLES.lock();
-    tables.insert(id, table);
-    id
-}
-
-/// Remove a capability table (called on task/process exit).
-pub fn destroy_table(table_id: u64) {
-    let mut tables = TABLES.lock();
-    tables.remove(&table_id);
-}
-
-/// Execute an operation on a task's capability table.
-///
-/// This is the primary interface for syscall handlers: look up the
-/// caller's table and perform an operation on it.
-///
-/// # Errors
-///
-/// - `InvalidHandle` — the table ID doesn't exist.
-pub fn with_table<F, R>(table_id: u64, f: F) -> KernelResult<R>
-where
-    F: FnOnce(&mut CapTable) -> KernelResult<R>,
-{
-    let mut tables = TABLES.lock();
-    let table = tables
-        .get_mut(&table_id)
-        .ok_or(KernelError::InvalidHandle)?;
-    f(table)
 }
 
 // ---------------------------------------------------------------------------

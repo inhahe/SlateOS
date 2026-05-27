@@ -9,6 +9,10 @@
 //! At each boot phase, call `mark(Milestone::XYZ)`.  After boot, the
 //! `milestones()` function returns all recorded timestamps for display.
 
+// Diagnostic/profiling subsystem — all public API for tooling and kshell
+// commands; many helpers may not have call sites in production paths yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Boot milestones in chronological order.

@@ -16,6 +16,9 @@
 //! the root namespace and delegate to `netns::interface_config()` for
 //! child namespaces.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 

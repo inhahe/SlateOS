@@ -31,6 +31,10 @@
 //! - Fuchsia `k counters` — unified kernel metric dump
 //! - DTrace snapshot() — point-in-time capture
 
+// Diagnostic/profiling subsystem — all public API for tooling and kshell
+// commands; many helpers may not have call sites in production paths yet.
+#![allow(dead_code)]
+
 use crate::serial_println;
 use core::sync::atomic::{AtomicBool, Ordering};
 

@@ -4,6 +4,12 @@
 //! It prevents accidental overlap when adding new subsystems and provides
 //! a single source of truth for the kernel's memory map.
 //!
+//! USER_* constants and `all_regions()` are part of the VA layout API;
+//! they're exported for tooling/debugging even when not directly used
+//! by the kernel itself, so we allow dead_code at module scope.
+
+#![allow(dead_code)]
+//!
 //! ## Layout (x86_64, higher-half kernel)
 //!
 //! ```text

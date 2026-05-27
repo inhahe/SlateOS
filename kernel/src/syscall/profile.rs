@@ -26,6 +26,11 @@
 //! - Linux ftrace `sys_enter`/`sys_exit` tracepoints
 //! - strace — per-syscall timing and statistics
 
+// Profiler API: query/reset helpers and per-slot accessors are exposed
+// for the kshell `syscallprof` command but not directly invoked from
+// production paths.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::serial_println;
 

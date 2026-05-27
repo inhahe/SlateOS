@@ -35,6 +35,11 @@
 //! - Linux `arch/x86/mm/tlb.c` — `choose_new_asid()`, PCID support
 //! - Linux `arch/x86/include/asm/tlbflush.h` — INVPCID helpers
 
+// PCID is an optimization layer; some helpers (single-address invalidation
+// types, debug accessors) are kept for completeness with the Intel SDM
+// description even though current call sites don't exercise all paths.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::serial_println;
 

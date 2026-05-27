@@ -34,6 +34,10 @@
 //! - Linux `printk_ratelimit()`
 //! - Token bucket algorithm (Wikipedia)
 
+// Rate-limiter API surface: counters and config getters are exposed for
+// any caller that wants to inspect a limiter, but not all paths use them.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------

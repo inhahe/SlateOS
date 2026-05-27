@@ -37,6 +37,9 @@
 //! - Design spec: "Docker: yes, eventually — it needs container
 //!   primitives (namespaces, cgroups equivalent)."
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};

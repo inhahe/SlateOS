@@ -25,6 +25,9 @@
 //! - RFC 8259 (The JavaScript Object Notation Data Interchange Format)
 //! - ECMA-404 (The JSON Data Interchange Syntax)
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 

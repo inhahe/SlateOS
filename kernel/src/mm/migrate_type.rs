@@ -45,6 +45,11 @@
 //! - Linux `mm/page_alloc.c` — per-pageblock migration type tracking
 //! - Mel Gorman, "Understanding the Linux Virtual Memory Manager" §6
 
+// Anti-fragmentation infrastructure: pageblock accessors and migration
+// type APIs are exposed for the compactor to consume.  Until full
+// compaction wiring is in place, several helpers appear unused.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::serial_println;
 

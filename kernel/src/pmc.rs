@@ -41,6 +41,11 @@
 //! - Intel SDM Vol. 3, §19.2: Architectural Performance Monitoring
 //! - AMD APM Vol. 2, §13: Performance Optimization
 
+// PMC is a diagnostic/profiling subsystem; many event constants and
+// helper methods are exposed for ad-hoc measurement but not currently
+// invoked from production paths.
+#![allow(dead_code)]
+
 use crate::cpu;
 use crate::serial_println;
 

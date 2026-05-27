@@ -103,6 +103,7 @@ pub struct GatherStats {
     /// Number of times full flush was used instead of range flush.
     pub full_flush_chosen: u64,
     /// Number of `free_frame` failures (leaked frames).
+    #[allow(dead_code)] // surfaced via stats() for diagnostics; not yet read from kshell
     pub free_failures: u64,
 }
 

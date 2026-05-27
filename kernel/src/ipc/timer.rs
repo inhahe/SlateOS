@@ -27,6 +27,10 @@
 //! Timers can also be registered with completion ports via
 //! `SYS_CP_REGISTER(cp, 5, timer_handle, user_data)`.
 
+// Timer API surface includes counters, configuration constants, and
+// debug accessors that aren't all wired up to syscalls yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::serial_println;
 

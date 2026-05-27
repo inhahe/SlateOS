@@ -10,6 +10,9 @@
 //! of running CPUID directly — this avoids duplicate calls and provides a
 //! single source of truth for CPU capabilities.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 /// Halt the CPU until the next interrupt arrives.
 ///
 /// This is the standard idle instruction — it puts the CPU into a

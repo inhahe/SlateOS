@@ -16,6 +16,9 @@
 //! - IRQ handlers (vectors 32+) will be wired up when the APIC driver
 //!   is initialized.
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use core::arch::global_asm;
 use core::ptr::addr_of;
 use core::ptr::addr_of_mut;

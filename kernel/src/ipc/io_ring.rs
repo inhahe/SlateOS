@@ -59,6 +59,9 @@
 //! - Linux io_uring (Jens Axboe, 2019)
 //! - Design spec: "io_uring-style submission queue" in design desicions.txt
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
 use core::sync::atomic::{AtomicU32, Ordering};

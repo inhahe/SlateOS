@@ -61,6 +61,12 @@ const BUFFER_MASK: usize = BUFFER_SIZE - 1;
 // ---------------------------------------------------------------------------
 
 /// Broad category for a trace event.
+///
+/// Variants not currently emitted (Fs, Net, Sync, Proc, Driver) are
+/// reserved for future instrumentation hooks. We define the full
+/// classification taxonomy up front so trace consumers can rely on
+/// stable category IDs.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Category {
@@ -92,6 +98,7 @@ pub enum Category {
 
 impl Category {
     /// Short name for display.
+    #[allow(dead_code)] // Used by trace dump tooling once wired up.
     pub const fn short_name(self) -> &'static str {
         match self {
             Self::Sched => "sched",
@@ -115,6 +122,10 @@ impl Category {
 // ---------------------------------------------------------------------------
 
 /// Well-known event IDs within each category.
+///
+/// Constants are defined comprehensively so call sites can opt in over
+/// time without revising consumer code. Most aren't yet emitted.
+#[allow(dead_code)]
 pub mod event {
     // Sched events
     pub const CONTEXT_SWITCH: u16 = 1;
@@ -404,6 +415,7 @@ pub fn read_recent(out: &mut [TraceEntry]) -> usize {
 }
 
 /// Clear the trace buffer (reset all counters).
+#[allow(dead_code)] // Exposed by the trace control API once a kshell `trace clear` command exists.
 pub fn clear() {
     TOTAL_EVENTS.store(0, Ordering::Relaxed);
     WRITE_POS.store(0, Ordering::Relaxed);

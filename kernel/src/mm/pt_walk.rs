@@ -32,6 +32,10 @@
 //! - Linux `mm/pagewalk.c` — `walk_page_range()`, `struct mm_walk_ops`
 //! - Linux `arch/x86/mm/init_64.c` — `kernel_physical_mapping_init()`
 
+// Diagnostic/profiling subsystem — all public API for tooling and kshell
+// commands; many helpers may not have call sites in production paths yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::serial_println;
 use crate::mm::page_table::{self, PageFlags};

@@ -29,6 +29,9 @@
 //! +-----------------------------------+
 //! ```
 
+// Subsystem API surface; not every helper has an in-tree caller yet.
+#![allow(dead_code)]
+
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;

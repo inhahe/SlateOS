@@ -33,6 +33,10 @@
 //! - Windows Debug Heap: 0xFD guard bytes, 0xCD init fill, 0xDD free fill
 //! - Electric Fence / DUMA: guard page-based overflow detection
 
+// Diagnostic/profiling subsystem — all public API for tooling and kshell
+// commands; many helpers may not have call sites in production paths yet.
+#![allow(dead_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::serial_println;
 

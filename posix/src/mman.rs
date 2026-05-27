@@ -151,33 +151,78 @@ pub const MCL_FUTURE: i32 = 2;
 /// Lock all pages when they are faulted in (Linux 4.4+).
 pub const MCL_ONFAULT: i32 = 4;
 
+/// Our OS uses 16 KiB pages.  Address arguments to mlock/munlock/msync/
+/// madvise must be aligned to this; lengths are rounded *up* to a
+/// page multiple by the kernel (matching Linux semantics).
+const MMAN_PAGE_SIZE: u64 = 16384;
+
+/// Validate that an address is page-aligned.  Linux returns EINVAL for
+/// non-aligned addresses on mlock/munlock/msync/madvise.
+#[inline]
+fn is_page_aligned(addr: *const core::ffi::c_void) -> bool {
+    (addr as u64) & (MMAN_PAGE_SIZE - 1) == 0
+}
+
+/// Check whether `addr + len` would overflow the address space.  Linux
+/// returns EINVAL when this happens; otherwise the kernel may misinterpret
+/// the range and corrupt unrelated mappings.
+#[inline]
+fn range_overflows(addr: *const core::ffi::c_void, len: SizeT) -> bool {
+    (addr as u64).checked_add(len as u64).is_none()
+}
+
 /// Lock pages in memory.
 ///
-/// Stub: succeeds silently.  No kernel page-pinning support yet.
+/// Validates inputs (addr must be page-aligned; addr + len must not
+/// overflow) and otherwise succeeds silently — we have no kernel
+/// page-pinning yet, so the lock is logically a no-op, but caller
+/// bugs (unaligned addr, wrap-around range) now produce real EINVAL
+/// instead of silent success.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mlock(_addr: *const core::ffi::c_void, _len: SizeT) -> i32 {
+pub extern "C" fn mlock(addr: *const core::ffi::c_void, len: SizeT) -> i32 {
+    if !is_page_aligned(addr) || range_overflows(addr, len) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
 }
 
 /// Unlock pages in memory.
 ///
-/// Stub: succeeds silently.
+/// Same validation as `mlock`; same lock-is-a-no-op success path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn munlock(_addr: *const core::ffi::c_void, _len: SizeT) -> i32 {
+pub extern "C" fn munlock(addr: *const core::ffi::c_void, len: SizeT) -> i32 {
+    if !is_page_aligned(addr) || range_overflows(addr, len) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
 }
 
 /// Lock all pages in the process address space.
 ///
-/// Stub: succeeds silently.
+/// Validates `flags`: must contain at least one of MCL_CURRENT or
+/// MCL_FUTURE (Linux rejects bare 0), and no unknown bits.  MCL_ONFAULT
+/// requires either MCL_CURRENT or MCL_FUTURE.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mlockall(_flags: i32) -> i32 {
+pub extern "C" fn mlockall(flags: i32) -> i32 {
+    let known = MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT;
+    // Reject unknown bits.
+    if flags & !known != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Must have at least one of MCL_CURRENT or MCL_FUTURE.
+    if flags & (MCL_CURRENT | MCL_FUTURE) == 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
 }
 
 /// Unlock all pages.
 ///
-/// Stub: succeeds silently.
+/// Takes no arguments; always succeeds (matches Linux).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn munlockall() -> i32 {
     0
@@ -185,17 +230,85 @@ pub extern "C" fn munlockall() -> i32 {
 
 /// Synchronize a mapped region to its backing store.
 ///
-/// Stub: succeeds silently.  We don't have file-backed mmap yet.
+/// Validates inputs per Linux semantics:
+/// * `addr` must be page-aligned (EINVAL otherwise).
+/// * `addr + length` must not overflow (EINVAL otherwise).
+/// * `flags` must contain exactly one of `MS_SYNC` or `MS_ASYNC`
+///   (EINVAL if neither, EINVAL if both, EINVAL if any unknown bits).
+///   `MS_INVALIDATE` may be combined with either.
+///
+/// Otherwise no-op: we don't have file-backed mmap yet, so there's
+/// nothing to flush.  When that's wired up, this surface stays correct.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn msync(_addr: *mut core::ffi::c_void, _length: SizeT, _flags: i32) -> i32 {
+pub extern "C" fn msync(addr: *mut core::ffi::c_void, length: SizeT, flags: i32) -> i32 {
+    if !is_page_aligned(addr) || range_overflows(addr, length) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let known = MS_ASYNC | MS_SYNC | MS_INVALIDATE;
+    if flags & !known != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Exactly one of MS_SYNC or MS_ASYNC must be set.
+    let sync_async = flags & (MS_SYNC | MS_ASYNC);
+    if sync_async != MS_SYNC && sync_async != MS_ASYNC {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
+}
+
+/// Recognized madvise advice values.  Returns `true` if `advice` is
+/// one of the constants defined for Linux's madvise syscall.  Used by
+/// both `madvise` and `posix_madvise` to give EINVAL for garbage advice.
+fn is_known_madvise(advice: i32) -> bool {
+    matches!(
+        advice,
+        // Core POSIX advisory hints.
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_DONTNEED
+        // Linux extensions.  Numbered values match Linux <asm-generic/mman-common.h>;
+        // we accept the values without acting on them.
+        | 6        // MADV_FREE_OLD (unused on modern Linux)
+        | 8        // MADV_FREE
+        | 9        // MADV_REMOVE
+        | 10       // MADV_DONTFORK
+        | 11       // MADV_DOFORK
+        | 12       // MADV_MERGEABLE
+        | 13       // MADV_UNMERGEABLE
+        | 14       // MADV_HUGEPAGE
+        | 15       // MADV_NOHUGEPAGE
+        | 16       // MADV_DONTDUMP
+        | 17       // MADV_DODUMP
+        | 18       // MADV_WIPEONFORK
+        | 19       // MADV_KEEPONFORK
+        | 20       // MADV_COLD
+        | 21       // MADV_PAGEOUT
+        | 22       // MADV_POPULATE_READ
+        | 23       // MADV_POPULATE_WRITE
+        | 24       // MADV_DONTNEED_LOCKED
+        | 25       // MADV_COLLAPSE
+        | 100      // MADV_HWPOISON
+        | 101      // MADV_SOFT_OFFLINE
+    )
 }
 
 /// Give advice about use of memory.
 ///
-/// Stub: succeeds silently.
+/// Validates inputs (addr page-aligned, addr+length doesn't overflow,
+/// advice is a known `MADV_*` value).  Otherwise advisory no-op: our
+/// kernel doesn't act on access-pattern hints, but garbage from the
+/// caller now produces a real EINVAL instead of silent success.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn madvise(_addr: *mut core::ffi::c_void, _length: SizeT, _advice: i32) -> i32 {
+pub extern "C" fn madvise(addr: *mut core::ffi::c_void, length: SizeT, advice: i32) -> i32 {
+    if !is_page_aligned(addr) || range_overflows(addr, length) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if !is_known_madvise(advice) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
 }
 
@@ -290,8 +403,64 @@ mod tests {
     fn test_mlock_stubs_succeed() {
         assert_eq!(mlock(core::ptr::null(), 4096), 0);
         assert_eq!(munlock(core::ptr::null(), 4096), 0);
-        assert_eq!(mlockall(0), 0);
+        // mlockall(0) is invalid per Linux — flags must contain at least
+        // one of MCL_CURRENT or MCL_FUTURE.
+        assert_eq!(mlockall(MCL_CURRENT), 0);
         assert_eq!(munlockall(), 0);
+    }
+
+    #[test]
+    fn test_mlockall_zero_flags_einval() {
+        // Bare 0 means "lock nothing" which Linux treats as a programmer error.
+        errno::set_errno(0);
+        let ret = mlockall(0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mlockall_unknown_flag_einval() {
+        // Bit 31 isn't a defined MCL_* flag.
+        errno::set_errno(0);
+        let ret = mlockall(MCL_CURRENT | (1 << 30));
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mlockall_onfault_alone_einval() {
+        // MCL_ONFAULT alone (no CURRENT/FUTURE) is invalid.
+        errno::set_errno(0);
+        let ret = mlockall(MCL_ONFAULT);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mlock_unaligned_addr_einval() {
+        // Page size is 16384; 1 is not aligned.
+        errno::set_errno(0);
+        let ret = mlock(1 as *const core::ffi::c_void, 16384);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_munlock_unaligned_addr_einval() {
+        errno::set_errno(0);
+        let ret = munlock(0x100 as *const core::ffi::c_void, 16384);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mlock_overflow_einval() {
+        // u64::MAX as a pointer; any length > 0 overflows.
+        errno::set_errno(0);
+        let ret = mlock(usize::MAX as *const core::ffi::c_void, 16384);
+        assert_eq!(ret, -1);
+        // The addr is also not page-aligned, but EINVAL covers either case.
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
@@ -599,12 +768,13 @@ mod tests {
 
     #[test]
     fn test_mlock_with_nonzero_addr() {
-        assert_eq!(mlock(0x1000 as *const core::ffi::c_void, 16384), 0);
+        // Use an address that's actually page-aligned (16384 = 0x4000).
+        assert_eq!(mlock(0x4000 as *const core::ffi::c_void, 16384), 0);
     }
 
     #[test]
     fn test_munlock_with_nonzero_addr() {
-        assert_eq!(munlock(0x1000 as *const core::ffi::c_void, 16384), 0);
+        assert_eq!(munlock(0x4000 as *const core::ffi::c_void, 16384), 0);
     }
 
     #[test]
@@ -637,12 +807,111 @@ mod tests {
 
     #[test]
     fn test_mlock2_with_addr() {
-        assert_eq!(mlock2(0x1000 as *const core::ffi::c_void, 16384, 0), 0);
+        // 0x4000 = 16384 = page-aligned.
+        assert_eq!(mlock2(0x4000 as *const core::ffi::c_void, 16384, 0), 0);
     }
 
     #[test]
     fn test_mlock2_with_addr_onfault() {
-        assert_eq!(mlock2(0x1000 as *const core::ffi::c_void, 16384, MLOCK_ONFAULT), 0);
+        assert_eq!(mlock2(0x4000 as *const core::ffi::c_void, 16384, MLOCK_ONFAULT), 0);
+    }
+
+    #[test]
+    fn test_mlock2_unknown_flag_einval() {
+        // Bit 1 isn't a defined MLOCK_* flag.
+        errno::set_errno(0);
+        let ret = mlock2(core::ptr::null(), 16384, 0x10);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_msync_no_sync_or_async_einval() {
+        // Must have exactly one of MS_SYNC or MS_ASYNC.
+        errno::set_errno(0);
+        let ret = msync(core::ptr::null_mut(), 16384, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_msync_both_sync_and_async_einval() {
+        errno::set_errno(0);
+        let ret = msync(core::ptr::null_mut(), 16384, MS_SYNC | MS_ASYNC);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_msync_unknown_flag_einval() {
+        errno::set_errno(0);
+        let ret = msync(core::ptr::null_mut(), 16384, MS_SYNC | 0x100);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_msync_unaligned_addr_einval() {
+        errno::set_errno(0);
+        let ret = msync(0x100 as *mut core::ffi::c_void, 16384, MS_SYNC);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_madvise_unknown_advice_einval() {
+        errno::set_errno(0);
+        let ret = madvise(core::ptr::null_mut(), 16384, 999);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_madvise_unaligned_addr_einval() {
+        errno::set_errno(0);
+        let ret = madvise(0x1 as *mut core::ffi::c_void, 16384, MADV_NORMAL);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_madvise_linux_extensions_accepted() {
+        // MADV_FREE (8), MADV_DONTFORK (10), MADV_HUGEPAGE (14), MADV_COLD (20),
+        // MADV_COLLAPSE (25), MADV_HWPOISON (100), MADV_SOFT_OFFLINE (101) — all
+        // valid Linux advisory values; we accept (no-op) without EINVAL.
+        for advice in [8i32, 10, 14, 20, 25, 100, 101] {
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, advice),
+                0,
+                "advice {advice} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_posix_madvise_unknown_advice_returns_einval_directly() {
+        // posix_madvise returns errno DIRECTLY (does not set errno).
+        errno::set_errno(12345);
+        let ret = posix_madvise(core::ptr::null_mut(), 16384, 999);
+        assert_eq!(ret, errno::EINVAL);
+        // errno must be untouched.
+        assert_eq!(errno::get_errno(), 12345);
+    }
+
+    #[test]
+    fn test_posix_madvise_unaligned_addr_einval() {
+        errno::set_errno(12345);
+        let ret = posix_madvise(0x100 as *mut core::ffi::c_void, 16384, POSIX_MADV_NORMAL);
+        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(errno::get_errno(), 12345);
+    }
+
+    #[test]
+    fn test_posix_madvise_rejects_linux_extensions() {
+        // POSIX limits posix_madvise to the 5 POSIX_MADV_* constants; even
+        // values that Linux madvise accepts (MADV_FREE = 8) get EINVAL.
+        let ret = posix_madvise(core::ptr::null_mut(), 16384, 8);
+        assert_eq!(ret, errno::EINVAL);
     }
 
     #[test]
@@ -885,17 +1154,31 @@ pub const POSIX_MADV_DONTNEED: i32 = 4;
 
 /// POSIX-specified memory advice.
 ///
-/// Unlike `madvise` (which sets errno), `posix_madvise` returns the
-/// error code directly (0 on success).
+/// Unlike `madvise` (which sets errno and returns -1), `posix_madvise`
+/// returns the error code directly — 0 on success, positive errno on
+/// failure.  Errno is **not** touched.
 ///
-/// Stub: always returns 0 (advisory, no kernel action).
+/// POSIX restricts `advice` to the six `POSIX_MADV_*` constants — pass
+/// anything else and you get EINVAL even though Linux's `madvise`
+/// would accept many more values.
+///
+/// Errors:
+/// * `EINVAL` — `addr` not page-aligned, `addr + len` overflows, or
+///   `advice` not a `POSIX_MADV_*` constant.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_madvise(
-    _addr: *mut core::ffi::c_void,
-    _len: SizeT,
-    _advice: i32,
+    addr: *mut core::ffi::c_void,
+    len: SizeT,
+    advice: i32,
 ) -> i32 {
-    0
+    if !is_page_aligned(addr) || range_overflows(addr, len) {
+        return errno::EINVAL;
+    }
+    match advice {
+        POSIX_MADV_NORMAL | POSIX_MADV_RANDOM | POSIX_MADV_SEQUENTIAL
+        | POSIX_MADV_WILLNEED | POSIX_MADV_DONTNEED => 0,
+        _ => errno::EINVAL,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,14 +1426,23 @@ pub const MLOCK_ONFAULT: i32 = 1;
 /// `flags == MLOCK_ONFAULT` locks pages only as they are faulted in,
 /// rather than faulting them all in immediately.
 ///
-/// Stub: succeeds silently (same as `mlock`).  No kernel page-pinning
-/// support yet.
+/// Validates inputs the same way `mlock` does (page-aligned addr,
+/// non-overflowing range), plus rejects unknown flag bits with EINVAL.
+/// Otherwise no-op: no kernel page-pinning yet.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mlock2(
-    _addr: *const core::ffi::c_void,
-    _len: SizeT,
-    _flags: i32,
+    addr: *const core::ffi::c_void,
+    len: SizeT,
+    flags: i32,
 ) -> i32 {
+    if !is_page_aligned(addr) || range_overflows(addr, len) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if flags & !MLOCK_ONFAULT != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
 }
 

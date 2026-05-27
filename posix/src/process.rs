@@ -627,17 +627,203 @@ pub extern "C" fn setns(fd: i32, nstype: i32) -> i32 {
     -1
 }
 
+/// Maximum source/target path length accepted by `mount(2)`.
+///
+/// Matches Linux's `PATH_MAX` (4096 bytes including NUL).  Source and
+/// target paths longer than this are rejected with `ENAMETOOLONG`.
+pub const MOUNT_PATH_MAX: usize = 4096;
+
+/// Maximum filesystem-type name length accepted by `mount(2)`.
+///
+/// Linux's `copy_mount_string` caps the fstype copy at `PAGE_SIZE`
+/// (4096 on x86_64).  We use a tighter 256-byte cap which still
+/// accommodates every real-world fstype ("ext4", "xfs", "tmpfs",
+/// "overlay", "fuse.gocryptfs-1.7", "nfs4", "cifs", "9p", ...).
+pub const MOUNT_TYPE_MAX: usize = 256;
+
+/// All `MS_*` bits accepted by `mount(2)`.
+///
+/// Mirrors Linux's user-visible mount-flag set in `fs/namespace.c`.
+/// Any bit outside this mask is rejected with `EINVAL`.  Note that
+/// `MS_KERNMOUNT` is kernel-internal and not exposed here — passing
+/// it from userspace is rejected.
+pub const MOUNT_FLAGS_VALID: u64 = crate::sys_mount::MS_RDONLY
+    | crate::sys_mount::MS_NOSUID
+    | crate::sys_mount::MS_NODEV
+    | crate::sys_mount::MS_NOEXEC
+    | crate::sys_mount::MS_SYNCHRONOUS
+    | crate::sys_mount::MS_REMOUNT
+    | crate::sys_mount::MS_MANDLOCK
+    | crate::sys_mount::MS_DIRSYNC
+    | crate::sys_mount::MS_NOSYMFOLLOW
+    | crate::sys_mount::MS_NOATIME
+    | crate::sys_mount::MS_NODIRATIME
+    | crate::sys_mount::MS_BIND
+    | crate::sys_mount::MS_MOVE
+    | crate::sys_mount::MS_REC
+    | crate::sys_mount::MS_SILENT
+    | crate::sys_mount::MS_POSIXACL
+    | crate::sys_mount::MS_UNBINDABLE
+    | crate::sys_mount::MS_PRIVATE
+    | crate::sys_mount::MS_SLAVE
+    | crate::sys_mount::MS_SHARED
+    | crate::sys_mount::MS_RELATIME
+    | crate::sys_mount::MS_I_VERSION
+    | crate::sys_mount::MS_STRICTATIME
+    | crate::sys_mount::MS_LAZYTIME;
+
+/// Bits that select the *mode* of the mount operation.
+///
+/// Linux's `do_mount` dispatches based on which of these bits is set:
+/// `MS_REMOUNT` → remount path, `MS_BIND` → bind path,
+/// `MS_MOVE` → move path, one of `MS_SHARED|MS_PRIVATE|MS_SLAVE|
+/// MS_UNBINDABLE` → propagation-type change, none → fresh mount.
+///
+/// Exactly **one** (or zero) of these bits may be set.  Combinations
+/// like `MS_BIND | MS_MOVE` or `MS_SHARED | MS_PRIVATE` are rejected
+/// with `EINVAL` (Linux's `do_mount` likewise checks this).  Note that
+/// `MS_REC` is **not** a mode bit — it modifies bind/propagation
+/// operations and may be combined with any of them.
+pub const MOUNT_MODE_BITS: u64 = crate::sys_mount::MS_REMOUNT
+    | crate::sys_mount::MS_BIND
+    | crate::sys_mount::MS_MOVE
+    | crate::sys_mount::MS_SHARED
+    | crate::sys_mount::MS_PRIVATE
+    | crate::sys_mount::MS_SLAVE
+    | crate::sys_mount::MS_UNBINDABLE;
+
 /// Mount a filesystem.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// # Linux behaviour
+///
+/// `mount(const char *source, const char *target, const char *fstype,
+///        unsigned long flags, const void *data)`.  Argument-domain
+/// checks performed before reaching kernel mount code, in the order
+/// Linux executes them:
+///
+/// 1. `target == NULL`                                  → `EFAULT`
+/// 2. empty target string                               → `ENOENT`
+/// 3. target not NUL-terminated within `PATH_MAX`       → `ENAMETOOLONG`
+/// 4. `flags & ~MOUNT_FLAGS_VALID`                      → `EINVAL`
+/// 5. more than one of `MOUNT_MODE_BITS` set            → `EINVAL`
+/// 6. modes requiring a source (`MS_BIND`, `MS_MOVE`, fresh mount)
+///    validate the source pointer:
+///    * `source == NULL`                                → `EFAULT`
+///    * empty source string                             → `ENOENT`
+///    * source overflows `PATH_MAX`                     → `ENAMETOOLONG`
+/// 7. modes requiring a filesystem type (fresh mount only) validate
+///    the fstype pointer:
+///    * `fstype == NULL`                                → `EFAULT`
+///    * empty fstype string                             → `EINVAL`
+///      (matches Linux's "no such filesystem" path)
+///    * fstype overflows `MOUNT_TYPE_MAX`               → `ENAMETOOLONG`
+///
+/// After all argument-domain checks pass we return `ENOSYS`: there is
+/// no VFS/mount-namespace subsystem in this microkernel — filesystem
+/// services live in userspace and are reached via capability handles,
+/// not via the legacy `mount(2)` syscall.
+///
+/// # Safety
+///
+/// When non-NULL, `target` and `source` must each point to a
+/// NUL-terminated byte string or to at least `MOUNT_PATH_MAX + 1`
+/// readable bytes.  `fstype`, when non-NULL, must point to a
+/// NUL-terminated byte string or at least `MOUNT_TYPE_MAX + 1`
+/// readable bytes.  `data` is never dereferenced.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mount(
-    _source: *const u8,
-    _target: *const u8,
-    _fstype: *const u8,
-    _flags: u64,
+    source: *const u8,
+    target: *const u8,
+    fstype: *const u8,
+    flags: u64,
     _data: *const u8,
 ) -> i32 {
+    // (1)–(3) Target: required, non-NULL, non-empty, NUL-terminated
+    // within PATH_MAX.
+    if target.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: target is non-null; caller contract guarantees
+    // NUL-terminated string or PATH_MAX+1 readable bytes.
+    let tlen = unsafe { umount_cstr_len(target, MOUNT_PATH_MAX) };
+    match tlen {
+        None => {
+            errno::set_errno(errno::ENAMETOOLONG);
+            return -1;
+        }
+        Some(0) => {
+            errno::set_errno(errno::ENOENT);
+            return -1;
+        }
+        Some(_) => {}
+    }
+
+    // (4) Reject unknown MS_* bits.
+    if (flags & !MOUNT_FLAGS_VALID) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (5) At most one mode bit may be set.
+    let mode_bits = flags & MOUNT_MODE_BITS;
+    if mode_bits != 0 && !mode_bits.is_power_of_two() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (6) Source required for: fresh mount, MS_BIND, MS_MOVE.
+    // Not required for MS_REMOUNT or any propagation-type change.
+    let source_required = mode_bits == 0
+        || mode_bits == crate::sys_mount::MS_BIND
+        || mode_bits == crate::sys_mount::MS_MOVE;
+    if source_required {
+        if source.is_null() {
+            errno::set_errno(errno::EFAULT);
+            return -1;
+        }
+        // SAFETY: source non-null per caller contract.
+        let slen = unsafe { umount_cstr_len(source, MOUNT_PATH_MAX) };
+        match slen {
+            None => {
+                errno::set_errno(errno::ENAMETOOLONG);
+                return -1;
+            }
+            Some(0) => {
+                errno::set_errno(errno::ENOENT);
+                return -1;
+            }
+            Some(_) => {}
+        }
+    }
+
+    // (7) fstype required only for fresh mount.  Bind/move/remount/
+    // propagation ignore fstype on Linux.
+    let fstype_required = mode_bits == 0;
+    if fstype_required {
+        if fstype.is_null() {
+            errno::set_errno(errno::EFAULT);
+            return -1;
+        }
+        // SAFETY: fstype non-null per caller contract.
+        let flen = unsafe { umount_cstr_len(fstype, MOUNT_TYPE_MAX) };
+        match flen {
+            None => {
+                errno::set_errno(errno::ENAMETOOLONG);
+                return -1;
+            }
+            Some(0) => {
+                // Linux returns ENODEV for empty/unknown fstype after
+                // module-load failure; we collapse to EINVAL since we
+                // never reach fstype lookup.
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            Some(_) => {}
+        }
+    }
+
+    // All arguments validated; VFS/mount subsystem not implemented.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -1589,7 +1775,18 @@ mod tests {
 
     #[test]
     fn test_mount_returns_enosys() {
-        assert_eq!(mount(core::ptr::null(), core::ptr::null(), core::ptr::null(), 0, core::ptr::null()), -1);
+        // Fully-valid arguments: source=/dev/sda1, target=/mnt,
+        // fstype=ext4, flags=0.  Reaches the ENOSYS terminal leg.
+        assert_eq!(
+            mount(
+                b"/dev/sda1\0".as_ptr(),
+                b"/mnt\0".as_ptr(),
+                b"ext4\0".as_ptr(),
+                0,
+                core::ptr::null(),
+            ),
+            -1
+        );
     }
 
     #[test]
@@ -1871,7 +2068,14 @@ mod tests {
     #[test]
     fn test_mount_sets_enosys() {
         crate::errno::set_errno(0);
-        mount(core::ptr::null(), core::ptr::null(), core::ptr::null(), 0, core::ptr::null());
+        // Valid args reach the ENOSYS terminal leg.
+        mount(
+            b"/dev/sda1\0".as_ptr(),
+            b"/mnt\0".as_ptr(),
+            b"ext4\0".as_ptr(),
+            0,
+            core::ptr::null(),
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -3992,5 +4196,932 @@ mod tests {
             assert_eq!(ret, -1, "kcmp type {t} should return -1");
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 53 — mount(2) validator
+    //
+    // Argument-domain checks performed before reaching kernel mount code:
+    //   target NULL                 → EFAULT
+    //   empty target                → ENOENT
+    //   target overflows PATH_MAX   → ENAMETOOLONG
+    //   unknown MS_* bits           → EINVAL
+    //   multiple mode bits          → EINVAL
+    //   source NULL when required   → EFAULT
+    //   empty source when required  → ENOENT
+    //   source overflows PATH_MAX   → ENAMETOOLONG
+    //   fstype NULL on new mount    → EFAULT
+    //   empty fstype on new mount   → EINVAL
+    //   fstype overflows TYPE_MAX   → ENAMETOOLONG
+    //   otherwise                   → ENOSYS
+    // ------------------------------------------------------------------
+
+    // --- target validation ---
+
+    #[test]
+    fn test_mount_null_target_efault() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            core::ptr::null(),
+            b"ext4\0".as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mount_empty_target_enoent() {
+        crate::errno::set_errno(0);
+        let empty = b"\0";
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            empty.as_ptr(),
+            b"ext4\0".as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_mount_target_too_long_enametoolong() {
+        let huge = vec![b'a'; MOUNT_PATH_MAX + 1];
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            huge.as_ptr(),
+            b"ext4\0".as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
+    }
+
+    #[test]
+    fn test_mount_max_length_target_passes() {
+        // 4095 bytes + NUL = exactly at boundary.
+        let mut buf = vec![b'a'; MOUNT_PATH_MAX];
+        buf[MOUNT_PATH_MAX - 1] = 0;
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            buf.as_ptr(),
+            b"ext4\0".as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- flag mask ---
+
+    #[test]
+    fn test_mount_unknown_flag_einval() {
+        crate::errno::set_errno(0);
+        // Bit 1<<31 is well outside MOUNT_FLAGS_VALID.
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            b"/mnt\0".as_ptr(),
+            b"ext4\0".as_ptr(),
+            1u64 << 31,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mount_high_bit_einval() {
+        crate::errno::set_errno(0);
+        // Top bit must be rejected.
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            b"/mnt\0".as_ptr(),
+            b"ext4\0".as_ptr(),
+            1u64 << 63,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mount_kernmount_rejected() {
+        // MS_KERNMOUNT is kernel-internal and must not be settable
+        // from userspace.
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            b"/mnt\0".as_ptr(),
+            b"ext4\0".as_ptr(),
+            crate::sys_mount::MS_KERNMOUNT,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- mode-bit exclusion ---
+
+    #[test]
+    fn test_mount_bind_and_move_einval() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/src\0".as_ptr(),
+            b"/dst\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_BIND | crate::sys_mount::MS_MOVE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mount_remount_and_bind_einval() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/src\0".as_ptr(),
+            b"/dst\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_REMOUNT | crate::sys_mount::MS_BIND,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mount_shared_and_private_einval() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_SHARED | crate::sys_mount::MS_PRIVATE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mount_all_four_propagation_einval() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_SHARED
+                | crate::sys_mount::MS_PRIVATE
+                | crate::sys_mount::MS_SLAVE
+                | crate::sys_mount::MS_UNBINDABLE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mount_move_and_unbindable_einval() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/src\0".as_ptr(),
+            b"/dst\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_MOVE | crate::sys_mount::MS_UNBINDABLE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- MS_REC is NOT a mode bit and can combine with anything ---
+
+    #[test]
+    fn test_mount_rec_with_bind_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/src\0".as_ptr(),
+            b"/dst\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_BIND | crate::sys_mount::MS_REC,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_rec_with_shared_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_SHARED | crate::sys_mount::MS_REC,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- source validation ---
+
+    #[test]
+    fn test_mount_null_source_for_new_mount_efault() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/mnt\0".as_ptr(),
+            b"ext4\0".as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mount_null_source_for_bind_efault() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/dst\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_BIND,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mount_null_source_for_move_efault() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/dst\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_MOVE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mount_null_source_for_remount_passes() {
+        // MS_REMOUNT: source is ignored on Linux; NULL must reach ENOSYS.
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_REMOUNT | crate::sys_mount::MS_RDONLY,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_null_source_for_shared_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_SHARED,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_null_source_for_private_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_PRIVATE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_null_source_for_slave_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_SLAVE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_null_source_for_unbindable_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_UNBINDABLE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_empty_source_enoent() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"\0".as_ptr(),
+            b"/mnt\0".as_ptr(),
+            b"ext4\0".as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_mount_source_too_long_enametoolong() {
+        let huge = vec![b'a'; MOUNT_PATH_MAX + 1];
+        crate::errno::set_errno(0);
+        let ret = mount(
+            huge.as_ptr(),
+            b"/mnt\0".as_ptr(),
+            b"ext4\0".as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
+    }
+
+    // --- fstype validation ---
+
+    #[test]
+    fn test_mount_null_fstype_for_new_mount_efault() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            b"/mnt\0".as_ptr(),
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mount_null_fstype_for_bind_passes() {
+        // MS_BIND: fstype ignored on Linux; NULL must reach ENOSYS.
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/src\0".as_ptr(),
+            b"/dst\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_BIND,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_null_fstype_for_move_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/src\0".as_ptr(),
+            b"/dst\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_MOVE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_null_fstype_for_remount_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_REMOUNT,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_null_fstype_for_propagation_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_SHARED,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_empty_fstype_einval() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            b"/mnt\0".as_ptr(),
+            b"\0".as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mount_fstype_too_long_enametoolong() {
+        let huge = vec![b'a'; MOUNT_TYPE_MAX + 1];
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            b"/mnt\0".as_ptr(),
+            huge.as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
+    }
+
+    #[test]
+    fn test_mount_max_length_fstype_passes() {
+        let mut buf = vec![b'a'; MOUNT_TYPE_MAX];
+        buf[MOUNT_TYPE_MAX - 1] = 0;
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            b"/mnt\0".as_ptr(),
+            buf.as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- successful paths through each mode ---
+
+    #[test]
+    fn test_mount_new_mount_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            b"/\0".as_ptr(),
+            b"ext4\0".as_ptr(),
+            crate::sys_mount::MS_NOATIME,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_remount_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_REMOUNT | crate::sys_mount::MS_RDONLY,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_bind_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/home/user/src\0".as_ptr(),
+            b"/srv/www\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_BIND,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mount_move_passes() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/mnt/old\0".as_ptr(),
+            b"/mnt/new\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_MOVE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- ordering: target check happens BEFORE flag/mode checks ---
+
+    #[test]
+    fn test_mount_target_check_before_flag_check() {
+        // NULL target + bogus flag → must be EFAULT (target check first).
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            core::ptr::null(),
+            b"ext4\0".as_ptr(),
+            1u64 << 31,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mount_target_check_before_mode_check() {
+        // NULL target + BIND|MOVE conflict → must be EFAULT.
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/src\0".as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+            crate::sys_mount::MS_BIND | crate::sys_mount::MS_MOVE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mount_flag_check_before_source_check() {
+        // Unknown flag + NULL source → EINVAL (flag check first).
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/mnt\0".as_ptr(),
+            b"ext4\0".as_ptr(),
+            1u64 << 31,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mount_mode_check_before_source_check() {
+        // BIND|MOVE conflict + NULL source → EINVAL (mode check first).
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/dst\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_BIND | crate::sys_mount::MS_MOVE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mount_source_check_before_fstype_check() {
+        // NULL source + NULL fstype on new mount → EFAULT (source first).
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/mnt\0".as_ptr(),
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // --- constants self-consistency ---
+
+    #[test]
+    fn test_mount_path_max_matches_umount() {
+        // mount and umount must share the PATH_MAX cap.
+        assert_eq!(MOUNT_PATH_MAX, UMOUNT_PATH_MAX);
+    }
+
+    #[test]
+    fn test_mount_type_max_reasonable() {
+        // MOUNT_TYPE_MAX should accommodate every real-world fstype.
+        assert!(MOUNT_TYPE_MAX >= 64);
+        assert!(MOUNT_TYPE_MAX <= MOUNT_PATH_MAX);
+    }
+
+    #[test]
+    fn test_mount_mode_bits_subset_of_valid() {
+        // Every mode bit must also be in MOUNT_FLAGS_VALID.
+        assert_eq!(MOUNT_MODE_BITS & MOUNT_FLAGS_VALID, MOUNT_MODE_BITS);
+    }
+
+    #[test]
+    fn test_mount_rec_not_a_mode_bit() {
+        // MS_REC is a modifier, not a mode bit.
+        assert_eq!(MOUNT_MODE_BITS & crate::sys_mount::MS_REC, 0);
+    }
+
+    #[test]
+    fn test_mount_kernmount_not_in_valid_mask() {
+        // MS_KERNMOUNT is kernel-internal and rejected from userspace.
+        assert_eq!(MOUNT_FLAGS_VALID & crate::sys_mount::MS_KERNMOUNT, 0);
+    }
+
+    // --- errno-preservation on no-op error legs ---
+
+    #[test]
+    fn test_mount_errno_set_to_efault_only() {
+        // After EFAULT, no further mutation of errno.
+        crate::errno::set_errno(0);
+        let _ = mount(
+            b"/dev/sda1\0".as_ptr(),
+            core::ptr::null(),
+            b"ext4\0".as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 53 — mount(2) workflow tests
+    // ------------------------------------------------------------------
+
+    /// systemd-fstab-generator's mount of an ext4 root partition:
+    /// `mount("/dev/disk/by-uuid/<uuid>", "/", "ext4",
+    ///        MS_NOATIME, "errors=remount-ro")`.
+    /// Must validate cleanly and reach ENOSYS so the generator falls
+    /// back to its "kernel-too-old" error path.
+    #[test]
+    fn test_mount_workflow_systemd_ext4_root() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/disk/by-uuid/abcdef01-2345-6789-abcd-ef0123456789\0".as_ptr(),
+            b"/\0".as_ptr(),
+            b"ext4\0".as_ptr(),
+            crate::sys_mount::MS_NOATIME,
+            b"errors=remount-ro\0".as_ptr(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// runc 1.1+ container init mounts `/proc`:
+    /// `mount("proc", "/proc", "proc",
+    ///        MS_NOEXEC|MS_NOSUID|MS_NODEV, NULL)`.
+    /// The OCI runtime spec mandates these protective flags for every
+    /// container's /proc.
+    #[test]
+    fn test_mount_workflow_runc_proc_oci_flags() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"proc\0".as_ptr(),
+            b"/proc\0".as_ptr(),
+            b"proc\0".as_ptr(),
+            crate::sys_mount::MS_NOEXEC
+                | crate::sys_mount::MS_NOSUID
+                | crate::sys_mount::MS_NODEV,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Docker 24+ / containerd-shim overlay mount of a layered image:
+    /// `mount("overlay", "<merged>", "overlay", 0,
+    ///        "lowerdir=L1:L2,upperdir=U,workdir=W")`.
+    /// The opaque `data` blob (lowerdir/upperdir/workdir) is not
+    /// validated by us — only the four pointer/flag positions are.
+    #[test]
+    fn test_mount_workflow_docker_overlay() {
+        crate::errno::set_errno(0);
+        let data = b"lowerdir=/var/lib/docker/overlay2/L1/diff:/var/lib/docker/overlay2/L2/diff,upperdir=/var/lib/docker/overlay2/U/diff,workdir=/var/lib/docker/overlay2/W/work\0";
+        let ret = mount(
+            b"overlay\0".as_ptr(),
+            b"/var/lib/docker/overlay2/abc123/merged\0".as_ptr(),
+            b"overlay\0".as_ptr(),
+            0,
+            data.as_ptr(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// systemd-tmpfiles' `tmpfs` for `/run`:
+    /// `mount("tmpfs", "/run", "tmpfs",
+    ///        MS_NOSUID|MS_NODEV|MS_STRICTATIME,
+    ///        "size=10%,mode=755")`.
+    #[test]
+    fn test_mount_workflow_systemd_tmpfs_run() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"tmpfs\0".as_ptr(),
+            b"/run\0".as_ptr(),
+            b"tmpfs\0".as_ptr(),
+            crate::sys_mount::MS_NOSUID
+                | crate::sys_mount::MS_NODEV
+                | crate::sys_mount::MS_STRICTATIME,
+            b"size=10%,mode=755\0".as_ptr(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// `mount --bind` from util-linux:
+    /// `mount("/home/source", "/mnt/dest", NULL, MS_BIND, NULL)`.
+    /// The user-namespace rootless-container scenario.
+    #[test]
+    fn test_mount_workflow_util_linux_bind() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/home/source\0".as_ptr(),
+            b"/mnt/dest\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_BIND,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// `mount --rbind` (recursive bind), as used by Bubblewrap when
+    /// constructing a Flatpak sandbox:
+    /// `mount("/usr", "/newroot/usr", NULL, MS_BIND|MS_REC, NULL)`.
+    #[test]
+    fn test_mount_workflow_bubblewrap_rbind() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/usr\0".as_ptr(),
+            b"/newroot/usr\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_BIND | crate::sys_mount::MS_REC,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// `mount -o remount,ro /` issued by `shutdown(8)` during system
+    /// halt to flush dirty pages before powering off:
+    /// `mount(NULL, "/", NULL, MS_REMOUNT|MS_RDONLY, NULL)`.
+    #[test]
+    fn test_mount_workflow_shutdown_remount_ro() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_REMOUNT | crate::sys_mount::MS_RDONLY,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// systemd's `MountFlags=private` directive emits
+    /// `mount(NULL, "/", NULL, MS_PRIVATE|MS_REC, NULL)` to isolate
+    /// the unit's mount namespace from the host on PID-1 startup.
+    #[test]
+    fn test_mount_workflow_systemd_mount_flags_private() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            core::ptr::null(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_PRIVATE | crate::sys_mount::MS_REC,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// `mount.cifs` (cifs-utils 7.0+) mounting a Windows SMB share:
+    /// `mount("//fileserver/share", "/mnt/share", "cifs",
+    ///        MS_NOSUID|MS_NODEV,
+    ///        "username=alice,password=...,vers=3.1.1")`.
+    #[test]
+    fn test_mount_workflow_cifs_utils_smb_share() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"//fileserver/share\0".as_ptr(),
+            b"/mnt/share\0".as_ptr(),
+            b"cifs\0".as_ptr(),
+            crate::sys_mount::MS_NOSUID | crate::sys_mount::MS_NODEV,
+            b"username=alice,vers=3.1.1\0".as_ptr(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// `pivot_root`-style transition: dracut's initramfs moves the
+    /// real root from `/sysroot` to `/` via `mount(NULL, "/sysroot",
+    /// NULL, MS_MOVE, NULL)` immediately before switch_root.
+    #[test]
+    fn test_mount_workflow_dracut_pivot_root() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/sysroot\0".as_ptr(),
+            b"/\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_MOVE,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Buggy caller from a real bug report (Go's `syscall.Mount`
+    /// wrapper before Go 1.18): passes `MS_BIND | MS_REMOUNT` to apply
+    /// `nosuid` to a bind-mounted directory.  Linux requires two
+    /// separate calls — the first to bind, the second to remount with
+    /// the new flags.  Our validator rejects the combo with EINVAL,
+    /// matching what Linux returns from `do_mount`'s mode-conflict
+    /// check.  Fixed in Go 1.18 by splitting into two calls.
+    #[test]
+    fn test_mount_workflow_buggy_go_bind_remount_combo() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/src\0".as_ptr(),
+            b"/dst\0".as_ptr(),
+            core::ptr::null(),
+            crate::sys_mount::MS_BIND
+                | crate::sys_mount::MS_REMOUNT
+                | crate::sys_mount::MS_NOSUID,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Buggy caller: bash one-liner `mount -t '' /dev/sda1 /mnt`
+    /// (empty fstype from a `$FS` variable that wasn't set).  Linux
+    /// fails this in `get_fs_type` with ENODEV; we collapse to EINVAL
+    /// at validation time since the fstype lookup never happens.
+    #[test]
+    fn test_mount_workflow_buggy_empty_fstype_var() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            b"/mnt\0".as_ptr(),
+            b"\0".as_ptr(),
+            0,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Buggy caller: Java 11 ProcessBuilder issuing
+    /// `mount("/dev/sda1", "/mnt", "ext4", 1<<30, NULL)` because
+    /// `MountFlag.READ_ONLY.bits()` was set to a stale constant
+    /// from kernel 2.4.  Our validator rejects with EINVAL just as
+    /// Linux's user-flag whitelist would.
+    #[test]
+    fn test_mount_workflow_buggy_stale_kernel_flag() {
+        crate::errno::set_errno(0);
+        let ret = mount(
+            b"/dev/sda1\0".as_ptr(),
+            b"/mnt\0".as_ptr(),
+            b"ext4\0".as_ptr(),
+            1u64 << 30,
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 }

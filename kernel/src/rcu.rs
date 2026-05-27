@@ -291,7 +291,7 @@ pub fn synchronize() {
             // Without this, tickless idle CPUs (whose APIC timer is
             // stopped) would prevent grace periods from completing.
             let idle = CPU_IDLE.get(i)
-                .map_or(false, |f| f.load(Ordering::Acquire));
+                .is_some_and(|f| f.load(Ordering::Acquire));
             if idle {
                 continue;
             }

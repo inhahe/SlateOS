@@ -218,7 +218,7 @@ pub fn set_enabled(enabled: bool) -> KernelResult<()> {
 }
 
 pub fn is_enabled() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.config.enabled)
+    STATE.lock().as_ref().is_some_and(|s| s.config.enabled)
 }
 
 pub fn set_port(port: u16) -> KernelResult<()> {

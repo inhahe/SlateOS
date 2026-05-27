@@ -1110,7 +1110,7 @@ fn register_bsp(bsp_apic_id: u8) {
 ///
 /// Uses the centralized CPU feature cache from [`crate::cpu::features()`].
 fn detect_rdtscp() -> bool {
-    crate::cpu::features().map_or(false, |f| f.rdtscp)
+    crate::cpu::features().is_some_and(|f| f.rdtscp)
 }
 
 /// Detect RDPID instruction support.
@@ -1120,7 +1120,7 @@ fn detect_rdtscp() -> bool {
 ///
 /// Uses the centralized CPU feature cache from [`crate::cpu::features()`].
 fn detect_rdpid() -> bool {
-    crate::cpu::features().map_or(false, |f| f.rdpid)
+    crate::cpu::features().is_some_and(|f| f.rdpid)
 }
 
 // ---------------------------------------------------------------------------

@@ -270,7 +270,7 @@ pub fn set_enabled(enabled: bool) -> KernelResult<()> {
 /// Check if firewall is enabled.
 pub fn is_enabled() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().map_or(false, |s| s.enabled)
+    guard.as_ref().is_some_and(|s| s.enabled)
 }
 
 /// Set the active network zone.

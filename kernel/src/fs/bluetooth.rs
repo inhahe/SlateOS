@@ -326,7 +326,7 @@ pub fn set_enabled(enabled: bool) -> KernelResult<()> {
 /// Check if Bluetooth is enabled.
 pub fn is_enabled() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().map_or(false, |s| s.config.enabled)
+    guard.as_ref().is_some_and(|s| s.config.enabled)
 }
 
 /// Set the adapter display name.

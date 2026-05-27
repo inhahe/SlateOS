@@ -495,7 +495,7 @@ pub fn route_lookup(ns_id: NetNsId, dest_ip: Ipv4Addr) -> Option<Ipv4Addr> {
 
             // Prefer longer prefix (more specific mask = higher u32 value).
             // On tie, prefer lower metric.
-            let dominated = best.map_or(false, |b| {
+            let dominated = best.is_some_and(|b| {
                 let new_prefix = route.mask.to_u32();
                 let old_prefix = b.mask.to_u32();
                 if new_prefix > old_prefix {

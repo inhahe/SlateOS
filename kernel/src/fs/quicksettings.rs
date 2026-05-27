@@ -244,7 +244,7 @@ pub fn set_panel_open(open: bool) -> KernelResult<()> {
 
 /// Check if panel is open.
 pub fn is_panel_open() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.panel_open)
+    STATE.lock().as_ref().is_some_and(|s| s.panel_open)
 }
 
 /// Get all visible tiles sorted by position.

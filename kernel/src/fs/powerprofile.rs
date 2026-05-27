@@ -595,18 +595,18 @@ pub fn battery_info() -> BatteryInfo {
 /// Check if animations should be disabled.
 pub fn should_disable_animations() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().map_or(false, |s| {
+    guard.as_ref().is_some_and(|s| {
         find_profile(s, &s.active_profile.clone())
-            .map_or(false, |p| p.disable_animations)
+            .is_some_and(|p| p.disable_animations)
     })
 }
 
 /// Check if background activity should be reduced.
 pub fn should_reduce_background() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().map_or(false, |s| {
+    guard.as_ref().is_some_and(|s| {
         find_profile(s, &s.active_profile.clone())
-            .map_or(false, |p| p.reduce_background)
+            .is_some_and(|p| p.reduce_background)
     })
 }
 

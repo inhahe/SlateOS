@@ -298,7 +298,7 @@ pub fn list_trusted() -> Vec<PairDevice> {
 
 /// Is scanning?
 pub fn is_scanning() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.scanning)
+    STATE.lock().as_ref().is_some_and(|s| s.scanning)
 }
 
 /// Statistics: (device_count, paired_count, trusted_count, total_paired, total_failed, ops).

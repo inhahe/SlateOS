@@ -701,7 +701,7 @@ impl Journal {
                         // AFTER this transaction, so replaying would corrupt data.
                         let is_revoked = revoke_table
                             .get(fs_block)
-                            .map_or(false, |&revoke_seq| revoke_seq >= txn_seq);
+                            .is_some_and(|&revoke_seq| revoke_seq >= txn_seq);
 
                         if is_revoked {
                             revoked = revoked.saturating_add(1);

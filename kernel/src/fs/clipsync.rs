@@ -300,7 +300,7 @@ pub fn get_queue(max: usize) -> Vec<SyncEntry> {
 
 /// Is sync enabled?
 pub fn is_enabled() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.enabled)
+    STATE.lock().as_ref().is_some_and(|s| s.enabled)
 }
 
 /// Statistics: (device_count, total_sent, total_received, total_bytes, ops).

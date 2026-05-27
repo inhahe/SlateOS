@@ -372,7 +372,7 @@ pub fn charge_pct() -> u8 {
 /// Quick check if on AC power.
 pub fn on_ac_power() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().map_or(false, |s| s.sources.iter().any(|src| src.ac_connected))
+    guard.as_ref().is_some_and(|s| s.sources.iter().any(|src| src.ac_connected))
 }
 
 /// Statistics: (source_count, charge_pct, state_label, cycle_count, alert_count, ops).

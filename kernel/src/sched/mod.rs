@@ -836,7 +836,7 @@ pub fn register_ap_idle(cpu_index: usize) -> TaskId {
 pub fn cpu_is_idle(cpu: usize) -> bool {
     IDLE_FLAGS
         .get(cpu)
-        .map_or(false, |f| f.load(Ordering::Acquire))
+        .is_some_and(|f| f.load(Ordering::Acquire))
 }
 
 /// Pick the best CPU for a task, respecting its affinity mask.
@@ -3712,7 +3712,7 @@ pub fn smp_self_test() -> KernelResult<()> {
     for i in 0..num_cpus {
         if IDLE_FLAGS
             .get(i)
-            .map_or(false, |f| f.load(Ordering::Acquire))
+            .is_some_and(|f| f.load(Ordering::Acquire))
         {
             serial_println!(
                 "[sched]   FAIL: CPU {} has idle flag set during normal operation",

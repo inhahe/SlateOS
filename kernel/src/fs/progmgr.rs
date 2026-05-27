@@ -386,7 +386,7 @@ pub fn has_capability(app_id: &str, cap: ProgCapability) -> bool {
         .programs
         .iter()
         .find(|p| p.app_id == app_id)
-        .map_or(false, |p| p.capabilities.contains(&cap))
+        .is_some_and(|p| p.capabilities.contains(&cap))
 }
 
 // ---------------------------------------------------------------------------

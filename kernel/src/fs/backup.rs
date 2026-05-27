@@ -723,7 +723,7 @@ fn load_latest_manifest(backup_root: &str) -> KernelResult<Manifest> {
             let path = alloc::format!("{}/{}", backup_root, entry.name);
             if let Ok(m) = load_manifest(&path) {
                 let ts = m.timestamp_ns;
-                if best.as_ref().map_or(true, |(prev_ts, _)| ts > *prev_ts) {
+                if best.as_ref().is_none_or(|(prev_ts, _)| ts > *prev_ts) {
                     best = Some((ts, path));
                 }
             }

@@ -268,8 +268,8 @@ pub fn get_pack(code: &str) -> KernelResult<LanguagePack> {
 /// Check if current language is RTL.
 pub fn is_rtl() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().map_or(false, |s| {
-        s.packs.iter().find(|p| p.code == s.system_language).map_or(false, |p| p.rtl)
+    guard.as_ref().is_some_and(|s| {
+        s.packs.iter().find(|p| p.code == s.system_language).is_some_and(|p| p.rtl)
     })
 }
 

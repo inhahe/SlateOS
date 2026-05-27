@@ -1742,7 +1742,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // Lines with labels like {cpu="0"} have the value after the closing brace.
         let has_numeric_values = metrics_str.lines()
             .filter(|l| !l.starts_with('#') && !l.is_empty())
-            .all(|l| l.split_whitespace().last().map_or(false, |v| v.parse::<u64>().is_ok()));
+            .all(|l| l.split_whitespace().last().is_some_and(|v| v.parse::<u64>().is_ok()));
         assert!(has_numeric_values, "All metric lines must have numeric values");
         // Count total metric families (# TYPE lines).
         let type_lines = metrics_str.lines()

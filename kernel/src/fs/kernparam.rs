@@ -173,7 +173,7 @@ pub fn consume(key: &str, subsystem: &str) -> KernelResult<String> {
 
 /// Check if a boolean parameter is set (present with empty value or "1"/"yes"/"true").
 pub fn is_set(key: &str) -> bool {
-    get(key).map_or(false, |v| v.is_empty() || v == "1" || v == "yes" || v == "true")
+    get(key).is_some_and(|v| v.is_empty() || v == "1" || v == "yes" || v == "true")
 }
 
 /// List all parameters.

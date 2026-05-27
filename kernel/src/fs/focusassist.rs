@@ -388,7 +388,7 @@ pub fn should_suppress(app_id: &str, priority: NotifPriority) -> SuppressResult 
 /// Whether focus assist is currently active.
 pub fn is_active() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().map_or(false, |s| s.active_profile_id.is_some())
+    guard.as_ref().is_some_and(|s| s.active_profile_id.is_some())
 }
 
 /// Get the currently active profile, if any.
@@ -442,7 +442,7 @@ pub fn deactivate() -> KernelResult<Vec<MissedNotification>> {
         let profile_id = state.active_profile_id.unwrap_or(0);
         let show_summary = state.profiles.iter()
             .find(|p| p.id == profile_id)
-            .map_or(false, |p| p.show_summary);
+            .is_some_and(|p| p.show_summary);
 
         let missed = if show_summary {
             state.missed.clone()

@@ -401,7 +401,7 @@ pub fn should_start_in_tray(app_id: &str) -> bool {
             // Check appregistry for start_hidden flag.
             drop(tray);
             super::appregistry::get(app_id)
-                .map_or(false, |app| app.start_hidden)
+                .is_some_and(|app| app.start_hidden)
         }
     }
 }
@@ -418,7 +418,7 @@ pub fn should_have_tray_icon(app_id: &str) -> bool {
             // Check appregistry for tray_icon flag.
             drop(tray);
             super::appregistry::get(app_id)
-                .map_or(false, |app| app.tray_icon)
+                .is_some_and(|app| app.tray_icon)
         }
     }
 }

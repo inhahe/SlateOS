@@ -93,7 +93,7 @@ impl IdMapping {
     fn contains_inner(&self, inner_id: u32) -> bool {
         inner_id >= self.inner_start
             && inner_id.checked_sub(self.inner_start)
-                .map_or(false, |offset| offset < self.count)
+                .is_some_and(|offset| offset < self.count)
     }
 
     /// Check if `outer_id` falls within this mapping range.
@@ -101,7 +101,7 @@ impl IdMapping {
     fn contains_outer(&self, outer_id: u32) -> bool {
         outer_id >= self.outer_start
             && outer_id.checked_sub(self.outer_start)
-                .map_or(false, |offset| offset < self.count)
+                .is_some_and(|offset| offset < self.count)
     }
 
     /// Translate an inner ID to an outer ID.

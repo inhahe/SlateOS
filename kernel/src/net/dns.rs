@@ -693,7 +693,7 @@ fn parse_response_inner(
     let mut offset = 12;
     for _ in 0..qdcount {
         offset = skip_name(data, offset)?;
-        if offset.checked_add(4).map_or(true, |end| end > data.len()) {
+        if offset.checked_add(4).is_none_or(|end| end > data.len()) {
             return Err(KernelError::InvalidArgument);
         }
         offset += 4; // QTYPE + QCLASS.
@@ -817,7 +817,7 @@ fn parse_ptr_response(data: &[u8], expected_id: u16) -> KernelResult<String> {
     let mut offset = 12;
     for _ in 0..qdcount {
         offset = skip_name(data, offset)?;
-        if offset.checked_add(4).map_or(true, |end| end > data.len()) {
+        if offset.checked_add(4).is_none_or(|end| end > data.len()) {
             return Err(KernelError::InvalidArgument);
         }
         offset += 4; // QTYPE + QCLASS.
@@ -1417,7 +1417,7 @@ fn parse_aaaa_response(
     let mut offset = 12;
     for _ in 0..qdcount {
         offset = skip_name(data, offset)?;
-        if offset.checked_add(4).map_or(true, |end| end > data.len()) {
+        if offset.checked_add(4).is_none_or(|end| end > data.len()) {
             return Err(KernelError::InvalidArgument);
         }
         offset += 4; // QTYPE + QCLASS.

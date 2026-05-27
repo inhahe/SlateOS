@@ -169,9 +169,9 @@ pub fn check_device(vid: u16, pid: u16, class: UsbClass, name: &str) -> KernelRe
         // Check rules in order (first match wins).
         for rule in &mut state.rules {
             if !rule.enabled { continue; }
-            let vid_match = rule.vendor_id.map_or(true, |v| v == vid);
-            let pid_match = rule.product_id.map_or(true, |p| p == pid);
-            let class_match = rule.class.map_or(true, |c| c == class);
+            let vid_match = rule.vendor_id.is_none_or(|v| v == vid);
+            let pid_match = rule.product_id.is_none_or(|p| p == pid);
+            let class_match = rule.class.is_none_or(|c| c == class);
             if vid_match && pid_match && class_match {
                 rule.hit_count += 1;
                 let decision = rule.decision;

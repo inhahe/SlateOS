@@ -231,7 +231,7 @@ impl SwapSlotAllocator {
         let bit = slot % 64;
         self.bitmap
             .get(wi)
-            .map_or(false, |w| *w & (1u64 << bit) != 0)
+            .is_some_and(|w| *w & (1u64 << bit) != 0)
     }
 
     /// Number of free slots.
@@ -1489,7 +1489,7 @@ pub unsafe fn swap_in_page(
 #[must_use]
 pub unsafe fn is_swapped(pml4_phys: u64, virt: VirtAddr) -> bool {
     page_table::read_leaf_pte(pml4_phys, virt)
-        .map_or(false, |pte| pte.is_swap())
+        .is_some_and(|pte| pte.is_swap())
 }
 
 // ---------------------------------------------------------------------------

@@ -234,7 +234,7 @@ pub fn set_sharing_enabled(enabled: bool) -> KernelResult<()> {
 /// Check if sharing is enabled.
 pub fn is_sharing_enabled() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().map_or(false, |s| s.sharing_enabled)
+    guard.as_ref().is_some_and(|s| s.sharing_enabled)
 }
 
 /// Set the hostname for sharing.

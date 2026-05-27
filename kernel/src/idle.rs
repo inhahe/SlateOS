@@ -134,7 +134,7 @@ pub fn stats() -> IdleStats {
 /// Must be called after `cpu::detect_features()`.
 pub fn init() {
     let has_mwait = cpu::features()
-        .map_or(false, |f| f.mwait);
+        .is_some_and(|f| f.mwait);
 
     if has_mwait {
         MWAIT_ENABLED.store(true, Ordering::Release);
@@ -185,7 +185,7 @@ pub fn clear_resched() {
 pub fn resched_pending() -> bool {
     let cpu = smp::current_cpu_index();
     NEED_RESCHED.get(cpu)
-        .map_or(false, |f| f.load(Ordering::Acquire))
+        .is_some_and(|f| f.load(Ordering::Acquire))
 }
 
 /// Enter the idle state once.
@@ -253,7 +253,7 @@ fn idle_mwait() {
     }
 
     // Check if we already have a pending resched before entering idle.
-    if NEED_RESCHED.get(cpu).map_or(false, |f| f.load(Ordering::Acquire)) {
+    if NEED_RESCHED.get(cpu).is_some_and(|f| f.load(Ordering::Acquire)) {
         RESCHED_WAKES.fetch_add(1, Ordering::Relaxed);
         return;
     }
@@ -279,7 +279,7 @@ fn idle_mwait() {
         // This closes the race window: if signal_resched wrote between
         // our earlier check and the MONITOR setup, MWAIT would wait
         // forever (the write already happened, won't write again).
-        if NEED_RESCHED.get(cpu).map_or(false, |f| f.load(Ordering::Acquire)) {
+        if NEED_RESCHED.get(cpu).is_some_and(|f| f.load(Ordering::Acquire)) {
             RESCHED_WAKES.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -299,7 +299,7 @@ fn idle_mwait() {
     }
 
     // Check if we woke due to resched signal.
-    if NEED_RESCHED.get(cpu).map_or(false, |f| f.load(Ordering::Acquire)) {
+    if NEED_RESCHED.get(cpu).is_some_and(|f| f.load(Ordering::Acquire)) {
         RESCHED_WAKES.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -319,7 +319,7 @@ fn idle_hlt() {
 pub fn self_test() {
     crate::serial_println!("[idle] Running self-test...");
 
-    let has_mwait = cpu::features().map_or(false, |f| f.mwait);
+    let has_mwait = cpu::features().is_some_and(|f| f.mwait);
     crate::serial_println!("[idle]   MWAIT support: {}", has_mwait);
 
     // Test 1: signal/clear/pending cycle.

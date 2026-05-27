@@ -322,7 +322,7 @@ pub fn get_wake_word() -> String {
 
 /// Is voice control listening?
 pub fn is_listening() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.listening)
+    STATE.lock().as_ref().is_some_and(|s| s.listening)
 }
 
 /// Statistics: (command_count, total_recognitions, total_executed, total_rejected, ops).

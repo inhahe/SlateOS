@@ -241,9 +241,9 @@ pub fn set_cap(app: &str, cap_bytes: Option<u64>) -> KernelResult<()> {
 /// Check if an app is over its cap.
 pub fn is_over_cap(app: &str) -> bool {
     let guard = STATE.lock();
-    guard.as_ref().map_or(false, |s| {
-        s.apps.iter().find(|a| a.app_name == app).map_or(false, |a| {
-            a.cap_bytes.map_or(false, |cap| a.bytes_sent + a.bytes_received >= cap)
+    guard.as_ref().is_some_and(|s| {
+        s.apps.iter().find(|a| a.app_name == app).is_some_and(|a| {
+            a.cap_bytes.is_some_and(|cap| a.bytes_sent + a.bytes_received >= cap)
         })
     })
 }

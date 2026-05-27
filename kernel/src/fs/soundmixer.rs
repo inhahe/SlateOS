@@ -799,7 +799,7 @@ pub fn self_test() -> KernelResult<()> {
     let devs2 = list_devices();
     let speakers = devs2.iter().find(|d| d.id == "speakers");
     assert!(speakers.is_some());
-    assert!(speakers.map_or(false, |d| d.is_default));
+    assert!(speakers.is_some_and(|d| d.is_default));
     set_device_volume("hdmi0", 50)?;
     remove_device("hdmi0")?;
     assert_eq!(list_devices().len(), 1);
@@ -816,11 +816,11 @@ pub fn self_test() -> KernelResult<()> {
     report_activity(s1)?;
     let entry = get_app_entry("player");
     assert!(entry.is_some());
-    assert!(entry.map_or(false, |e| e.playing));
+    assert!(entry.is_some_and(|e| e.playing));
     report_inactive(s1)?;
     // s2 is for same app — still has streams but s2 isn't active either.
     let entry2 = get_app_entry("player");
-    assert!(entry2.map_or(true, |e| !e.playing));
+    assert!(entry2.is_none_or(|e| !e.playing));
     let hist = sound_history();
     assert!(!hist.is_empty());
 

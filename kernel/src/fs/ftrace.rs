@@ -185,7 +185,7 @@ pub fn per_probe() -> Vec<ProbeStats> {
 
 /// Global enabled state.
 pub fn is_enabled() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.trace_enabled)
+    STATE.lock().as_ref().is_some_and(|s| s.trace_enabled)
 }
 
 /// Statistics: (probe_count, total_hits, total_misses, total_overhead_ns, ops).

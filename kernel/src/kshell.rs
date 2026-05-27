@@ -9371,7 +9371,7 @@ fn cmd_find(args: &str) {
 
     let filter = FindFilter {
         name_pattern,
-        is_glob: name_pattern.map_or(false, |p| {
+        is_glob: name_pattern.is_some_and(|p| {
             p.contains('*') || p.contains('?') || p.contains('[')
         }),
         type_filter,
@@ -33620,7 +33620,7 @@ fn cmd_reslimit(args: &str) {
                     let write_mbps: u64 = parts.get(3)
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
-                    let low_pri = parts.get(4).map_or(false, |s| *s == "low");
+                    let low_pri = parts.get(4).is_some_and(|s| *s == "low");
                     let read_bps = if read_mbps == 0 { reslimit::UNLIMITED }
                         else { read_mbps.saturating_mul(1_000_000) };
                     let write_bps = if write_mbps == 0 { reslimit::UNLIMITED }
@@ -44671,7 +44671,7 @@ fn cmd_snaplayout(args: &str) {
             let active = snaplayout::get_active();
             shell_println!("Snap Layouts ({}):", layouts.len());
             for l in &layouts {
-                let marker = if active.as_ref().map_or(false, |a| a.id == l.id) { " *" } else { "" };
+                let marker = if active.as_ref().is_some_and(|a| a.id == l.id) { " *" } else { "" };
                 shell_println!("  [{}] {} ({} zones, used {} times){}",
                     l.id, l.name, l.zones.len(), l.use_count, marker);
             }
@@ -44930,7 +44930,7 @@ fn cmd_eyeprotect(args: &str) {
             let profiles = eyeprotect::list_profiles();
             let active = eyeprotect::get_active();
             for p in &profiles {
-                let marker = if active.as_ref().map_or(false, |a| a.id == p.id) { " *" } else { "" };
+                let marker = if active.as_ref().is_some_and(|a| a.id == p.id) { " *" } else { "" };
                 let status = if p.enabled { "on" } else { "off" };
                 shell_println!("  [{}] {} — every {}min, {}s break, {} [{}]{}",
                     p.id, p.name, p.interval_mins, p.break_duration_secs, p.reminder_mode.label(), status, marker);
@@ -51135,7 +51135,7 @@ fn cmd_raidmgr(args: &str) {
             };
             let disk = parts[2];
             let size: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(1_000_000_000);
-            let spare = parts.get(4).map_or(false, |s| *s == "spare");
+            let spare = parts.get(4).is_some_and(|s| *s == "spare");
             match raidmgr::add_disk(aid, disk, size, spare) {
                 Ok(()) => shell_println!("Added {} to array {} as {}", disk, aid, if spare { "spare" } else { "active" }),
                 Err(e) => shell_println!("Error: {:?}", e),
@@ -62805,7 +62805,7 @@ fn detect_magic(header: &[u8]) -> Option<&'static str> {
     // ar archive (used for .a static libraries and .deb packages)
     if header.starts_with(b"!<arch>\n") {
         // Check if it's a .deb by looking for "debian-binary" member.
-        if header.len() >= 68 && header.get(8..24).map_or(false, |n| {
+        if header.len() >= 68 && header.get(8..24).is_some_and(|n| {
             n.starts_with(b"debian-binary")
         }) {
             return Some("Debian package (ar archive)");
@@ -63386,9 +63386,9 @@ fn grep_matches(line: &str, pattern: &str, whole_word: bool) -> bool {
         if let Some(pos) = line[start..].find(pattern) {
             let abs = start + pos;
             let before_ok = abs == 0
-                || line[..abs].chars().next_back().map_or(true, is_word_boundary);
+                || line[..abs].chars().next_back().is_none_or(is_word_boundary);
             let after_ok = abs + pat_len >= line.len()
-                || line[abs + pat_len..].chars().next().map_or(true, is_word_boundary);
+                || line[abs + pat_len..].chars().next().is_none_or(is_word_boundary);
             if before_ok && after_ok {
                 return true;
             }
@@ -69609,7 +69609,7 @@ fn mapfile_store(var_name: &str, text: &str, strip_newlines: bool) {
 
     // Remove the trailing empty element that split('\n') produces for
     // text ending in a newline.
-    let lines = if lines.last().map_or(false, |l| l.is_empty() || l == "\n") {
+    let lines = if lines.last().is_some_and(|l| l.is_empty() || l == "\n") {
         lines.get(..lines.len().saturating_sub(1)).unwrap_or(&[]).to_vec()
     } else {
         lines

@@ -203,10 +203,10 @@ pub fn evaluate(filename: &str, extension: &str, size_bytes: u64, directory: &st
                 MatchCondition::NameContains => fname_lower.contains(&rule.pattern.to_lowercase()),
                 MatchCondition::NameStartsWith => fname_lower.starts_with(&rule.pattern.to_lowercase()),
                 MatchCondition::SizeGreaterThan => {
-                    rule.pattern.parse::<u64>().map_or(false, |limit| size_bytes > limit)
+                    rule.pattern.parse::<u64>().is_ok_and(|limit| size_bytes > limit)
                 }
                 MatchCondition::SizeLessThan => {
-                    rule.pattern.parse::<u64>().map_or(false, |limit| size_bytes < limit)
+                    rule.pattern.parse::<u64>().is_ok_and(|limit| size_bytes < limit)
                 }
                 MatchCondition::InDirectory => dir_lower.starts_with(&rule.pattern.to_lowercase()),
                 MatchCondition::AnyFile => true,

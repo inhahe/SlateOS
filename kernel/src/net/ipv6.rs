@@ -737,8 +737,7 @@ pub fn process_ipv6(data: &[u8]) -> KernelResult<()> {
     let is_for_us = packet.dst == our_link_local
         || packet.dst.is_multicast()
         || packet.dst == Ipv6Addr::LOOPBACK
-        || super::icmpv6::slaac_global_addr()
-            .map_or(false, |ga| ga == packet.dst);
+        || (super::icmpv6::slaac_global_addr() == Some(packet.dst));
 
     if !is_for_us {
         return Ok(());

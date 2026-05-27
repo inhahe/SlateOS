@@ -207,9 +207,9 @@ pub fn remove_limit(app_name: &str) -> KernelResult<()> {
 
 /// Check if an app is over its limit.
 pub fn is_over_limit(app_name: &str) -> bool {
-    STATE.lock().as_ref().map_or(false, |s| {
-        s.apps.iter().find(|a| a.app_name == app_name).map_or(false, |a| {
-            a.daily_limit_ms.map_or(false, |limit| a.total_foreground_ms >= limit)
+    STATE.lock().as_ref().is_some_and(|s| {
+        s.apps.iter().find(|a| a.app_name == app_name).is_some_and(|a| {
+            a.daily_limit_ms.is_some_and(|limit| a.total_foreground_ms >= limit)
         })
     })
 }

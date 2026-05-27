@@ -248,7 +248,7 @@ impl ImageIndex {
                 || self.manifests[0]
                     .platform
                     .as_ref()
-                    .map_or(false, Platform::matches_host)
+                    .is_some_and(Platform::matches_host)
             {
                 return Some(&self.manifests[0].descriptor);
             }

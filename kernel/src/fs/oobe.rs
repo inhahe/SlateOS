@@ -306,7 +306,7 @@ pub fn get_choices() -> Option<SetupChoices> {
 
 /// Check if OOBE is completed.
 pub fn is_completed() -> bool {
-    STATE.lock().as_ref().map_or(true, |s| s.completed)
+    STATE.lock().as_ref().is_none_or(|s| s.completed)
 }
 
 /// Force complete (skip remaining).

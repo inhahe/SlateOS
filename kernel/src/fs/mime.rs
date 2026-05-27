@@ -162,7 +162,7 @@ pub fn from_bytes(header: &[u8]) -> Option<&'static str> {
         if header.len() >= 68
             && header
                 .get(8..24)
-                .map_or(false, |n| n.starts_with(b"debian-binary"))
+                .is_some_and(|n| n.starts_with(b"debian-binary"))
         {
             return Some("application/vnd.debian.binary-package");
         }

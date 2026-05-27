@@ -137,7 +137,7 @@ impl Event {
 /// one general-purpose counter.
 #[must_use]
 pub fn is_available() -> bool {
-    cpu::features().map_or(false, |f| f.pmu_version >= 1 && f.pmu_counters > 0)
+    cpu::features().is_some_and(|f| f.pmu_version >= 1 && f.pmu_counters > 0)
 }
 
 /// Number of general-purpose PMC registers available.

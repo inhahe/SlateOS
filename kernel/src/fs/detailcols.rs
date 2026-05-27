@@ -257,7 +257,7 @@ pub fn get_column(id: &str) -> KernelResult<ColumnDef> {
 pub fn list_columns(category: Option<ColumnCategory>) -> Vec<ColumnDef> {
     let state = STATE.lock();
     state.columns.iter()
-        .filter(|c| category.map_or(true, |cat| c.category == cat))
+        .filter(|c| category.is_none_or(|cat| c.category == cat))
         .cloned()
         .collect()
 }

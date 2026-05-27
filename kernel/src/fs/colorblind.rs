@@ -222,7 +222,7 @@ pub fn remove_preset(id: u32) -> KernelResult<()> {
 
 /// Is filter enabled?
 pub fn is_enabled() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.enabled)
+    STATE.lock().as_ref().is_some_and(|s| s.enabled)
 }
 
 /// Get current settings: (enabled, cvd_type, intensity, simulate).

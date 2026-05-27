@@ -279,7 +279,7 @@ pub fn delete_macro(id: u32) -> KernelResult<()> {
 
 /// Is currently recording?
 pub fn is_recording() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.recording)
+    STATE.lock().as_ref().is_some_and(|s| s.recording)
 }
 
 /// Get a macro by id.

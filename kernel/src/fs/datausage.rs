@@ -309,7 +309,7 @@ pub fn metered_status() -> MeteredStatus {
 /// Check if background data should be restricted.
 pub fn should_restrict_background() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().map_or(false, |s| {
+    guard.as_ref().is_some_and(|s| {
         s.metered != MeteredStatus::Unmetered
             || s.limits.iter().any(|l| l.exceeded && l.block_on_exceed)
     })

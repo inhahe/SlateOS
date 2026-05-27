@@ -148,7 +148,7 @@ fn bitmap_test(bitmap: &[u8], bit: u32) -> bool {
     let byte_idx = (bit / 8) as usize;
     let bit_idx = bit % 8;
     bitmap.get(byte_idx)
-        .map_or(false, |b| (b >> bit_idx) & 1 != 0)
+        .is_some_and(|b| (b >> bit_idx) & 1 != 0)
 }
 
 /// Set a bit in a bitmap (mark as allocated).

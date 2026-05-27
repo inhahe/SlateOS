@@ -569,7 +569,7 @@ pub fn record_frame(id: u64) -> KernelResult<()> {
 /// Check if any session is actively recording.
 pub fn is_recording() -> bool {
     let guard = STATE.lock();
-    guard.as_ref().map_or(false, |s| {
+    guard.as_ref().is_some_and(|s| {
         s.recordings.iter().any(|r| r.state == RecordingState::Recording)
     })
 }

@@ -206,7 +206,7 @@ pub fn set_max_size(bytes: u64) -> KernelResult<()> {
 
 /// Check if dumps are enabled.
 pub fn is_enabled() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.dumps_enabled)
+    STATE.lock().as_ref().is_some_and(|s| s.dumps_enabled)
 }
 
 /// Get total bytes used by dumps.

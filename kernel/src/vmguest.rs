@@ -888,7 +888,7 @@ pub fn tick() {
 
 /// Send a heartbeat to the host.
 fn send_heartbeat(state: &mut State, now_ns: u64) {
-    if !state.feature(GuestFeature::Heartbeat).map_or(false, |f| f.active) {
+    if !state.feature(GuestFeature::Heartbeat).is_some_and(|f| f.active) {
         return;
     }
 
@@ -908,7 +908,7 @@ fn send_heartbeat(state: &mut State, now_ns: u64) {
 
 /// Check if host has requested balloon size change.
 fn check_balloon(state: &mut State) {
-    if !state.feature(GuestFeature::MemoryBalloon).map_or(false, |f| f.supported) {
+    if !state.feature(GuestFeature::MemoryBalloon).is_some_and(|f| f.supported) {
         return;
     }
     if !state.balloon.auto_enabled {
@@ -947,7 +947,7 @@ fn check_balloon(state: &mut State) {
 
 /// Monitor clock drift between host and guest.
 fn check_clock_drift(state: &mut State, now_ns: u64) {
-    if !state.feature(GuestFeature::TimeSynchronization).map_or(false, |f| f.active) {
+    if !state.feature(GuestFeature::TimeSynchronization).is_some_and(|f| f.active) {
         return;
     }
 
@@ -968,7 +968,7 @@ fn check_clock_drift(state: &mut State, now_ns: u64) {
 
 /// Report guest information to the host.
 fn report_guest_info(state: &mut State) {
-    if !state.feature(GuestFeature::GuestInfo).map_or(false, |f| f.active) {
+    if !state.feature(GuestFeature::GuestInfo).is_some_and(|f| f.active) {
         return;
     }
 
@@ -989,7 +989,7 @@ fn report_guest_info(state: &mut State) {
 
 /// Check for host-initiated shutdown/reboot requests.
 fn check_host_requests(state: &mut State) {
-    if !state.feature(GuestFeature::GracefulShutdown).map_or(false, |f| f.active) {
+    if !state.feature(GuestFeature::GracefulShutdown).is_some_and(|f| f.active) {
         return;
     }
 
@@ -1031,13 +1031,13 @@ pub fn active_feature_count() -> u32 {
 /// Check if a specific feature is supported.
 pub fn is_feature_supported(feature: GuestFeature) -> bool {
     let state = STATE.lock();
-    state.feature(feature).map_or(false, |f| f.supported)
+    state.feature(feature).is_some_and(|f| f.supported)
 }
 
 /// Check if a specific feature is active.
 pub fn is_feature_active(feature: GuestFeature) -> bool {
     let state = STATE.lock();
-    state.feature(feature).map_or(false, |f| f.active)
+    state.feature(feature).is_some_and(|f| f.active)
 }
 
 /// Get current balloon state.
@@ -1106,7 +1106,7 @@ pub fn request_display_resize(width: u32, height: u32) -> (u32, u32) {
     }
 
     let mut state = STATE.lock();
-    if !state.feature(GuestFeature::DisplayResize).map_or(false, |f| f.supported) {
+    if !state.feature(GuestFeature::DisplayResize).is_some_and(|f| f.supported) {
         return (0, 0);
     }
 

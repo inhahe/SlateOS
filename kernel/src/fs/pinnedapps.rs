@@ -211,7 +211,7 @@ pub fn list_all() -> Vec<PinnedApp> {
 
 /// Check if an app is pinned in a location.
 pub fn is_pinned(location: PinLocation, app_name: &str) -> bool {
-    STATE.lock().as_ref().map_or(false, |s| {
+    STATE.lock().as_ref().is_some_and(|s| {
         s.pins.iter().any(|p| p.app_name == app_name && p.location == location)
     })
 }

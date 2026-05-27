@@ -188,7 +188,7 @@ pub fn set_enabled(enabled: bool) -> KernelResult<()> {
 }
 
 pub fn is_enabled() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.enabled)
+    STATE.lock().as_ref().is_some_and(|s| s.enabled)
 }
 
 /// Record that an app gained focus.

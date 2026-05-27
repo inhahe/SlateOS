@@ -659,7 +659,7 @@ impl BuddyAllocator {
             while addr != 0 {
                 // Check if the allocation (the lower portion after splitting)
                 // fits within the constraint.
-                if addr.checked_add(alloc_size).map_or(false, |end| end <= max_addr) {
+                if addr.checked_add(alloc_size).is_some_and(|end| end <= max_addr) {
                     // Found a suitable block.  Remove it from the list.
                     self.remove_free(addr, source_order);
 

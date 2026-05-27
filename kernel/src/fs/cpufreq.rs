@@ -205,7 +205,7 @@ pub fn set_boost(enabled: bool) -> KernelResult<()> {
 
 /// Check if boost is enabled.
 pub fn boost_enabled() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.boost_enabled)
+    STATE.lock().as_ref().is_some_and(|s| s.boost_enabled)
 }
 
 /// List all CPUs.

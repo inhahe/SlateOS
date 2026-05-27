@@ -218,7 +218,7 @@ pub fn list(root: Option<&str>) -> Vec<(String, String)> {
     let store = STORE.lock();
     store.comments.iter()
         .filter(|(path, _)| {
-            root.map_or(true, |r| {
+            root.is_none_or(|r| {
                 path.as_str() == r
                     || (path.starts_with(r) && path.as_bytes().get(r.len()) == Some(&b'/'))
             })

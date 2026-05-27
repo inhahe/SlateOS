@@ -199,7 +199,7 @@ pub fn thread_siblings(cpu_id: u32) -> Vec<u32> {
 
 /// Check if SMT is enabled.
 pub fn smt_enabled() -> bool {
-    STATE.lock().as_ref().map_or(false, |s| s.smt_enabled)
+    STATE.lock().as_ref().is_some_and(|s| s.smt_enabled)
 }
 
 /// Set CPU online/offline.

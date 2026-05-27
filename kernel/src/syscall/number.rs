@@ -1389,6 +1389,17 @@ pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
 /// (one-shot) — subsequent calls return 0.
 pub const SYS_PROCESS_GET_ARGS: u64 = 519;
 
+/// Get the parent process ID of the calling process.
+///
+/// Returns: parent PID on success.  Returns 0 if the calling task is
+/// not associated with a process (kernel thread), if the process has
+/// no recorded parent (e.g. init/pid 1), or if the process has been
+/// reparented after the parent exited.  This is the same "no Unix
+/// concept of orphan re-parenting to init" convention used elsewhere
+/// in our process table — userspace `getppid()` should treat 0 as
+/// "no parent" and use it as a sentinel.
+pub const SYS_PROCESS_PARENT_ID: u64 = 520;
+
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------

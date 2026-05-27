@@ -2771,6 +2771,25 @@ pub fn sys_process_id(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(pid as i64)
 }
 
+/// `SYS_PROCESS_PARENT_ID` — get the parent PID of the calling process.
+///
+/// Returns: parent PID on success, 0 if the calling task isn't owned by
+/// any process (kernel thread) or if the process has no recorded parent
+/// (init/pid 1, or a process whose parent has already been reaped).
+pub fn sys_process_parent_id(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    use crate::proc::{thread, pcb};
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::ok(0);
+    };
+    let ppid = pcb::parent(pid).unwrap_or(0);
+
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(ppid as i64)
+}
+
 /// `SYS_CAP_QUERY` — query the calling process's capabilities.
 ///
 /// Returns the number of valid capabilities held by the calling process.

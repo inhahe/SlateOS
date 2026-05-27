@@ -52,6 +52,7 @@ pub const SYS_THREAD_JOIN: u64 = 512;
 pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
 pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
 pub const SYS_PROCESS_GET_ARGS: u64 = 519;
+pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 
 // Filesystem
 pub const SYS_FS_READ_FILE: u64 = 600;

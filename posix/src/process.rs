@@ -125,12 +125,27 @@ pub extern "C" fn getpid() -> PidT {
 
 /// Get the parent process ID of the calling process.
 ///
-/// Note: Our kernel doesn't have a direct "get parent PID" syscall yet.
-/// Returns 1 (init) as a placeholder until implemented.
+/// Queries `SYS_PROCESS_PARENT_ID` on the kernel target.  The kernel
+/// returns 0 if the calling task isn't owned by any process (kernel
+/// thread) or if the process has no recorded parent (init/pid 1, or
+/// a process whose parent has already exited).  We translate "no parent"
+/// to 1 (init) to match the POSIX convention that orphaned processes
+/// are re-parented to init — userspace code that does `if getppid() == 1`
+/// to detect orphan/daemon-reparenting status keeps working.
+///
+/// On host builds, returns 1 as a deterministic placeholder.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getppid() -> PidT {
-    // TODO: Add SYS_PROCESS_PARENT_ID syscall.
-    1
+    #[cfg(target_os = "none")]
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let raw = syscall0(SYS_PROCESS_PARENT_ID);
+        if raw > 0 { raw as PidT } else { 1 }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        1
+    }
 }
 
 /// Wait for a child process to change state.

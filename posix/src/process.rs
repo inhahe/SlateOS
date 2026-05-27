@@ -642,20 +642,149 @@ pub extern "C" fn mount(
     -1
 }
 
+/// All flag bits accepted by `umount2(2)`.
+///
+/// Mirrors Linux's `fs/namespace.c::ksys_umount` whitelist:
+/// `MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW`.  Any
+/// other bit yields `EINVAL`.
+pub const UMOUNT2_FLAGS_VALID: i32 = crate::sys_mount::MNT_FORCE
+    | crate::sys_mount::MNT_DETACH
+    | crate::sys_mount::MNT_EXPIRE
+    | crate::sys_mount::UMOUNT_NOFOLLOW;
+
+/// Maximum path length accepted by `umount`/`umount2` (matches
+/// `PATH_MAX` on Linux — 4096 bytes including NUL).
+pub const UMOUNT_PATH_MAX: usize = 4096;
+
+/// Walk a NUL-terminated byte string up to `max` bytes (excluding NUL).
+///
+/// Returns `Some(len)` if a NUL byte is found, where `len` is the number
+/// of bytes before the NUL.  Returns `None` if no NUL appears in the
+/// first `max + 1` bytes — the path is treated as "too long."
+///
+/// # Safety
+///
+/// `s` must be non-null and point to at least one readable byte; the
+/// walk stops as soon as a NUL is found or after reading `max + 1` bytes.
+/// Caller must ensure the buffer is at least `max + 1` bytes large or
+/// terminated within that range — same contract as Linux's `strnlen_user`.
+#[inline]
+unsafe fn umount_cstr_len(s: *const u8, max: usize) -> Option<usize> {
+    let mut i = 0usize;
+    while i <= max {
+        // SAFETY: caller contract — readable up to first NUL or max+1.
+        let b = unsafe { *s.add(i) };
+        if b == 0 {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Unmount a filesystem.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// # Linux behaviour
+///
+/// `umount(const char *target)` (Linux's old single-arg form, kept for
+/// backward compat with libc; `umount(8)` actually calls `umount2`).
+/// Argument checks:
+///
+/// * `target == NULL`                         → `EFAULT`
+/// * `*target == 0` (empty path)              → `ENOENT`
+/// * not NUL-terminated within `PATH_MAX`     → `ENAMETOOLONG`
+///
+/// After path validation we return `ENOSYS` because no filesystem-
+/// namespace subsystem is wired up here.
+///
+/// # Safety
+///
+/// `target`, when non-NULL, must point to a NUL-terminated byte string
+/// or to at least `UMOUNT_PATH_MAX + 1` readable bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn umount(_target: *const u8) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn umount(target: *const u8) -> i32 {
+    if target.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: target is non-null; caller contract gives us a NUL-
+    // terminated string or at least UMOUNT_PATH_MAX+1 readable bytes.
+    let len = unsafe { umount_cstr_len(target, UMOUNT_PATH_MAX) };
+    match len {
+        None => {
+            // No NUL in PATH_MAX+1 bytes — path is too long.
+            errno::set_errno(errno::ENAMETOOLONG);
+            -1
+        }
+        Some(0) => {
+            // Empty path string.
+            errno::set_errno(errno::ENOENT);
+            -1
+        }
+        Some(_) => {
+            // Path is well-formed; mount subsystem not wired up.
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+    }
 }
 
 /// Unmount a filesystem with flags.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// # Linux behaviour
+///
+/// `umount2(const char *target, int flags)` (the syscall `umount(8)`
+/// actually invokes).  Argument checks:
+///
+/// * `target == NULL`                                   → `EFAULT`
+/// * `*target == 0`                                     → `ENOENT`
+/// * not NUL-terminated within `PATH_MAX`               → `ENAMETOOLONG`
+/// * `flags & ~UMOUNT2_FLAGS_VALID`                     → `EINVAL`
+/// * `MNT_EXPIRE` combined with `MNT_FORCE | MNT_DETACH`→ `EINVAL`
+///   (Linux's `fs/namespace.c` explicitly rejects this combo since an
+///    expiry mark can't coexist with a force/detach action).
+///
+/// After arguments are validated we return `ENOSYS`.
+///
+/// # Safety
+///
+/// `target`, when non-NULL, must point to a NUL-terminated byte string
+/// or to at least `UMOUNT_PATH_MAX + 1` readable bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn umount2(_target: *const u8, _flags: i32) -> i32 {
+pub extern "C" fn umount2(target: *const u8, flags: i32) -> i32 {
+    if target.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: same contract as umount above.
+    let len = unsafe { umount_cstr_len(target, UMOUNT_PATH_MAX) };
+    match len {
+        None => {
+            errno::set_errno(errno::ENAMETOOLONG);
+            return -1;
+        }
+        Some(0) => {
+            errno::set_errno(errno::ENOENT);
+            return -1;
+        }
+        Some(_) => {}
+    }
+    // Reject unknown flag bits.
+    if (flags & !UMOUNT2_FLAGS_VALID) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // MNT_EXPIRE is mutually exclusive with MNT_FORCE and MNT_DETACH.
+    if (flags & crate::sys_mount::MNT_EXPIRE) != 0
+        && (flags
+            & (crate::sys_mount::MNT_FORCE
+                | crate::sys_mount::MNT_DETACH))
+            != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Arguments validated; mount subsystem not wired up.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -1317,12 +1446,14 @@ mod tests {
 
     #[test]
     fn test_umount_returns_enosys() {
-        assert_eq!(umount(core::ptr::null()), -1);
+        // NULL is now caught with EFAULT; use a valid path so we still
+        // exercise the ENOSYS terminal state.
+        assert_eq!(umount(b"/mnt/foo\0".as_ptr()), -1);
     }
 
     #[test]
     fn test_umount2_returns_enosys() {
-        assert_eq!(umount2(core::ptr::null(), 0), -1);
+        assert_eq!(umount2(b"/mnt/foo\0".as_ptr(), 0), -1);
     }
 
     // -- wifcontinued: continued status is 0xFFFF --
@@ -1599,14 +1730,15 @@ mod tests {
     #[test]
     fn test_umount_sets_enosys() {
         crate::errno::set_errno(0);
-        umount(core::ptr::null());
+        // NULL → EFAULT now; use a valid path to reach the ENOSYS leg.
+        umount(b"/mnt/foo\0".as_ptr());
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_umount2_sets_enosys() {
         crate::errno::set_errno(0);
-        umount2(core::ptr::null(), 0);
+        umount2(b"/mnt/foo\0".as_ptr(), 0);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -2718,6 +2850,344 @@ mod tests {
         let ret = unshare(bits);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 51 — umount / umount2 validators
+    // ------------------------------------------------------------------
+
+    // --- umount: path validation ---
+
+    #[test]
+    fn test_umount_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(umount(core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_umount_empty_string_enoent() {
+        crate::errno::set_errno(0);
+        let empty = b"\0";
+        assert_eq!(umount(empty.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_umount_valid_path_reaches_enosys() {
+        crate::errno::set_errno(0);
+        let path = b"/mnt/cdrom\0";
+        assert_eq!(umount(path.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_umount_unterminated_path_enametoolong() {
+        // 4097-byte buffer of 'a' with no NUL — must trigger ENAMETOOLONG.
+        let huge = vec![b'a'; UMOUNT_PATH_MAX + 1];
+        crate::errno::set_errno(0);
+        assert_eq!(umount(huge.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
+    }
+
+    #[test]
+    fn test_umount_max_length_path_passes() {
+        // 4095 bytes of 'a' + NUL — exactly at the boundary.
+        let mut buf = vec![b'a'; UMOUNT_PATH_MAX];
+        buf[UMOUNT_PATH_MAX - 1] = 0;
+        crate::errno::set_errno(0);
+        assert_eq!(umount(buf.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_umount_single_slash_passes() {
+        // umount("/") is what `umount -a` ends with, hits ENOSYS cleanly.
+        crate::errno::set_errno(0);
+        let path = b"/\0";
+        assert_eq!(umount(path.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- umount2: path validation (same shape as umount) ---
+
+    #[test]
+    fn test_umount2_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(umount2(core::ptr::null(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_umount2_empty_string_enoent() {
+        crate::errno::set_errno(0);
+        let empty = b"\0";
+        assert_eq!(umount2(empty.as_ptr(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_umount2_unterminated_path_enametoolong() {
+        let huge = vec![b'a'; UMOUNT_PATH_MAX + 1];
+        crate::errno::set_errno(0);
+        assert_eq!(umount2(huge.as_ptr(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
+    }
+
+    // --- umount2: flag mask ---
+
+    #[test]
+    fn test_umount2_unknown_flag_einval() {
+        crate::errno::set_errno(0);
+        let path = b"/mnt/foo\0";
+        // bit 0x10 is not in UMOUNT2_FLAGS_VALID.
+        assert_eq!(umount2(path.as_ptr(), 0x10), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_umount2_high_flag_einval() {
+        crate::errno::set_errno(0);
+        let path = b"/mnt/foo\0";
+        assert_eq!(umount2(path.as_ptr(), i32::MIN), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_umount2_mnt_force_passes() {
+        crate::errno::set_errno(0);
+        let path = b"/mnt/foo\0";
+        assert_eq!(
+            umount2(path.as_ptr(), crate::sys_mount::MNT_FORCE),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_umount2_mnt_detach_passes() {
+        crate::errno::set_errno(0);
+        let path = b"/mnt/foo\0";
+        assert_eq!(
+            umount2(path.as_ptr(), crate::sys_mount::MNT_DETACH),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_umount2_mnt_expire_alone_passes() {
+        crate::errno::set_errno(0);
+        let path = b"/mnt/foo\0";
+        assert_eq!(
+            umount2(path.as_ptr(), crate::sys_mount::MNT_EXPIRE),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_umount2_umount_nofollow_passes() {
+        crate::errno::set_errno(0);
+        let path = b"/mnt/foo\0";
+        assert_eq!(
+            umount2(path.as_ptr(), crate::sys_mount::UMOUNT_NOFOLLOW),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_umount2_force_plus_detach_passes() {
+        // FORCE + DETACH is allowed (no mutual exclusion between them).
+        crate::errno::set_errno(0);
+        let path = b"/mnt/foo\0";
+        let flags = crate::sys_mount::MNT_FORCE | crate::sys_mount::MNT_DETACH;
+        assert_eq!(umount2(path.as_ptr(), flags), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- umount2: MNT_EXPIRE mutual exclusion ---
+
+    #[test]
+    fn test_umount2_expire_plus_force_einval() {
+        crate::errno::set_errno(0);
+        let path = b"/mnt/foo\0";
+        let flags = crate::sys_mount::MNT_EXPIRE | crate::sys_mount::MNT_FORCE;
+        assert_eq!(umount2(path.as_ptr(), flags), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_umount2_expire_plus_detach_einval() {
+        crate::errno::set_errno(0);
+        let path = b"/mnt/foo\0";
+        let flags = crate::sys_mount::MNT_EXPIRE | crate::sys_mount::MNT_DETACH;
+        assert_eq!(umount2(path.as_ptr(), flags), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_umount2_expire_plus_nofollow_passes() {
+        // EXPIRE + NOFOLLOW is allowed (NOFOLLOW is unrelated to expiry).
+        crate::errno::set_errno(0);
+        let path = b"/mnt/foo\0";
+        let flags = crate::sys_mount::MNT_EXPIRE
+            | crate::sys_mount::UMOUNT_NOFOLLOW;
+        assert_eq!(umount2(path.as_ptr(), flags), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- umount2: validation order ---
+
+    #[test]
+    fn test_umount2_null_path_before_flag_check() {
+        // NULL path + bad flags → EFAULT wins (path checked first).
+        crate::errno::set_errno(0);
+        assert_eq!(umount2(core::ptr::null(), 0x10), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_umount2_empty_path_before_flag_check() {
+        crate::errno::set_errno(0);
+        let empty = b"\0";
+        assert_eq!(umount2(empty.as_ptr(), 0x10), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_umount2_flag_check_before_mutex_check() {
+        // Unknown bit + EXPIRE + FORCE: unknown bit fires first.
+        crate::errno::set_errno(0);
+        let path = b"/mnt/foo\0";
+        let flags = 0x10
+            | crate::sys_mount::MNT_EXPIRE
+            | crate::sys_mount::MNT_FORCE;
+        assert_eq!(umount2(path.as_ptr(), flags), -1);
+        // Both checks return EINVAL — this test documents that the
+        // unknown-bit check runs first (covers more cases).
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- Constants ---
+
+    #[test]
+    fn test_umount2_flags_valid_mask_constant() {
+        assert_eq!(UMOUNT2_FLAGS_VALID, 0x0F);
+        assert_eq!(
+            UMOUNT2_FLAGS_VALID,
+            crate::sys_mount::MNT_FORCE
+                | crate::sys_mount::MNT_DETACH
+                | crate::sys_mount::MNT_EXPIRE
+                | crate::sys_mount::UMOUNT_NOFOLLOW,
+        );
+    }
+
+    #[test]
+    fn test_umount_path_max_constant() {
+        assert_eq!(UMOUNT_PATH_MAX, 4096);
+    }
+
+    // --- errno preserved on validated call ---
+
+    #[test]
+    fn test_umount_validated_call_sets_enosys() {
+        crate::errno::set_errno(0);
+        let path = b"/proc\0";
+        umount(path.as_ptr());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- Workflow tests: real-world umount callers ---
+
+    /// systemd shutdown sequence: `systemd-shutdown` walks the mount
+    /// tree and calls `umount2(mount_point, MNT_FORCE | MNT_DETACH)`
+    /// on every remaining mount as part of `final.target` processing.
+    /// Must reach ENOSYS so the unmount-failure tally is reported
+    /// rather than the shutdown looping on "Invalid argument."
+    #[test]
+    fn test_umount2_workflow_systemd_final_target() {
+        crate::errno::set_errno(0);
+        let mount = b"/home\0";
+        let flags = crate::sys_mount::MNT_FORCE | crate::sys_mount::MNT_DETACH;
+        assert_eq!(umount2(mount.as_ptr(), flags), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// `umount -l /mnt/x` (lazy unmount): util-linux's `umount(8)`
+    /// translates `-l` to `umount2(path, MNT_DETACH)`.  Validates that
+    /// the bare-DETACH flag reaches ENOSYS so users see "Function not
+    /// implemented" rather than a wrong-args message.
+    #[test]
+    fn test_umount2_workflow_util_linux_lazy() {
+        crate::errno::set_errno(0);
+        let mount = b"/mnt/usb\0";
+        assert_eq!(
+            umount2(mount.as_ptr(), crate::sys_mount::MNT_DETACH),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// autofs `expire` daemon: invokes `umount2(path, MNT_EXPIRE)` to
+    /// mark a stale automount for expiry.  If the mount is still busy,
+    /// Linux returns EAGAIN; otherwise it tears it down.  In our world
+    /// the syscall reaches ENOSYS — autofs's expire timer then falls
+    /// back to a periodic retry loop without dropping the entry.
+    #[test]
+    fn test_umount2_workflow_autofs_expire() {
+        crate::errno::set_errno(0);
+        let mount = b"/net/server-a\0";
+        assert_eq!(
+            umount2(mount.as_ptr(), crate::sys_mount::MNT_EXPIRE),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Docker daemon container teardown: when removing a container,
+    /// `containerd-shim` calls `umount2(rootfs_overlay, MNT_DETACH)`
+    /// on the overlayfs mount before unlinking the container directory.
+    /// On ENOSYS, the shim falls back to recursive `rmdir` which leaves
+    /// the overlay junk behind — admin must clean up manually.
+    #[test]
+    fn test_umount2_workflow_docker_overlay_teardown() {
+        crate::errno::set_errno(0);
+        let mount =
+            b"/var/lib/docker/overlay2/abc123/merged\0";
+        assert_eq!(
+            umount2(mount.as_ptr(), crate::sys_mount::MNT_DETACH),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// `findmnt --umount` from util-linux: the modern util-linux
+    /// preflight that walks `/proc/self/mountinfo` for the right entry
+    /// then calls `umount2(target, UMOUNT_NOFOLLOW)` to avoid following
+    /// a symlink to an unintended mount.  Must accept the NOFOLLOW
+    /// flag and reach ENOSYS so the tool prints a useful error.
+    #[test]
+    fn test_umount2_workflow_findmnt_nofollow() {
+        crate::errno::set_errno(0);
+        let mount = b"/mnt/symlinked-target\0";
+        assert_eq!(
+            umount2(mount.as_ptr(), crate::sys_mount::UMOUNT_NOFOLLOW),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Buggy shell-script caller: `umount2(NULL, 0)` from a C
+    /// extension that forgot to set the mount path.  Must catch with
+    /// EFAULT so the bug surfaces immediately rather than silently
+    /// returning ENOSYS as if the path were valid.
+    #[test]
+    fn test_umount2_workflow_buggy_null_path() {
+        crate::errno::set_errno(0);
+        assert_eq!(umount2(core::ptr::null(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     // -- arch_prctl --

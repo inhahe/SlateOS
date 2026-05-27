@@ -324,6 +324,17 @@ pub const SYS_SCHED_SET_PROFILE: u64 = 53;
 /// manually tuned.
 pub const SYS_SCHED_GET_PROFILE: u64 = 54;
 
+/// Get the number of online CPUs.
+///
+/// Returns the number of CPUs the scheduler is currently using.  Used
+/// by userspace runtimes to size worker thread pools, by libc's
+/// `sysconf(_SC_NPROCESSORS_ONLN)` / `get_nprocs()`, and by
+/// `sched_getaffinity()` to populate a meaningful default affinity
+/// mask.
+///
+/// Returns: number of online CPUs (always ≥ 1).
+pub const SYS_CPU_COUNT: u64 = 55;
+
 /// Read a kernel tunable parameter (sysctl-like interface).
 ///
 /// `arg0`: parameter ID (e.g., 0 = mm.max_stack_frames).

@@ -7200,6 +7200,23 @@ pub fn sys_sched_get_profile(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_CPU_COUNT` — get the number of online CPUs.
+///
+/// Reads `crate::smp::cpu_count()` which is updated by the SMP
+/// bootstrap as each AP comes online and stays stable thereafter.
+/// Always returns at least 1 (the BSP).
+///
+/// Returns: number of online CPUs.
+pub fn sys_cpu_count(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+
+    let n = crate::smp::cpu_count().max(1);
+    // smp::cpu_count() returns usize.  On x86_64 a CPU count never
+    // exceeds i64::MAX; cast is lossless.
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    SyscallResult::ok(n as i64)
+}
+
 // ---------------------------------------------------------------------------
 // Sysctl — kernel parameter registry (60–69)
 // ---------------------------------------------------------------------------

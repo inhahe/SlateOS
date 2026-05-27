@@ -865,8 +865,18 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
     match name {
         _SC_PAGESIZE => 16384, // Our OS uses 16 KiB pages.
         _SC_NPROCESSORS_CONF | _SC_NPROCESSORS_ONLN => {
-            // TODO: Query actual CPU count from kernel.
-            1
+            // On bare metal, query the kernel for the online CPU count.
+            // On host (cargo test), fall back to 1 — the host's syscall
+            // table doesn't match ours.
+            #[cfg(target_os = "none")]
+            {
+                let n = crate::syscall::syscall0(crate::syscall::SYS_CPU_COUNT);
+                if n >= 1 { n } else { 1 }
+            }
+            #[cfg(not(target_os = "none"))]
+            {
+                1
+            }
         }
         _SC_OPEN_MAX => crate::fdtable::MAX_FDS as i64,
         _SC_LOGIN_NAME_MAX => i64::from(crate::limits::LOGIN_NAME_MAX),
@@ -2101,6 +2111,22 @@ mod tests {
     #[test]
     fn test_sysconf_phys_pages() {
         assert!(sysconf(_SC_PHYS_PAGES) > 0);
+    }
+
+    #[test]
+    fn test_sysconf_nprocessors_positive() {
+        assert!(sysconf(_SC_NPROCESSORS_ONLN) >= 1);
+        assert!(sysconf(_SC_NPROCESSORS_CONF) >= 1);
+    }
+
+    #[test]
+    fn test_sysconf_nprocessors_conf_ge_onln() {
+        // Configured CPUs should be >= online CPUs.  We don't model offline
+        // CPUs, so they're equal.
+        assert_eq!(
+            sysconf(_SC_NPROCESSORS_CONF),
+            sysconf(_SC_NPROCESSORS_ONLN),
+        );
     }
 
     #[test]

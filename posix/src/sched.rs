@@ -168,9 +168,28 @@ pub struct CpuSetT {
     pub bits: [u64; 16],
 }
 
+/// Number of CPUs reportable by `sched_getaffinity` / fitting in a `CpuSetT`.
+const CPU_SETSIZE_BITS: usize = 1024;
+
+/// Query the kernel's online CPU count.  Falls back to 1 in test builds where
+/// our SYSCALL ABI isn't valid.  Always returns ≥ 1.
+fn online_cpu_count() -> usize {
+    #[cfg(target_os = "none")]
+    {
+        let n = crate::syscall::syscall0(crate::syscall::SYS_CPU_COUNT);
+        if n >= 1 { n as usize } else { 1 }
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        1
+    }
+}
+
 /// Get the CPU affinity mask for a process.
 ///
-/// Stub: returns a mask with CPU 0 set (single-CPU assumption).
+/// Populates `mask` with bits 0..N set, where N is the number of online CPUs
+/// (capped at `CPU_SETSIZE`).  Our scheduler doesn't yet support per-thread
+/// affinity restriction, so every thread can be dispatched to any online CPU.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getaffinity(
     _pid: i32,
@@ -182,6 +201,8 @@ pub extern "C" fn sched_getaffinity(
         return -1;
     }
 
+    let ncpus = online_cpu_count().min(CPU_SETSIZE_BITS);
+
     // SAFETY: mask is non-null and cpusetsize is large enough.
     unsafe {
         // Zero the mask first.
@@ -191,8 +212,14 @@ pub extern "C" fn sched_getaffinity(
             *bytes.add(i) = 0;
             i = i.wrapping_add(1);
         }
-        // Set CPU 0.
-        (*mask).bits[0] = 1;
+        // Set bits 0..ncpus.
+        let mut cpu: usize = 0;
+        while cpu < ncpus {
+            let word = cpu / 64;
+            let bit = cpu % 64;
+            (*mask).bits[word] |= 1u64 << bit;
+            cpu = cpu.wrapping_add(1);
+        }
     }
 
     0
@@ -200,13 +227,43 @@ pub extern "C" fn sched_getaffinity(
 
 /// Set the CPU affinity mask for a process.
 ///
-/// Stub: always succeeds (ignores the mask).
+/// Validates the mask (non-NULL, sufficient size, at least one valid CPU bit
+/// set) but does not actually constrain scheduling — our scheduler treats all
+/// online CPUs as eligible.  Returns 0 on success, -1 with errno on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setaffinity(
     _pid: i32,
-    _cpusetsize: usize,
-    _mask: *const CpuSetT,
+    cpusetsize: usize,
+    mask: *const CpuSetT,
 ) -> i32 {
+    if mask.is_null() || cpusetsize < core::mem::size_of::<CpuSetT>() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let ncpus = online_cpu_count().min(CPU_SETSIZE_BITS);
+
+    // SAFETY: mask is non-null and large enough.
+    let any_valid = unsafe {
+        let mut found = false;
+        let mut cpu: usize = 0;
+        while cpu < ncpus {
+            let word = cpu / 64;
+            let bit = cpu % 64;
+            if (*mask).bits[word] & (1u64 << bit) != 0 {
+                found = true;
+                break;
+            }
+            cpu = cpu.wrapping_add(1);
+        }
+        found
+    };
+
+    if !any_valid {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     0
 }
 
@@ -539,6 +596,52 @@ mod tests {
         let cpuset = CpuSetT { bits: [1; 16] };
         let ret = sched_setaffinity(0, 128, &raw const cpuset);
         assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_sched_setaffinity_null_einval() {
+        let ret = sched_setaffinity(0, 128, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sched_setaffinity_too_small_einval() {
+        let cpuset = CpuSetT { bits: [1; 16] };
+        let ret = sched_setaffinity(0, 1, &raw const cpuset);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sched_setaffinity_empty_mask_einval() {
+        // An all-zero mask has no valid CPU bits set -> EINVAL.
+        let cpuset = CpuSetT { bits: [0; 16] };
+        let ret = sched_setaffinity(0, 128, &raw const cpuset);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sched_setaffinity_unreachable_cpu_einval() {
+        // Bit only set for CPU 100, but in host test build only 1 CPU is
+        // online, so no valid bit -> EINVAL.
+        let mut cpuset = CpuSetT { bits: [0; 16] };
+        cpuset.bits[1] = 1u64 << (100 - 64); // bit 100
+        let ret = sched_setaffinity(0, 128, &raw const cpuset);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sched_getaffinity_roundtrip() {
+        // sched_getaffinity should give back a mask that sched_setaffinity
+        // accepts — the kernel's reported affinity is always usable.
+        let mut cpuset = CpuSetT { bits: [0; 16] };
+        let g = sched_getaffinity(0, 128, &raw mut cpuset);
+        assert_eq!(g, 0);
+        let s = sched_setaffinity(0, 128, &raw const cpuset);
+        assert_eq!(s, 0);
     }
 
     // -- sched_getcpu / getcpu --

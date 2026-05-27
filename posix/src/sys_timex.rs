@@ -151,33 +151,221 @@ impl Timex {
 }
 
 // ---------------------------------------------------------------------------
+// Process-local NTP discipline state
+// ---------------------------------------------------------------------------
+//
+// We don't have a real-time NTP-disciplined clock (no RTC infrastructure
+// yet — the kernel exposes only a monotonic counter).  Rather than fail
+// every NTP-client call, we remember the parameters that callers write
+// and reflect them back on subsequent reads.  This makes ntpd / chronyd
+// / Java's `LD_PRELOAD`-style clock probes happy without lying about
+// what the kernel actually disciplines.
+//
+// The state is protected by a spinlock because adjtimex can be called
+// from multiple threads.
+
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Process-local NTP discipline parameters.  Mirrors the subset of
+/// `Timex` fields that adjtimex actually carries between calls.
+struct TimexState {
+    offset: i64,
+    freq: i64,
+    maxerror: i64,
+    esterror: i64,
+    status: i32,
+    constant: i64,
+    tick: i64,
+    tai: i32,
+}
+
+static TIMEX_LOCK: AtomicBool = AtomicBool::new(false);
+static mut TIMEX_STATE: TimexState = TimexState {
+    offset: 0,
+    // Default NTP frequency tolerance: 32_768_000 scaled ppm (Linux's
+    // `MAXFREQ * (1 << 16)`).
+    freq: 0,
+    maxerror: 16_000_000,
+    esterror: 16_000_000,
+    // Clock is unsynchronized until NTP discipline is engaged.
+    status: STA_UNSYNC,
+    constant: 2,
+    // Linux default jiffy tick (USEC_PER_SEC / HZ at HZ=100).
+    tick: 10_000,
+    tai: 0,
+};
+
+/// RAII guard for the TIMEX spinlock.
+struct TimexLockGuard;
+impl Drop for TimexLockGuard {
+    fn drop(&mut self) {
+        TIMEX_LOCK.store(false, Ordering::Release);
+    }
+}
+
+/// Acquire the TIMEX spinlock.  Spins (with `core::hint::spin_loop`)
+/// until acquired; safe to call from anywhere.
+fn lock_timex() -> TimexLockGuard {
+    while TIMEX_LOCK
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    TimexLockGuard
+}
+
+/// Convert the saved state's `status` into the adjtimex return code.
+///
+/// Linux returns one of `TIME_OK`, `TIME_INS`, `TIME_DEL`, `TIME_OOP`,
+/// `TIME_WAIT`, or `TIME_ERROR`.  `TIME_ERROR` is used whenever the
+/// `STA_UNSYNC` bit is set.
+fn status_to_return(status: i32) -> i32 {
+    if (status & STA_UNSYNC) != 0 {
+        return TIME_ERROR;
+    }
+    if (status & STA_INS) != 0 {
+        return TIME_INS;
+    }
+    if (status & STA_DEL) != 0 {
+        return TIME_DEL;
+    }
+    TIME_OK
+}
+
+// ---------------------------------------------------------------------------
 // Functions
 // ---------------------------------------------------------------------------
 
-/// Adjust the kernel clock.
+/// Adjust the kernel clock (Linux `adjtimex(2)`).
 ///
-/// Stub — returns `TIME_ERROR` / sets `ENOSYS`.
+/// Reads `tx->modes` to decide which subset of fields to apply, then
+/// fills the entire struct with the current discipline state and
+/// returns the appropriate `TIME_*` code.  Setting `modes = 0` is a
+/// read-only query.
+///
+/// Returns -1 with `EFAULT` on null pointer.  We do not enforce
+/// privilege on writes (no user/permission model yet); on a real
+/// multi-user system this would require CAP_SYS_TIME.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn adjtimex(_tx: *mut Timex) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
+    if tx.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // SAFETY: caller contract — `tx` points to a writable Timex.
+    let modes = unsafe { (*tx).modes };
+
+    // Reject mode bits we don't recognise.
+    const KNOWN_MODES: u32 = ADJ_OFFSET
+        | ADJ_FREQUENCY
+        | ADJ_MAXERROR
+        | ADJ_ESTERROR
+        | ADJ_STATUS
+        | ADJ_TIMECONST
+        | ADJ_TAI
+        | ADJ_MICRO
+        | ADJ_NANO
+        | ADJ_SETOFFSET
+        | ADJ_TICK;
+    if (modes & !KNOWN_MODES) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let _guard = lock_timex();
+
+    // SAFETY: serialized by TIMEX_LOCK.
+    let state = unsafe { &mut *core::ptr::addr_of_mut!(TIMEX_STATE) };
+
+    // SAFETY: caller-supplied writable struct.
+    unsafe {
+        // Apply each requested update.
+        if (modes & ADJ_OFFSET) != 0 {
+            state.offset = (*tx).offset;
+        }
+        if (modes & ADJ_FREQUENCY) != 0 {
+            state.freq = (*tx).freq;
+        }
+        if (modes & ADJ_MAXERROR) != 0 {
+            state.maxerror = (*tx).maxerror;
+        }
+        if (modes & ADJ_ESTERROR) != 0 {
+            state.esterror = (*tx).esterror;
+        }
+        if (modes & ADJ_STATUS) != 0 {
+            state.status = (*tx).status;
+        }
+        if (modes & ADJ_TIMECONST) != 0 {
+            state.constant = (*tx).constant;
+        }
+        if (modes & ADJ_TAI) != 0 {
+            state.tai = (*tx).tai;
+        }
+        if (modes & ADJ_TICK) != 0 {
+            state.tick = (*tx).tick;
+        }
+        // ADJ_NANO / ADJ_MICRO toggle the STA_NANO bit but otherwise
+        // don't carry a value.
+        if (modes & ADJ_NANO) != 0 {
+            state.status |= STA_NANO;
+        }
+        if (modes & ADJ_MICRO) != 0 {
+            state.status &= !STA_NANO;
+        }
+
+        // Now read everything back into the caller's struct.
+        (*tx).offset = state.offset;
+        (*tx).freq = state.freq;
+        (*tx).maxerror = state.maxerror;
+        (*tx).esterror = state.esterror;
+        (*tx).status = state.status;
+        (*tx).constant = state.constant;
+        (*tx).precision = 1; // 1 unit (nano if STA_NANO else micro).
+        // 32_768_000 scaled ppm = NTP's MAXFREQ default.
+        (*tx).tolerance = 32_768_000;
+        (*tx).tick = state.tick;
+        (*tx).tai = state.tai;
+        // Wall clock fields we don't track stay at whatever the caller
+        // wrote — set them to 0 so reads after a fresh adjtimex are
+        // deterministic.
+        (*tx).time_tv_sec = 0;
+        (*tx).time_tv_usec = 0;
+        (*tx).ppsfreq = 0;
+        (*tx).jitter = 0;
+        (*tx).shift = 0;
+        (*tx).stabil = 0;
+        (*tx).jitcnt = 0;
+        (*tx).calcnt = 0;
+        (*tx).errcnt = 0;
+        (*tx).stbcnt = 0;
+    }
+
+    status_to_return(state.status)
 }
 
 /// NTP-compatible clock adjustment (identical to `adjtimex`).
-///
-/// Stub — returns `-1` / sets `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ntp_adjtime(tx: *mut Timex) -> i32 {
     adjtimex(tx)
 }
 
-/// Adjust kernel clock (alias for `adjtimex`).
+/// Per-clock adjtimex (`clock_adjtime(2)`).
 ///
-/// Stub — returns `-1` / sets `ENOSYS`.
+/// `clk_id` selects which clock to adjust.  We accept `CLOCK_REALTIME`
+/// (0) and `CLOCK_MONOTONIC` (1) — both forward to the same shared
+/// discipline state because we have only one underlying clock.
+/// Returns -1 with `EINVAL` for any other clock id, or with `EFAULT`
+/// on null `tx`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn clock_adjtime(_clk_id: i32, _tx: *mut Timex) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn clock_adjtime(clk_id: i32, tx: *mut Timex) -> i32 {
+    // CLOCK_REALTIME = 0, CLOCK_MONOTONIC = 1 — see <time.h>.
+    if clk_id != 0 && clk_id != 1 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    adjtimex(tx)
 }
 
 // ---------------------------------------------------------------------------
@@ -241,21 +429,198 @@ mod tests {
         assert_ne!(TIME_INS, TIME_DEL);
     }
 
-    #[test]
-    fn test_adjtimex_stub() {
-        let mut tx = Timex::zeroed();
-        assert_eq!(adjtimex(&mut tx), -1);
+    /// Serializes tests that touch the global TIMEX_STATE.
+    static TIMEX_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Restore TIMEX_STATE to its boot defaults so each test starts
+    /// from a known baseline.
+    fn reset_timex_state() {
+        let _guard = lock_timex();
+        // SAFETY: serialized by TIMEX_LOCK.
+        unsafe {
+            let s = &mut *core::ptr::addr_of_mut!(TIMEX_STATE);
+            s.offset = 0;
+            s.freq = 0;
+            s.maxerror = 16_000_000;
+            s.esterror = 16_000_000;
+            s.status = STA_UNSYNC;
+            s.constant = 2;
+            s.tick = 10_000;
+            s.tai = 0;
+        }
     }
 
     #[test]
-    fn test_ntp_adjtime_stub() {
-        let mut tx = Timex::zeroed();
-        assert_eq!(ntp_adjtime(&mut tx), -1);
+    fn test_adjtimex_null_efault() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let ret = adjtimex(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
-    fn test_clock_adjtime_stub() {
+    fn test_adjtimex_read_only_returns_time_error_when_unsync() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
         let mut tx = Timex::zeroed();
-        assert_eq!(clock_adjtime(0, &mut tx), -1);
+        // modes=0 = read-only query.
+        let ret = adjtimex(&mut tx);
+        // Boot default has STA_UNSYNC set → TIME_ERROR.
+        assert_eq!(ret, TIME_ERROR);
+        // Status field is populated from state.
+        assert_ne!(tx.status & STA_UNSYNC, 0);
+        // Default tick reflected.
+        assert_eq!(tx.tick, 10_000);
+    }
+
+    #[test]
+    fn test_adjtimex_set_offset_persists() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_OFFSET;
+        tx.offset = 12_345;
+        let _ = adjtimex(&mut tx);
+        // Read back.
+        let mut tx2 = Timex::zeroed();
+        let _ = adjtimex(&mut tx2);
+        assert_eq!(tx2.offset, 12_345);
+    }
+
+    #[test]
+    fn test_adjtimex_set_status_clears_unsync_returns_time_ok() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_STATUS;
+        tx.status = STA_PLL; // No STA_UNSYNC, no leap.
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, TIME_OK);
+    }
+
+    #[test]
+    fn test_adjtimex_set_status_with_leap_ins_returns_time_ins() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_STATUS;
+        tx.status = STA_INS; // Synchronized, leap-second insert pending.
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, TIME_INS);
+    }
+
+    #[test]
+    fn test_adjtimex_set_status_with_leap_del_returns_time_del() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_STATUS;
+        tx.status = STA_DEL;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, TIME_DEL);
+    }
+
+    #[test]
+    fn test_adjtimex_adj_nano_sets_sta_nano() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_NANO;
+        let _ = adjtimex(&mut tx);
+        // STA_NANO should now be set in the state.
+        let mut tx2 = Timex::zeroed();
+        let _ = adjtimex(&mut tx2);
+        assert_ne!(tx2.status & STA_NANO, 0);
+    }
+
+    #[test]
+    fn test_adjtimex_adj_micro_clears_sta_nano() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        // First set nano.
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_NANO;
+        let _ = adjtimex(&mut tx);
+        // Now clear it.
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_MICRO;
+        let _ = adjtimex(&mut tx);
+        let mut tx2 = Timex::zeroed();
+        let _ = adjtimex(&mut tx2);
+        assert_eq!(tx2.status & STA_NANO, 0);
+    }
+
+    #[test]
+    fn test_adjtimex_unknown_modes_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = 0x8000_0000; // Not in KNOWN_MODES.
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_fills_tolerance_and_precision() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        let _ = adjtimex(&mut tx);
+        // tolerance is the NTP MAXFREQ default.
+        assert_eq!(tx.tolerance, 32_768_000);
+        // precision = 1 unit.
+        assert_eq!(tx.precision, 1);
+    }
+
+    #[test]
+    fn test_ntp_adjtime_matches_adjtimex() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        let ret = ntp_adjtime(&mut tx);
+        assert_eq!(ret, TIME_ERROR);
+    }
+
+    #[test]
+    fn test_clock_adjtime_realtime_works() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        let ret = clock_adjtime(0, &mut tx); // CLOCK_REALTIME
+        assert_eq!(ret, TIME_ERROR);
+    }
+
+    #[test]
+    fn test_clock_adjtime_monotonic_works() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        let ret = clock_adjtime(1, &mut tx); // CLOCK_MONOTONIC
+        assert_eq!(ret, TIME_ERROR);
+    }
+
+    #[test]
+    fn test_clock_adjtime_unknown_clock_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        let ret = clock_adjtime(99, &mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clock_adjtime_null_tx_efault() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let ret = clock_adjtime(0, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 }

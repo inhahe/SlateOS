@@ -950,7 +950,7 @@ fn split_leaf_and_insert(
     // The new leaf needs a logical block number in the directory's extent tree.
     // We need to grow the directory by one block and use that logical number.
     let dir_size = u64::from(dir_inode.i_size_lo);
-    let blocks_in_dir = (dir_size as usize + block_size - 1) / block_size;
+    let blocks_in_dir = (dir_size as usize).div_ceil(block_size);
     let new_logical = blocks_in_dir as u32;
 
     // Extend the directory's extent tree to map new_logical → new_block_phys.
@@ -1390,7 +1390,7 @@ pub fn self_test() -> KernelResult<()> {
 
         // Should not find a different name.
         let result = scan_leaf_block(&block, "other")?;
-        if result != None {
+        if result.is_some() {
             serial_println!("[ext4-htree]   FAIL: scan_leaf_block should not find 'other'");
             return Err(KernelError::InternalError);
         }

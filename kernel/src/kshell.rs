@@ -710,7 +710,7 @@ fn expand_brace_expr(inner: &str, result: &mut String) {
 
     // Try to find an operator: :-, :+, :=, :?, :N:N, %, %%, #, ##, /, //, ^, ^^, ,, ,,
     // Scan for the operator position (skip the variable name).
-    let name_end = inner.find(|c: char| c == ':' || c == '%' || c == '#' || c == '/' || c == '^' || c == ',')
+    let name_end = inner.find([':', '%', '#', '/', '^', ','])
         .unwrap_or(inner.len());
     let name = inner.get(..name_end).unwrap_or(inner);
     let rest = inner.get(name_end..).unwrap_or("");
@@ -2407,7 +2407,7 @@ fn parse_case_clauses(body: &str) -> Vec<(Vec<String>, Vec<String>)> {
 
         // Split commands on `;` and newlines.
         let commands: Vec<String> = commands_str
-            .split(|c: char| c == ';' || c == '\n')
+            .split([';', '\n'])
             .map(|s| String::from(s.trim()))
             .filter(|s| !s.is_empty())
             .collect();
@@ -4211,7 +4211,7 @@ fn execute_single(line: &str) {
 
     // Check for output redirection (> file, >> file).
     if let Some(redir) = parse_redirect(line) {
-        execute_redirect(&redir.command, &redir.path, redir.append);
+        execute_redirect(redir.command, redir.path, redir.append);
         set_exit(0);
         return;
     }
@@ -4219,13 +4219,13 @@ fn execute_single(line: &str) {
     // Check for here-string (cmd <<< word).
     if let Some((command, word)) = parse_here_string(line) {
         let input = alloc::format!("{}\n", word);
-        dispatch_with_input(&command, &input);
+        dispatch_with_input(command, &input);
         return;
     }
 
     // Check for input redirection (cmd < file).
     if let Some((command, path)) = parse_input_redirect(line) {
-        execute_input_redirect(&command, &path);
+        execute_input_redirect(command, path);
         return;
     }
 
@@ -4331,7 +4331,7 @@ struct InlineAssignment {
 /// - There's no command after the assignment (bare assignment)
 fn parse_inline_assignment(line: &str) -> Option<InlineAssignment> {
     // The first word (up to first whitespace) must contain `=`.
-    let first_space = line.find(|c: char| c == ' ' || c == '\t')?;
+    let first_space = line.find([' ', '\t'])?;
     let first_word = line.get(..first_space)?;
     let rest = line.get(first_space.saturating_add(1)..)?.trim();
 
@@ -4450,7 +4450,7 @@ fn execute_input_redirect(command: &str, path: &str) {
     // If the command itself has output redirection, handle it.
     if let Some(redir) = parse_redirect(command) {
         capture_start();
-        dispatch_with_input(&redir.command, text);
+        dispatch_with_input(redir.command, text);
         let output = capture_stop();
         if !output.is_empty() {
             use crate::fs::vfs::Vfs;
@@ -4648,7 +4648,7 @@ fn execute_pipe_chain(segments: &[&str]) {
     // The first segment might have input redirection (cmd < file | ...).
     let first = segments[0];
     if let Some((command, path)) = parse_input_redirect(first) {
-        execute_input_redirect(&command, &path);
+        execute_input_redirect(command, path);
     } else {
         dispatch(first);
     }
@@ -4667,7 +4667,7 @@ fn execute_pipe_chain(segments: &[&str]) {
     let last = segments[last_idx];
     if let Some(redir) = parse_redirect(last) {
         capture_start();
-        dispatch_with_input(&redir.command, &piped_data);
+        dispatch_with_input(redir.command, &piped_data);
         let output = capture_stop();
         if !output.is_empty() {
             use crate::fs::vfs::Vfs;
@@ -6187,7 +6187,7 @@ fn cmd_renice(args: &str) {
         return;
     }
 
-    let Some(&tid_str) = words.get(0) else { return };
+    let Some(&tid_str) = words.first() else { return };
     let Some(&pri_str) = words.get(1) else { return };
 
     let Ok(task_id) = tid_str.parse::<u64>() else {
@@ -6232,7 +6232,7 @@ fn cmd_throttle(args: &str) {
         return;
     }
 
-    let Some(&tid_str) = words.get(0) else { return };
+    let Some(&tid_str) = words.first() else { return };
     let Ok(task_id) = tid_str.parse::<u64>() else {
         shell_println!("Invalid task ID: {}", tid_str);
         return;
@@ -6277,7 +6277,7 @@ fn cmd_taskset(args: &str) {
         return;
     }
 
-    let Some(&tid_str) = words.get(0) else { return };
+    let Some(&tid_str) = words.first() else { return };
     let Ok(task_id) = tid_str.parse::<u64>() else {
         shell_println!("Invalid task ID: {}", tid_str);
         return;
@@ -10027,7 +10027,7 @@ fn cmd_integrity(args: &str) {
         }
 
         "list" | "ls" => {
-            let prefix = target.map(|p| resolve_path(p));
+            let prefix = target.map(resolve_path);
             let max_display = 100;
 
             let (entries, total) = integrity::list_entries(
@@ -10280,7 +10280,7 @@ fn cmd_fhist(args: &str) {
         }
 
         "list" | "ls" => {
-            let prefix = target.map(|p| resolve_path(p));
+            let prefix = target.map(resolve_path);
             let tracked = history::list_tracked(prefix.as_deref(), 100);
 
             if tracked.is_empty() {
@@ -12087,7 +12087,7 @@ fn cmd_fssnapshot(args: &str) {
                         };
                         let hash_str = e.content_hash
                             .as_ref()
-                            .map(|h| snapshot::hash_to_hex(h))
+                            .map(snapshot::hash_to_hex)
                             .map(|s| {
                                 // Show first 16 hex chars.
                                 let short: String = s.chars().take(16).collect();
@@ -12625,7 +12625,7 @@ fn cmd_fcompress(args: &str) {
                         fcompress::default_algorithm()
                     };
                     let extensions: Vec<alloc::string::String> = if parts.len() > 4 {
-                        parts[4].split(',').map(|s| alloc::string::String::from(s)).collect()
+                        parts[4].split(',').map(alloc::string::String::from).collect()
                     } else {
                         Vec::new()
                     };
@@ -13757,7 +13757,7 @@ fn cmd_backup(args: &str) {
                 } else {
                     backup::BackupMode::Full
                 },
-                verify: !flags.iter().any(|f| *f == "--no-verify"),
+                verify: !flags.contains(&"--no-verify"),
                 dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
                 exclude,
                 ..backup::BackupOptions::default()
@@ -13793,7 +13793,7 @@ fn cmd_backup(args: &str) {
             let flags = &parts[3..];
             let opts = backup::BackupOptions {
                 mode: backup::BackupMode::Incremental,
-                verify: !flags.iter().any(|f| *f == "--no-verify"),
+                verify: !flags.contains(&"--no-verify"),
                 dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
                 ..backup::BackupOptions::default()
             };
@@ -13826,7 +13826,7 @@ fn cmd_backup(args: &str) {
             });
             let flags = &parts[3..];
             let opts = backup::RestoreOptions {
-                verify: !flags.iter().any(|f| *f == "--no-verify"),
+                verify: !flags.contains(&"--no-verify"),
                 dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
                 ..backup::RestoreOptions::default()
             };
@@ -14230,9 +14230,9 @@ fn cmd_batch(args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     let dry_run = parts.iter().any(|f| *f == "--dry-run" || *f == "-n");
-    let conflict = if parts.iter().any(|f| *f == "--overwrite") {
+    let conflict = if parts.contains(&"--overwrite") {
         batch::ConflictStrategy::Overwrite
-    } else if parts.iter().any(|f| *f == "--rename") {
+    } else if parts.contains(&"--rename") {
         batch::ConflictStrategy::Rename
     } else {
         batch::ConflictStrategy::Skip
@@ -20770,7 +20770,7 @@ fn cmd_useracct(args: &str) {
         "avatar" => { if parts.len() < 3 { shell_println!("Usage: useracct avatar <uid> <path>"); } else { match parts[1].parse::<u64>() { Ok(uid) => match useracct::set_avatar(uid, parts[2]) { Ok(()) => shell_println!("Set avatar for uid={}", uid), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid uid") } } }
         "autologin" => { if parts.len() < 3 { shell_println!("Usage: useracct autologin <uid> <on|off>"); } else { match parts[1].parse::<u64>() { Ok(uid) => { let on = matches!(parts[2], "on" | "true" | "yes" | "1"); match useracct::set_auto_login(uid, on) { Ok(()) => shell_println!("Auto-login {} for uid={}", if on { "enabled" } else { "disabled" }, uid), Err(e) => shell_println!("Error: {:?}", e) } }, Err(_) => shell_println!("Invalid uid") } } }
         "groups" | "grp" => { let groups = useracct::list_groups(); if groups.is_empty() { shell_println!("No groups"); } else { for g in &groups { let kind = if g.system_group { "system" } else { "user" }; shell_println!("  gid={} {} ({}) — {}", g.gid, g.name, kind, g.description); } } }
-        "addgroup" | "gadd" => { if parts.len() < 2 { shell_println!("Usage: useracct addgroup <name> [description] [--system]"); } else { let sys = parts.iter().any(|p| *p == "--system"); let desc = parts.get(2).copied().unwrap_or(""); match useracct::create_group(parts[1], desc, sys) { Ok(gid) => shell_println!("Created group '{}' (gid={})", parts[1], gid), Err(e) => shell_println!("Error: {:?}", e) } } }
+        "addgroup" | "gadd" => { if parts.len() < 2 { shell_println!("Usage: useracct addgroup <name> [description] [--system]"); } else { let sys = parts.contains(&"--system"); let desc = parts.get(2).copied().unwrap_or(""); match useracct::create_group(parts[1], desc, sys) { Ok(gid) => shell_println!("Created group '{}' (gid={})", parts[1], gid), Err(e) => shell_println!("Error: {:?}", e) } } }
         "rmgroup" | "gdel" => { if parts.len() < 2 { shell_println!("Usage: useracct rmgroup <gid>"); } else { match parts[1].parse::<u64>() { Ok(gid) => match useracct::remove_group(gid) { Ok(()) => shell_println!("Removed group gid={}", gid), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid gid") } } }
         "join" => { if parts.len() < 3 { shell_println!("Usage: useracct join <uid> <gid>"); } else { match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) { (Ok(uid), Ok(gid)) => match useracct::add_to_group(uid, gid) { Ok(()) => shell_println!("Added uid={} to gid={}", uid, gid), Err(e) => shell_println!("Error: {:?}", e) }, _ => shell_println!("Invalid uid/gid") } } }
         "leave" => { if parts.len() < 3 { shell_println!("Usage: useracct leave <uid> <gid>"); } else { match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) { (Ok(uid), Ok(gid)) => match useracct::remove_from_group(uid, gid) { Ok(()) => shell_println!("Removed uid={} from gid={}", uid, gid), Err(e) => shell_println!("Error: {:?}", e) }, _ => shell_println!("Invalid uid/gid") } } }
@@ -20965,7 +20965,7 @@ fn cmd_bootcfg(args: &str) {
     match sub {
         "show" | "config" => { let cfg = bootcfg::get_config(); let loader = match cfg.loader_type { bootcfg::BootloaderType::Grub2 => "GRUB2", bootcfg::BootloaderType::SystemdBoot => "systemd-boot", bootcfg::BootloaderType::CustomUefi => "Custom UEFI", bootcfg::BootloaderType::DirectUefi => "Direct UEFI" }; let console = match cfg.console_mode { bootcfg::ConsoleMode::Text => "text", bootcfg::ConsoleMode::Graphical => "graphical", bootcfg::ConsoleMode::Verbose => "verbose", bootcfg::ConsoleMode::Silent => "silent" }; shell_println!("Bootloader: {}", loader); shell_println!("Timeout:    {}s", cfg.timeout_secs); shell_println!("Console:    {}", console); shell_println!("Activity:   {}", cfg.show_boot_activity); shell_println!("Secure Boot:{}", cfg.secure_boot); shell_println!("ESP:        {}", cfg.esp_path); shell_println!("GRUB cfg:   {}", cfg.grub_config_path); shell_println!("GFX mode:   {}", cfg.gfx_mode); shell_println!("Dual boot:  {}", cfg.dual_boot); }
         "entries" | "ls" => { let entries = bootcfg::list_entries(); if entries.is_empty() { shell_println!("No boot entries"); } else { for e in &entries { let kind = match e.kind { bootcfg::EntryKind::OurOs => "os", bootcfg::EntryKind::Linux => "linux", bootcfg::EntryKind::Windows => "windows", bootcfg::EntryKind::MacOs => "macos", bootcfg::EntryKind::Recovery => "recovery", bootcfg::EntryKind::MemTest => "memtest", bootcfg::EntryKind::FirmwareSettings => "firmware", bootcfg::EntryKind::Custom => "custom" }; let def = if e.is_default { " *" } else { "" }; let hid = if e.hidden { " (hidden)" } else { "" }; shell_println!("  #{} id={} {} [{}]{}{}", e.position, e.id, e.name, kind, def, hid); } } }
-        "add" => { if parts.len() < 4 { shell_println!("Usage: bootcfg add <name> <kernel_path> <params...> [--type os|linux|windows|recovery]"); } else { let kind = if parts.iter().any(|p| *p == "linux") { bootcfg::EntryKind::Linux } else if parts.iter().any(|p| *p == "windows") { bootcfg::EntryKind::Windows } else if parts.iter().any(|p| *p == "recovery") { bootcfg::EntryKind::Recovery } else { bootcfg::EntryKind::OurOs }; let params = parts[3..].iter().filter(|p| !["--type", "os", "linux", "windows", "recovery"].contains(p)).copied().collect::<Vec<_>>().join(" "); match bootcfg::add_entry(parts[1], kind, parts[2], "", &params, false) { Ok(id) => shell_println!("Added entry '{}' (id={})", parts[1], id), Err(e) => shell_println!("Error: {:?}", e) } } }
+        "add" => { if parts.len() < 4 { shell_println!("Usage: bootcfg add <name> <kernel_path> <params...> [--type os|linux|windows|recovery]"); } else { let kind = if parts.contains(&"linux") { bootcfg::EntryKind::Linux } else if parts.contains(&"windows") { bootcfg::EntryKind::Windows } else if parts.contains(&"recovery") { bootcfg::EntryKind::Recovery } else { bootcfg::EntryKind::OurOs }; let params = parts[3..].iter().filter(|p| !["--type", "os", "linux", "windows", "recovery"].contains(p)).copied().collect::<Vec<_>>().join(" "); match bootcfg::add_entry(parts[1], kind, parts[2], "", &params, false) { Ok(id) => shell_println!("Added entry '{}' (id={})", parts[1], id), Err(e) => shell_println!("Error: {:?}", e) } } }
         "remove" | "rm" => { if parts.len() < 2 { shell_println!("Usage: bootcfg remove <entry_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match bootcfg::remove_entry(id) { Ok(()) => shell_println!("Removed entry {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
         "default" | "def" => { if parts.len() < 2 { shell_println!("Usage: bootcfg default <entry_id>"); } else { match parts[1].parse::<u64>() { Ok(id) => match bootcfg::set_default(id) { Ok(()) => shell_println!("Set default to entry {}", id), Err(e) => shell_println!("Error: {:?}", e) }, Err(_) => shell_println!("Invalid id") } } }
         "params" => { if parts.len() < 3 { shell_println!("Usage: bootcfg params <entry_id> <parameters...>"); } else { match parts[1].parse::<u64>() { Ok(id) => { let params = parts[2..].join(" "); match bootcfg::set_parameters(id, &params) { Ok(()) => shell_println!("Set parameters for entry {}", id), Err(e) => shell_println!("Error: {:?}", e) } }, Err(_) => shell_println!("Invalid id") } } }
@@ -68487,7 +68487,7 @@ fn parse_cut_args(args: &str) -> (char, Vec<usize>, Option<(usize, usize)>, Opti
         } else if rest.starts_with("-f") {
             rest = rest.get(2..).unwrap_or("").trim_start();
             // Parse field list: N or N,M,...
-            let end = rest.find(|c: char| c == ' ' || c == '\t').unwrap_or(rest.len());
+            let end = rest.find([' ', '\t']).unwrap_or(rest.len());
             let spec = rest.get(..end).unwrap_or("");
             for part in spec.split(',') {
                 if let Ok(n) = part.trim().parse::<usize>() {
@@ -68497,7 +68497,7 @@ fn parse_cut_args(args: &str) -> (char, Vec<usize>, Option<(usize, usize)>, Opti
             rest = rest.get(end..).unwrap_or("");
         } else if rest.starts_with("-c") {
             rest = rest.get(2..).unwrap_or("").trim_start();
-            let end = rest.find(|c: char| c == ' ' || c == '\t').unwrap_or(rest.len());
+            let end = rest.find([' ', '\t']).unwrap_or(rest.len());
             let spec = rest.get(..end).unwrap_or("");
             if let Some(dash) = spec.find('-') {
                 let start = spec.get(..dash).and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
@@ -68760,7 +68760,7 @@ fn parse_fold_args(args: &str) -> (usize, Option<String>) {
 
     if rest.starts_with("-w") {
         rest = rest.get(2..).unwrap_or("").trim_start();
-        let end = rest.find(|c: char| c == ' ' || c == '\t').unwrap_or(rest.len());
+        let end = rest.find([' ', '\t']).unwrap_or(rest.len());
         if let Ok(w) = rest.get(..end).unwrap_or("80").parse::<usize>() {
             width = w.max(1);
         }
@@ -68875,7 +68875,7 @@ fn cmd_xargs_input(args: &str, input: &str) {
     // Parse -n N flag.
     if rest.starts_with("-n") {
         rest = rest.get(2..).unwrap_or("").trim_start();
-        let end = rest.find(|c: char| c == ' ' || c == '\t').unwrap_or(rest.len());
+        let end = rest.find([' ', '\t']).unwrap_or(rest.len());
         max_args = rest.get(..end).and_then(|s| s.parse::<usize>().ok());
         rest = rest.get(end..).unwrap_or("").trim_start();
     }
@@ -69707,7 +69707,7 @@ fn cmd_let(args: &str) {
     }
 
     // No assignment — just evaluate.
-    let val = eval_arithmetic(&expr);
+    let val = eval_arithmetic(expr);
     set_exit(if val == 0 { 1 } else { 0 });
 }
 
@@ -75287,7 +75287,7 @@ fn cmd_lockdep(args: &str) {
             }
         }
         let total_held: u8 = (0..online)
-            .map(|cpu| crate::lockdep::held_depth(cpu))
+            .map(crate::lockdep::held_depth)
             .fold(0u8, |a, b| a.saturating_add(b));
         if total_held == 0 {
             shell_println!("    (no locks held on any CPU)");
@@ -75680,7 +75680,7 @@ fn cmd_lsblk() {
     );
 
     for dev in &devices {
-        let size_bytes = (dev.sector_count as u64).saturating_mul(dev.sector_size as u64);
+        let size_bytes = dev.sector_count.saturating_mul(dev.sector_size as u64);
         let size_str = if size_bytes >= 1024 * 1024 * 1024 {
             alloc::format!("{} GiB", size_bytes / (1024 * 1024 * 1024))
         } else if size_bytes >= 1024 * 1024 {
@@ -76053,8 +76053,8 @@ fn cmd_tar(args: &str) {
     // -j for bzip2, -J for xz, --zstd for zstd (matches GNU tar conventions).
     let bz2_compress = flags.contains('j');
     let xz_compress = flags.contains('J');
-    let zstd_compress = parts.iter().any(|&p| p == "--zstd");
-    let lz4_compress = parts.iter().any(|&p| p == "--lz4");
+    let zstd_compress = parts.contains(&"--zstd");
+    let lz4_compress = parts.contains(&"--lz4");
 
     // Exactly one mode required.
     let mode_count = u8::from(create) + u8::from(extract) + u8::from(list);
@@ -76713,7 +76713,7 @@ fn cmd_unzip(args: &str) {
         }
 
         // Extract and decompress (with CRC-32 verification).
-        let file_data = match zip::extract_entry(&data, &entry) {
+        let file_data = match zip::extract_entry(&data, entry) {
             Ok(d) => d,
             Err(e) => {
                 crate::console_println!("  unzip: '{}': {:?}", entry.name, e);
@@ -78290,7 +78290,7 @@ const B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw
 /// Encode bytes to Base64.
 #[allow(clippy::arithmetic_side_effects)]
 fn base64_encode(data: &[u8]) -> alloc::string::String {
-    let mut out = alloc::string::String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = alloc::string::String::with_capacity(data.len().div_ceil(3) * 4);
     let mut i = 0;
     while i < data.len() {
         let b0 = data[i];
@@ -78704,15 +78704,15 @@ fn cmd_gunzip(args: &str) {
         resolve_path(explicit)
     } else {
         // Strip .gz extension.
-        let stripped = if input.ends_with(".gz") {
+        
+        if input.ends_with(".gz") {
             alloc::string::String::from(&input[..input.len().saturating_sub(3)])
         } else if input.ends_with(".tgz") {
             let base = &input[..input.len().saturating_sub(4)];
             alloc::format!("{}.tar", base)
         } else {
             alloc::format!("{}.out", input)
-        };
-        stripped
+        }
     };
 
     match crate::fs::Vfs::write_file(&out, &decompressed) {

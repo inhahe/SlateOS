@@ -365,7 +365,7 @@ pub fn setup(
     #[allow(clippy::arithmetic_side_effects)]
     let total_size = header_size + sq_size + cq_size;
     #[allow(clippy::arithmetic_side_effects)]
-    let frames_needed = (total_size + FRAME_SIZE - 1) / FRAME_SIZE;
+    let frames_needed = total_size.div_ceil(FRAME_SIZE);
 
     // Allocate physical frames.
     let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;

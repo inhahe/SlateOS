@@ -717,7 +717,7 @@ fn decode_huffman_tree(data: &[u8]) -> KernelResult<(Vec<u8>, usize, usize)> {
     } else {
         // Direct representation: 4-bit weight pairs.
         let num_symbols = (header as usize) - 127;
-        let num_bytes = (num_symbols + 1) / 2;
+        let num_bytes = num_symbols.div_ceil(2);
         if 1 + num_bytes > data.len() {
             return Err(KernelError::CorruptedData);
         }
@@ -1384,7 +1384,7 @@ fn decompress_huffman_4streams(
     }
 
     // Each stream decompresses to roughly regen_size/4 bytes.
-    let quarter = (regen_size + 3) / 4;
+    let quarter = regen_size.div_ceil(4);
     let sizes = [
         quarter.min(regen_size),
         quarter.min(regen_size.saturating_sub(quarter)),
@@ -1526,7 +1526,7 @@ fn decode_sequences(
         let ml_code = ml_entry.symbol;
 
         // Decode offset.
-        let of_bits = of_code as u8; // offset code IS the number of extra bits
+        let of_bits = of_code; // offset code IS the number of extra bits
         let offset_raw = if of_bits > 0 {
             let extra = br.read_bits(of_bits)?;
             (1u32 << of_bits) | extra
@@ -2204,7 +2204,7 @@ fn encode_bits_to_bytes(bits: &[bool]) -> Vec<u8> {
         return vec![1];
     }
     let total_with_sentinel = bits.len() + 1;
-    let num_bytes = (total_with_sentinel + 7) / 8;
+    let num_bytes = total_with_sentinel.div_ceil(8);
     let total_padded = num_bytes * 8;
     let padding = total_padded - total_with_sentinel;
 

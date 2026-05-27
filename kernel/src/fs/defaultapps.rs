@@ -401,7 +401,7 @@ pub fn category_for_type(content_type: &str) -> Option<AppCategory> {
         AppCategory::Maps, AppCategory::SystemMonitor,
     ];
     for cat in &categories {
-        if cat.mime_types().iter().any(|m| *m == content_type) {
+        if cat.mime_types().contains(&content_type) {
             return Some(*cat);
         }
     }

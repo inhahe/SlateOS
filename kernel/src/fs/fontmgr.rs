@@ -285,7 +285,7 @@ pub fn list_families() -> Vec<String> {
     let state = STATE.lock();
     let mut families: Vec<String> = Vec::new();
     for f in &state.fonts {
-        if f.enabled && !families.iter().any(|fam| *fam == f.family) {
+        if f.enabled && !families.contains(&f.family) {
             families.push(f.family.clone());
         }
     }
@@ -445,7 +445,7 @@ pub fn stats() -> (usize, usize, usize, u64) {
     let families = {
         let mut fams: Vec<&str> = Vec::new();
         for f in &state.fonts {
-            if !fams.iter().any(|fam| *fam == f.family.as_str()) {
+            if !fams.contains(&f.family.as_str()) {
                 fams.push(&f.family);
             }
         }

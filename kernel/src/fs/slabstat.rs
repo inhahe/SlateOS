@@ -132,10 +132,10 @@ pub fn alloc(name: &str) -> KernelResult<()> {
         c.total_allocs += 1;
         if c.active_objects > c.total_objects {
             c.total_objects = c.active_objects;
-            c.total_slabs = ((c.total_objects + c.objects_per_slab as u64 - 1) / c.objects_per_slab as u64) as u32;
+            c.total_slabs = c.total_objects.div_ceil(c.objects_per_slab as u64) as u32;
         }
         if c.active_objects > c.high_watermark { c.high_watermark = c.active_objects; }
-        c.active_slabs = ((c.active_objects + c.objects_per_slab as u64 - 1) / c.objects_per_slab as u64) as u32;
+        c.active_slabs = c.active_objects.div_ceil(c.objects_per_slab as u64) as u32;
         state.total_allocs += 1;
         Ok(())
     })
@@ -148,7 +148,7 @@ pub fn free(name: &str) -> KernelResult<()> {
         if c.active_objects == 0 { return Err(KernelError::InvalidArgument); }
         c.active_objects -= 1;
         c.total_frees += 1;
-        c.active_slabs = ((c.active_objects + c.objects_per_slab as u64 - 1) / c.objects_per_slab as u64) as u32;
+        c.active_slabs = c.active_objects.div_ceil(c.objects_per_slab as u64) as u32;
         state.total_frees += 1;
         Ok(())
     })

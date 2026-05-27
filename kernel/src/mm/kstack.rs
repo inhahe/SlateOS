@@ -83,7 +83,7 @@ const MAX_STACKS: usize = 4096;
 
 /// Bitmap words needed to track MAX_STACKS slots (64 bits per word).
 #[allow(clippy::arithmetic_side_effects)]
-const BITMAP_WORDS: usize = (MAX_STACKS + 63) / 64;
+const BITMAP_WORDS: usize = MAX_STACKS.div_ceil(64);
 
 // ---------------------------------------------------------------------------
 // State

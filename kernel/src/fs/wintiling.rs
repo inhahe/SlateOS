@@ -217,7 +217,7 @@ fn calculate_tiles(ws: &Workspace, windows: &mut [TiledWindow]) {
             // Integer square root ceiling: find smallest cols where cols*cols >= count.
             let mut cols = 1u32;
             while (cols * cols) < count as u32 { cols += 1; }
-            let rows = ((count as u32) + cols - 1) / cols;
+            let rows = (count as u32).div_ceil(cols);
             let cw = (mw.saturating_sub(gap * (cols + 1))) / cols;
             let ch = (mh.saturating_sub(gap * (rows + 1))) / rows;
             for (i, idx) in tiled.iter().enumerate() {

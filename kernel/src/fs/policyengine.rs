@@ -137,8 +137,7 @@ where
 
 fn matches_pattern(pattern: &str, value: &str) -> bool {
     if pattern == "*" { return true; }
-    if pattern.ends_with('*') {
-        let prefix = &pattern[..pattern.len() - 1];
+    if let Some(prefix) = pattern.strip_suffix('*') {
         value.starts_with(prefix)
     } else {
         pattern == value

@@ -95,7 +95,7 @@ impl VmallocEntry {
 /// Bitmap tracking allocated virtual pages.
 /// Each bit represents one 16 KiB page in the vmalloc region.
 /// VMALLOC_MAX_PAGES = 8192, so we need 8192 / 64 = 128 u64 words.
-const BITMAP_WORDS: usize = (VMALLOC_MAX_PAGES + 63) / 64;
+const BITMAP_WORDS: usize = VMALLOC_MAX_PAGES.div_ceil(64);
 
 /// Global vmalloc state, protected by a spinlock.
 struct VmallocState {
@@ -202,7 +202,7 @@ pub fn vmalloc(size: usize) -> KernelResult<*mut u8> {
     }
 
     // Round up to frame size.
-    let page_count = (size + FRAME_SIZE - 1) / FRAME_SIZE;
+    let page_count = size.div_ceil(FRAME_SIZE);
 
     let pml4 = page_table::active_pml4_phys();
     let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE;

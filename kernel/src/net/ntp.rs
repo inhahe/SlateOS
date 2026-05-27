@@ -161,7 +161,7 @@ impl NtpTimestamp {
 
     /// Decode from 8 bytes (network byte order).
     fn decode(buf: &[u8]) -> Self {
-        let seconds = (*buf.get(0).unwrap_or(&0) as u32) << 24
+        let seconds = (*buf.first().unwrap_or(&0) as u32) << 24
             | (*buf.get(1).unwrap_or(&0) as u32) << 16
             | (*buf.get(2).unwrap_or(&0) as u32) << 8
             | *buf.get(3).unwrap_or(&0) as u32;
@@ -341,7 +341,7 @@ fn parse_response(data: &[u8]) -> KernelResult<NtpResponse> {
         return Err(KernelError::InvalidArgument);
     }
 
-    let byte0 = *data.get(0).unwrap_or(&0);
+    let byte0 = *data.first().unwrap_or(&0);
     let leap_indicator = (byte0 >> 6) & 0x03;
     let version = (byte0 >> 3) & 0x07;
     let mode = byte0 & 0x07;
@@ -637,8 +637,8 @@ fn ephemeral_port() -> u16 {
     static PORT_COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = PORT_COUNTER.fetch_add(1, Ordering::Relaxed);
     // Range 49152–65535 (14 bits of space).
-    let port = 49152u16.saturating_add((n % 16384) as u16);
-    port
+    
+    49152u16.saturating_add((n % 16384) as u16)
 }
 
 // ---------------------------------------------------------------------------

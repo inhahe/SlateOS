@@ -519,7 +519,7 @@ fn parse_server_hello(data: &[u8]) -> KernelResult<ServerHello> {
         return Err(KernelError::InvalidArgument);
     }
 
-    let msg_type = data.get(0).copied().ok_or(KernelError::InternalError)?;
+    let msg_type = data.first().copied().ok_or(KernelError::InternalError)?;
     if msg_type != handshake_type::SERVER_HELLO {
         crate::serial_println!("[tls] Expected ServerHello (2), got {}", msg_type);
         return Err(KernelError::InvalidArgument);
@@ -721,7 +721,7 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
     while !got_finished {
         // Read one TLS record.
         let record = read_raw_record(tcp_handle, TLS_TIMEOUT_POLLS)?;
-        let record_type = record.get(0).copied().ok_or(KernelError::InternalError)?;
+        let record_type = record.first().copied().ok_or(KernelError::InternalError)?;
 
         // Skip ChangeCipherSpec (compatibility).
         if record_type == content_type::CHANGE_CIPHER_SPEC {
@@ -742,7 +742,7 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
         server_hs_seq = server_hs_seq.wrapping_add(1);
 
         if inner_type == content_type::ALERT {
-            let level = plaintext.get(0).copied().unwrap_or(0);
+            let level = plaintext.first().copied().unwrap_or(0);
             let desc = plaintext.get(1).copied().unwrap_or(0);
             crate::serial_println!("[tls] Alert during handshake: level={}, desc={}", level, desc);
             return Err(KernelError::ChannelClosed);
@@ -764,7 +764,7 @@ pub fn tls_connect(tcp_handle: usize, server_name: &str) -> KernelResult<TlsSess
                 break; // Need more data.
             }
 
-            let hs_type = hs_buf.get(0).copied().ok_or(KernelError::InternalError)?;
+            let hs_type = hs_buf.first().copied().ok_or(KernelError::InternalError)?;
             let msg_data = Vec::from(hs_buf.get(..total_len).ok_or(KernelError::InternalError)?);
 
             match hs_type {
@@ -949,7 +949,7 @@ pub fn tls_recv(session: &mut TlsSession, max_bytes: usize) -> KernelResult<Vec<
         Err(_) => return Ok(Vec::new()), // No data available yet.
     };
 
-    let record_type = record.get(0).copied().ok_or(KernelError::InternalError)?;
+    let record_type = record.first().copied().ok_or(KernelError::InternalError)?;
 
     // Handle unencrypted alert (shouldn't happen after handshake, but be safe).
     if record_type == content_type::ALERT {
@@ -988,7 +988,7 @@ pub fn tls_recv(session: &mut TlsSession, max_bytes: usize) -> KernelResult<Vec<
             Ok(result)
         }
         content_type::ALERT => {
-            let _level = plaintext.get(0).copied().unwrap_or(0);
+            let _level = plaintext.first().copied().unwrap_or(0);
             let desc = plaintext.get(1).copied().unwrap_or(0);
             if desc == alert_desc::CLOSE_NOTIFY {
                 crate::serial_println!("[tls] Received close_notify");
@@ -1001,7 +1001,7 @@ pub fn tls_recv(session: &mut TlsSession, max_bytes: usize) -> KernelResult<Vec<
         content_type::HANDSHAKE => {
             // Post-handshake messages (e.g., NewSessionTicket, KeyUpdate).
             // For now, just ignore them.
-            if let Some(&hs_type) = plaintext.get(0) {
+            if let Some(&hs_type) = plaintext.first() {
                 if hs_type == handshake_type::NEW_SESSION_TICKET {
                     crate::serial_println!("[tls] Post-handshake NewSessionTicket (ignored)");
                 } else if hs_type == handshake_type::KEY_UPDATE {
@@ -1111,7 +1111,7 @@ fn parse_client_hello(data: &[u8]) -> KernelResult<ParsedClientHello> {
         return Err(KernelError::InvalidArgument);
     }
 
-    let msg_type = data.get(0).copied().ok_or(KernelError::InternalError)?;
+    let msg_type = data.first().copied().ok_or(KernelError::InternalError)?;
     if msg_type != handshake_type::CLIENT_HELLO {
         return Err(KernelError::InvalidArgument);
     }
@@ -1204,7 +1204,7 @@ fn parse_client_hello(data: &[u8]) -> KernelResult<ParsedClientHello> {
                 if ext_data.is_empty() {
                     continue;
                 }
-                let list_len = ext_data.get(0).copied().ok_or(KernelError::InvalidArgument)? as usize;
+                let list_len = ext_data.first().copied().ok_or(KernelError::InvalidArgument)? as usize;
                 let mut voff = 1usize;
                 let vend = 1 + list_len;
                 while voff + 2 <= vend && voff + 2 <= ext_data.len() {
@@ -1684,7 +1684,7 @@ pub fn tls_accept(
 
     while !got_client_finished {
         let record = read_raw_record(tcp_handle, TLS_TIMEOUT_POLLS)?;
-        let record_type = record.get(0).copied().ok_or(KernelError::InternalError)?;
+        let record_type = record.first().copied().ok_or(KernelError::InternalError)?;
 
         // Skip ChangeCipherSpec.
         if record_type == content_type::CHANGE_CIPHER_SPEC {
@@ -1716,7 +1716,7 @@ pub fn tls_accept(
         if plaintext.len() < 4 {
             return Err(KernelError::InvalidArgument);
         }
-        let hs_type = plaintext.get(0).copied().ok_or(KernelError::InternalError)?;
+        let hs_type = plaintext.first().copied().ok_or(KernelError::InternalError)?;
         if hs_type != handshake_type::FINISHED {
             crate::serial_println!("[tls] Server: expected Finished (20), got {}", hs_type);
             return Err(KernelError::InvalidArgument);
@@ -1825,7 +1825,7 @@ pub fn tls_server_recv(session: &mut TlsServerSession, max_bytes: usize) -> Kern
         Err(e) => return Err(e),
     };
 
-    let record_type = record.get(0).copied().ok_or(KernelError::InternalError)?;
+    let record_type = record.first().copied().ok_or(KernelError::InternalError)?;
 
     // Skip ChangeCipherSpec (shouldn't appear after handshake, but be safe).
     if record_type == content_type::CHANGE_CIPHER_SPEC {
@@ -1939,8 +1939,8 @@ fn compute_finished_verify(
     let fk_len = finished_key_vec.len().min(HASH_LEN);
     finished_key[..fk_len].copy_from_slice(finished_key_vec.get(..fk_len).unwrap_or(&[]));
 
-    let hmac_result = crypto::hmac_sha256(&finished_key, transcript_hash);
-    hmac_result
+    
+    crypto::hmac_sha256(&finished_key, transcript_hash)
 }
 
 /// Derive traffic key from a traffic secret.
@@ -2062,7 +2062,7 @@ fn try_read_raw_record(tcp_handle: usize) -> KernelResult<Vec<u8>> {
 fn read_handshake_record(tcp_handle: usize, timeout_polls: u32) -> KernelResult<Vec<u8>> {
     let record = read_raw_record(tcp_handle, timeout_polls)?;
 
-    let record_type = record.get(0).copied().ok_or(KernelError::InternalError)?;
+    let record_type = record.first().copied().ok_or(KernelError::InternalError)?;
     if record_type == content_type::ALERT {
         let level = record.get(5).copied().unwrap_or(0);
         let desc = record.get(6).copied().unwrap_or(0);
@@ -2224,7 +2224,7 @@ pub fn self_test() -> KernelResult<()> {
         let hello = build_client_hello("example.com", &random, &pubkey);
 
         // Must start with handshake type CLIENT_HELLO (1).
-        assert!(hello.get(0).copied() == Some(handshake_type::CLIENT_HELLO), "ClientHello type");
+        assert!(hello.first().copied() == Some(handshake_type::CLIENT_HELLO), "ClientHello type");
         // Length field (3 bytes) should match remaining data.
         let len = read_u24_slice(&hello, 1);
         assert!(hello.len() == 4 + len, "ClientHello length field");
@@ -2328,7 +2328,7 @@ pub fn self_test() -> KernelResult<()> {
         let server_hello = build_server_hello(&random, &pubkey);
 
         // Verify structure: type=2, length matches.
-        assert!(server_hello.get(0).copied() == Some(handshake_type::SERVER_HELLO),
+        assert!(server_hello.first().copied() == Some(handshake_type::SERVER_HELLO),
                 "ServerHello type");
         let len = read_u24_slice(&server_hello, 1);
         assert!(server_hello.len() == 4 + len, "ServerHello length");
@@ -2348,7 +2348,7 @@ pub fn self_test() -> KernelResult<()> {
         let cert = build_self_signed_certificate(&seed, &pubkey);
 
         // Must start with SEQUENCE tag (0x30).
-        assert!(cert.get(0).copied() == Some(0x30), "Certificate is DER SEQUENCE");
+        assert!(cert.first().copied() == Some(0x30), "Certificate is DER SEQUENCE");
         // Must be at least 100 bytes (minimal X.509 + Ed25519 key + signature).
         assert!(cert.len() > 100, "Certificate has reasonable size");
         // Should contain the Ed25519 OID (1.3.101.112 = 06 03 2B 65 70).
@@ -2366,7 +2366,7 @@ pub fn self_test() -> KernelResult<()> {
         let cv_msg = build_certificate_verify(&seed, &transcript);
 
         // Type = CERTIFICATE_VERIFY (15).
-        assert!(cv_msg.get(0).copied() == Some(handshake_type::CERTIFICATE_VERIFY),
+        assert!(cv_msg.first().copied() == Some(handshake_type::CERTIFICATE_VERIFY),
                 "CertificateVerify type");
         // Body should contain Ed25519 algorithm (0x0807).
         assert!(cv_msg.get(4).copied() == Some(0x08), "CertVerify alg high");

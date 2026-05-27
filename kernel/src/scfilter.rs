@@ -58,7 +58,7 @@ pub const MAX_FILTERS: usize = 128;
 ///
 /// 1000 bits / 64 bits per word = 16 words (ceil).
 #[allow(clippy::arithmetic_side_effects)]
-const BITMAP_WORDS: usize = (MAX_SYSCALL_NR + 63) / 64;
+const BITMAP_WORDS: usize = MAX_SYSCALL_NR.div_ceil(64);
 
 // ---------------------------------------------------------------------------
 // Types

@@ -124,7 +124,7 @@ impl FatBpb {
         let root_dir_sectors = {
             let entries_bytes = u32::from(root_entry_count) * 32;
             let bps = u32::from(bytes_per_sector);
-            (entries_bytes + bps - 1) / bps
+            entries_bytes.div_ceil(bps)
         };
 
         // Data sectors and cluster count determine the FAT type.
@@ -216,7 +216,7 @@ impl FatBpb {
     fn root_dir_sectors(&self) -> u32 {
         let entries_bytes = u32::from(self.root_entry_count) * 32;
         let bps = u32::from(self.bytes_per_sector);
-        (entries_bytes + bps - 1) / bps
+        entries_bytes.div_ceil(bps)
     }
 
     /// LBA of the first data sector (cluster 2).
@@ -631,7 +631,7 @@ impl FatDirEntry {
             return None;
         }
 
-        let first_byte = raw.get(0).copied()?;
+        let first_byte = raw.first().copied()?;
 
         // 0x00 = end of directory, 0xE5 = deleted entry.
         if first_byte == 0x00 || first_byte == 0xE5 {
@@ -2039,7 +2039,7 @@ impl FatFs {
 
         let cluster_bytes = usize::from(self.bpb.sectors_per_cluster)
             * usize::from(self.bpb.bytes_per_sector);
-        let clusters_needed = (data.len() + cluster_bytes - 1) / cluster_bytes;
+        let clusters_needed = data.len().div_ceil(cluster_bytes);
 
         // End-of-chain marker depends on FAT type.
         let eoc = match self.bpb.fat_type {
@@ -2652,7 +2652,7 @@ impl FatFs {
             // Allocate enough new clusters to hold the remaining slots.
             let remaining = n - run.len();
             let slots_per_cluster = entries_per_sector * usize::from(self.bpb.sectors_per_cluster);
-            let clusters_needed = (remaining + slots_per_cluster - 1) / slots_per_cluster;
+            let clusters_needed = remaining.div_ceil(slots_per_cluster);
 
             for _ in 0..clusters_needed {
                 let new_c = self.alloc_cluster()?;
@@ -3134,7 +3134,7 @@ impl FileSystem for FatFs {
         if cluster_bytes == 0 {
             return Err(KernelError::IoError);
         }
-        let needed_clusters = (size + cluster_bytes - 1) / cluster_bytes;
+        let needed_clusters = size.div_ceil(cluster_bytes);
 
         // Try to resolve the file via path (handles both LFN and 8.3).
         let existing = {
@@ -3759,7 +3759,7 @@ impl FileSystem for FatFs {
 
         // Calculate how many clusters are needed for the new size.
         let clusters_needed = if new_size == 0 { 0 } else {
-            (new_size + cluster_bytes - 1) / cluster_bytes
+            new_size.div_ceil(cluster_bytes)
         };
 
         // Count existing clusters.
@@ -3933,7 +3933,7 @@ impl FileSystem for FatFs {
         };
 
         let clusters_needed = if new_size == 0 { 0 } else {
-            ((new_size as usize) + cluster_bytes - 1) / cluster_bytes
+            (new_size as usize).div_ceil(cluster_bytes)
         };
 
         // Walk existing chain to count clusters.
@@ -5222,8 +5222,7 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
         FatType::Fat16 => 512, // 512 entries * 32 bytes = 16 KiB = 32 sectors.
         FatType::Fat32 => 0,
     };
-    let root_dir_sectors = (u32::from(root_entry_count) * 32 + u32::from(bytes_per_sector) - 1)
-        / u32::from(bytes_per_sector);
+    let root_dir_sectors = (u32::from(root_entry_count) * 32).div_ceil(u32::from(bytes_per_sector));
 
     // Calculate sectors per FAT.
     // The formula solves for the FAT size given the total sectors,
@@ -5245,8 +5244,8 @@ pub fn mkfs_fat(device: &str, label: Option<&str>) -> KernelResult<()> {
     let spf = {
         let max_clusters = data_sectors_available / u32::from(spc);
         let needed_entries = max_clusters + 2; // +2 for reserved entries 0 and 1
-        let single_fat = (needed_entries + entries_per_fat_sector - 1) / entries_per_fat_sector;
-        single_fat
+        
+        needed_entries.div_ceil(entries_per_fat_sector)
     };
 
     // Volume label (11 bytes, space-padded, uppercase).

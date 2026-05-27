@@ -1146,7 +1146,7 @@ fn parse_dir_datetime(data: &[u8]) -> u64 {
         return 0;
     }
 
-    let year = *data.get(0).unwrap_or(&0) as u32 + 1900;
+    let year = *data.first().unwrap_or(&0) as u32 + 1900;
     let month = *data.get(1).unwrap_or(&1) as u32;
     let day = *data.get(2).unwrap_or(&1) as u32;
     let hour = *data.get(3).unwrap_or(&0) as u32;

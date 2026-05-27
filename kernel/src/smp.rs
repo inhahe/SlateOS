@@ -475,7 +475,7 @@ fn build_trampoline() -> [u8; 1024] {
     // Actually 48 A1 is only for moffs64 which is 8 bytes address in 64-bit.
     // In 64-bit mode, "MOV RAX, moffs64" = A1 + 8-byte absolute address.
     // But with REX.W: 48 A1 <addr64>
-    let entry_addr = (base as u64) + (DATA_ENTRY as u64);
+    let entry_addr = base + (DATA_ENTRY as u64);
     buf[p] = 0x48; buf[p+1] = 0xA1; p += 2;
     buf[p]   = (entry_addr & 0xFF) as u8;
     buf[p+1] = ((entry_addr >> 8) & 0xFF) as u8;

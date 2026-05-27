@@ -197,8 +197,8 @@ pub fn record_event(notify_type: NotifyType, kind: EventKind) -> KernelResult<()
         t.events += 1;
         t.event_counts[event_index(kind)] += 1;
         t.queue_depth += 1;
-        if t.queue_depth > t.max_queue_depth as u32 {
-            t.queue_depth = t.max_queue_depth as u32;
+        if t.queue_depth > t.max_queue_depth {
+            t.queue_depth = t.max_queue_depth;
             t.overflows += 1;
             state.total_overflows += 1;
         }

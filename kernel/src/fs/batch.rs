@@ -387,8 +387,7 @@ fn apply_rename_pattern(name: &str, pattern: &str, replacement: &str) -> Option<
     if pattern.starts_with("*.") && replacement.starts_with("*.") {
         let old_ext = &pattern[1..]; // ".ext1"
         let new_ext = &replacement[1..]; // ".ext2"
-        if name.ends_with(old_ext) {
-            let base = &name[..name.len() - old_ext.len()];
+        if let Some(base) = name.strip_suffix(old_ext) {
             return Some(alloc::format!("{}{}", base, new_ext));
         }
     }
@@ -397,8 +396,7 @@ fn apply_rename_pattern(name: &str, pattern: &str, replacement: &str) -> Option<
     if pattern.ends_with('*') && replacement.ends_with('*') {
         let old_prefix = &pattern[..pattern.len() - 1];
         let new_prefix = &replacement[..replacement.len() - 1];
-        if name.starts_with(old_prefix) {
-            let suffix = &name[old_prefix.len()..];
+        if let Some(suffix) = name.strip_prefix(old_prefix) {
             return Some(alloc::format!("{}{}", new_prefix, suffix));
         }
     }

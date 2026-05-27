@@ -2722,7 +2722,7 @@ pub fn read_up_to(handle: usize, max_bytes: usize) -> KernelResult<Vec<u8>> {
         // or if it was 0 and now it's > 0.  This prevents deadlock when
         // the peer stopped sending due to our zero window.
         let new_free = MAX_RX_BUFFER.saturating_sub(conn.rx_buffer.len());
-        let mss = effective_mss(conn) as usize;
+        let mss = effective_mss(conn);
         let should_update = (old_free < mss && new_free >= mss)
             || (old_free == 0 && new_free > 0);
 

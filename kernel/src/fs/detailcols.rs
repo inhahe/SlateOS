@@ -357,7 +357,7 @@ pub fn columns_for_types(mime_types: &[&str]) -> Vec<ColumnDef> {
     let mut result: Vec<ColumnDef> = Vec::new();
     // Standard columns first (in registration order).
     for col in &state.columns {
-        if col.category == ColumnCategory::Standard && !seen_ids.iter().any(|s| *s == col.id) {
+        if col.category == ColumnCategory::Standard && !seen_ids.contains(&col.id) {
             // Always include standard columns.
             result.push(col.clone());
         }

@@ -768,7 +768,7 @@ pub fn self_test() -> KernelResult<()> {
         let pkt = icmp::build_trace_echo_request(seq);
 
         // Type = 8 (Echo Request).
-        assert!(*pkt.get(0).unwrap_or(&0) == 8, "type");
+        assert!(*pkt.first().unwrap_or(&0) == 8, "type");
         // Code = 0.
         assert!(*pkt.get(1).unwrap_or(&0xFF) == 0, "code");
         // ID = TRACEROUTE_ID (0x5678).
@@ -973,7 +973,7 @@ pub fn self_test() -> KernelResult<()> {
         let pkt = icmpv6::build_trace6_echo_request(&src, &dst, seq);
 
         // Type = 128 (Echo Request).
-        assert!(*pkt.get(0).unwrap_or(&0) == 128, "v6 type");
+        assert!(*pkt.first().unwrap_or(&0) == 128, "v6 type");
         // ID = TRACEROUTE6_ID.
         let id = u16::from_be_bytes([
             *pkt.get(4).unwrap_or(&0),

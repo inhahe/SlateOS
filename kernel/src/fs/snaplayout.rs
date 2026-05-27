@@ -272,12 +272,12 @@ pub fn suggest_layout(window_count: usize) -> Option<SnapLayout> {
         // Find layout with zone count closest to window count.
         s.layouts.iter()
             .min_by_key(|l| {
-                let diff = if l.zones.len() >= window_count {
+                
+                if l.zones.len() >= window_count {
                     l.zones.len() - window_count
                 } else {
                     window_count - l.zones.len()
-                };
-                diff
+                }
             })
             .cloned()
     })

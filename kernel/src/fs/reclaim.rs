@@ -381,7 +381,7 @@ fn run_cas_gc_phase() -> (usize, u64) {
 fn run_tmpwatch_phase() -> u64 {
     let now = crate::timekeeping::clock_realtime() / 1_000_000_000;
     match crate::fs::tmpwatch::run(now) {
-        Ok(result) => result.files_removed as u64,
+        Ok(result) => result.files_removed,
         Err(_) => 0,
     }
 }

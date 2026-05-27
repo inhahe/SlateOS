@@ -408,7 +408,7 @@ impl Response {
 
     /// Get Content-Length header value, if present and valid.
     pub fn content_length(&self) -> Option<usize> {
-        self.header("Content-Length").and_then(|v| parse_usize(v))
+        self.header("Content-Length").and_then(parse_usize)
     }
 
     /// Get the body as a UTF-8 string (lossy).
@@ -1789,9 +1789,9 @@ pub fn self_test() -> KernelResult<()> {
     {
         assert!(find_crlf(b"hello\r\nworld") == Some(5), "crlf basic");
         assert!(find_crlf(b"\r\n") == Some(0), "crlf at start");
-        assert!(find_crlf(b"no newline") == None, "no crlf");
-        assert!(find_crlf(b"") == None, "empty");
-        assert!(find_crlf(b"\r") == None, "lone cr");
+        assert!(find_crlf(b"no newline").is_none(), "no crlf");
+        assert!(find_crlf(b"").is_none(), "empty");
+        assert!(find_crlf(b"\r").is_none(), "lone cr");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[http]   test 15 (crlf finding) PASSED");

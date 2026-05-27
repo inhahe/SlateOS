@@ -354,14 +354,14 @@ fn scan_thumbnails(items: &mut Vec<CleanItem>) -> u64 {
         if items.len() < MAX_SCAN_ENTRIES {
             items.push(CleanItem {
                 path: String::from("[thumbnail cache]"),
-                size_bytes: mem_bytes as u64,
+                size_bytes: mem_bytes,
                 category: CleanCategory::Thumbnails,
                 reason: format!("{} cached thumbnails", count),
                 age_days: 0,
             });
         }
     }
-    mem_bytes as u64
+    mem_bytes
 }
 
 fn scan_log_files(items: &mut Vec<CleanItem>, _retention_days: u32) -> u64 {

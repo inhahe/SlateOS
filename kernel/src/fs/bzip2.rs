@@ -1269,7 +1269,7 @@ fn build_tables_and_selectors(
     n_groups: usize,
 ) -> (Vec<Vec<u8>>, Vec<u8>) {
     let n_symbols = symbols.len();
-    let n_selectors = (n_symbols + GROUP_SIZE - 1) / GROUP_SIZE;
+    let n_selectors = n_symbols.div_ceil(GROUP_SIZE);
 
     // Initialize: distribute symbols evenly across groups for initial
     // frequency counts.

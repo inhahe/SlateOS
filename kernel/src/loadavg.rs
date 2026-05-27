@@ -138,7 +138,7 @@ pub fn sample() {
     // Count runnable tasks (Ready + Running states).
     let sched = crate::sched::sched_stats();
     let runnable = sched.total_tasks_spawned
-        .saturating_sub(sched.total_tasks_exited) as u64;
+        .saturating_sub(sched.total_tasks_exited);
 
     // Update the three load averages.
     let old_1 = LOAD_1.load(Ordering::Relaxed);
@@ -192,5 +192,5 @@ pub fn sample_count() -> u64 {
 pub fn nr_running() -> u64 {
     let sched = crate::sched::sched_stats();
     sched.total_tasks_spawned
-        .saturating_sub(sched.total_tasks_exited) as u64
+        .saturating_sub(sched.total_tasks_exited)
 }

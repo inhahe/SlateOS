@@ -677,7 +677,7 @@ fn controller_reset(base: u64) -> KernelResult<()> {
     let gcap = mmio_read16(base, REG_GCAP);
     let total_streams = ((gcap >> 8) & 0xF)  // ISS
         + ((gcap >> 12) & 0xF)               // OSS
-        + ((gcap >> 3) & 0x1F) as u16;       // BSS
+        + (((gcap >> 3) & 0x1F));       // BSS
 
     for i in 0..total_streams {
         let stream_off = STREAM_BASE + (i as usize) * STREAM_SIZE;
@@ -1017,7 +1017,7 @@ pub fn configure_output() -> KernelResult<()> {
 
     // Configure codec: set stream/channel on DAC.
     // Stream tag in bits 7:4, channel 0 in bits 3:0.
-    let stream_chan = ((stream_tag as u8) << 4) | 0;
+    let stream_chan = (stream_tag << 4) | 0;
     let _ = send_verb(dev, verb12(cad, dev.dac_nid, VERB_SET_CONV_STREAM_CHAN, stream_chan));
 
     // Set format on DAC (4-bit verb: verb=2, payload=format).

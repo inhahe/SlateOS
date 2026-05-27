@@ -311,7 +311,7 @@ pub fn list_category(category: Category) -> Vec<Template> {
         .cloned()
         .collect();
 
-    result.sort_by(|a, b| a.priority.cmp(&b.priority));
+    result.sort_by_key(|a| a.priority);
     result
 }
 

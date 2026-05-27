@@ -1895,10 +1895,10 @@ impl Ext4Driver {
 
         // Update the extent tree — strategy depends on tree depth.
         let new_logical_start = if current_size > 0 {
-            let current_blocks = current_size
+            
+            current_size
                 .saturating_add(block_size_u64.saturating_sub(1))
-                / block_size_u64;
-            current_blocks
+                / block_size_u64
         } else {
             0
         };
@@ -3945,7 +3945,7 @@ impl Ext4Driver {
         let block_bytes = inode_block_as_bytes(inode);
 
         // Parse the extent header.
-        let header = read_struct::<Ext4ExtentHeader>(&block_bytes)?;
+        let header = read_struct::<Ext4ExtentHeader>(block_bytes)?;
         if header.eh_magic != EXT4_EXTENT_MAGIC {
             return Err(KernelError::IoError);
         }
@@ -3993,7 +3993,7 @@ impl Ext4Driver {
             // Deeper trees are rare for files under ~340 MB.
             let ino_seed = inode_csum_seed(&self.sb, inode_nr, inode.i_generation);
             self.read_extent_tree_recursive(
-                ino_seed, &block_bytes, &header, file_size, &mut result,
+                ino_seed, block_bytes, &header, file_size, &mut result,
             )?;
         }
 
@@ -5082,7 +5082,7 @@ pub fn inode_block_as_bytes_mut(inode: &mut Ext4Inode) -> &mut [u8] {
 fn inode_block_sectors(inode: &Ext4Inode, block_size: u32) -> u64 {
     let lo = u64::from(inode.i_blocks_lo);
     let hi = u64::from(u16::from_le_bytes([
-        *inode.i_osd2.get(0).unwrap_or(&0),
+        *inode.i_osd2.first().unwrap_or(&0),
         *inode.i_osd2.get(1).unwrap_or(&0),
     ]));
     let raw = lo | (hi << 32);
@@ -5603,7 +5603,7 @@ fn test_inode_blocks_48() -> KernelResult<()> {
 
     // Verify hi bytes in i_osd2[0..2].
     let hi = u16::from_le_bytes([
-        *inode.i_osd2.get(0).unwrap_or(&0),
+        *inode.i_osd2.first().unwrap_or(&0),
         *inode.i_osd2.get(1).unwrap_or(&0),
     ]);
     if hi != 0x0001 {

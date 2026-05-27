@@ -1103,7 +1103,7 @@ pub fn handle_fault(unit_index: u8) {
 
         // Read the fault recording register (at FRO offset from CAP).
         let cap_val = read_reg64(mmio, reg::CAP);
-        let fro = ((cap_val & cap::FRO_MASK) >> cap::FRO_SHIFT) as u64;
+        let fro = ((cap_val & cap::FRO_MASK) >> cap::FRO_SHIFT);
         let fr_base = mmio + fro * 16; // Each fault record is 128 bits.
 
         // Read fault info (simplified — full parsing would extract

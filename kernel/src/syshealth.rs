@@ -365,7 +365,7 @@ fn check_load(config: &HealthConfig, metrics: &mut Vec<HealthMetric>, overall: &
 
     let ncpus = core::cmp::max(crate::smp::cpu_count() as u64, 1);
     // Per-CPU load x100.
-    let per_cpu_x100 = load1 as u64 * 100 / ncpus;
+    let per_cpu_x100 = load1 * 100 / ncpus;
 
     let level = if per_cpu_x100 >= u64::from(config.load_crit_per_cpu_x100) {
         HealthLevel::Critical

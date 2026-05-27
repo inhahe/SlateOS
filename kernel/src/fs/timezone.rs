@@ -234,7 +234,7 @@ pub fn list_regions() -> Vec<String> {
     let state = STATE.lock();
     let mut regions: Vec<String> = Vec::new();
     for tz in &state.tz_database {
-        if !regions.iter().any(|r| *r == tz.region) {
+        if !regions.contains(&tz.region) {
             regions.push(tz.region.clone());
         }
     }

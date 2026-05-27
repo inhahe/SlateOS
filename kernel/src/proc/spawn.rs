@@ -1198,7 +1198,7 @@ fn test_exec_process() -> KernelResult<()> {
 
     // Calculate how many frames we need for the target ELF data.
     #[allow(clippy::arithmetic_side_effects)]
-    let frames_needed = (target_elf.len() + FRAME_SIZE - 1) / FRAME_SIZE;
+    let frames_needed = target_elf.len().div_ceil(FRAME_SIZE);
     let mut bytes_copied = 0usize;
 
     for i in 0..frames_needed {

@@ -477,10 +477,9 @@ fn path_matches_prefix(path: &str, prefix: &str) -> bool {
     if path == prefix {
         return true;
     }
-    if path.starts_with(prefix) {
+    if let Some(after) = path.strip_prefix(prefix) {
         // Must be followed by '/' or end of string to match
         // a directory boundary (not a partial filename).
-        let after = &path[prefix.len()..];
         return after.starts_with('/');
     }
     false
@@ -498,8 +497,7 @@ fn strip_prefix_match<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     if path == prefix {
         return Some("");
     }
-    if path.starts_with(prefix) {
-        let suffix = &path[prefix.len()..];
+    if let Some(suffix) = path.strip_prefix(prefix) {
         if suffix.starts_with('/') {
             return Some(suffix);
         }

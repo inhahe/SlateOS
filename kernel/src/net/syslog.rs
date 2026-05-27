@@ -419,7 +419,7 @@ fn parse_message(data: &[u8], source_ip: Ipv4Addr) -> Option<SyslogMessage> {
         (String::from(hostname), String::from(app_name), String::from(msg))
     } else if parts.len() >= 2 {
         // Minimal format.
-        let hostname = parts.get(0).copied().unwrap_or("-");
+        let hostname = parts.first().copied().unwrap_or("-");
         let msg = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
         (String::from(hostname), String::from("-"), msg)
     } else {
@@ -468,7 +468,7 @@ fn parse_message_v6(data: &[u8], source_ip: Ipv6Addr) -> Option<SyslogMessage> {
         let msg = parts.get(4).copied().unwrap_or("");
         (String::from(hostname), String::from(app_name), String::from(msg))
     } else if parts.len() >= 2 {
-        let hostname = parts.get(0).copied().unwrap_or("-");
+        let hostname = parts.first().copied().unwrap_or("-");
         let msg = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
         (String::from(hostname), String::from("-"), msg)
     } else {

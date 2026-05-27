@@ -173,7 +173,7 @@ fn parse_opcode(data: &[u8]) -> Option<u16> {
     if data.len() < 2 {
         return None;
     }
-    Some((*data.get(0)? as u16) << 8 | *data.get(1)? as u16)
+    Some((*data.first()? as u16) << 8 | *data.get(1)? as u16)
 }
 
 /// Parse a block number from a DATA or ACK packet.
@@ -1290,7 +1290,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         let pkt = build_rrq("test.txt");
         // Opcode should be 00 01 (RRQ).
-        assert!(*pkt.get(0).unwrap_or(&99) == 0, "RRQ opcode high");
+        assert!(*pkt.first().unwrap_or(&99) == 0, "RRQ opcode high");
         assert!(*pkt.get(1).unwrap_or(&99) == 1, "RRQ opcode low");
         // Filename should follow.
         assert!(pkt.get(2..10) == Some(b"test.txt" as &[u8]), "RRQ filename");
@@ -1308,7 +1308,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         let data = [1u8, 2, 3, 4, 5];
         let pkt = build_data(42, &data);
-        assert!(*pkt.get(0).unwrap_or(&99) == 0, "DATA opcode high");
+        assert!(*pkt.first().unwrap_or(&99) == 0, "DATA opcode high");
         assert!(*pkt.get(1).unwrap_or(&99) == 3, "DATA opcode low");
         assert!(*pkt.get(2).unwrap_or(&99) == 0, "block high");
         assert!(*pkt.get(3).unwrap_or(&99) == 42, "block low");
@@ -1322,7 +1322,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         let pkt = build_ack(256);
         assert!(pkt.len() == 4, "ACK size");
-        assert!(*pkt.get(0).unwrap_or(&99) == 0, "ACK opcode high");
+        assert!(*pkt.first().unwrap_or(&99) == 0, "ACK opcode high");
         assert!(*pkt.get(1).unwrap_or(&99) == 4, "ACK opcode low");
         assert!(*pkt.get(2).unwrap_or(&99) == 1, "block high");
         assert!(*pkt.get(3).unwrap_or(&99) == 0, "block low");
@@ -1334,7 +1334,7 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 4: ERROR packet construction ---
     {
         let pkt = build_error(ERR_FILE_NOT_FOUND, "Not found");
-        assert!(*pkt.get(0).unwrap_or(&99) == 0, "ERROR opcode high");
+        assert!(*pkt.first().unwrap_or(&99) == 0, "ERROR opcode high");
         assert!(*pkt.get(1).unwrap_or(&99) == 5, "ERROR opcode low");
         assert!(*pkt.get(2).unwrap_or(&99) == 0, "error code high");
         assert!(*pkt.get(3).unwrap_or(&99) == 1, "error code low");
@@ -1352,8 +1352,8 @@ pub fn self_test() -> KernelResult<()> {
         assert!(parse_opcode(&[0, 3]) == Some(OP_DATA), "parse DATA");
         assert!(parse_opcode(&[0, 4]) == Some(OP_ACK), "parse ACK");
         assert!(parse_opcode(&[0, 5]) == Some(OP_ERROR), "parse ERROR");
-        assert!(parse_opcode(&[0]) == None, "too short");
-        assert!(parse_opcode(&[]) == None, "empty");
+        assert!(parse_opcode(&[0]).is_none(), "too short");
+        assert!(parse_opcode(&[]).is_none(), "empty");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[tftp]   test 5 (opcode parsing) PASSED");
@@ -1364,7 +1364,7 @@ pub fn self_test() -> KernelResult<()> {
         assert!(parse_block_num(&[0, 3, 0, 1]) == Some(1), "block 1");
         assert!(parse_block_num(&[0, 4, 1, 0]) == Some(256), "block 256");
         assert!(parse_block_num(&[0, 3, 255, 255]) == Some(65535), "block max");
-        assert!(parse_block_num(&[0, 3]) == None, "too short");
+        assert!(parse_block_num(&[0, 3]).is_none(), "too short");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[tftp]   test 6 (block number parsing) PASSED");
@@ -1408,7 +1408,7 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 10: WRQ packet construction ---
     {
         let pkt = build_wrq("upload.bin");
-        assert!(*pkt.get(0).unwrap_or(&99) == 0, "WRQ opcode high");
+        assert!(*pkt.first().unwrap_or(&99) == 0, "WRQ opcode high");
         assert!(*pkt.get(1).unwrap_or(&99) == 2, "WRQ opcode low");
         let (filename, mode) = parse_request(&pkt).unwrap();
         assert!(filename == "upload.bin", "WRQ filename");

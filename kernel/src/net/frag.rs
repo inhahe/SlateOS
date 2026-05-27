@@ -186,10 +186,10 @@ impl FragEntry {
         // Mark received blocks in the bitmap.
         let first_block = byte_offset / FRAG_BLOCK_SIZE;
         // Round up for the end block to handle partial final blocks.
-        let last_block = (end + FRAG_BLOCK_SIZE - 1) / FRAG_BLOCK_SIZE;
+        let last_block = end.div_ceil(FRAG_BLOCK_SIZE);
 
         // Grow bitmap if needed.
-        let bitmap_needed = (last_block + 7) / 8;
+        let bitmap_needed = last_block.div_ceil(8);
         if bitmap_needed > self.received.len() {
             self.received.resize(bitmap_needed, 0);
         }
@@ -219,7 +219,7 @@ impl FragEntry {
             return true;
         }
 
-        let total_blocks = (total + FRAG_BLOCK_SIZE - 1) / FRAG_BLOCK_SIZE;
+        let total_blocks = total.div_ceil(FRAG_BLOCK_SIZE);
 
         // Check all full bytes in the bitmap.
         let full_bytes = total_blocks / 8;
@@ -536,9 +536,9 @@ impl FragEntryV6 {
 
         // Mark received blocks in the bitmap.
         let first_block = byte_offset / FRAG_BLOCK_SIZE;
-        let last_block = (end + FRAG_BLOCK_SIZE - 1) / FRAG_BLOCK_SIZE;
+        let last_block = end.div_ceil(FRAG_BLOCK_SIZE);
 
-        let bitmap_needed = (last_block + 7) / 8;
+        let bitmap_needed = last_block.div_ceil(8);
         if bitmap_needed > self.received.len() {
             self.received.resize(bitmap_needed, 0);
         }
@@ -566,7 +566,7 @@ impl FragEntryV6 {
             return true;
         }
 
-        let total_blocks = (total + FRAG_BLOCK_SIZE - 1) / FRAG_BLOCK_SIZE;
+        let total_blocks = total.div_ceil(FRAG_BLOCK_SIZE);
 
         let full_bytes = total_blocks / 8;
         for i in 0..full_bytes {
@@ -843,7 +843,7 @@ fn test_two_fragments_ordered() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     // Verify buffer: first 16 bytes = 0x11, next 8 = 0x22.
-    if entry.buffer.get(0) != Some(&0x11) || entry.buffer.get(16) != Some(&0x22) {
+    if entry.buffer.first() != Some(&0x11) || entry.buffer.get(16) != Some(&0x22) {
         crate::serial_println!("[frag]   FAIL: buffer content mixed");
         return Err(KernelError::InternalError);
     }
@@ -973,7 +973,7 @@ fn test_v6_two_fragments_ordered() -> crate::error::KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    if entry.buffer.get(0) != Some(&0x11) || entry.buffer.get(16) != Some(&0x22) {
+    if entry.buffer.first() != Some(&0x11) || entry.buffer.get(16) != Some(&0x22) {
         crate::serial_println!("[frag]   FAIL: v6 buffer content");
         return Err(KernelError::InternalError);
     }

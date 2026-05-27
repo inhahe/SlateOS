@@ -1571,8 +1571,8 @@ fn distance_to_slot(dist: u32) -> u32 {
     // Find the highest set bit position.
     let msb = 31u32.wrapping_sub(dist.leading_zeros());
     // Slot = 2*msb + bit below msb.
-    let slot = msb.wrapping_mul(2).wrapping_add((dist >> (msb.wrapping_sub(1))) & 1);
-    slot
+    
+    msb.wrapping_mul(2).wrapping_add((dist >> (msb.wrapping_sub(1))) & 1)
 }
 
 // ---------------------------------------------------------------------------

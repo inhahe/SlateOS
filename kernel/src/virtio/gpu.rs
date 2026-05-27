@@ -624,7 +624,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
         .checked_mul(height as usize)
         .and_then(|v| v.checked_mul(4))
         .ok_or(KernelError::InvalidArgument)?;
-    let frames_needed = (fb_bytes + FRAME_SIZE - 1) / FRAME_SIZE;
+    let frames_needed = fb_bytes.div_ceil(FRAME_SIZE);
 
     let mut fb_frames = alloc::vec::Vec::new();
     for i in 0..frames_needed {
@@ -792,7 +792,7 @@ fn setup_modern_transport(
         // Each frame is 16 KiB but hardware pages are 4 KiB.
         // We map at frame granularity (our allocator's unit).
         let region_len = (cap.length as u64).max(FRAME_SIZE as u64);
-        let num_frames = ((region_len as usize) + FRAME_SIZE - 1) / FRAME_SIZE;
+        let num_frames = (region_len as usize).div_ceil(FRAME_SIZE);
 
         for i in 0..num_frames {
             let frame_phys = (region_phys & !(FRAME_SIZE as u64 - 1))

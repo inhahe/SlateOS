@@ -722,8 +722,8 @@ pub fn is_socket_activated(name: &[u8]) -> bool {
 fn drain_pre_queue(name: &[u8]) -> VecDeque<ChannelHandle> {
     let mut activations = SOCKET_ACTIVATIONS.lock();
     if let Some(entry) = activations.iter_mut().find(|e| e.name == name) {
-        let queue = core::mem::take(&mut entry.pre_queue);
-        queue
+        
+        core::mem::take(&mut entry.pre_queue)
     } else {
         VecDeque::new()
     }

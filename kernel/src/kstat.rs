@@ -137,7 +137,7 @@ pub fn sample() {
 
     // --- Memory pressure ---
     let pressure = crate::mm::memory_pressure();
-    let pressure_score = pressure.score as u8;
+    let pressure_score = pressure.score;
 
     // --- Per-CPU utilization ---
     let mut cpu_util = [0u8; 4];

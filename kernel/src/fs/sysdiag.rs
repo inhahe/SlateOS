@@ -426,8 +426,8 @@ fn diag_storage() -> (u32, u32, Vec<DiagIssue>) {
     // Test 3: check disk space via statvfs
     tests += 1;
     if let Ok(info) = crate::fs::Vfs::statvfs("/") {
-        let total = info.total_blocks.saturating_mul(info.block_size as u64);
-        let free = info.free_blocks.saturating_mul(info.block_size as u64);
+        let total = info.total_blocks.saturating_mul(info.block_size);
+        let free = info.free_blocks.saturating_mul(info.block_size);
         if total > 0 {
             let used_pct = ((total - free) * 100) / total;
             if used_pct > 95 {

@@ -323,7 +323,7 @@ pub fn compute_columns(directory: &str) -> KernelResult<Vec<DisplayColumn>> {
     }
 
     // Step 4: Sort by position.
-    columns.sort_by(|a, b| a.position.cmp(&b.position));
+    columns.sort_by_key(|a| a.position);
 
     // Renumber positions.
     for (i, col) in columns.iter_mut().enumerate() {
@@ -387,7 +387,7 @@ pub fn list_columns() -> Vec<ColumnDef> {
     init();
     let defs = COLUMN_DEFS.lock();
     let mut result: Vec<ColumnDef> = defs.clone();
-    result.sort_by(|a, b| a.priority.cmp(&b.priority));
+    result.sort_by_key(|a| a.priority);
     result
 }
 

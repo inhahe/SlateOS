@@ -537,8 +537,8 @@ pub fn search(
     min_size: Option<u64>,
     max_size: Option<u64>,
 ) -> Vec<IndexEntry> {
-    let name_lower = name_query.map(|q| to_ascii_lower(q));
-    let ext_lower = ext_filter.map(|e| to_ascii_lower(e));
+    let name_lower = name_query.map(to_ascii_lower);
+    let ext_lower = ext_filter.map(to_ascii_lower);
 
     let idx = INDEX.lock();
     idx.entries

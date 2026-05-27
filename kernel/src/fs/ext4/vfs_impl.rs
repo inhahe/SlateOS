@@ -1541,7 +1541,7 @@ fn set_inode_gid_32(inode: &mut super::ondisk::Ext4Inode, gid: u32) {
 fn inode_block_sectors(inode: &super::ondisk::Ext4Inode, block_size: u32) -> u64 {
     let lo = u64::from(inode.i_blocks_lo);
     let hi = u64::from(u16::from_le_bytes([
-        *inode.i_osd2.get(0).unwrap_or(&0),
+        *inode.i_osd2.first().unwrap_or(&0),
         *inode.i_osd2.get(1).unwrap_or(&0),
     ]));
     let raw = lo | (hi << 32);

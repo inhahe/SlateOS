@@ -193,16 +193,16 @@ pub fn scan(filter: &ScanFilter) -> KernelResult<Vec<RecoverableFile>> {
     let mut found: BTreeMap<String, RecoverableFile> = BTreeMap::new();
 
     // Source 1: Trash.
-    scan_trash(&filter, &mut found);
+    scan_trash(filter, &mut found);
 
     // Source 2: Journal (deleted events).
-    scan_journal(&filter, &mut found);
+    scan_journal(filter, &mut found);
 
     // Source 3: File history (CAS-backed versions).
-    scan_history(&filter, &mut found);
+    scan_history(filter, &mut found);
 
     // Source 4: Integrity baselines.
-    scan_integrity(&filter, &mut found);
+    scan_integrity(filter, &mut found);
 
     // Collect and sort: recoverable content first, then metadata-only.
     let mut results: Vec<RecoverableFile> = found.into_values().collect();

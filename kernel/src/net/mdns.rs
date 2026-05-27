@@ -647,7 +647,7 @@ fn parse_record_data(rtype: RecordType, rdata: &[u8], full_packet: &[u8]) -> Opt
                 return None;
             }
             Some(RecordData::Address(Ipv4Addr([
-                *rdata.get(0)?,
+                *rdata.first()?,
                 *rdata.get(1)?,
                 *rdata.get(2)?,
                 *rdata.get(3)?,
@@ -675,7 +675,7 @@ fn parse_record_data(rtype: RecordType, rdata: &[u8], full_packet: &[u8]) -> Opt
             if rdata.len() < 6 {
                 return None;
             }
-            let priority = (*rdata.get(0)? as u16) << 8 | *rdata.get(1)? as u16;
+            let priority = (*rdata.first()? as u16) << 8 | *rdata.get(1)? as u16;
             let weight = (*rdata.get(2)? as u16) << 8 | *rdata.get(3)? as u16;
             let port = (*rdata.get(4)? as u16) << 8 | *rdata.get(5)? as u16;
             // Target name follows.

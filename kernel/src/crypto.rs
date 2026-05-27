@@ -861,13 +861,13 @@ pub fn poly1305(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
     // is error-prone because the carry from word N already contains the
     // upper limb bits that word N+1 also references, causing double-counting.
     #[allow(clippy::cast_possible_truncation)]
-    let h0w = ((h[0]      ) | (h[1] << 26)) as u32;  // bits  0-31
+    let h0w = ((h[0]      ) | (h[1] << 26));  // bits  0-31
     #[allow(clippy::cast_possible_truncation)]
-    let h1w = ((h[1] >> 6 ) | (h[2] << 20)) as u32;  // bits 32-63
+    let h1w = ((h[1] >> 6 ) | (h[2] << 20));  // bits 32-63
     #[allow(clippy::cast_possible_truncation)]
-    let h2w = ((h[2] >> 12) | (h[3] << 14)) as u32;  // bits 64-95
+    let h2w = ((h[2] >> 12) | (h[3] << 14));  // bits 64-95
     #[allow(clippy::cast_possible_truncation)]
-    let h3w = ((h[3] >> 18) | (h[4] << 8 )) as u32;  // bits 96-127
+    let h3w = ((h[3] >> 18) | (h[4] << 8 ));  // bits 96-127
 
     let mut f: u64;
     f = (h0w as u64).wrapping_add(s[0] as u64);
@@ -916,9 +916,9 @@ pub fn chacha20_poly1305_encrypt(
 
     // Step 3: Build Poly1305 input: AAD || pad || ciphertext || pad || lengths.
     let mac_input = build_aead_mac_input(aad, plaintext);
-    let tag = poly1305(&otk, &mac_input);
+    
 
-    tag
+    poly1305(&otk, &mac_input)
 }
 
 /// ChaCha20-Poly1305 AEAD decryption.

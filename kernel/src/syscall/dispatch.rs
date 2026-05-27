@@ -30,7 +30,7 @@ use super::number::{
     SYS_CLOCK_MONOTONIC,
     SYS_DEBUG_PRINT, SYS_LOG_READ,
     SYS_CHANNEL_SEND_BLOCKING, SYS_CHANNEL_SEND_TIMEOUT,
-    SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE,
+    SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE,
     SYS_TIMER_CANCEL, SYS_TIMER_CREATE,
     SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_TRY_READ,
     SYS_EVENTFD_WRITE, SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT,
@@ -298,6 +298,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_EVENTFD_CLOSE as usize] = Some(handlers::sys_eventfd_close);
     handlers[SYS_EVENTFD_READ_TIMEOUT as usize] = Some(handlers::sys_eventfd_read_timeout);
     handlers[SYS_EVENTFD_WRITE_TIMEOUT as usize] = Some(handlers::sys_eventfd_write_timeout);
+    handlers[SYS_EVENTFD_HAS_VALUE as usize] = Some(handlers::sys_eventfd_has_value);
     handlers[SYS_CP_CREATE as usize] = Some(handlers::sys_cp_create);
     handlers[SYS_CP_REGISTER as usize] = Some(handlers::sys_cp_register);
     handlers[SYS_CP_UNREGISTER as usize] = Some(handlers::sys_cp_unregister);

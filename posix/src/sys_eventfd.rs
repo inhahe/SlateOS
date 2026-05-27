@@ -34,22 +34,28 @@ mod tests {
         assert_ne!(EFD_NONBLOCK, EFD_SEMAPHORE);
     }
 
+    /// `eventfd` rejects `EFD_SEMAPHORE` (not yet implemented).
     #[test]
-    fn test_eventfd_stub() {
-        let fd = eventfd(0, 0);
-        assert_eq!(fd, -1);
+    fn test_eventfd_semaphore_rejected() {
+        crate::errno::set_errno(0);
+        assert_eq!(eventfd(0, EFD_SEMAPHORE), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// `eventfd_read` on an invalid fd returns -1 with EFAULT (null buf).
     #[test]
-    fn test_eventfd_read_stub() {
-        let ret = eventfd_read(-1, core::ptr::null_mut());
-        assert_eq!(ret, -1);
+    fn test_eventfd_read_null_returns_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(eventfd_read(-1, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
+    /// `eventfd_write` with `u64::MAX` is rejected (Linux EINVAL).
     #[test]
-    fn test_eventfd_write_stub() {
-        let ret = eventfd_write(-1, 1);
-        assert_eq!(ret, -1);
+    fn test_eventfd_write_max_rejected() {
+        crate::errno::set_errno(0);
+        assert_eq!(eventfd_write(-1, u64::MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]

@@ -14,6 +14,11 @@
 //! supported" response.
 
 use crate::errno;
+use crate::fdtable::{self, HandleKind};
+use crate::syscall::{
+    SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ,
+    SYS_EVENTFD_WRITE, syscall1, syscall2,
+};
 
 /// Events for `epoll_ctl`.
 pub const EPOLLIN: u32 = 0x001;
@@ -134,29 +139,127 @@ pub const EFD_SEMAPHORE: i32 = 1;
 
 /// Create an eventfd file descriptor.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// `initval` seeds the kernel counter.  Supported flags: `EFD_CLOEXEC`
+/// (sets `FD_CLOEXEC` on the new fd) and `EFD_NONBLOCK` (sets
+/// `O_NONBLOCK` on the new fd, making `read()` return `EAGAIN` instead
+/// of blocking when the counter is 0).
+///
+/// `EFD_SEMAPHORE` is not yet supported and returns -1/EINVAL — the
+/// kernel `eventfd::read()` drains the entire counter rather than
+/// decrementing by 1.  Tracked in `todo.txt`.
+///
+/// Returns a fresh fd on success, -1 with `errno` set on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn eventfd(_initval: u32, _flags: i32) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn eventfd(initval: u32, flags: i32) -> i32 {
+    // Reject EFD_SEMAPHORE — we don't have the kernel semantics yet.
+    if flags & EFD_SEMAPHORE != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Reject unknown flag bits.
+    let allowed = EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE;
+    if flags & !allowed != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let handle_ret = syscall1(SYS_EVENTFD_CREATE, u64::from(initval));
+    if handle_ret < 0 {
+        return errno::translate(handle_ret) as i32;
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let handle = handle_ret as u64;
+
+    let nonblock_bit = if flags & EFD_NONBLOCK != 0 {
+        crate::fcntl::O_NONBLOCK
+    } else {
+        0
+    };
+    let status = crate::fcntl::O_RDWR | nonblock_bit;
+
+    let Some(fd) = fdtable::alloc_fd_with_flags(HandleKind::Eventfd, handle, status) else {
+        // Table full — clean up the kernel handle.
+        let _ = syscall1(SYS_EVENTFD_CLOSE, handle);
+        errno::set_errno(errno::EMFILE);
+        return -1;
+    };
+
+    if flags & EFD_CLOEXEC != 0 {
+        // set_fd_flags can't fail for an fd we just allocated.
+        let _ = fdtable::set_fd_flags(fd, fdtable::FD_CLOEXEC);
+    }
+
+    fd
 }
 
 /// Read from an eventfd (glibc convenience wrapper).
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Stores the counter value at `*value` and returns 0 on success.
+/// Returns -1 with `errno` set on error (EBADF, EINVAL, EAGAIN if
+/// non-blocking with zero counter).
+///
+/// Equivalent to `read(fd, value, 8) == 8 ? 0 : -1`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn eventfd_read(_fd: i32, _value: *mut u64) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn eventfd_read(fd: i32, value: *mut u64) -> i32 {
+    if value.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    let Some(entry) = fdtable::get_fd(fd) else {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if entry.kind != HandleKind::Eventfd {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
+    let nr = if is_nb { SYS_EVENTFD_TRY_READ } else { SYS_EVENTFD_READ };
+    let r = syscall1(nr, entry.handle);
+    if r < 0 {
+        let _ = errno::translate(r);
+        return -1;
+    }
+
+    // SAFETY: `value` is non-null (checked above); caller guarantees it
+    // points to a writable u64.  We write the kernel counter result.
+    #[allow(clippy::cast_sign_loss)]
+    unsafe {
+        core::ptr::write_unaligned(value, r as u64);
+    }
+    0
 }
 
 /// Write to an eventfd (glibc convenience wrapper).
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Adds `value` to the kernel counter.  Returns 0 on success, -1 with
+/// `errno` set on error (EBADF, EINVAL if `value` is `u64::MAX`).
+///
+/// Equivalent to `write(fd, &value, 8) == 8 ? 0 : -1`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn eventfd_write(_fd: i32, _value: u64) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn eventfd_write(fd: i32, value: u64) -> i32 {
+    if value == u64::MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let Some(entry) = fdtable::get_fd(fd) else {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if entry.kind != HandleKind::Eventfd {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let r = syscall2(SYS_EVENTFD_WRITE, entry.handle, value);
+    if r < 0 {
+        let _ = errno::translate(r);
+        return -1;
+    }
+    0
 }
 
 // ===========================================================================
@@ -398,28 +501,78 @@ mod tests {
         assert_ne!(EFD_NONBLOCK, 0);
     }
 
-    // -- eventfd stubs --
+    // -- eventfd userspace checks (no kernel needed) --
 
+    /// `EFD_SEMAPHORE` is not yet supported; userspace must reject it
+    /// before issuing the kernel call.
     #[test]
-    fn test_eventfd_enosys() {
+    fn test_eventfd_semaphore_rejected() {
         errno::set_errno(0);
-        assert_eq!(eventfd(0, 0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(eventfd(0, EFD_SEMAPHORE), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
+    /// Unknown flag bits should be rejected (forward-compat).
     #[test]
-    fn test_eventfd_read_enosys() {
+    fn test_eventfd_unknown_flag_rejected() {
+        errno::set_errno(0);
+        // Use a bit that is not in {EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE}.
+        let bad_bit = 0x40;
+        assert!(bad_bit & (EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE) == 0);
+        assert_eq!(eventfd(0, bad_bit), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// `eventfd_read` with a null pointer must fail with EFAULT.
+    #[test]
+    fn test_eventfd_read_null_returns_efault() {
+        errno::set_errno(0);
+        assert_eq!(eventfd_read(3, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// `eventfd_read` on a non-eventfd fd must fail with EBADF.
+    #[test]
+    fn test_eventfd_read_bad_fd_returns_ebadf() {
         errno::set_errno(0);
         let mut val: u64 = 0;
-        assert_eq!(eventfd_read(3, &raw mut val), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        // fd 999 is not in the table.
+        assert_eq!(eventfd_read(999, &raw mut val), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
+    /// `eventfd_read` on a negative fd must fail with EBADF.
     #[test]
-    fn test_eventfd_write_enosys() {
+    fn test_eventfd_read_negative_fd_returns_ebadf() {
         errno::set_errno(0);
-        assert_eq!(eventfd_write(3, 1), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let mut val: u64 = 0;
+        assert_eq!(eventfd_read(-1, &raw mut val), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    /// `eventfd_write` with `u64::MAX` is invalid per Linux semantics
+    /// and must be rejected before issuing the kernel call.
+    #[test]
+    fn test_eventfd_write_max_rejected() {
+        errno::set_errno(0);
+        assert_eq!(eventfd_write(3, u64::MAX), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// `eventfd_write` on a non-eventfd fd must fail with EBADF.
+    #[test]
+    fn test_eventfd_write_bad_fd_returns_ebadf() {
+        errno::set_errno(0);
+        assert_eq!(eventfd_write(999, 1), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    /// `eventfd_write` on a negative fd must fail with EBADF.
+    #[test]
+    fn test_eventfd_write_negative_fd_returns_ebadf() {
+        errno::set_errno(0);
+        assert_eq!(eventfd_write(-1, 1), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
     // -- timerfd constants --
@@ -670,36 +823,28 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
-    // -- eventfd with different initval --
+    // -- eventfd input validation (no kernel needed) --
+    //
+    // The success path requires a real kernel and is exercised by
+    // integration tests (see tests/eventfd.rs).  These cases all fail
+    // before any syscall is issued.
 
+    /// EFD_SEMAPHORE combined with valid flags is still rejected.
     #[test]
-    fn test_eventfd_nonzero_initval() {
+    fn test_eventfd_semaphore_with_cloexec_rejected() {
         errno::set_errno(0);
-        assert_eq!(eventfd(42, 0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(eventfd(0, EFD_SEMAPHORE | EFD_CLOEXEC), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
+    /// Multiple unknown flag bits are still rejected.
     #[test]
-    fn test_eventfd_with_flags() {
+    fn test_eventfd_multiple_unknown_flags_rejected() {
         errno::set_errno(0);
-        assert_eq!(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_eventfd_semaphore() {
-        errno::set_errno(0);
-        assert_eq!(eventfd(0, EFD_SEMAPHORE), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    // -- eventfd_read with null --
-
-    #[test]
-    fn test_eventfd_read_null() {
-        errno::set_errno(0);
-        assert_eq!(eventfd_read(3, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let bad = 0x40 | 0x80;
+        assert!(bad & (EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE) == 0);
+        assert_eq!(eventfd(42, bad), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -- inotify_init1 with flags --

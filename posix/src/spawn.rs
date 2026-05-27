@@ -131,6 +131,9 @@ pub mod fd_handle_type {
     pub const UDP_SOCKET: u8 = 3;
     /// Console I/O (stdin/stdout/stderr virtual handle).
     pub const CONSOLE: u8 = 4;
+    /// Eventfd counter handle (raw pass-through — no kernel-level dup
+    /// yet; closing from either side closes for both).
+    pub const EVENTFD: u8 = 5;
 }
 
 /// A file descriptor mapping entry for `SYS_PROCESS_SPAWN_EX`.
@@ -588,6 +591,7 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         HandleKind::Console => fd_handle_type::CONSOLE,
         HandleKind::TcpStream | HandleKind::TcpListener => fd_handle_type::TCP_SOCKET,
         HandleKind::UdpSocket => fd_handle_type::UDP_SOCKET,
+        HandleKind::Eventfd => fd_handle_type::EVENTFD,
     }
 }
 
@@ -1979,6 +1983,7 @@ mod tests {
         assert_eq!(fd_handle_type::TCP_SOCKET, 2);
         assert_eq!(fd_handle_type::UDP_SOCKET, 3);
         assert_eq!(fd_handle_type::CONSOLE, 4);
+        assert_eq!(fd_handle_type::EVENTFD, 5);
     }
 
     #[test]
@@ -1989,6 +1994,7 @@ mod tests {
             fd_handle_type::TCP_SOCKET,
             fd_handle_type::UDP_SOCKET,
             fd_handle_type::CONSOLE,
+            fd_handle_type::EVENTFD,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
@@ -2028,6 +2034,12 @@ mod tests {
     fn test_kind_to_handle_type_udp() {
         use crate::fdtable::HandleKind;
         assert_eq!(kind_to_handle_type(HandleKind::UdpSocket), fd_handle_type::UDP_SOCKET);
+    }
+
+    #[test]
+    fn test_kind_to_handle_type_eventfd() {
+        use crate::fdtable::HandleKind;
+        assert_eq!(kind_to_handle_type(HandleKind::Eventfd), fd_handle_type::EVENTFD);
     }
 
     // -- build_fd_map --

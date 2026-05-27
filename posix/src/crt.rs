@@ -255,6 +255,7 @@ unsafe fn retrieve_initial_fds() {
             fd_handle_type::TCP_SOCKET => HandleKind::TcpStream,
             fd_handle_type::UDP_SOCKET => HandleKind::UdpSocket,
             fd_handle_type::CONSOLE => HandleKind::Console,
+            fd_handle_type::EVENTFD => HandleKind::Eventfd,
             _ => HandleKind::File, // Unknown — default to file.
         };
 

@@ -434,6 +434,12 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             }
             0
         }
+        HandleKind::Eventfd => {
+            // Linux's eventfd has no .ioctl handler, so ioctl() returns
+            // ENOTTY on eventfds.  Match that behavior.
+            errno::set_errno(errno::ENOTTY);
+            -1
+        }
     }
 }
 

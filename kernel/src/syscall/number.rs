@@ -772,6 +772,18 @@ pub const SYS_EVENTFD_READ_TIMEOUT: u64 = 245;
 /// Returns: 0 on success, `TimedOut` if deadline expires.
 pub const SYS_EVENTFD_WRITE_TIMEOUT: u64 = 246;
 
+/// Non-destructive readiness query on an eventfd.
+///
+/// `arg0`: eventfd handle.
+///
+/// Used by `poll`/`select`/`epoll` to decide whether the eventfd is
+/// readable without consuming its value.  Unlike `SYS_EVENTFD_TRY_READ`,
+/// this does not modify the counter.
+///
+/// Returns: 1 if the counter is > 0 (readable), 0 if it is 0
+/// (not readable), or a negative error on bad handle.
+pub const SYS_EVENTFD_HAS_VALUE: u64 = 247;
+
 /// Create a completion port (unified wait multiplexer).
 ///
 /// Returns: completion port handle.

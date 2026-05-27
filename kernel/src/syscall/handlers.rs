@@ -1939,6 +1939,18 @@ pub fn sys_eventfd_write_timeout(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_EVENTFD_HAS_VALUE` — non-destructive readiness query.
+///
+/// `arg0`: eventfd handle.
+///
+/// Returns: 1 if the counter is > 0 (readable), 0 if the counter is 0.
+/// Used by `poll`/`select`/`epoll` to determine readability without
+/// consuming the eventfd value.
+pub fn sys_eventfd_has_value(args: &SyscallArgs) -> SyscallResult {
+    let handle = EventFdHandle::from_raw(args.arg0);
+    SyscallResult::ok(i64::from(eventfd::has_value(handle)))
+}
+
 // ---------------------------------------------------------------------------
 // Completion port handlers (250–259)
 // ---------------------------------------------------------------------------

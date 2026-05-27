@@ -422,6 +422,15 @@ fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool,
             // UDP is always writable when bound (no flow control).
             (readable, true, false, false)
         }
+
+        // Eventfd: counter > 0 means readable.  Always writable until
+        // the counter saturates near u64::MAX (we ignore that edge case
+        // and report writable unconditionally — adding 0 always succeeds,
+        // and `eventfd_write(fd, 0)` is a no-op).
+        HandleKind::Eventfd => {
+            let has = syscall1(crate::syscall::SYS_EVENTFD_HAS_VALUE, handle);
+            (has > 0, true, false, false)
+        }
     }
 }
 

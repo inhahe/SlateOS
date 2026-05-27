@@ -112,6 +112,12 @@ pub mod fd_handle_type {
     pub const UDP_SOCKET: u8 = 3;
     /// Console I/O (stdin/stdout/stderr virtual handle).
     pub const CONSOLE: u8 = 4;
+    /// Eventfd counter handle (from `ipc::eventfd`).  The raw handle
+    /// value is passed through — the kernel eventfd subsystem provides
+    /// its own ref-counting via `is_handle_referenced` so multiple PCBs
+    /// can hold the same handle safely.
+    #[allow(dead_code)] // Used only via fd inheritance; readable in matches.
+    pub const EVENTFD: u8 = 5;
 }
 
 /// A file descriptor mapping entry passed from userspace.
@@ -494,6 +500,16 @@ pub fn spawn_process(
                 }
                 fd_handle_type::CONSOLE => {
                     // Console is a virtual handle — just pass the value.
+                    Ok(parent_handle)
+                }
+                fd_handle_type::EVENTFD => {
+                    // For eventfd handles, pass through the raw value.
+                    //
+                    // TODO(kernel-ipc): Once eventfd::dup() exists with
+                    // proper ref-counting, use it here instead of raw
+                    // pass-through.  Without ref-counting, closing the
+                    // handle from either parent or child closes it for
+                    // both — same caveat as pipes.
                     Ok(parent_handle)
                 }
                 _ => {

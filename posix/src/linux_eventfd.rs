@@ -28,10 +28,13 @@ mod tests {
         assert_ne!(EFD_NONBLOCK, EFD_SEMAPHORE);
     }
 
+    /// `EFD_SEMAPHORE` is rejected before any syscall — verifies the
+    /// re-export reaches the real implementation that does the check.
     #[test]
-    fn test_eventfd_stub() {
-        let fd = eventfd(0, 0);
-        assert_eq!(fd, -1);
+    fn test_eventfd_semaphore_rejected() {
+        crate::errno::set_errno(0);
+        assert_eq!(eventfd(0, EFD_SEMAPHORE), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]

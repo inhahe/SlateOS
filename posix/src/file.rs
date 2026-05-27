@@ -168,6 +168,9 @@ pub extern "C" fn close(fd: Fd) -> i32 {
             if entry.handle == 0 { return 0; } // Unbound socket, nothing to close.
             syscall1(SYS_UDP_CLOSE, entry.handle)
         }
+        HandleKind::Eventfd => {
+            syscall1(SYS_EVENTFD_CLOSE, entry.handle)
+        }
     };
 
     errno::translate(ret) as i32
@@ -267,6 +270,31 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             // Listeners are not readable via read(); use accept().
             errno::set_errno(errno::EINVAL);
             return -1;
+        }
+        HandleKind::Eventfd => {
+            // Linux semantics: read on an eventfd requires an 8-byte
+            // buffer.  On success, the kernel counter is written into
+            // the buffer (host endian) and read() returns 8.  Buffers
+            // smaller than 8 bytes fail with EINVAL.
+            if count < 8 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
+                & crate::fcntl::O_NONBLOCK != 0;
+            let nr = if is_nb { SYS_EVENTFD_TRY_READ } else { SYS_EVENTFD_READ };
+            let r = syscall1(nr, entry.handle);
+            if r < 0 {
+                return errno::translate(r) as SsizeT;
+            }
+            // SAFETY: `buf` is valid for `count >= 8` bytes (checked above).
+            // We write 8 bytes representing the u64 counter value in host
+            // endianness, matching Linux eventfd semantics.
+            unsafe {
+                let val = r as u64;
+                core::ptr::write_unaligned(buf.cast::<u64>(), val);
+            }
+            return 8;
         }
     };
 
@@ -384,6 +412,28 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             errno::set_errno(errno::EINVAL);
             return -1;
         }
+        HandleKind::Eventfd => {
+            // Linux semantics: write on an eventfd requires an 8-byte
+            // buffer.  The bytes are interpreted as a host-endian u64
+            // delta added to the counter.  Writing 0xFFFF_FFFF_FFFF_FFFF
+            // (u64::MAX) is invalid (Linux EINVAL); writing 0 is a no-op
+            // but still legal.
+            if count < 8 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            // SAFETY: `buf` is valid for `count >= 8` bytes (checked above).
+            let val = unsafe { core::ptr::read_unaligned(buf.cast::<u64>()) };
+            if val == u64::MAX {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            let r = syscall2(SYS_EVENTFD_WRITE, entry.handle, val);
+            if r < 0 {
+                return errno::translate(r) as SsizeT;
+            }
+            return 8;
+        }
     };
 
     errno::translate(ret) as SsizeT
@@ -419,7 +469,8 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
             errno::translate(ret) as OffT
         }
         HandleKind::Pipe | HandleKind::Console
-        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
+        | HandleKind::Eventfd => {
             errno::set_errno(errno::ESPIPE);
             -1
         }
@@ -907,6 +958,20 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
                 -1
             }
         }
+        HandleKind::Eventfd => {
+            // No kernel-level dup for eventfds.  Share the handle;
+            // close() uses is_handle_referenced() to only close the
+            // kernel handle when the last fd referencing it is closed.
+            if let Some(fd) = fdtable::alloc_fd_with_flags(
+                HandleKind::Eventfd, entry.handle, src_status,
+            ) {
+                fdtable::copy_fd_path(oldfd, fd);
+                fd
+            } else {
+                errno::set_errno(errno::EMFILE);
+                -1
+            }
+        }
     }
 }
 
@@ -945,7 +1010,8 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         }
         HandleKind::Console
         | HandleKind::Pipe
-        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
+        | HandleKind::Eventfd => {
             entry.handle
         }
     };
@@ -1151,6 +1217,17 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
             unsafe {
                 core::ptr::write_bytes(buf, 0, 1);
                 (*buf).st_mode = crate::fcntl::S_IFSOCK;
+            }
+            0
+        }
+        HandleKind::Eventfd => {
+            // Linux fstat on an eventfd returns a character device with
+            // mode 0600.  We emulate that: zero out the struct and set
+            // S_IFCHR so callers that branch on file type get a sensible
+            // value.
+            unsafe {
+                core::ptr::write_bytes(buf, 0, 1);
+                (*buf).st_mode = crate::fcntl::S_IFCHR;
             }
             0
         }
@@ -1404,7 +1481,8 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
             errno::translate(ret) as i32
         }
         HandleKind::Pipe | HandleKind::Console
-        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
+        | HandleKind::Eventfd => {
             errno::set_errno(errno::EINVAL);
             -1
         }
@@ -1429,7 +1507,8 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
             errno::translate(ret) as i32
         }
         HandleKind::Pipe | HandleKind::Console
-        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => 0,
+        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
+        | HandleKind::Eventfd => 0,
     }
 }
 
@@ -1499,6 +1578,7 @@ fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
         HandleKind::TcpStream => syscall1(SYS_TCP_CLOSE, handle),
         HandleKind::TcpListener => syscall1(SYS_TCP_CLOSE_LISTENER, handle),
         HandleKind::UdpSocket => syscall1(SYS_UDP_CLOSE, handle),
+        HandleKind::Eventfd => syscall1(SYS_EVENTFD_CLOSE, handle),
     }
 }
 

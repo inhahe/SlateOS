@@ -81,6 +81,14 @@ pub enum HandleKind {
     TcpListener,
     /// A UDP socket (uses `SYS_UDP_SEND`/`SYS_UDP_RECV`/`SYS_UDP_CLOSE`).
     UdpSocket,
+    /// A Linux-compatible eventfd counter
+    /// (uses `SYS_EVENTFD_*`).
+    ///
+    /// A `read()` returns the 8-byte counter value (little-endian) and
+    /// resets it to 0; a `write()` adds the 8-byte counter delta to the
+    /// counter.  These semantics are implemented in [`crate::file`]'s
+    /// `read`/`write` dispatch.
+    Eventfd,
 }
 
 /// An entry in the file descriptor table.
@@ -1143,6 +1151,7 @@ mod tests {
             HandleKind::TcpStream,
             HandleKind::TcpListener,
             HandleKind::UdpSocket,
+            HandleKind::Eventfd,
         ];
         for kind in kinds {
             let fd = alloc_fd(kind, 999).unwrap();

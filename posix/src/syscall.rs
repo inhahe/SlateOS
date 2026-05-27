@@ -88,6 +88,16 @@ pub const SYS_PIPE_CLOSE: u64 = 225;
 pub const SYS_PIPE_POLL: u64 = 228;
 pub const SYS_PIPE_READABLE_BYTES: u64 = 229;
 
+// Eventfd (IPC range 240-249)
+pub const SYS_EVENTFD_CREATE: u64 = 240;
+pub const SYS_EVENTFD_WRITE: u64 = 241;
+pub const SYS_EVENTFD_READ: u64 = 242;
+pub const SYS_EVENTFD_TRY_READ: u64 = 243;
+pub const SYS_EVENTFD_CLOSE: u64 = 244;
+pub const SYS_EVENTFD_READ_TIMEOUT: u64 = 245;
+pub const SYS_EVENTFD_WRITE_TIMEOUT: u64 = 246;
+pub const SYS_EVENTFD_HAS_VALUE: u64 = 247;
+
 // Networking (800-999)
 pub const SYS_TCP_CONNECT: u64 = 800;
 pub const SYS_TCP_SEND: u64 = 801;
@@ -320,6 +330,10 @@ mod tests {
             SYS_PIPE_CREATE, SYS_PIPE_WRITE, SYS_PIPE_READ,
             SYS_PIPE_TRY_WRITE, SYS_PIPE_TRY_READ, SYS_PIPE_CLOSE,
             SYS_PIPE_POLL, SYS_PIPE_READABLE_BYTES,
+            SYS_EVENTFD_CREATE, SYS_EVENTFD_WRITE, SYS_EVENTFD_READ,
+            SYS_EVENTFD_TRY_READ, SYS_EVENTFD_CLOSE,
+            SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_WRITE_TIMEOUT,
+            SYS_EVENTFD_HAS_VALUE,
             SYS_TCP_CONNECT, SYS_TCP_SEND, SYS_TCP_RECV, SYS_TCP_CLOSE,
             SYS_TCP_BIND, SYS_TCP_ACCEPT, SYS_TCP_CLOSE_LISTENER,
             SYS_TCP_ABORT, SYS_TCP_PEER_ADDR,
@@ -366,6 +380,10 @@ mod tests {
             SYS_PIPE_CREATE, SYS_PIPE_WRITE, SYS_PIPE_READ,
             SYS_PIPE_TRY_WRITE, SYS_PIPE_TRY_READ, SYS_PIPE_CLOSE,
             SYS_PIPE_POLL, SYS_PIPE_READABLE_BYTES,
+            SYS_EVENTFD_CREATE, SYS_EVENTFD_WRITE, SYS_EVENTFD_READ,
+            SYS_EVENTFD_TRY_READ, SYS_EVENTFD_CLOSE,
+            SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_WRITE_TIMEOUT,
+            SYS_EVENTFD_HAS_VALUE,
             SYS_TCP_CONNECT, SYS_TCP_SEND, SYS_TCP_RECV, SYS_TCP_CLOSE,
             SYS_TCP_BIND, SYS_TCP_ACCEPT, SYS_TCP_CLOSE_LISTENER,
             SYS_TCP_ABORT, SYS_TCP_PEER_ADDR,
@@ -415,6 +433,10 @@ mod tests {
         assert!((200..400).contains(&SYS_PIPE_WRITE));
         assert!((200..400).contains(&SYS_PIPE_READ));
         assert!((200..400).contains(&SYS_PIPE_CLOSE));
+        assert!((200..400).contains(&SYS_EVENTFD_CREATE));
+        assert!((200..400).contains(&SYS_EVENTFD_WRITE));
+        assert!((200..400).contains(&SYS_EVENTFD_READ));
+        assert!((200..400).contains(&SYS_EVENTFD_CLOSE));
 
         // kernel-process: 500-599
         assert!((500..600).contains(&SYS_PROCESS_SPAWN));
@@ -440,18 +462,22 @@ mod tests {
         assert!((800..1000).contains(&SYS_DNS_RESOLVE));
     }
 
-    // -- All pipe syscall numbers in IPC range --
+    // -- All IPC syscall numbers (pipe + eventfd) in IPC range --
 
     #[test]
-    fn pipe_syscalls_in_ipc_range() {
-        let pipe_nrs = [
+    fn ipc_syscalls_in_ipc_range() {
+        let ipc_nrs = [
             SYS_PIPE_CREATE, SYS_PIPE_WRITE, SYS_PIPE_READ,
             SYS_PIPE_TRY_WRITE, SYS_PIPE_TRY_READ, SYS_PIPE_CLOSE,
             SYS_PIPE_POLL, SYS_PIPE_READABLE_BYTES,
+            SYS_EVENTFD_CREATE, SYS_EVENTFD_WRITE, SYS_EVENTFD_READ,
+            SYS_EVENTFD_TRY_READ, SYS_EVENTFD_CLOSE,
+            SYS_EVENTFD_READ_TIMEOUT, SYS_EVENTFD_WRITE_TIMEOUT,
+            SYS_EVENTFD_HAS_VALUE,
         ];
-        for &nr in &pipe_nrs {
+        for &nr in &ipc_nrs {
             assert!((200..400).contains(&nr),
-                "pipe syscall {nr} must be in IPC range 200-399");
+                "IPC syscall {nr} must be in IPC range 200-399");
         }
     }
 

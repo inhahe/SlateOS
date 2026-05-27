@@ -425,7 +425,8 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         | fdtable::HandleKind::Pipe
         | fdtable::HandleKind::TcpStream
         | fdtable::HandleKind::TcpListener
-        | fdtable::HandleKind::UdpSocket => entry.handle,
+        | fdtable::HandleKind::UdpSocket
+        | fdtable::HandleKind::Eventfd => entry.handle,
     };
 
     // F_DUPFD inherits the source's file status flags (O_APPEND, etc.).

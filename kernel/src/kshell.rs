@@ -27707,7 +27707,7 @@ fn cmd_datausage(args: &str) {
             datausage::init_defaults();
             shell_println!("Data usage monitoring initialized.");
         }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("datausage (dusage) — network data usage monitoring");
             shell_println!("  show               Show current usage overview");
             shell_println!("  apps               List all app usage (sorted)");
@@ -29454,7 +29454,7 @@ fn cmd_parental(args: &str) {
             parental::init_defaults();
             shell_println!("Parental controls initialized.");
         }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("parental (pctl) — parental controls");
             shell_println!("  show                         List profiles");
             shell_println!("  create <uid> <name>          Create child profile");
@@ -29698,7 +29698,7 @@ fn cmd_audiodevice(args: &str) {
             audiodevice::init_defaults();
             shell_println!("Audio devices initialized.");
         }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("audiodevice (adev) — audio device management");
             shell_println!("  show                        List all devices");
             shell_println!("  outputs / inputs            List by direction");
@@ -29865,7 +29865,7 @@ fn cmd_sessionmgr(args: &str) {
             sessionmgr::init_defaults();
             shell_println!("Session manager initialized.");
         }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("sessionmgr (session) — user session management");
             shell_println!("  show               List sessions");
             shell_println!("  login <uid> <name>  Create session");
@@ -30014,7 +30014,7 @@ fn cmd_crashreport(args: &str) {
             crashreport::init_defaults();
             shell_println!("Crash reporter initialized.");
         }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("crashreport (crash) — crash report management");
             shell_println!("  show                  List reports");
             shell_println!("  detail <id>           Report details + stack trace");
@@ -30190,7 +30190,7 @@ fn cmd_netproxy(args: &str) {
             netproxy::init_defaults();
             shell_println!("Proxy settings initialized.");
         }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("netproxy (proxy) — network proxy settings");
             shell_println!("  show                             Current config");
             shell_println!("  mode <none|manual|auto|detect>   Set proxy mode");
@@ -30371,7 +30371,7 @@ fn cmd_fileversion(args: &str) {
             fileversion::init_defaults();
             shell_println!("File versioning initialized.");
         }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("fileversion (fver) — file version history");
             shell_println!("  show                    Overview");
             shell_println!("  list <path>             Versions of a file");
@@ -30547,7 +30547,7 @@ fn cmd_devicemgr(args: &str) {
             devicemgr::init_defaults();
             shell_println!("Device manager initialized.");
         }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("devicemgr (devmgr) — hardware device management");
             shell_println!("  show                       List devices");
             shell_println!("  info <id>                  Device details");
@@ -30689,7 +30689,7 @@ fn cmd_location(args: &str) {
             location::init_defaults();
             shell_println!("Location services initialized.");
         }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("location (loc) — location services");
             shell_println!("  show                         Overview");
             shell_println!("  enable/disable               Toggle services");
@@ -30846,7 +30846,7 @@ fn cmd_diskencrypt(args: &str) {
             diskencrypt::init_defaults();
             shell_println!("Disk encryption initialized.");
         }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("diskencrypt (dencrypt) — disk encryption management");
             shell_println!("  show                  List volumes");
             shell_println!("  info <id>             Volume details");
@@ -31003,7 +31003,7 @@ fn cmd_pkgmgr(args: &str) {
             pkgmgr::init_defaults();
             shell_println!("Package manager initialized.");
         }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("pkgmgr (pkg) — package management");
             shell_println!("  show                  Overview");
             shell_println!("  list                  Installed packages");
@@ -31094,7 +31094,7 @@ fn cmd_remotedesktop(args: &str) {
         }
         "test" => { remotedesktop::self_test(); shell_println!("Remote desktop self-test complete."); }
         "init" => { remotedesktop::init_defaults(); shell_println!("Remote desktop initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("remotedesktop (rdp) — remote desktop");
             shell_println!("  show                  Status and sessions");
             shell_println!("  enable/disable        Toggle server");
@@ -31184,7 +31184,7 @@ fn cmd_restorepoint(args: &str) {
         }
         "test" => { restorepoint::self_test(); shell_println!("Restore point self-test complete."); }
         "init" => { restorepoint::init_defaults(); shell_println!("Restore points initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("restorepoint (rpoint) — system restore points");
             shell_println!("  show                List restore points");
             shell_println!("  create <desc>       Create restore point");
@@ -31302,7 +31302,7 @@ fn cmd_battery(args: &str) {
         }
         "test" => { battery::self_test(); shell_println!("Battery self-test complete."); }
         "init" => { battery::init_defaults(); shell_println!("Battery manager initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("battery (batt) — power source management");
             shell_println!("  show              All power sources");
             shell_println!("  info <id>         Source details");
@@ -31426,7 +31426,7 @@ fn cmd_dictation(args: &str) {
         }
         "test" => { dictation::self_test(); shell_println!("Dictation self-test complete."); }
         "init" => { dictation::init_defaults(); shell_println!("Dictation initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("dictation (dict) — speech-to-text input");
             shell_println!("  show                Overview");
             shell_println!("  enable/disable      Toggle dictation");
@@ -31566,7 +31566,7 @@ fn cmd_screenreader(args: &str) {
         }
         "test" => { screenreader::self_test(); shell_println!("Screen reader self-test complete."); }
         "init" => { screenreader::init_defaults(); shell_println!("Screen reader initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("screenreader (sr) — screen reader / UI narration");
             shell_println!("  show               Overview");
             shell_println!("  enable/disable      Toggle screen reader");
@@ -31694,7 +31694,7 @@ fn cmd_langpack(args: &str) {
         }
         "test" => { langpack::self_test(); shell_println!("Language pack self-test complete."); }
         "init" => { langpack::init_defaults(); shell_println!("Language pack manager initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("langpack (lpack) — language and translation management");
             shell_println!("  show               Overview");
             shell_println!("  list               List installed packs");
@@ -31802,7 +31802,7 @@ fn cmd_spellcheck(args: &str) {
         }
         "test" => { spellcheck::self_test(); shell_println!("Spell check self-test complete."); }
         "init" => { spellcheck::init_defaults(); shell_println!("Spell checker initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("spellcheck (spell) — system spell checker");
             shell_println!("  show               Overview");
             shell_println!("  check <word>        Check a word");
@@ -31892,7 +31892,7 @@ fn cmd_screentime(args: &str) {
         }
         "test" => { screentime::self_test(); shell_println!("Screen time self-test complete."); }
         "init" => { screentime::init_defaults(); shell_println!("Screen time initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("screentime (stime) — app usage and screen time tracking");
             shell_println!("  show               Today's overview");
             shell_println!("  apps               Per-app usage breakdown");
@@ -31984,7 +31984,7 @@ fn cmd_disksmart(args: &str) {
         }
         "test" => { disksmart::self_test(); shell_println!("Disk S.M.A.R.T. self-test complete."); }
         "init" => { disksmart::init_defaults(); shell_println!("Disk S.M.A.R.T. initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("disksmart (smart) — disk health monitoring");
             shell_println!("  show               Overview");
             shell_println!("  list               List monitored drives");
@@ -32091,7 +32091,7 @@ fn cmd_magnifier(args: &str) {
         }
         "test" => { magnifier::self_test(); shell_println!("Magnifier self-test complete."); }
         "init" => { magnifier::init_defaults(); shell_println!("Magnifier initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("magnifier (mag) — screen magnification");
             shell_println!("  show               Overview");
             shell_println!("  enable/disable     Toggle magnifier");
@@ -32190,7 +32190,7 @@ fn cmd_cloudsync(args: &str) {
         }
         "test" => { cloudsync::self_test(); shell_println!("Cloud sync self-test complete."); }
         "init" => { cloudsync::init_defaults(); shell_println!("Cloud sync initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("cloudsync (csync) — cloud storage sync");
             shell_println!("  show               Overview");
             shell_println!("  list               List accounts");
@@ -32255,7 +32255,7 @@ fn cmd_gestures(args: &str) {
         }
         "test" => { gestures::self_test(); shell_println!("Gestures self-test complete."); }
         "init" => { gestures::init_defaults(); shell_println!("Gestures initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("gestures (gesture) — touch gesture management");
             shell_println!("  show               Overview");
             shell_println!("  list               List gesture mappings");
@@ -32350,7 +32350,7 @@ fn cmd_soundevents(args: &str) {
         }
         "test" => { soundevents::self_test(); shell_println!("Sound events self-test complete."); }
         "init" => { soundevents::init_defaults(); shell_println!("Sound events initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("soundevents (sevents) — system notification sounds");
             shell_println!("  show               Overview");
             shell_println!("  list               List event→sound mappings");
@@ -32439,7 +32439,7 @@ fn cmd_usbmgr(args: &str) {
         }
         "test" => { usbmgr::self_test(); shell_println!("USB manager self-test complete."); }
         "init" => { usbmgr::init_defaults(); shell_println!("USB manager initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("usbmgr (usb) — USB device management");
             shell_println!("  show               Overview");
             shell_println!("  list               List connected devices");
@@ -32540,7 +32540,7 @@ fn cmd_cliphistory(args: &str) {
         }
         "test" => { cliphistory::self_test(); shell_println!("Clipboard history self-test complete."); }
         "init" => { cliphistory::init_defaults(); shell_println!("Clipboard history initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("cliphistory (cliphist) — clipboard history");
             shell_println!("  show               Overview");
             shell_println!("  list [n]           Recent entries");
@@ -32619,7 +32619,7 @@ fn cmd_displaycolor(args: &str) {
         }
         "test" => { displaycolor::self_test(); shell_println!("Display color self-test complete."); }
         "init" => { displaycolor::init_defaults(); shell_println!("Display color initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("displaycolor (dcolor) — color profile management");
             shell_println!("  show               Overview");
             shell_println!("  profiles           List color profiles");
@@ -32727,7 +32727,7 @@ fn cmd_syslog(args: &str) {
         }
         "test" => { syslog::self_test(); shell_println!("System log self-test complete."); }
         "init" => { syslog::init_defaults(); shell_println!("System log initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("syslog (slog) — system log viewer");
             shell_println!("  show               Overview");
             shell_println!("  tail [n]           Recent entries");
@@ -36014,7 +36014,8 @@ fn cmd_pcap(args: &str) {
                         }
                     }
                 }
-                "all" | _ => pcap::CaptureFilter::all(),
+                // "all" or any unrecognised filter falls through to capture everything.
+                _ => pcap::CaptureFilter::all(),
             };
             pcap::start(filter);
             shell_println!("Packet capture started");
@@ -36601,8 +36602,9 @@ fn cmd_netstat(args: &str) {
         "-6" | "--ipv6" => {
             shell_print!("{}", netstat::format_ipv6_info());
         }
-        "-a" | _ => {
-            // Default: show everything.
+        // "-a" or any unrecognised flag falls through to the default
+        // (show everything).
+        _ => {
             let conns = netstat::collect_tcp_connections();
             let listeners = netstat::collect_tcp_listeners();
             let udp = netstat::collect_udp_sockets();
@@ -37067,7 +37069,8 @@ fn cmd_nat(args: &str) {
                 }
             }
         }
-        "help" | _ => {
+        // "help" or any unrecognised subcommand falls through to the help text.
+        _ => {
             shell_println!("nat — NAT/masquerade management");
             shell_println!("Usage:");
             shell_println!("  nat                  — show status (default)");
@@ -38757,7 +38760,7 @@ fn cmd_inputa11y(args: &str) {
         }
         "test" => { inputa11y::self_test(); shell_println!("Input a11y self-test complete."); }
         "init" => { inputa11y::init_defaults(); shell_println!("Input a11y initialized."); }
-        "help" | _ if sub == "help" => {
+        "help" => {
             shell_println!("inputa11y (ia11y) — input accessibility");
             shell_println!("  show               Overview");
             shell_println!("  sticky <on|off>     Sticky keys");

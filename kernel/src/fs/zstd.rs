@@ -1076,7 +1076,9 @@ fn decompress_frame(data: &[u8]) -> KernelResult<(Vec<u8>, usize)> {
                 )?;
                 pos += block_size;
             }
-            BLOCK_RESERVED | _ => {
+            // BLOCK_RESERVED (3) and any other unrecognised block type
+            // are corrupt streams per RFC 8878 §3.1.1.1.2.
+            _ => {
                 return Err(KernelError::CorruptedData);
             }
         }

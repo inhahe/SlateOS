@@ -557,7 +557,7 @@ mod tests {
             qcmd(Q_GETQUOTA, 0xFF), // qtype = 255 (out of range)
             c"/dev/sda1".as_ptr().cast::<u8>(),
             0,
-            (1usize as *mut u8),
+            1usize as *mut u8,
         );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);

@@ -100,9 +100,10 @@ pub mod fd_handle_type {
     /// Regular file handle (from `fs::handle`).  The kernel dups it
     /// via `fs::handle::dup()`.
     pub const FILE: u8 = 0;
-    /// Pipe handle (from `ipc::pipe`).  The raw handle value is
-    /// passed through — the kernel-ipc zone must provide ref-counting
-    /// for pipe handles before this type is fully functional.
+    /// Pipe handle (from `ipc::pipe`).  Spawn dups via `pipe::dup()`,
+    /// which uses per-end refcounting so multiple PCBs can share the
+    /// same read or write end safely (matching Linux fork() pipe
+    /// inheritance).
     pub const PIPE: u8 = 1;
     /// TCP socket handle.
     #[allow(dead_code)] // Protocol constant — used when net stack is integrated.
@@ -112,10 +113,9 @@ pub mod fd_handle_type {
     pub const UDP_SOCKET: u8 = 3;
     /// Console I/O (stdin/stdout/stderr virtual handle).
     pub const CONSOLE: u8 = 4;
-    /// Eventfd counter handle (from `ipc::eventfd`).  The raw handle
-    /// value is passed through — the kernel eventfd subsystem provides
-    /// its own ref-counting via `is_handle_referenced` so multiple PCBs
-    /// can hold the same handle safely.
+    /// Eventfd counter handle (from `ipc::eventfd`).  Spawn dups via
+    /// `eventfd::dup()`, which refcounts entries in EVENTFD_TABLE so
+    /// multiple PCBs can hold the same handle safely.
     #[allow(dead_code)] // Used only via fd inheritance; readable in matches.
     pub const EVENTFD: u8 = 5;
 }
@@ -490,13 +490,15 @@ pub fn spawn_process(
                     crate::fs::handle::dup(parent_handle)
                 }
                 fd_handle_type::PIPE => {
-                    // For pipe handles, pass through the raw value.
-                    //
-                    // TODO(kernel-ipc): Once pipe::dup() exists with proper
-                    // ref-counting, use it here instead of raw pass-through.
-                    // Without ref-counting, closing the handle from either
-                    // parent or child closes it for both.
-                    Ok(parent_handle)
+                    // Pipes have per-end refcounting: `dup()` increments
+                    // the refcount on the appropriate end (read or
+                    // write) and returns the same handle.  The child
+                    // closes its reference independently when it dies
+                    // or when its fd-table layer claims the handle.
+                    crate::ipc::pipe::dup(
+                        crate::ipc::pipe::PipeHandle::from_raw(parent_handle),
+                    )
+                    .map(|h| h.raw())
                 }
                 fd_handle_type::CONSOLE => {
                     // Console is a virtual handle — just pass the value.
@@ -546,7 +548,12 @@ pub fn spawn_process(
                                     crate::ipc::eventfd::EventFdHandle::from_raw(h),
                                 );
                             }
-                            _ => {} // PIPE/CONSOLE: nothing to close yet.
+                            fd_handle_type::PIPE => {
+                                crate::ipc::pipe::close(
+                                    crate::ipc::pipe::PipeHandle::from_raw(h),
+                                );
+                            }
+                            _ => {} // CONSOLE/etc.: nothing to close yet.
                         }
                     }
                     serial_println!(

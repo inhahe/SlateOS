@@ -85,6 +85,15 @@ popen/pclose → DONE: Full implementation using posix_spawnp + pipe + fd_map.
   Pipe close from one process will close for both.  Need readers/writers u32 counters
   in Pipe struct instead of read_closed/write_closed booleans, plus pipe::dup(handle)
   that increments the appropriate counter.
+  [DONE 2026-05-27] Pipe struct gained reader_refcount: u32 and
+  writer_refcount: u32 (init 1 each).  pipe::dup(handle) increments
+  the appropriate end's counter and returns the same handle.
+  close() decrements; only the final close of each end sets the
+  corresponding _closed flag and wakes waiters.  spawn.rs PIPE branch
+  now calls pipe::dup() instead of pass-through; pcb::destroy_
+  process_resources() closes unclaimed pipe initial_fds.  Self-test
+  test_dup_refcount in kernel/src/ipc/pipe.rs exercises: dup write
+  end, partial close keeps writer open, EOF only on final close.
 Per-namespace ARP → DONE (veth pairs + per-namespace ARP cache with 3 self-tests)
 TCP/UDP namespace-aware → DONE (ns_id field on TcpConnection/TcpListener/UdpSocket,
   all public APIs take ns_id, lookups filter by namespace, self-tests for isolation)

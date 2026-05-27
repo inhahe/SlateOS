@@ -157,6 +157,16 @@ struct Pipe {
     reader_waiter: Option<TaskId>,
     /// Task blocked on write (waiting for space).
     writer_waiter: Option<TaskId>,
+    /// Reference count for the read end.  Each `create()` and each
+    /// `dup()` of a read handle adds 1; each `close()` of a read
+    /// handle subtracts 1.  When this hits 0 the read end is
+    /// logically closed (waking any blocked writer with
+    /// `ChannelClosed`).  Matches Linux pipe semantics: a pipe end
+    /// stays open as long as at least one fd refers to it.
+    reader_refcount: u32,
+    /// Reference count for the write end.  Symmetric with
+    /// `reader_refcount`.  Hitting 0 wakes blocked readers with EOF.
+    writer_refcount: u32,
 }
 
 impl Pipe {
@@ -170,6 +180,8 @@ impl Pipe {
             write_closed: false,
             reader_waiter: None,
             writer_waiter: None,
+            reader_refcount: 1,
+            writer_refcount: 1,
         }
     }
 
@@ -718,13 +730,52 @@ pub fn write_timeout(handle: PipeHandle, data: &[u8], timeout_ns: u64) -> Kernel
     }
 }
 
-/// Close a pipe handle.
+/// Duplicate a pipe handle reference.
 ///
-/// If the read end is closed, any blocked writer is woken (it will
-/// see `ChannelClosed`).  If the write end is closed, any blocked
-/// reader is woken (it will see EOF).
+/// Increments the refcount on the appropriate end (read or write) and
+/// returns the same handle.  The caller must `close()` the handle when
+/// done — only the final `close()` for an end (refcount → 0) marks
+/// that end as logically closed and wakes the other side.
 ///
-/// When both ends are closed, the pipe is removed from the table.
+/// Used at spawn time so a parent and child can each hold the same
+/// pipe end (matching Linux fork() pipe inheritance).
+///
+/// # Returns
+///
+/// - `Ok(handle)` — refcount incremented; same handle returned.
+/// - `Err(InvalidHandle)` — pipe not found (already fully torn down)
+///   or the refcount would overflow `u32::MAX`.
+pub fn dup(handle: PipeHandle) -> KernelResult<PipeHandle> {
+    let mut table = PIPES.lock();
+    let pipe = table
+        .get_mut(&handle.pipe_id())
+        .ok_or(KernelError::InvalidHandle)?;
+
+    let slot = match handle.end() {
+        PipeEnd::Read => &mut pipe.reader_refcount,
+        PipeEnd::Write => &mut pipe.writer_refcount,
+    };
+
+    // If the end is already at refcount 0 it should have been removed,
+    // but defensively reject dup against a zero refcount.
+    if *slot == 0 {
+        return Err(KernelError::InvalidHandle);
+    }
+
+    *slot = slot.checked_add(1).ok_or(KernelError::InvalidHandle)?;
+    Ok(handle)
+}
+
+/// Close (drop one reference to) a pipe handle.
+///
+/// Decrements the refcount on the handle's end.  Only the final close
+/// (refcount → 0) marks that end as logically closed:
+///
+/// - Read end fully closed: wakes any blocked writer (`ChannelClosed`).
+/// - Write end fully closed: wakes any blocked reader (sees EOF).
+///
+/// When both ends are fully closed, the pipe is removed from the
+/// table.
 pub fn close(handle: PipeHandle) {
     let mut wake_task = None;
 
@@ -733,18 +784,27 @@ pub fn close(handle: PipeHandle) {
         if let Some(pipe) = table.get_mut(&handle.pipe_id()) {
             match handle.end() {
                 PipeEnd::Read => {
+                    pipe.reader_refcount = pipe.reader_refcount.saturating_sub(1);
+                    if pipe.reader_refcount > 0 {
+                        // Still referenced — keep the end open.
+                        return;
+                    }
                     pipe.read_closed = true;
                     // Wake blocked writer — it will see ChannelClosed.
                     wake_task = pipe.writer_waiter.take();
                 }
                 PipeEnd::Write => {
+                    pipe.writer_refcount = pipe.writer_refcount.saturating_sub(1);
+                    if pipe.writer_refcount > 0 {
+                        return;
+                    }
                     pipe.write_closed = true;
                     // Wake blocked reader — it will see EOF (0 bytes).
                     wake_task = pipe.reader_waiter.take();
                 }
             }
 
-            // Remove pipe if both ends are closed.
+            // Remove pipe if both ends are fully closed.
             if pipe.read_closed && pipe.write_closed {
                 table.remove(&handle.pipe_id());
             }
@@ -871,8 +931,76 @@ pub fn self_test() -> KernelResult<()> {
     test_reader_close_broken_pipe()?;
     test_nonblocking()?;
     test_blocking_roundtrip()?;
+    test_dup_refcount()?;
 
     serial_println!("[pipe] Pipe self-test PASSED");
+    Ok(())
+}
+
+/// Test: `dup()` increments the per-end refcount; the end stays open
+/// until the final `close()`.
+fn test_dup_refcount() -> KernelResult<()> {
+    let (rh, wh) = create();
+
+    // Dup the write end — refcount 1 → 2.
+    let wh2 = dup(wh)?;
+    if wh2 != wh {
+        serial_println!("[pipe]   FAIL: dup returned a different write handle");
+        close(rh);
+        close(wh);
+        close(wh2);
+        return Err(KernelError::InternalError);
+    }
+
+    // Write something through the original handle.
+    let n = write(wh, b"abc")?;
+    if n != 3 {
+        serial_println!("[pipe]   FAIL: write returned {}", n);
+        close(rh);
+        close(wh);
+        close(wh2);
+        return Err(KernelError::InternalError);
+    }
+
+    // Close one writer reference — refcount 2 → 1.  Reader must NOT
+    // see EOF yet because the write end is still referenced.
+    close(wh);
+
+    let mut buf = [0u8; 16];
+    let n = read(rh, &mut buf)?;
+    if n != 3 || buf.get(..3) != Some(b"abc".as_slice()) {
+        serial_println!("[pipe]   FAIL: read after partial close: n={}", n);
+        close(rh);
+        close(wh2);
+        return Err(KernelError::InternalError);
+    }
+
+    // The pipe is empty and the writer is still open — try_read should
+    // return WouldBlock (not EOF).
+    match try_read(rh, &mut buf) {
+        Err(KernelError::WouldBlock) => {}
+        other => {
+            serial_println!(
+                "[pipe]   FAIL: try_read after partial writer close: {:?}",
+                other
+            );
+            close(rh);
+            close(wh2);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Final writer close — refcount 1 → 0.  Now the reader sees EOF.
+    close(wh2);
+    let n = read(rh, &mut buf)?;
+    if n != 0 {
+        serial_println!("[pipe]   FAIL: expected EOF after final writer close: n={}", n);
+        close(rh);
+        return Err(KernelError::InternalError);
+    }
+
+    close(rh);
+    serial_println!("[pipe]   Dup refcount: OK");
     Ok(())
 }
 

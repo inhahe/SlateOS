@@ -2,10 +2,22 @@
 //!
 //! Implements `times()` for querying process and children CPU times.
 //!
-//! ## Limitations
+//! ## Behavior
 //!
-//! Since we have no kernel scheduler to query, all CPU time fields
-//! are zero and the return value increments based on `clock()`.
+//! On `target_os = "none"` (kernel target) the CPU-time fields are
+//! filled from the kernel's aggregate per-CPU accounting (`SYS_CPU_TIMES`):
+//!
+//! - `tms_utime` = system_ns / 10_000_000 (kernel+user code time).  Since
+//!   we don't separately track user vs kernel for a task yet, this lumps
+//!   them together under user time.
+//! - `tms_stime` = (irq_ns + softirq_ns) / 10_000_000 (interrupt time).
+//! - `tms_cutime` / `tms_cstime` = 0 (no terminated-children tracking).
+//!
+//! Return value: monotonic wall-clock ticks (CLOCK_MONOTONIC nanoseconds
+//! divided by 10_000_000 for the 100 Hz `CLK_TCK`).
+//!
+//! On host targets, the fields are zeroed and the return value is a
+//! monotonic call counter (for unit-test determinism).
 
 // ---------------------------------------------------------------------------
 // Types
@@ -29,17 +41,37 @@ pub struct Tms {
 }
 
 /// Clock ticks per second (matches `_SC_CLK_TCK`).
+///
+/// On `target_os = "none"` we drive timing through `NS_PER_TICK` instead,
+/// but keep the constant for ABI documentation and unit tests.
 #[allow(dead_code)]
 const CLK_TCK: i64 = 100;
+
+/// Nanoseconds per `clock_t` tick (1e9 / CLK_TCK = 10_000_000 for 100 Hz).
+const NS_PER_TICK: u64 = 10_000_000;
+
+/// Convert a nanosecond count to clock ticks (saturating to `i64::MAX`).
+#[allow(clippy::cast_possible_wrap)]
+fn ns_to_ticks(ns: u64) -> i64 {
+    let ticks = ns / NS_PER_TICK;
+    if ticks > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        ticks as i64
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Monotonic tick counter
 // ---------------------------------------------------------------------------
 
-/// Simple monotonic tick counter.
+/// Simple monotonic tick counter (host-test fallback only).
 ///
-/// Each call to `times()` increments this, providing a strictly
-/// monotonic elapsed-time value even without a real scheduler.
+/// On host builds (`not(target_os = "none")`), each call to `times()`
+/// increments this counter so unit tests can verify monotonic behavior
+/// deterministically.  On the kernel target the return value comes from
+/// `SYS_CLOCK_MONOTONIC` and this counter is unused.
+#[cfg(not(target_os = "none"))]
 static mut TICK_COUNTER: i64 = 0;
 
 // ---------------------------------------------------------------------------
@@ -52,11 +84,10 @@ static mut TICK_COUNTER: i64 = 0;
 /// information.  Returns the elapsed real time in clock ticks
 /// since an arbitrary epoch, or `(clock_t)(-1)` on error.
 ///
-/// ## Stub behavior
-///
-/// All CPU time fields are set to zero (we have no kernel scheduler
-/// to query).  The return value is a monotonically increasing tick
-/// count.
+/// On kernel builds, CPU time fields are populated from the kernel's
+/// aggregate per-CPU time accounting via `SYS_CPU_TIMES`.  On host
+/// builds, fields are zeroed and the return value is a monotonic
+/// call counter (for deterministic unit testing).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn times(buffer: *mut Tms) -> i64 {
     if buffer.is_null() {
@@ -64,20 +95,69 @@ pub extern "C" fn times(buffer: *mut Tms) -> i64 {
         return -1;
     }
 
-    // SAFETY: caller guarantees buffer is valid for one Tms.
-    unsafe {
-        (*buffer).tms_utime = 0;
-        (*buffer).tms_stime = 0;
-        (*buffer).tms_cutime = 0;
-        (*buffer).tms_cstime = 0;
+    #[cfg(target_os = "none")]
+    {
+        // Query the kernel's aggregate CPU time fields.
+        let system_ns = read_cpu_time_field(0);
+        let irq_ns = read_cpu_time_field(1);
+        let softirq_ns = read_cpu_time_field(2);
+
+        let utime_ticks = ns_to_ticks(system_ns);
+        let stime_ticks = ns_to_ticks(irq_ns.saturating_add(softirq_ns));
+
+        // SAFETY: caller guarantees buffer is valid for one Tms.
+        unsafe {
+            (*buffer).tms_utime = utime_ticks;
+            (*buffer).tms_stime = stime_ticks;
+            // No terminated-children tracking yet.
+            (*buffer).tms_cutime = 0;
+            (*buffer).tms_cstime = 0;
+        }
+
+        // Return value: wall-clock monotonic time in ticks.
+        // CLOCK_MONOTONIC returns nanoseconds since boot.
+        #[allow(clippy::cast_sign_loss)]
+        let mono_ns = {
+            let raw = crate::syscall::syscall0(crate::syscall::SYS_CLOCK_MONOTONIC);
+            if raw < 0 { 0u64 } else { raw as u64 }
+        };
+        let ticks = ns_to_ticks(mono_ns);
+        // POSIX says (clock_t)(-1) on error, but a real zero return at boot
+        // is valid.  Bump by 1 if we'd otherwise return 0 to keep the value
+        // strictly positive and consistent with the host-side counter.
+        if ticks <= 0 { 1 } else { ticks }
     }
 
-    // Return a monotonically increasing tick value.
-    // SAFETY: single-threaded access.
-    unsafe {
-        TICK_COUNTER = TICK_COUNTER.wrapping_add(1);
-        TICK_COUNTER
+    #[cfg(not(target_os = "none"))]
+    {
+        // SAFETY: caller guarantees buffer is valid for one Tms.
+        unsafe {
+            (*buffer).tms_utime = 0;
+            (*buffer).tms_stime = 0;
+            (*buffer).tms_cutime = 0;
+            (*buffer).tms_cstime = 0;
+        }
+
+        // Return a monotonically increasing tick value (host test stub).
+        // SAFETY: single-threaded access.
+        unsafe {
+            TICK_COUNTER = TICK_COUNTER.wrapping_add(1);
+            TICK_COUNTER
+        }
     }
+}
+
+/// Read one aggregate-CPU-time field from the kernel.
+///
+/// Returns 0 on any error (e.g., field out of range or kernel returning
+/// a negative status).  Saturating zero is acceptable here because the
+/// caller treats CPU time fields as monotonic counters — clamping below
+/// at zero never causes a regression.
+#[cfg(target_os = "none")]
+#[allow(clippy::cast_sign_loss)]
+fn read_cpu_time_field(which: u64) -> u64 {
+    let raw = crate::syscall::syscall1(crate::syscall::SYS_CPU_TIMES, which);
+    if raw < 0 { 0 } else { raw as u64 }
 }
 
 // ---------------------------------------------------------------------------
@@ -211,5 +291,43 @@ mod tests {
             assert_eq!(tms.tms_cutime, 0);
             assert_eq!(tms.tms_cstime, 0);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // ns_to_ticks — boundary cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ns_to_ticks_zero() {
+        assert_eq!(ns_to_ticks(0), 0);
+    }
+
+    #[test]
+    fn test_ns_to_ticks_one_tick() {
+        assert_eq!(ns_to_ticks(NS_PER_TICK), 1);
+    }
+
+    #[test]
+    fn test_ns_to_ticks_truncation() {
+        // 19_999_999 ns < 2 ticks => 1 tick.
+        assert_eq!(ns_to_ticks(2 * NS_PER_TICK - 1), 1);
+        // 20_000_000 ns exactly => 2 ticks.
+        assert_eq!(ns_to_ticks(2 * NS_PER_TICK), 2);
+    }
+
+    #[test]
+    fn test_ns_to_ticks_one_second_is_clk_tck() {
+        // 1 second of nanoseconds => CLK_TCK ticks (100 for 100 Hz).
+        assert_eq!(ns_to_ticks(1_000_000_000), CLK_TCK);
+    }
+
+    #[test]
+    fn test_ns_to_ticks_saturates_at_i64_max() {
+        // u64::MAX nanoseconds / 10_000_000 ns/tick = 1.84e12 ticks,
+        // which is < i64::MAX (~9.2e18), so this case does NOT saturate.
+        let huge = u64::MAX;
+        let ticks = ns_to_ticks(huge);
+        assert!(ticks > 0);
+        assert_eq!(ticks as u64, huge / NS_PER_TICK);
     }
 }

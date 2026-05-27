@@ -7267,6 +7267,37 @@ pub fn sys_loadavg(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(val as i64)
 }
 
+/// `SYS_CPU_TIMES` — read aggregate per-CPU time accounting fields.
+///
+/// `arg0`: field selector:
+///   - 0 = system_ns (kernel + user code time)
+///   - 1 = irq_ns
+///   - 2 = softirq_ns
+///   - 3 = idle_ns
+///   - 4 = total_ns (wall time × online CPU count)
+///
+/// Returns: the selected field in nanoseconds, or `InvalidArgument`
+/// if `arg0` is not in 0..=4.
+///
+/// Used by `posix::times()` and `posix::getrusage()` to populate
+/// process CPU time fields with real kernel data.  Since we don't
+/// currently track per-task CPU time (the scheduler runs a single
+/// user process per CPU), the aggregate stats are a reasonable
+/// approximation for the calling process.
+pub fn sys_cpu_times(args: &SyscallArgs) -> SyscallResult {
+    let agg = crate::cputime::aggregate_stats();
+    let val = match args.arg0 {
+        0 => agg.system_ns,
+        1 => agg.irq_ns,
+        2 => agg.softirq_ns,
+        3 => agg.idle_ns,
+        4 => agg.total_ns,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(val as i64)
+}
+
 // ---------------------------------------------------------------------------
 // Sysctl — kernel parameter registry (60–69)
 // ---------------------------------------------------------------------------

@@ -231,7 +231,19 @@ pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
 
 /// Get resource usage.
 ///
-/// Returns zeroed usage data (no kernel accounting support yet).
+/// On the kernel target, `ru_utime` is filled from the aggregate kernel
+/// "system" cycles (kernel + user code that's not IRQ/softirq/idle) and
+/// `ru_stime` is filled from aggregate IRQ + softirq cycles, both via
+/// `SYS_CPU_TIMES`.  All other fields are zeroed — we don't yet track
+/// per-process page-fault counts, RSS, I/O bytes, etc.
+///
+/// For `RUSAGE_CHILDREN` we return all-zero (no terminated-children
+/// accounting yet) so callers can still distinguish "no children" from
+/// EINVAL.  This matches glibc's behavior on systems without child
+/// tracking.
+///
+/// On host builds, the buffer is zero-filled (preserves existing test
+/// behavior).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getrusage(who: i32, usage: *mut Rusage) -> i32 {
     if usage.is_null() {
@@ -244,13 +256,55 @@ pub extern "C" fn getrusage(who: i32, usage: *mut Rusage) -> i32 {
         return -1;
     }
 
-    // SAFETY: Caller guarantees usage is valid.  We zero-fill since
-    // we don't have kernel-level resource accounting yet.
+    // SAFETY: Caller guarantees usage is valid for one Rusage.
     unsafe {
         core::ptr::write_bytes(usage, 0, 1);
     }
 
+    // On the kernel target, populate user/system CPU times from kernel
+    // aggregate stats.  RUSAGE_CHILDREN stays all-zero (no child tracking).
+    #[cfg(target_os = "none")]
+    {
+        if who == RUSAGE_SELF || who == RUSAGE_THREAD {
+            let system_ns = read_cpu_time_field_ns(0);
+            let irq_ns = read_cpu_time_field_ns(1);
+            let softirq_ns = read_cpu_time_field_ns(2);
+
+            // SAFETY: We just zero-filled the buffer above; pointer is valid.
+            unsafe {
+                (*usage).ru_utime = ns_to_timeval(system_ns);
+                (*usage).ru_stime = ns_to_timeval(irq_ns.saturating_add(softirq_ns));
+            }
+        }
+    }
+
     0
+}
+
+/// Read one aggregate-CPU-time field from the kernel.
+///
+/// Returns 0 on any negative return (out-of-range selector, etc.) so
+/// callers can use the value directly as a saturating-zero monotonic
+/// counter.
+#[cfg(target_os = "none")]
+#[allow(clippy::cast_sign_loss)]
+fn read_cpu_time_field_ns(which: u64) -> u64 {
+    let raw = crate::syscall::syscall1(crate::syscall::SYS_CPU_TIMES, which);
+    if raw < 0 { 0 } else { raw as u64 }
+}
+
+/// Convert a nanosecond duration into a POSIX `Timeval` (seconds + microseconds).
+#[cfg(target_os = "none")]
+#[allow(clippy::cast_possible_wrap)]
+fn ns_to_timeval(ns: u64) -> crate::time::Timeval {
+    const NS_PER_SEC: u64 = 1_000_000_000;
+    const NS_PER_USEC: u64 = 1_000;
+    let secs = ns / NS_PER_SEC;
+    let usec = (ns % NS_PER_SEC) / NS_PER_USEC;
+    crate::time::Timeval {
+        tv_sec: if secs > i64::MAX as u64 { i64::MAX } else { secs as i64 },
+        tv_usec: usec as i64,
+    }
 }
 
 // ---------------------------------------------------------------------------

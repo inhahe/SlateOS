@@ -374,6 +374,19 @@ pub const SYS_PHYS_PAGES_AVAIL: u64 = 57;
 /// is not 0/1/2.
 pub const SYS_LOADAVG: u64 = 58;
 
+/// Get aggregate per-CPU time accounting fields (summed across all CPUs).
+///
+/// `arg0`: field selector:
+///   - 0 = system_ns (kernel/user code time, all non-IRQ/softirq/idle)
+///   - 1 = irq_ns (hardware interrupt handlers)
+///   - 2 = softirq_ns (deferred interrupt work)
+///   - 3 = idle_ns (HLT/MWAIT time)
+///   - 4 = total_ns (wall time × number of online CPUs)
+///
+/// Returns: the selected aggregate field in nanoseconds.
+/// `InvalidArgument` if `arg0` is not 0..=4.
+pub const SYS_CPU_TIMES: u64 = 59;
+
 /// Read a kernel tunable parameter (sysctl-like interface).
 ///
 /// `arg0`: parameter ID (e.g., 0 = mm.max_stack_frames).

@@ -482,6 +482,14 @@ Remaining net improvements (diminishing returns):
   refcount inside the EVENTFD_TABLE entry plus an eventfd::dup()
   helper, then update kernel/src/proc/spawn.rs's fd_handle_type::
   EVENTFD branch to call it (mirrors what kernel-ipc owes pipes).
+  [DONE 2026-05-27] EventFd grew a `refcount: u32` field (init 1).
+  `eventfd::dup(handle)` increments it and returns the same id.
+  `close()` decrements and only tears down when refcount hits 0.
+  spawn.rs EVENTFD branch now calls dup() instead of pass-through.
+  pcb::destroy_process_resources() closes unclaimed eventfd
+  initial_fds (previously fell into the FILE branch which silently
+  no-op'd).  Self-test `test_dup_refcount` covers dup+partial close+
+  final close+post-close dup-failure.
 ## Clippy lint cleanup
 
 UPDATE (2026-05-27): Workspace lint policy relaxed in commit 948fd5ff.

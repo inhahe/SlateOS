@@ -1032,6 +1032,8 @@ fn destroy_process_resources(
     // Console handles are virtual (no kernel resource to free).
     // Pipe handles are currently pass-through (no dup) so closing
     // them here would close the parent's copy too — skip for now.
+    // Eventfd handles are ref-counted; spawn dup'd the parent ref,
+    // so the child's `close()` only drops that one reference.
     // File handles were duped and must be closed.
     for &(_fd, handle_type, handle) in initial_fds {
         match handle_type {
@@ -1042,6 +1044,17 @@ fn destroy_process_resources(
                 // TODO(kernel-ipc): Once pipe handles are ref-counted,
                 // close them here.  Currently they are pass-through
                 // so closing would affect the parent.
+            }
+            crate::proc::spawn::fd_handle_type::EVENTFD => {
+                // Spawn dup'd the parent's eventfd ref into the child;
+                // closing here drops that ref.  If userspace already
+                // claimed the handle via SYS_PROCESS_GET_INITIAL_FDS
+                // and put it into the fd-table, the fd-table layer
+                // owns the close instead and this branch is unreached
+                // because `initial_fds` is emptied at claim time.
+                crate::ipc::eventfd::close(
+                    crate::ipc::eventfd::EventFdHandle::from_raw(handle),
+                );
             }
             _ => {
                 // FILE, TCP_SOCKET, UDP_SOCKET, and any unknown types —

@@ -114,6 +114,12 @@ struct EventFd {
     /// 1 (instead of draining the counter to 0 and returning its full
     /// value).  Matches Linux `EFD_SEMAPHORE` semantics.
     semaphore: bool,
+    /// Reference count.  Each successful `create()` or `dup()` adds 1;
+    /// each `close()` subtracts 1.  The entry is removed from the
+    /// global table only when this drops to 0.  Allows multiple PCBs
+    /// to hold the same eventfd handle (e.g. spawn-time fd inheritance)
+    /// without one process's `close()` invalidating another's handle.
+    refcount: u32,
 }
 
 impl EventFd {
@@ -124,6 +130,7 @@ impl EventFd {
             writer_waiter: None,
             closed: false,
             semaphore,
+            refcount: 1,
         }
     }
 }
@@ -583,20 +590,61 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
     }
 }
 
-/// Close an eventfd handle.
+/// Duplicate an eventfd handle reference.
 ///
-/// Wakes any blocked reader or writer (they will see `ChannelClosed`).
+/// Increments the reference count on the eventfd and returns the same
+/// handle.  The caller must `close()` the handle when done — only the
+/// final `close()` (refcount → 0) tears down the eventfd and wakes any
+/// waiters.
+///
+/// Used at spawn time so a parent and child can each hold the same
+/// eventfd without one's `close()` invalidating the other's handle.
+///
+/// # Returns
+///
+/// - `Ok(handle)` — refcount incremented; same handle returned.
+/// - `Err(InvalidHandle)` — handle not found (already fully closed)
+///   or the refcount would overflow `u32::MAX`.
+pub fn dup(handle: EventFdHandle) -> KernelResult<EventFdHandle> {
+    let mut table = EVENTFD_TABLE.lock();
+    let efd = table
+        .get_mut(&handle.id())
+        .ok_or(KernelError::InvalidHandle)?;
+
+    // Refcount overflow is a kernel bug or a hostile caller — refuse.
+    efd.refcount = efd
+        .refcount
+        .checked_add(1)
+        .ok_or(KernelError::InvalidHandle)?;
+
+    Ok(handle)
+}
+
+/// Close (drop one reference to) an eventfd handle.
+///
+/// Decrements the refcount.  Only the final close (refcount → 0)
+/// removes the entry from the table and wakes any blocked reader or
+/// writer (they will see `ChannelClosed`).
 pub fn close(handle: EventFdHandle) {
     let mut wake_tasks: [Option<TaskId>; 2] = [None, None];
 
     {
         let mut table = EVENTFD_TABLE.lock();
         if let Some(efd) = table.get_mut(&handle.id()) {
+            // Decrement refcount.  `saturating_sub` guards against an
+            // accidental double-close pushing it below zero, but in
+            // practice each close must pair with a successful create
+            // or dup — so this should never saturate.
+            efd.refcount = efd.refcount.saturating_sub(1);
+            if efd.refcount > 0 {
+                // Still referenced — keep the entry alive.
+                return;
+            }
+
+            // Final close: mark closed, drain waiters, remove entry.
             efd.closed = true;
             wake_tasks[0] = efd.reader_waiter.take();
             wake_tasks[1] = efd.writer_waiter.take();
-
-            // Remove from table.
             table.remove(&handle.id());
         }
     }
@@ -645,6 +693,7 @@ pub fn self_test() -> KernelResult<()> {
     test_nonblocking()?;
     test_blocking_read()?;
     test_semaphore_mode()?;
+    test_dup_refcount()?;
 
     serial_println!("[eventfd] Eventfd self-test PASSED");
     Ok(())
@@ -936,5 +985,72 @@ fn test_semaphore_mode() -> KernelResult<()> {
 
     close(handle);
     serial_println!("[eventfd]   Semaphore mode: OK");
+    Ok(())
+}
+
+/// Test 7: `dup()` increments the refcount; the entry survives until
+/// the final `close()`.
+fn test_dup_refcount() -> KernelResult<()> {
+    let h = create(0);
+
+    // Dup once — refcount goes 1 → 2.
+    let h2 = dup(h)?;
+    if h2 != h {
+        serial_println!("[eventfd]   FAIL: dup returned a different handle");
+        close(h);
+        close(h2);
+        return Err(KernelError::InternalError);
+    }
+
+    // Write/read still works on either handle.
+    write(h, 5)?;
+    let val = read(h2)?;
+    if val != 5 {
+        serial_println!("[eventfd]   FAIL: dup'd read got {}, expected 5", val);
+        close(h);
+        close(h2);
+        return Err(KernelError::InternalError);
+    }
+
+    // Close once — refcount 2 → 1.  The handle must still be valid.
+    close(h);
+    match try_read(h2) {
+        // Counter is 0 (we drained it above) so try_read returns
+        // WouldBlock — _not_ InvalidHandle.  WouldBlock proves the
+        // entry survived the first close.
+        Err(KernelError::WouldBlock) => {}
+        other => {
+            serial_println!(
+                "[eventfd]   FAIL: after partial close, try_read: {:?}",
+                other
+            );
+            close(h2);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Final close — refcount 1 → 0.  The entry is removed.
+    close(h2);
+    match try_read(h2) {
+        Err(KernelError::InvalidHandle) => {}
+        other => {
+            serial_println!(
+                "[eventfd]   FAIL: after final close, try_read: {:?}",
+                other
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // dup on a fully-closed handle must fail.
+    match dup(h2) {
+        Err(KernelError::InvalidHandle) => {}
+        other => {
+            serial_println!("[eventfd]   FAIL: dup after final close: {:?}", other);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    serial_println!("[eventfd]   Dup refcount: OK");
     Ok(())
 }

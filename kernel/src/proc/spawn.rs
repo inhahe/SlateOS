@@ -503,14 +503,16 @@ pub fn spawn_process(
                     Ok(parent_handle)
                 }
                 fd_handle_type::EVENTFD => {
-                    // For eventfd handles, pass through the raw value.
-                    //
-                    // TODO(kernel-ipc): Once eventfd::dup() exists with
-                    // proper ref-counting, use it here instead of raw
-                    // pass-through.  Without ref-counting, closing the
-                    // handle from either parent or child closes it for
-                    // both — same caveat as pipes.
-                    Ok(parent_handle)
+                    // Eventfds are ref-counted: `dup()` increments the
+                    // refcount and returns the same id.  The child
+                    // closes its reference independently when it dies
+                    // (or when SYS_PROCESS_GET_INITIAL_FDS hands the
+                    // handle off to the child's fd-table, which then
+                    // owns the close).
+                    crate::ipc::eventfd::dup(
+                        crate::ipc::eventfd::EventFdHandle::from_raw(parent_handle),
+                    )
+                    .map(|h| h.raw())
                 }
                 _ => {
                     // Unknown handle type.
@@ -531,12 +533,20 @@ pub fn spawn_process(
                     initial_fds.push((fd_num, handle_type, child_handle));
                 }
                 Err(e) => {
-                    // Close any FILE handles we already duped — don't leak.
-                    // Pipe handles are pass-through (not duped), and
-                    // console handles are virtual — only close FILE types.
+                    // Close any handles we already duped — don't leak.
+                    // Pipe handles are pass-through (not duped) and
+                    // console handles are virtual — skip those.
                     for &(_fd, ht, h) in &initial_fds {
-                        if ht == fd_handle_type::FILE {
-                            let _ = crate::fs::handle::close(h);
+                        match ht {
+                            fd_handle_type::FILE => {
+                                let _ = crate::fs::handle::close(h);
+                            }
+                            fd_handle_type::EVENTFD => {
+                                crate::ipc::eventfd::close(
+                                    crate::ipc::eventfd::EventFdHandle::from_raw(h),
+                                );
+                            }
+                            _ => {} // PIPE/CONSOLE: nothing to close yet.
                         }
                     }
                     serial_println!(

@@ -378,6 +378,31 @@ Remaining net improvements (diminishing returns):
   allows it to use a static return buffer; only the tests needed
   serialisation.
 
+- (FIXED 2026-05-27) errno tests parallel-test race: posix's errno was a
+  single global AtomicI32, so cargo's parallel test runner regularly
+  saw test A's `set_errno(ENOMEM)` clobber test B's `get_errno()` read
+  between B's `translate(NOT_FOUND)` call and B's assertion that errno
+  was ENOENT.  Manifested as flaky `errno::tests::test_translate_*`
+  failures (often `test_translate_not_found` getting 12 instead of 2)
+  that only surfaced with the full test suite under load — running
+  errno tests in isolation always passed.  Fixed properly: in
+  `#[cfg(test)]` builds the backing storage is now a `thread_local!(
+  Cell<i32>)`; production keeps the AtomicI32 since `__errno_location()`
+  needs a stable address for the glibc/musl `*__errno_location()` ABI.
+  `__errno_location` is now `#[cfg(not(test))]`-only, along with the
+  one test that referenced it.  The errno tests' add-then-immediately-
+  removed serialising mutex from earlier today is gone with this fix.
+
+  Side bug exposed by the TLS migration: `linux_aio_abi::execute_iocb`'s
+  unknown-opcode arm returned `-EINVAL` directly while the surrounding
+  wrapper re-reads errno (under the assumption that the primitive set
+  it).  In the global-errno world a previous test had left EINVAL in
+  errno often enough that the bug was invisible; with TLS each thread
+  starts at 0 and the wrapper substituted EIO.  Fixed by having
+  execute_iocb clear errno before dispatch and the unknown-opcode arm
+  set errno=EINVAL and return -1, so the wrapper produces -EINVAL via
+  the standard -1+errno→event path.
+
 ## Cross-Zone Bug Reports
 
 - bench_isr_latency() page fault → double fault (kernel-core zone):

@@ -40,6 +40,7 @@ pub const SYS_PROCESS_SPAWN: u64 = 500;
 pub const SYS_PROCESS_WAIT: u64 = 501;
 pub const SYS_PROCESS_EXEC: u64 = 503;
 pub const SYS_PROCESS_TRY_WAIT: u64 = 507;
+pub const SYS_PROCESS_IS_READY: u64 = 509;
 pub const SYS_THREAD_CREATE: u64 = 510;
 pub const SYS_THREAD_EXIT: u64 = 511;
 pub const SYS_THREAD_JOIN: u64 = 512;

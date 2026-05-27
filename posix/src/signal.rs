@@ -259,11 +259,67 @@ pub unsafe extern "C" fn sigaction(
 
 /// Send a signal to a process.
 ///
-/// Stub: always returns -1 and sets errno to ENOSYS.
+/// Our OS does not deliver Unix signals — process control uses IPC
+/// messages instead.  Most `(pid, sig)` combinations therefore fail
+/// with `ENOSYS`.  Two cases are still useful and are honoured:
+///
+/// * `kill(pid, 0)` — the canonical POSIX existence check.  No signal
+///   is sent; we only verify whether the target PID is a live process.
+///   Implemented via the native `SYS_PROCESS_IS_READY` syscall, which
+///   returns a non-negative value if the process exists and a negative
+///   error otherwise.  We translate that into the POSIX contract:
+///   `0` on success, `-1`/`ESRCH` if no such process.
+///
+/// * `kill(self, SIGABRT)` — defers to `abort()`, matching the
+///   `raise(SIGABRT)` semantics required by libc.
+///
+/// `pid <= 0` selects process groups or "all processes" on Linux.  We
+/// have no Unix process-group concept (the design uses IPC), so those
+/// forms return `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
-    let _ = pid;
-    let _ = sig;
+    // sig == 0 is a pure existence/permission check; honour it.
+    if sig == 0 {
+        if pid <= 0 {
+            // pid == 0 → "every process in the caller's process group",
+            // pid == -1 → "every process you may signal", pid < -1 →
+            // "process group |pid|".  None of these are supported here.
+            errno::set_errno(errno::ENOSYS);
+            return -1;
+        }
+        // SYS_PROCESS_IS_READY: returns 1 if ready, 0 if alive but not
+        // yet ready, negative error if the PID is unknown.  For an
+        // existence check we collapse {0, 1} to success.
+        let ret = crate::syscall::syscall1(
+            crate::syscall::SYS_PROCESS_IS_READY,
+            pid as u64,
+        );
+        if ret < 0 {
+            errno::set_errno(errno::ESRCH);
+            return -1;
+        }
+        return 0;
+    }
+
+    // Validate sig number for everything else.  Linux returns EINVAL
+    // for out-of-range signals; we match that so programs see the same
+    // diagnostic regardless of whether the signal is implemented.
+    if !(1..NSIG).contains(&sig) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // `kill(getpid(), SIGABRT)` is a common abort idiom (e.g. inside
+    // assertion failure paths).  Honour it the same way `raise()` does.
+    if sig == SIGABRT {
+        let self_pid = crate::syscall::syscall0(
+            crate::syscall::SYS_PROCESS_ID,
+        ) as i32;
+        if pid == self_pid {
+            crate::unistd::abort();
+        }
+    }
+
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -1552,6 +1608,13 @@ mod tests {
     }
 
     // -- kill / raise stubs --
+    //
+    // Note on coverage: the `kill(pid > 0, 0)` and SIGABRT-to-self paths
+    // dispatch into native syscalls (SYS_PROCESS_IS_READY / SYS_PROCESS_ID)
+    // that aren't available in host-target test builds, so we don't
+    // exercise those here.  We do test the validation paths that resolve
+    // entirely in our code: pid<=0 with sig==0, out-of-range signals,
+    // and the unchanged ENOSYS behaviour for arbitrary (pid, sig).
 
     #[test]
     fn test_kill_returns_enosys() {
@@ -1567,6 +1630,71 @@ mod tests {
         let ret = kill(1, SIGTERM);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_kill_sig0_pid_zero_enosys() {
+        // pid == 0 means "every process in the caller's process group"
+        // on Linux.  We don't implement process groups, so reject with
+        // ENOSYS before touching any syscall.
+        crate::errno::set_errno(0);
+        let ret = kill(0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_kill_sig0_pid_negative_enosys() {
+        // Negative pids select process groups; same story.
+        crate::errno::set_errno(0);
+        let ret = kill(-5, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_kill_sig0_pid_minus_one_enosys() {
+        // pid == -1 means "every process you may signal".  ENOSYS.
+        crate::errno::set_errno(0);
+        let ret = kill(-1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_kill_invalid_signal_einval() {
+        // Out-of-range signal numbers must produce EINVAL, distinct
+        // from ENOSYS.  This is the diagnostic POSIX programs expect.
+        crate::errno::set_errno(0);
+        let ret = kill(1, NSIG);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        crate::errno::set_errno(0);
+        let ret = kill(1, -1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        crate::errno::set_errno(0);
+        let ret = kill(1, 1000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_kill_unsupported_signal_enosys() {
+        // Valid signal numbers we don't implement still return ENOSYS,
+        // matching the pre-existing contract.
+        for sig in [SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGPIPE, SIGCHLD] {
+            crate::errno::set_errno(0);
+            let ret = kill(1, sig);
+            assert_eq!(ret, -1, "kill(1, {sig}) should fail");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "kill(1, {sig}) should set ENOSYS"
+            );
+        }
     }
 
     // -- sigtimedwait / sigqueue stubs --

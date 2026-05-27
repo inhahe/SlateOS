@@ -289,6 +289,13 @@ pub extern "C" fn io_destroy(ctx_id: u64) -> i32 {
 /// Translate a single iocb into a completion event by executing the
 /// requested operation synchronously.
 fn execute_iocb(iocb: &Iocb) -> IoEvent {
+    // Clear errno so the post-dispatch wrapper can distinguish "the
+    // primitive set errno" from "the opcode itself was the error".
+    // Without this, a stale errno from a previous call could leak into
+    // a successful read's accounting (and previously a thread-local
+    // zero would mask the unknown-opcode arm's encoded EINVAL).
+    errno::set_errno(0);
+
     let fd = iocb.aio_fildes as crate::types::Fd;
     let res: i64 = match iocb.aio_lio_opcode {
         IOCB_CMD_PREAD => {
@@ -325,8 +332,13 @@ fn execute_iocb(iocb: &Iocb) -> IoEvent {
         IOCB_CMD_FDSYNC => i64::from(crate::file::fdatasync(fd)),
         IOCB_CMD_NOOP => 0,
         _ => {
-            // Unknown opcode: surface as -EINVAL in the event itself.
-            -i64::from(errno::EINVAL)
+            // Unknown opcode: set errno so the wrapper below routes
+            // through the standard -1+errno→event path and produces
+            // -EINVAL in `res`.  (Just returning -EINVAL here without
+            // touching errno would let the wrapper substitute EIO when
+            // errno happens to be 0.)
+            errno::set_errno(errno::EINVAL);
+            -1
         }
     };
 

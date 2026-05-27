@@ -441,6 +441,13 @@ pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, 
             let readable = crate::epoll::epoll_instance_has_ready(handle);
             (readable, false, false, false)
         }
+
+        // Timerfd: readable when at least one expiration has occurred
+        // since the last `read()`/`settime()`.  Never writable.
+        HandleKind::Timerfd => {
+            let readable = crate::epoll::timerfd_is_readable(handle);
+            (readable, false, false, false)
+        }
     }
 }
 

@@ -101,6 +101,18 @@ pub enum HandleKind {
     /// list lives in the parent's userspace memory).  posix_spawn does
     /// not propagate epoll fds to the child.
     Epoll,
+
+    /// A Linux-compatible timerfd instance (userspace, monotonic clock).
+    ///
+    /// The `handle` is an index into a per-process timerfd instance
+    /// table in [`crate::epoll`].  Each instance owns a (start_ns,
+    /// interval_ns) pair; `read()` returns the count of expirations
+    /// since the last read and resets it.  Readiness is computed by
+    /// comparing the current monotonic time to the next expiry.
+    ///
+    /// timerfd instances are not shared between processes — posix_spawn
+    /// does not propagate them to the child.
+    Timerfd,
 }
 
 /// An entry in the file descriptor table.

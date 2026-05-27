@@ -177,6 +177,11 @@ pub extern "C" fn close(fd: Fd) -> i32 {
             crate::epoll::epoll_instance_close(entry.handle);
             0
         }
+        HandleKind::Timerfd => {
+            // Userspace-managed: free the timer slot.
+            crate::epoll::timerfd_instance_close(entry.handle);
+            0
+        }
     };
 
     errno::translate(ret) as i32
@@ -281,6 +286,40 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             // Linux: read/write on an epoll fd returns EINVAL.
             errno::set_errno(errno::EINVAL);
             return -1;
+        }
+        HandleKind::Timerfd => {
+            // Linux timerfd read: writes 8 bytes containing the number
+            // of expirations since the last read (or settime), as a
+            // host-endian u64.  If no expirations have occurred:
+            //   - O_NONBLOCK (or TFD_NONBLOCK): return EAGAIN.
+            //   - Otherwise: sleep 10ms and retry.
+            if count < 8 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            let fd_nb = fdtable::get_status_flags(fd).unwrap_or(0)
+                & crate::fcntl::O_NONBLOCK != 0;
+            let is_nb = fd_nb || crate::epoll::timerfd_is_nonblock(entry.handle);
+            // SAFETY: `buf` is valid for `count >= 8` bytes (checked above).
+            let dst = unsafe { core::slice::from_raw_parts_mut(buf, 8) };
+            loop {
+                match crate::epoll::timerfd_read(entry.handle, dst) {
+                    Ok(0) => {
+                        if is_nb {
+                            errno::set_errno(errno::EAGAIN);
+                            return -1;
+                        }
+                        // Block: sleep 10ms and retry.  Matches the rest
+                        // of our readiness polling.
+                        let _ = syscall1(SYS_SLEEP, 10_000_000);
+                    }
+                    Ok(n) => return n as SsizeT,
+                    Err(e) => {
+                        errno::set_errno(e);
+                        return -1;
+                    }
+                }
+            }
         }
         HandleKind::Eventfd => {
             // Linux semantics: read on an eventfd requires an 8-byte
@@ -428,6 +467,11 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             errno::set_errno(errno::EINVAL);
             return -1;
         }
+        HandleKind::Timerfd => {
+            // Linux: write on a timerfd returns EINVAL.
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
         HandleKind::Eventfd => {
             // Linux semantics: write on an eventfd requires an 8-byte
             // buffer.  The bytes are interpreted as a host-endian u64
@@ -486,7 +530,7 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
         }
         HandleKind::Pipe | HandleKind::Console
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
-        | HandleKind::Eventfd | HandleKind::Epoll => {
+        | HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd => {
             errno::set_errno(errno::ESPIPE);
             -1
         }
@@ -1002,6 +1046,19 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
                 -1
             }
         }
+        HandleKind::Timerfd => {
+            // Share the timerfd instance.  Same refcount-by-fd-scan
+            // pattern as Eventfd/Epoll.
+            if let Some(fd) = fdtable::alloc_fd_with_flags(
+                HandleKind::Timerfd, entry.handle, src_status,
+            ) {
+                fdtable::copy_fd_path(oldfd, fd);
+                fd
+            } else {
+                errno::set_errno(errno::EMFILE);
+                -1
+            }
+        }
     }
 }
 
@@ -1044,12 +1101,13 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         | HandleKind::Eventfd => {
             entry.handle
         }
-        HandleKind::Epoll => {
-            // Share the epoll instance.  No addref needed: dup2 calls
-            // is_handle_referenced() before tearing down the evicted
-            // handle, and the new fd at `newfd` is installed before
-            // that check — so an in-place dup2 (newfd's old handle ==
-            // oldfd's handle) still sees a reference and skips close.
+        HandleKind::Epoll | HandleKind::Timerfd => {
+            // Share the epoll/timerfd instance.  No addref needed: dup2
+            // calls is_handle_referenced() before tearing down the
+            // evicted handle, and the new fd at `newfd` is installed
+            // before that check — so an in-place dup2 (newfd's old
+            // handle == oldfd's handle) still sees a reference and
+            // skips close.
             entry.handle
         }
     };
@@ -1258,11 +1316,10 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
             }
             0
         }
-        HandleKind::Eventfd | HandleKind::Epoll => {
-            // Linux fstat on an eventfd / epollfd returns a character
-            // device.  We emulate that: zero out the struct and set
-            // S_IFCHR so callers that branch on file type get a sensible
-            // value.
+        HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd => {
+            // Linux fstat on an eventfd / epollfd / timerfd returns a
+            // character device.  Zero the struct and set S_IFCHR so
+            // callers that branch on file type get a sensible value.
             unsafe {
                 core::ptr::write_bytes(buf, 0, 1);
                 (*buf).st_mode = crate::fcntl::S_IFCHR;
@@ -1520,7 +1577,7 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
         }
         HandleKind::Pipe | HandleKind::Console
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
-        | HandleKind::Eventfd | HandleKind::Epoll => {
+        | HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd => {
             errno::set_errno(errno::EINVAL);
             -1
         }
@@ -1546,7 +1603,7 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
         }
         HandleKind::Pipe | HandleKind::Console
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
-        | HandleKind::Eventfd | HandleKind::Epoll => 0,
+        | HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd => 0,
     }
 }
 
@@ -1620,6 +1677,11 @@ fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
         HandleKind::Epoll => {
             // Userspace-managed: no kernel handle to close.
             crate::epoll::epoll_instance_close(handle);
+            0
+        }
+        HandleKind::Timerfd => {
+            // Userspace-managed: no kernel handle to close.
+            crate::epoll::timerfd_instance_close(handle);
             0
         }
     }

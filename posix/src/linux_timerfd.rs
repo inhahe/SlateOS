@@ -41,9 +41,11 @@ mod tests {
     }
 
     #[test]
-    fn test_timerfd_create_stub() {
+    fn test_timerfd_create_returns_valid_fd() {
+        // timerfd_create now returns a real userspace fd.
         let fd = timerfd_create(0, 0);
-        assert_eq!(fd, -1);
+        assert!(fd >= 0, "expected valid fd, got {fd}");
+        crate::file::close(fd);
     }
 
     #[test]

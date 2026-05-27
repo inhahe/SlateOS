@@ -187,6 +187,102 @@ manual_checked_ops = "allow"
 # catches the real bug (taking `&FOO` to such a const).
 declare_interior_mutable_const = "allow"
 
+# cast_lossless: ~800 hits.  `x as u64` vs `u64::from(x)` for a widening
+# cast.  Both are equivalent and bug-free; the `as` form is shorter and
+# reads naturally next to other casts.  Pure style.
+cast_lossless = "allow"
+
+# map_unwrap_or: ~150 hits.  `.map(f).unwrap_or(d)` vs `.map_or(d, f)`.
+# Either form is fine; the chained form sometimes reads more naturally
+# when the closure body is non-trivial.  Pure style.
+map_unwrap_or = "allow"
+
+# explicit_iter_loop: ~100 hits.  `for x in v.iter()` vs `for x in &v`.
+# The explicit form is fine and arguably clearer when scanning code.
+# Pure style.
+explicit_iter_loop = "allow"
+
+# manual_range_contains: ~85 hits.  `a <= x && x <= b` vs `(a..=b).contains(&x)`.
+# The chained-comparison form reads naturally and avoids the
+# `&`-borrow on `x`.  Pure style.
+manual_range_contains = "allow"
+
+# borrow_as_ptr / ref_as_ptr: ~130 combined hits.  Suggests
+# `&raw const x` / `&raw mut x` over `&x as *const _` / `&x as *mut _`.
+# The `as` form is widely understood; `&raw` syntax is newer and not
+# universally familiar.  Pure style.
+borrow_as_ptr = "allow"
+ref_as_ptr = "allow"
+
+# ptr_as_ptr: ~135 hits.  Suggests `.cast::<T>()` over `as *const T`.
+# Functionally identical; the `as` form is fine and matches surrounding
+# pointer-arithmetic style in driver/MMIO code.  Pure style.
+ptr_as_ptr = "allow"
+
+# trivially_copy_pass_by_ref: ~55 hits.  Suggests passing small Copy
+# types by value instead of by reference.  In kernel code we often
+# pass by reference for API stability (so adding fields later doesn't
+# silently change the calling convention).  Style preference.
+trivially_copy_pass_by_ref = "allow"
+
+# unnested_or_patterns: ~55 hits.  Suggests `A(_) | B(_)` → `(A | B)(_)`.
+# Both forms are equivalent; the unnested form is often clearer when
+# the variants carry data that's about to be matched.  Pure style.
+unnested_or_patterns = "allow"
+
+# collapsible_match: ~55 hits.  Suggests folding nested `match`/`if let`
+# into a single pattern with `|` or `..`.  The nested form is often
+# clearer when each level has a distinct logical purpose.  Pure style.
+collapsible_match = "allow"
+
+# struct_field_names: ~50 hits.  Flags structs whose field names share
+# a common prefix or suffix.  In low-level code the prefix usually
+# mirrors a hardware spec (`pm1a_*`, `cpu_*`) and removing it loses
+# the mapping.  Pure style.
+struct_field_names = "allow"
+
+# if_not_else: ~50 hits.  Suggests inverting `if !cond { ... } else { ... }`.
+# The negated form is often natural when the "negative" branch is the
+# main path (e.g., `if !ready { return Poll::Pending } else { ... }`).
+# Pure style.
+if_not_else = "allow"
+
+# bool_to_int_with_if: ~40 hits.  Suggests `usize::from(cond)` over
+# `if cond { 1 } else { 0 }`.  The explicit if/else is fine and often
+# clearer next to other branchy code.  Pure style.
+bool_to_int_with_if = "allow"
+
+# many_single_char_names: ~30 hits.  Single-letter names match math
+# notation in checksum/compression/crypto code (`a`, `b`, `c`, `d` for
+# CRC state; `x`, `y` for coordinates).  Pure style.
+many_single_char_names = "allow"
+
+# assigning_clones: ~25 hits.  Suggests `.clone_into(&mut dst)` over
+# `dst = src.clone()`.  The latter is universally understood; the
+# former is an unstable-feel API choice for a marginal perf win on
+# already-allocated buffers.  Pure style.
+assigning_clones = "allow"
+
+# unused_self / used_underscore_binding / used_underscore_items:
+# ~50 combined hits.  These flag intentional API stability patterns
+# (methods that don't use &self today but might tomorrow; underscore
+# bindings used in #[cfg(debug)] paths).  Pure style.
+unused_self = "allow"
+used_underscore_binding = "allow"
+used_underscore_items = "allow"
+
+# case_sensitive_file_extension_comparisons: ~35 hits.  Suggests
+# `.to_lowercase()`-style comparisons.  Our spec mandates a
+# case-sensitive filesystem (CLAUDE.md), so case-exact extension
+# matching is intentional, not a bug.
+case_sensitive_file_extension_comparisons = "allow"
+
+# needless_range_loop: ~130 hits.  `for i in 0..n` is often the
+# clearest way to express bounded iteration; rewriting to
+# `.iter().enumerate()` doesn't always help readability, especially
+# when the body indexes multiple parallel arrays.  Pure style.
+needless_range_loop = "allow"
+
 # Userspace defaults: size-optimised, abort on panic, stripped.
 [profile.release]
 opt-level = "s"

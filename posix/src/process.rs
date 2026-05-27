@@ -516,20 +516,113 @@ pub extern "C" fn clone(
     -1
 }
 
+/// All flag bits accepted by `unshare(2)`.
+///
+/// Mirrors Linux's `check_unshare_flags` in `kernel/fork.c`: the union
+/// of every CLONE_* bit that unshare permits.  In particular, CLONE_IO,
+/// CLONE_PIDFD, CLONE_SETTLS, CLONE_PARENT_SETTID, CLONE_CHILD_SETTID,
+/// CLONE_CHILD_CLEARTID, CLONE_UNTRACED, CLONE_DETACHED, and the high
+/// clone3-only bits (CLONE_INTO_CGROUP, CLONE_CLEAR_SIGHAND) are
+/// rejected — they are not meaningful in an "unshare from the current
+/// task" context.
+pub const UNSHARE_FLAGS_VALID: u32 = (crate::linux_clone_args::CLONE_THREAD
+    | crate::linux_clone_args::CLONE_FS
+    | crate::linux_clone_args::CLONE_NEWNS
+    | crate::linux_clone_args::CLONE_SIGHAND
+    | crate::linux_clone_args::CLONE_VM
+    | crate::linux_clone_args::CLONE_FILES
+    | crate::linux_clone_args::CLONE_SYSVSEM
+    | crate::linux_clone_args::CLONE_NEWUTS
+    | crate::linux_clone_args::CLONE_NEWIPC
+    | crate::linux_clone_args::CLONE_NEWNET
+    | crate::linux_clone_args::CLONE_NEWUSER
+    | crate::linux_clone_args::CLONE_NEWPID
+    | crate::linux_clone_args::CLONE_NEWCGROUP
+    | crate::linux_clone_args::CLONE_NEWTIME) as u32;
+
+/// All `nstype` bits accepted by `setns(2)`.
+///
+/// Linux 3.0 introduced `setns` and only the namespace CLONE_NEW* bits
+/// are valid — sharing flags (CLONE_VM, CLONE_FS, ...) are not meaningful
+/// since `setns` joins an existing namespace, it doesn't create a fresh
+/// resource view.  `nstype == 0` is a special "infer the namespace type
+/// from the file descriptor" probe and is accepted.
+pub const SETNS_NSTYPE_VALID: u32 = (crate::linux_clone_args::CLONE_NEWNS
+    | crate::linux_clone_args::CLONE_NEWCGROUP
+    | crate::linux_clone_args::CLONE_NEWUTS
+    | crate::linux_clone_args::CLONE_NEWIPC
+    | crate::linux_clone_args::CLONE_NEWUSER
+    | crate::linux_clone_args::CLONE_NEWPID
+    | crate::linux_clone_args::CLONE_NEWNET
+    | crate::linux_clone_args::CLONE_NEWTIME) as u32;
+
 /// Linux `unshare` — disassociate parts of the execution context.
 ///
-/// Stub: returns -1 with ENOSYS (namespaces not implemented).
+/// # Linux behaviour
+///
+/// `unshare(int flags)` (added in Linux 2.6.16) lets a process give up
+/// shared resources (mount namespace, UTS namespace, IPC namespace, ...)
+/// to create per-process copies.  The valid flag set is
+/// `UNSHARE_FLAGS_VALID`; any other bit yields `EINVAL`.
+///
+/// Special case: `unshare(0)` is a successful no-op — `kernel/fork.c`
+/// short-circuits when no resources need duplicating.  Userspace libraries
+/// (e.g. `util-linux` `unshare(1)`'s `--keep-caps` probe) call this form
+/// to test for syscall availability.
+///
+/// After flag validation we return `ENOSYS` because the namespace
+/// subsystem isn't wired up — matches what Linux returns when built
+/// without `CONFIG_NAMESPACES`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn unshare(_flags: i32) -> i32 {
+pub extern "C" fn unshare(flags: i32) -> i32 {
+    // Reject any bit outside the unshare-accepted CLONE_* set.
+    // Cast i32 → u32 preserves bit pattern so high-bit attacks
+    // (e.g. CLONE_IO at 0x8000_0000 i.e. i32::MIN) are detected.
+    let bits = flags as u32;
+    if (bits & !UNSHARE_FLAGS_VALID) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // unshare(0) is a successful no-op per Linux.
+    if bits == 0 {
+        return 0;
+    }
+    // Arguments validated; namespace subsystem not implemented.
     errno::set_errno(errno::ENOSYS);
     -1
 }
 
 /// Linux `setns` — reassociate a thread with a namespace.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// # Linux behaviour
+///
+/// `setns(int fd, int nstype)` (added in Linux 3.0) joins the namespace
+/// referenced by `fd`.  Argument-domain checks:
+///
+/// * `fd < 0`                              → `EBADF`
+/// * `nstype & ~SETNS_NSTYPE_VALID`         → `EINVAL`
+///
+/// `nstype == 0` is the "any namespace, infer from fd" form and is
+/// accepted — used by container runtimes that don't know the namespace
+/// type in advance.  In Linux 5.8+ `nstype` may also be a `pidfd` that
+/// triggers entering *all* of the target's namespaces; we accept fds
+/// from `pidfd_open` the same way.
+///
+/// After arguments validate we return `ENOSYS` (no namespace subsystem).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setns(_fd: i32, _nstype: i32) -> i32 {
+pub extern "C" fn setns(fd: i32, nstype: i32) -> i32 {
+    // fd must be non-negative.
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    // Reject any bit outside the setns-accepted namespace set.
+    let bits = nstype as u32;
+    if (bits & !SETNS_NSTYPE_VALID) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Arguments validated; namespace subsystem not implemented.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -1204,7 +1297,12 @@ mod tests {
 
     #[test]
     fn test_unshare_returns_enosys() {
-        assert_eq!(unshare(0), -1);
+        // unshare(0) is a Linux-faithful no-op; use CLONE_NEWNS to hit
+        // the ENOSYS path now that flag validation passes through.
+        assert_eq!(
+            unshare(crate::linux_clone_args::CLONE_NEWNS as i32),
+            -1,
+        );
     }
 
     #[test]
@@ -1478,7 +1576,9 @@ mod tests {
     #[test]
     fn test_unshare_sets_enosys() {
         crate::errno::set_errno(0);
-        unshare(0);
+        // unshare(0) is a no-op (returns 0) per Linux — exercise the
+        // ENOSYS path with a real namespace flag instead.
+        unshare(crate::linux_clone_args::CLONE_NEWNS as i32);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -2175,6 +2275,449 @@ mod tests {
         );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 50 — unshare / setns validators
+    // ------------------------------------------------------------------
+
+    // --- unshare: zero is a no-op ---
+
+    #[test]
+    fn test_unshare_zero_returns_zero_and_preserves_errno() {
+        crate::errno::set_errno(0xBEEF);
+        let ret = unshare(0);
+        assert_eq!(ret, 0);
+        // Linux rule: successful syscalls must not clobber errno.
+        assert_eq!(crate::errno::get_errno(), 0xBEEF);
+    }
+
+    // --- unshare: each valid flag falls through to ENOSYS ---
+
+    #[test]
+    fn test_unshare_clone_newns_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            unshare(crate::linux_clone_args::CLONE_NEWNS as i32),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_unshare_clone_newuts_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            unshare(crate::linux_clone_args::CLONE_NEWUTS as i32),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_unshare_clone_newipc_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            unshare(crate::linux_clone_args::CLONE_NEWIPC as i32),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_unshare_clone_newpid_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            unshare(crate::linux_clone_args::CLONE_NEWPID as i32),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_unshare_clone_newnet_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            unshare(crate::linux_clone_args::CLONE_NEWNET as i32),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_unshare_clone_newuser_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            unshare(crate::linux_clone_args::CLONE_NEWUSER as i32),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_unshare_clone_newcgroup_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            unshare(crate::linux_clone_args::CLONE_NEWCGROUP as i32),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_unshare_clone_newtime_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            unshare(crate::linux_clone_args::CLONE_NEWTIME as i32),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_unshare_all_valid_flags_combined_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(unshare(UNSHARE_FLAGS_VALID as i32), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- unshare: rejected flag bits ---
+
+    #[test]
+    fn test_unshare_clone_io_rejected() {
+        // CLONE_IO = 0x8000_0000 is not valid for unshare.
+        crate::errno::set_errno(0);
+        let ret = unshare(crate::linux_clone_args::CLONE_IO as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_unshare_clone_pidfd_rejected() {
+        // CLONE_PIDFD is not meaningful for unshare.
+        crate::errno::set_errno(0);
+        let ret = unshare(crate::linux_clone_args::CLONE_PIDFD as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_unshare_clone_settls_rejected() {
+        crate::errno::set_errno(0);
+        let ret = unshare(crate::linux_clone_args::CLONE_SETTLS as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_unshare_clone_parent_settid_rejected() {
+        crate::errno::set_errno(0);
+        let ret =
+            unshare(crate::linux_clone_args::CLONE_PARENT_SETTID as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_unshare_minus_one_einval() {
+        // All bits set — guaranteed to include unrecognised ones.
+        crate::errno::set_errno(0);
+        let ret = unshare(-1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_unshare_valid_mixed_with_invalid_rejected() {
+        // Even if CLONE_NEWNS is valid, mixing in CLONE_IO must fail.
+        crate::errno::set_errno(0);
+        let bits = (crate::linux_clone_args::CLONE_NEWNS
+            | crate::linux_clone_args::CLONE_IO) as i32;
+        let ret = unshare(bits);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- unshare: valid mask shape ---
+
+    #[test]
+    fn test_unshare_flags_valid_mask_constant() {
+        // Sanity-check the mask value: must contain every flag listed
+        // in the Linux fork.c::check_unshare_flags whitelist and no
+        // other bits.
+        let expected = (crate::linux_clone_args::CLONE_THREAD
+            | crate::linux_clone_args::CLONE_FS
+            | crate::linux_clone_args::CLONE_NEWNS
+            | crate::linux_clone_args::CLONE_SIGHAND
+            | crate::linux_clone_args::CLONE_VM
+            | crate::linux_clone_args::CLONE_FILES
+            | crate::linux_clone_args::CLONE_SYSVSEM
+            | crate::linux_clone_args::CLONE_NEWUTS
+            | crate::linux_clone_args::CLONE_NEWIPC
+            | crate::linux_clone_args::CLONE_NEWNET
+            | crate::linux_clone_args::CLONE_NEWUSER
+            | crate::linux_clone_args::CLONE_NEWPID
+            | crate::linux_clone_args::CLONE_NEWCGROUP
+            | crate::linux_clone_args::CLONE_NEWTIME) as u32;
+        assert_eq!(UNSHARE_FLAGS_VALID, expected);
+        // CLONE_IO (sign bit) must be absent.
+        assert_eq!(
+            UNSHARE_FLAGS_VALID
+                & (crate::linux_clone_args::CLONE_IO as u32),
+            0,
+        );
+    }
+
+    // --- setns: fd validation ---
+
+    #[test]
+    fn test_setns_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(setns(-1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_setns_min_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(setns(i32::MIN, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- setns: nstype mask ---
+
+    #[test]
+    fn test_setns_clone_io_in_nstype_einval() {
+        // CLONE_IO is not a namespace type.
+        crate::errno::set_errno(0);
+        let ret = setns(3, crate::linux_clone_args::CLONE_IO as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setns_clone_vm_in_nstype_einval() {
+        // Sharing flags (CLONE_VM) are not namespace types.
+        crate::errno::set_errno(0);
+        let ret = setns(3, crate::linux_clone_args::CLONE_VM as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setns_clone_files_in_nstype_einval() {
+        crate::errno::set_errno(0);
+        let ret = setns(3, crate::linux_clone_args::CLONE_FILES as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setns_zero_nstype_passes() {
+        // nstype == 0 means "infer from fd", accepted by Linux.
+        crate::errno::set_errno(0);
+        assert_eq!(setns(3, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_setns_clone_newns_passes() {
+        crate::errno::set_errno(0);
+        let ret = setns(3, crate::linux_clone_args::CLONE_NEWNS as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_setns_clone_newpid_passes() {
+        crate::errno::set_errno(0);
+        let ret = setns(3, crate::linux_clone_args::CLONE_NEWPID as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_setns_clone_newuser_passes() {
+        crate::errno::set_errno(0);
+        let ret = setns(3, crate::linux_clone_args::CLONE_NEWUSER as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_setns_clone_newtime_passes() {
+        crate::errno::set_errno(0);
+        let ret = setns(3, crate::linux_clone_args::CLONE_NEWTIME as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_setns_all_valid_nstypes_combined_passes() {
+        crate::errno::set_errno(0);
+        let ret = setns(3, SETNS_NSTYPE_VALID as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_setns_minus_one_nstype_einval() {
+        crate::errno::set_errno(0);
+        let ret = setns(3, -1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- setns: order — fd before nstype ---
+
+    #[test]
+    fn test_setns_fd_before_nstype() {
+        // Bad fd + bad nstype → EBADF wins (fd is checked first).
+        crate::errno::set_errno(0);
+        let ret = setns(-1, crate::linux_clone_args::CLONE_IO as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- setns: valid mask shape ---
+
+    #[test]
+    fn test_setns_nstype_valid_mask_constant() {
+        let expected = (crate::linux_clone_args::CLONE_NEWNS
+            | crate::linux_clone_args::CLONE_NEWCGROUP
+            | crate::linux_clone_args::CLONE_NEWUTS
+            | crate::linux_clone_args::CLONE_NEWIPC
+            | crate::linux_clone_args::CLONE_NEWUSER
+            | crate::linux_clone_args::CLONE_NEWPID
+            | crate::linux_clone_args::CLONE_NEWNET
+            | crate::linux_clone_args::CLONE_NEWTIME)
+            as u32;
+        assert_eq!(SETNS_NSTYPE_VALID, expected);
+        // No sharing flags must be in the mask.
+        assert_eq!(
+            SETNS_NSTYPE_VALID
+                & (crate::linux_clone_args::CLONE_VM as u32),
+            0,
+        );
+        assert_eq!(
+            SETNS_NSTYPE_VALID
+                & (crate::linux_clone_args::CLONE_FILES as u32),
+            0,
+        );
+        assert_eq!(
+            SETNS_NSTYPE_VALID
+                & (crate::linux_clone_args::CLONE_FS as u32),
+            0,
+        );
+    }
+
+    // --- Workflow tests: real-world namespace callers ---
+
+    /// `unshare(1)` userspace tool's `--user --map-root-user` probe:
+    /// runs `unshare(CLONE_NEWUSER | CLONE_NEWNS)` to create a fresh
+    /// user namespace as PID 0 inside, then enters a mount namespace
+    /// to set up the rootless container.  On ENOSYS the tool prints
+    /// "unshare: unshare failed: Function not implemented" rather than
+    /// "Invalid argument," letting the user know to upgrade the kernel.
+    #[test]
+    fn test_unshare_workflow_util_linux_rootless() {
+        crate::errno::set_errno(0);
+        let bits = (crate::linux_clone_args::CLONE_NEWUSER
+            | crate::linux_clone_args::CLONE_NEWNS) as i32;
+        let ret = unshare(bits);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// systemd-nspawn container-init path: after fork, the child calls
+    /// `unshare(CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC
+    /// | CLONE_NEWNET)` to set up the full container namespace.  Must
+    /// validate cleanly so systemd-nspawn falls back to its
+    /// kernel-too-old code path that uses cgroup-only isolation.
+    #[test]
+    fn test_unshare_workflow_systemd_nspawn_full() {
+        crate::errno::set_errno(0);
+        let bits = (crate::linux_clone_args::CLONE_NEWPID
+            | crate::linux_clone_args::CLONE_NEWNS
+            | crate::linux_clone_args::CLONE_NEWUTS
+            | crate::linux_clone_args::CLONE_NEWIPC
+            | crate::linux_clone_args::CLONE_NEWNET) as i32;
+        let ret = unshare(bits);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Firefox content-process sandbox uses `unshare(CLONE_NEWUSER |
+    /// CLONE_NEWPID | CLONE_NEWNET)` to drop into a sandboxed PID and
+    /// network namespace.  On ENOSYS, Firefox's sandbox library
+    /// (`sandbox_brokerLauncher`) falls back to seccomp-only filtering.
+    #[test]
+    fn test_unshare_workflow_firefox_sandbox() {
+        crate::errno::set_errno(0);
+        let bits = (crate::linux_clone_args::CLONE_NEWUSER
+            | crate::linux_clone_args::CLONE_NEWPID
+            | crate::linux_clone_args::CLONE_NEWNET) as i32;
+        let ret = unshare(bits);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// `nsenter --net=/proc/<pid>/ns/net`: opens the net-ns file, gets
+    /// a fd, then calls `setns(fd, CLONE_NEWNET)`.  Must reach ENOSYS
+    /// so nsenter prints "Function not implemented" rather than crashing
+    /// on a bad-args error.
+    #[test]
+    fn test_setns_workflow_nsenter_join_net_namespace() {
+        crate::errno::set_errno(0);
+        let fd = 4; // hypothetical /proc/<pid>/ns/net fd
+        let ret = setns(fd, crate::linux_clone_args::CLONE_NEWNET as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// runc `nsexec` cgo helper: when joining an existing container,
+    /// runc opens each namespace file in turn and calls
+    /// `setns(fd, 0)` letting the kernel infer the type from the fd.
+    /// This is the "any namespace" form added in Linux 3.0.
+    #[test]
+    fn test_setns_workflow_runc_join_inferred_type() {
+        crate::errno::set_errno(0);
+        let fd = 5;
+        let ret = setns(fd, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// CRIU `criu restore` re-enters the target's namespaces via
+    /// `setns(pidfd, CLONE_NEWPID | CLONE_NEWNET | ...)` — the Linux
+    /// 5.8+ pidfd-with-multiple-nstypes form.  Must validate as a
+    /// combined valid namespace mask and reach ENOSYS.
+    #[test]
+    fn test_setns_workflow_criu_pidfd_multi_ns() {
+        crate::errno::set_errno(0);
+        let pidfd = 7;
+        let nstype = (crate::linux_clone_args::CLONE_NEWPID
+            | crate::linux_clone_args::CLONE_NEWNET
+            | crate::linux_clone_args::CLONE_NEWNS) as i32;
+        let ret = setns(pidfd, nstype);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Buggy caller from a Stack Overflow snippet: `unshare(CLONE_VM
+    /// | CLONE_FILES)` — these *are* valid unshare bits, but they're
+    /// meaningless without CLONE_THREAD.  Linux still accepts them
+    /// (the mask check passes), so we mirror that and let the call
+    /// reach ENOSYS.  The bug isn't in flag validation; it's in the
+    /// caller's understanding of unshare semantics.
+    #[test]
+    fn test_unshare_workflow_share_flags_alone_accepted() {
+        crate::errno::set_errno(0);
+        let bits = (crate::linux_clone_args::CLONE_VM
+            | crate::linux_clone_args::CLONE_FILES) as i32;
+        let ret = unshare(bits);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     // -- arch_prctl --

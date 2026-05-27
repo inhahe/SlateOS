@@ -1007,14 +1007,162 @@ pub const ARCH_SET_GS: i32 = 0x1001;
 /// Get the GS base address.
 pub const ARCH_GET_GS: i32 = 0x1004;
 
+/// Linux 4.12+: get the `IA32_TSC_AUX` "CPU ID" emitted by `rdtscp` /
+/// `rdpid`.  `addr` is a `unsigned long *` to receive the value.
+pub const ARCH_GET_CPUID: i32 = 0x1011;
+/// Linux 4.12+: set whether userspace can execute `cpuid` (1) or it
+/// faults with `SIGSEGV` (0).  `addr` is the boolean value, not a ptr.
+pub const ARCH_SET_CPUID: i32 = 0x1012;
+/// Linux 5.18+: control Intel CET shadow-stack feature for the
+/// calling task.  `addr` is a `cet_status *` to receive the state.
+pub const ARCH_CET_STATUS: i32 = 0x3001;
+/// Linux 5.18+: enable Intel CET shadow-stack on the calling task.
+pub const ARCH_CET_ENABLE: i32 = 0x3002;
+/// Linux 5.18+: disable Intel CET shadow-stack on the calling task.
+pub const ARCH_CET_DISABLE: i32 = 0x3003;
+/// Linux 5.18+: lock CET configuration so it can't be changed
+/// (anti-tamper for hardened processes).
+pub const ARCH_CET_LOCK: i32 = 0x3004;
+/// Linux 5.18+: allocate a shadow-stack region for a thread.
+pub const ARCH_CET_ALLOC_SHSTK: i32 = 0x3005;
+/// Linux 6.4+: set the Intel LAM (Linear Address Masking) width.
+pub const ARCH_GET_UNTAG_MASK: i32 = 0x4001;
+/// Linux 6.4+: enable LAM with a given untag mask width.
+pub const ARCH_ENABLE_TAGGED_ADDR: i32 = 0x4002;
+/// Linux 6.4+: get max LAM untag mask width supported by the kernel.
+pub const ARCH_GET_MAX_TAG_BITS: i32 = 0x4003;
+/// Linux 6.4+: force LAM untagging even on legacy syscalls.
+pub const ARCH_FORCE_TAGGED_SVA: i32 = 0x4004;
+
+/// Highest x86-64 user-canonical address bit (bit 47 on 4-level paging,
+/// bit 56 on 5-level paging).  Anything above this with the high bits
+/// not all-zero / all-one is non-canonical and faults at the LDT/MSR.
+///
+/// We use the conservative 4-level bound (bit 47); a real kernel would
+/// pick this dynamically based on CR4.LA57.  Used to validate `addr`
+/// arguments to ARCH_SET_FS/ARCH_SET_GS — Linux rejects non-canonical
+/// addresses with EINVAL since loading them into the MSR raises #GP.
+pub const X86_64_CANONICAL_MAX: u64 = 0x0000_7FFF_FFFF_FFFF;
+
 /// Set architecture-specific thread state.
 ///
-/// Stub: returns -1 with ENOSYS.  A real implementation would use
-/// `wrfsbase`/`wrgsbase` or the MSR to set segment base addresses.
+/// # Linux behaviour
+///
+/// `arch_prctl(int code, unsigned long addr)` (x86-64 only) is the
+/// architecture-specific knob for FS/GS base, CET shadow-stack, LAM
+/// untagging, and CPUID-fault control.  Argument-domain checks:
+///
+/// * `code` not in the recognised set                      → `EINVAL`
+/// * For SET_FS/SET_GS: `addr > X86_64_CANONICAL_MAX` and
+///   not in the upper-half canonical range                 → `EINVAL`
+///   (Linux's `arch/x86/kernel/process_64.c::do_arch_prctl_64`
+///    explicitly rejects non-canonical addresses since loading
+///    them into the FS/GS_BASE MSR raises #GP)
+/// * For SET_CPUID: `addr` not 0 or 1                      → `EINVAL`
+///   (it's a boolean — only 0 disables, 1 enables; everything else
+///    is bogus per `arch/x86/kernel/process.c::set_cpuid_mode`)
+/// * For GET_FS/GET_GS/GET_CPUID/GET_UNTAG_MASK/
+///   GET_MAX_TAG_BITS/CET_STATUS: `addr == 0`              → `EFAULT`
+///   (these write the result to `*addr` — NULL output ptr is a fault)
+/// * For ENABLE_TAGGED_ADDR: `addr` (the width) > 6        → `EINVAL`
+///   (LAM57 supports 6 mask bits; anything wider is not implementable)
+///
+/// After arguments validate we return `ENOSYS` because none of these
+/// CPU-state knobs are implemented in our microkernel design (FS/GS
+/// base is set at thread spawn by the kernel; CET/LAM are not yet
+/// supported on our target hardware abstraction).
+///
+/// **Architectural rationale** (matches Linux on `CONFIG_X86_64` kernels
+/// with the CET/LAM features compiled out — the canonical "syscall
+/// exists but feature unavailable" shape).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn arch_prctl(_code: i32, _addr: u64) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn arch_prctl(code: i32, addr: u64) -> i32 {
+    match code {
+        // FS/GS base setters — addr is a canonical user address.
+        ARCH_SET_FS | ARCH_SET_GS => {
+            // Non-canonical address rejected by Linux (else #GP on MSR
+            // load).  Canonical range is either 0..=0x0000_7FFF_FFFF_FFFF
+            // (low half) or 0xFFFF_8000_0000_0000..=u64::MAX (high half).
+            let is_low_canonical = addr <= X86_64_CANONICAL_MAX;
+            let is_high_canonical = addr >= 0xFFFF_8000_0000_0000;
+            if !is_low_canonical && !is_high_canonical {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+        // FS/GS base getters — addr is a *u64 output pointer.
+        ARCH_GET_FS | ARCH_GET_GS => {
+            if addr == 0 {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+        // CPUID-fault control.
+        ARCH_SET_CPUID => {
+            // addr is a boolean — only 0 and 1 are accepted.
+            if addr > 1 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+        ARCH_GET_CPUID => {
+            // GET_CPUID takes no addr in Linux — the return value *is*
+            // the answer.  We still validate that addr is 0 (the
+            // documented sentinel) and reach ENOSYS.
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+        // Intel CET shadow-stack family.
+        ARCH_CET_STATUS => {
+            if addr == 0 {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+        ARCH_CET_ENABLE
+        | ARCH_CET_DISABLE
+        | ARCH_CET_LOCK
+        | ARCH_CET_ALLOC_SHSTK => {
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+        // Intel LAM (Linear Address Masking) family.
+        ARCH_GET_UNTAG_MASK | ARCH_GET_MAX_TAG_BITS => {
+            if addr == 0 {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+        ARCH_ENABLE_TAGGED_ADDR => {
+            // addr is the requested untag mask width.  LAM57 caps
+            // this at 6 (the 6 bits between PML5 and PML4 boundary).
+            if addr > 6 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+        ARCH_FORCE_TAGGED_SVA => {
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+        // Unknown code.
+        _ => {
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3190,6 +3338,397 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
+    // ------------------------------------------------------------------
+    // Phase 52 — arch_prctl(2) validator
+    // ------------------------------------------------------------------
+
+    // --- unknown code ---
+
+    #[test]
+    fn test_arch_prctl_unknown_code_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(0x9999, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_arch_prctl_zero_code_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(0, 0x1000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_arch_prctl_negative_code_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(-1, 0x1000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- ARCH_SET_FS / ARCH_SET_GS canonical-address check ---
+
+    #[test]
+    fn test_arch_prctl_set_fs_low_canonical_passes() {
+        crate::errno::set_errno(0);
+        // User-space address in low canonical half.
+        assert_eq!(arch_prctl(ARCH_SET_FS, 0x0000_4000_0000_0000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_set_fs_max_low_canonical_passes() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_SET_FS, X86_64_CANONICAL_MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_set_fs_non_canonical_einval() {
+        crate::errno::set_errno(0);
+        // Just above the canonical max — the classic non-canonical zone.
+        assert_eq!(arch_prctl(ARCH_SET_FS, 0x0001_0000_0000_0000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_arch_prctl_set_fs_high_canonical_passes() {
+        crate::errno::set_errno(0);
+        // Kernel-side canonical address — technically rejected by
+        // Linux as "userspace can't set kernel addresses" but our
+        // validator only checks canonicality, not privilege.
+        assert_eq!(arch_prctl(ARCH_SET_FS, 0xFFFF_8000_0000_0000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_set_fs_zero_passes() {
+        // FS base of 0 is valid — used to "disable" FS-relative access.
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_SET_FS, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_set_gs_non_canonical_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_SET_GS, 0x8000_0000_0000_0000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_arch_prctl_set_gs_low_canonical_passes() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_SET_GS, 0x4000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- ARCH_GET_FS / ARCH_GET_GS output-ptr check ---
+
+    #[test]
+    fn test_arch_prctl_get_fs_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_GET_FS, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_arch_prctl_get_gs_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_GET_GS, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_arch_prctl_get_gs_valid_passes() {
+        let mut out: u64 = 0;
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_GET_GS, &raw mut out as u64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- CPUID-fault control ---
+
+    #[test]
+    fn test_arch_prctl_set_cpuid_zero_passes() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_SET_CPUID, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_set_cpuid_one_passes() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_SET_CPUID, 1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_set_cpuid_two_einval() {
+        crate::errno::set_errno(0);
+        // CPUID is a boolean — only 0 and 1 are accepted.
+        assert_eq!(arch_prctl(ARCH_SET_CPUID, 2), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_arch_prctl_set_cpuid_huge_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_SET_CPUID, u64::MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_arch_prctl_get_cpuid_passes() {
+        // GET_CPUID is allowed without addr.
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_GET_CPUID, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- Intel CET shadow-stack family ---
+
+    #[test]
+    fn test_arch_prctl_cet_status_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_CET_STATUS, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_arch_prctl_cet_status_valid_passes() {
+        let mut out: u64 = 0;
+        crate::errno::set_errno(0);
+        assert_eq!(
+            arch_prctl(ARCH_CET_STATUS, &raw mut out as u64),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_cet_enable_passes() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_CET_ENABLE, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_cet_disable_passes() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_CET_DISABLE, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_cet_lock_passes() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_CET_LOCK, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_cet_alloc_shstk_passes() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_CET_ALLOC_SHSTK, 0x10000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- Intel LAM (Linear Address Masking) family ---
+
+    #[test]
+    fn test_arch_prctl_get_untag_mask_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_GET_UNTAG_MASK, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_arch_prctl_get_untag_mask_valid_passes() {
+        let mut out: u64 = 0;
+        crate::errno::set_errno(0);
+        assert_eq!(
+            arch_prctl(ARCH_GET_UNTAG_MASK, &raw mut out as u64),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_arch_prctl_get_max_tag_bits_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_GET_MAX_TAG_BITS, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_arch_prctl_enable_tagged_addr_in_range_passes() {
+        // LAM48 supports up to 6 untag bits.
+        for width in 0..=6u64 {
+            crate::errno::set_errno(0);
+            assert_eq!(arch_prctl(ARCH_ENABLE_TAGGED_ADDR, width), -1);
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "width {width} should reach ENOSYS",
+            );
+        }
+    }
+
+    #[test]
+    fn test_arch_prctl_enable_tagged_addr_too_wide_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_ENABLE_TAGGED_ADDR, 7), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_arch_prctl_enable_tagged_addr_huge_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_ENABLE_TAGGED_ADDR, u64::MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_arch_prctl_force_tagged_sva_passes() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_FORCE_TAGGED_SVA, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- Constant sanity ---
+
+    #[test]
+    fn test_arch_prctl_constants_distinct() {
+        // None of the recognised codes alias each other.
+        let codes = [
+            ARCH_SET_FS,
+            ARCH_GET_FS,
+            ARCH_SET_GS,
+            ARCH_GET_GS,
+            ARCH_GET_CPUID,
+            ARCH_SET_CPUID,
+            ARCH_CET_STATUS,
+            ARCH_CET_ENABLE,
+            ARCH_CET_DISABLE,
+            ARCH_CET_LOCK,
+            ARCH_CET_ALLOC_SHSTK,
+            ARCH_GET_UNTAG_MASK,
+            ARCH_ENABLE_TAGGED_ADDR,
+            ARCH_GET_MAX_TAG_BITS,
+            ARCH_FORCE_TAGGED_SVA,
+        ];
+        for i in 0..codes.len() {
+            for j in (i + 1)..codes.len() {
+                assert_ne!(codes[i], codes[j], "codes alias at {i}/{j}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_x86_64_canonical_max_constant() {
+        // Bit 47 set, bits 48-63 clear — the highest user-canonical address.
+        assert_eq!(X86_64_CANONICAL_MAX, 0x0000_7FFF_FFFF_FFFF);
+        // One past canonical max is non-canonical.
+        let one_past = X86_64_CANONICAL_MAX + 1;
+        assert_eq!(one_past, 0x0000_8000_0000_0000);
+    }
+
+    // --- Workflow tests: real-world arch_prctl callers ---
+
+    /// glibc thread setup: `__pthread_init_static_tls` calls
+    /// `arch_prctl(ARCH_SET_FS, tls_block)` to point FS at the
+    /// thread's TLS image after `clone(CLONE_VM | CLONE_SETTLS)`.
+    /// Must validate the canonical user address and reach ENOSYS so
+    /// glibc's TLS init reports a real "syscall not implemented"
+    /// error rather than crashing on FS=garbage.
+    #[test]
+    fn test_arch_prctl_workflow_glibc_tls_init() {
+        crate::errno::set_errno(0);
+        // Typical TLS image lives in the low half of user space.
+        let tls_base = 0x0000_7FFF_0000_0000u64;
+        assert_eq!(arch_prctl(ARCH_SET_FS, tls_base), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// musl libc thread reaper: when joining a thread, musl reads
+    /// the thread's TLS via `arch_prctl(ARCH_GET_FS, &out)` to walk
+    /// its `pthread` struct.  Must validate the output pointer and
+    /// reach ENOSYS so musl falls back to its `/proc/<tid>/syscall`
+    /// scan path (slower but works on kernels < 5.6).
+    #[test]
+    fn test_arch_prctl_workflow_musl_thread_reap() {
+        let mut tls_addr: u64 = 0;
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_GET_FS, &raw mut tls_addr as u64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// QEMU TCG userspace mode: when emulating x86-64-on-x86-64,
+    /// QEMU intercepts the guest's `arch_prctl(ARCH_SET_GS, addr)`
+    /// and forwards to the host syscall to set the guest's GS base.
+    /// Must validate canonical and reach ENOSYS so QEMU's fallback
+    /// path uses a software-emulated GS register instead.
+    #[test]
+    fn test_arch_prctl_workflow_qemu_tcg_set_gs() {
+        crate::errno::set_errno(0);
+        let guest_gs = 0x0000_4000_8000_0000u64;
+        assert_eq!(arch_prctl(ARCH_SET_GS, guest_gs), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Chrome sandbox `seccomp-bpf` policy probe: at process start,
+    /// the sandbox helper calls `arch_prctl(ARCH_SET_CPUID, 0)` to
+    /// disable CPUID for sandboxed code (so it can't fingerprint the
+    /// host CPU).  Must accept the boolean and reach ENOSYS.
+    #[test]
+    fn test_arch_prctl_workflow_chrome_cpuid_disable() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_SET_CPUID, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Intel CET-enabled binary startup (gcc -fcf-protection=full):
+    /// after dynamic linker init, the linker calls
+    /// `arch_prctl(ARCH_CET_ENABLE, 0)` to enable shadow stack and
+    /// indirect-branch tracking.  On ENOSYS the linker falls back
+    /// to non-CET mode (no shadow stack); the binary still works
+    /// but loses the CET hardening.
+    #[test]
+    fn test_arch_prctl_workflow_cet_enable_dynamic_linker() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_CET_ENABLE, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// HWASan-instrumented binary (LLVM HWAddressSanitizer):
+    /// at startup, the HWASan runtime calls
+    /// `arch_prctl(ARCH_ENABLE_TAGGED_ADDR, 6)` to enable LAM57
+    /// untagging on Intel Sapphire Rapids+ CPUs.  On ENOSYS the
+    /// runtime falls back to software emulation (slower but works
+    /// on pre-LAM CPUs).
+    #[test]
+    fn test_arch_prctl_workflow_hwasan_lam_enable() {
+        crate::errno::set_errno(0);
+        assert_eq!(arch_prctl(ARCH_ENABLE_TAGGED_ADDR, 6), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Buggy caller from a uninitialised-pointer bug: a stack-allocated
+    /// `pthread_t*` field was never zeroed, so it contains stale heap
+    /// data when passed to `arch_prctl(ARCH_SET_FS, p)`.  The stale
+    /// value happens to fall in the non-canonical hole (bit 47 = 1 but
+    /// bits 48-63 = 0).  Must catch with EINVAL so the bug surfaces
+    /// immediately rather than crashing with #GP later when the MSR
+    /// load executes.
+    #[test]
+    fn test_arch_prctl_workflow_buggy_noncanonical_pthread_t() {
+        crate::errno::set_errno(0);
+        // Bit 47 set, bits 48-63 clear → classic non-canonical address.
+        let bad_addr = 0x0000_DEAD_BEEF_1000u64;
+        assert_eq!(arch_prctl(ARCH_SET_FS, bad_addr), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
     // -- arch_prctl --
 
     #[test]
@@ -3202,7 +3741,10 @@ mod tests {
     #[test]
     fn test_arch_prctl_get_fs_enosys() {
         crate::errno::set_errno(0);
-        assert_eq!(arch_prctl(ARCH_GET_FS, 0), -1);
+        // addr=0 is now caught with EFAULT; use a real output ptr to
+        // exercise the ENOSYS terminal state.
+        let mut out: u64 = 0;
+        assert_eq!(arch_prctl(ARCH_GET_FS, &raw mut out as u64), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 

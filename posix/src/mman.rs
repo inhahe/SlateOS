@@ -304,16 +304,20 @@ mod tests {
         assert_eq!(madvise(core::ptr::null_mut(), 4096, MADV_NORMAL), 0);
     }
 
-    // -- Shared memory stubs return ENOSYS --
+    // -- Shared memory: name validation --
 
     #[test]
-    fn test_shm_open_returns_enosys() {
-        assert_eq!(shm_open(b"/test\0".as_ptr(), 0, 0), -1);
+    fn test_shm_open_null_name_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(shm_open(core::ptr::null(), 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
-    fn test_shm_unlink_returns_enosys() {
-        assert_eq!(shm_unlink(b"/test\0".as_ptr()), -1);
+    fn test_shm_unlink_null_name_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(shm_unlink(core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     // -- posix_madvise stub succeeds --
@@ -462,32 +466,98 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    // -- shm stubs set errno --
+    // -- shm name validation and path composition --
 
     #[test]
-    fn test_shm_open_sets_errno() {
+    fn test_shm_open_empty_name_einval() {
+        // Empty name (just NUL) — must be rejected.
         crate::errno::set_errno(0);
-        let ret = shm_open(b"/shm_test\0".as_ptr(), 0, 0o644);
+        let ret = shm_open(b"\0".as_ptr(), 0, 0o644);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
-    fn test_shm_unlink_sets_errno() {
+    fn test_shm_open_missing_leading_slash_einval() {
+        // POSIX: name must begin with '/'.
         crate::errno::set_errno(0);
-        let ret = shm_unlink(b"/shm_test\0".as_ptr());
+        let ret = shm_open(b"foo\0".as_ptr(), 0, 0o644);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
-    fn test_shm_open_null_name() {
-        assert_eq!(shm_open(core::ptr::null(), 0, 0), -1);
+    fn test_shm_open_embedded_slash_einval() {
+        // POSIX: name should not contain additional '/'.
+        crate::errno::set_errno(0);
+        let ret = shm_open(b"/foo/bar\0".as_ptr(), 0, 0o644);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
-    fn test_shm_unlink_null_name() {
-        assert_eq!(shm_unlink(core::ptr::null()), -1);
+    fn test_shm_unlink_empty_name_einval() {
+        crate::errno::set_errno(0);
+        let ret = shm_unlink(b"\0".as_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_shm_unlink_missing_leading_slash_einval() {
+        crate::errno::set_errno(0);
+        let ret = shm_unlink(b"bar\0".as_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_shm_open_too_long_nametoolong() {
+        // Name of SHM_NAME_MAX bytes is rejected (loop terminates at
+        // SHM_NAME_MAX without finding NUL).
+        let mut big = [b'a'; 256];
+        big[0] = b'/';
+        // We don't write a NUL into `big[..SHM_NAME_MAX]` so the helper
+        // hits the limit and reports ENAMETOOLONG.
+        big[255] = 0; // Make sure the buffer ends in NUL eventually.
+        crate::errno::set_errno(0);
+        let ret = shm_open(big.as_ptr(), 0, 0o644);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
+    }
+
+    #[test]
+    fn test_resolve_shm_name_basic() {
+        let mut out = [0u8; 256];
+        let len = resolve_shm_name(b"/foo\0".as_ptr(), &mut out);
+        // "/dev/shm" (8) + "/foo" (4) = 12.
+        assert_eq!(len, 12);
+        assert_eq!(&out[..12], b"/dev/shm/foo");
+        assert_eq!(out[12], 0); // NUL-terminated.
+    }
+
+    #[test]
+    fn test_resolve_shm_name_rejects_no_leading_slash() {
+        let mut out = [0u8; 256];
+        crate::errno::set_errno(0);
+        assert_eq!(resolve_shm_name(b"foo\0".as_ptr(), &mut out), 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_resolve_shm_name_rejects_double_slash() {
+        let mut out = [0u8; 256];
+        crate::errno::set_errno(0);
+        assert_eq!(resolve_shm_name(b"//foo\0".as_ptr(), &mut out), 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_shm_constants() {
+        assert_eq!(SHM_DIR, b"/dev/shm");
+        assert!(SHM_NAME_MAX > 8); // Room for at least a short name.
+        // Must leave headroom under PATH_MAX after the prefix.
+        assert!(SHM_DIR.len() + SHM_NAME_MAX < crate::unistd::PATH_MAX);
     }
 
     // -- memfd_create sets errno --
@@ -646,26 +716,151 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
-// POSIX shared memory objects — stubs
+// POSIX shared memory objects — backed by files under /dev/shm/
 // ---------------------------------------------------------------------------
+//
+// POSIX shm_open(3) is specified to open a *named* shared-memory object
+// such that mmap() with MAP_SHARED on the resulting fd shares memory
+// between processes that open the same name.  On Linux this is
+// implemented by mounting tmpfs at /dev/shm and treating the name as a
+// filename in that mount.  We follow the Linux convention: shm_open
+// opens /dev/shm/<sanitized-name> as a regular file, and shm_unlink
+// removes it.  Memory sharing then falls out of file-backed mmap(),
+// which our kernel supports for any open fd.
+//
+// Name rules (POSIX):
+//   * Must start with '/'.
+//   * Should not contain other '/' characters.
+//   * Length, including leading '/' but excluding NUL, must be <=
+//     `SHM_NAME_MAX` so that the resolved path fits in a PATH_MAX
+//     buffer with room for the "/dev/shm" prefix.
+
+/// Prefix where POSIX shared memory objects live.
+const SHM_DIR: &[u8] = b"/dev/shm";
+
+/// Maximum bytes in a shm name (including the leading '/').  Chosen so
+/// that the resolved path `/dev/shm/<name>` stays well under PATH_MAX.
+const SHM_NAME_MAX: usize = 200;
+
+/// Resolve a shm_open / shm_unlink name into `/dev/shm/<name>` in `out`.
+///
+/// Returns the byte length written (not counting trailing NUL) on
+/// success, or sets errno and returns 0 on failure.  Validates that
+/// the name starts with '/', is non-empty after that '/', contains no
+/// embedded '/' (POSIX), and fits in the buffer.
+fn resolve_shm_name(name: *const u8, out: &mut [u8]) -> usize {
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return 0;
+    }
+    // Read the name as a C string with bounded length.
+    let mut name_len: usize = 0;
+    // SAFETY: caller contract — `name` is a valid NUL-terminated C string.
+    while name_len < SHM_NAME_MAX {
+        let b = unsafe { *name.add(name_len) };
+        if b == 0 {
+            break;
+        }
+        name_len = name_len.wrapping_add(1);
+    }
+    if name_len == 0 {
+        errno::set_errno(errno::EINVAL);
+        return 0;
+    }
+    if name_len >= SHM_NAME_MAX {
+        // Either truncated (no NUL found) or too long either way.
+        errno::set_errno(errno::ENAMETOOLONG);
+        return 0;
+    }
+    // SAFETY: bounded length above; we know `name` has at least 1 byte.
+    let first = unsafe { *name };
+    if first != b'/' {
+        errno::set_errno(errno::EINVAL);
+        return 0;
+    }
+    // No additional '/' in the remainder.
+    let mut i: usize = 1;
+    while i < name_len {
+        // SAFETY: i < name_len < SHM_NAME_MAX; we just walked these bytes.
+        let b = unsafe { *name.add(i) };
+        if b == b'/' || b == 0 {
+            errno::set_errno(errno::EINVAL);
+            return 0;
+        }
+        i = i.wrapping_add(1);
+    }
+    // Compose "/dev/shm" + name (name already begins with '/').
+    let total = SHM_DIR.len().wrapping_add(name_len);
+    if total >= out.len() {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return 0;
+    }
+    let Some(prefix_dst) = out.get_mut(..SHM_DIR.len()) else {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return 0;
+    };
+    prefix_dst.copy_from_slice(SHM_DIR);
+    // SAFETY: name has at least name_len readable bytes.
+    let name_slice = unsafe { core::slice::from_raw_parts(name, name_len) };
+    let Some(name_dst) = out.get_mut(SHM_DIR.len()..total) else {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return 0;
+    };
+    name_dst.copy_from_slice(name_slice);
+    // NUL-terminate.
+    if let Some(slot) = out.get_mut(total) {
+        *slot = 0;
+    }
+    total
+}
 
 /// Open a POSIX shared memory object.
 ///
-/// Stub: returns -1 with ENOSYS.  Shared memory between processes
-/// requires kernel support for named memory regions.
+/// Resolves `name` to `/dev/shm/<name>` and forwards to `open()`.  The
+/// returned fd can be sized with `ftruncate` and mapped with `mmap`
+/// using `MAP_SHARED`.  Other processes that `shm_open` the same name
+/// will obtain a separate fd that maps the same underlying file, giving
+/// the POSIX shared-memory semantic.
+///
+/// # Errors
+///
+/// - `EFAULT` — `name` is NULL.
+/// - `EINVAL` — `name` is empty, does not start with `/`, or contains
+///   additional `/` characters.
+/// - `ENAMETOOLONG` — the resolved `/dev/shm/<name>` path exceeds
+///   `PATH_MAX`.
+/// - Plus any error reported by the underlying `open()` call (notably
+///   `ENOENT` if `O_CREAT` is not set and the object doesn't exist).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn shm_open(_name: *const u8, _oflag: i32, _mode: ModeT) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn shm_open(name: *const u8, oflag: i32, mode: ModeT) -> i32 {
+    let mut path = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_shm_name(name, &mut path);
+    if len == 0 {
+        return -1;
+    }
+    crate::file::open(path.as_ptr(), oflag, mode)
 }
 
 /// Remove a POSIX shared memory object.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Resolves `name` to `/dev/shm/<name>` and forwards to `unlink()`.
+/// As with regular files, processes that already have the object open
+/// continue to access it until they close their fds; the name itself
+/// is removed immediately (subject to the underlying filesystem's
+/// semantics for unlink-while-open).
+///
+/// # Errors
+///
+/// Same name-validation errors as `shm_open`, plus any error from
+/// `unlink()` (e.g., `ENOENT`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn shm_unlink(_name: *const u8) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn shm_unlink(name: *const u8) -> i32 {
+    let mut path = [0u8; crate::unistd::PATH_MAX];
+    let len = resolve_shm_name(name, &mut path);
+    if len == 0 {
+        return -1;
+    }
+    crate::file::unlink(path.as_ptr())
 }
 
 // ---------------------------------------------------------------------------

@@ -730,21 +730,325 @@ pub struct LinuxDirent64 {
     pub d_name: [u8; 256],
 }
 
-/// Read directory entries via the raw Linux `getdents64` syscall.
-///
-/// Stub: returns -1 with ENOSYS.  Programs should use `readdir()` instead.
-/// A real implementation would fill `dirp` with packed `linux_dirent64`
-/// structs from the kernel directory listing.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getdents64(_fd: i32, _dirp: *mut u8, _count: usize) -> i64 {
-    crate::errno::set_errno(crate::errno::ENOSYS);
-    -1
+// ---------------------------------------------------------------------------
+// Per-fd getdents iterator cache
+// ---------------------------------------------------------------------------
+//
+// `getdents64` is stateful: each call returns the next batch of entries
+// for a given fd, with no caller-visible position object.  We therefore
+// keep a small static pool of per-fd snapshot caches.  On the first call
+// for an fd, we snapshot the directory via SYS_FS_LIST_DIR; subsequent
+// calls walk the snapshot until exhausted, at which point we free the
+// slot and return 0.
+//
+// LIMITATIONS:
+//   * Cache is keyed by fd number, so if a program closes a directory fd
+//     mid-iteration and reuses that fd number, the next `getdents64`
+//     call on the new fd will see stale snapshot data until the cache
+//     reports EOF and frees the slot.  Real programs do not close-and-
+//     reuse mid-iteration, but document the issue (see todo.txt).
+//   * Snapshot pool is small (4 slots).  If more concurrent
+//     getdents64-iterated directories are needed, raise this constant.
+
+const MAX_GETDENTS_CACHES: usize = 4;
+
+struct GetdentsCache {
+    in_use: bool,
+    fd: i32,
+    /// Kernel snapshot buffer, same layout as the `Dir` buffer.
+    buf: [u8; MAX_DIR_ENTRIES * DIR_ENTRY_SIZE],
+    /// Number of kernel entries in `buf`.
+    count: usize,
+    /// Next entry index to emit.
+    pos: usize,
 }
 
-/// Read directory entries via the raw Linux `getdents` syscall.
+impl GetdentsCache {
+    const EMPTY: Self = Self {
+        in_use: false,
+        fd: -1,
+        buf: [0u8; MAX_DIR_ENTRIES * DIR_ENTRY_SIZE],
+        count: 0,
+        pos: 0,
+    };
+}
+
+static mut GETDENTS_POOL: [GetdentsCache; MAX_GETDENTS_CACHES] =
+    [const { GetdentsCache::EMPTY }; MAX_GETDENTS_CACHES];
+
+/// Find the cache slot owning `fd`, if any.
+fn find_getdents_cache(fd: i32) -> Option<*mut GetdentsCache> {
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: Single-threaded access (consistent with the rest of posix).
+    unsafe {
+        let base = core::ptr::addr_of_mut!(GETDENTS_POOL).cast::<GetdentsCache>();
+        let mut i: usize = 0;
+        while i < MAX_GETDENTS_CACHES {
+            let slot = base.add(i);
+            if (*slot).in_use && (*slot).fd == fd {
+                return Some(slot);
+            }
+            i = i.wrapping_add(1);
+        }
+    }
+    None
+}
+
+/// Allocate a free cache slot, or return null if the pool is exhausted.
+fn alloc_getdents_cache(fd: i32) -> *mut GetdentsCache {
+    // SAFETY: Single-threaded access.
+    unsafe {
+        let base = core::ptr::addr_of_mut!(GETDENTS_POOL).cast::<GetdentsCache>();
+        let mut i: usize = 0;
+        while i < MAX_GETDENTS_CACHES {
+            let slot = base.add(i);
+            if !(*slot).in_use {
+                (*slot).in_use = true;
+                (*slot).fd = fd;
+                (*slot).count = 0;
+                (*slot).pos = 0;
+                return slot;
+            }
+            i = i.wrapping_add(1);
+        }
+    }
+    core::ptr::null_mut()
+}
+
+/// Release a cache slot back to the pool.
+fn free_getdents_cache(slot: *mut GetdentsCache) {
+    if slot.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees `slot` points into GETDENTS_POOL.
+    unsafe {
+        (*slot).in_use = false;
+        (*slot).fd = -1;
+        (*slot).count = 0;
+        (*slot).pos = 0;
+    }
+}
+
+/// Header size of a `linux_dirent64` record (everything before `d_name`).
+const LINUX_DIRENT64_HEADER: usize = 19;
+
+/// Emit one `linux_dirent64` record into `out`.
 ///
-/// Stub: returns -1 with ENOSYS.  Same as `getdents64` but with the
-/// older 32-bit-inode struct layout.
+/// Returns `Some(reclen)` on success (number of bytes written, padded to
+/// 8-byte alignment) or `None` if `out` is too small to hold the record.
+fn emit_linux_dirent64(
+    out: &mut [u8],
+    ino: u64,
+    off: i64,
+    dtype: u8,
+    name: &[u8],
+) -> Option<usize> {
+    // Name must include space for the trailing NUL terminator and the
+    // whole record must be rounded up to 8-byte alignment so the next
+    // record's u64 fields stay aligned.
+    let name_len = name.len();
+    let unpadded = LINUX_DIRENT64_HEADER
+        .checked_add(name_len)?
+        .checked_add(1)?;
+    let reclen = unpadded.checked_add(7)? & !7usize;
+    if reclen > out.len() || reclen > u16::MAX as usize {
+        return None;
+    }
+    let slot = out.get_mut(..reclen)?;
+    slot[0..8].copy_from_slice(&ino.to_le_bytes());
+    slot[8..16].copy_from_slice(&off.to_le_bytes());
+    let reclen_u16 = reclen as u16;
+    slot[16..18].copy_from_slice(&reclen_u16.to_le_bytes());
+    slot[18] = dtype;
+    if let Some(name_dst) = slot.get_mut(LINUX_DIRENT64_HEADER..LINUX_DIRENT64_HEADER + name_len) {
+        name_dst.copy_from_slice(name);
+    }
+    // Zero the NUL terminator and any tail padding.
+    if let Some(tail) = slot.get_mut(LINUX_DIRENT64_HEADER + name_len..reclen) {
+        for b in tail {
+            *b = 0;
+        }
+    }
+    Some(reclen)
+}
+
+/// Parse a single 264-byte kernel directory entry into `(name, dtype)`.
+///
+/// Returns `None` if the entry has no name (empty NUL-terminated string).
+fn parse_kernel_entry(entry: &[u8; DIR_ENTRY_SIZE]) -> Option<(&[u8], u8)> {
+    // Name occupies bytes 0..256; find NUL.
+    let mut name_len: usize = 0;
+    while name_len < 256 && entry[name_len] != 0 {
+        name_len = name_len.wrapping_add(1);
+    }
+    if name_len == 0 {
+        return None;
+    }
+    let dtype = entry[260];
+    let name = entry.get(..name_len)?;
+    Some((name, dtype))
+}
+
+/// Read directory entries via the raw Linux `getdents64` syscall.
+///
+/// Programs normally use `readdir()`; this exists for low-level
+/// compatibility with code that calls the raw syscall (e.g. `ls -f`
+/// implementations and language runtimes that bypass libc's dir
+/// streams).
+///
+/// On the first call for a given fd we snapshot the directory via
+/// `SYS_FS_LIST_DIR`; subsequent calls drain the snapshot.  Returns the
+/// number of bytes written into `dirp`, 0 at end-of-directory, or -1
+/// with errno set on error.
+///
+/// # Errors
+///
+/// - `EBADF`  — `fd` is negative or not a valid open fd.
+/// - `EFAULT` — `dirp` is null and `count` is non-zero.
+/// - `EINVAL` — `count` is zero or too small to hold any single entry.
+/// - `ENOTDIR` — `fd` does not refer to a directory.
+/// - `ENFILE` — the per-fd snapshot cache pool is exhausted.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
+    if fd < 0 {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return -1;
+    }
+    if count == 0 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    if dirp.is_null() {
+        crate::errno::set_errno(crate::errno::EFAULT);
+        return -1;
+    }
+
+    // Locate or allocate the cache slot for this fd.
+    let slot_ptr = if let Some(existing) = find_getdents_cache(fd) {
+        existing
+    } else {
+        // Validate fd before snapshotting.
+        if crate::fdtable::get_fd(fd).is_none() {
+            crate::errno::set_errno(crate::errno::EBADF);
+            return -1;
+        }
+        // Look up the stored path for this fd.
+        let mut path_buf = [0u8; crate::unistd::PATH_MAX];
+        let path_len = crate::fdtable::get_fd_path(fd, &mut path_buf);
+        if path_len == 0 {
+            crate::errno::set_errno(crate::errno::ENOTDIR);
+            return -1;
+        }
+        let slot = alloc_getdents_cache(fd);
+        if slot.is_null() {
+            crate::errno::set_errno(crate::errno::ENFILE);
+            return -1;
+        }
+        // Snapshot the directory listing into the cache buffer.
+        // SAFETY: slot is a valid pointer into GETDENTS_POOL; the
+        // buffer is owned exclusively while in_use is true.
+        let buf_ptr = unsafe { core::ptr::addr_of_mut!((*slot).buf) }.cast::<u8>();
+        let ret = syscall3(
+            SYS_FS_LIST_DIR,
+            path_buf.as_ptr() as u64,
+            path_len as u64,
+            buf_ptr as u64,
+        );
+        if ret < 0 {
+            free_getdents_cache(slot);
+            let _ = errno::translate(ret); // Sets errno.
+            return -1;
+        }
+        // SAFETY: slot is valid; we own it via in_use.
+        unsafe {
+            (*slot).count = ret as usize;
+            (*slot).pos = 0;
+        }
+        slot
+    };
+
+    // SAFETY: slot_ptr is non-null and refers to an owned cache slot.
+    let (snapshot_count, mut pos, buf_ptr_const) = unsafe {
+        let cnt = (*slot_ptr).count;
+        let p = (*slot_ptr).pos;
+        let bp = core::ptr::addr_of!((*slot_ptr).buf).cast::<u8>();
+        (cnt, p, bp)
+    };
+
+    // If we are already past the end, free the slot and report EOF.
+    if pos >= snapshot_count {
+        free_getdents_cache(slot_ptr);
+        return 0;
+    }
+
+    // SAFETY: dirp points to a writable buffer of `count` bytes (caller
+    // contract for getdents64).  We never read past `count`.
+    let out = unsafe { core::slice::from_raw_parts_mut(dirp, count) };
+    let mut written: usize = 0;
+    let mut emitted_any = false;
+
+    while pos < snapshot_count {
+        let entry_off = pos.wrapping_mul(DIR_ENTRY_SIZE);
+        // Bounds: each snapshot entry is exactly DIR_ENTRY_SIZE bytes
+        // and `count < MAX_DIR_ENTRIES` was guaranteed by SYS_FS_LIST_DIR.
+        let entry_end = entry_off.wrapping_add(DIR_ENTRY_SIZE);
+        if entry_end > MAX_DIR_ENTRIES.wrapping_mul(DIR_ENTRY_SIZE) {
+            // Defensive: bail rather than over-read.
+            break;
+        }
+        // SAFETY: we computed bounds against the fixed-size buf above.
+        let entry_slice = unsafe {
+            core::slice::from_raw_parts(buf_ptr_const.add(entry_off), DIR_ENTRY_SIZE)
+        };
+        // The slice is exactly DIR_ENTRY_SIZE long, so `try_into` always
+        // succeeds; the match is purely to satisfy the borrow checker.
+        let Ok(entry_arr) = <&[u8; DIR_ENTRY_SIZE]>::try_from(entry_slice) else {
+            break;
+        };
+        let Some((name, dtype)) = parse_kernel_entry(entry_arr) else {
+            // Empty name — skip silently.
+            pos = pos.wrapping_add(1);
+            continue;
+        };
+
+        let Some(remaining) = out.get_mut(written..) else {
+            break;
+        };
+        match emit_linux_dirent64(remaining, pos as u64, (pos as i64).wrapping_add(1), dtype, name) {
+            Some(reclen) => {
+                written = written.wrapping_add(reclen);
+                emitted_any = true;
+                pos = pos.wrapping_add(1);
+            }
+            None => {
+                // Buffer full for this batch.
+                break;
+            }
+        }
+    }
+
+    if !emitted_any {
+        // Caller's buffer is too small for the next available record.
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+
+    // Persist updated position.
+    // SAFETY: slot_ptr still owned by this call.
+    unsafe { (*slot_ptr).pos = pos; }
+
+    written as i64
+}
+
+/// Read directory entries via the legacy Linux `getdents` syscall.
+///
+/// Always returns -1 with `ENOSYS`: the legacy struct has a 32-bit
+/// inode field which doesn't fit our 64-bit inodes, and modern programs
+/// universally use `getdents64`.  Callers should use `readdir()` or
+/// `getdents64` instead.  glibc/musl do not ship a wrapper for either
+/// raw syscall, so this stub is the documented stand-in.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getdents(_fd: i32, _dirp: *mut u8, _count: usize) -> i64 {
     crate::errno::set_errno(crate::errno::ENOSYS);
@@ -1253,14 +1557,17 @@ mod tests {
     // -- getdents / getdents64 stubs --
 
     #[test]
-    fn test_getdents64_enosys() {
+    fn test_getdents64_null_buf_returns_efault() {
+        // getdents64 is now implemented; a null buffer with non-zero
+        // count must report EFAULT before touching the cache.
         crate::errno::set_errno(0);
         assert_eq!(getdents64(3, core::ptr::null_mut(), 4096), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
-    fn test_getdents_enosys() {
+    fn test_getdents_still_enosys() {
+        // getdents (legacy 32-bit-ino variant) remains unimplemented.
         crate::errno::set_errno(0);
         assert_eq!(getdents(3, core::ptr::null_mut(), 4096), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
@@ -1323,5 +1630,136 @@ mod tests {
             None,
         );
         // Just verify no crash.
+    }
+
+    // -- getdents / getdents64 --
+
+    #[test]
+    fn test_getdents_returns_enosys() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 256];
+        let ret = getdents(3, buf.as_mut_ptr(), buf.len());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_getdents64_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 256];
+        let ret = getdents64(-1, buf.as_mut_ptr(), buf.len());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_getdents64_zero_count_einval() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 256];
+        let ret = getdents64(3, buf.as_mut_ptr(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getdents64_null_buf_efault() {
+        crate::errno::set_errno(0);
+        let ret = getdents64(3, core::ptr::null_mut(), 256);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_getdents64_invalid_fd_ebadf() {
+        // fd 9999 is far above any allocated test fd, so get_fd() returns None.
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 256];
+        let ret = getdents64(9999, buf.as_mut_ptr(), buf.len());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_emit_linux_dirent64_layout() {
+        // Verify the header layout: ino|off|reclen|type|name|NUL|pad.
+        let mut out = [0u8; 64];
+        let name = b"hi";
+        let reclen = emit_linux_dirent64(&mut out, 0xCAFEBABE, 7, DT_REG, name)
+            .expect("emit should succeed");
+        // 19 (header) + 2 (name) + 1 (NUL) = 22 → rounded up to 24.
+        assert_eq!(reclen, 24);
+        // ino
+        let ino = u64::from_le_bytes(out[0..8].try_into().unwrap());
+        assert_eq!(ino, 0xCAFEBABE);
+        // off
+        let off = i64::from_le_bytes(out[8..16].try_into().unwrap());
+        assert_eq!(off, 7);
+        // reclen
+        let rl = u16::from_le_bytes(out[16..18].try_into().unwrap());
+        assert_eq!(rl as usize, reclen);
+        // type
+        assert_eq!(out[18], DT_REG);
+        // name + NUL
+        assert_eq!(&out[19..21], b"hi");
+        assert_eq!(out[21], 0);
+        // Padding bytes are zero.
+        assert_eq!(out[22], 0);
+        assert_eq!(out[23], 0);
+    }
+
+    #[test]
+    fn test_emit_linux_dirent64_too_small() {
+        let mut out = [0u8; 8];
+        assert!(emit_linux_dirent64(&mut out, 1, 1, DT_DIR, b"abc").is_none());
+    }
+
+    #[test]
+    fn test_emit_linux_dirent64_alignment() {
+        // Every record must be a multiple of 8 bytes so consecutive
+        // records keep their u64 fields aligned.
+        let mut out = [0u8; 128];
+        for name in [&b"a"[..], &b"abc"[..], &b"longer"[..], &b"exactly7"[..]] {
+            let r = emit_linux_dirent64(&mut out, 0, 0, DT_REG, name)
+                .expect("emit should succeed");
+            assert_eq!(r % 8, 0, "reclen {r} not 8-aligned for name {name:?}");
+        }
+    }
+
+    #[test]
+    fn test_parse_kernel_entry_empty_name_skipped() {
+        let entry = [0u8; DIR_ENTRY_SIZE];
+        assert!(parse_kernel_entry(&entry).is_none());
+    }
+
+    #[test]
+    fn test_parse_kernel_entry_extracts_name_and_type() {
+        let mut entry = [0u8; DIR_ENTRY_SIZE];
+        entry[0] = b'f';
+        entry[1] = b'o';
+        entry[2] = b'o';
+        // bytes 3.. are NUL — name terminates at NUL.
+        entry[260] = DT_DIR;
+        let (name, dtype) = parse_kernel_entry(&entry).expect("should parse");
+        assert_eq!(name, b"foo");
+        assert_eq!(dtype, DT_DIR);
+    }
+
+    #[test]
+    fn test_getdents_cache_pool_constants() {
+        // Sanity check the pool size — bumping this constant must be
+        // a deliberate decision (it grows .bss).
+        assert_eq!(MAX_GETDENTS_CACHES, 4);
+    }
+
+    #[test]
+    fn test_getdents_cache_find_returns_none_for_negative() {
+        assert!(find_getdents_cache(-1).is_none());
+        assert!(find_getdents_cache(-42).is_none());
+    }
+
+    #[test]
+    fn test_linux_dirent64_header_size() {
+        // 8 (ino) + 8 (off) + 2 (reclen) + 1 (type) = 19.
+        assert_eq!(LINUX_DIRENT64_HEADER, 19);
     }
 }

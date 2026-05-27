@@ -558,6 +558,22 @@ Remaining net improvements (diminishing returns):
   MAX_INOTIFY_CHILDREN=16 per directory watch, MAX_INOTIFY_EVENTS=32
   queued events, INOTIFY_NAME_MAX=64, INOTIFY_PATH_MAX=256.
 
+- (2026-05-27) posix getdents64 uses a per-fd snapshot cache, NOT
+  incremental kernel iteration.  Each fd's first getdents64 call
+  invokes SYS_FS_LIST_DIR for the whole directory; subsequent calls
+  drain that snapshot.  On EOF the cache slot is freed.  Pool is
+  4 slots, so at most 4 concurrent getdents64-iterated directories
+  may be in progress before ENFILE is returned to new openers.
+  Cache is keyed by fd number — if a program closes a directory fd
+  mid-iteration and reuses the fd number, the new opener will see
+  stale snapshot data until it consumes the rest of the snapshot.
+  Real programs do not close-and-reuse mid-iteration, but the
+  deferred proper fix is to hook fdtable::close_fd() to invalidate
+  caches when their owning fd is released (mirroring how DIR_POOL
+  is implicitly invalidated by closedir()).  Also: legacy getdents
+  (32-bit-ino variant) remains ENOSYS — glibc/musl ship no wrapper
+  for it and our 64-bit inodes don't fit the legacy struct.
+
 ## Clippy lint cleanup
 
 UPDATE (2026-05-27): Workspace lint policy relaxed in commit 948fd5ff.

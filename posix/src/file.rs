@@ -2360,12 +2360,43 @@ pub const POSIX_FADV_DONTNEED: i32 = 4;
 
 /// Advise the kernel about file access patterns.
 ///
-/// Stub: always returns 0 (success).  The kernel doesn't use file
-/// access hints yet, but programs that call `posix_fadvise` should
-/// not fail.
+/// Validates inputs per POSIX/Linux semantics, then accepts the
+/// advice as a no-op — our kernel doesn't act on access-pattern
+/// hints yet, but the validation surface is real so callers that
+/// pass garbage get a real error instead of silent success.
+///
+/// Unlike most POSIX functions, `posix_fadvise` returns the error
+/// number directly (positive) on failure — it does **not** set
+/// errno and return -1.  Returns 0 on success.
+///
+/// Errors:
+/// * `EBADF` — `fd` is not an open file descriptor.
+/// * `EINVAL` — `advice` is not one of the defined `POSIX_FADV_*`
+///   constants, or `len` is negative.
+/// * `ESPIPE` — `fd` refers to a pipe (Linux extension; POSIX
+///   leaves this unspecified).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn posix_fadvise(_fd: Fd, _offset: OffT, _len: OffT, _advice: i32) -> i32 {
-    0 // Succeed silently — advice is purely advisory.
+pub extern "C" fn posix_fadvise(fd: Fd, _offset: OffT, len: OffT, advice: i32) -> i32 {
+    // EINVAL for negative len.
+    if len < 0 {
+        return errno::EINVAL;
+    }
+    // EINVAL for unknown advice values.
+    match advice {
+        POSIX_FADV_NORMAL | POSIX_FADV_SEQUENTIAL | POSIX_FADV_RANDOM
+        | POSIX_FADV_NOREUSE | POSIX_FADV_WILLNEED | POSIX_FADV_DONTNEED => {}
+        _ => return errno::EINVAL,
+    }
+    // EBADF if the fd isn't open.
+    let Some(entry) = fdtable::get_fd(fd) else {
+        return errno::EBADF;
+    };
+    // ESPIPE for pipes (Linux extension; matches what real applications expect).
+    if matches!(entry.kind, fdtable::HandleKind::Pipe) {
+        return errno::ESPIPE;
+    }
+    // Advice is purely advisory — accept and ignore.
+    0
 }
 
 /// Ensure that disk space is allocated for the file region
@@ -3751,9 +3782,80 @@ mod tests {
 
     #[test]
     fn test_posix_fadvise_succeeds() {
-        assert_eq!(posix_fadvise(0, 0, 0, POSIX_FADV_NORMAL), 0);
-        assert_eq!(posix_fadvise(0, 0, 0, POSIX_FADV_SEQUENTIAL), 0);
-        assert_eq!(posix_fadvise(0, 0, 0, POSIX_FADV_RANDOM), 0);
+        // Open our own fd so we don't depend on whether some other
+        // test in the suite has closed stdin/stdout.
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0)
+            .expect("fd available");
+        assert_eq!(posix_fadvise(fd, 0, 0, POSIX_FADV_NORMAL), 0);
+        assert_eq!(posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL), 0);
+        assert_eq!(posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM), 0);
+        assert_eq!(posix_fadvise(fd, 0, 0, POSIX_FADV_WILLNEED), 0);
+        assert_eq!(posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED), 0);
+        assert_eq!(posix_fadvise(fd, 0, 0, POSIX_FADV_NOREUSE), 0);
+        let _ = close(fd);
+    }
+
+    #[test]
+    fn test_posix_fadvise_bad_fd_returns_ebadf() {
+        // -1 is never a valid fd → EBADF (returned directly).
+        assert_eq!(posix_fadvise(-1, 0, 0, POSIX_FADV_NORMAL), errno::EBADF);
+        // A high fd that's not open → also EBADF.
+        assert_eq!(posix_fadvise(900, 0, 0, POSIX_FADV_NORMAL), errno::EBADF);
+    }
+
+    #[test]
+    fn test_posix_fadvise_bad_advice_returns_einval() {
+        // Unknown advice value → EINVAL.  Linux validates advice before
+        // touching the fd table; we do the same.  Use an invalid fd to
+        // demonstrate advice validation happens first (independent of fd state).
+        assert_eq!(posix_fadvise(-1, 0, 0, 99), errno::EINVAL);
+        assert_eq!(posix_fadvise(-1, 0, 0, -1), errno::EINVAL);
+        assert_eq!(posix_fadvise(-1, 0, 0, 6), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_posix_fadvise_negative_len_returns_einval() {
+        // Negative len is the only length constraint (offset may be any value).
+        // Use an invalid fd to demonstrate len validation runs first.
+        assert_eq!(posix_fadvise(-1, 0, -1, POSIX_FADV_NORMAL), errno::EINVAL);
+        assert_eq!(posix_fadvise(-1, 100, -100, POSIX_FADV_SEQUENTIAL), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_posix_fadvise_does_not_set_errno() {
+        // posix_fadvise returns the error directly — it must NOT also
+        // pollute errno (POSIX requires the error to be returned, not
+        // signaled the usual way).  Verify a fresh errno value survives.
+        errno::set_errno(12345);
+        let ret = posix_fadvise(-1, 0, 0, POSIX_FADV_NORMAL);
+        assert_eq!(ret, errno::EBADF);
+        assert_eq!(errno::get_errno(), 12345);
+    }
+
+    #[test]
+    fn test_posix_fadvise_pipe_returns_espipe() {
+        // Pipes are unseekable — Linux returns ESPIPE.
+        let mut pipefd = [0i32; 2];
+        let ret = crate::pipe::pipe(pipefd.as_mut_ptr());
+        assert_eq!(ret, 0, "pipe() must succeed for this test");
+        let read_end = pipefd[0];
+        let write_end = pipefd[1];
+        assert_eq!(posix_fadvise(read_end, 0, 0, POSIX_FADV_NORMAL), errno::ESPIPE);
+        assert_eq!(posix_fadvise(write_end, 0, 0, POSIX_FADV_NORMAL), errno::ESPIPE);
+        // Cleanup.
+        let _ = close(read_end);
+        let _ = close(write_end);
+    }
+
+    #[test]
+    fn test_fadvise64_delegates_to_posix_fadvise() {
+        // fadvise64 must validate the same way as posix_fadvise.
+        assert_eq!(fadvise64(-1, 0, 0, POSIX_FADV_NORMAL), errno::EBADF);
+        assert_eq!(fadvise64(-1, 0, 0, 99), errno::EINVAL);
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0)
+            .expect("fd available");
+        assert_eq!(fadvise64(fd, 0, 0, POSIX_FADV_NORMAL), 0);
+        let _ = close(fd);
     }
 
     #[test]
@@ -5134,7 +5236,10 @@ mod tests {
 
     #[test]
     fn test_fadvise64_succeeds() {
-        assert_eq!(fadvise64(0, 0, 0, 0), 0);
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0)
+            .expect("fd available");
+        assert_eq!(fadvise64(fd, 0, 0, 0), 0);
+        let _ = close(fd);
     }
 
     // -- splice / vmsplice (buffered fallback) --

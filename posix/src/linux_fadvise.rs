@@ -41,7 +41,13 @@ mod tests {
 
     #[test]
     fn test_posix_fadvise_stub() {
-        assert_eq!(posix_fadvise(0, 0, 0, POSIX_FADV_NORMAL), 0);
+        use crate::fdtable;
+        // Open our own fd so we don't depend on whether some other
+        // test in the suite has closed stdin.
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0)
+            .expect("fd available");
+        assert_eq!(posix_fadvise(fd, 0, 0, POSIX_FADV_NORMAL), 0);
+        let _ = crate::file::close(fd);
     }
 
     #[test]

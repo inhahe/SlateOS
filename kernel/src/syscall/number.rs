@@ -357,6 +357,23 @@ pub const SYS_PHYS_PAGES_TOTAL: u64 = 56;
 /// Returns: free physical pages.
 pub const SYS_PHYS_PAGES_AVAIL: u64 = 57;
 
+/// Read one of the three EWMA load averages.
+///
+/// `arg0`: which average to read.
+///   - 0 = 1-minute
+///   - 1 = 5-minute
+///   - 2 = 15-minute
+///
+/// Returns the fixed-point value with FSHIFT=11 (i.e., the integer
+/// load × 2048, plus fractional bits).  Userspace divides by 2048.0
+/// to get the conventional decimal form.  Used by libc's
+/// `getloadavg()` and by `uptime`-like utilities to read the
+/// scheduler's tracked load.
+///
+/// Returns: load value in fixed-point.  `InvalidArgument` if `arg0`
+/// is not 0/1/2.
+pub const SYS_LOADAVG: u64 = 58;
+
 /// Read a kernel tunable parameter (sysctl-like interface).
 ///
 /// `arg0`: parameter ID (e.g., 0 = mm.max_stack_frames).

@@ -1335,10 +1335,26 @@ pub extern "C" fn getloadavg(loadavg: *mut f64, nelem: i32) -> i32 {
 
     let mut i: i32 = 0;
     while i < count {
+        let v = {
+            #[cfg(target_os = "none")]
+            {
+                // Kernel FSHIFT — must match crate::loadavg::FSHIFT (11).
+                const FIXED_1_F: f64 = 2048.0;
+                let raw = crate::syscall::syscall1(
+                    crate::syscall::SYS_LOADAVG,
+                    i as u64,
+                );
+                // Negative = kernel error (shouldn't happen for 0..=2);
+                // treat as zero load.
+                if raw < 0 { 0.0 } else { raw as f64 / FIXED_1_F }
+            }
+            #[cfg(not(target_os = "none"))]
+            { 0.0 }
+        };
         // SAFETY: loadavg is valid for at least nelem elements (caller
         // contract), and i < count <= nelem.
         unsafe {
-            *loadavg.add(i as usize) = 0.0;
+            *loadavg.add(i as usize) = v;
         }
         i = i.wrapping_add(1);
     }

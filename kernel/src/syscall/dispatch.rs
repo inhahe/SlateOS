@@ -63,6 +63,7 @@ use super::number::{
     SYS_DMA_ATTACH, SYS_DMA_DETACH,
     SYS_CPU_COUNT,
     SYS_PHYS_PAGES_TOTAL, SYS_PHYS_PAGES_AVAIL,
+    SYS_LOADAVG,
     SYS_SCHED_GET_PROFILE, SYS_SCHED_GET_TIMESLICE, SYS_SCHED_RECONFIGURE,
     SYS_SCHED_SET_PROFILE, SYS_SCHED_SET_TIMESLICE,
     SYS_SYSCTL_GET, SYS_SYSCTL_SET,
@@ -255,6 +256,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CPU_COUNT as usize] = Some(handlers::sys_cpu_count);
     handlers[SYS_PHYS_PAGES_TOTAL as usize] = Some(handlers::sys_phys_pages_total);
     handlers[SYS_PHYS_PAGES_AVAIL as usize] = Some(handlers::sys_phys_pages_avail);
+    handlers[SYS_LOADAVG as usize] = Some(handlers::sys_loadavg);
 
     // Sysctl — kernel parameter registry (60–69).
     handlers[SYS_SYSCTL_GET as usize] = Some(handlers::sys_sysctl_get);

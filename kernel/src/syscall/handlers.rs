@@ -7246,6 +7246,27 @@ pub fn sys_phys_pages_avail(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(free as i64)
 }
 
+/// `SYS_LOADAVG` — read one of the three EWMA load averages.
+///
+/// `arg0`: 0 = 1-min, 1 = 5-min, 2 = 15-min.
+///
+/// Reads `crate::loadavg::get()`, returns the requested fixed-point
+/// value (FSHIFT=11, i.e., load × 2048).  Reports
+/// `InvalidArgument` for any other index.
+///
+/// Returns: load value in fixed-point on success.
+pub fn sys_loadavg(args: &SyscallArgs) -> SyscallResult {
+    let (l1, l5, l15) = crate::loadavg::get();
+    let val = match args.arg0 {
+        0 => l1,
+        1 => l5,
+        2 => l15,
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(val as i64)
+}
+
 // ---------------------------------------------------------------------------
 // Sysctl — kernel parameter registry (60–69)
 // ---------------------------------------------------------------------------

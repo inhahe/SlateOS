@@ -454,6 +454,23 @@ Remaining net improvements (diminishing returns):
   esp/boot/kernel (per limine.conf kernel_path: boot():/boot/kernel).  The
   esp/EFI/BOOT/ directory is for the bootloader EFI binary, not the kernel.
   Always copy built kernel to esp/boot/kernel.
+
+- (2026-05-26) Linux eventfd(): EFD_SEMAPHORE flag is unsupported.
+  The kernel eventfd::read() implementation drains the entire counter
+  atomically, but EFD_SEMAPHORE requires read() to decrement by 1 and
+  return 1 (semaphore semantics).  Userspace posix::eventfd() rejects
+  EFD_SEMAPHORE with EINVAL until the kernel adds a semaphore-mode
+  read path (eventfd::read_semaphore(handle)) and a corresponding
+  flag bit on the kernel EventFd state.  Tracked here so a future
+  session can add it without re-deriving the requirements.
+
+- (2026-05-26) eventfd fd inheritance across spawn is pass-through:
+  closing the eventfd handle from parent OR child invalidates it for
+  both, because there is no kernel-level eventfd::dup() with ref-
+  counting yet.  Same caveat as pipes.  Fix: add an Arc-like
+  refcount inside the EVENTFD_TABLE entry plus an eventfd::dup()
+  helper, then update kernel/src/proc/spawn.rs's fd_handle_type::
+  EVENTFD branch to call it (mirrors what kernel-ipc owes pipes).
 ## Clippy lint cleanup (deferred, large effort)
 
 - (2026-05-26) `cargo clippy -p kernel` reports 16895 warnings and ~63

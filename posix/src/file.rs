@@ -1254,10 +1254,45 @@ pub extern "C" fn dup3(oldfd: Fd, newfd: Fd, flags: i32) -> Fd {
 /// Linux-compatible `close_range` syscall wrapper.  On success returns 0;
 /// on error returns -1 and sets errno.
 ///
-/// `flags` is currently ignored (Linux supports `CLOSE_RANGE_UNSHARE`
-/// and `CLOSE_RANGE_CLOEXEC`, neither of which is meaningful for us).
+/// Recognized flag bits:
+///
+/// * `CLOSE_RANGE_UNSHARE` (bit 1) — Linux unshares the fd table from
+///   any sharing parent before closing.  Our processes never share fd
+///   tables (every process has its own — see `fdtable` docs), so this
+///   bit's postcondition is already satisfied; we accept the bit as a
+///   no-op.
+/// * `CLOSE_RANGE_CLOEXEC` (bit 2) — set `FD_CLOEXEC` on each open fd
+///   in the range instead of closing it.  Useful for libraries that
+///   want to ensure no descriptors leak across a subsequent `execve`
+///   without disturbing already-open fds in the current process.
+///
+/// Returns -1 with `EINVAL` for `first > last` (Linux behavior) or for
+/// any unknown flag bit.  Returns -1 with `EINVAL` when both
+/// `CLOSE_RANGE_UNSHARE` is set without `CLOSE_RANGE_CLOEXEC`? — no:
+/// the two are independent and both may be combined.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn close_range(first: u32, last: u32, _flags: u32) -> i32 {
+pub extern "C" fn close_range(first: u32, last: u32, flags: u32) -> i32 {
+    use crate::linux_close_range::{CLOSE_RANGE_CLOEXEC, CLOSE_RANGE_UNSHARE};
+
+    // Linux returns EINVAL for inverted ranges.  Our previous code
+    // silently treated them as no-ops, which masks bugs in callers.
+    if first > last {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Reject any flag bit we don't understand.  glibc and musl
+    // forward-compat their callers by passing 0; anything else is a
+    // bug in the caller (or a feature we haven't implemented yet).
+    let known_flags = CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC;
+    if flags & !known_flags != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let cloexec = (flags & CLOSE_RANGE_CLOEXEC) != 0;
+    // CLOSE_RANGE_UNSHARE is implicitly a no-op for us (no fd-table sharing).
+
     // Cap at MAX_FDS-1: no fd beyond the table limit can be open,
     // and iterating up to u32::MAX would take ~4 billion iterations
     // due to wrapping.  Programs commonly pass UINT_MAX as `last`
@@ -1266,8 +1301,17 @@ pub extern "C" fn close_range(first: u32, last: u32, _flags: u32) -> i32 {
     let effective_last = if last >= max { max.wrapping_sub(1) } else { last };
     let mut fd = first;
     while fd <= effective_last {
-        // close() is best-effort here — ignore errors on individual fds.
-        let _ = close(fd as i32);
+        if cloexec {
+            // Only modify open fds — skipping closed slots avoids
+            // creating spurious "fd N has FD_CLOEXEC set" state that
+            // a later open() would inherit.
+            if let Some(existing) = fdtable::get_fd_flags(fd as i32) {
+                let _ = fdtable::set_fd_flags(fd as i32, existing | fdtable::FD_CLOEXEC);
+            }
+        } else {
+            // close() is best-effort here — ignore errors on individual fds.
+            let _ = close(fd as i32);
+        }
         fd = fd.wrapping_add(1);
     }
     0
@@ -3874,8 +3918,69 @@ mod tests {
 
     #[test]
     fn test_close_range_inverted() {
-        // close_range with first > last should do nothing (no crash).
-        let _ = close_range(100, 50, 0);
+        // close_range with first > last returns EINVAL (matches Linux).
+        errno::set_errno(0);
+        let ret = close_range(100, 50, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_close_range_unknown_flag_einval() {
+        // Bit 0 isn't a defined CLOSE_RANGE_* flag; reject it.
+        errno::set_errno(0);
+        let ret = close_range(0, 10, 1);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_close_range_unshare_accepted() {
+        use crate::linux_close_range::CLOSE_RANGE_UNSHARE;
+        // CLOSE_RANGE_UNSHARE on an empty range succeeds (no-op for us
+        // — we never share fd tables across processes).
+        let ret = close_range(500, 600, CLOSE_RANGE_UNSHARE);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_close_range_cloexec_sets_flag() {
+        use crate::linux_close_range::CLOSE_RANGE_CLOEXEC;
+        // Reserve an fd, ensure CLOEXEC starts clear, run close_range
+        // with CLOSE_RANGE_CLOEXEC across a range containing it, and
+        // verify the flag flipped on without the fd being closed.
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0)
+            .expect("fd available");
+        assert!(fdtable::set_fd_flags(fd, 0));
+        let ret = close_range(fd as u32, fd as u32, CLOSE_RANGE_CLOEXEC);
+        assert_eq!(ret, 0);
+        assert_eq!(fdtable::get_fd_flags(fd), Some(fdtable::FD_CLOEXEC));
+        // fd must still be open after CLOEXEC mode.
+        assert!(fdtable::get_fd(fd).is_some());
+        // Cleanup.
+        let _ = close(fd);
+    }
+
+    #[test]
+    fn test_close_range_cloexec_skips_closed_fds() {
+        use crate::linux_close_range::CLOSE_RANGE_CLOEXEC;
+        // CLOSE_RANGE_CLOEXEC over a range of unopened fds must not
+        // create FD_CLOEXEC state in slots that aren't actually open.
+        // Pick a high range unlikely to clash with anything else.
+        let ret = close_range(900, 910, CLOSE_RANGE_CLOEXEC);
+        assert_eq!(ret, 0);
+        for fd in 900..=910 {
+            assert!(fdtable::get_fd_flags(fd).is_none(),
+                "unopened fd {fd} must not have flags set");
+        }
+    }
+
+    #[test]
+    fn test_close_range_combined_flags_accepted() {
+        use crate::linux_close_range::{CLOSE_RANGE_CLOEXEC, CLOSE_RANGE_UNSHARE};
+        // Both flags combined is valid per the Linux ABI.
+        let ret = close_range(500, 510, CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC);
+        assert_eq!(ret, 0);
     }
 
     #[test]

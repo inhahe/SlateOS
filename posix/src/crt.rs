@@ -783,12 +783,78 @@ pub static mut __libc_single_threaded: u8 = 1;
 // Auxiliary vector access
 // ---------------------------------------------------------------------------
 
+/// AT_RANDOM backing buffer.
+///
+/// glibc expects `getauxval(AT_RANDOM)` to return a pointer to 16 bytes
+/// of kernel-supplied randomness.  These bytes are used for stack
+/// canaries, pthread keys, and ASLR-style seeds inside libc.  Programs
+/// MUST NOT use them for cryptography (use `getrandom()` for that), but
+/// they must be unpredictable per-process — a constant here would let
+/// an attacker bypass stack canary protection.
+///
+/// We populate this on first read via `fill_random()` (RDRAND with LCG
+/// fallback).  The buffer is then stable for the rest of the process
+/// lifetime, which matches the Linux ABI contract.
+static mut AT_RANDOM_BYTES: [u8; 16] = [0; 16];
+/// Whether `AT_RANDOM_BYTES` has been initialized.
+///
+/// Single-process userspace: one of the AT_RANDOM bytes happening to be
+/// zero on a freshly-RDRAND'd buffer is harmless (a stack canary with
+/// one zero byte is still 120 bits of entropy), but the `initialized`
+/// flag avoids re-rolling the value on every getauxval call so callers
+/// who cache the pointer see stable bytes through the buffer.
+static AT_RANDOM_INITIALIZED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// AT_PLATFORM backing string ("x86_64", null-terminated).
+///
+/// glibc dynamic linker reads this to pick architecture-specific
+/// library paths (`/usr/lib/$AT_PLATFORM/`).
+static AT_PLATFORM_BYTES: [u8; 7] = *b"x86_64\0";
+
+/// Initialize the AT_RANDOM buffer if not yet done.
+///
+/// Safe to call repeatedly — only the first call writes the buffer.
+/// Subsequent calls observe the AtomicBool and short-circuit.
+fn ensure_at_random_initialized() {
+    use core::sync::atomic::Ordering;
+
+    // Acquire ordering pairs with the Release on the store below: a
+    // reader that observes `initialized = true` is guaranteed to see
+    // the full random buffer.
+    if AT_RANDOM_INITIALIZED.load(Ordering::Acquire) {
+        return;
+    }
+
+    // Take a raw pointer to the static buffer.  fill_random is safe
+    // (it writes through the pointer with the standard write-len ABI);
+    // the buffer itself is owned by this module and only ever written
+    // here.  Race in single-process userspace is harmless: both racers
+    // call fill_random into the same buffer; the second write simply
+    // overwrites the first.
+    let ptr = core::ptr::addr_of_mut!(AT_RANDOM_BYTES).cast::<u8>();
+    crate::unistd::fill_random(ptr, 16);
+    AT_RANDOM_INITIALIZED.store(true, Ordering::Release);
+}
+
 /// Query the auxiliary vector (glibc extension).
 ///
 /// The auxiliary vector is a mechanism for the kernel to pass
 /// information to userspace at process startup (page size, UID, etc.).
-/// Since our kernel doesn't populate an auxv yet, we return sensible
-/// defaults for known types and 0 for everything else.
+/// Our kernel doesn't populate an auxv struct; we synthesize the
+/// commonly-queried entries here:
+///
+/// - `AT_PAGESZ` (6) → 16384 (our page size).
+/// - `AT_CLKTCK` (17) → 100 (HZ).
+/// - `AT_RANDOM` (25) → pointer to 16 bytes of process-local randomness,
+///   lazily populated on first call from `fill_random()` (RDRAND with
+///   LCG fallback).  Used by glibc/musl for stack canaries.
+/// - `AT_PLATFORM` (15) → pointer to "x86_64\0".
+/// - `AT_SECURE`/`AT_HWCAP`/`AT_HWCAP2`/`AT_UID`/`AT_EUID`/`AT_GID`/
+///   `AT_EGID` → 0 (single-user OS, no setuid binaries, no advertised
+///   hwcap flags yet — programs fall back to CPUID).
+///
+/// Any other type sets `errno = ENOENT` and returns 0, matching glibc.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getauxval(typ: u64) -> u64 {
     // Common AT_* values (from Linux headers).
@@ -801,10 +867,17 @@ pub extern "C" fn getauxval(typ: u64) -> u64 {
     const AT_EUID: u64 = 12;
     const AT_GID: u64 = 13;
     const AT_EGID: u64 = 14;
+    const AT_RANDOM: u64 = 25;
+    const AT_PLATFORM: u64 = 15;
 
     match typ {
         AT_PAGESZ => 16384, // Our 16 KiB page size.
         AT_CLKTCK => 100,   // Jiffy rate (HZ).
+        AT_RANDOM => {
+            ensure_at_random_initialized();
+            core::ptr::addr_of!(AT_RANDOM_BYTES) as u64
+        }
+        AT_PLATFORM => core::ptr::addr_of!(AT_PLATFORM_BYTES) as u64,
         // Secure mode off, no hwcap flags, root uid/gid.
         AT_SECURE | AT_HWCAP | AT_HWCAP2 | AT_UID | AT_EUID | AT_GID | AT_EGID => 0,
         _ => {

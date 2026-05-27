@@ -1450,7 +1450,7 @@ pub extern "C" fn getentropy(buf: *mut u8, buflen: usize) -> i32 {
 /// Tries RDRAND first (hardware RNG), falls back to an LCG seeded from
 /// the monotonic clock.  Not cryptographically strong — suitable for
 /// seeding userspace PRNGs, temp file names, etc.
-fn fill_random(buf: *mut u8, len: usize) {
+pub(crate) fn fill_random(buf: *mut u8, len: usize) {
     // Try RDRAND first.
     let mut seed: u64 = 0;
     let rdrand_ok: bool;

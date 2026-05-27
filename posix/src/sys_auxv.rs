@@ -139,4 +139,63 @@ mod tests {
         let val = getauxval(0xFFFF_FFFF);
         assert_eq!(val, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // AT_RANDOM — pointer to 16 bytes of process-local randomness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_getauxval_random_returns_pointer() {
+        let p = getauxval(AT_RANDOM);
+        assert!(p != 0, "AT_RANDOM must return a non-null pointer");
+    }
+
+    #[test]
+    fn test_getauxval_random_stable_across_calls() {
+        // glibc's stack-canary code reads the pointer once at startup,
+        // then re-reads the bytes during later canary refresh.  The
+        // pointer (and the bytes it points at) must be stable for the
+        // process lifetime.
+        let p1 = getauxval(AT_RANDOM);
+        let p2 = getauxval(AT_RANDOM);
+        assert_eq!(p1, p2, "AT_RANDOM pointer must be stable");
+
+        // SAFETY: AT_RANDOM points at a static 16-byte buffer.
+        let bytes1: [u8; 16] = unsafe { *(p1 as *const [u8; 16]) };
+        let bytes2: [u8; 16] = unsafe { *(p2 as *const [u8; 16]) };
+        assert_eq!(bytes1, bytes2, "AT_RANDOM bytes must not change between calls");
+    }
+
+    #[test]
+    fn test_getauxval_random_not_all_zero() {
+        // Lazy init must populate the buffer with non-zero bytes
+        // (RDRAND on real hardware, LCG fallback otherwise).  A buffer
+        // that's all zeros would mean init didn't run, which would
+        // defeat the stack-canary protection.
+        let p = getauxval(AT_RANDOM);
+        // SAFETY: AT_RANDOM points at a static 16-byte buffer.
+        let bytes: [u8; 16] = unsafe { *(p as *const [u8; 16]) };
+        assert!(
+            bytes.iter().any(|&b| b != 0),
+            "AT_RANDOM buffer should not be all zeros after init"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AT_PLATFORM — pointer to a null-terminated CPU-platform string
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_getauxval_platform_returns_pointer() {
+        let p = getauxval(AT_PLATFORM);
+        assert!(p != 0, "AT_PLATFORM must return a non-null pointer");
+    }
+
+    #[test]
+    fn test_getauxval_platform_is_x86_64() {
+        let p = getauxval(AT_PLATFORM);
+        // SAFETY: AT_PLATFORM points to a static null-terminated string.
+        let bytes: [u8; 7] = unsafe { *(p as *const [u8; 7]) };
+        assert_eq!(&bytes, b"x86_64\0");
+    }
 }

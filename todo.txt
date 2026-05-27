@@ -504,6 +504,17 @@ Remaining net improvements (diminishing returns):
   doesn't touch eventfd code.  Investigate: add cross-test isolation
   for setsid/setpgid state, or serialize that suite with #[serial].
 
+- (2026-05-27) Flaky test: `posix::getopt::tests::test_long_only_double_dash_still_works`
+  intermittently fails during full `cargo test -p posix --lib` with
+  `assertion left == right failed, left: -1, right: 86` at
+  posix/src/getopt.rs:1113 but passes cleanly in isolation.  Cause:
+  getopt's global `optind`/`optarg`/`optopt` static state is shared
+  across parallel test threads, so a concurrent test that resets or
+  advances `optind` between calls in this test corrupts its iteration.
+  Fix: serialize the getopt test module with `#[serial]` (add the
+  `serial_test` dev-dep) or restructure getopt to take a context
+  pointer so the tests don't share global state.
+
 - (2026-05-26) Linux eventfd(): EFD_SEMAPHORE flag is unsupported.
   [DONE 2026-05-27] Kernel EventFd grew a `semaphore` field and a new
   `create_with_flags(initial, semaphore)` constructor; read(),

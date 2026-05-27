@@ -1155,6 +1155,9 @@ fn parse_ipv4(s: &str) -> Option<Ipv4Addr> {
 // ---------------------------------------------------------------------------
 
 /// Run NTP module self-tests.
+// Self-tests deliberately runtime-assert RFC 5905 constants
+// (mode codes, stratum values, port number) as living documentation.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[ntp] Running NTP self-tests...");
     let mut passed = 0u32;

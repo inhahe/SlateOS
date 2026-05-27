@@ -1279,6 +1279,9 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Run TFTP self-tests.
+// Self-tests deliberately runtime-assert TFTP opcodes and error
+// codes as living documentation.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[tftp] Running TFTP self-tests...");
     let mut passed = 0u32;

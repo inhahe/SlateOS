@@ -1066,6 +1066,10 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Run DHCPv6 self-tests.
+// Self-tests deliberately runtime-assert RFC-defined constants
+// (port numbers, message-type codes) as living documentation; those
+// trigger clippy::assertions_on_constants.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[dhcpv6] Running DHCPv6 self-tests...");
     let mut passed = 0u32;

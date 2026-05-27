@@ -601,6 +601,9 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Run pcap self-tests.
+// Self-tests deliberately runtime-assert pcap-format constants
+// (magic numbers, link-type codes) as living documentation.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[pcap] Running pcap self-tests...");
     let mut passed = 0u32;

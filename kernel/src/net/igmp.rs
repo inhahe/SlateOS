@@ -536,6 +536,9 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Run IGMP self-tests.
+// Self-tests deliberately runtime-assert RFC-defined constants
+// (message-type codes, protocol numbers) as living documentation.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[igmp] Running IGMP self-tests...");
     let mut passed = 0u32;

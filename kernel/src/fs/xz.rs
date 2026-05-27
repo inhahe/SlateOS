@@ -1982,9 +1982,7 @@ pub fn xz_compress(data: &[u8]) -> KernelResult<Vec<u8>> {
     let total_before_pad = 1 + bh_body.len() + 4;
     let padded_total = (total_before_pad + 3) & !3;
     let pad_needed = padded_total - total_before_pad;
-    for _ in 0..pad_needed {
-        bh_body.push(0x00);
-    }
+    bh_body.resize(bh_body.len() + pad_needed, 0x00);
 
     let size_byte = ((padded_total / 4) - 1) as u8;
 
@@ -2003,9 +2001,7 @@ pub fn xz_compress(data: &[u8]) -> KernelResult<Vec<u8>> {
     stream.extend_from_slice(&lzma2_payload);
     // Pad to 4-byte alignment.
     let data_pad = (4 - (lzma2_payload.len() % 4)) % 4;
-    for _ in 0..data_pad {
-        stream.push(0x00);
-    }
+    stream.resize(stream.len() + data_pad, 0x00);
 
     // --- Block check ---
     if check_type == CHECK_CRC64 {
@@ -2025,9 +2021,7 @@ pub fn xz_compress(data: &[u8]) -> KernelResult<Vec<u8>> {
     encode_vli(&mut index_body, data.len() as u64);
     // Pad index to 4-byte alignment.
     let index_pad = (4 - (index_body.len() % 4)) % 4;
-    for _ in 0..index_pad {
-        index_body.push(0x00);
-    }
+    index_body.resize(index_body.len() + index_pad, 0x00);
     let index_crc = super::compress::crc32_iso_pub(&index_body);
     stream.extend_from_slice(&index_body);
     stream.extend_from_slice(&index_crc.to_le_bytes());
@@ -2233,9 +2227,7 @@ fn test_full_decompress() -> KernelResult<()> {
     let total_before_pad = 1 + block_header_body.len() + 4;
     let padded_total = (total_before_pad + 3) & !3;
     let pad_needed = padded_total - total_before_pad;
-    for _ in 0..pad_needed {
-        block_header_body.push(0x00);
-    }
+    block_header_body.resize(block_header_body.len() + pad_needed, 0x00);
 
     // Size byte: (total / 4) - 1
     let size_byte = ((padded_total / 4) - 1) as u8;
@@ -2274,9 +2266,7 @@ fn test_full_decompress() -> KernelResult<()> {
     encode_vli(&mut index_body, payload.len() as u64);
     // Pad index to 4-byte alignment.
     let index_pad = (4 - (index_body.len() % 4)) % 4;
-    for _ in 0..index_pad {
-        index_body.push(0x00);
-    }
+    index_body.resize(index_body.len() + index_pad, 0x00);
     let index_crc = super::compress::crc32_iso_pub(&index_body);
 
     // Stream header.
@@ -2294,9 +2284,7 @@ fn test_full_decompress() -> KernelResult<()> {
 
     // Block data (LZMA2 payload).
     stream.extend_from_slice(&lzma2_payload);
-    for _ in 0..block_data_pad {
-        stream.push(0x00);
-    }
+    stream.resize(stream.len() + block_data_pad, 0x00);
 
     // Block check.
     stream.extend_from_slice(&block_check.to_le_bytes());

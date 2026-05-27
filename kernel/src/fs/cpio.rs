@@ -437,18 +437,14 @@ pub fn mkcpio(entries: &[CpioEntry]) -> KernelResult<Vec<u8>> {
         let name_total = HEADER_SIZE.wrapping_add(name_with_null);
         let name_padded = align4(name_total);
         let name_pad = name_padded.saturating_sub(name_total);
-        for _ in 0..name_pad {
-            buf.push(0);
-        }
+        buf.resize(buf.len() + name_pad, 0);
 
         // Write file data.
         buf.extend_from_slice(file_data);
 
         // Pad data to 4-byte boundary.
         let data_pad = align4(file_data.len()).saturating_sub(file_data.len());
-        for _ in 0..data_pad {
-            buf.push(0);
-        }
+        buf.resize(buf.len() + data_pad, 0);
 
         ino = ino.wrapping_add(1);
     }
@@ -471,15 +467,11 @@ pub fn mkcpio(entries: &[CpioEntry]) -> KernelResult<Vec<u8>> {
     let trailer_total = HEADER_SIZE.wrapping_add(trailer_namesize as usize);
     let trailer_padded = align4(trailer_total);
     let trailer_pad = trailer_padded.saturating_sub(trailer_total);
-    for _ in 0..trailer_pad {
-        buf.push(0);
-    }
+    buf.resize(buf.len() + trailer_pad, 0);
 
     // Pad entire archive to 512-byte block boundary (common convention).
     let block_pad = align_block(buf.len(), 512).saturating_sub(buf.len());
-    for _ in 0..block_pad {
-        buf.push(0);
-    }
+    buf.resize(buf.len() + block_pad, 0);
 
     Ok(buf)
 }

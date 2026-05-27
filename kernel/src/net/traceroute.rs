@@ -631,6 +631,9 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Run traceroute self-tests.
+// Self-tests deliberately runtime-assert ICMP type codes and
+// related protocol constants as living documentation.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[traceroute] Running traceroute self-tests...");
     let mut passed = 0u32;
@@ -799,8 +802,9 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 8: Stats initial values ---
     {
         let s = stats();
-        // Stats may be non-zero from previous runs, just check they're valid.
-        assert!(!s.active || s.active, "active is bool");
+        // Stats may be non-zero from previous runs; we just verify
+        // the call returns without panicking.
+        let _ = s.active;
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[traceroute]   test 8 (stats) PASSED");
@@ -939,7 +943,9 @@ pub fn self_test() -> KernelResult<()> {
     // --- Test 15: IPv6 stats / procfs ---
     {
         let s = stats6();
-        assert!(!s.active || s.active, "v6 active is bool");
+        // Stats may be non-zero from previous runs; we just verify
+        // the call returns without panicking.
+        let _ = s.active;
 
         let content = procfs_content6();
         assert!(content.contains("Traceroute6"), "v6 header");

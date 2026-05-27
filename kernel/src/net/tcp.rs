@@ -804,9 +804,7 @@ fn build_segment_with_options(
     // Options.
     seg.extend_from_slice(options);
     // Pad with NOP/END to 4-byte boundary.
-    for _ in options.len()..opt_padded {
-        seg.push(TCP_OPT_END);
-    }
+    seg.resize(seg.len() + opt_padded.saturating_sub(options.len()), TCP_OPT_END);
 
     // Payload.
     seg.extend_from_slice(payload);

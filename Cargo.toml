@@ -168,6 +168,25 @@ return_self_not_must_use = "allow"
 # even when the body doesn't move; clippy can't tell the difference.
 needless_pass_by_value = "allow"
 
+# manual_checked_ops: ~150 hits.  Clippy 1.95 lint flagging the
+# pattern `if x > 0 { a / x } else { 0 }` with a suggestion to use
+# `a.checked_div(x).unwrap_or(0)`.  Functionally identical; the
+# if-guard form makes the check explicit and reads naturally in
+# percentage/rate calculations across the kernel.  Style preference
+# only.
+manual_checked_ops = "allow"
+
+# declare_interior_mutable_const: ~70 hits.  All flag the canonical
+# array-init idiom:
+#     static T: [AtomicU64; N] = { const Z: AtomicU64 = AtomicU64::new(0); [Z; N] };
+# This pattern is required because `[AtomicU64::new(0); N]` doesn't
+# compile (AtomicU64 isn't Copy).  The const value is *consumed* by
+# the array-repeat, not borrowed — each array slot ends up with its
+# own fresh atomic, which is exactly the intended behaviour.  The
+# companion lint `borrow_interior_mutable_const` stays enabled and
+# catches the real bug (taking `&FOO` to such a const).
+declare_interior_mutable_const = "allow"
+
 # Userspace defaults: size-optimised, abort on panic, stripped.
 [profile.release]
 opt-level = "s"

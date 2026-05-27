@@ -771,6 +771,9 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Run telnet server self-tests.
+// Self-tests deliberately runtime-assert telnet protocol constants
+// (IAC byte, command codes, port number) as living documentation.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[telnet] Running telnet server self-tests...");
     let mut passed = 0u32;

@@ -585,6 +585,9 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Run MLD self-tests.
+// Self-tests deliberately runtime-assert RFC-defined constants
+// (ICMPv6 message types, protocol numbers) as living documentation.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[mld] Running MLD self-tests...");
     let mut passed = 0u32;

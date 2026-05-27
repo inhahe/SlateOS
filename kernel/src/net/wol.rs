@@ -153,6 +153,9 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Run Wake-on-LAN self-tests.
+// Self-tests deliberately runtime-assert magic-packet format
+// constants as living documentation.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[wol] Running WoL self-tests...");
     let mut passed = 0u32;

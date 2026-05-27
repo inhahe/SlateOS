@@ -556,13 +556,14 @@ fn decode_fse_table(
         if count == 0 {
             loop {
                 let repeat = br.read_bits(2)? as usize;
-                for _ in 0..repeat {
-                    norm_counts.push(0);
-                    sym += 1;
-                    if sym > max_symbol + 1 {
-                        return Err(KernelError::CorruptedData);
-                    }
+                // Bounds-check before extending to catch corrupted streams
+                // that would otherwise push past max_symbol.
+                let new_sym = sym.checked_add(repeat).ok_or(KernelError::CorruptedData)?;
+                if new_sym > max_symbol + 1 {
+                    return Err(KernelError::CorruptedData);
                 }
+                norm_counts.resize(norm_counts.len() + repeat, 0);
+                sym = new_sym;
                 if repeat < 3 { break; }
             }
         }
@@ -2208,9 +2209,7 @@ fn encode_bits_to_bytes(bits: &[bool]) -> Vec<u8> {
     // Layout from MSB of last byte to LSB of first byte:
     // [padding zeros][sentinel=1][bits[0]][bits[1]]...[bits[n-1]]
     let mut all_bits = Vec::with_capacity(total_padded);
-    for _ in 0..padding {
-        all_bits.push(false);
-    }
+    all_bits.resize(padding, false);
     all_bits.push(true); // sentinel
     all_bits.extend_from_slice(bits);
 

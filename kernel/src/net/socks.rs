@@ -517,7 +517,10 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Run SOCKS self-tests.
+// Self-tests deliberately runtime-assert SOCKS5 protocol constants
+// (method codes, command codes) as living documentation.
 #[allow(dead_code)] // Public API.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[socks] Running SOCKS5 self-tests...");
     let mut passed = 0u32;

@@ -609,7 +609,10 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Run iperf self-tests.
+// Self-tests deliberately runtime-assert protocol constants as
+// living documentation.
 #[allow(dead_code)] // Public API.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[iperf] Running iperf self-tests...");
     let mut passed = 0u32;

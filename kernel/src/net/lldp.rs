@@ -679,6 +679,9 @@ pub fn procfs_content() -> String {
 // ---------------------------------------------------------------------------
 
 /// Run LLDP self-tests.
+// Self-tests deliberately runtime-assert RFC-defined constants
+// (TLV type codes, EtherType) as living documentation.
+#[allow(clippy::assertions_on_constants)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[lldp] Running LLDP self-tests...");
     let mut passed = 0u32;

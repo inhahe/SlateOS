@@ -527,7 +527,7 @@ pub fn self_test() -> KernelResult<()> {
         assert!(gets > 0);
         assert!(sets > 0);
         let _ = saved; // u64, always >= 0
-        assert!(templates > 0 || true);
+        let _ = templates; // may be 0 in fresh-boot self-test
         serial_println!("[viewstate] test 6 passed: stats");
     }
 

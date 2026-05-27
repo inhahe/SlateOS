@@ -477,8 +477,9 @@ pub fn self_test() -> KernelResult<()> {
     // Test 5: disk usage.
     {
         let usage = gather_disk_usage("/");
-        // Root should have some contents.
-        assert!(usage.file_count > 0 || usage.dir_count > 0 || true);
+        // Root may legitimately be empty during early boot self-tests;
+        // we only verify the call returns without panicking.
+        let _ = (usage.file_count, usage.dir_count);
         serial_println!("[properties] test 5 passed: disk usage");
     }
 

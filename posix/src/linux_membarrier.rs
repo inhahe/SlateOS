@@ -16,8 +16,8 @@ pub const MEMBARRIER_CMD_GLOBAL: i32 = 1;
 /// Expedited global memory barrier (with IPI).
 pub const MEMBARRIER_CMD_GLOBAL_EXPEDITED: i32 = 1 << 1;
 
-/// Register intent to use expedited barrier.
-pub const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED: i32 = 1 << 4;
+/// Register intent to use expedited global barrier.
+pub const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED: i32 = 1 << 2;
 
 /// Expedited private memory barrier (same process only).
 pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED: i32 = 1 << 3;
@@ -76,10 +76,21 @@ mod tests {
     }
 
     #[test]
-    fn test_membarrier_query_stub() {
-        // membarrier with CMD_QUERY should return supported mask or -1.
-        let ret = membarrier(MEMBARRIER_CMD_QUERY, 0, 0);
-        // Stub returns -1 (ENOSYS).
-        assert!(ret == -1 || ret >= 0);
+    fn test_membarrier_query_reports_supported_bitmask() {
+        // CMD_QUERY returns the bitmask of supported commands.  At
+        // least CMD_GLOBAL and CMD_PRIVATE_EXPEDITED must be supported.
+        let mask = membarrier(MEMBARRIER_CMD_QUERY, 0, 0);
+        assert!(mask > 0);
+        assert_ne!(mask & MEMBARRIER_CMD_GLOBAL, 0);
+        assert_ne!(mask & MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0);
+    }
+
+    #[test]
+    fn test_membarrier_register_global_expedited_distinct_from_private() {
+        // Regression: these used to collide on the same bit.
+        assert_ne!(
+            MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED,
+            MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED,
+        );
     }
 }

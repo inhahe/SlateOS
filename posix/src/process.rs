@@ -686,22 +686,90 @@ pub extern "C" fn ioprio_set(_which: i32, _who: i32, _ioprio: i32) -> i32 {
 pub const MEMBARRIER_CMD_QUERY: i32 = 0;
 /// Issue a global barrier.
 pub const MEMBARRIER_CMD_GLOBAL: i32 = 1;
-/// Register intent to use private expedited barriers.
-pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: i32 = 1 << 4;
+/// Expedited global memory barrier (with IPI).
+pub const MEMBARRIER_CMD_GLOBAL_EXPEDITED: i32 = 1 << 1;
+/// Register intent to use expedited global barriers.
+pub const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED: i32 = 1 << 2;
 /// Issue a private expedited barrier.
 pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED: i32 = 1 << 3;
+/// Register intent to use private expedited barriers.
+pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: i32 = 1 << 4;
+/// Private expedited sync-core barrier.
+pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE: i32 = 1 << 5;
+/// Register for sync-core private expedited.
+pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: i32 = 1 << 6;
 
-/// Perform a memory barrier operation across processes.
+/// Bitmask of operations supported by [`membarrier`] / reported by
+/// `MEMBARRIER_CMD_QUERY`.
 ///
-/// Stub: `MEMBARRIER_CMD_QUERY` returns 0 (no supported commands),
-/// other commands return -1 with ENOSYS.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn membarrier(cmd: i32, _flags: u32, _cpu_id: i32) -> i32 {
-    if cmd == MEMBARRIER_CMD_QUERY {
-        return 0; // No commands supported.
+/// We support every "regular" command except the rseq variants (no
+/// restartable-sequence infrastructure yet).  All supported commands
+/// reduce to a local `mfence` on x86_64; cross-CPU expedited semantics
+/// are best-effort because we have no userspace path to send IPIs to
+/// other cores.  In practice, each peer thread re-fences whenever it
+/// crosses a syscall boundary, so the visible ordering matches Linux
+/// for everything except code that aggressively spins in userspace
+/// without ever syscalling.
+const MEMBARRIER_SUPPORTED: i32 = MEMBARRIER_CMD_GLOBAL
+    | MEMBARRIER_CMD_GLOBAL_EXPEDITED
+    | MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
+    | MEMBARRIER_CMD_PRIVATE_EXPEDITED
+    | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+    | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
+    | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE;
+
+/// Issue an x86_64 `mfence` on the calling CPU.  This drains the local
+/// store buffer and provides a full memory barrier with respect to
+/// every subsequent load/store on this core.
+#[inline]
+fn local_mfence() {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: `mfence` is a serializing memory-fence instruction with
+    // no operands, no side effects beyond memory ordering, and no
+    // privilege requirements.  Safe at every CPU mode.
+    unsafe {
+        core::arch::asm!("mfence", options(nostack, preserves_flags));
     }
-    errno::set_errno(errno::ENOSYS);
-    -1
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        // Fall back to the compiler's strongest barrier intrinsic on
+        // non-x86_64 hosts (test-only).
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Perform a memory barrier operation across all threads of the
+/// process.
+///
+/// On x86_64 the issuing CPU is fenced via `mfence`.  Linux's
+/// expedited variants additionally IPI peer CPUs to force them to
+/// fence; our kernel does not yet expose a userspace-triggered IPI, so
+/// peer-CPU fencing is implicit (each thread re-fences on its next
+/// syscall).  `MEMBARRIER_CMD_QUERY` returns the bitmask of supported
+/// commands.  `flags` must be zero on every command except the rseq
+/// variants (which we don't support).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn membarrier(cmd: i32, flags: u32, _cpu_id: i32) -> i32 {
+    if cmd == MEMBARRIER_CMD_QUERY {
+        return MEMBARRIER_SUPPORTED;
+    }
+
+    // Reject unknown / unsupported commands.
+    if cmd <= 0 || (cmd & !MEMBARRIER_SUPPORTED) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // No flag bits are defined for our supported commands.
+    if flags != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // For every supported command the visible effect is: drain the
+    // local store buffer.  Issue an mfence.
+    local_mfence();
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1580,28 +1648,109 @@ mod tests {
     // -- membarrier --
 
     #[test]
-    fn test_membarrier_query() {
-        assert_eq!(membarrier(MEMBARRIER_CMD_QUERY, 0, 0), 0);
+    fn test_membarrier_query_reports_supported_bitmask() {
+        // QUERY must return the bitmask of supported commands (non-zero).
+        let mask = membarrier(MEMBARRIER_CMD_QUERY, 0, 0);
+        assert!(mask > 0, "QUERY mask must be positive");
+        // Every supported command must be present in the mask.
+        assert_ne!(mask & MEMBARRIER_CMD_GLOBAL, 0);
+        assert_ne!(mask & MEMBARRIER_CMD_GLOBAL_EXPEDITED, 0);
+        assert_ne!(mask & MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED, 0);
+        assert_ne!(mask & MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0);
+        assert_ne!(mask & MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0);
+        assert_ne!(mask & MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 0);
+        assert_ne!(
+            mask & MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
+            0,
+        );
     }
 
     #[test]
-    fn test_membarrier_global_enosys() {
-        crate::errno::set_errno(0);
-        assert_eq!(membarrier(MEMBARRIER_CMD_GLOBAL, 0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    fn test_membarrier_global_succeeds() {
+        // CMD_GLOBAL must succeed and issue a fence.
+        assert_eq!(membarrier(MEMBARRIER_CMD_GLOBAL, 0, 0), 0);
     }
 
     #[test]
-    fn test_membarrier_private_expedited_enosys() {
+    fn test_membarrier_global_expedited_succeeds() {
+        assert_eq!(membarrier(MEMBARRIER_CMD_GLOBAL_EXPEDITED, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_membarrier_private_expedited_succeeds() {
+        assert_eq!(membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_membarrier_register_private_expedited_succeeds() {
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0),
+            0,
+        );
+    }
+
+    #[test]
+    fn test_membarrier_register_global_expedited_succeeds() {
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED, 0, 0),
+            0,
+        );
+    }
+
+    #[test]
+    fn test_membarrier_private_expedited_sync_core_succeeds() {
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 0, 0),
+            0,
+        );
+    }
+
+    #[test]
+    fn test_membarrier_register_sync_core_succeeds() {
+        assert_eq!(
+            membarrier(
+                MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
+                0,
+                0,
+            ),
+            0,
+        );
+    }
+
+    #[test]
+    fn test_membarrier_unknown_cmd_einval() {
+        // A command bit not in the supported mask must yield EINVAL.
         crate::errno::set_errno(0);
-        assert_eq!(membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        let unsupported_cmd = 1 << 30; // outside MEMBARRIER_SUPPORTED.
+        assert_eq!(membarrier(unsupported_cmd, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_membarrier_negative_cmd_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(membarrier(-1, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_membarrier_unknown_flag_einval() {
+        // Non-zero flags must be rejected with EINVAL.
+        crate::errno::set_errno(0);
+        assert_eq!(membarrier(MEMBARRIER_CMD_GLOBAL, 0x1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_membarrier_constants() {
         assert_eq!(MEMBARRIER_CMD_QUERY, 0);
         assert_eq!(MEMBARRIER_CMD_GLOBAL, 1);
+        assert_eq!(MEMBARRIER_CMD_GLOBAL_EXPEDITED, 2);
+        assert_eq!(MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED, 4);
+        assert_eq!(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 8);
+        assert_eq!(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 16);
+        assert_eq!(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 32);
+        assert_eq!(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE, 64);
     }
 
     // -----------------------------------------------------------------------

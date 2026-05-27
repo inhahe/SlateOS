@@ -366,6 +366,18 @@ Remaining net improvements (diminishing returns):
   test runner or a separate host-testable crate that extracts pure
   logic functions.
 
+- (FIXED 2026-05-27) crypt::tests parallel-test race: crypt() returns
+  a pointer into a single process-global static buffer, so cargo's
+  parallel test harness was racing on the buffer when multiple tests
+  invoked crypt() at the same time.  test_crypt_empty_key would
+  intermittently see "$0$abc" (left over from a concurrent
+  test_crypt_different_keys call) instead of "$0$".  Fixed by adding
+  a CRYPT_TEST_LOCK std::sync::Mutex that all crypt-using tests
+  acquire on entry (same pattern as sys_timex / linux_aio_abi tests).
+  The underlying crypt() function is unchanged — POSIX explicitly
+  allows it to use a static return buffer; only the tests needed
+  serialisation.
+
 ## Cross-Zone Bug Reports
 
 - bench_isr_latency() page fault → double fault (kernel-core zone):

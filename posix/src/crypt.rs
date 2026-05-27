@@ -127,12 +127,26 @@ pub extern "C" fn setkey(_key: *const u8) {
 mod tests {
     use super::*;
 
+    /// Serialise all `crypt()` tests in this module: `crypt()` returns a
+    /// pointer into a process-global static buffer, so concurrent calls
+    /// from cargo's parallel test runner trample each other's results.
+    /// The crypt-using tests below acquire this mutex on entry to keep
+    /// observable behaviour deterministic.
+    ///
+    /// We deliberately do *not* recover from poisoning with
+    /// `into_inner()` — if a test panicked holding the mutex the global
+    /// buffer's contents are by definition undefined, so the next test
+    /// should also fail noisily rather than silently observing stale
+    /// state.
+    static CRYPT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     // -----------------------------------------------------------------------
     // crypt
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_crypt_returns_prefixed_key() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let result = crypt(b"password\0".as_ptr(), b"$6$salt\0".as_ptr());
         assert!(!result.is_null());
         // Should start with "$0$" (our stub prefix).
@@ -143,6 +157,7 @@ mod tests {
 
     #[test]
     fn test_crypt_different_keys() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let r1 = crypt(b"abc\0".as_ptr(), b"xx\0".as_ptr());
         assert!(!r1.is_null());
         let s1 = unsafe { core::ffi::CStr::from_ptr(r1.cast()) };
@@ -151,6 +166,7 @@ mod tests {
 
     #[test]
     fn test_crypt_null_key() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::errno::set_errno(0);
         let result = crypt(core::ptr::null(), b"salt\0".as_ptr());
         assert!(result.is_null());
@@ -159,6 +175,7 @@ mod tests {
 
     #[test]
     fn test_crypt_null_salt() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         crate::errno::set_errno(0);
         let result = crypt(b"key\0".as_ptr(), core::ptr::null());
         assert!(result.is_null());
@@ -167,6 +184,7 @@ mod tests {
 
     #[test]
     fn test_crypt_empty_key() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let result = crypt(b"\0".as_ptr(), b"salt\0".as_ptr());
         assert!(!result.is_null());
         let s = unsafe { core::ffi::CStr::from_ptr(result.cast()) };
@@ -175,6 +193,7 @@ mod tests {
 
     #[test]
     fn test_crypt_overwrites_static_buffer() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // crypt uses a static buffer — second call overwrites first.
         let _r1 = crypt(b"first\0".as_ptr(), b"xx\0".as_ptr());
         let r2 = crypt(b"second\0".as_ptr(), b"yy\0".as_ptr());

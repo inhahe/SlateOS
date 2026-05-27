@@ -76,6 +76,7 @@ use super::number::{
     SYS_PROCESS_CRASH_INFO,
     SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_INITIAL_FDS,
     SYS_PROCESS_PARENT_ID,
+    SYS_PROCESS_COUNT,
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX,
     SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
     SYS_SET_EXCEPTION_HANDLER,
@@ -375,6 +376,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_GET_INITIAL_FDS as usize] = Some(handlers::sys_process_get_initial_fds);
     handlers[SYS_PROCESS_GET_ARGS as usize] = Some(handlers::sys_process_get_args);
     handlers[SYS_PROCESS_PARENT_ID as usize] = Some(handlers::sys_process_parent_id);
+    handlers[SYS_PROCESS_COUNT as usize] = Some(handlers::sys_process_count);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);

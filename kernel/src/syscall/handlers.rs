@@ -2790,6 +2790,25 @@ pub fn sys_process_parent_id(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(ppid as i64)
 }
 
+/// `SYS_PROCESS_COUNT` — return the count of live processes.
+///
+/// Wraps `pcb::count()`, which returns the size of the process table
+/// (all live entries regardless of state).  Used by `sysinfo()` to fill
+/// `struct sysinfo.procs`.
+///
+/// Saturating-casts the `usize` table size to `i64`.  On a 64-bit host
+/// this only matters if more than `i64::MAX` processes exist, which is
+/// impossible in practice but guarded against for forward-compatibility.
+pub fn sys_process_count(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    use crate::proc::pcb;
+
+    let n = pcb::count();
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    let clamped: i64 = if n > i64::MAX as usize { i64::MAX } else { n as i64 };
+    SyscallResult::ok(clamped)
+}
+
 /// `SYS_CAP_QUERY` — query the calling process's capabilities.
 ///
 /// Returns the number of valid capabilities held by the calling process.

@@ -1664,6 +1664,32 @@ pub struct Sysinfo {
     _padding: [u8; 4],
 }
 
+/// Read the kernel's live process count for `sysinfo.procs`.
+///
+/// On bare metal, queries `SYS_PROCESS_COUNT` and clamps the result to
+/// `u16` (the Linux `struct sysinfo.procs` field is unsigned short).
+/// Negative kernel returns are treated as zero (defensive — the syscall
+/// is documented as never failing, but the i64 carries the encoded-error
+/// convention everywhere else, so we mirror it).
+///
+/// On host builds (cargo test), returns a fixed 1 so unit tests stay
+/// deterministic.
+#[cfg(target_os = "none")]
+fn read_process_count() -> u16 {
+    let raw = syscall0(SYS_PROCESS_COUNT);
+    if raw <= 0 {
+        return 0;
+    }
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let n = raw as u64;
+    if n > u64::from(u16::MAX) { u16::MAX } else { n as u16 }
+}
+
+#[cfg(not(target_os = "none"))]
+fn read_process_count() -> u16 {
+    1
+}
+
 /// Return overall system statistics.
 ///
 /// Fills the `Sysinfo` structure from real kernel data on the kernel
@@ -1674,8 +1700,8 @@ pub struct Sysinfo {
 ///   (×65536) by left-shifting 5 bits.
 /// - `totalram` / `freeram`: physical page counts from `SYS_PHYS_PAGES_*`
 ///   multiplied by `mem_unit` (which is set to our 16 KiB frame size).
-/// - `procs`: 1 (no kernel-side process-count interface yet — this OS
-///   currently runs init as the only userspace process).
+/// - `procs`: live process count from `SYS_PROCESS_COUNT`, capped to
+///   `u16::MAX` (the Linux ABI uses `unsigned short` here).
 /// - `sharedram` / `bufferram` / `totalswap` / `freeswap` / `totalhigh`
 ///   / `freehigh`: 0 (no swap, no buffer-cache accounting, no high-mem
 ///   region — we're 64-bit only).
@@ -1703,7 +1729,7 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
         s.bufferram = 0;
         s.totalswap = 0;
         s.freeswap = 0;
-        s.procs = 1;
+        s.procs = read_process_count();
         s._pad = [0; 6];
         s.totalhigh = 0;
         s.freehigh = 0;
@@ -3207,6 +3233,17 @@ mod tests {
         // Sysinfo should be reasonably sized.
         let size = core::mem::size_of::<Sysinfo>();
         assert!(size >= 64, "Sysinfo should be at least 64 bytes, got {size}");
+    }
+
+    #[test]
+    fn test_sysinfo_procs_host_fallback_is_one() {
+        // On the host (cargo test target), read_process_count returns 1
+        // unconditionally — there is no kernel to query.  This pins the
+        // host fallback so it can't silently regress.
+        let mut info = core::mem::MaybeUninit::<Sysinfo>::zeroed();
+        let _ = sysinfo(info.as_mut_ptr());
+        let info = unsafe { info.assume_init() };
+        assert_eq!(info.procs, 1, "host fallback should report procs == 1");
     }
 
     // ------------------------------------------------------------------

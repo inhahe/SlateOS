@@ -1400,6 +1400,18 @@ pub const SYS_PROCESS_GET_ARGS: u64 = 519;
 /// "no parent" and use it as a sentinel.
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 
+/// Get the count of live processes managed by the kernel.
+///
+/// Takes no arguments.  Returns the current number of entries in the
+/// process table (including the kernel-creator pid 0 / init, processes
+/// in any state — Creating/Ready/Running/Sleeping/Zombie).  This count
+/// is used by `sysinfo()` to populate `struct sysinfo.procs`.
+///
+/// Returns: number of processes as a non-negative i64 (saturating at
+/// `i64::MAX` in the unlikely event the table grows past that).  Never
+/// fails — there is no error path.
+pub const SYS_PROCESS_COUNT: u64 = 521;
+
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------

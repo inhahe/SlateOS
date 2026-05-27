@@ -598,37 +598,176 @@ pub extern "C" fn reboot(_cmd: i32) -> i32 {
 // pidfd — Linux process file descriptor (5.3+)
 // ---------------------------------------------------------------------------
 
-/// Flags for `pidfd_open`.
+/// `O_NONBLOCK` for `pidfd_open` — return immediately from `waitid`/`read`
+/// instead of blocking when the referenced process is still running.
+///
+/// Linux defines this as `O_NONBLOCK` (octal `04000`).  Added in Linux 5.10.
 pub const PIDFD_NONBLOCK: u32 = 0o4000;
+
+/// `O_EXCL` repurposed for `pidfd_open(2)` — open a TID (thread) pidfd
+/// instead of a TGID (process) pidfd.  Added in Linux 6.2.
+///
+/// Numerically: octal `0200` = `0x80`, matching Linux's `O_EXCL`.
+pub const PIDFD_THREAD: u32 = 0o200;
+
+/// All flag bits accepted by `pidfd_open(2)`.
+///
+/// Any bit outside this mask makes `pidfd_open` fail with `EINVAL` —
+/// matches Linux's `kernel/pid.c::pidfd_create` validator.
+pub const PIDFD_OPEN_FLAGS_VALID: u32 = PIDFD_NONBLOCK | PIDFD_THREAD;
+
+/// Maximum signal number accepted by `pidfd_send_signal(2)`.
+///
+/// Linux's `kernel/signal.c::pidfd_send_signal` rejects `sig < 0 ||
+/// sig > _NSIG` (`_NSIG = 64` on x86-64).  Signal `0` is the
+/// permission-test value (no signal delivered).
+pub const PIDFD_SIG_MAX: i32 = 64;
 
 /// Obtain a file descriptor that refers to a process.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// # Linux behaviour
+///
+/// `pidfd_open(2)` (added in Linux 5.3) returns a file descriptor that
+/// refers to the process whose PID is `pid`.  The descriptor can be
+/// passed to `waitid(P_PIDFD, ...)`, `pidfd_send_signal(2)`,
+/// `pidfd_getfd(2)`, and `poll/epoll` (to learn of exit).
+///
+/// Errors the kernel returns *before* allocating a pidfd object:
+///
+/// * `pid <= 0`                                 → `EINVAL`
+/// * `flags & ~(PIDFD_NONBLOCK|PIDFD_THREAD)`    → `EINVAL`
+/// * unknown PID (no such process)              → `ESRCH`  (only when
+///   the kernel actually looks up the task; here we cannot, so callers
+///   should not depend on `ESRCH` from this validator)
+///
+/// We replicate the *argument*-domain checks so callers (e.g. container
+/// runtimes' probing code) get the same `EINVAL`/`ENOSYS` shape they
+/// expect.  After arguments are accepted, we fall back to `ENOSYS`
+/// because the spawn/lookup subsystem isn't wired up here.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pidfd_open(_pid: PidT, _flags: u32) -> i32 {
+pub extern "C" fn pidfd_open(pid: PidT, flags: u32) -> i32 {
+    // pid must be a strictly positive PID — Linux rejects 0 and any
+    // negative value (since negative would mean "process group" elsewhere
+    // but is not accepted here).
+    if pid <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Reject any unknown flag bits.  See PIDFD_OPEN_FLAGS_VALID.
+    if (flags & !PIDFD_OPEN_FLAGS_VALID) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Arguments validated; underlying subsystem not implemented.
     errno::set_errno(errno::ENOSYS);
     -1
 }
 
 /// Send a signal to a process referred to by a pidfd.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// # Linux behaviour
+///
+/// `pidfd_send_signal(pidfd, sig, info, flags)` (added in Linux 5.1)
+/// delivers `sig` to the process referenced by `pidfd`.  Argument-
+/// domain checks the kernel performs before touching the target:
+///
+/// * `flags != 0`           → `EINVAL`  (no flag bits defined yet)
+/// * `pidfd < 0`            → `EBADF`
+/// * `sig < 0 || sig > 64`  → `EINVAL`  (`sig == 0` is allowed and is
+///   a permission/existence probe — no signal is delivered)
+/// * If `info != NULL`: the kernel copies in a `siginfo_t` and rejects
+///   the call when `info->si_signo != sig` (`kernel/signal.c`
+///   `do_pidfd_send_signal` → `copy_siginfo_from_user`).
+///
+/// We replicate every argument-domain check.  Callers that just want
+/// to know "does the syscall exist with the right shape" (e.g. systemd's
+/// `bus_kill_unit_processes` fallback ladder) will see the same errno
+/// pattern they get on a stripped-down Linux build.
+///
+/// # Safety
+///
+/// `info`, if non-NULL, must point to at least `sizeof(SiginfoT) == 128`
+/// readable bytes.  We use `core::ptr::read_unaligned` to defend against
+/// alignment-1 caller pointers.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pidfd_send_signal(
-    _pidfd: i32,
-    _sig: i32,
-    _info: *const core::ffi::c_void,
-    _flags: u32,
+    pidfd: i32,
+    sig: i32,
+    info: *const core::ffi::c_void,
+    flags: u32,
 ) -> i32 {
+    // No flag bits are defined for pidfd_send_signal in Linux.
+    if flags != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // pidfd must be a non-negative fd.
+    if pidfd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    // sig must be in [0, 64].  0 is the permission/existence probe.
+    if !(0..=PIDFD_SIG_MAX).contains(&sig) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // If info is provided, validate the siginfo_t.si_signo cross-check.
+    // Note: when sig == 0 the kernel still requires si_signo == 0 when
+    // info is non-NULL.
+    if !info.is_null() {
+        // SAFETY: caller contract says `info` (when non-NULL) points to
+        // a SiginfoT-sized region.  read_unaligned defends against an
+        // arbitrarily-aligned caller pointer.
+        let si_signo = unsafe {
+            core::ptr::read_unaligned(info.cast::<crate::signal::SiginfoT>())
+                .si_signo
+        };
+        if si_signo != sig {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    }
+    // Arguments validated; signal delivery not wired up.
     errno::set_errno(errno::ENOSYS);
     -1
 }
 
 /// Retrieve a duplicate of another process's file descriptor via pidfd.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// # Linux behaviour
+///
+/// `pidfd_getfd(pidfd, targetfd, flags)` (added in Linux 5.6) returns
+/// a new fd in *our* table that refers to the same open file description
+/// as `targetfd` in the process referenced by `pidfd`.  Used by debuggers
+/// (`strace -y`, `lldb`), container runtimes that need to pass an fd
+/// across PID namespaces, and rootless container image extractors.
+///
+/// Argument-domain checks the kernel performs:
+///
+/// * `flags != 0`     → `EINVAL`  (no flag bits defined)
+/// * `pidfd < 0`      → `EBADF`
+/// * `targetfd < 0`   → `EBADF`
+///
+/// After arguments are accepted we return `ENOSYS` — replicating a
+/// Linux build without `CONFIG_PIDFD_GETFD`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pidfd_getfd(_pidfd: i32, _targetfd: i32, _flags: u32) -> i32 {
+pub extern "C" fn pidfd_getfd(pidfd: i32, targetfd: i32, flags: u32) -> i32 {
+    // No flag bits are defined.
+    if flags != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // pidfd must be non-negative.
+    if pidfd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    // targetfd must be non-negative.
+    if targetfd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    // Arguments validated; cross-process fd duplication not wired up.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -1601,6 +1740,441 @@ mod tests {
     #[test]
     fn test_pidfd_nonblock_constant() {
         assert_ne!(PIDFD_NONBLOCK, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 49 — pidfd_open / pidfd_send_signal / pidfd_getfd validators
+    // ------------------------------------------------------------------
+
+    // --- pidfd_open: pid domain ---
+
+    #[test]
+    fn test_pidfd_open_pid_zero_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_open(0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_pid_negative_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_open(-1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_pid_min_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_open(i32::MIN, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_pid_max_valid() {
+        // Largest positive PID passes domain check, falls through to ENOSYS.
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_open(i32::MAX, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- pidfd_open: flag mask ---
+
+    #[test]
+    fn test_pidfd_open_unknown_flag_einval() {
+        // bit 0x1 is not in PIDFD_OPEN_FLAGS_VALID
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_open(1, 0x1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_high_bit_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_open(1, 0x8000_0000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_thread_flag_passes() {
+        // PIDFD_THREAD (Linux 6.2+) is recognised → falls through to ENOSYS.
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_open(1, PIDFD_THREAD), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pidfd_open_nonblock_plus_thread_passes() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_open(1, PIDFD_NONBLOCK | PIDFD_THREAD), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pidfd_open_flag_constant_values() {
+        // PIDFD_NONBLOCK == O_NONBLOCK == octal 04000 on Linux x86-64.
+        assert_eq!(PIDFD_NONBLOCK, 0o4000);
+        // PIDFD_THREAD == O_EXCL == octal 0200 on Linux x86-64.
+        assert_eq!(PIDFD_THREAD, 0o200);
+        // The valid mask is exactly the union of the two.
+        assert_eq!(
+            PIDFD_OPEN_FLAGS_VALID,
+            PIDFD_NONBLOCK | PIDFD_THREAD,
+        );
+    }
+
+    #[test]
+    fn test_pidfd_open_validation_order_pid_first() {
+        // When both pid and flags are invalid, pid is checked first.
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_open(0, 0xFFFF_FFFF), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- pidfd_send_signal: flags ---
+
+    #[test]
+    fn test_pidfd_send_signal_nonzero_flags_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_send_signal(3, 9, core::ptr::null(), 1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_send_signal_high_flag_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            pidfd_send_signal(3, 9, core::ptr::null(), 0x8000_0000),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- pidfd_send_signal: pidfd ---
+
+    #[test]
+    fn test_pidfd_send_signal_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_send_signal(-1, 9, core::ptr::null(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_pidfd_send_signal_min_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            pidfd_send_signal(i32::MIN, 9, core::ptr::null(), 0),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- pidfd_send_signal: sig range ---
+
+    #[test]
+    fn test_pidfd_send_signal_negative_sig_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_send_signal(3, -1, core::ptr::null(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_send_signal_sig_too_large_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            pidfd_send_signal(3, PIDFD_SIG_MAX + 1, core::ptr::null(), 0),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_send_signal_sig_max_valid() {
+        // sig == 64 is the maximum accepted; falls through to ENOSYS.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            pidfd_send_signal(3, PIDFD_SIG_MAX, core::ptr::null(), 0),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pidfd_send_signal_sig_zero_permission_probe() {
+        // sig == 0 is the permission/existence probe; allowed.
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_send_signal(3, 0, core::ptr::null(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- pidfd_send_signal: siginfo cross-check ---
+
+    #[test]
+    fn test_pidfd_send_signal_info_signo_mismatch_einval() {
+        let mut info: crate::signal::SiginfoT = Default::default();
+        info.si_signo = 11; // SIGSEGV
+        crate::errno::set_errno(0);
+        // Outer sig is 9 but si_signo is 11 → EINVAL.
+        let ret = pidfd_send_signal(
+            3,
+            9,
+            (&raw const info).cast::<core::ffi::c_void>(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_send_signal_info_signo_match_passes() {
+        let mut info: crate::signal::SiginfoT = Default::default();
+        info.si_signo = 9; // SIGKILL
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(
+            3,
+            9,
+            (&raw const info).cast::<core::ffi::c_void>(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pidfd_send_signal_info_with_sig_zero_requires_zero_signo() {
+        // sig == 0 + si_signo != 0 is still a mismatch.
+        let mut info: crate::signal::SiginfoT = Default::default();
+        info.si_signo = 11;
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(
+            3,
+            0,
+            (&raw const info).cast::<core::ffi::c_void>(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- pidfd_send_signal: order — flags first, then fd, then sig, then info ---
+
+    #[test]
+    fn test_pidfd_send_signal_flags_before_fd() {
+        // Both flags and fd are invalid → EINVAL for flags wins.
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(-1, 9, core::ptr::null(), 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_send_signal_fd_before_sig() {
+        // Bad fd + bad sig → EBADF for fd wins.
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(-1, 999, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- pidfd_getfd: flags ---
+
+    #[test]
+    fn test_pidfd_getfd_nonzero_flags_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_getfd(3, 0, 1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_getfd_high_flag_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_getfd(3, 0, 0x8000_0000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- pidfd_getfd: pidfd ---
+
+    #[test]
+    fn test_pidfd_getfd_negative_pidfd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_getfd(-1, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_pidfd_getfd_min_pidfd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_getfd(i32::MIN, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- pidfd_getfd: targetfd ---
+
+    #[test]
+    fn test_pidfd_getfd_negative_targetfd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_getfd(3, -1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_pidfd_getfd_min_targetfd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_getfd(3, i32::MIN, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_pidfd_getfd_max_fds_pass() {
+        // Both fds at i32::MAX → fall through to ENOSYS.
+        crate::errno::set_errno(0);
+        assert_eq!(pidfd_getfd(i32::MAX, i32::MAX, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- pidfd_getfd: order — flags first, then pidfd, then targetfd ---
+
+    #[test]
+    fn test_pidfd_getfd_flags_before_pidfd() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_getfd(-1, 0, 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_getfd_pidfd_before_targetfd() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_getfd(-5, -7, 0);
+        assert_eq!(ret, -1);
+        // pidfd is the first fd checked → its EBADF wins, but both produce
+        // the same errno code so this is more a tag for ordering coverage.
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- Constants ---
+
+    #[test]
+    fn test_pidfd_sig_max_constant() {
+        assert_eq!(PIDFD_SIG_MAX, 64);
+    }
+
+    #[test]
+    fn test_pidfd_open_valid_mask_constant() {
+        assert_eq!(PIDFD_OPEN_FLAGS_VALID, 0o4000 | 0o200);
+        // No overlap with reserved bits (high bits) that would alias real
+        // O_* values we don't accept.
+        assert_eq!(PIDFD_OPEN_FLAGS_VALID & !0o4200, 0);
+    }
+
+    // --- errno preserved on validation success (ENOSYS still set) ---
+
+    #[test]
+    fn test_pidfd_open_sets_errno_on_validated_call() {
+        crate::errno::set_errno(0);
+        let _ = pidfd_open(123, PIDFD_NONBLOCK);
+        // ENOSYS is the "validated but unimplemented" sentinel.
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- Workflow tests: real-world callers exercise the validator shape ---
+
+    /// systemd's `sd_pidfd_get_inode_id` probe: opens a pidfd for the
+    /// caller's own PID with PIDFD_NONBLOCK, then would `fstat` it.  We
+    /// see the open get past argument validation (PID > 0, recognised
+    /// flag) and stop at ENOSYS — letting systemd's fallback ladder
+    /// (cgroup.events poll) kick in.
+    #[test]
+    fn test_pidfd_workflow_systemd_open_probe() {
+        crate::errno::set_errno(0);
+        // systemd uses getpid() result, which is always > 0.
+        let pid: PidT = 1234;
+        let ret = pidfd_open(pid, PIDFD_NONBLOCK);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// runc/crun container runtime: when joining an existing container,
+    /// runc opens `/proc/<pid>/ns/pid` and then calls `pidfd_open(pid, 0)`
+    /// to get a stable handle.  Both legs of the probe must validate
+    /// arguments cleanly so runc reports a sensible "kernel too old"
+    /// error rather than crashing.
+    #[test]
+    fn test_pidfd_workflow_runc_join_namespace() {
+        crate::errno::set_errno(0);
+        // Container init PID (typically 1 inside the container, but the
+        // host-side PID can be anything > 0).
+        let ret = pidfd_open(2718, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Go's `syscall.PidFD` family (Go 1.22): the standard library probes
+    /// pidfd support by calling `pidfd_open(getpid(), 0)` at startup of
+    /// any program that uses `os/exec.Cmd.Start` with `Cancel` set.  An
+    /// `EINVAL` here would be a regression — the call must reach our
+    /// ENOSYS line.
+    #[test]
+    fn test_pidfd_workflow_go_runtime_probe() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(99, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// strace `-y` / `lldb` cross-process fd inspection: uses
+    /// `pidfd_getfd(tracee_pidfd, fd_in_tracee, 0)` to import a fd.
+    /// Tests the happy-path validation: real fds and zero flags pass.
+    #[test]
+    fn test_pidfd_workflow_strace_y_inspect_fd() {
+        crate::errno::set_errno(0);
+        let pidfd = 5; // hypothetical pidfd for the tracee
+        let target_fd = 3; // tracee's stderr or a socket
+        let ret = pidfd_getfd(pidfd, target_fd, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// kill(1) replacement using pidfd: `kill --pidfd=<fd> <sig>` (from
+    /// util-linux) calls `pidfd_send_signal(fd, sig, NULL, 0)`.  Tests
+    /// a typical SIGTERM (15) on a real fd with NULL info.
+    #[test]
+    fn test_pidfd_workflow_kill_pidfd_term() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(7, 15, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Java JDK 22's `ProcessHandleImpl` uses pidfd internally on Linux
+    /// 5.3+ to avoid PID reuse races in `Process.onExit()`.  The probe
+    /// at class init opens a pidfd to itself.  Tests that a self-pid
+    /// open with the maximum valid flag combo validates cleanly.
+    #[test]
+    fn test_pidfd_workflow_jdk22_process_handle_probe() {
+        crate::errno::set_errno(0);
+        let self_pid: PidT = 12345;
+        let ret = pidfd_open(self_pid, PIDFD_NONBLOCK | PIDFD_THREAD);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Buggy caller that passes a stack-allocated siginfo_t whose
+    /// si_signo got zero-initialised but the outer sig is non-zero.
+    /// This is a common bug in C wrappers that forget to set si_signo.
+    /// We must catch it with EINVAL so the bug is loud, not silent.
+    #[test]
+    fn test_pidfd_workflow_buggy_zero_initialised_siginfo() {
+        let info: crate::signal::SiginfoT = Default::default();
+        // si_signo defaults to 0.
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(
+            3,
+            9, // SIGKILL requested
+            (&raw const info).cast::<core::ffi::c_void>(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     // -- arch_prctl --

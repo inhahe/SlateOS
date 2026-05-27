@@ -685,6 +685,37 @@ static mut HOSTNAME_BUF: [u8; HOST_NAME_MAX + 1] = {
 /// Length of the current hostname (excluding null terminator).
 static mut HOSTNAME_LEN: usize = 9; // "localhost".len()
 
+/// Copy the current hostname into `out`, returning the number of bytes
+/// written (excluding any null terminator).  Truncates if `out` is
+/// smaller than the stored hostname; never null-terminates — the caller
+/// owns null-termination semantics.
+///
+/// Used by `utsname::uname()` so the utsname `nodename` field reflects
+/// the same hostname that `gethostname()` / `sethostname()` see, instead
+/// of a hardcoded "localhost".
+pub(crate) fn copy_hostname(out: &mut [u8]) -> usize {
+    // SAFETY: Single-address-space, no concurrent writes during the read.
+    // Same access pattern as `gethostname()` above.
+    let (src_ptr, src_len) = unsafe {
+        (&raw const HOSTNAME_BUF, HOSTNAME_LEN)
+    };
+    let n = core::cmp::min(out.len(), src_len);
+    let mut i = 0;
+    while i < n {
+        // SAFETY: i < HOSTNAME_LEN <= HOST_NAME_MAX, HOSTNAME_BUF is at
+        // least HOST_NAME_MAX + 1 bytes, and out[i] is in-bounds because
+        // i < n <= out.len().
+        unsafe {
+            let b = *src_ptr.cast::<u8>().add(i);
+            if let Some(slot) = out.get_mut(i) {
+                *slot = b;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+    n
+}
+
 /// Domain name buffer (including null terminator space).
 ///
 /// Initialized to "(none)" — can be changed via `setdomainname()`.

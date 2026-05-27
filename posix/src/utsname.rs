@@ -71,7 +71,16 @@ pub extern "C" fn uname(buf: *mut Utsname) -> i32 {
     uts.machine = [0u8; UTSNAME_LEN];
 
     fill_field(&mut uts.sysname, b"CustomOS");
-    fill_field(&mut uts.nodename, b"localhost");
+
+    // nodename: read the current hostname (set via sethostname()) instead
+    // of hardcoding "localhost".  copy_hostname writes the first N bytes
+    // without null-terminating; fill_field then null-terminates inside
+    // the fixed-size field.
+    let mut host_buf = [0u8; UTSNAME_LEN - 1];
+    let host_len = crate::unistd::copy_hostname(&mut host_buf);
+    let host_slice = host_buf.get(..host_len).unwrap_or(&[]);
+    fill_field(&mut uts.nodename, host_slice);
+
     fill_field(&mut uts.release, b"0.1.0");
     fill_field(&mut uts.version, b"#1 SMP");
     fill_field(&mut uts.machine, b"x86_64");
@@ -230,6 +239,32 @@ mod tests {
         assert!(uts.release[0] == b'0');  // "0.1.0"
         assert!(uts.version[0] == b'#');  // "#1 SMP"
         assert!(uts.machine[0] == b'x');  // "x86_64"
+    }
+
+    // -----------------------------------------------------------------------
+    // uname — nodename reflects the hostname set via sethostname()
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn uname_nodename_tracks_sethostname() {
+        // Save default state via gethostname so we can restore it.
+        let mut saved = [0u8; 256];
+        let _ = crate::unistd::gethostname(saved.as_mut_ptr(), saved.len());
+
+        // Change the hostname.
+        let new_name = b"uname-test-host";
+        let rc = crate::unistd::sethostname(new_name.as_ptr(), new_name.len());
+        assert_eq!(rc, 0);
+
+        // uname must now report the new hostname.
+        let mut uts: Utsname = unsafe { mem::zeroed() };
+        uname(&mut uts as *mut Utsname);
+        assert_eq!(&uts.nodename[..new_name.len()], new_name);
+        assert_eq!(uts.nodename[new_name.len()], 0);
+
+        // Restore the default hostname for other tests.
+        let restore = b"localhost";
+        let _ = crate::unistd::sethostname(restore.as_ptr(), restore.len());
     }
 
     // -----------------------------------------------------------------------

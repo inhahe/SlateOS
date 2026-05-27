@@ -530,13 +530,11 @@ impl DeadlineScheduler {
             remaining = remaining.saturating_sub(1);
         }
 
-        for slot in &keys_to_steal[..steal_idx] {
-            if let Some(key) = slot {
-                if let Some(entry) = self.tree.remove(key) {
-                    self.deadlines.remove(&entry.id);
-                    self.nr_running = self.nr_running.saturating_sub(1);
-                    stolen.push(entry.id, entry.priority);
-                }
+        for key in keys_to_steal[..steal_idx].iter().flatten() {
+            if let Some(entry) = self.tree.remove(key) {
+                self.deadlines.remove(&entry.id);
+                self.nr_running = self.nr_running.saturating_sub(1);
+                stolen.push(entry.id, entry.priority);
             }
         }
 

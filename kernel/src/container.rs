@@ -388,36 +388,32 @@ pub fn create(config: &ContainerConfig) -> KernelResult<ContainerId> {
 
     // 2a: PID namespace.
     let pid_ns = crate::pidns::create(crate::pidns::ROOT_NS)
-        .map_err(|e| {
+        .inspect_err(|&e| {
             serial_println!("[container] Failed to create PID namespace: {:?}", e);
-            e
         })?;
 
     // 2b: User namespace.
     let user_ns = crate::userns::create(crate::userns::ROOT_NS, 0)
-        .map_err(|e| {
+        .inspect_err(|&e| {
             serial_println!("[container] Failed to create user namespace: {:?}", e);
             let _ = crate::pidns::delete(pid_ns);
-            e
         })?;
 
     // 2c: Network namespace.
     let net_ns = crate::netns::create()
-        .map_err(|e| {
+        .inspect_err(|&e| {
             serial_println!("[container] Failed to create network namespace: {:?}", e);
             let _ = crate::userns::delete(user_ns);
             let _ = crate::pidns::delete(pid_ns);
-            e
         })?;
 
     // 2d: Cgroup.
     let cgroup_id = crate::cgroup::create(crate::cgroup::ROOT_CGROUP)
-        .map_err(|e| {
+        .inspect_err(|&e| {
             serial_println!("[container] Failed to create cgroup: {:?}", e);
             let _ = crate::netns::delete(net_ns);
             let _ = crate::userns::delete(user_ns);
             let _ = crate::pidns::delete(pid_ns);
-            e
         })?;
 
     // --- Phase 3: Apply configuration. ---

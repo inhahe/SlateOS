@@ -169,12 +169,7 @@ pub fn validate() {
 /// unmapped kernel space.
 #[must_use]
 pub fn identify(addr: u64) -> Option<&'static Region> {
-    for region in ALL_REGIONS {
-        if region.contains(addr) {
-            return Some(region);
-        }
-    }
-    None
+    ALL_REGIONS.iter().find(|&region| region.contains(addr)).map(|v| v as _)
 }
 
 /// Check if an address is in kernel space (above the canonical hole).

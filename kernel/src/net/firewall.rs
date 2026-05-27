@@ -650,7 +650,7 @@ struct FixedBufWriter<'a> {
     pos: usize,
 }
 
-impl<'a> core::fmt::Write for FixedBufWriter<'a> {
+impl core::fmt::Write for FixedBufWriter<'_> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let bytes = s.as_bytes();
         let space = self.buf.len().saturating_sub(self.pos);

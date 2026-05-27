@@ -1716,12 +1716,10 @@ fn handle_window_adjust(
         .ok_or(KernelError::InvalidArgument)?;
 
     // Find the channel and adjust its window.
-    for slot in &mut session.channels {
-        if let Some(ch) = slot {
-            if ch.server_channel == recipient_channel {
-                ch.client_window = ch.client_window.saturating_add(bytes_to_add);
-                return Ok(());
-            }
+    for ch in session.channels.iter_mut().flatten() {
+        if ch.server_channel == recipient_channel {
+            ch.client_window = ch.client_window.saturating_add(bytes_to_add);
+            return Ok(());
         }
     }
 
@@ -1954,21 +1952,19 @@ fn process_message(
                         let mut replies = vec![reply];
 
                         // Check if any channel just became shell_active.
-                        for slot in &session.channels {
-                            if let Some(ch) = slot {
-                                if ch.shell_active && ch.line_buf.is_empty() {
-                                    let welcome = format!(
-                                        "\r\nWelcome to MintOS SSH ({}).\r\n\
-                                         Type 'help' for available commands.\r\n\r\n\
-                                         {}@mintos$ ",
-                                        session.username, session.username
-                                    );
-                                    let mut data_msg = Vec::with_capacity(32 + welcome.len());
-                                    data_msg.push(msg::CHANNEL_DATA);
-                                    write_u32(&mut data_msg, ch.client_channel);
-                                    write_string(&mut data_msg, welcome.as_bytes());
-                                    replies.push(data_msg);
-                                }
+                        for ch in session.channels.iter().flatten() {
+                            if ch.shell_active && ch.line_buf.is_empty() {
+                                let welcome = format!(
+                                    "\r\nWelcome to MintOS SSH ({}).\r\n\
+                                     Type 'help' for available commands.\r\n\r\n\
+                                     {}@mintos$ ",
+                                    session.username, session.username
+                                );
+                                let mut data_msg = Vec::with_capacity(32 + welcome.len());
+                                data_msg.push(msg::CHANNEL_DATA);
+                                write_u32(&mut data_msg, ch.client_channel);
+                                write_string(&mut data_msg, welcome.as_bytes());
+                                replies.push(data_msg);
                             }
                         }
 

@@ -1325,10 +1325,7 @@ pub fn sys_channel_recv_caps(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Get receiver PID.
-    let receiver_pid = match caller_pid() {
-        Some(pid) => pid,
-        None => 0,
-    };
+    let receiver_pid = caller_pid().unwrap_or_default();
 
     match channel::recv_with_caps(handle, receiver_pid) {
         Ok((data, new_handles)) => {

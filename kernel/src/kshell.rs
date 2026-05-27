@@ -72363,21 +72363,19 @@ fn cmd_kprofile(args: &str) {
             "------", "-----", "---", "----", "---");
     }
 
-    for snap in &snapshots {
-        if let Some(s) = snap {
-            any = true;
-            if freq > 0 {
-                let min_ns = crate::bench::cycles_to_ns(s.min_cycles);
-                let mean_ns = crate::bench::cycles_to_ns(s.mean_cycles);
-                let max_ns = crate::bench::cycles_to_ns(s.max_cycles);
-                shell_println!("  {:<14} {:>8} {:>8} {:>8} {:>8}  {:>7} {:>7} {:>7}",
-                    s.name, s.count,
-                    s.min_cycles, s.mean_cycles, s.max_cycles,
-                    min_ns, mean_ns, max_ns);
-            } else {
-                shell_println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
-                    s.name, s.count, s.min_cycles, s.mean_cycles, s.max_cycles);
-            }
+    for s in snapshots.iter().flatten() {
+        any = true;
+        if freq > 0 {
+            let min_ns = crate::bench::cycles_to_ns(s.min_cycles);
+            let mean_ns = crate::bench::cycles_to_ns(s.mean_cycles);
+            let max_ns = crate::bench::cycles_to_ns(s.max_cycles);
+            shell_println!("  {:<14} {:>8} {:>8} {:>8} {:>8}  {:>7} {:>7} {:>7}",
+                s.name, s.count,
+                s.min_cycles, s.mean_cycles, s.max_cycles,
+                min_ns, mean_ns, max_ns);
+        } else {
+            shell_println!("  {:<14} {:>10} {:>10} {:>10} {:>10}",
+                s.name, s.count, s.min_cycles, s.mean_cycles, s.max_cycles);
         }
     }
 
@@ -72438,32 +72436,30 @@ fn cmd_lockstats(args: &str) {
             "----", "--------", "--------", "---", "----------", "----------");
     }
 
-    for snap in &snapshots {
-        if let Some(s) = snap {
-            if s.acquisitions == 0 {
-                continue;
-            }
-            any = true;
-            let name_str = core::str::from_utf8(s.name).unwrap_or("???");
-            let pct = if s.acquisitions > 0 {
-                (s.contentions * 100) / s.acquisitions
-            } else {
-                0
-            };
+    for s in snapshots.iter().flatten() {
+        if s.acquisitions == 0 {
+            continue;
+        }
+        any = true;
+        let name_str = core::str::from_utf8(s.name).unwrap_or("???");
+        let pct = if s.acquisitions > 0 {
+            (s.contentions * 100) / s.acquisitions
+        } else {
+            0
+        };
 
-            if freq > 0 {
-                let max_wait_ns = crate::bench::cycles_to_ns(s.max_wait_cycles);
-                let max_hold_ns = crate::bench::cycles_to_ns(s.max_hold_cycles);
-                let tot_wait_us = crate::bench::cycles_to_ns(s.total_wait_cycles) / 1000;
-                let tot_hold_us = crate::bench::cycles_to_ns(s.total_hold_cycles) / 1000;
-                shell_println!("  {:<12} {:>8} {:>8} {:>4}%  {:>5}ns {:>5}ns  {:>5}us {:>5}us",
-                    name_str, s.acquisitions, s.contentions, pct,
-                    max_wait_ns, max_hold_ns, tot_wait_us, tot_hold_us);
-            } else {
-                shell_println!("  {:<12} {:>8} {:>8} {:>4}%  {:>10} {:>10}",
-                    name_str, s.acquisitions, s.contentions, pct,
-                    s.max_wait_cycles, s.max_hold_cycles);
-            }
+        if freq > 0 {
+            let max_wait_ns = crate::bench::cycles_to_ns(s.max_wait_cycles);
+            let max_hold_ns = crate::bench::cycles_to_ns(s.max_hold_cycles);
+            let tot_wait_us = crate::bench::cycles_to_ns(s.total_wait_cycles) / 1000;
+            let tot_hold_us = crate::bench::cycles_to_ns(s.total_hold_cycles) / 1000;
+            shell_println!("  {:<12} {:>8} {:>8} {:>4}%  {:>5}ns {:>5}ns  {:>5}us {:>5}us",
+                name_str, s.acquisitions, s.contentions, pct,
+                max_wait_ns, max_hold_ns, tot_wait_us, tot_hold_us);
+        } else {
+            shell_println!("  {:<12} {:>8} {:>8} {:>4}%  {:>10} {:>10}",
+                name_str, s.acquisitions, s.contentions, pct,
+                s.max_wait_cycles, s.max_hold_cycles);
         }
     }
 
@@ -76510,10 +76506,7 @@ fn tar_add_recursive(
             }
         }
         EntryType::Symlink => {
-            let target = match Vfs::readlink(path) {
-                Ok(t) => t,
-                Err(_) => alloc::string::String::new(),
-            };
+            let target = Vfs::readlink(path).unwrap_or_default();
 
             let entry = TarWriteEntry {
                 name: archive_name.clone(),
@@ -77020,10 +77013,7 @@ fn cmd_cpio_create(args: &[&str]) {
                 };
 
                 let link_target = if etype == crate::fs::cpio::CpioEntryType::Symlink {
-                    match Vfs::readlink(&path) {
-                        Ok(t) => t,
-                        Err(_) => alloc::string::String::new(),
-                    }
+                    Vfs::readlink(&path).unwrap_or_default()
                 } else {
                     alloc::string::String::new()
                 };

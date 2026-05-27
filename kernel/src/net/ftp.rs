@@ -391,10 +391,7 @@ pub fn list_directory(
         super::poll();
     }
 
-    let listing_data = match super::tcp::read_up_to(data_handle, MAX_DATA_SIZE) {
-        Ok(d) => d,
-        Err(_) => Vec::new(),
-    };
+    let listing_data = super::tcp::read_up_to(data_handle, MAX_DATA_SIZE).unwrap_or_default();
 
     BYTES_DOWNLOADED.fetch_add(listing_data.len() as u64, Ordering::Relaxed);
 

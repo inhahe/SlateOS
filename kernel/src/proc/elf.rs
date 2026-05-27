@@ -440,7 +440,7 @@ pub struct LoadableSegments<'a> {
     index: usize,
 }
 
-impl<'a> Iterator for LoadableSegments<'a> {
+impl Iterator for LoadableSegments<'_> {
     type Item = LoadableSegment;
 
     fn next(&mut self) -> Option<Self::Item> {

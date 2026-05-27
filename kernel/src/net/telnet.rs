@@ -589,10 +589,7 @@ fn handle_negotiation(tcp_handle: usize, cmd: u8, option: u8) {
 
 /// Send bytes over a TCP handle, returning bytes sent.
 fn send_bytes(tcp_handle: usize, data: &[u8]) -> usize {
-    match super::tcp::send(tcp_handle, data) {
-        Ok(n) => n,
-        Err(_) => 0,
-    }
+    super::tcp::send(tcp_handle, data).unwrap_or_default()
 }
 
 /// Send a text line over TCP, returning bytes sent.

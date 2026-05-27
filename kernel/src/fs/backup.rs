@@ -271,11 +271,10 @@ pub fn create(src: &str, dst: &str, opts: &BackupOptions) -> KernelResult<Backup
     // Create backup subdirectory for this run.
     let backup_dir = alloc::format!("{}/{}", dst, manifest_id);
     if !opts.dry_run {
-        Vfs::mkdir(&backup_dir).map_err(|e| {
+        Vfs::mkdir(&backup_dir).inspect_err(|&e| {
             if matches!(e, KernelError::AlreadyExists) {
-                return e;
+                return;
             }
-            e
         }).or_else(|e| {
             if matches!(e, KernelError::AlreadyExists) { Ok(()) } else { Err(e) }
         })?;

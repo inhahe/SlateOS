@@ -489,7 +489,7 @@ struct ExtHeaderResult<'a> {
 /// Fragment header is encountered, its fields are extracted and stored
 /// so the caller can route the packet to reassembly.
 #[allow(clippy::arithmetic_side_effects)]
-fn skip_extension_headers<'a>(mut nh: u8, mut data: &'a [u8]) -> ExtHeaderResult<'a> {
+fn skip_extension_headers(mut nh: u8, mut data: &[u8]) -> ExtHeaderResult<'_> {
     let mut frag_info: Option<(u16, bool, u32)> = None;
 
     loop {

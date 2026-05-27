@@ -459,7 +459,7 @@ struct MsgWriter<'a> {
     pos: usize,
 }
 
-impl<'a> core::fmt::Write for MsgWriter<'a> {
+impl core::fmt::Write for MsgWriter<'_> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         let bytes = s.as_bytes();
         let avail = self.buf.len().saturating_sub(self.pos);

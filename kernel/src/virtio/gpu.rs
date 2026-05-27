@@ -628,7 +628,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
 
     let mut fb_frames = alloc::vec::Vec::new();
     for i in 0..frames_needed {
-        let f = frame::alloc_frame().map_err(|e| {
+        let f = frame::alloc_frame().inspect_err(|&e| {
             serial_println!("[virtio-gpu] Failed to alloc FB frame {}: {:?}", i, e);
             // Free already allocated.
             for frame in &fb_frames {
@@ -636,7 +636,6 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
                 // aliased.  Failure to free is logged but not fatal.
                 unsafe { let _ = frame::free_frame(*frame); }
             }
-            e
         })?;
         // Zero the frame.
         // SAFETY: Just allocated; HHDM maps it writable.  Zeroing one

@@ -340,7 +340,7 @@ fn emit_serial(entry: &LogEntry) {
 /// Wrapper that escapes special characters for JSON string output.
 struct JsonEscape<'a>(&'a str);
 
-impl<'a> fmt::Display for JsonEscape<'a> {
+impl fmt::Display for JsonEscape<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for ch in self.0.chars() {
             match ch {
@@ -543,7 +543,7 @@ struct FmtBuf<'a> {
     pos: usize,
 }
 
-impl<'a> fmt::Write for FmtBuf<'a> {
+impl fmt::Write for FmtBuf<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let bytes = s.as_bytes();
         let avail = self.buf.len().saturating_sub(self.pos);

@@ -34,7 +34,7 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::format;
 use spin::Mutex;
@@ -525,7 +525,7 @@ pub fn procfs_content() -> String {
             "ID", "SvcID", "Type", "Port", "Path/Service", "State", "Activ", "Pend"));
         for e in &entries {
             let display = if e.path.is_empty() {
-                format!("{}", e.service_name)
+                e.service_name.to_string()
             } else {
                 e.path.clone()
             };

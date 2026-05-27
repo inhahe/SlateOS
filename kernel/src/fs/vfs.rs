@@ -25,7 +25,7 @@
 
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -3569,7 +3569,7 @@ pub fn self_test() -> KernelResult<()> {
                         let mb = info.total_bytes() / (1024 * 1024);
                         alloc::format!("{} MiB, {}% used", mb, info.usage_percent())
                     } else {
-                        alloc::format!("ram-backed")
+                        "ram-backed".to_string()
                     },
                 );
             }

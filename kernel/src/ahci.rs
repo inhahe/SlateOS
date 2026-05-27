@@ -928,9 +928,9 @@ pub fn init(hhdm_offset: u64) {
         let vs = unsafe { mmio_read32(abar_virt + HBA_VS) };
 
         #[allow(clippy::arithmetic_side_effects)]
-        let num_ports = ((cap & 0x1F) + 1); // Bits 4:0 = NP (0-based).
+        let num_ports = (cap & 0x1F) + 1; // Bits 4:0 = NP (0-based).
         #[allow(clippy::arithmetic_side_effects)]
-        let num_slots = (((cap >> 8) & 0x1F) + 1); // Bits 12:8 = NCS (0-based).
+        let num_slots = ((cap >> 8) & 0x1F) + 1; // Bits 12:8 = NCS (0-based).
         let supports_64bit = cap & (1 << 31) != 0;
 
         serial_println!(

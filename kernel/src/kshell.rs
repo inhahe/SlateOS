@@ -23,7 +23,7 @@
 //! still processing input promptly when keys arrive.
 
 use alloc::collections::{BTreeMap, BTreeSet};
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -10660,8 +10660,8 @@ fn cmd_quota(args: &str) {
                     shell_println!("{:<12} {:>12} {:>12} {:>12} {:>12}  {}",
                         subj_str,
                         quota::format_bytes(info.usage.bytes_used),
-                        if info.limits.soft_bytes > 0 { quota::format_bytes(info.limits.soft_bytes) } else { alloc::format!("-") },
-                        if info.limits.hard_bytes > 0 { quota::format_bytes(info.limits.hard_bytes) } else { alloc::format!("-") },
+                        if info.limits.soft_bytes > 0 { quota::format_bytes(info.limits.soft_bytes) } else { "-".to_string() },
+                        if info.limits.hard_bytes > 0 { quota::format_bytes(info.limits.hard_bytes) } else { "-".to_string() },
                         info.usage.inodes_used,
                         status,
                     );
@@ -10727,8 +10727,8 @@ fn print_quota_info(info: &crate::fs::quota::QuotaInfo) {
     shell_println!("=== Quota: {} ===", subj_str);
     shell_println!("  Bytes:");
     shell_println!("    Used:  {}", quota::format_bytes(info.usage.bytes_used));
-    shell_println!("    Soft:  {}", if info.limits.soft_bytes > 0 { quota::format_bytes(info.limits.soft_bytes) } else { alloc::format!("unlimited") });
-    shell_println!("    Hard:  {}", if info.limits.hard_bytes > 0 { quota::format_bytes(info.limits.hard_bytes) } else { alloc::format!("unlimited") });
+    shell_println!("    Soft:  {}", if info.limits.soft_bytes > 0 { quota::format_bytes(info.limits.soft_bytes) } else { "unlimited".to_string() });
+    shell_println!("    Hard:  {}", if info.limits.hard_bytes > 0 { quota::format_bytes(info.limits.hard_bytes) } else { "unlimited".to_string() });
     if info.over_hard_bytes {
         shell_println!("    ** OVER HARD LIMIT **");
     } else if info.over_soft_bytes {
@@ -10737,8 +10737,8 @@ fn print_quota_info(info: &crate::fs::quota::QuotaInfo) {
 
     shell_println!("  Files:");
     shell_println!("    Used:  {}", info.usage.inodes_used);
-    shell_println!("    Soft:  {}", if info.limits.soft_inodes > 0 { alloc::format!("{}", info.limits.soft_inodes) } else { alloc::format!("unlimited") });
-    shell_println!("    Hard:  {}", if info.limits.hard_inodes > 0 { alloc::format!("{}", info.limits.hard_inodes) } else { alloc::format!("unlimited") });
+    shell_println!("    Soft:  {}", if info.limits.soft_inodes > 0 { alloc::format!("{}", info.limits.soft_inodes) } else { "unlimited".to_string() });
+    shell_println!("    Hard:  {}", if info.limits.hard_inodes > 0 { alloc::format!("{}", info.limits.hard_inodes) } else { "unlimited".to_string() });
     if info.over_hard_inodes {
         shell_println!("    ** OVER HARD LIMIT **");
     } else if info.over_soft_inodes {
@@ -11968,7 +11968,7 @@ fn cmd_fssnapshot(args: &str) {
             for s in &snaps {
                 let parent_str = s.parent
                     .map(|p| alloc::format!("{}", p.0))
-                    .unwrap_or_else(|| alloc::format!("-"));
+                    .unwrap_or_else(|| "-".to_string());
                 shell_println!("{:>4}  {:20}  {:30}  {:>8}  {:>12}  {}",
                     s.id.0, s.name, s.root_path, s.file_count, s.total_bytes, parent_str);
             }
@@ -11994,7 +11994,7 @@ fn cmd_fssnapshot(args: &str) {
                     shell_println!("  Bytes:  {}", i.total_bytes);
                     shell_println!("  Parent: {}", i.parent
                         .map(|p| alloc::format!("{}", p.0))
-                        .unwrap_or_else(|| alloc::format!("none")));
+                        .unwrap_or_else(|| "none".to_string()));
                     let kids = snapshot::children(i.id);
                     if !kids.is_empty() {
                         let ids: Vec<_> = kids.iter()
@@ -12093,7 +12093,7 @@ fn cmd_fssnapshot(args: &str) {
                                 let short: String = s.chars().take(16).collect();
                                 short
                             })
-                            .unwrap_or_else(|| alloc::format!("-"));
+                            .unwrap_or_else(|| "-".to_string());
                         shell_println!("  {} {:>8}  {}  {}",
                             t, e.size, hash_str, e.path);
                     }
@@ -37273,7 +37273,7 @@ fn cmd_qos(args: &str) {
                         crate::net::qos::ClassifyMatch::DstPort(p) => format!("dst port {}", p),
                         crate::net::qos::ClassifyMatch::SrcPort(p) => format!("src port {}", p),
                         crate::net::qos::ClassifyMatch::Dscp(d) => format!("DSCP {}", d),
-                        crate::net::qos::ClassifyMatch::All => format!("all traffic"),
+                        crate::net::qos::ClassifyMatch::All => "all traffic".to_string(),
                     };
                     shell_println!("  {} → priority {}", desc, priority);
                 }
@@ -66268,17 +66268,17 @@ fn cmd_cgroup(args: &str) {
             for id in 0..cgroup::MAX_CGROUPS as u32 {
                 if let Some(s) = cgroup::stats(id) {
                     let cpu_q = if s.cpu_quota == 0 {
-                        alloc::format!("unlimited")
+                        "unlimited".to_string()
                     } else {
                         alloc::format!("{}/{}", s.cpu_quota, s.cpu_period)
                     };
                     let mem = if s.mem_limit == 0 {
-                        alloc::format!("unlimited")
+                        "unlimited".to_string()
                     } else {
                         alloc::format!("{}/{}", s.mem_usage, s.mem_limit)
                     };
                     let parent = if s.parent == u32::MAX {
-                        alloc::format!("-")
+                        "-".to_string()
                     } else {
                         alloc::format!("{}", s.parent)
                     };
@@ -66385,32 +66385,32 @@ fn cmd_cgroup(args: &str) {
                 return;
             };
             crate::console_println!("=== Cgroup {} ===", id);
-            let parent = if s.parent == u32::MAX { alloc::format!("none (root)") }
+            let parent = if s.parent == u32::MAX { "none (root)".to_string() }
                          else { alloc::format!("{}", s.parent) };
             crate::console_println!("  Parent:           {}", parent);
             crate::console_println!("  Tasks:            {}", s.nr_tasks);
             crate::console_println!("  Children:         {}", s.nr_children);
             crate::console_println!("  CPU quota:        {}", if s.cpu_quota == 0 {
-                alloc::format!("unlimited")
+                "unlimited".to_string()
             } else {
                 alloc::format!("{} ticks / {} period", s.cpu_quota, s.cpu_period)
             });
             crate::console_println!("  CPU used:         {} ticks (this period)", s.cpu_used);
             crate::console_println!("  CPU throttles:    {}", s.cpu_throttle_count);
             crate::console_println!("  Memory limit:     {}", if s.mem_limit == 0 {
-                alloc::format!("unlimited")
+                "unlimited".to_string()
             } else {
                 alloc::format!("{} frames", s.mem_limit)
             });
             crate::console_println!("  Memory usage:     {} frames", s.mem_usage);
             crate::console_println!("  Memory peak:      {} frames", s.mem_peak);
             crate::console_println!("  I/O ops limit:    {}", if s.io_ops_limit == 0 {
-                alloc::format!("unlimited")
+                "unlimited".to_string()
             } else {
                 alloc::format!("{} ops/period", s.io_ops_limit)
             });
             crate::console_println!("  I/O bytes limit:  {}", if s.io_bytes_limit == 0 {
-                alloc::format!("unlimited")
+                "unlimited".to_string()
             } else {
                 alloc::format!("{} frames/period", s.io_bytes_limit)
             });
@@ -66419,22 +66419,22 @@ fn cmd_cgroup(args: &str) {
             crate::console_println!("  I/O throttles:    {}", s.io_throttle_count);
             crate::console_println!("  Eff. CPU quota:   {}", {
                 let eff = cgroup::effective_cpu_quota(id);
-                if eff == 0 { alloc::format!("unlimited") }
+                if eff == 0 { "unlimited".to_string() }
                 else { alloc::format!("{} ticks", eff) }
             });
             crate::console_println!("  Eff. mem limit:   {}", {
                 let eff = cgroup::effective_mem_limit(id);
-                if eff == 0 { alloc::format!("unlimited") }
+                if eff == 0 { "unlimited".to_string() }
                 else { alloc::format!("{} frames", eff) }
             });
             crate::console_println!("  Eff. I/O ops:     {}", {
                 let eff = cgroup::effective_io_ops_limit(id);
-                if eff == 0 { alloc::format!("unlimited") }
+                if eff == 0 { "unlimited".to_string() }
                 else { alloc::format!("{} ops", eff) }
             });
             crate::console_println!("  Eff. I/O bytes:   {}", {
                 let eff = cgroup::effective_io_bytes_limit(id);
-                if eff == 0 { alloc::format!("unlimited") }
+                if eff == 0 { "unlimited".to_string() }
                 else { alloc::format!("{} frames", eff) }
             });
         }
@@ -66461,9 +66461,9 @@ fn cmd_cgroup(args: &str) {
             let limit = cgroup::IoLimit::new(ops, bytes);
             match cgroup::set_io_limit(id, limit) {
                 Ok(()) => {
-                    let ops_str = if ops == 0 { alloc::format!("unlimited") }
+                    let ops_str = if ops == 0 { "unlimited".to_string() }
                                   else { alloc::format!("{} ops/period", ops) };
-                    let bytes_str = if bytes == 0 { alloc::format!("unlimited") }
+                    let bytes_str = if bytes == 0 { "unlimited".to_string() }
                                     else { alloc::format!("{} frames/period", bytes) };
                     crate::console_println!(
                         "Cgroup {}: I/O limit set — ops: {}, bytes: {}",
@@ -66520,7 +66520,7 @@ fn cmd_pidns(args: &str) {
             for id in 0..pidns::MAX_NAMESPACES as u32 {
                 if let Some(s) = pidns::stats(id) {
                     let parent = if s.parent == u32::MAX {
-                        alloc::format!("-")
+                        "-".to_string()
                     } else {
                         alloc::format!("{}", s.parent)
                     };
@@ -66569,7 +66569,7 @@ fn cmd_pidns(args: &str) {
                 return;
             };
             crate::console_println!("=== PID Namespace {} ===", id);
-            let parent = if s.parent == u32::MAX { alloc::format!("none (root)") }
+            let parent = if s.parent == u32::MAX { "none (root)".to_string() }
                          else { alloc::format!("{}", s.parent) };
             crate::console_println!("  Parent:     {}", parent);
             crate::console_println!("  Processes:  {}", s.nr_procs);
@@ -66618,7 +66618,7 @@ fn cmd_userns(args: &str) {
             for id in 0..userns::MAX_NAMESPACES as u32 {
                 if let Some(s) = userns::stats(id) {
                     let parent = if s.parent == u32::MAX {
-                        alloc::format!("-")
+                        "-".to_string()
                     } else {
                         alloc::format!("{}", s.parent)
                     };
@@ -66711,7 +66711,7 @@ fn cmd_userns(args: &str) {
             };
             crate::console_println!("=== User Namespace {} ===", id);
             let parent = if s.parent == u32::MAX {
-                alloc::format!("none (root)")
+                "none (root)".to_string()
             } else {
                 alloc::format!("{}", s.parent)
             };
@@ -71927,7 +71927,7 @@ fn cmd_boottime() {
         } else {
             let delta = tick.saturating_sub(prev_tick);
             let delta_str = if prev_tick == 0 {
-                alloc::format!("--")
+                "--".to_string()
             } else {
                 alloc::format!("+{}", delta)
             };
@@ -73551,7 +73551,7 @@ fn cmd_cap_audit(args: &str) {
                 let e = &buf[i];
                 if e.is_valid() {
                     let result_str = if e.result == 0 {
-                        alloc::format!("ok")
+                        "ok".to_string()
                     } else {
                         alloc::format!("E{}", e.result)
                     };
@@ -73798,7 +73798,7 @@ fn cmd_strace(args: &str) {
                     let result_str = if e.complete {
                         alloc::format!("{}", e.result)
                     } else {
-                        alloc::format!("(entry)")
+                        "(entry)".to_string()
                     };
                     shell_println!("  {:>10}  {:>4}  {:>4}  {:>16x}  {:>8}  {:>7}",
                         e.timestamp, e.pid, name,

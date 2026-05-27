@@ -59,7 +59,7 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::format;
 use spin::Mutex;
@@ -913,7 +913,7 @@ pub fn procfs_content() -> String {
         out.push('\n');
     }
 
-    out.push_str(&format!("\n--- Config ---\n"));
+    out.push_str(&"\n--- Config ---\n".to_string());
     out.push_str(&format!("  Shutdown Grace: {} ms\n",
         state.config.shutdown_grace_ns / 1_000_000));
     out.push_str(&format!("  Auto Flush Logs: {}\n", state.config.auto_flush_logs));

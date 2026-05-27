@@ -21,7 +21,7 @@
 #![allow(dead_code)]
 
 use alloc::boxed::Box;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -5509,12 +5509,10 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
     // -----------------------------------------------------------------------
     match fs.read_clean_shutdown_bit() {
         Ok(true) => {
-            report.warn(alloc::format!("Clean-shutdown bit: set (clean)"));
+            report.warn("Clean-shutdown bit: set (clean)".to_string());
         }
         Ok(false) => {
-            report.warn(alloc::format!(
-                "Clean-shutdown bit: NOT set (volume was not cleanly unmounted)"
-            ));
+            report.warn("Clean-shutdown bit: NOT set (volume was not cleanly unmounted)".to_string());
         }
         Err(e) => {
             report.error(alloc::format!(
@@ -5564,7 +5562,7 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
                 ));
             }
         } else {
-            report.warn(alloc::format!("FAT copies: match"));
+            report.warn("FAT copies: match".to_string());
         }
     }
 
@@ -5882,12 +5880,12 @@ pub fn fsck_fat(device: &str, repair: bool) -> KernelResult<FsckReport> {
         if report.repaired > 0 {
             let _ = fs.set_clean_shutdown_bit(true);
             let _ = super::cache::flush(device);
-            report.warn(alloc::format!("Clean-shutdown bit set after repair"));
+            report.warn("Clean-shutdown bit set after repair".to_string());
         }
     }
 
     if report.errors == 0 || (repair && report.errors <= report.repaired) {
-        report.warn(alloc::format!("Filesystem clean."));
+        report.warn("Filesystem clean.".to_string());
     } else {
         let unrepaired = report.errors.saturating_sub(report.repaired);
         report.warn(alloc::format!(

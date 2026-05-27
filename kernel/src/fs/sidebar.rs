@@ -28,7 +28,7 @@
 
 #![allow(dead_code)]
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -343,7 +343,7 @@ fn build_this_pc(expanded: &[(SectionKind, bool)]) -> SidebarSection {
     let mut prio = 1u32;
     for mp in &mount_points {
         if crate::fs::vfs::Vfs::metadata(mp).is_ok() {
-            let label = alloc::format!("{}", mp);
+            let label = mp.to_string();
             items.push(SidebarItem {
                 label,
                 path: String::from(*mp),

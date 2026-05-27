@@ -1290,6 +1290,117 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
     0
 }
 
+// ---------------------------------------------------------------------------
+// gethostid / sethostid — host identifier
+// ---------------------------------------------------------------------------
+
+/// Process-local host identifier.
+///
+/// Initialized to 0 (= "unset" sentinel).  `sethostid()` writes here.
+/// When unset, `gethostid()` derives a value from the current hostname
+/// via FNV-1a so callers get a stable-per-hostname 32-bit identifier
+/// instead of always seeing 0 (which would defeat the function's
+/// purpose of distinguishing hosts).
+///
+/// Real Linux persists the value in `/etc/hostid`; we have no on-disk
+/// store yet so it lives in memory only, lost across reboots.  Once
+/// the OS gains a proper config-files directory, this should migrate
+/// to a file under `/etc/hostid` to match Linux semantics.
+static HOSTID: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+
+/// FNV-1a 32-bit hash — used to derive a stable hostid from the hostname
+/// when no explicit hostid was set via `sethostid()`.
+fn fnv1a32(bytes: &[u8]) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    let mut i = 0;
+    while i < bytes.len() {
+        // Index via .get() to keep clippy::indexing_slicing happy and
+        // because the loop bound has already been checked.
+        if let Some(&b) = bytes.get(i) {
+            h ^= u32::from(b);
+            h = h.wrapping_mul(0x0100_0193);
+        }
+        i = i.wrapping_add(1);
+    }
+    h
+}
+
+/// Get the unique identifier of the current host.
+///
+/// Returns the value previously set by `sethostid()` if any, otherwise
+/// derives a stable 32-bit identifier from the current hostname via
+/// FNV-1a so callers see a deterministic non-zero value.  POSIX defines
+/// the return type as `long` (`i64` on LP64); the value is conceptually
+/// 32 bits and we sign-extend through i64.
+///
+/// Never fails.  Used by programs that want a coarse machine identifier
+/// (e.g. inetd's anti-replay heuristics, distributed lockfile owner IDs,
+/// `tar`'s archive UUID seed).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn gethostid() -> i64 {
+    use core::sync::atomic::Ordering;
+
+    let stored = HOSTID.load(Ordering::Relaxed);
+    if stored != 0 {
+        return stored;
+    }
+
+    // Derive from hostname.  SAFETY: single-address-space, no concurrent
+    // writes during read (matches the gethostname / copy_hostname pattern).
+    let (src_ptr, src_len) = unsafe { (&raw const HOSTNAME_BUF, HOSTNAME_LEN) };
+    let mut tmp = [0u8; HOST_NAME_MAX];
+    let n = core::cmp::min(src_len, tmp.len());
+    let mut i = 0;
+    while i < n {
+        // SAFETY: i < n <= HOSTNAME_LEN <= HOST_NAME_MAX, source buffer is
+        // HOST_NAME_MAX + 1 bytes, and tmp has HOST_NAME_MAX bytes.
+        unsafe {
+            let b = *src_ptr.cast::<u8>().add(i);
+            if let Some(slot) = tmp.get_mut(i) {
+                *slot = b;
+            }
+        }
+        i = i.wrapping_add(1);
+    }
+
+    let h = fnv1a32(tmp.get(..n).unwrap_or(&[]));
+    // Sign-extend through i32 → i64 so a value with the high bit set
+    // (e.g. fnv1a32("localhost") = 0xc2e09d09) doesn't appear as a
+    // huge positive number to callers that expect `(int)gethostid()`.
+    #[allow(clippy::cast_possible_wrap)]
+    let signed = i64::from(h as i32);
+    signed
+}
+
+/// Set the unique identifier of the current host.
+///
+/// Stores `hostid` in process memory.  Subsequent calls to `gethostid()`
+/// will return this value (sign-extended through i32 to match the
+/// historical `(int)` cast in glibc).  Real Linux requires CAP_SYS_ADMIN
+/// and persists to `/etc/hostid`; we have neither user model nor on-disk
+/// config files yet, so we accept any caller and persist only in RAM.
+///
+/// Returns 0 on success.  Never fails on this platform.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sethostid(hostid: i64) -> i32 {
+    use core::sync::atomic::Ordering;
+
+    // Truncate to 32 bits and sign-extend back, matching Linux's
+    // `sethostid(int)` historical behaviour even though our prototype
+    // takes `long`.  Callers that pass a 64-bit value will see the low
+    // 32 bits round-trip.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let truncated = i64::from(hostid as i32);
+    // If the caller passes 0, store a sentinel that's not zero (we use 0
+    // internally to mean "unset" so the FNV fallback kicks in).  Pick
+    // the FNV-derived value of the current hostname so the round-trip
+    // through 0 is a no-op: gethostid() before sethostid(0) and after
+    // both return the same hostname-derived hash.
+    let to_store = if truncated == 0 { gethostid() } else { truncated };
+    HOSTID.store(to_store, Ordering::Relaxed);
+    0
+}
+
 /// Change the root directory.
 ///
 /// Stub: returns -1 with `ENOSYS`.  Filesystem namespaces are not
@@ -3362,6 +3473,113 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(klogctl(0, core::ptr::null_mut(), 0), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // ------------------------------------------------------------------
+    // gethostid / sethostid
+    // ------------------------------------------------------------------
+
+    /// Reset HOSTID to the unset sentinel so per-test setup is consistent.
+    fn reset_hostid_for_test() {
+        use core::sync::atomic::Ordering;
+        HOSTID.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_gethostid_unset_returns_hostname_hash() {
+        reset_hostid_for_test();
+        // Pin the hostname so the derived hash is deterministic.
+        let name = b"hostid-test-A";
+        assert_eq!(sethostname(name.as_ptr(), name.len()), 0);
+
+        let id = gethostid();
+        // Re-derive locally and compare.
+        let expected = i64::from(fnv1a32(name) as i32);
+        assert_eq!(id, expected);
+
+        // Restore default hostname for other tests.
+        let restore = b"localhost";
+        let _ = sethostname(restore.as_ptr(), restore.len());
+    }
+
+    #[test]
+    fn test_gethostid_stable_within_hostname() {
+        reset_hostid_for_test();
+        let name = b"hostid-test-B";
+        assert_eq!(sethostname(name.as_ptr(), name.len()), 0);
+
+        let a = gethostid();
+        let b = gethostid();
+        assert_eq!(a, b, "gethostid must be stable while hostname is unchanged");
+
+        let restore = b"localhost";
+        let _ = sethostname(restore.as_ptr(), restore.len());
+    }
+
+    #[test]
+    fn test_gethostid_changes_with_hostname() {
+        reset_hostid_for_test();
+        let n1 = b"hostid-test-C1";
+        let _ = sethostname(n1.as_ptr(), n1.len());
+        let id1 = gethostid();
+
+        let n2 = b"hostid-test-C2-different";
+        let _ = sethostname(n2.as_ptr(), n2.len());
+        let id2 = gethostid();
+
+        assert_ne!(id1, id2, "different hostnames must hash to different ids");
+
+        let restore = b"localhost";
+        let _ = sethostname(restore.as_ptr(), restore.len());
+    }
+
+    #[test]
+    fn test_sethostid_then_gethostid_roundtrip() {
+        reset_hostid_for_test();
+        assert_eq!(sethostid(0x1234_5678), 0);
+        assert_eq!(gethostid(), 0x1234_5678);
+
+        // Negative values (high bit set in 32-bit) sign-extend through i32→i64.
+        assert_eq!(sethostid(0xFFFF_FFFF_u32 as i64), 0);
+        assert_eq!(gethostid(), -1_i64);
+
+        reset_hostid_for_test();
+    }
+
+    #[test]
+    fn test_sethostid_truncates_to_32_bits() {
+        reset_hostid_for_test();
+        // Pass a value with bits set above the i32 range.
+        assert_eq!(sethostid(0x1_0000_0001), 0);
+        // The high bit (bit 32 in u64) is dropped; low 32 bits sign-extended.
+        assert_eq!(gethostid(), 0x0000_0001);
+
+        reset_hostid_for_test();
+    }
+
+    #[test]
+    fn test_sethostid_zero_falls_back_to_hostname() {
+        reset_hostid_for_test();
+        let name = b"hostid-test-D";
+        let _ = sethostname(name.as_ptr(), name.len());
+        let derived = gethostid();
+
+        // sethostid(0) must not turn off gethostid — it should keep
+        // returning the hostname-derived value.
+        assert_eq!(sethostid(0), 0);
+        assert_eq!(gethostid(), derived);
+
+        reset_hostid_for_test();
+        let restore = b"localhost";
+        let _ = sethostname(restore.as_ptr(), restore.len());
+    }
+
+    #[test]
+    fn test_fnv1a32_known_vector() {
+        // FNV-1a 32-bit canonical test vectors from the reference impl.
+        assert_eq!(fnv1a32(b""), 0x811c_9dc5);
+        assert_eq!(fnv1a32(b"a"), 0xe40c_292c);
+        assert_eq!(fnv1a32(b"foobar"), 0xbf9c_f968);
     }
 
     // ------------------------------------------------------------------

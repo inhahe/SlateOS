@@ -87,6 +87,10 @@ static PARTIAL_FLUSHES: AtomicU64 = AtomicU64::new(0);
 /// Total times full flush was chosen over range flush.
 static FULL_FLUSH_CHOSEN: AtomicU64 = AtomicU64::new(0);
 
+/// Total `free_frame` failures during gather finish (frame leak — indicates
+/// an invariant violation upstream, but we can't panic in the shootdown path).
+static FREE_FAILURES: AtomicU64 = AtomicU64::new(0);
+
 /// Statistics snapshot.
 #[derive(Debug, Clone, Copy)]
 pub struct GatherStats {
@@ -98,6 +102,8 @@ pub struct GatherStats {
     pub partial_flushes: u64,
     /// Number of times full flush was used instead of range flush.
     pub full_flush_chosen: u64,
+    /// Number of `free_frame` failures (leaked frames).
+    pub free_failures: u64,
 }
 
 /// Get current gather statistics.
@@ -108,6 +114,7 @@ pub fn stats() -> GatherStats {
         pages_freed: GATHER_PAGES_FREED.load(Ordering::Relaxed),
         partial_flushes: PARTIAL_FLUSHES.load(Ordering::Relaxed),
         full_flush_chosen: FULL_FLUSH_CHOSEN.load(Ordering::Relaxed),
+        free_failures: FREE_FAILURES.load(Ordering::Relaxed),
     }
 }
 
@@ -277,7 +284,17 @@ impl TlbGather {
                     // SAFETY: The frame was collected during an unmap operation.
                     // The TLB flush above ensures no CPU has a stale mapping.
                     // The frame is exclusively ours to free.
-                    unsafe { frame::free_frame(pf); }
+                    // A failure here indicates an upstream invariant violation
+                    // (caller passed an invalid frame). We can't panic in the
+                    // TLB shootdown path, so log and count — leaking a frame
+                    // is preferable to a kernel hang.
+                    if let Err(e) = unsafe { frame::free_frame(pf) } {
+                        FREE_FAILURES.fetch_add(1, Ordering::Relaxed);
+                        crate::serial_println!(
+                            "[tlb_gather] free_frame({:#x}) failed: {:?} (leaked)",
+                            phys, e
+                        );
+                    }
                 }
             }
         }

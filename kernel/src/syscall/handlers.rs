@@ -4531,7 +4531,7 @@ unsafe fn read_user_path<'a>(ptr: u64, len: u64) -> Result<&'a str, SyscallResul
         return Err(SyscallResult::err(e));
     }
     // SAFETY: Validated above — path_ptr is in user space and mapped.
-    let bytes = core::slice::from_raw_parts(path_ptr, path_len);
+    let bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
     core::str::from_utf8(bytes).map_err(|_| SyscallResult::err(KernelError::InvalidArgument))
 }
 

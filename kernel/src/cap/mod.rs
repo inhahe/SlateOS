@@ -61,7 +61,7 @@ pub mod rights;
 pub mod table;
 
 pub use rights::Rights;
-pub use table::{CapHandle, CapEntry, CapTable};
+pub use table::CapTable;
 
 use crate::error::KernelResult;
 use crate::serial_println;

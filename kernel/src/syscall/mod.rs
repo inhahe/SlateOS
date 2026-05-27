@@ -31,6 +31,6 @@ pub mod number;
 pub mod profile;
 pub mod trace;
 
-pub use dispatch::{dispatch, self_test, SyscallArgs, SyscallResult};
+pub use dispatch::self_test;
 
 // TODO: io_uring submission path.

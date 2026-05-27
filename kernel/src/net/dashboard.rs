@@ -473,7 +473,6 @@ fn api_ipv6() -> Vec<u8> {
     };
 
     let ra_received = icmpv6::ra_received();
-    let global_addr = icmpv6::slaac_global_addr();
     let (slaac_addrs, slaac_count) = icmpv6::slaac_addresses();
     let rdnss = icmpv6::slaac_rdnss();
     let router = if ra_received { Some(icmpv6::slaac_router()) } else { None };

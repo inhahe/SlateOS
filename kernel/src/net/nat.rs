@@ -514,7 +514,6 @@ pub fn list_port_forwards() -> Vec<(NatProto, u16, Ipv4Addr, u16, NetNsId)> {
 /// Allocate a unique NAT port (round-robin in ephemeral range).
 fn alloc_port(table: &mut NatTable, proto: NatProto) -> Option<u16> {
     let range_size = NAT_PORT_END.wrapping_sub(NAT_PORT_START).wrapping_add(1);
-    let start = table.next_port;
 
     // Try each port in the range exactly once.
     for _ in 0..range_size {

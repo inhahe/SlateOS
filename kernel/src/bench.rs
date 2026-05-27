@@ -2821,8 +2821,13 @@ fn bench_net_ns_arp_lookup() {
         }
     };
 
-    // Initialize per-namespace ARP cache and seed it.
-    arp::ns_init(ns_id);
+    // Initialize per-namespace ARP cache and seed it. A failure here means
+    // the ns just created above is unusable — skip the bench rather than
+    // continuing with a half-initialized state.
+    if let Err(e) = arp::ns_init(ns_id) {
+        serial_println!("[bench]   net_ns_arp_lookup: SKIPPED (arp::ns_init failed: {:?})", e);
+        return;
+    }
     let target_ip = crate::net::interface::Ipv4Addr([10, 0, 0, 1]);
     let target_mac = crate::virtio::net::MacAddress([0x02, 0x00, 0x00, 0x00, 0xBE, 0x01]);
     arp::ns_insert(ns_id, target_ip, target_mac);

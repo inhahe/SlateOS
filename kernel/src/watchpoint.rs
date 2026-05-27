@@ -340,10 +340,8 @@ pub fn self_test() {
     serial_println!("[watchpoint]   Clear: OK");
 
     // Test 2: Add a watchpoint on a known kernel variable.
-    // Use the ACTIVE_COUNT atomic's address as our test target.
-    let test_addr = &ACTIVE_COUNT as *const AtomicU8 as u64;
-    // Align to 8 bytes (AtomicU8 might not be 8-byte aligned).
-    // Use EVENT_POS instead — it's an AtomicU32 at a stable address.
+    // Use EVENT_POS — it's an AtomicU32 at a stable, 8-byte-aligned address.
+    // (ACTIVE_COUNT is AtomicU8 and might not be 8-byte aligned.)
     let test_addr = &EVENT_POS as *const core::sync::atomic::AtomicU32 as u64;
 
     // Make sure it's in kernel space and aligned.

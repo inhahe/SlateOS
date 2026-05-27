@@ -574,10 +574,10 @@ fn check_rate_limit(src_ip: [u8; 4]) -> bool {
             break;
         }
         if entry.ip == [0, 0, 0, 0] {
-            // Empty slot — use it immediately.
+            // Empty slot — use it immediately. `oldest_tick` doesn't matter
+            // because we're breaking out and the slot is already targeted.
             found_idx = None;
             oldest_idx = i;
-            oldest_tick = 0;
             break;
         }
         if entry.last_tick < oldest_tick {

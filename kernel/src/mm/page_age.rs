@@ -39,7 +39,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 use crate::serial_println;
-use crate::mm::page_table::{self, PageFlags, VirtAddr};
+use crate::mm::page_table;
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -525,7 +525,7 @@ pub fn self_test() {
 
     // Cleanup: free the test PML4 frame.
     // SAFETY: We allocated this frame above, it's not mapped anywhere.
-    unsafe { frame::free_frame(pml4_frame); }
+    unsafe { frame::free_frame(pml4_frame) }.expect("page_age self-test: free pml4");
 
     serial_println!("[page_age] Self-test PASSED");
 }

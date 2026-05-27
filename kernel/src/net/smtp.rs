@@ -33,7 +33,6 @@ use alloc::format;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
-use super::interface::Ipv4Addr;
 
 // ---------------------------------------------------------------------------
 // Constants

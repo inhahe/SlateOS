@@ -542,8 +542,7 @@ impl VirtioGpuBackend {
             }
         }
 
-        crate::virtio::gpu::flush_full();
-        Ok(())
+        crate::virtio::gpu::flush_full()
     }
 
     /// Flush a sub-region: bulk memcpy + partial host transfer.
@@ -595,7 +594,6 @@ impl VirtioGpuBackend {
             }
         }
 
-        crate::virtio::gpu::flush_rect(x, y, w, h);
-        Ok(())
+        crate::virtio::gpu::flush_rect(x, y, w, h)
     }
 }

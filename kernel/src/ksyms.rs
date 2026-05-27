@@ -277,7 +277,7 @@ pub fn count() -> usize {
 ///
 /// Returns (name, base_address, offset) or None.
 #[must_use]
-pub fn nearest(addr: u64) -> Option<(&'static str, u64, u64)> {
+pub fn nearest(_addr: u64) -> Option<(&'static str, u64, u64)> {
     // Can't return a reference to the Mutex-guarded data directly.
     // This function is a convenience that returns owned data via resolve().
     None // Use resolve() instead for now.

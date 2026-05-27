@@ -137,10 +137,12 @@ fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
     // other than populating registers.  We save/restore rbx via xchg
     // because LLVM reserves it.
     unsafe {
+        // `{tmp:r}` forces 64-bit register name to match the `xchg rbx, ...`
+        // operand. The binding is u32 — rust only reads the low 32 bits.
         core::arch::asm!(
-            "xchg rbx, {tmp}",
+            "xchg rbx, {tmp:r}",
             "cpuid",
-            "xchg rbx, {tmp}",
+            "xchg rbx, {tmp:r}",
             tmp = out(reg) ebx,
             inout("eax") leaf => eax,
             out("ecx") ecx,

@@ -34,7 +34,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::serial_println;
-use crate::mm::page_table::{self, PageFlags, PageTableEntry, VirtAddr};
+use crate::mm::page_table::{self, PageFlags};
 
 // ---------------------------------------------------------------------------
 // Configuration

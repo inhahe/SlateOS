@@ -291,7 +291,9 @@ pub unsafe fn scan_dsdt_for_s5(dsdt_virt: u64) -> Option<u8> {
         return None;
     }
 
-    let data = core::slice::from_raw_parts(data_start as *const u8, data_len);
+    // SAFETY: data_start is data_len bytes within the DSDT region, which
+    // the caller guarantees is mapped and valid for at least total_len bytes.
+    let data = unsafe { core::slice::from_raw_parts(data_start as *const u8, data_len) };
 
     // Search for the \_S5_ name.
     for i in 0..data_len.saturating_sub(s5_signature.len() + 5) {

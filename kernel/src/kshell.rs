@@ -36450,7 +36450,6 @@ fn cmd_mld(args: &str) {
 
 /// `lldp` — Link Layer Discovery Protocol.
 fn cmd_lldp(args: &str) {
-    use alloc::format;
     use crate::net::lldp;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -36629,7 +36628,6 @@ fn cmd_netstat(args: &str) {
 
 /// `ndisc` / `arpscan` — Network discovery via ARP scanning.
 fn cmd_ndisc(args: &str) {
-    use alloc::format;
     use crate::net::ndisc;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
@@ -37479,7 +37477,6 @@ fn cmd_vlan(args: &str) {
 
 /// `smtp` — SMTP client for sending email.
 fn cmd_smtp(args: &str) {
-    use alloc::format;
     use alloc::vec::Vec;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("help");
@@ -37570,7 +37567,6 @@ fn cmd_smtp(args: &str) {
 
 /// `ftp` — FTP client for file transfer.
 fn cmd_ftp(args: &str) {
-    use alloc::format;
     use alloc::vec::Vec;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("help");
@@ -37740,7 +37736,6 @@ fn cmd_ftp(args: &str) {
 
 /// `snmp` — Simple Network Management Protocol client.
 fn cmd_snmp(args: &str) {
-    use alloc::format;
     use alloc::vec::Vec;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("help");
@@ -38059,7 +38054,6 @@ fn cmd_snmp(args: &str) {
 
 /// `iperf` — network bandwidth measurement tool.
 fn cmd_iperf(args: &str) {
-    use alloc::format;
     use alloc::vec::Vec;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("help");
@@ -38278,7 +38272,6 @@ fn cmd_iperf(args: &str) {
 
 /// `nc` / `netcat` — TCP/UDP networking swiss army knife.
 fn cmd_nc(args: &str) {
-    use alloc::format;
     use alloc::vec::Vec;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("help");

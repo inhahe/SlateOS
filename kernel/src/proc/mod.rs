@@ -40,8 +40,6 @@ pub mod pcb;
 pub mod spawn;
 pub mod thread;
 
-pub use pcb::{ProcessId, Process};
-
 use crate::error::KernelResult;
 use crate::serial_println;
 

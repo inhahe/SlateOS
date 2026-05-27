@@ -303,10 +303,10 @@ pub fn format_routing() -> String {
     out.push_str("Destination                              Next Hop   Iface\n");
     out.push_str("───────────────────────────────────────  ─────────  ─────\n");
 
-    let link_local = Ipv6Addr::from_mac_link_local(&info.mac);
-    out.push_str(&format!(
+    let _link_local = Ipv6Addr::from_mac_link_local(&info.mac);
+    out.push_str(
         "fe80::/10                                ::         eth0   (link-local)\n",
-    ));
+    );
 
     if let Some(global) = super::icmpv6::slaac_global_addr() {
         // Show the /64 prefix route.

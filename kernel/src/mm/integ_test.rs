@@ -26,8 +26,7 @@
 
 use crate::serial_println;
 use crate::mm::{
-    frame::{self, PhysFrame, FRAME_SIZE},
-    kvspace,
+    frame::{self, FRAME_SIZE},
     migrate_type::{self, MigrateType},
     page_table::{self, PageFlags, VirtAddr},
     pt_walk::{self, WalkAction, WalkEntry},
@@ -109,7 +108,8 @@ fn test_alloc_map_access_unmap() {
 
     let freed_frame = unmap_result.unwrap();
     assert_eq!(freed_frame.addr(), phys);
-    unsafe { frame::free_frame(freed_frame); }
+    // SAFETY: frame was just unmapped above; we own it exclusively.
+    unsafe { frame::free_frame(freed_frame) }.expect("integ_test: free_frame after unmap");
 
     serial_println!("[mm_integ]   Test 1 (alloc-map-access-unmap): PASSED");
 }
@@ -198,7 +198,8 @@ fn test_pt_walk_finds_mappings() {
     // Cleanup.
     let f = unsafe { page_table::unmap_frame(pml4, virt) }.expect("unmap");
     crate::tlb::flush_range(test_va, 4);
-    unsafe { frame::free_frame(f); }
+    // SAFETY: frame was just unmapped above; we own it exclusively.
+    unsafe { frame::free_frame(f) }.expect("integ_test: free_frame after pt walk");
 
     serial_println!("[mm_integ]   Test 3 (PT walk finds mapping): PASSED");
 }

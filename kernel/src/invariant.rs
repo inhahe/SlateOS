@@ -222,7 +222,6 @@ fn check_pressure_range() -> InvariantResult {
 
 /// IPC: no negative operation counts.
 fn check_ipc_counters() -> InvariantResult {
-    let s = crate::ipc::stats::snapshot();
     // All fields are u64, so they can't be negative.
     // But check for clearly impossible conditions (sends without creation).
     // Actually this isn't necessarily an invariant since channels can be

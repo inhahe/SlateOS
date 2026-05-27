@@ -1842,8 +1842,7 @@ pub fn zstd_store(data: &[u8]) -> Vec<u8> {
             out.push(first_byte);
         } else {
             // Raw block: type=0, size=block_len.
-            let bh = if is_last { 1u32 } else { 0u32 }
-                | (0u32 << 1)               // type = raw
+            let bh = if is_last { 1u32 } else { 0u32 }               // type = raw
                 | ((block_len as u32) << 3); // size = byte count
             out.push(bh as u8);
             out.push((bh >> 8) as u8);
@@ -1937,7 +1936,6 @@ pub fn compress_zstd(data: &[u8]) -> Vec<u8> {
         } else {
             // Fall back to raw block.
             let bh = if is_last { 1u32 } else { 0u32 }
-                | (0u32 << 1)
                 | ((block_len as u32) << 3);
             out.push(bh as u8);
             out.push((bh >> 8) as u8);
@@ -2534,7 +2532,7 @@ fn build_test_frame_with_checksum(payload: &[u8]) -> Vec<u8> {
     frame.push(payload.len() as u8);
 
     // Raw block (simplest).
-    let bh = 1u32 | (0u32 << 1) | ((payload.len() as u32) << 3);
+    let bh = 1u32 | ((payload.len() as u32) << 3);
     frame.push(bh as u8);
     frame.push((bh >> 8) as u8);
     frame.push((bh >> 16) as u8);

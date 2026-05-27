@@ -675,7 +675,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // Pick a virtual address.
     let base_vaddr = if vaddr_hint != 0 {
         // Caller specified an address — validate alignment.
-        if vaddr_hint % frame_size != 0 {
+        if !vaddr_hint.is_multiple_of(frame_size) {
             return SyscallResult::err(KernelError::BadAlignment);
         }
         vaddr_hint
@@ -691,7 +691,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
 
     if flags & MAP_MMIO != 0 {
         // MMIO mapping: map specific physical address.
-        if phys_addr % frame_size != 0 {
+        if !phys_addr.is_multiple_of(frame_size) {
             return SyscallResult::err(KernelError::BadAlignment);
         }
 
@@ -824,7 +824,7 @@ pub fn sys_munmap(args: &SyscallArgs) -> SyscallResult {
 
     // Validate alignment.
     let frame_size = FRAME_SIZE as u64;
-    if vaddr % frame_size != 0 {
+    if !vaddr.is_multiple_of(frame_size) {
         return SyscallResult::err(KernelError::BadAlignment);
     }
 

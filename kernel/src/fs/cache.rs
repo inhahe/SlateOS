@@ -552,7 +552,7 @@ fn update_readahead_tracker(
         // sequential runs use a small window (low cache pressure)
         // while large file reads ramp up to full throughput.
         if tracker.seq_count > 0
-            && tracker.seq_count % tracker.window == 0
+            && tracker.seq_count.is_multiple_of(tracker.window)
         {
             tracker.window = tracker.window.saturating_mul(2).min(get_readahead_max());
         }

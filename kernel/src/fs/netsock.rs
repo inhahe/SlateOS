@@ -299,8 +299,8 @@ pub fn self_test() {
 
     // 6: Filter by proto/state/pid.
     assert!(by_proto(SockProto::Tcp).len() >= 3);
-    assert!(by_state(TcpState::Listen).len() >= 1);
-    assert!(by_pid(200).len() >= 1);
+    assert!(!by_state(TcpState::Listen).is_empty());
+    assert!(!by_pid(200).is_empty());
     crate::serial_println!("  [6/8] filters: OK");
 
     // 7: Close socket.

@@ -523,7 +523,7 @@ pub(crate) fn lzma_decode(
                 lzma.rep[1] = lzma.rep[0];
                 lzma.rep[0] = dist;
                 lzma.state = STATE_REP[lzma.state as usize];
-            };
+            }
 
             // Copy `len` bytes from distance `dist` back in the output.
             let d = dist.saturating_add(1) as usize;
@@ -1876,7 +1876,7 @@ fn lzma2_encode(data: &[u8]) -> Vec<u8> {
         out.push(comp_minus1 as u8);
 
         // Properties byte: lc + 9 * (lp + 5 * pb) = 3 + 9*(0 + 5*2) = 3+90 = 93
-        let props = 3u8 + 9 * (0 + 5 * 2); // lc=3, lp=0, pb=2
+        let props = 3u8 + 9 * (5 * 2); // lc=3, lp=0, pb=2
         out.push(props);
 
         // LZMA compressed data.
@@ -1966,7 +1966,7 @@ pub fn xz_compress(data: &[u8]) -> KernelResult<Vec<u8>> {
 
     // --- Block header ---
     // Block flags: 1 filter (0x00), has_compressed_size (0x40), has_uncompressed_size (0x80).
-    let block_flags: u8 = 0x00 | 0x40 | 0x80;
+    let block_flags: u8 = 0x40 | 0x80;
     let mut bh_body = Vec::new();
     bh_body.push(block_flags);
     // Compressed size (VLI).

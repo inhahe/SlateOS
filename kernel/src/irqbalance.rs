@@ -152,7 +152,7 @@ pub fn tick() {
     }
 
     let count = TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
-    if count % BALANCE_INTERVAL_TICKS != 0 || count == 0 {
+    if !count.is_multiple_of(BALANCE_INTERVAL_TICKS) || count == 0 {
         return;
     }
 

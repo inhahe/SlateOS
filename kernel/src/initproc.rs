@@ -59,7 +59,7 @@
 
 #![allow(dead_code)]
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;
 use spin::Mutex;
@@ -529,7 +529,7 @@ pub fn tick() {
     // Periodic orphan logging (every 100 ticks if there were orphans).
     if orphan_count > 0 {
         let state = STATE.lock();
-        if state.total_ticks % 100 == 0 {
+        if state.total_ticks.is_multiple_of(100) {
             crate::syslog!("init.reap", Info,
                 "Reaped {} orphans this cycle, {} total", reaped, state.total_reaped);
         }
@@ -913,7 +913,7 @@ pub fn procfs_content() -> String {
         out.push('\n');
     }
 
-    out.push_str(&"\n--- Config ---\n".to_string());
+    out.push_str("\n--- Config ---\n");
     out.push_str(&format!("  Shutdown Grace: {} ms\n",
         state.config.shutdown_grace_ns / 1_000_000));
     out.push_str(&format!("  Auto Flush Logs: {}\n", state.config.auto_flush_logs));

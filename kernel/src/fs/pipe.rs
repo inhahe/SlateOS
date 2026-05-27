@@ -83,8 +83,7 @@ struct RingBuffer {
 impl RingBuffer {
     /// Create a new ring buffer with the given capacity.
     fn new(capacity: usize) -> Self {
-        let mut buf = Vec::new();
-        buf.resize(capacity, 0);
+        let buf = vec![0; capacity];
         Self {
             buf,
             read_pos: 0,

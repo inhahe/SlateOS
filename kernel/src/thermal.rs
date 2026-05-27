@@ -181,7 +181,7 @@ pub fn periodic_check() {
     }
 
     let ticks = TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
-    if ticks % SAMPLE_INTERVAL_TICKS != 0 {
+    if !ticks.is_multiple_of(SAMPLE_INTERVAL_TICKS) {
         return;
     }
 
@@ -219,7 +219,7 @@ pub fn periodic_check() {
     // Temperature threshold checks (rate-limited).
     if temp >= CRITICAL_THRESHOLD {
         let prev_critical = CRITICAL_COUNT.fetch_add(1, Ordering::Relaxed);
-        if prev_critical % 10 == 0 {
+        if prev_critical.is_multiple_of(10) {
             serial_println!(
                 "[thermal] CRITICAL: Package temperature {}°C (>= {}°C threshold)",
                 temp, CRITICAL_THRESHOLD
@@ -232,7 +232,7 @@ pub fn periodic_check() {
         }
     } else if temp >= WARN_THRESHOLD {
         let prev_warn = WARN_COUNT.fetch_add(1, Ordering::Relaxed);
-        if prev_warn % 60 == 0 {
+        if prev_warn.is_multiple_of(60) {
             // Warn once per ~5 minutes at sustained high temp.
             serial_println!(
                 "[thermal] Warning: Package temperature {}°C (>= {}°C threshold)",

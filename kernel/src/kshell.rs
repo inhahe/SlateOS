@@ -7867,7 +7867,7 @@ fn days_in_month(year: u32, month: u32) -> u32 {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
         2 => {
-            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+            if (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400) {
                 29
             } else {
                 28
@@ -21506,7 +21506,7 @@ fn cmd_timezone(args: &str) {
             match timezone::remove_ntp_server(host) { Ok(()) => shell_println!("Removed"), Err(e) => shell_println!("Error: {:?}", e) }
         }
         "timefmt" => {
-            match parts.get(1).copied().unwrap_or("24") { "12" => timezone::set_time_format(timezone::TimeFormat::H12), _ => timezone::set_time_format(timezone::TimeFormat::H24) };
+            match parts.get(1).copied().unwrap_or("24") { "12" => timezone::set_time_format(timezone::TimeFormat::H12), _ => timezone::set_time_format(timezone::TimeFormat::H24) }
             shell_println!("Time format set");
         }
         "datefmt" => {
@@ -21515,7 +21515,7 @@ fn cmd_timezone(args: &str) {
                 "dmy" | "eu" => timezone::set_date_format(timezone::DateFormat::Dmy),
                 "dot" | "de" => timezone::set_date_format(timezone::DateFormat::DmyDot),
                 _ => timezone::set_date_format(timezone::DateFormat::Iso),
-            };
+            }
             shell_println!("Date format set");
         }
         "weekstart" => {
@@ -21523,7 +21523,7 @@ fn cmd_timezone(args: &str) {
                 "sun" | "sunday" => timezone::set_week_start(timezone::WeekStart::Sunday),
                 "sat" | "saturday" => timezone::set_week_start(timezone::WeekStart::Saturday),
                 _ => timezone::set_week_start(timezone::WeekStart::Monday),
-            };
+            }
             shell_println!("Week start set");
         }
         "seconds" => {
@@ -21627,13 +21627,13 @@ fn cmd_fontmgr(args: &str) {
         "hint" => {
             match parts.get(1).copied().unwrap_or("slight") {
                 "none" => fontmgr::set_hint_mode(fontmgr::HintMode::None), "medium" | "med" => fontmgr::set_hint_mode(fontmgr::HintMode::Medium), "full" => fontmgr::set_hint_mode(fontmgr::HintMode::Full), _ => fontmgr::set_hint_mode(fontmgr::HintMode::Slight),
-            };
+            }
             shell_println!("Hinting set");
         }
         "antialias" | "aa" => {
             match parts.get(1).copied().unwrap_or("subpixel") {
                 "none" | "off" => fontmgr::set_antialias(fontmgr::AntialiasMode::None), "gray" | "grayscale" => fontmgr::set_antialias(fontmgr::AntialiasMode::Grayscale), _ => fontmgr::set_antialias(fontmgr::AntialiasMode::Subpixel),
-            };
+            }
             shell_println!("Antialiasing set");
         }
         "dpi" => {
@@ -78342,7 +78342,7 @@ fn base64_decode(input: &str) -> Result<alloc::vec::Vec<u8>, &'static str> {
         .filter(|&b| !b.is_ascii_whitespace())
         .collect();
 
-    if clean.len() % 4 != 0 {
+    if !clean.len().is_multiple_of(4) {
         return Err("invalid base64 length");
     }
 

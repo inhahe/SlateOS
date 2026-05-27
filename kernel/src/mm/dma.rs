@@ -456,7 +456,7 @@ pub fn self_test() {
     assert!(buf.order() == 2, "64K → order 2");
     assert!(buf.allocated_size() == FRAME_SIZE * 4, "alloc 4 frames");
     // Verify alignment (order 2 = 64 KiB aligned).
-    assert!(buf.phys_addr() % (FRAME_SIZE as u64 * 4) == 0, "aligned");
+    assert!(buf.phys_addr().is_multiple_of(FRAME_SIZE as u64 * 4), "aligned");
     // SAFETY: We're the only user.
     unsafe { free(buf).expect("DMA free 64K") };
     serial_println!("[dma]   alloc/free 64K: OK");

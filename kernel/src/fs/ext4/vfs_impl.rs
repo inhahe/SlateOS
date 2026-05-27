@@ -644,7 +644,7 @@ impl FileSystem for Ext4Fs {
         // succeed — blocks will be allocated on demand when data is written.
         if current_size != 0 {
             let extra_blocks = needed_blocks.saturating_sub(current_blocks);
-            if extra_blocks == 0 || extra_blocks > u64::from(u16::MAX & 0x7FFF) {
+            if extra_blocks == 0 || extra_blocks > 0x7FFF_u64 {
                 return Ok(());
             }
 
@@ -690,7 +690,7 @@ impl FileSystem for Ext4Fs {
         }
 
         // Allocate contiguous blocks via the driver (avoids split borrows).
-        let blocks_to_alloc = needed_blocks.min(u64::from(u16::MAX & 0x7FFF));
+        let blocks_to_alloc = needed_blocks.min(0x7FFF_u64);
 
         #[allow(clippy::cast_possible_truncation)]
         let blocks_u32 = blocks_to_alloc as u32;

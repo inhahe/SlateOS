@@ -157,7 +157,7 @@ pub struct BacktraceResult {
 /// - Kernel text/data (0xFFFF_FFFF_8000... — static stacks)
 fn is_valid_frame_ptr(addr: u64) -> bool {
     // Must be non-null and 8-byte aligned (stack frames are word-aligned).
-    if addr == 0 || addr % 8 != 0 {
+    if addr == 0 || !addr.is_multiple_of(8) {
         return false;
     }
 

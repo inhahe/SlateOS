@@ -224,7 +224,7 @@ impl KernelRng {
 
                 // Re-key every 1 MiB of output for forward secrecy.
                 // Uses the first 32 bytes of output as the new key.
-                if self.bytes_generated % (1024 * 1024) == 0 {
+                if self.bytes_generated.is_multiple_of(1024 * 1024) {
                     self.rekey_from_output();
                 }
             }
@@ -472,7 +472,7 @@ pub fn init() {
 pub fn fill(buf: &mut [u8]) {
     // Mix in accumulated interrupt entropy periodically.
     let count = ENTROPY_COUNT.load(Ordering::Relaxed);
-    if count > 0 && count % 256 == 0 {
+    if count > 0 && count.is_multiple_of(256) {
         let entropy = ENTROPY_ACCUM.swap(0, Ordering::Relaxed);
         if entropy != 0 {
             let mut rng = RNG.lock();

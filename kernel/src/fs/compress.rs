@@ -20,6 +20,7 @@
 //! - RFC 1952: GZIP file format specification
 //! - Based on the public-domain puff.c by Mark Adler
 
+use alloc::vec;
 use alloc::vec::Vec;
 use crate::error::{KernelError, KernelResult};
 
@@ -773,8 +774,7 @@ fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
     // Hash chain: head[h] = most recent pos with hash h.
     // prev[pos % MAX_DISTANCE] = previous pos in same chain.
     let mut head = [0u32; HASH_SIZE];
-    let mut prev = Vec::new();
-    prev.resize(MAX_DISTANCE, 0u32);
+    let mut prev = vec![0; MAX_DISTANCE];
 
     let mut pos: usize = 0;
 
@@ -880,8 +880,7 @@ const MAX_CODE_BITS: u8 = 15;
 #[allow(clippy::arithmetic_side_effects)]
 fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
     let n = freqs.len();
-    let mut lengths = Vec::new();
-    lengths.resize(n, 0u8);
+    let mut lengths = vec![0; n];
 
     // Collect non-zero frequency symbols.
     let mut symbols: Vec<(u32, usize)> = freqs.iter().enumerate()
@@ -907,8 +906,7 @@ fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
     let count = symbols.len();
     // Internal nodes: freq and max leaf depth.
     let mut node_freq: Vec<u32> = symbols.iter().map(|s| s.0).collect();
-    let mut node_depth: Vec<u8> = Vec::new();
-    node_depth.resize(count, 0u8);
+    let mut node_depth: Vec<u8> = vec![0; count];
 
     // Repeatedly merge the two lowest-frequency nodes.
     // We use a simple O(n^2) approach (fine for 286 symbols).
@@ -1036,8 +1034,7 @@ fn build_canonical_codes(lengths: &[u8]) -> Vec<(u16, u8)> {
     }
 
     // Count codes of each length.
-    let mut bl_count = Vec::new();
-    bl_count.resize(max_len as usize + 1, 0u16);
+    let mut bl_count: Vec<u16> = vec![0; max_len as usize + 1];
     for &l in lengths {
         if l > 0 {
             bl_count[l as usize] = bl_count[l as usize].wrapping_add(1);
@@ -1045,8 +1042,7 @@ fn build_canonical_codes(lengths: &[u8]) -> Vec<(u16, u8)> {
     }
 
     // Compute starting code for each length.
-    let mut next_code = Vec::new();
-    next_code.resize(max_len as usize + 1, 0u16);
+    let mut next_code: Vec<u16> = vec![0; max_len as usize + 1];
     let mut code: u16 = 0;
     for bits in 1..=max_len {
         code = (code.wrapping_add(bl_count[bits as usize - 1])) << 1;
@@ -1485,7 +1481,7 @@ pub fn gunzip(data: &[u8]) -> KernelResult<Vec<u8>> {
     ]);
 
     // Verify size (mod 2^32).
-    let actual_size = (output.len() as u32) & 0xFFFF_FFFF;
+    let actual_size = output.len() as u32;
     if actual_size != expected_size {
         crate::serial_println!(
             "[gunzip] Size mismatch: expected {} got {}",

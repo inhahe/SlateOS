@@ -454,12 +454,12 @@ pub fn self_test() {
 
     // Test 8: Filter by class.
     let storage = devices_by_class(DeviceClass::Storage);
-    assert!(storage.len() >= 1);
+    assert!(!storage.is_empty());
     crate::serial_println!("  [8/11] filter by class: OK");
 
     // Test 9: Filter by bus.
     let usb = devices_by_bus(BusType::Usb);
-    assert!(usb.len() >= 1);
+    assert!(!usb.is_empty());
     crate::serial_println!("  [9/11] filter by bus: OK");
 
     // Test 10: Remove device.

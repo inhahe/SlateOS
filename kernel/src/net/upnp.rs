@@ -724,7 +724,7 @@ pub fn tick() {
     let tick_num = TICK_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     // Check every 30 ticks (30 seconds).
-    if tick_num % 30 != 0 {
+    if !tick_num.is_multiple_of(30) {
         return;
     }
 

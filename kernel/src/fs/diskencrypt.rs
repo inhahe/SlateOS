@@ -442,7 +442,7 @@ pub fn self_test() {
 
     // Test 1: Default volume present.
     let vols = list_volumes();
-    assert!(vols.len() >= 1);
+    assert!(!vols.is_empty());
     assert_eq!(vols[0].status, VolumeStatus::Unencrypted);
     crate::serial_println!("  [1/11] default volume: OK");
 

@@ -520,7 +520,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("  partmgr::self_test 2: create partitions");
     let mb = 1024 * 1024u64;
     let gb = 1024 * mb;
-    let p1 = create_partition(d1, 1 * mb, 512 * mb, FsType::EfiSystem, "EFI")?;
+    let p1 = create_partition(d1, mb, 512 * mb, FsType::EfiSystem, "EFI")?;
     let p2 = create_partition(d1, 513 * mb, 50 * gb, FsType::Ext4, "root")?;
     let parts = list_partitions(d1);
     assert_eq!(parts.len(), 2);

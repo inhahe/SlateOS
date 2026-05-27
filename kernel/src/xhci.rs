@@ -1332,7 +1332,7 @@ impl XhciController {
             slot_id,
             0x80,                    // bmRequestType: Device-to-Host, Standard, Device
             USB_REQ_GET_DESCRIPTOR,  // bRequest
-            (u16::from(USB_DESC_DEVICE) << 8) | 0, // wValue: type << 8 | index
+            u16::from(USB_DESC_DEVICE) << 8, // wValue: type << 8 | index
             0,                       // wIndex
             buf_phys,                // data buffer physical address
             18,                      // wLength (device descriptor is 18 bytes)
@@ -1555,7 +1555,7 @@ impl XhciController {
             slot_id,
             0x80, // Device-to-Host, Standard, Device
             USB_REQ_GET_DESCRIPTOR,
-            (u16::from(USB_DESC_CONFIGURATION) << 8) | 0,
+            u16::from(USB_DESC_CONFIGURATION) << 8,
             0,
             buf_phys,
             255, // Read up to 255 bytes

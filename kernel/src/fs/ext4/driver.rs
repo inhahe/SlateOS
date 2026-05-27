@@ -2173,8 +2173,7 @@ impl Ext4Driver {
         // Copy existing extent data from the inode's i_block BEFORE we
         // modify it.  Each extent is 12 bytes starting at offset 12
         // (after the header).
-        let mut saved_extents = Vec::new();
-        saved_extents.resize(existing_entries.saturating_mul(extent_size), 0u8);
+        let mut saved_extents = vec![0; existing_entries.saturating_mul(extent_size)];
         {
             let block_bytes = inode_block_as_bytes(inode);
             for i in 0..existing_entries {

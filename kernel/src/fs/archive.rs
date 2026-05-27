@@ -661,10 +661,10 @@ fn test_zip_roundtrip() {
     ];
 
     let archive = create(ArchiveFormat::Zip, &entries).expect("create zip");
-    assert!(archive.len() > 0, "archive should have data");
+    assert!(!archive.is_empty(), "archive should have data");
 
     let listed = list(&archive).expect("list zip");
-    assert!(listed.len() >= 1, "should list entries");
+    assert!(!listed.is_empty(), "should list entries");
     assert!(listed.iter().any(|e| e.name == "hello.txt"), "should find hello.txt");
 
     let content = extract_one(&archive, "hello.txt").expect("extract");

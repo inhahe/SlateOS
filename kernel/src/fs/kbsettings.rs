@@ -303,7 +303,7 @@ pub fn should_repeat(keycode: u16, held_ms: u64) -> bool {
         let rate = if ovr.rate_ms > 0 { ovr.rate_ms } else { state.config.repeat_rate_ms };
         if held_ms < delay as u64 { return false; }
         let since_first = held_ms - delay as u64;
-        return since_first % rate as u64 == 0;
+        return since_first.is_multiple_of(rate as u64);
     }
 
     let delay = state.config.repeat_delay_ms as u64;
@@ -311,7 +311,7 @@ pub fn should_repeat(keycode: u16, held_ms: u64) -> bool {
     if held_ms < delay { return false; }
     if rate == 0 { return false; }
     let since_first = held_ms - delay;
-    since_first % rate == 0
+    since_first.is_multiple_of(rate)
 }
 
 // ---------------------------------------------------------------------------

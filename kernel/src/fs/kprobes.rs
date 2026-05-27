@@ -237,7 +237,7 @@ pub fn self_test() {
 
     // 6: By type.
     let kprobes = by_type(ProbeType::Kprobe);
-    assert!(kprobes.len() >= 1);
+    assert!(!kprobes.is_empty());
     let tp = by_type(ProbeType::Tracepoint);
     assert_eq!(tp.len(), 1);
     crate::serial_println!("  [6/8] by type: OK");

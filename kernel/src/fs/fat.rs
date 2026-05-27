@@ -388,7 +388,7 @@ fn encode_lfn(name: &str) -> Option<Vec<u16>> {
     // Add null terminator.
     ucs2.push(0x0000);
     // Pad to multiple of 13 with 0xFFFF.
-    while ucs2.len() % LFN_CHARS_PER_ENTRY != 0 {
+    while !ucs2.len().is_multiple_of(LFN_CHARS_PER_ENTRY) {
         ucs2.push(0xFFFF);
     }
     Some(ucs2)
@@ -802,7 +802,7 @@ fn dos_datetime_to_ns(date: u16, time: u16) -> u64 {
 
 /// Check if a year is a leap year.
 const fn is_leap(y: u64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400)
 }
 
 /// Convert nanoseconds-since-Unix-epoch to DOS packed date+time.
@@ -3166,7 +3166,7 @@ impl FileSystem for FatFs {
             dir_lba = 0;
             dir_offset = 0;
             exists = false;
-        };
+        }
 
         // Count existing clusters.
         let mut existing_count: u64 = 0;
@@ -3744,7 +3744,7 @@ impl FileSystem for FatFs {
             dir_lba = 0;
             dir_offset = 0;
             exists = false;
-        };
+        }
 
         let new_end = offset as usize + data.len();
         let new_size = new_end.max(old_size as usize);
@@ -4302,7 +4302,7 @@ pub fn self_test() -> KernelResult<()> {
     //   date = (1980-1980)<<9 | 1<<5 | 1 = 0x0021
     //   time = 0
     //   Expected: 315532800 seconds since Unix epoch = 315_532_800_000_000_000 ns.
-    let dos_epoch_date: u16 = (0 << 9) | (1 << 5) | 1;
+    let dos_epoch_date: u16 = ((1 << 5)) | 1;
     let dos_epoch_ns = dos_datetime_to_ns(dos_epoch_date, 0);
     // 1980-01-01T00:00:00Z = 315532800 seconds * 1e9.
     let expected_dos_epoch_ns: u64 = 315_532_800_000_000_000;
@@ -4318,7 +4318,7 @@ pub fn self_test() -> KernelResult<()> {
     //   date = (2000-1980)<<9 | 6<<5 | 15 = 20<<9 | 6<<5 | 15 = 10240 + 192 + 15 = 10447
     //   time = 14<<11 | 30<<5 | 0 = 28672 + 960 = 29632
     let y2k_date: u16 = (20 << 9) | (6 << 5) | 15;
-    let y2k_time: u16 = (14 << 11) | (30 << 5) | 0;
+    let y2k_time: u16 = (14 << 11) | (30 << 5);
     let y2k_ns = dos_datetime_to_ns(y2k_date, y2k_time);
     // 2000-06-15T14:30:00Z = 961078200 seconds * 1e9.
     let expected_y2k_ns: u64 = 961_078_200_000_000_000;
@@ -4511,7 +4511,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         // 2000-06-15 14:30:00 → ns → dos → ns should be idempotent.
         let orig_date: u16 = (20 << 9) | (6 << 5) | 15;
-        let orig_time: u16 = (14 << 11) | (30 << 5) | 0;
+        let orig_time: u16 = (14 << 11) | (30 << 5);
         let ns = dos_datetime_to_ns(orig_date, orig_time);
         let (rt_date, rt_time) = ns_to_dos_datetime(ns);
         if rt_date != orig_date || rt_time != orig_time {

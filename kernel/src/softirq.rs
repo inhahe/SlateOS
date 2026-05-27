@@ -364,7 +364,7 @@ fn handle_timer() {
     // We use try_flush_expired() which returns None if the cache lock is
     // already held (avoids deadlock in softirq context).
     let ticks = CACHE_FLUSH_TICKS.fetch_add(1, Ordering::Relaxed);
-    if ticks % CACHE_FLUSH_INTERVAL == 0 && crate::smp::current_cpu_index() == 0 {
+    if ticks.is_multiple_of(CACHE_FLUSH_INTERVAL) && crate::smp::current_cpu_index() == 0 {
         // Ignore result — if the lock is contended, we'll retry in
         // ~5 seconds.  No log spam; this is background housekeeping.
         let _ = crate::fs::cache::try_flush_expired();

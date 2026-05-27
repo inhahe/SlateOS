@@ -503,7 +503,7 @@ pub fn self_test() -> KernelResult<()> {
     assert_eq!(list_entries().len(), 1);
     clear_all();
     init_defaults();
-    assert!(list_entries().len() >= 1);
+    assert!(!list_entries().is_empty());
     assert!(router_info().is_some());
 
     clear_all();

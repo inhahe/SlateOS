@@ -46,7 +46,7 @@
 
 #![allow(dead_code)]
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::format;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU32, Ordering};
@@ -868,17 +868,17 @@ pub fn tick() {
     }
 
     // Balloon adjustment — check every 10 ticks.
-    if tick_num % 10 == 0 {
+    if tick_num.is_multiple_of(10) {
         check_balloon(&mut state);
     }
 
     // Clock drift monitoring — check every 60 ticks.
-    if tick_num % 60 == 0 {
+    if tick_num.is_multiple_of(60) {
         check_clock_drift(&mut state, now_ns);
     }
 
     // Guest info report — report once initially, then every 300 ticks (5 min).
-    if state.guest_info.report_count == 0 || tick_num % 300 == 0 {
+    if state.guest_info.report_count == 0 || tick_num.is_multiple_of(300) {
         report_guest_info(&mut state);
     }
 
@@ -1213,7 +1213,7 @@ pub fn procfs_content() -> String {
     out.push_str(&format!("page_mapped: {}\n", state.clock.page_mapped));
 
     // Balloon.
-    out.push_str(&"\n=== Balloon ===\n".to_string());
+    out.push_str("\n=== Balloon ===\n");
     out.push_str(&format!("inflated_pages: {}\n", state.balloon.inflated_pages));
     out.push_str(&format!("target_pages: {}\n", state.balloon.target_pages));
     out.push_str(&format!("total_inflated: {}\n", state.balloon.total_inflated));
@@ -1222,14 +1222,14 @@ pub fn procfs_content() -> String {
     out.push_str(&format!("auto: {}\n", state.balloon.auto_enabled));
 
     // Heartbeat.
-    out.push_str(&"\n=== Heartbeat ===\n".to_string());
+    out.push_str("\n=== Heartbeat ===\n");
     out.push_str(&format!("interval_secs: {}\n", state.heartbeat.interval_secs));
     out.push_str(&format!("sent: {}\n", state.heartbeat.sent_count));
     out.push_str(&format!("failed: {}\n", state.heartbeat.failed_count));
     out.push_str(&format!("host_ack: {}\n", state.heartbeat.host_ack));
 
     // Guest info.
-    out.push_str(&"\n=== Guest Info ===\n".to_string());
+    out.push_str("\n=== Guest Info ===\n");
     out.push_str(&format!("os: {} {}\n", state.guest_info.os_name, state.guest_info.os_version));
     out.push_str(&format!("kernel: {}\n", state.guest_info.kernel_version));
     out.push_str(&format!("cpus: {}\n", state.guest_info.cpu_count));

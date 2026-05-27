@@ -183,7 +183,7 @@ fn should_fail_alloc_slow() -> bool {
                 return false;
             }
             let calls = CALL_COUNT.load(Ordering::Relaxed);
-            if calls % u64::from(denom) == 0 {
+            if calls.is_multiple_of(u64::from(denom)) {
                 TOTAL_INJECTED.fetch_add(1, Ordering::Relaxed);
                 return true;
             }

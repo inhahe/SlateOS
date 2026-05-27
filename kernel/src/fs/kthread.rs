@@ -225,7 +225,7 @@ pub fn self_test() {
 
     // 6: On CPU.
     let cpu2 = on_cpu(2);
-    assert!(cpu2.len() >= 1);
+    assert!(!cpu2.is_empty());
     crate::serial_println!("  [6/8] on cpu: OK");
 
     // 7: Unregister.

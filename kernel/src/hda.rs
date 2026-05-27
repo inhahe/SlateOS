@@ -1017,7 +1017,7 @@ pub fn configure_output() -> KernelResult<()> {
 
     // Configure codec: set stream/channel on DAC.
     // Stream tag in bits 7:4, channel 0 in bits 3:0.
-    let stream_chan = (stream_tag << 4) | 0;
+    let stream_chan = stream_tag << 4;
     let _ = send_verb(dev, verb12(cad, dev.dac_nid, VERB_SET_CONV_STREAM_CHAN, stream_chan));
 
     // Set format on DAC (4-bit verb: verb=2, payload=format).

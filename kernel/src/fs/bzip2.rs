@@ -303,8 +303,7 @@ fn bwt_inverse(block: &[u8], block_len: usize, orig_ptr: u32) -> KernelResult<Ve
     // T[i] = the position where block[i] would go in the sorted output.
     // Using the "counting sort position" approach:
     //   For each position i (in order), T[i] = cumul[block[i]]++
-    let mut t_vec = Vec::new();
-    t_vec.resize(block_len, 0u32);
+    let mut t_vec = vec![0; block_len];
 
     // Reset cumul for building T (we need the running version).
     let mut running = [0u32; 256];

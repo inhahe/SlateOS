@@ -2279,7 +2279,7 @@ fn gen_encryption() -> Vec<u8> {
     let key_list = encrypt::list_keys();
     let mut out = String::with_capacity(512);
 
-    out.push_str(&"File encryption: ChaCha20 + HMAC-SHA256\n\n".to_string());
+    out.push_str("File encryption: ChaCha20 + HMAC-SHA256\n\n");
     out.push_str(&format!("  keys stored:      {}\n", keys));
     out.push_str(&format!("  files encrypted:  {}\n", enc));
     out.push_str(&format!("  files decrypted:  {}\n\n", dec));
@@ -2871,13 +2871,13 @@ fn gen_fontmgr() -> Vec<u8> {
     out.push_str(&format!("Families:     {}\n", families));
     out.push_str(&format!("System fonts: {}\n", system));
     out.push_str(&format!("Operations:   {}\n", ops));
-    out.push_str(&"\nDefaults:\n".to_string());
+    out.push_str("\nDefaults:\n");
     out.push_str(&format!("  UI:         {}\n", defs.ui));
     out.push_str(&format!("  Document:   {}\n", defs.document));
     out.push_str(&format!("  Monospace:  {}\n", defs.monospace));
     out.push_str(&format!("  Titlebar:   {}\n", defs.titlebar));
     out.push_str(&format!("  Fallback:   {}\n", defs.fallback));
-    out.push_str(&"\nRendering:\n".to_string());
+    out.push_str("\nRendering:\n");
     out.push_str(&format!("  Size:       {} pt\n", rs.global_size_pt));
     out.push_str(&format!("  Hinting:    {:?}\n", rs.hint_mode));
     out.push_str(&format!("  Antialias:  {:?}\n", rs.antialias));
@@ -5067,7 +5067,7 @@ fn gen_storageclean() -> Vec<u8> {
     }
 
     if let Some(report) = super::storageclean::last_report() {
-        out.push_str(&"\nlast_scan:\n".to_string());
+        out.push_str("\nlast_scan:\n");
         out.push_str(&format!("  reclaimable: {} ({})\n",
             report.total_reclaimable_bytes,
             super::storageclean::format_size(report.total_reclaimable_bytes)));
@@ -9032,7 +9032,7 @@ fn gen_aiostat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (rings, submitted, completed, overflows, ops) = super::aiostat::stats();
-    out.push_str(&"=== Async I/O Stats ===\n".to_string());
+    out.push_str("=== Async I/O Stats ===\n");
     out.push_str(&format!("Rings: {}  Submitted: {}  Completed: {}  Overflows: {}  Ops: {}\n\n", rings, submitted, completed, overflows, ops));
     for r in super::aiostat::ring_stats() {
         out.push_str(&format!("Ring {} (pid {})  SQ {}/{}  CQ pending {}  submitted {}  completed {}  overflows {}  sq_full {}\n",
@@ -9046,7 +9046,7 @@ fn gen_kthread() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (threads, created, exited, ops) = super::kthread::stats();
-    out.push_str(&"=== Kernel Thread Stats ===\n".to_string());
+    out.push_str("=== Kernel Thread Stats ===\n");
     out.push_str(&format!("Active: {}  Created: {}  Exited: {}  Ops: {}\n\n", threads, created, exited, ops));
     for t in super::kthread::list() {
         out.push_str(&format!("  [{}] {} cpu={} state={} cpu_time={}ns wakeups={}\n",
@@ -9059,7 +9059,7 @@ fn gen_mmapstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (procs, maps, unmaps, protects, bytes, ops) = super::mmapstat::stats();
-    out.push_str(&"=== Mmap Stats ===\n".to_string());
+    out.push_str("=== Mmap Stats ===\n");
     out.push_str(&format!("Processes: {}  Maps: {}  Unmaps: {}  Protects: {}  Bytes: {}  Ops: {}\n\n", procs, maps, unmaps, protects, bytes, ops));
     out.push_str("Type breakdown:\n");
     for (mt, count) in &super::mmapstat::type_breakdown() {
@@ -9077,7 +9077,7 @@ fn gen_rqstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (cpus, enqueues, dequeues, balances, ops) = super::rqstat::stats();
-    out.push_str(&"=== Runqueue Stats ===\n".to_string());
+    out.push_str("=== Runqueue Stats ===\n");
     out.push_str(&format!("CPUs: {}  Enqueues: {}  Dequeues: {}  Balances: {}  Ops: {}\n\n", cpus, enqueues, dequeues, balances, ops));
     for c in super::rqstat::per_cpu() {
         let avg_wait = if c.dequeues > 0 { c.total_wait_ns / c.dequeues } else { 0 };
@@ -9092,7 +9092,7 @@ fn gen_thpstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (promos, demos, scans, collapses, ops) = super::thpstat::stats();
-    out.push_str(&"=== Transparent Huge Pages Stats ===\n".to_string());
+    out.push_str("=== Transparent Huge Pages Stats ===\n");
     out.push_str(&format!("Promotions: {}  Demotions: {}  Khugepaged scans: {}  Collapses: {}  Ops: {}\n\n", promos, demos, scans, collapses, ops));
     out.push_str("Per-size:\n");
     for s in super::thpstat::per_size() {
@@ -9110,7 +9110,7 @@ fn gen_cgiostat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (cgs, rbytes, wbytes, throttles, ops) = super::cgiostat::stats();
-    out.push_str(&"=== Cgroup I/O Stats ===\n".to_string());
+    out.push_str("=== Cgroup I/O Stats ===\n");
     out.push_str(&format!("Cgroups: {}  Read: {} bytes  Write: {} bytes  Throttles: {}  Ops: {}\n\n", cgs, rbytes, wbytes, throttles, ops));
     for cg in super::cgiostat::per_cgroup() {
         let bw = if cg.bw_limit_bps > 0 { alloc::format!("{}B/s", cg.bw_limit_bps) } else { String::from("unlimited") };
@@ -9124,7 +9124,7 @@ fn gen_bpfstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (progs, maps, loaded, runs, verr, ops) = super::bpfstat::stats();
-    out.push_str(&"=== BPF Stats ===\n".to_string());
+    out.push_str("=== BPF Stats ===\n");
     out.push_str(&format!("Programs: {}  Maps: {}  Total loaded: {}  Runs: {}  Verifier errors: {}  Ops: {}\n\n", progs, maps, loaded, runs, verr, ops));
     out.push_str("Programs:\n");
     for p in super::bpfstat::list_programs() {
@@ -9144,7 +9144,7 @@ fn gen_pgtable() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (pages, walks, flushes, avg, ops) = super::pgtable::stats();
-    out.push_str(&"=== Page Table Stats ===\n".to_string());
+    out.push_str("=== Page Table Stats ===\n");
     out.push_str(&format!("Pages used: {}  Walks: {}  TLB flushes: {}  Avg depth: {}.{}  Ops: {}\n\n", pages, walks, flushes, avg / 100, avg % 100, ops));
     out.push_str("Per-level:\n");
     for l in super::pgtable::per_level() {
@@ -9161,7 +9161,7 @@ fn gen_zramstat() -> Vec<u8> {
     let mut out = String::new();
     let (devs, orig, compr, reads, writes, ops) = super::zramstat::stats();
     let ratio = if compr > 0 { orig * 100 / compr } else { 0 };
-    out.push_str(&"=== ZRAM Stats ===\n".to_string());
+    out.push_str("=== ZRAM Stats ===\n");
     out.push_str(&format!("Devices: {}  Orig: {}  Compr: {}  Ratio: {}.{}x  Reads: {}  Writes: {}  Ops: {}\n\n",
         devs, orig, compr, ratio / 100, ratio % 100, reads, writes, ops));
     for d in super::zramstat::per_device() {
@@ -9178,7 +9178,7 @@ fn gen_ksmstat() -> Vec<u8> {
     let mut out = String::new();
     let (shared, sharing, merges, unmerges, saved, ops) = super::ksmstat::stats();
     let (scans, pages_scanned) = super::ksmstat::scan_stats();
-    out.push_str(&"=== KSM Stats ===\n".to_string());
+    out.push_str("=== KSM Stats ===\n");
     out.push_str(&format!("Shared: {}  Sharing: {}  Merges: {}  Unmerges: {}  Saved: {} bytes  Ops: {}\n", shared, sharing, merges, unmerges, saved, ops));
     out.push_str(&format!("Scans: {}  Pages scanned: {}\n\n", scans, pages_scanned));
     out.push_str("Per-process:\n");
@@ -9193,7 +9193,7 @@ fn gen_clocksrc() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (sources, reads, skews, ops) = super::clocksrc::stats();
-    out.push_str(&"=== Clock Source Stats ===\n".to_string());
+    out.push_str("=== Clock Source Stats ===\n");
     out.push_str(&format!("Sources: {}  Reads: {}  Skew corrections: {}  Ops: {}\n\n", sources, reads, skews, ops));
     for s in super::clocksrc::list() {
         let cur = if s.is_current { " [CURRENT]" } else { "" };
@@ -9209,7 +9209,7 @@ fn gen_pmcstat() -> Vec<u8> {
     let mut out = String::new();
     let (cpus, samples, mx, ipc, ops) = super::pmcstat::stats();
     let cmr = super::pmcstat::cache_miss_rate_x10000();
-    out.push_str(&"=== PMC Stats ===\n".to_string());
+    out.push_str("=== PMC Stats ===\n");
     out.push_str(&format!("CPUs: {}  Samples: {}  Multiplex: {}  IPC: {}.{}  Cache miss: {}.{}%  Ops: {}\n\n",
         cpus, samples, mx, ipc / 100, ipc % 100, cmr / 100, cmr % 100, ops));
     let events = ["cycles", "insns", "cache-miss", "cache-ref", "br-miss", "br-insn", "bus-cyc", "stall-fe"];
@@ -9227,7 +9227,7 @@ fn gen_cputhr() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (cpus, events, ms, caps, ops) = super::cputhr::stats();
-    out.push_str(&"=== CPU Thermal Throttle Stats ===\n".to_string());
+    out.push_str("=== CPU Thermal Throttle Stats ===\n");
     out.push_str(&format!("CPUs: {}  Throttle events: {}  Total: {}ms  Freq caps: {}  Ops: {}\n\n", cpus, events, ms, caps, ops));
     for c in super::cputhr::per_cpu() {
         let temp = c.temp_mc / 1000;
@@ -9244,7 +9244,7 @@ fn gen_ipcns() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (nss, shm, sem, msg, ops) = super::ipcns::stats();
-    out.push_str(&"=== IPC Namespace Stats ===\n".to_string());
+    out.push_str("=== IPC Namespace Stats ===\n");
     out.push_str(&format!("Namespaces: {}  SHM: {}  SEM: {}  MSG: {}  Ops: {}\n\n", nss, shm, sem, msg, ops));
     for ns in super::ipcns::ns_list() {
         out.push_str(&format!("  [{}] {:<16} shm={}({} bytes) sem={}({}) msg={}({} bytes)\n",
@@ -9257,7 +9257,7 @@ fn gen_netqueue() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (queues, rx, tx, napi, drops, ops) = super::netqueue::stats();
-    out.push_str(&"=== Network Queue Stats ===\n".to_string());
+    out.push_str("=== Network Queue Stats ===\n");
     out.push_str(&format!("Queues: {}  RX: {} pkts  TX: {} pkts  NAPI: {}  Drops: {}  Ops: {}\n\n", queues, rx, tx, napi, drops, ops));
     for q in super::netqueue::per_queue() {
         out.push_str(&format!("  {} q{} {:<3} pkts={} bytes={} drops={} napi={} budget_ex={} backlog={}\n",
@@ -9271,7 +9271,7 @@ fn gen_secmod() -> Vec<u8> {
     let mut out = String::new();
     let (mods, checks, denials, audits, ops) = super::secmod::stats();
     let deny_rate = if checks > 0 { denials * 10000 / checks } else { 0 };
-    out.push_str(&"=== Security Module Stats ===\n".to_string());
+    out.push_str("=== Security Module Stats ===\n");
     out.push_str(&format!("Modules: {}  Checks: {}  Denials: {} ({}.{}%)  Audits: {}  Ops: {}\n\n",
         mods, checks, denials, deny_rate / 100, deny_rate % 100, audits, ops));
     let hooks = ["file_open", "file_perm", "inode_cr", "inode_rm", "task_al", "task_kl", "sock_cr", "sock_cn"];
@@ -9291,7 +9291,7 @@ fn gen_vmballoon() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (cur, target, inf, def, oom, ops) = super::vmballoon::stats();
-    out.push_str(&"=== VM Balloon Stats ===\n".to_string());
+    out.push_str("=== VM Balloon Stats ===\n");
     out.push_str(&format!("Current: {} pages  Target: {} pages  Inflates: {}  Deflates: {}  OOM: {}  Ops: {}\n",
         cur, target, inf, def, oom, ops));
     if let Some(s) = super::vmballoon::status() {
@@ -9306,7 +9306,7 @@ fn gen_devfreq() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (devs, trans, ops) = super::devfreq::stats();
-    out.push_str(&"=== Device Frequency Stats ===\n".to_string());
+    out.push_str("=== Device Frequency Stats ===\n");
     out.push_str(&format!("Devices: {}  Transitions: {}  Ops: {}\n\n", devs, trans, ops));
     for d in super::devfreq::list() {
         out.push_str(&format!("  [{}] {:<12} {}-{} kHz  cur={} kHz  gov={}  trans={}\n",
@@ -9321,7 +9321,7 @@ fn gen_hwrng() -> Vec<u8> {
     let (generated, requested, reseeds, bits, ops) = super::hwrng::stats();
     let ps = super::hwrng::pool_status();
     let ready = if ps.ready { "YES" } else { "NO" };
-    out.push_str(&"=== Hardware RNG Stats ===\n".to_string());
+    out.push_str("=== Hardware RNG Stats ===\n");
     out.push_str(&format!("Generated: {} B  Requested: {} B  Reseeds: {}  Pool: {}/{} bits  Ready: {}  Ops: {}\n\n",
         generated, requested, reseeds, bits, ps.pool_size_bits, ready, ops));
     out.push_str("Sources:\n");
@@ -9335,7 +9335,7 @@ fn gen_acpistat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (events, gpes, suspends, resumes, ops) = super::acpistat::stats();
-    out.push_str(&"=== ACPI Stats ===\n".to_string());
+    out.push_str("=== ACPI Stats ===\n");
     out.push_str(&format!("Events: {}  GPEs: {}  Suspends: {}  Resumes: {}  Ops: {}\n\n", events, gpes, suspends, resumes, ops));
     out.push_str("Event types:\n");
     for (ev, count) in &super::acpistat::event_counts() {
@@ -9353,7 +9353,7 @@ fn gen_userfault() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (handlers, faults, resolves, copies, zeros, ops) = super::userfault::stats();
-    out.push_str(&"=== Userfaultfd Stats ===\n".to_string());
+    out.push_str("=== Userfaultfd Stats ===\n");
     out.push_str(&format!("Handlers: {}  Faults: {}  Resolves: {}  Copies: {}  Zeros: {}  Ops: {}\n\n",
         handlers, faults, resolves, copies, zeros, ops));
     out.push_str("Per-process:\n");
@@ -9370,7 +9370,7 @@ fn gen_ioport() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (regions, reads, writes, ur, uw, ops) = super::ioport::stats();
-    out.push_str(&"=== I/O Port Stats ===\n".to_string());
+    out.push_str("=== I/O Port Stats ===\n");
     out.push_str(&format!("Regions: {}  Reads: {}  Writes: {}  Untracked R: {}  Untracked W: {}  Ops: {}\n\n",
         regions, reads, writes, ur, uw, ops));
     out.push_str("Per-region:\n");
@@ -9385,7 +9385,7 @@ fn gen_msivec() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (devs, vecs, ints, allocs, frees, ops) = super::msivec::stats();
-    out.push_str(&"=== MSI Vector Stats ===\n".to_string());
+    out.push_str("=== MSI Vector Stats ===\n");
     out.push_str(&format!("Devices: {}  Vectors: {}  Interrupts: {}  Allocs: {}  Frees: {}  Ops: {}\n\n",
         devs, vecs, ints, allocs, frees, ops));
     out.push_str("Per-device:\n");
@@ -9400,7 +9400,7 @@ fn gen_cpuset() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (sets, assignments, affinity, ops) = super::cpuset::stats();
-    out.push_str(&"=== CPU Set Stats ===\n".to_string());
+    out.push_str("=== CPU Set Stats ===\n");
     out.push_str(&format!("Sets: {}  Assignments: {}  Affinity changes: {}  Ops: {}\n\n",
         sets, assignments, affinity, ops));
     out.push_str("CPU sets:\n");
@@ -9417,7 +9417,7 @@ fn gen_ftrace() -> Vec<u8> {
     let mut out = String::new();
     let (probes, hits, misses, overhead, ops) = super::ftrace::stats();
     let enabled = if super::ftrace::is_enabled() { "ON" } else { "OFF" };
-    out.push_str(&"=== Function Trace Stats ===\n".to_string());
+    out.push_str("=== Function Trace Stats ===\n");
     out.push_str(&format!("Tracing: {}  Probes: {}  Hits: {}  Misses: {}  Overhead: {} ns  Ops: {}\n\n",
         enabled, probes, hits, misses, overhead, ops));
     out.push_str("Probes:\n");
@@ -9434,7 +9434,7 @@ fn gen_kstack() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (cpus, overflows, guards, samples, ops) = super::kstack::stats();
-    out.push_str(&"=== Kernel Stack Stats ===\n".to_string());
+    out.push_str("=== Kernel Stack Stats ===\n");
     out.push_str(&format!("CPUs: {}  Overflows: {}  Guard hits: {}  Samples: {}  Ops: {}\n\n",
         cpus, overflows, guards, samples, ops));
     out.push_str("Per-CPU:\n");
@@ -9451,7 +9451,7 @@ fn gen_fnotify() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (watches, events, overflows, ops) = super::fnotify::stats();
-    out.push_str(&"=== File Notification Stats ===\n".to_string());
+    out.push_str("=== File Notification Stats ===\n");
     out.push_str(&format!("Watches: {}  Events: {}  Overflows: {}  Ops: {}\n\n", watches, events, overflows, ops));
     for t in &super::fnotify::per_type() {
         out.push_str(&format!("{}: watches={}/{}  events={}  overflows={}  queue={}/{}\n",
@@ -9465,7 +9465,7 @@ fn gen_netlat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (ifaces, rtt, proc_s, ops) = super::netlat::stats();
-    out.push_str(&"=== Network Latency Stats ===\n".to_string());
+    out.push_str("=== Network Latency Stats ===\n");
     out.push_str(&format!("Interfaces: {}  RTT samples: {}  Processing samples: {}  Ops: {}\n\n",
         ifaces, rtt, proc_s, ops));
     let labels = super::netlat::bucket_labels();
@@ -9489,7 +9489,7 @@ fn gen_diskstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (devs, reads, writes, rb, wb, ops) = super::diskstat::stats();
-    out.push_str(&"=== Disk Stats ===\n".to_string());
+    out.push_str("=== Disk Stats ===\n");
     out.push_str(&format!("Devices: {}  Reads: {}  Writes: {}  ReadBytes: {}  WriteBytes: {}  Ops: {}\n\n",
         devs, reads, writes, rb, wb, ops));
     out.push_str("Per-device:\n");
@@ -9507,7 +9507,7 @@ fn gen_taskio() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (tasks, rb, wb, cancelled, io_wait, ops) = super::taskio::stats();
-    out.push_str(&"=== Per-Task I/O Stats ===\n".to_string());
+    out.push_str("=== Per-Task I/O Stats ===\n");
     out.push_str(&format!("Tasks: {}  ReadBytes: {}  WriteBytes: {}  Cancelled: {}  IOWait: {} ns  Ops: {}\n\n",
         tasks, rb, wb, cancelled, io_wait, ops));
     out.push_str("Per-task:\n");
@@ -9523,7 +9523,7 @@ fn gen_ttystat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (ttys, rb, wb, sigs, overruns, ops) = super::ttystat::stats();
-    out.push_str(&"=== TTY Stats ===\n".to_string());
+    out.push_str("=== TTY Stats ===\n");
     out.push_str(&format!("TTYs: {}  ReadBytes: {}  WriteBytes: {}  Signals: {}  Overruns: {}  Ops: {}\n\n",
         ttys, rb, wb, sigs, overruns, ops));
     out.push_str("Per-TTY:\n");
@@ -9540,7 +9540,7 @@ fn gen_swapact() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (areas, si, so, sip, sop, ops) = super::swapact::stats();
-    out.push_str(&"=== Swap Activity Stats ===\n".to_string());
+    out.push_str("=== Swap Activity Stats ===\n");
     out.push_str(&format!("Areas: {}  SwapIn: {}  SwapOut: {}  InPages: {}  OutPages: {}  Ops: {}\n\n",
         areas, si, so, sip, sop, ops));
     out.push_str("Per-area:\n");
@@ -9561,7 +9561,7 @@ fn gen_schedwait() -> Vec<u8> {
     let mut out = String::new();
     let (waits, ns, ops) = super::schedwait::stats();
     let avg = if waits > 0 { ns / waits } else { 0 };
-    out.push_str(&"=== Scheduler Wait Stats ===\n".to_string());
+    out.push_str("=== Scheduler Wait Stats ===\n");
     out.push_str(&format!("Total waits: {}  Total ns: {}  Avg ns: {}  Ops: {}\n\n", waits, ns, avg, ops));
     out.push_str("Per-reason:\n");
     for (reason, count, total, max) in super::schedwait::per_reason() {
@@ -9582,7 +9582,7 @@ fn gen_ratestat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (limiters, allows, denies, bursts, ops) = super::ratestat::stats();
-    out.push_str(&"=== Rate Limiter Stats ===\n".to_string());
+    out.push_str("=== Rate Limiter Stats ===\n");
     out.push_str(&format!("Limiters: {}  Allows: {}  Denies: {}  Bursts: {}  Ops: {}\n\n",
         limiters, allows, denies, bursts, ops));
     out.push_str("Per-limiter:\n");
@@ -9599,7 +9599,7 @@ fn gen_iomem() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (regs, reads, writes, ops) = super::iomem::stats();
-    out.push_str(&"=== I/O Memory Stats ===\n".to_string());
+    out.push_str("=== I/O Memory Stats ===\n");
     out.push_str(&format!("Regions: {}  Reads: {}  Writes: {}  Ops: {}\n\n", regs, reads, writes, ops));
     out.push_str("Regions:\n");
     for r in super::iomem::regions() {
@@ -9615,7 +9615,7 @@ fn gen_vmzone() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (zones, allocs, frees, reclaims, ops) = super::vmzone::stats();
-    out.push_str(&"=== VM Zone Stats ===\n".to_string());
+    out.push_str("=== VM Zone Stats ===\n");
     out.push_str(&format!("Zones: {}  Allocs: {}  Frees: {}  Reclaims: {}  Ops: {}\n\n",
         zones, allocs, frees, reclaims, ops));
     out.push_str("Per-zone:\n");
@@ -9633,7 +9633,7 @@ fn gen_budstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (zones, splits, coalesces, ops) = super::budstat::stats();
-    out.push_str(&"=== Buddy Allocator Stats ===\n".to_string());
+    out.push_str("=== Buddy Allocator Stats ===\n");
     out.push_str(&format!("Zones: {}  Splits: {}  Coalesces: {}  Ops: {}\n\n", zones, splits, coalesces, ops));
     for z in super::budstat::per_zone() {
         out.push_str(&format!("{}:\n  Free:  ", z.zone_name));
@@ -9651,7 +9651,7 @@ fn gen_cgmem() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (cgroups, charges, uncharges, ooms, ops) = super::cgmem::stats();
-    out.push_str(&"=== Cgroup Memory Stats ===\n".to_string());
+    out.push_str("=== Cgroup Memory Stats ===\n");
     out.push_str(&format!("Cgroups: {}  Charges: {}  Uncharges: {}  OOM kills: {}  Ops: {}\n\n",
         cgroups, charges, uncharges, ooms, ops));
     for c in super::cgmem::per_cgroup() {
@@ -9669,7 +9669,7 @@ fn gen_vmfrag() -> Vec<u8> {
     let mut out = String::new();
     let (zones, compactions, success, fail, ops) = super::vmfrag::stats();
     let rate = if compactions > 0 { success * 100 / compactions } else { 0 };
-    out.push_str(&"=== VM Fragmentation Index ===\n".to_string());
+    out.push_str("=== VM Fragmentation Index ===\n");
     out.push_str(&format!("Zones: {}  Compactions: {}  Success: {}({}%)  Fail: {}  Ops: {}\n\n",
         zones, compactions, success, rate, fail, ops));
     for z in super::vmfrag::per_zone() {
@@ -9687,7 +9687,7 @@ fn gen_pidfd() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
     let (pids, creates, polls, signals, waits, closes, ops) = super::pidfd::stats();
-    out.push_str(&"=== Pidfd Stats ===\n".to_string());
+    out.push_str("=== Pidfd Stats ===\n");
     out.push_str(&format!("Tracked PIDs: {}  Creates: {}  Polls: {}  Signals: {}  Waits: {}  Closes: {}  Ops: {}\n\n",
         pids, creates, polls, signals, waits, closes, ops));
     out.push_str("Per-PID:\n");

@@ -589,11 +589,11 @@ pub fn self_test() -> KernelResult<()> {
     // Test 4: search.
     {
         let results = search("test");
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
         assert_eq!(results[0].id, "test.app");
 
         let results = search("testing");
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
         serial_println!("[appregistry] test 4 passed: search");
     }
 

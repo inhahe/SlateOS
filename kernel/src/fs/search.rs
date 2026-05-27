@@ -796,7 +796,7 @@ fn test_compound_query() {
         .execute("/tmp/search_cq")
         .expect("execute");
 
-    assert!(results.len() >= 1, "should find at least 1 matching file");
+    assert!(!results.is_empty(), "should find at least 1 matching file");
     for r in &results {
         assert!(r.path.contains("report"), "should contain 'report'");
         assert!(r.path.ends_with(".txt"), "should be .txt");

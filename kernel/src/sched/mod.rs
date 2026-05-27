@@ -1528,7 +1528,7 @@ pub fn timer_tick() -> bool {
     if cpu == 0 {
         let tick = BANDWIDTH_TICK.fetch_add(1, Ordering::Relaxed);
         #[allow(clippy::arithmetic_side_effects)]
-        if tick > 0 && tick % BANDWIDTH_PERIOD_TICKS == 0 {
+        if tick > 0 && tick.is_multiple_of(BANDWIDTH_PERIOD_TICKS) {
             unthrottle_expired();
             update_load_average();
             // Reset cgroup CPU and I/O period counters alongside per-task resets.
@@ -1537,12 +1537,12 @@ pub fn timer_tick() -> bool {
         }
         // Anti-starvation check: every STARVATION_CHECK_INTERVAL ticks.
         #[allow(clippy::arithmetic_side_effects)]
-        if tick > 0 && tick % STARVATION_CHECK_INTERVAL == 0 {
+        if tick > 0 && tick.is_multiple_of(STARVATION_CHECK_INTERVAL) {
             check_starvation();
         }
         // Watchdog check: every WATCHDOG_CHECK_INTERVAL ticks (5s).
         #[allow(clippy::arithmetic_side_effects)]
-        if tick > 0 && tick % WATCHDOG_CHECK_INTERVAL == 0 {
+        if tick > 0 && tick.is_multiple_of(WATCHDOG_CHECK_INTERVAL) {
             watchdog_check();
         }
     }

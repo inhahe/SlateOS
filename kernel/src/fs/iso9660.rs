@@ -815,7 +815,7 @@ fn parse_single_record(
         // System Use area starts after file id, padded to even.
         let su_start = 33usize
             .saturating_add(file_id_len)
-            .saturating_add(if file_id_len % 2 == 0 { 1 } else { 0 })
+            .saturating_add(if file_id_len.is_multiple_of(2) { 1 } else { 0 })
             .saturating_add(susp_skip as usize);
 
         if su_start < rec.len() {
@@ -851,7 +851,7 @@ fn detect_rock_ridge(root_data: &[u8]) -> Option<(bool, u8)> {
     let file_id_len = *root_data.get(32)? as usize;
     let su_start = 33usize
         .saturating_add(file_id_len)
-        .saturating_add(if file_id_len % 2 == 0 { 1 } else { 0 });
+        .saturating_add(if file_id_len.is_multiple_of(2) { 1 } else { 0 });
 
     if su_start >= rec_len {
         return None;

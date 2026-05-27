@@ -140,10 +140,10 @@ pub unsafe fn map_huge_2m(
     let paddr = phys.addr();
 
     // Alignment check: both must be 2 MiB-aligned.
-    if vaddr % HUGE_PAGE_SIZE_2M as u64 != 0 {
+    if !vaddr.is_multiple_of(HUGE_PAGE_SIZE_2M as u64) {
         return Err(KernelError::InvalidAddress);
     }
-    if paddr % HUGE_PAGE_SIZE_2M as u64 != 0 {
+    if !paddr.is_multiple_of(HUGE_PAGE_SIZE_2M as u64) {
         return Err(KernelError::InvalidAddress);
     }
 
@@ -199,7 +199,7 @@ pub unsafe fn unmap_huge_2m(
     virt: VirtAddr,
 ) -> KernelResult<PhysFrame> {
     let vaddr = virt.as_u64();
-    if vaddr % HUGE_PAGE_SIZE_2M as u64 != 0 {
+    if !vaddr.is_multiple_of(HUGE_PAGE_SIZE_2M as u64) {
         return Err(KernelError::InvalidAddress);
     }
 

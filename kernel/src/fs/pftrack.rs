@@ -207,7 +207,7 @@ pub fn list_processes() -> Vec<ProcessFaults> {
 pub fn top_faulters(n: usize) -> Vec<ProcessFaults> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut sorted = s.processes.clone();
-        sorted.sort_by(|a, b| b.total.cmp(&a.total));
+        sorted.sort_by_key(|e| core::cmp::Reverse(e.total));
         sorted.truncate(n);
         sorted
     })
@@ -217,7 +217,7 @@ pub fn top_faulters(n: usize) -> Vec<ProcessFaults> {
 pub fn hotspots(n: usize) -> Vec<Hotspot> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut sorted = s.hotspots.clone();
-        sorted.sort_by(|a, b| b.count.cmp(&a.count));
+        sorted.sort_by_key(|e| core::cmp::Reverse(e.count));
         sorted.truncate(n);
         sorted
     })

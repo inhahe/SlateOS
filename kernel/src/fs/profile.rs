@@ -308,7 +308,7 @@ pub fn report() -> ProfileReport {
         let mut entries: Vec<(String, u64)> = map.iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|e| core::cmp::Reverse(e.1));
         entries.truncate(20);
         entries
     } else {

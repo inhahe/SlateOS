@@ -280,7 +280,7 @@ pub fn per_syscall_stats() -> alloc::vec::Vec<(usize, u64, u64)> {
         }
     }
     // Sort by call count descending.
-    result.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    result.sort_unstable_by_key(|e| core::cmp::Reverse(e.1));
     result
 }
 

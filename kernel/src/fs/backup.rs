@@ -507,7 +507,7 @@ pub fn list(backup_root: &str) -> KernelResult<Vec<BackupInfo>> {
     }
 
     // Sort by timestamp (newest first).
-    backups.sort_by(|a, b| b.timestamp_ns.cmp(&a.timestamp_ns));
+    backups.sort_by_key(|e| core::cmp::Reverse(e.timestamp_ns));
 
     Ok(backups)
 }

@@ -408,7 +408,7 @@ pub fn scan_wifi() {
 pub fn wifi_networks() -> Vec<WifiNetwork> {
     let state = STATE.lock();
     let mut nets = state.wifi_networks.clone();
-    nets.sort_by(|a, b| b.signal.cmp(&a.signal));
+    nets.sort_by_key(|e| core::cmp::Reverse(e.signal));
     nets
 }
 

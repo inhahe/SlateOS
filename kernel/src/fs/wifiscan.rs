@@ -279,7 +279,7 @@ pub fn connected_ssid() -> Option<String> {
 pub fn list_networks() -> Vec<WifiNetwork> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut nets = s.networks.clone();
-        nets.sort_by(|a, b| b.signal_dbm.cmp(&a.signal_dbm)); // Strongest first (least negative).
+        nets.sort_by_key(|e| core::cmp::Reverse(e.signal_dbm)); // Strongest first (least negative).
         nets
     })
 }

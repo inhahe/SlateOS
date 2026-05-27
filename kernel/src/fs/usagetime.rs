@@ -244,7 +244,7 @@ pub fn set_tracking(enabled: bool) -> KernelResult<()> {
 pub fn top_apps(max: usize) -> Vec<AppUsage> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut apps = s.apps.clone();
-        apps.sort_by(|a, b| b.total_foreground_ms.cmp(&a.total_foreground_ms));
+        apps.sort_by_key(|e| core::cmp::Reverse(e.total_foreground_ms));
         apps.truncate(max);
         apps
     })

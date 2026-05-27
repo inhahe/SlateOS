@@ -187,7 +187,7 @@ pub fn per_cpu() -> Vec<CpuMigStats> {
 pub fn hot_tasks(n: usize) -> Vec<TaskMigInfo> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut sorted = s.tasks.clone();
-        sorted.sort_by(|a, b| b.migrations.cmp(&a.migrations));
+        sorted.sort_by_key(|e| core::cmp::Reverse(e.migrations));
         sorted.truncate(n);
         sorted
     })

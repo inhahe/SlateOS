@@ -276,7 +276,7 @@ pub fn list_devices() -> Vec<SwapDevice> {
 pub fn list_processes() -> Vec<ProcessSwap> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut procs = s.processes.clone();
-        procs.sort_by(|a, b| b.swap_bytes.cmp(&a.swap_bytes));
+        procs.sort_by_key(|e| core::cmp::Reverse(e.swap_bytes));
         procs
     })
 }

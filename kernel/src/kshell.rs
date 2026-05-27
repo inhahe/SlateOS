@@ -5966,7 +5966,7 @@ fn cmd_top() {
     shell_println!("");
     let mut task_list = crate::sched::task_list();
     // Sort by TSC cycles (more precise than ticks).
-    task_list.sort_by(|a, b| b.total_cycles.cmp(&a.total_cycles));
+    task_list.sort_by_key(|e| core::cmp::Reverse(e.total_cycles));
 
     let freq = crate::bench::tsc_freq();
     shell_println!(
@@ -6362,7 +6362,7 @@ fn cmd_schedstat() {
     }
 
     // Sort by total_wait_ticks descending (most starved first).
-    task_list.sort_by(|a, b| b.total_wait_ticks.cmp(&a.total_wait_ticks));
+    task_list.sort_by_key(|e| core::cmp::Reverse(e.total_wait_ticks));
 
     shell_println!(
         "{:<6} {:<12} {:<4} {:>8} {:>8} {:>8} {:>6} {:>6}",
@@ -8142,7 +8142,7 @@ fn ls_list_dir(
 
     // Apply sorting.  Sorting requires metadata lookups.
     if sort_by_size {
-        filtered.sort_by(|a, b| b.size.cmp(&a.size));
+        filtered.sort_by_key(|e| core::cmp::Reverse(e.size));
     } else if sort_by_time {
         // Sort by modification time (most recent first).
         // We need to look up metadata for each entry.
@@ -8160,7 +8160,7 @@ fn ls_list_dir(
                 (e, mtime)
             })
             .collect();
-        with_mtime.sort_by(|a, b| b.1.cmp(&a.1));
+        with_mtime.sort_by_key(|e| core::cmp::Reverse(e.1));
         filtered = with_mtime.into_iter().map(|(e, _)| e).collect();
     }
 

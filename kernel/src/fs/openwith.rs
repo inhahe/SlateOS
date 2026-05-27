@@ -199,7 +199,7 @@ pub fn build_choices(path: &str) -> KernelResult<Vec<AppChoice>> {
         let mut recent_for_type: Vec<&RecentChoice> = recent.iter()
             .filter(|r| r.mime == mime && !seen_paths.contains(&r.app_path))
             .collect();
-        recent_for_type.sort_by(|a, b| b.last_used_ns.cmp(&a.last_used_ns));
+        recent_for_type.sort_by_key(|e| core::cmp::Reverse(e.last_used_ns));
 
         for rc in recent_for_type.iter().take(MAX_RECENT_PER_TYPE) {
             seen_paths.push(rc.app_path.clone());
@@ -298,7 +298,7 @@ pub fn recent_for_type(mime: &str) -> Vec<(String, String, u64)> {
         .filter(|r| r.mime == mime)
         .map(|r| (r.app_path.clone(), r.app_name.clone(), r.use_count))
         .collect();
-    entries.sort_by(|a, b| b.2.cmp(&a.2)); // Most used first.
+    entries.sort_by_key(|e| core::cmp::Reverse(e.2)); // Most used first.
     entries
 }
 

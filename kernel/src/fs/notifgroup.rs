@@ -300,7 +300,7 @@ pub fn dismiss_all() -> KernelResult<()> {
 pub fn get_groups() -> Vec<NotifGroupEntry> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut groups = s.groups.clone();
-        groups.sort_by(|a, b| b.latest_ns.cmp(&a.latest_ns));
+        groups.sort_by_key(|e| core::cmp::Reverse(e.latest_ns));
         groups
     })
 }

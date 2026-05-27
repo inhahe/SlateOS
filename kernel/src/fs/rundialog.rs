@@ -192,7 +192,7 @@ pub fn record(command: &str, resolved_path: &str) {
                 entry.resolved_path = String::from(resolved_path);
             }
             // Move to front by sorting (newest first).
-            state.recent.sort_by(|a, b| b.timestamp_ns.cmp(&a.timestamp_ns));
+            state.recent.sort_by_key(|e| core::cmp::Reverse(e.timestamp_ns));
             return;
         }
     }

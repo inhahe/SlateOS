@@ -201,7 +201,7 @@ pub fn update_memory(pid: u32, bytes: u64, rss_pages: u64) -> KernelResult<()> {
 pub fn top_cpu(n: usize) -> Vec<ProcessStats> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut sorted = s.processes.clone();
-        sorted.sort_by(|a, b| b.cpu_time_us.cmp(&a.cpu_time_us));
+        sorted.sort_by_key(|e| core::cmp::Reverse(e.cpu_time_us));
         sorted.truncate(n);
         sorted
     })
@@ -211,7 +211,7 @@ pub fn top_cpu(n: usize) -> Vec<ProcessStats> {
 pub fn top_mem(n: usize) -> Vec<ProcessStats> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut sorted = s.processes.clone();
-        sorted.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes));
+        sorted.sort_by_key(|e| core::cmp::Reverse(e.memory_bytes));
         sorted.truncate(n);
         sorted
     })

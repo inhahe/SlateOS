@@ -394,7 +394,7 @@ pub fn app_usage() -> Vec<AppUsage> {
     let guard = STATE.lock();
     guard.as_ref().map_or_else(Vec::new, |s| {
         let mut apps = s.apps.clone();
-        apps.sort_by(|a, b| b.total_bytes().cmp(&a.total_bytes()));
+        apps.sort_by_key(|e| core::cmp::Reverse(e.total_bytes()));
         apps
     })
 }
@@ -458,7 +458,7 @@ pub fn usage_summary(period: UsagePeriod) -> UsageSummary {
     let mut top: Vec<(String, u64)> = state.apps.iter()
         .map(|a| (a.app_id.clone(), a.total_bytes()))
         .collect();
-    top.sort_by(|a, b| b.1.cmp(&a.1));
+    top.sort_by_key(|e| core::cmp::Reverse(e.1));
     top.truncate(10);
 
     UsageSummary {

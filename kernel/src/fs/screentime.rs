@@ -277,7 +277,7 @@ pub fn app_usage() -> Vec<AppUsage> {
     match guard.as_ref() {
         Some(s) => {
             let mut apps = s.apps.clone();
-            apps.sort_by(|a, b| b.focus_secs.cmp(&a.focus_secs));
+            apps.sort_by_key(|e| core::cmp::Reverse(e.focus_secs));
             apps
         }
         None => Vec::new(),

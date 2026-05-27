@@ -322,7 +322,7 @@ pub fn columns_for_dir(dir_path: &str) -> Vec<FieldStat> {
     }
 
     // Sort by frequency (most common first).
-    field_counts.sort_by(|a, b| b.2.cmp(&a.2));
+    field_counts.sort_by_key(|e| core::cmp::Reverse(e.2));
 
     field_counts.into_iter()
         .map(|(name, label, count)| FieldStat { name, label, count })

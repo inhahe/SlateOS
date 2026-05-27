@@ -182,7 +182,7 @@ pub fn get(name: &str) -> Option<SlabCache> {
 pub fn top_active(n: usize) -> Vec<SlabCache> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut sorted = s.caches.clone();
-        sorted.sort_by(|a, b| b.active_objects.cmp(&a.active_objects));
+        sorted.sort_by_key(|e| core::cmp::Reverse(e.active_objects));
         sorted.truncate(n);
         sorted
     })

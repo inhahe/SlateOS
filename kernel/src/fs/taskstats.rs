@@ -230,7 +230,7 @@ pub fn list_tasks() -> Vec<TaskAccounting> {
 pub fn top_cpu(n: usize) -> Vec<TaskAccounting> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut sorted = s.tasks.clone();
-        sorted.sort_by(|a, b| b.cpu_time_ns.cmp(&a.cpu_time_ns));
+        sorted.sort_by_key(|e| core::cmp::Reverse(e.cpu_time_ns));
         sorted.truncate(n);
         sorted
     })

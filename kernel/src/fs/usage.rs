@@ -372,7 +372,7 @@ impl Collector {
             .iter()
             .map(|(p, s)| SizeEntry { path: p.clone(), size: *s })
             .collect();
-        dir_entries.sort_by(|a, b| b.size.cmp(&a.size));
+        dir_entries.sort_by_key(|e| core::cmp::Reverse(e.size));
         dir_entries.truncate(TOP_N);
 
         // Top files by size.
@@ -380,7 +380,7 @@ impl Collector {
             .iter()
             .map(|(p, s)| SizeEntry { path: p.clone(), size: *s })
             .collect();
-        file_entries.sort_by(|a, b| b.size.cmp(&a.size));
+        file_entries.sort_by_key(|e| core::cmp::Reverse(e.size));
         file_entries.truncate(TOP_N);
 
         // Extension groups, sorted by total size.
@@ -392,7 +392,7 @@ impl Collector {
                 count: *count,
             })
             .collect();
-        ext_groups.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+        ext_groups.sort_by_key(|e| core::cmp::Reverse(e.total_size));
         ext_groups.truncate(TOP_N);
 
         // Average file size.

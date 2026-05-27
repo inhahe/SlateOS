@@ -274,7 +274,7 @@ pub fn get_app_usage(app: &str) -> Option<AppUsage> {
 pub fn top_apps(max: usize) -> Vec<AppUsage> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut apps = s.apps.clone();
-        apps.sort_by(|a, b| (b.bytes_sent + b.bytes_received).cmp(&(a.bytes_sent + a.bytes_received)));
+        apps.sort_by_key(|e| core::cmp::Reverse(e.bytes_sent + e.bytes_received));
         apps.truncate(max);
         apps
     })

@@ -235,7 +235,7 @@ pub fn set_enabled(enabled: bool) -> KernelResult<()> {
 pub fn list_recent(max: usize) -> Vec<SearchEntry> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut entries = s.entries.clone();
-        entries.sort_by(|a, b| b.timestamp_ns.cmp(&a.timestamp_ns));
+        entries.sort_by_key(|e| core::cmp::Reverse(e.timestamp_ns));
         entries.truncate(max);
         entries
     })

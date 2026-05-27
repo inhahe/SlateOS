@@ -1016,7 +1016,7 @@ pub fn init(num_slots: u32) {
     });
     state.total_capacity = state.total_capacity.saturating_add(num_slots);
     // Keep devices sorted by priority (descending).
-    state.devices.sort_by(|a, b| b.priority.cmp(&a.priority));
+    state.devices.sort_by_key(|e| core::cmp::Reverse(e.priority));
     state.initialized = true;
 
     serial_println!(
@@ -1087,7 +1087,7 @@ pub fn init_disk(device_name: &str, base_sector: u64, num_slots: u32) -> KernelR
     });
     state.total_capacity = state.total_capacity.saturating_add(num_slots);
     // Keep devices sorted by priority (descending).
-    state.devices.sort_by(|a, b| b.priority.cmp(&a.priority));
+    state.devices.sort_by_key(|e| core::cmp::Reverse(e.priority));
     state.initialized = true;
 
     let total_free: u32 = state.devices.iter().map(|d| d.slots.free_count()).sum();

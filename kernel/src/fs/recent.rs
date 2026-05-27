@@ -255,7 +255,7 @@ pub fn query(filter: &RecentFilter) -> Vec<RecentEntry> {
         .collect();
 
     // Sort by timestamp, newest first.
-    results.sort_by(|a, b| b.timestamp_ns.cmp(&a.timestamp_ns));
+    results.sort_by_key(|e| core::cmp::Reverse(e.timestamp_ns));
 
     // Apply limit.
     if filter.limit > 0 && results.len() > filter.limit {

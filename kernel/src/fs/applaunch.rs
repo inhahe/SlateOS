@@ -200,7 +200,7 @@ pub fn search(query: &str, max: usize) -> Vec<LaunchResult> {
         })
         .collect();
 
-    results.sort_by(|a, b| b.score.cmp(&a.score));
+    results.sort_by_key(|e| core::cmp::Reverse(e.score));
     results.truncate(max);
     results
 }
@@ -227,7 +227,7 @@ pub fn list_items() -> Vec<LaunchItem> {
 pub fn top_launched(max: usize) -> Vec<LaunchItem> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut items = s.items.clone();
-        items.sort_by(|a, b| b.launch_count.cmp(&a.launch_count));
+        items.sort_by_key(|e| core::cmp::Reverse(e.launch_count));
         items.truncate(max);
         items
     })

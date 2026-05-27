@@ -107,7 +107,7 @@ pub fn register(mime: &str, app_path: &str, app_name: &str, priority: u32, user_
     }
 
     // Sort by priority, highest first.
-    list.sort_by(|a, b| b.priority.cmp(&a.priority));
+    list.sort_by_key(|e| core::cmp::Reverse(e.priority));
 }
 
 /// Unregister an application from a MIME type.

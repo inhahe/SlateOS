@@ -419,7 +419,7 @@ pub fn record_launch(app_id: &str) -> KernelResult<()> {
     }
 
     // Sort by last launched (most recent first).
-    menu.recent.sort_by(|a, b| b.last_launched_ns.cmp(&a.last_launched_ns));
+    menu.recent.sort_by_key(|e| core::cmp::Reverse(e.last_launched_ns));
     Ok(())
 }
 

@@ -215,7 +215,7 @@ pub fn get(id: u32) -> Option<Note> {
 pub fn list(max: usize) -> Vec<Note> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut notes = s.notes.clone();
-        notes.sort_by(|a, b| b.modified_ns.cmp(&a.modified_ns));
+        notes.sort_by_key(|e| core::cmp::Reverse(e.modified_ns));
         notes.truncate(max);
         notes
     })

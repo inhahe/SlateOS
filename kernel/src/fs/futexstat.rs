@@ -210,7 +210,7 @@ pub fn record_contention(pid: u32, address: u64, ns: u64) -> KernelResult<()> {
 pub fn hotspots(n: usize) -> Vec<FutexAddr> {
     STATE.lock().as_ref().map_or(Vec::new(), |s| {
         let mut sorted: Vec<_> = s.addrs.clone();
-        sorted.sort_by(|a, b| b.waits.cmp(&a.waits));
+        sorted.sort_by_key(|e| core::cmp::Reverse(e.waits));
         sorted.truncate(n);
         sorted
     })

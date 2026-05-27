@@ -647,7 +647,7 @@ pub fn app_streams(app_id: &str) -> Vec<AudioStream> {
 pub fn sound_history() -> Vec<SoundHistoryEntry> {
     let state = MIXER.lock();
     let mut entries = state.history.clone();
-    entries.sort_by(|a, b| b.timestamp_ns.cmp(&a.timestamp_ns));
+    entries.sort_by_key(|e| core::cmp::Reverse(e.timestamp_ns));
     entries
 }
 

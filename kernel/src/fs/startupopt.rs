@@ -307,7 +307,7 @@ pub fn get_stages_by_duration() -> Vec<BootStage> {
             .filter(|s| s.completed)
             .cloned()
             .collect();
-        stages.sort_by(|a, b| b.duration_ms.cmp(&a.duration_ms));
+        stages.sort_by_key(|e| core::cmp::Reverse(e.duration_ms));
         stages
     })
 }

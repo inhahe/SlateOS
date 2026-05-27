@@ -342,8 +342,18 @@ mod tests {
     // -- memfd_create returns ENOSYS --
 
     #[test]
-    fn test_memfd_create_returns_enosys() {
-        assert_eq!(memfd_create(b"test\0".as_ptr(), 0), -1);
+    fn test_memfd_create_succeeds_or_real_errno() {
+        // memfd_create is implemented (no longer ENOSYS).  On host-target
+        // tests the underlying open() may still fail because /dev/shm
+        // doesn't exist, but any failure must be a real errno — never
+        // ENOSYS — and a successful call returns a positive fd.
+        let ret = memfd_create(b"test\0".as_ptr(), 0);
+        if ret < 0 {
+            assert_ne!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        } else {
+            assert!(ret >= 0);
+            let _ = crate::file::close(ret);
+        }
     }
 
     // -- mremap returns MAP_FAILED --
@@ -563,15 +573,10 @@ mod tests {
     // -- memfd_create sets errno --
 
     #[test]
-    fn test_memfd_create_sets_errno() {
+    fn test_memfd_create_null_name_efault() {
         crate::errno::set_errno(0);
-        assert_eq!(memfd_create(b"test\0".as_ptr(), 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_memfd_create_null_name() {
         assert_eq!(memfd_create(core::ptr::null(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     // -- mremap sets errno --
@@ -897,14 +902,192 @@ pub extern "C" fn posix_madvise(
 // memfd_create (Linux extension)
 // ---------------------------------------------------------------------------
 
-/// Create an anonymous file backed by memory.
+/// Maximum length of the user-supplied `memfd_create` name (Linux's
+/// limit, minus the prefix we add).  The Linux kernel allows names up
+/// to 249 bytes total; we reserve a few bytes for our `.memfd_<n>_`
+/// prefix so the on-disk path still fits in `/dev/shm/<prefix><name>`
+/// without exceeding the underlying filesystem's per-component limit.
+const MEMFD_NAME_MAX: usize = 200;
+
+/// Monotonic counter used to make on-disk `/dev/shm/.memfd_<n>_<name>`
+/// paths unique within a process.  Each call to `memfd_create` consumes
+/// one value.  Even after the process exits, leftover files in
+/// `/dev/shm` will be reaped by the boot cleanup pass; collisions across
+/// process restarts would only matter if the cleanup pass is skipped,
+/// and the unlink-after-open below makes the file anonymous anyway.
+static MEMFD_COUNTER: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Recognised flag bits for `memfd_create`.  Anything outside this set
+/// is rejected with `EINVAL` (matches Linux).
+const MEMFD_FLAG_MASK: u32 = crate::linux_memfd::MFD_CLOEXEC
+    | crate::linux_memfd::MFD_ALLOW_SEALING
+    | crate::linux_memfd::MFD_HUGETLB
+    | crate::linux_memfd::MFD_NOEXEC_SEAL
+    | crate::linux_memfd::MFD_EXEC;
+
+/// `memfd_create` — create an anonymous in-memory file.
 ///
-/// Stub: returns -1 with ENOSYS.  Requires kernel support for
-/// anonymous file descriptors backed by anonymous memory.
+/// The `name` parameter is purely for debugging/proc display: it doesn't
+/// place the file in any namespace and two memfds with the same name
+/// don't share storage.  Internally we route the request through
+/// `/dev/shm/.memfd_<counter>_<name>`, open it with `O_CREAT | O_RDWR
+/// | O_EXCL`, then `unlink()` the path immediately so the file becomes
+/// truly anonymous (only the returned fd keeps it alive).
+///
+/// Supported flags:
+/// - `MFD_CLOEXEC` — set close-on-exec on the returned fd.
+/// - `MFD_ALLOW_SEALING` — accepted; sealing itself (fcntl
+///   `F_ADD_SEALS` / `F_GET_SEALS`) is not yet implemented, so the
+///   flag is recognised but currently has no observable effect beyond
+///   not erroring out.
+/// - `MFD_NOEXEC_SEAL` — accepted; equivalent in spirit to
+///   `MFD_ALLOW_SEALING` plus an immediate `F_SEAL_EXEC`.  Without
+///   sealing infrastructure or an executable-bit model on memfds, this
+///   currently has no observable effect.
+/// - `MFD_EXEC` — accepted, no-op (we don't have a noexec default to
+///   override).
+/// - `MFD_HUGETLB` — rejected with `EINVAL`; the kernel has no
+///   hugepage support yet.
+///
+/// # Errors
+///
+/// - `EFAULT` — `name` is NULL.
+/// - `EINVAL` — `name` is too long, `flags` has unknown bits, or
+///   `MFD_HUGETLB` is set.
+/// - Plus any error reported by the underlying `open()` / `unlink()`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn memfd_create(_name: *const u8, _flags: u32) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn memfd_create(name: *const u8, flags: u32) -> i32 {
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if flags & !MEMFD_FLAG_MASK != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if flags & crate::linux_memfd::MFD_HUGETLB != 0 {
+        // Hugepage-backed memfds require kernel huge-page support.
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Measure user name length with a bound.
+    let mut name_len: usize = 0;
+    while name_len <= MEMFD_NAME_MAX {
+        // SAFETY: caller contract — `name` is a valid NUL-terminated C string.
+        let b = unsafe { *name.add(name_len) };
+        if b == 0 {
+            break;
+        }
+        // Reject embedded '/' in the user name: it would split the path.
+        if b == b'/' {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        name_len = name_len.wrapping_add(1);
+    }
+    if name_len > MEMFD_NAME_MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Build "/dev/shm/.memfd_<counter>_<name>" into a stack buffer.
+    let mut path = [0u8; crate::unistd::PATH_MAX];
+    let mut pos: usize = 0;
+    // Helper: append a byte slice; returns false if it would overflow.
+    let put = |buf: &mut [u8], p: &mut usize, src: &[u8]| -> bool {
+        if p.wrapping_add(src.len()) >= buf.len() {
+            return false;
+        }
+        if let Some(dst) = buf.get_mut(*p..p.wrapping_add(src.len())) {
+            dst.copy_from_slice(src);
+        }
+        *p = p.wrapping_add(src.len());
+        true
+    };
+    if !put(&mut path, &mut pos, SHM_DIR) {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    }
+    if !put(&mut path, &mut pos, b"/.memfd_") {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    }
+    let counter = MEMFD_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // Format the counter as decimal into a small buffer.
+    let mut num_buf = [0u8; 20];
+    let num_len = format_u64(counter, &mut num_buf);
+    if !put(&mut path, &mut pos, &num_buf[..num_len]) {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    }
+    if !put(&mut path, &mut pos, b"_") {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    }
+    // Append the user-supplied name (sanitized: NUL-free, /-free above).
+    // SAFETY: name_len bytes are readable before the NUL.
+    let user_name = unsafe { core::slice::from_raw_parts(name, name_len) };
+    if !put(&mut path, &mut pos, user_name) {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    }
+    // NUL-terminate.
+    if pos >= path.len() {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    }
+    if let Some(slot) = path.get_mut(pos) {
+        *slot = 0;
+    }
+
+    // Open with O_CREAT | O_RDWR | O_EXCL.  Honor MFD_CLOEXEC.
+    let mut oflag =
+        crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | crate::fcntl::O_RDWR;
+    if flags & crate::linux_memfd::MFD_CLOEXEC != 0 {
+        oflag |= crate::fcntl::O_CLOEXEC;
+    }
+    let fd = crate::file::open(path.as_ptr(), oflag, 0o600);
+    if fd < 0 {
+        return -1;
+    }
+    // Unlink the path immediately so the fd becomes anonymous.  Failure
+    // here is non-fatal: the fd still works, the file just sticks around
+    // in /dev/shm until the boot cleanup pass.
+    let _ = crate::file::unlink(path.as_ptr());
+
+    fd
+}
+
+/// Format a `u64` as decimal into `buf`, returning the number of bytes
+/// written.  The output is left-aligned at the start of `buf`.
+fn format_u64(mut n: u64, buf: &mut [u8; 20]) -> usize {
+    if n == 0 {
+        if let Some(slot) = buf.get_mut(0) {
+            *slot = b'0';
+        }
+        return 1;
+    }
+    let mut tmp = [0u8; 20];
+    let mut i: usize = 0;
+    while n > 0 && i < tmp.len() {
+        if let Some(slot) = tmp.get_mut(i) {
+            *slot = b'0'.wrapping_add((n % 10) as u8);
+        }
+        n /= 10;
+        i = i.wrapping_add(1);
+    }
+    // Reverse into buf.
+    let mut j: usize = 0;
+    while j < i {
+        let src = i.wrapping_sub(1).wrapping_sub(j);
+        if let (Some(d), Some(s)) = (buf.get_mut(j), tmp.get(src)) {
+            *d = *s;
+        }
+        j = j.wrapping_add(1);
+    }
+    i
 }
 
 // ---------------------------------------------------------------------------

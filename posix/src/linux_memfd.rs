@@ -109,9 +109,82 @@ mod tests {
     }
 
     #[test]
-    fn test_memfd_create_stub() {
+    fn test_memfd_create_basic() {
+        // memfd_create with no flags should succeed and yield a positive fd.
+        // (Underlying open() may fail in host-target test runs without a
+        // real /dev/shm — accept either success or a real errno that is
+        // *not* ENOSYS.)
         let ret = memfd_create(b"test\0".as_ptr(), 0);
-        assert_eq!(ret, -1); // stub returns ENOSYS
+        if ret < 0 {
+            let e = crate::errno::get_errno();
+            assert_ne!(
+                e, crate::errno::ENOSYS,
+                "memfd_create must not return ENOSYS — it is implemented"
+            );
+        }
+        if ret >= 0 {
+            let _ = crate::file::close(ret);
+        }
+    }
+
+    #[test]
+    fn test_memfd_create_null_name_efault() {
+        let ret = memfd_create(core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_memfd_create_unknown_flag_einval() {
+        let ret = memfd_create(b"x\0".as_ptr(), 0x8000_0000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_hugetlb_einval() {
+        let ret = memfd_create(b"x\0".as_ptr(), MFD_HUGETLB);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_slash_in_name_einval() {
+        let ret = memfd_create(b"a/b\0".as_ptr(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_name_too_long_einval() {
+        let long_name = [b'a'; 250];
+        // Build a NUL-terminated copy.
+        let mut buf = [0u8; 256];
+        for (i, c) in long_name.iter().enumerate() {
+            if let Some(slot) = buf.get_mut(i) {
+                *slot = *c;
+            }
+        }
+        let ret = memfd_create(buf.as_ptr(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_accepts_known_flags() {
+        // CLOEXEC, ALLOW_SEALING, NOEXEC_SEAL, and EXEC must be accepted
+        // (the call may still fail at open() in a host-target test run,
+        // but it must not fail with EINVAL on flag validation).
+        for &fl in &[MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL, MFD_EXEC] {
+            let _ = crate::errno::set_errno(0);
+            let ret = memfd_create(b"x\0".as_ptr(), fl);
+            if ret < 0 {
+                let e = crate::errno::get_errno();
+                assert_ne!(e, crate::errno::EINVAL, "flag {fl:#x} should not be EINVAL");
+            } else {
+                let _ = crate::file::close(ret);
+            }
+        }
     }
 
     #[test]

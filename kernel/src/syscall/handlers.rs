@@ -1822,11 +1822,24 @@ pub fn sys_shm_close(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_EVENTFD_CREATE` — create a new eventfd counter.
 ///
 /// `arg0`: initial counter value.
+/// `arg1`: flags.  Bit 0 (`EVENTFD_SEMAPHORE_FLAG`) selects semaphore
+///         mode: `read()` decrements the counter by 1 and returns 1
+///         (matches Linux `EFD_SEMAPHORE`).  All other bits are
+///         reserved and must be 0 — userspace handles `EFD_CLOEXEC`
+///         and `EFD_NONBLOCK` itself via the fd-table layer.
 ///
-/// Returns: eventfd handle.
+/// Returns: eventfd handle, or `InvalidArgument` if reserved flag
+/// bits are set.
 pub fn sys_eventfd_create(args: &SyscallArgs) -> SyscallResult {
+    const EVENTFD_SEMAPHORE_FLAG: u64 = 1;
+
     let initial = args.arg0;
-    let handle = eventfd::create(initial);
+    let flags = args.arg1;
+    if flags & !EVENTFD_SEMAPHORE_FLAG != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let semaphore = flags & EVENTFD_SEMAPHORE_FLAG != 0;
+    let handle = eventfd::create_with_flags(initial, semaphore);
 
     if let Some(pid) = caller_pid() {
         pcb::register_ipc_handle(pid, ResourceType::EventFd, handle.raw());

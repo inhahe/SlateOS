@@ -139,23 +139,20 @@ pub const EFD_SEMAPHORE: i32 = 1;
 
 /// Create an eventfd file descriptor.
 ///
-/// `initval` seeds the kernel counter.  Supported flags: `EFD_CLOEXEC`
-/// (sets `FD_CLOEXEC` on the new fd) and `EFD_NONBLOCK` (sets
-/// `O_NONBLOCK` on the new fd, making `read()` return `EAGAIN` instead
-/// of blocking when the counter is 0).
+/// `initval` seeds the kernel counter.  Supported flags:
 ///
-/// `EFD_SEMAPHORE` is not yet supported and returns -1/EINVAL — the
-/// kernel `eventfd::read()` drains the entire counter rather than
-/// decrementing by 1.  Tracked in `todo.txt`.
+/// - `EFD_CLOEXEC` — sets `FD_CLOEXEC` on the new fd.
+/// - `EFD_NONBLOCK` — sets `O_NONBLOCK` on the new fd (makes `read()`
+///   return `EAGAIN` instead of blocking when the counter is 0).
+/// - `EFD_SEMAPHORE` — selects semaphore mode in the kernel: each
+///   `read()` decrements the counter by 1 and returns 1 (matches
+///   Linux `EFD_SEMAPHORE`).  Without this flag, `read()` drains the
+///   counter to 0 and returns the full value (default eventfd
+///   behavior).
 ///
 /// Returns a fresh fd on success, -1 with `errno` set on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn eventfd(initval: u32, flags: i32) -> i32 {
-    // Reject EFD_SEMAPHORE — we don't have the kernel semantics yet.
-    if flags & EFD_SEMAPHORE != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
     // Reject unknown flag bits.
     let allowed = EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE;
     if flags & !allowed != 0 {
@@ -163,7 +160,15 @@ pub extern "C" fn eventfd(initval: u32, flags: i32) -> i32 {
         return -1;
     }
 
-    let handle_ret = syscall1(SYS_EVENTFD_CREATE, u64::from(initval));
+    // Kernel-side flag layout: bit 0 = semaphore.  EFD_CLOEXEC and
+    // EFD_NONBLOCK are userspace-only fd-table concerns.
+    const KSYS_EVENTFD_SEMAPHORE: u64 = 1;
+    let kernel_flags = if flags & EFD_SEMAPHORE != 0 {
+        KSYS_EVENTFD_SEMAPHORE
+    } else {
+        0
+    };
+    let handle_ret = syscall2(SYS_EVENTFD_CREATE, u64::from(initval), kernel_flags);
     if handle_ret < 0 {
         return errno::translate(handle_ret) as i32;
     }
@@ -503,13 +508,16 @@ mod tests {
 
     // -- eventfd userspace checks (no kernel needed) --
 
-    /// `EFD_SEMAPHORE` is not yet supported; userspace must reject it
-    /// before issuing the kernel call.
+    /// `EFD_SEMAPHORE` must be accepted as a valid flag (the wrapper
+    /// no longer rejects it).  The success path requires a real kernel
+    /// and is covered by the integration tests in `tests/eventfd.rs`.
     #[test]
-    fn test_eventfd_semaphore_rejected() {
-        errno::set_errno(0);
-        assert_eq!(eventfd(0, EFD_SEMAPHORE), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+    fn test_eventfd_semaphore_flag_is_valid() {
+        // Just verify the bit is in the allowed set — the call would
+        // require the kernel to actually succeed, so we don't invoke it
+        // here.
+        let allowed = EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE;
+        assert_eq!(EFD_SEMAPHORE & !allowed, 0);
     }
 
     /// Unknown flag bits should be rejected (forward-compat).
@@ -829,12 +837,13 @@ mod tests {
     // integration tests (see tests/eventfd.rs).  These cases all fail
     // before any syscall is issued.
 
-    /// EFD_SEMAPHORE combined with valid flags is still rejected.
+    /// `EFD_SEMAPHORE` combines cleanly with the userspace fd-table
+    /// flags — they live in disjoint bits.  Functional success is
+    /// covered by integration tests with a live kernel.
     #[test]
-    fn test_eventfd_semaphore_with_cloexec_rejected() {
-        errno::set_errno(0);
-        assert_eq!(eventfd(0, EFD_SEMAPHORE | EFD_CLOEXEC), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+    fn test_eventfd_semaphore_disjoint_from_fd_flags() {
+        assert_eq!(EFD_SEMAPHORE & EFD_CLOEXEC, 0);
+        assert_eq!(EFD_SEMAPHORE & EFD_NONBLOCK, 0);
     }
 
     /// Multiple unknown flag bits are still rejected.

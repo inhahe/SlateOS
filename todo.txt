@@ -455,14 +455,25 @@ Remaining net improvements (diminishing returns):
   esp/EFI/BOOT/ directory is for the bootloader EFI binary, not the kernel.
   Always copy built kernel to esp/boot/kernel.
 
+- (2026-05-27) Flaky test: `posix::process::tests::test_setsid_sets_sid_and_pgid`
+  fails intermittently during the full `cargo test -p posix --lib` run
+  with a Windows NTSTATUS `0xC0000056` / `-1073741670` (STATUS_INSUFFICIENT_
+  RESOURCES) but passes cleanly in isolation.  Looks like a parallel-
+  test interaction (probably PID-table or thread-spawning resource
+  pressure on Windows when ~13k tests run concurrently).  Not caused
+  by recent changes — observed during EFD_SEMAPHORE work but the test
+  doesn't touch eventfd code.  Investigate: add cross-test isolation
+  for setsid/setpgid state, or serialize that suite with #[serial].
+
 - (2026-05-26) Linux eventfd(): EFD_SEMAPHORE flag is unsupported.
-  The kernel eventfd::read() implementation drains the entire counter
-  atomically, but EFD_SEMAPHORE requires read() to decrement by 1 and
-  return 1 (semaphore semantics).  Userspace posix::eventfd() rejects
-  EFD_SEMAPHORE with EINVAL until the kernel adds a semaphore-mode
-  read path (eventfd::read_semaphore(handle)) and a corresponding
-  flag bit on the kernel EventFd state.  Tracked here so a future
-  session can add it without re-deriving the requirements.
+  [DONE 2026-05-27] Kernel EventFd grew a `semaphore` field and a new
+  `create_with_flags(initial, semaphore)` constructor; read(),
+  try_read(), and read_timeout() all dispatch on the flag (decrement
+  by 1 + return 1 in semaphore mode; drain the counter as before
+  otherwise).  SYS_EVENTFD_CREATE now takes a `flags` arg1 (bit 0 =
+  semaphore).  posix::eventfd() forwards the flag through syscall2
+  and no longer EINVALs.  Kernel self-test `test_semaphore_mode`
+  exercises decrement, drain-to-WouldBlock, and re-fill.
 
 - (2026-05-26) eventfd fd inheritance across spawn is pass-through:
   closing the eventfd handle from parent OR child invalidates it for

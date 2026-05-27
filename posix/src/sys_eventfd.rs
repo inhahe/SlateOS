@@ -34,12 +34,13 @@ mod tests {
         assert_ne!(EFD_NONBLOCK, EFD_SEMAPHORE);
     }
 
-    /// `eventfd` rejects `EFD_SEMAPHORE` (not yet implemented).
+    /// `EFD_SEMAPHORE` is in the allowed-flag set (kernel now
+    /// implements semaphore-mode reads).  Functional success requires
+    /// a live kernel — exercised by the integration tests.
     #[test]
-    fn test_eventfd_semaphore_rejected() {
-        crate::errno::set_errno(0);
-        assert_eq!(eventfd(0, EFD_SEMAPHORE), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    fn test_eventfd_semaphore_flag_accepted() {
+        // Just check the bit definition matches Linux.
+        assert_eq!(EFD_SEMAPHORE, 1);
     }
 
     /// `eventfd_read` on an invalid fd returns -1 with EFAULT (null buf).

@@ -28,13 +28,12 @@ mod tests {
         assert_ne!(EFD_NONBLOCK, EFD_SEMAPHORE);
     }
 
-    /// `EFD_SEMAPHORE` is rejected before any syscall — verifies the
-    /// re-export reaches the real implementation that does the check.
+    /// `EFD_SEMAPHORE` is no longer rejected — the kernel now supports
+    /// semaphore-mode reads.  The success path requires a live kernel
+    /// and is covered by the integration tests.
     #[test]
-    fn test_eventfd_semaphore_rejected() {
-        crate::errno::set_errno(0);
-        assert_eq!(eventfd(0, EFD_SEMAPHORE), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    fn test_eventfd_semaphore_flag_value() {
+        assert_eq!(EFD_SEMAPHORE, 1);
     }
 
     #[test]

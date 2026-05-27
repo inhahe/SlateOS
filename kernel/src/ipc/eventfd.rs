@@ -110,15 +110,20 @@ struct EventFd {
     writer_waiter: Option<TaskId>,
     /// Whether the eventfd has been closed.
     closed: bool,
+    /// Semaphore mode: `read()` decrements the counter by 1 and returns
+    /// 1 (instead of draining the counter to 0 and returning its full
+    /// value).  Matches Linux `EFD_SEMAPHORE` semantics.
+    semaphore: bool,
 }
 
 impl EventFd {
-    fn new(initial: u64) -> Self {
+    fn new(initial: u64, semaphore: bool) -> Self {
         Self {
             counter: initial.min(MAX_COUNTER),
             reader_waiter: None,
             writer_waiter: None,
             closed: false,
+            semaphore,
         }
     }
 }
@@ -139,10 +144,23 @@ static EVENTFD_TABLE: Mutex<BTreeMap<EventFdId, EventFd>> =
 
 /// Create a new eventfd with an initial counter value.
 ///
-/// The initial value is typically 0 (event not signaled).
+/// The initial value is typically 0 (event not signaled).  The eventfd
+/// is created in default (non-semaphore) mode — `read()` drains the
+/// entire counter to 0.  Use [`create_with_flags`] for semaphore mode.
 pub fn create(initial: u64) -> EventFdHandle {
+    create_with_flags(initial, false)
+}
+
+/// Create a new eventfd with an initial counter value and a semaphore
+/// flag.
+///
+/// When `semaphore` is `true`, `read()` decrements the counter by 1
+/// and returns 1 (matching Linux `EFD_SEMAPHORE` semantics).  When
+/// `false`, `read()` returns the full counter value and resets it to
+/// 0 (default eventfd behavior).
+pub fn create_with_flags(initial: u64, semaphore: bool) -> EventFdHandle {
     let id = alloc_eventfd_id();
-    let efd = EventFd::new(initial);
+    let efd = EventFd::new(initial, semaphore);
 
     let mut table = EVENTFD_TABLE.lock();
     table.insert(id, efd);
@@ -375,10 +393,19 @@ pub fn read(handle: EventFdHandle) -> KernelResult<u64> {
                 .ok_or(KernelError::InvalidHandle)?;
 
             if efd.counter > 0 {
-                let val = efd.counter;
-                efd.counter = 0;
+                let val = if efd.semaphore {
+                    // Semaphore mode: decrement by 1, return 1.
+                    // `counter > 0` guarantees the subtraction can't underflow.
+                    efd.counter = efd.counter.saturating_sub(1);
+                    1
+                } else {
+                    // Default mode: drain the counter.
+                    let v = efd.counter;
+                    efd.counter = 0;
+                    v
+                };
 
-                // Wake blocked writer.
+                // Wake blocked writer (now that counter has room again).
                 let writer = efd.writer_waiter.take();
                 drop(table);
 
@@ -419,8 +446,14 @@ pub fn try_read(handle: EventFdHandle) -> KernelResult<u64> {
             .ok_or(KernelError::InvalidHandle)?;
 
         if efd.counter > 0 {
-            result = Ok(efd.counter);
-            efd.counter = 0;
+            if efd.semaphore {
+                // Semaphore mode: decrement by 1, return 1.
+                efd.counter = efd.counter.saturating_sub(1);
+                result = Ok(1);
+            } else {
+                result = Ok(efd.counter);
+                efd.counter = 0;
+            }
             wake_writer = efd.writer_waiter.take();
         } else if efd.closed {
             return Err(KernelError::ChannelClosed);
@@ -459,8 +492,14 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
             .ok_or(KernelError::InvalidHandle)?;
 
         if efd.counter > 0 {
-            let val = efd.counter;
-            efd.counter = 0;
+            let val = if efd.semaphore {
+                efd.counter = efd.counter.saturating_sub(1);
+                1
+            } else {
+                let v = efd.counter;
+                efd.counter = 0;
+                v
+            };
             let writer = efd.writer_waiter.take();
             drop(table);
             super::stats::eventfd_read();
@@ -507,8 +546,14 @@ pub fn read_timeout(handle: EventFdHandle, timeout_ns: u64) -> KernelResult<u64>
                 })?;
 
             if efd.counter > 0 {
-                let val = efd.counter;
-                efd.counter = 0;
+                let val = if efd.semaphore {
+                    efd.counter = efd.counter.saturating_sub(1);
+                    1
+                } else {
+                    let v = efd.counter;
+                    efd.counter = 0;
+                    v
+                };
                 let writer = efd.writer_waiter.take();
                 crate::hrtimer::cancel(timer_handle);
                 drop(table);
@@ -599,6 +644,7 @@ pub fn self_test() -> KernelResult<()> {
     test_read_resets()?;
     test_nonblocking()?;
     test_blocking_read()?;
+    test_semaphore_mode()?;
 
     serial_println!("[eventfd] Eventfd self-test PASSED");
     Ok(())
@@ -830,5 +876,65 @@ fn test_blocking_read() -> KernelResult<()> {
 
     close(handle);
     serial_println!("[eventfd]   Blocking read: OK");
+    Ok(())
+}
+
+/// Test 6: semaphore-mode read decrements by 1 and returns 1.
+///
+/// Matches Linux `EFD_SEMAPHORE` semantics: each read returns 1 (not
+/// the full counter) and decrements the counter by 1.  After N reads
+/// of an eventfd seeded with N, subsequent reads block (or return
+/// `WouldBlock`).
+fn test_semaphore_mode() -> KernelResult<()> {
+    let handle = create_with_flags(3, true);
+
+    // Three reads each return 1 (decrementing 3 → 2 → 1 → 0).
+    for expected_remaining in (0..3).rev() {
+        let val = try_read(handle)?;
+        if val != 1 {
+            serial_println!(
+                "[eventfd]   FAIL: semaphore read (remaining={}) got {}, expected 1",
+                expected_remaining,
+                val
+            );
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Fourth read finds counter == 0 → WouldBlock.
+    match try_read(handle) {
+        Err(KernelError::WouldBlock) => {}
+        other => {
+            serial_println!("[eventfd]   FAIL: semaphore drained try_read: {:?}", other);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // A write of 5 makes 5 more semaphore reads available.
+    write(handle, 5)?;
+    for _ in 0..5 {
+        let val = try_read(handle)?;
+        if val != 1 {
+            serial_println!("[eventfd]   FAIL: post-write semaphore read got {}", val);
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+    match try_read(handle) {
+        Err(KernelError::WouldBlock) => {}
+        other => {
+            serial_println!(
+                "[eventfd]   FAIL: post-write semaphore drained try_read: {:?}",
+                other
+            );
+            close(handle);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    close(handle);
+    serial_println!("[eventfd]   Semaphore mode: OK");
     Ok(())
 }

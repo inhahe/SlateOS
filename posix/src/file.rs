@@ -171,6 +171,12 @@ pub extern "C" fn close(fd: Fd) -> i32 {
         HandleKind::Eventfd => {
             syscall1(SYS_EVENTFD_CLOSE, entry.handle)
         }
+        HandleKind::Epoll => {
+            // Userspace-managed: free the instance slot.  No kernel
+            // resource to release.
+            crate::epoll::epoll_instance_close(entry.handle);
+            0
+        }
     };
 
     errno::translate(ret) as i32
@@ -268,6 +274,11 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
         }
         HandleKind::TcpListener => {
             // Listeners are not readable via read(); use accept().
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        HandleKind::Epoll => {
+            // Linux: read/write on an epoll fd returns EINVAL.
             errno::set_errno(errno::EINVAL);
             return -1;
         }
@@ -412,6 +423,11 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             errno::set_errno(errno::EINVAL);
             return -1;
         }
+        HandleKind::Epoll => {
+            // Linux: read/write on an epoll fd returns EINVAL.
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
         HandleKind::Eventfd => {
             // Linux semantics: write on an eventfd requires an 8-byte
             // buffer.  The bytes are interpreted as a host-endian u64
@@ -470,7 +486,7 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
         }
         HandleKind::Pipe | HandleKind::Console
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
-        | HandleKind::Eventfd => {
+        | HandleKind::Eventfd | HandleKind::Epoll => {
             errno::set_errno(errno::ESPIPE);
             -1
         }
@@ -972,6 +988,20 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
                 -1
             }
         }
+        HandleKind::Epoll => {
+            // Share the epoll instance.  No addref needed: the close
+            // path uses is_handle_referenced() to skip the instance
+            // teardown until the last fd referencing it goes away.
+            if let Some(fd) = fdtable::alloc_fd_with_flags(
+                HandleKind::Epoll, entry.handle, src_status,
+            ) {
+                fdtable::copy_fd_path(oldfd, fd);
+                fd
+            } else {
+                errno::set_errno(errno::EMFILE);
+                -1
+            }
+        }
     }
 }
 
@@ -1012,6 +1042,14 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         | HandleKind::Pipe
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
         | HandleKind::Eventfd => {
+            entry.handle
+        }
+        HandleKind::Epoll => {
+            // Share the epoll instance.  No addref needed: dup2 calls
+            // is_handle_referenced() before tearing down the evicted
+            // handle, and the new fd at `newfd` is installed before
+            // that check — so an in-place dup2 (newfd's old handle ==
+            // oldfd's handle) still sees a reference and skips close.
             entry.handle
         }
     };
@@ -1220,9 +1258,9 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
             }
             0
         }
-        HandleKind::Eventfd => {
-            // Linux fstat on an eventfd returns a character device with
-            // mode 0600.  We emulate that: zero out the struct and set
+        HandleKind::Eventfd | HandleKind::Epoll => {
+            // Linux fstat on an eventfd / epollfd returns a character
+            // device.  We emulate that: zero out the struct and set
             // S_IFCHR so callers that branch on file type get a sensible
             // value.
             unsafe {
@@ -1482,7 +1520,7 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
         }
         HandleKind::Pipe | HandleKind::Console
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
-        | HandleKind::Eventfd => {
+        | HandleKind::Eventfd | HandleKind::Epoll => {
             errno::set_errno(errno::EINVAL);
             -1
         }
@@ -1508,7 +1546,7 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
         }
         HandleKind::Pipe | HandleKind::Console
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
-        | HandleKind::Eventfd => 0,
+        | HandleKind::Eventfd | HandleKind::Epoll => 0,
     }
 }
 
@@ -1579,6 +1617,11 @@ fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
         HandleKind::TcpListener => syscall1(SYS_TCP_CLOSE_LISTENER, handle),
         HandleKind::UdpSocket => syscall1(SYS_UDP_CLOSE, handle),
         HandleKind::Eventfd => syscall1(SYS_EVENTFD_CLOSE, handle),
+        HandleKind::Epoll => {
+            // Userspace-managed: no kernel handle to close.
+            crate::epoll::epoll_instance_close(handle);
+            0
+        }
     }
 }
 

@@ -89,6 +89,18 @@ pub enum HandleKind {
     /// counter.  These semantics are implemented in [`crate::file`]'s
     /// `read`/`write` dispatch.
     Eventfd,
+
+    /// A Linux-compatible epoll instance (level-triggered, userspace).
+    ///
+    /// The `handle` is an index into a per-process epoll instance table
+    /// in [`crate::epoll`].  Each instance owns an interest list of
+    /// (fd, events, data) entries.  `epoll_wait()` polls the readiness
+    /// of each watched fd via the same primitives that `poll()` uses.
+    ///
+    /// epoll instances are not shared between processes (the interest
+    /// list lives in the parent's userspace memory).  posix_spawn does
+    /// not propagate epoll fds to the child.
+    Epoll,
 }
 
 /// An entry in the file descriptor table.

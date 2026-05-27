@@ -52,9 +52,11 @@ mod tests {
     }
 
     #[test]
-    fn test_epoll_create_stub() {
+    fn test_epoll_create_returns_valid_fd() {
+        // epoll_create with size > 0 should return a valid userspace fd.
         let fd = epoll_create(10);
-        assert_eq!(fd, -1);
+        assert!(fd >= 0, "expected valid fd, got {fd}");
+        crate::file::close(fd);
     }
 
     #[test]

@@ -359,7 +359,7 @@ pub unsafe extern "C" fn ppoll(
 /// connection refused/reset).  POSIX requires POLLERR to be reported
 /// unconditionally (regardless of requested events), and select() should
 /// set the fd in exceptfds when an error is present.
-fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool, bool) {
+pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool, bool) {
     use fdtable::HandleKind;
 
     match kind {
@@ -430,6 +430,16 @@ fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, bool, bool,
         HandleKind::Eventfd => {
             let has = syscall1(crate::syscall::SYS_EVENTFD_HAS_VALUE, handle);
             (has > 0, true, false, false)
+        }
+
+        // Epoll fd: readable when at least one watched fd is ready
+        // (i.e., a non-zero epoll_wait would return events).  An epoll
+        // fd is never "writable" in the POSIX sense — Linux reports
+        // POLLIN-only on epoll fds.  Used for nested epoll (epoll fd
+        // monitored by another epoll/poll/select).
+        HandleKind::Epoll => {
+            let readable = crate::epoll::epoll_instance_has_ready(handle);
+            (readable, false, false, false)
         }
     }
 }

@@ -592,6 +592,11 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         HandleKind::TcpStream | HandleKind::TcpListener => fd_handle_type::TCP_SOCKET,
         HandleKind::UdpSocket => fd_handle_type::UDP_SOCKET,
         HandleKind::Eventfd => fd_handle_type::EVENTFD,
+        // Epoll fds are per-process userspace state and cannot be
+        // meaningfully transferred to a child.  Map to FILE so the
+        // function is total; build_fd_map filters Epoll entries out
+        // before they reach this conversion.
+        HandleKind::Epoll => fd_handle_type::FILE,
     }
 }
 
@@ -672,7 +677,11 @@ fn build_fd_map(
         let fd = idx as i32;
         if let Some(entry) = fdtable::get_fd(fd) {
             // Skip close-on-exec fds — they shouldn't be inherited.
-            if entry.flags & fdtable::FD_CLOEXEC == 0 {
+            // Skip epoll fds — the instance state lives in the parent's
+            // userspace memory and cannot be transferred to the child.
+            if entry.flags & fdtable::FD_CLOEXEC == 0
+                && entry.kind != fdtable::HandleKind::Epoll
+            {
                 virt[idx] = Some((kind_to_handle_type(entry.kind), entry.handle));
             }
         }

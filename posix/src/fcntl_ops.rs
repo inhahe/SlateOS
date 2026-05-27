@@ -427,6 +427,12 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         | fdtable::HandleKind::TcpListener
         | fdtable::HandleKind::UdpSocket
         | fdtable::HandleKind::Eventfd => entry.handle,
+        fdtable::HandleKind::Epoll => {
+            // F_DUPFD on an epoll fd shares the instance.  No addref
+            // needed: close() uses is_handle_referenced() to skip
+            // instance teardown while another fd still references it.
+            entry.handle
+        }
     };
 
     // F_DUPFD inherits the source's file status flags (O_APPEND, etc.).
@@ -451,6 +457,9 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         if entry.kind == fdtable::HandleKind::File {
             let _ = crate::syscall::syscall1(crate::syscall::SYS_FS_CLOSE, new_handle);
         }
+        // Epoll: no refcount to drop — alloc_fd_from_with_flags failed
+        // before installing any new fd, so the existing fd still holds
+        // the only reference to the instance.
         errno::set_errno(errno::EMFILE);
         -1
     }

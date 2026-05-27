@@ -73,7 +73,34 @@ Are these bugs documented? And why is "pre-ex isting failures" even a thing? Why
 
 
 Posix/net zone work — all remaining items are blocked:
-epoll → needs kernel event notification (kernel-ipc zone)
+epoll → [DONE 2026-05-27] Full userspace epoll implementation on top of
+  the existing readiness primitives (same approach as poll/select).
+  - New HandleKind::Epoll in fdtable, with dispatch arms in file.rs
+    (close/read/write/dup/dup2/fstat/lseek/ftruncate/fsync),
+    fcntl_ops.rs (F_DUPFD), ioctl.rs (ENOTTY), poll.rs (check_readiness
+    nesting via epoll_instance_has_ready), spawn.rs (skip Epoll fds in
+    posix_spawn fd inheritance — per-process userspace state).
+  - posix/src/epoll.rs:
+    * EpollInstance table (MAX_EPOLL_INSTANCES=16, MAX_EPOLL_ENTRIES=128).
+    * EpollEvent is #[repr(C, packed)] — 12 bytes, matches Linux ABI.
+    * Implements: epoll_create, epoll_create1, epoll_ctl (ADD/MOD/DEL),
+      epoll_wait, epoll_pwait, epoll_pwait2.
+    * Level-triggered semantics only (ET accepted but treated as LT).
+    * EPOLLONESHOT supported: fires once then disables until re-armed
+      via EPOLL_CTL_MOD.
+    * Per-entry events/data/oneshot_fired state; compute_revents uses
+      crate::poll::check_readiness for the actual readiness query.
+    * Polling loop with 10ms sleep, matches existing poll/select pattern.
+    * Validates flags (EINVAL for unknown bits), detects duplicate ADD
+      (EEXIST), missing DEL (ENOENT), bad epfd (EBADF), invalid event
+      pointer (EFAULT), zero maxevents (EINVAL).
+    * Refcounting handled by is_handle_referenced() fd-table scan — no
+      separate per-instance refcount field; dup/dup2/F_DUPFD just share
+      the handle and close frees the slot when the last fd goes away.
+  - 95 epoll-related lib tests pass. Limitations: still a polling loop
+    not a true wait queue. A real wakeup-on-ready epoll would require
+    kernel-side event notification (kernel-ipc zone), but the userspace
+    impl is functionally complete and ABI-compatible.
 signal handling shim → needs kernel-side signal delivery (kernel-ipc zone)
 /proc, /sys equivalents → DONE (procfs 10K+ lines mounted at /proc, sysfs at /sys)
 popen/pclose → DONE: Full implementation using posix_spawnp + pipe + fd_map.
@@ -309,11 +336,14 @@ Remaining net improvements (diminishing returns):
 - (FIXED) Socket dup now works.  Same refcounting fix as pipe dup
   (is_handle_referenced scan + copy_meta for socket metadata).
 
-- poll/select report all valid fds as ready (optimistic readiness).  This
-  works correctly for files (POSIX says always ready) and is conservative
-  for pipes/sockets (programs handle blocking on I/O).  A proper kernel
-  event notification mechanism (eventfd/completion ports) would allow
-  accurate readiness reporting.
+- (DONE 2026-05-27) poll/select readiness: poll/ppoll/select/pselect now
+  do real per-fd-kind readiness via check_readiness() in posix/src/poll.rs.
+  Pipes use SYS_PIPE_POLL, TCP streams use SYS_TCP_POLL_STATUS, TCP listeners
+  use SYS_TCP_LISTENER_READY, UDP sockets use SYS_UDP_RX_READY, eventfd uses
+  SYS_EVENTFD_HAS_VALUE.  POLLERR/POLLHUP semantics match Linux (imply
+  readable, POLLERR also implies writable).  Files and console remain
+  always-ready per POSIX.  Polling loop uses 10ms sleep — a true epoll/
+  kqueue would still be a nice optimization but not a correctness issue.
 
 - getaddrinfo() uses static storage (no heap) and returns at most one
   result.  Not re-entrant — same as POSIX gethostbyname().

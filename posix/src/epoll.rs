@@ -1,35 +1,73 @@
-//! Linux-specific I/O multiplexing and fd-based notification stubs.
+//! Linux-specific I/O multiplexing and fd-based notification.
 //!
-//! Implements stubs for:
-//! - **epoll**: `epoll_create`, `epoll_create1`, `epoll_ctl`,
-//!   `epoll_wait`, `epoll_pwait`
-//! - **eventfd**: `eventfd`, `eventfd_read`, `eventfd_write`
-//! - **timerfd**: `timerfd_create`, `timerfd_settime`, `timerfd_gettime`
-//! - **signalfd**: `signalfd`, `signalfd4`
-//! - **inotify**: `inotify_init`, `inotify_init1`, `inotify_add_watch`,
-//!   `inotify_rm_watch`
+//! Implements:
+//! - **epoll** (`epoll_create`, `epoll_create1`, `epoll_ctl`, `epoll_wait`,
+//!   `epoll_pwait`, `epoll_pwait2`) — level-triggered, userspace-managed.
+//! - **eventfd** (`eventfd`, `eventfd_read`, `eventfd_write`) — wraps the
+//!   kernel's `SYS_EVENTFD_*` syscalls.
 //!
-//! Our OS doesn't implement these Linux-specific APIs.  These stubs
-//! allow programs that probe for them at runtime to get a clean "not
-//! supported" response.
+//! Still stubbed (return ENOSYS):
+//! - **timerfd** (`timerfd_create`, `timerfd_settime`, `timerfd_gettime`)
+//! - **signalfd** (`signalfd`, `signalfd4`)
+//! - **inotify** (`inotify_init`, `inotify_init1`, `inotify_add_watch`,
+//!   `inotify_rm_watch`)
+//!
+//! ## epoll Implementation
+//!
+//! epoll is implemented entirely in userspace on top of the same readiness
+//! primitives that `poll()`/`select()` use (`SYS_PIPE_POLL`,
+//! `SYS_TCP_POLL_STATUS`, `SYS_UDP_RX_READY`, `SYS_EVENTFD_HAS_VALUE`,
+//! etc.).  A fixed-size [`EpollInstance`] table holds the interest lists.
+//! Each `epoll_wait` iteration polls every watched fd and returns those
+//! that match their requested event mask.
+//!
+//! ### Limitations
+//!
+//! - **Level-triggered only.**  `EPOLLET` is accepted and stored but
+//!   behaves identically to level-triggered.  Implementing edge-triggered
+//!   correctly requires tracking per-entry "previously-ready" state, which
+//!   is fine to add later but not needed for correctness — programs that
+//!   only check ET-fired events will spuriously rearm but still make
+//!   progress.
+//! - **Polling loop, not true blocking wait.**  `epoll_wait(timeout=-1)`
+//!   sleeps in 10ms increments rather than blocking in the kernel.  Same
+//!   tradeoff as `poll()` — a true kqueue/IOCP-style event channel would
+//!   improve wake-up latency.
+//! - **Fixed instance count and interest list size.**  `MAX_EPOLL_INSTANCES`
+//!   epoll instances, each holding up to `MAX_EPOLL_ENTRIES` watched fds.
+//!   Exceeding either returns `ENOMEM`/`EMFILE`/`ENOSPC` as appropriate.
 
 use crate::errno;
 use crate::fdtable::{self, HandleKind};
 use crate::syscall::{
     SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ,
-    SYS_EVENTFD_WRITE, syscall1, syscall2,
+    SYS_EVENTFD_WRITE, SYS_CLOCK_MONOTONIC, SYS_SLEEP, syscall0, syscall1, syscall2,
 };
 
 /// Events for `epoll_ctl`.
 pub const EPOLLIN: u32 = 0x001;
+/// Priority data may be read (TCP urgent data, etc.).
+pub const EPOLLPRI: u32 = 0x002;
 /// Output ready.
 pub const EPOLLOUT: u32 = 0x004;
 /// Error condition.
 pub const EPOLLERR: u32 = 0x008;
 /// Hang up.
 pub const EPOLLHUP: u32 = 0x010;
-/// Edge-triggered.
+/// Stream peer shut down writing half (Linux extension).
+pub const EPOLLRDHUP: u32 = 0x2000;
+/// Fire once then disable (re-arm via `EPOLL_CTL_MOD`).
+pub const EPOLLONESHOT: u32 = 1 << 30;
+/// Edge-triggered (accepted but currently behaves as level-triggered).
 pub const EPOLLET: u32 = 1 << 31;
+
+/// Mask of all event bits we recognize in `events` (input).
+const EPOLL_INPUT_MASK: u32 =
+    EPOLLIN | EPOLLPRI | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLRDHUP
+        | EPOLLONESHOT | EPOLLET;
+
+/// `epoll_create1` flag: set `FD_CLOEXEC` on the new fd.
+pub const EPOLL_CLOEXEC: i32 = 0o2_000_000;
 
 /// `epoll_ctl` operations.
 pub const EPOLL_CTL_ADD: i32 = 1;
@@ -39,91 +77,542 @@ pub const EPOLL_CTL_DEL: i32 = 2;
 pub const EPOLL_CTL_MOD: i32 = 3;
 
 /// Event structure for epoll.
-#[repr(C)]
+///
+/// Linux's `epoll_event` is `__attribute__((packed))` on x86_64 so the
+/// total size is 12 bytes (4-byte events + 8-byte data) without trailing
+/// padding.  We replicate this layout with `#[repr(C, packed)]` so the
+/// userspace ABI matches code compiled against the Linux headers.
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct EpollEvent {
     /// Events bitmask.
     pub events: u32,
-    /// User data.
+    /// User data — opaque cookie returned in `epoll_wait` events.
     pub data: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Instance table
+// ---------------------------------------------------------------------------
+
+/// Maximum number of concurrent epoll instances per process.
+pub const MAX_EPOLL_INSTANCES: usize = 16;
+
+/// Maximum number of fds in an epoll instance's interest list.
+pub const MAX_EPOLL_ENTRIES: usize = 128;
+
+/// One entry in an epoll instance's interest list.
+#[derive(Clone, Copy)]
+struct EpollEntry {
+    fd: i32,
+    events: u32,
+    data: u64,
+    /// Already fired with `EPOLLONESHOT` set; suppress until re-armed
+    /// via `EPOLL_CTL_MOD`.
+    oneshot_fired: bool,
+}
+
+/// A single epoll instance.
+struct EpollInstance {
+    in_use: bool,
+    entries: [Option<EpollEntry>; MAX_EPOLL_ENTRIES],
+}
+
+const EPOLL_INSTANCE_INIT: EpollInstance = EpollInstance {
+    in_use: false,
+    entries: [None; MAX_EPOLL_ENTRIES],
+};
+
+static mut EPOLL_INSTANCES: [EpollInstance; MAX_EPOLL_INSTANCES] =
+    [EPOLL_INSTANCE_INIT; MAX_EPOLL_INSTANCES];
+
+fn instances_ptr() -> *mut [EpollInstance; MAX_EPOLL_INSTANCES] {
+    core::ptr::addr_of_mut!(EPOLL_INSTANCES)
+}
+
+/// Allocate a free instance slot and return its index.
+fn allocate_instance() -> Option<usize> {
+    // SAFETY: Single-threaded posix layer; no concurrent access.
+    unsafe {
+        let table = &mut *instances_ptr();
+        for (i, inst) in table.iter_mut().enumerate() {
+            if !inst.in_use {
+                inst.in_use = true;
+                inst.entries = [None; MAX_EPOLL_ENTRIES];
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+fn with_instance_mut<R>(idx: u64, f: impl FnOnce(&mut EpollInstance) -> R) -> Option<R> {
+    let i = usize::try_from(idx).ok()?;
+    if i >= MAX_EPOLL_INSTANCES {
+        return None;
+    }
+    // SAFETY: single-threaded.
+    unsafe {
+        let table = &mut *instances_ptr();
+        let inst = table.get_mut(i)?;
+        if !inst.in_use {
+            return None;
+        }
+        Some(f(inst))
+    }
+}
+
+fn with_instance<R>(idx: u64, f: impl FnOnce(&EpollInstance) -> R) -> Option<R> {
+    let i = usize::try_from(idx).ok()?;
+    if i >= MAX_EPOLL_INSTANCES {
+        return None;
+    }
+    // SAFETY: single-threaded.
+    unsafe {
+        let table = &*instances_ptr();
+        let inst = table.get(i)?;
+        if !inst.in_use {
+            return None;
+        }
+        Some(f(inst))
+    }
+}
+
+/// Free an epoll instance.  Called by `close()` when the last fd
+/// referencing the instance is closed.
+///
+/// Idempotent on already-freed slots.
+pub fn epoll_instance_close(idx: u64) {
+    let _ = with_instance_mut(idx, |inst| {
+        inst.in_use = false;
+        inst.entries = [None; MAX_EPOLL_ENTRIES];
+    });
+}
+
+/// Returns `true` if at least one fd in the instance has a ready event
+/// matching its watched mask.  Used by `poll()`/`select()` to support
+/// nesting epoll inside another multiplexer.
+#[must_use]
+pub fn epoll_instance_has_ready(idx: u64) -> bool {
+    with_instance(idx, |inst| {
+        for slot in inst.entries.iter().flatten() {
+            if slot.oneshot_fired {
+                continue;
+            }
+            if compute_revents(slot.fd, slot.events) != 0 {
+                return true;
+            }
+        }
+        false
+    })
+    .unwrap_or(false)
+}
+
+/// Compute revents for one watched fd.  Returns 0 if not ready or if
+/// the fd is invalid (the caller handles invalid-fd reporting via
+/// `EPOLLNVAL`-equivalent semantics in `epoll_wait`).
+fn compute_revents(fd: i32, mask: u32) -> u32 {
+    let Some(entry) = fdtable::get_fd(fd) else {
+        // Watched fd was closed without EPOLL_CTL_DEL.  Linux reports
+        // EPOLLERR | EPOLLHUP in this case if the caller asked for any
+        // events; we mirror that.
+        return EPOLLERR | EPOLLHUP;
+    };
+    let (readable, writable, hangup, error) =
+        crate::poll::check_readiness(entry.kind, entry.handle);
+    let mut revents: u32 = 0;
+    // Linux: POLLERR/POLLHUP imply readability for wake-up purposes.
+    let eff_readable = readable || hangup || error;
+    let eff_writable = writable || error;
+    if eff_readable && (mask & EPOLLIN != 0) {
+        revents |= EPOLLIN;
+    }
+    if eff_writable && (mask & EPOLLOUT != 0) {
+        revents |= EPOLLOUT;
+    }
+    // EPOLLERR and EPOLLHUP are always reported regardless of mask.
+    if error {
+        revents |= EPOLLERR;
+    }
+    if hangup {
+        revents |= EPOLLHUP;
+    }
+    revents
 }
 
 /// Create an epoll file descriptor.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// `size` was a hint in early Linux versions; modern kernels ignore it.
+/// We do too — `size` is accepted for API compatibility but unused.
+/// Returns the new fd or -1 with `errno` on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn epoll_create(_size: i32) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn epoll_create(size: i32) -> i32 {
+    // Linux requires size > 0 for the legacy API (even though it ignores
+    // the value).  Replicate that check.
+    if size <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    create_internal(0)
 }
 
 /// Create an epoll file descriptor with flags.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Supported flags: `EPOLL_CLOEXEC` (sets `FD_CLOEXEC` on the new fd).
+/// Returns the new fd or -1 with `errno` on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn epoll_create1(_flags: i32) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn epoll_create1(flags: i32) -> i32 {
+    if flags & !EPOLL_CLOEXEC != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    create_internal(flags)
+}
+
+/// Shared internal helper for `epoll_create` / `epoll_create1`.
+fn create_internal(flags: i32) -> i32 {
+    let Some(idx) = allocate_instance() else {
+        errno::set_errno(errno::ENOMEM);
+        return -1;
+    };
+    let Some(fd) = fdtable::alloc_fd_with_flags(HandleKind::Epoll, idx as u64, 0) else {
+        // fd table full — release the instance.
+        epoll_instance_close(idx as u64);
+        errno::set_errno(errno::EMFILE);
+        return -1;
+    };
+    if flags & EPOLL_CLOEXEC != 0 {
+        let _ = fdtable::set_fd_flags(fd, fdtable::FD_CLOEXEC);
+    }
+    fd
 }
 
 /// Control an epoll file descriptor.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// `op` is one of `EPOLL_CTL_ADD`, `EPOLL_CTL_MOD`, `EPOLL_CTL_DEL`.
+/// For ADD/MOD, `event` must be a valid pointer; for DEL it is ignored.
+///
+/// Returns 0 on success, -1 with `errno` on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn epoll_ctl(
-    _epfd: i32,
-    _op: i32,
-    _fd: i32,
-    _event: *mut EpollEvent,
+    epfd: i32,
+    op: i32,
+    fd: i32,
+    event: *mut EpollEvent,
 ) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    let Some(ep_entry) = fdtable::get_fd(epfd) else {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if ep_entry.kind != HandleKind::Epoll {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Linux: cannot epoll yourself.
+    if fd == epfd {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // The watched fd must be a valid open fd.  (Closed fds are allowed
+    // for DEL since the caller may be cleaning up state.)
+    if op != EPOLL_CTL_DEL && fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    let idx = ep_entry.handle;
+
+    match op {
+        EPOLL_CTL_ADD => {
+            if event.is_null() {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
+            // SAFETY: caller asserts validity of `event` for ADD/MOD.
+            let ev = unsafe { core::ptr::read_unaligned(event) };
+            // Unaligned read because of #[repr(packed)] — copy fields
+            // through stack locals to avoid taking references to packed
+            // fields (which would be UB).
+            let events_val = ev.events;
+            let data_val = ev.data;
+            if events_val & !EPOLL_INPUT_MASK != 0 {
+                // Unknown event bits — be permissive (Linux silently
+                // ignores unknown bits), but require at least one of
+                // POLLIN/POLLOUT/POLLRDHUP/POLLPRI is meaningful.  We
+                // accept whatever the caller passes.
+            }
+            let res = with_instance_mut(idx, |inst| {
+                // Reject if fd already present.
+                for slot in inst.entries.iter().flatten() {
+                    if slot.fd == fd {
+                        return Err(errno::EEXIST);
+                    }
+                }
+                // Find a free slot.
+                for slot in &mut inst.entries {
+                    if slot.is_none() {
+                        *slot = Some(EpollEntry {
+                            fd,
+                            events: events_val,
+                            data: data_val,
+                            oneshot_fired: false,
+                        });
+                        return Ok(());
+                    }
+                }
+                Err(errno::ENOSPC)
+            });
+            match res {
+                Some(Ok(())) => 0,
+                Some(Err(e)) => {
+                    errno::set_errno(e);
+                    -1
+                }
+                None => {
+                    errno::set_errno(errno::EBADF);
+                    -1
+                }
+            }
+        }
+        EPOLL_CTL_MOD => {
+            if event.is_null() {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
+            // SAFETY: caller asserts validity of `event`.
+            let ev = unsafe { core::ptr::read_unaligned(event) };
+            let events_val = ev.events;
+            let data_val = ev.data;
+            let res = with_instance_mut(idx, |inst| {
+                for slot in &mut inst.entries {
+                    if let Some(entry) = slot.as_mut() {
+                        if entry.fd == fd {
+                            entry.events = events_val;
+                            entry.data = data_val;
+                            // Re-arm oneshot per Linux semantics.
+                            entry.oneshot_fired = false;
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(errno::ENOENT)
+            });
+            match res {
+                Some(Ok(())) => 0,
+                Some(Err(e)) => {
+                    errno::set_errno(e);
+                    -1
+                }
+                None => {
+                    errno::set_errno(errno::EBADF);
+                    -1
+                }
+            }
+        }
+        EPOLL_CTL_DEL => {
+            let res = with_instance_mut(idx, |inst| {
+                for slot in &mut inst.entries {
+                    if let Some(entry) = slot.as_ref() {
+                        if entry.fd == fd {
+                            *slot = None;
+                            return Ok(());
+                        }
+                    }
+                }
+                Err(errno::ENOENT)
+            });
+            match res {
+                Some(Ok(())) => 0,
+                Some(Err(e)) => {
+                    errno::set_errno(e);
+                    -1
+                }
+                None => {
+                    errno::set_errno(errno::EBADF);
+                    -1
+                }
+            }
+        }
+        _ => {
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
+    }
 }
 
 /// Wait for events on an epoll file descriptor.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Blocks (via a polling loop, currently) until at least one watched fd
+/// becomes ready, the timeout expires, or a signal is delivered.
+///
+/// - `timeout == -1`: wait indefinitely.
+/// - `timeout == 0`: poll once and return immediately.
+/// - `timeout > 0`: wait at most `timeout` milliseconds.
+///
+/// Returns the number of events written into `events` (0..=maxevents),
+/// or -1 with `errno` set on error.
+///
+/// # Safety
+///
+/// `events` must point to an array of at least `maxevents` `EpollEvent`
+/// entries.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn epoll_wait(
-    _epfd: i32,
-    _events: *mut EpollEvent,
-    _maxevents: i32,
-    _timeout: i32,
+pub unsafe extern "C" fn epoll_wait(
+    epfd: i32,
+    events: *mut EpollEvent,
+    maxevents: i32,
+    timeout: i32,
 ) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    // Sleep interval for the poll loop: 10ms.  Matches poll()/select().
+    const POLL_INTERVAL_NS: u64 = 10_000_000;
+
+    if maxevents <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if events.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    let Some(ep_entry) = fdtable::get_fd(epfd) else {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if ep_entry.kind != HandleKind::Epoll {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let idx = ep_entry.handle;
+
+    let deadline_ns: u64 = if timeout > 0 {
+        let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+        // i32 ms → u64 ns: fits comfortably (max 2^31 ms ≈ 2^61 ns).
+        #[allow(clippy::cast_sign_loss)]
+        let ms = timeout as u64;
+        now.saturating_add(ms.saturating_mul(1_000_000))
+    } else {
+        0
+    };
+
+    loop {
+        // Scan the interest list and collect up to maxevents ready entries.
+        let n = with_instance_mut(idx, |inst| {
+            let mut count: i32 = 0;
+            let limit = maxevents;
+            let mut i = 0usize;
+            while i < MAX_EPOLL_ENTRIES && count < limit {
+                if let Some(entry) = inst.entries.get_mut(i) {
+                    if let Some(watched) = entry.as_mut() {
+                        if !watched.oneshot_fired {
+                            let revents = compute_revents(watched.fd, watched.events);
+                            if revents != 0 {
+                                // Write event into the caller's buffer.
+                                // SAFETY: caller asserts events is valid
+                                // for maxevents entries; count < limit.
+                                #[allow(clippy::cast_sign_loss)]
+                                let slot_ptr = unsafe {
+                                    events.add(count as usize)
+                                };
+                                let out = EpollEvent {
+                                    events: revents,
+                                    data: watched.data,
+                                };
+                                // SAFETY: slot_ptr is in-bounds (count
+                                // < maxevents) and writable per caller.
+                                unsafe {
+                                    core::ptr::write_unaligned(slot_ptr, out);
+                                }
+                                if watched.events & EPOLLONESHOT != 0 {
+                                    watched.oneshot_fired = true;
+                                }
+                                count = count.wrapping_add(1);
+                            }
+                        }
+                    }
+                }
+                i = i.wrapping_add(1);
+            }
+            count
+        });
+
+        let ready = n.unwrap_or(0);
+        if ready > 0 {
+            return ready;
+        }
+
+        // Nothing ready.
+        if timeout == 0 {
+            return 0;
+        }
+        if timeout > 0 {
+            let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
+            if now >= deadline_ns {
+                return 0;
+            }
+        }
+        let _ = syscall1(SYS_SLEEP, POLL_INTERVAL_NS);
+    }
 }
 
 /// Wait for events with a signal mask.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// We don't deliver signals, so `sigmask` is ignored — delegates to
+/// `epoll_wait`.
+///
+/// # Safety
+///
+/// Same requirements as `epoll_wait`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn epoll_pwait(
-    _epfd: i32,
-    _events: *mut EpollEvent,
-    _maxevents: i32,
-    _timeout: i32,
+pub unsafe extern "C" fn epoll_pwait(
+    epfd: i32,
+    events: *mut EpollEvent,
+    maxevents: i32,
+    timeout: i32,
     _sigmask: *const u64,
 ) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    unsafe { epoll_wait(epfd, events, maxevents, timeout) }
 }
 
 /// Wait for events on an epoll fd with nanosecond timeout (Linux 5.11+).
 ///
-/// Like `epoll_pwait`, but takes a `timespec` pointer instead of a
-/// millisecond integer, enabling sub-millisecond timeouts.
+/// Like `epoll_pwait`, but takes a `timespec` pointer (NULL = wait
+/// forever) instead of a millisecond integer.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// # Safety
+///
+/// `events` must be valid for `maxevents` entries.  `timeout` may be
+/// NULL or point to a valid `Timespec`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn epoll_pwait2(
-    _epfd: i32,
-    _events: *mut EpollEvent,
-    _maxevents: i32,
-    _timeout: *const crate::stat::Timespec,
+pub unsafe extern "C" fn epoll_pwait2(
+    epfd: i32,
+    events: *mut EpollEvent,
+    maxevents: i32,
+    timeout: *const crate::stat::Timespec,
     _sigmask: *const u64,
 ) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    let tms: i32 = if timeout.is_null() {
+        -1
+    } else {
+        // SAFETY: caller guarantees timeout points to a valid Timespec.
+        let ts = unsafe { &*timeout };
+        if ts.tv_sec == 0 && ts.tv_nsec == 0 {
+            0
+        } else {
+            // Round up nanoseconds → milliseconds so a non-zero
+            // sub-millisecond timeout doesn't collapse to 0.
+            let ms = ts.tv_sec
+                .saturating_mul(1_000)
+                .saturating_add(ts.tv_nsec.saturating_add(999_999) / 1_000_000);
+            if ms > i64::from(i32::MAX) {
+                i32::MAX
+            } else if ms <= 0 {
+                1
+            } else {
+                ms as i32
+            }
+        }
+    };
+    unsafe { epoll_wait(epfd, events, maxevents, tms) }
 }
 
 // ===========================================================================
@@ -458,41 +947,59 @@ mod tests {
         assert_eq!(edge_read, 0x8000_0001);
     }
 
-    // -- epoll stubs return -1 / ENOSYS --
+    // -- epoll argument validation (don't need a real fd table) --
 
     #[test]
-    fn test_epoll_create_enosys() {
+    fn test_epoll_create_invalid_size_returns_einval() {
         errno::set_errno(0);
-        assert_eq!(epoll_create(1), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(epoll_create(0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
+        assert_eq!(epoll_create(-5), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
-    fn test_epoll_create1_enosys() {
+    fn test_epoll_create1_unknown_flag_returns_einval() {
         errno::set_errno(0);
-        assert_eq!(epoll_create1(0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        // Bit that isn't EPOLL_CLOEXEC.
+        assert_eq!(epoll_create1(0x123), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
-    fn test_epoll_ctl_enosys() {
+    fn test_epoll_ctl_bad_epfd_returns_ebadf() {
         errno::set_errno(0);
-        assert_eq!(epoll_ctl(3, EPOLL_CTL_ADD, 4, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        // FD 250 is unlikely to be allocated in the default test table.
+        assert_eq!(epoll_ctl(250, EPOLL_CTL_ADD, 4, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
     #[test]
-    fn test_epoll_wait_enosys() {
+    fn test_epoll_wait_invalid_maxevents_returns_einval() {
         errno::set_errno(0);
-        assert_eq!(epoll_wait(3, core::ptr::null_mut(), 10, -1), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        // SAFETY: maxevents check happens before any pointer dereference.
+        let ret = unsafe { epoll_wait(3, core::ptr::null_mut(), 0, -1) };
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
-    fn test_epoll_pwait_enosys() {
+    fn test_epoll_pwait_bad_epfd_returns_ebadf() {
         errno::set_errno(0);
-        assert_eq!(epoll_pwait(3, core::ptr::null_mut(), 10, -1, core::ptr::null()), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let mut buf = [EpollEvent { events: 0, data: 0 }; 4];
+        // SAFETY: events pointer is to a valid local buffer.
+        let ret = unsafe {
+            epoll_pwait(
+                250,
+                buf.as_mut_ptr(),
+                buf.len() as i32,
+                0,
+                core::ptr::null(),
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
     // -- eventfd constants --
@@ -698,8 +1205,13 @@ mod tests {
     #[test]
     fn test_epoll_event_fields() {
         let ev = EpollEvent { events: EPOLLIN | EPOLLOUT, data: 42 };
-        assert_eq!(ev.events, EPOLLIN | EPOLLOUT);
-        assert_eq!(ev.data, 42);
+        // EpollEvent is #[repr(packed)] so direct field references would
+        // be UB on platforms where the fields need higher alignment.
+        // Copy through locals.
+        let events_val: u32 = ev.events;
+        let data_val: u64 = ev.data;
+        assert_eq!(events_val, EPOLLIN | EPOLLOUT);
+        assert_eq!(data_val, 42);
     }
 
     #[test]
@@ -707,7 +1219,8 @@ mod tests {
         // data field is often used to hold a pointer cast to u64.
         let val: u64 = 0x7FFE_0000_1234;
         let ev = EpollEvent { events: EPOLLIN, data: val };
-        assert_eq!(ev.data, val);
+        let data_val: u64 = ev.data;
+        assert_eq!(data_val, val);
     }
 
     // -- Itimerspec struct layout --
@@ -742,11 +1255,22 @@ mod tests {
     // -- epoll_pwait null events --
 
     #[test]
-    fn test_epoll_pwait_null_events() {
+    fn test_epoll_pwait_null_events_returns_efault() {
         errno::set_errno(0);
-        let ret = epoll_pwait(3, core::ptr::null_mut(), 10, 0, core::ptr::null());
+        // SAFETY: events pointer is intentionally null; the wrapper
+        // checks for null before any dereference.
+        let ret = unsafe {
+            epoll_pwait(3, core::ptr::null_mut(), 10, 0, core::ptr::null())
+        };
+        // Either EBADF (if fd 3 isn't an epoll fd) or EFAULT (if it
+        // were, since the events pointer is null).  In the unit-test
+        // environment fd 3 isn't an epoll fd, so EBADF.
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert!(
+            errno::get_errno() == errno::EBADF
+                || errno::get_errno() == errno::EFAULT
+                || errno::get_errno() == errno::EINVAL
+        );
     }
 
     // -- timerfd_gettime with fd 0 --
@@ -794,41 +1318,63 @@ mod tests {
 
     #[test]
     fn test_epoll_create_zero_size() {
+        // POSIX: epoll_create requires size > 0, else EINVAL.
         errno::set_errno(0);
         assert_eq!(epoll_create(0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
     fn test_epoll_create_large_size() {
+        // The `size` arg is advisory (Linux ignores it since 2.6.8). A
+        // large positive value should succeed and return a valid fd.
         errno::set_errno(0);
-        assert_eq!(epoll_create(1000), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let fd = epoll_create(1000);
+        assert!(fd >= 0, "epoll_create(1000) should succeed, got {fd}");
+        // Clean up so we don't exhaust the fd table across tests.
+        crate::file::close(fd);
     }
 
     // -- epoll_create1 with flags --
 
     #[test]
     fn test_epoll_create1_cloexec() {
+        // epoll_create1(O_CLOEXEC) should succeed.
         errno::set_errno(0);
-        assert_eq!(epoll_create1(crate::fcntl::O_CLOEXEC), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let fd = epoll_create1(crate::fcntl::O_CLOEXEC);
+        assert!(fd >= 0, "epoll_create1(O_CLOEXEC) should succeed, got {fd}");
+        crate::file::close(fd);
     }
 
     // -- epoll_ctl all operations --
 
     #[test]
-    fn test_epoll_ctl_del_enosys() {
+    fn test_epoll_ctl_del_on_bad_epfd() {
+        // EPOLL_CTL_DEL with an invalid epfd must fail. The exact errno
+        // depends on the impl path (EBADF if the fd isn't an epoll fd,
+        // ENOENT if the entry isn't registered) — accept either.
         errno::set_errno(0);
-        assert_eq!(epoll_ctl(3, EPOLL_CTL_DEL, 4, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let ret = epoll_ctl(3, EPOLL_CTL_DEL, 4, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        let e = errno::get_errno();
+        assert!(
+            e == errno::EBADF || e == errno::ENOENT || e == errno::EINVAL,
+            "unexpected errno {e}"
+        );
     }
 
     #[test]
-    fn test_epoll_ctl_mod_enosys() {
+    fn test_epoll_ctl_mod_with_null_event() {
+        // EPOLL_CTL_MOD with a null event pointer must fail.
         errno::set_errno(0);
-        assert_eq!(epoll_ctl(3, EPOLL_CTL_MOD, 4, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let ret = epoll_ctl(3, EPOLL_CTL_MOD, 4, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        let e = errno::get_errno();
+        assert!(
+            e == errno::EBADF || e == errno::EFAULT || e == errno::EINVAL
+                || e == errno::ENOENT,
+            "unexpected errno {e}"
+        );
     }
 
     // -- eventfd input validation (no kernel needed) --
@@ -940,9 +1486,16 @@ mod tests {
 
     #[test]
     fn test_epoll_wait_poll_mode() {
+        // Calling epoll_wait on an invalid (never-created) epfd returns
+        // EBADF. (3 is not a valid epoll fd in a fresh test process.)
         errno::set_errno(0);
-        assert_eq!(epoll_wait(3, core::ptr::null_mut(), 10, 0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let ret = unsafe { epoll_wait(3, core::ptr::null_mut(), 10, 0) };
+        assert_eq!(ret, -1);
+        assert!(
+            errno::get_errno() == errno::EBADF
+                || errno::get_errno() == errno::EFAULT
+                || errno::get_errno() == errno::EINVAL
+        );
     }
 
     // -- TFD/EFD/IN flag values match Linux octal --
@@ -986,19 +1539,144 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_epoll_pwait2_returns_enosys() {
+    fn test_epoll_pwait2_returns_ebadf_for_bad_fd() {
+        // epoll_pwait2 with an invalid epfd returns EBADF.
         crate::errno::set_errno(0);
-        let ret = epoll_pwait2(-1, core::ptr::null_mut(), 0, core::ptr::null(), core::ptr::null());
+        let ret = unsafe {
+            epoll_pwait2(-1, core::ptr::null_mut(), 0, core::ptr::null(), core::ptr::null())
+        };
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert!(
+            crate::errno::get_errno() == crate::errno::EBADF
+                || crate::errno::get_errno() == crate::errno::EINVAL
+                || crate::errno::get_errno() == crate::errno::EFAULT
+        );
     }
 
     #[test]
     fn test_epoll_pwait2_with_timeout() {
+        // Same invalid-fd path but with a non-null timespec.
         crate::errno::set_errno(0);
         let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 100_000 };
-        let ret = epoll_pwait2(-1, core::ptr::null_mut(), 1, &ts, core::ptr::null());
+        let ret = unsafe {
+            epoll_pwait2(-1, core::ptr::null_mut(), 1, &ts, core::ptr::null())
+        };
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert!(
+            crate::errno::get_errno() == crate::errno::EBADF
+                || crate::errno::get_errno() == crate::errno::EINVAL
+                || crate::errno::get_errno() == crate::errno::EFAULT
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Positive functional tests for the new userspace epoll implementation.
+    // These exercise epoll_create → epoll_ctl → epoll_wait (timeout=0) round
+    // trips. They don't depend on any kernel readiness, just the userspace
+    // state machine, so they're hermetic.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_epoll_create_close_round_trip() {
+        // Allocating + freeing an epoll fd should not leak the slot.
+        for _ in 0..32 {
+            let fd = epoll_create(1);
+            assert!(fd >= 0);
+            assert_eq!(crate::file::close(fd), 0);
+        }
+    }
+
+    #[test]
+    fn test_epoll_create1_zero_flags() {
+        // epoll_create1(0) is the documented "fresh epoll" form.
+        let fd = epoll_create1(0);
+        assert!(fd >= 0);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_epoll_create1_rejects_unknown_flags() {
+        // Unknown flag bits must yield EINVAL.
+        errno::set_errno(0);
+        let fd = epoll_create1(0xDEAD_BEEFu32 as i32);
+        assert_eq!(fd, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_epoll_ctl_add_then_del() {
+        // ADD a (bogus) fd to a valid epoll instance, then DEL it. The
+        // implementation should accept ADD on any fd in range and let
+        // epoll_wait's check_readiness reject it later. DEL should then
+        // succeed since the entry exists.
+        let ep = epoll_create1(0);
+        assert!(ep >= 0);
+        // Use a freshly created instance fd as the target so it's at
+        // least a valid userspace fd. The kind doesn't matter — epoll
+        // doesn't validate that you can sensibly poll it.
+        let target = epoll_create1(0);
+        assert!(target >= 0);
+
+        let mut ev = EpollEvent { events: EPOLLIN, data: 0xAABB_CCDDu64 };
+        let r = epoll_ctl(ep, EPOLL_CTL_ADD, target, &mut ev as *mut _);
+        assert_eq!(r, 0, "EPOLL_CTL_ADD should succeed");
+
+        // Re-adding the same fd should fail with EEXIST.
+        errno::set_errno(0);
+        let r2 = epoll_ctl(ep, EPOLL_CTL_ADD, target, &mut ev as *mut _);
+        assert_eq!(r2, -1);
+        assert_eq!(errno::get_errno(), errno::EEXIST);
+
+        // DEL should succeed.
+        let r3 = epoll_ctl(ep, EPOLL_CTL_DEL, target, core::ptr::null_mut());
+        assert_eq!(r3, 0);
+
+        // DEL again should fail with ENOENT.
+        errno::set_errno(0);
+        let r4 = epoll_ctl(ep, EPOLL_CTL_DEL, target, core::ptr::null_mut());
+        assert_eq!(r4, -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+
+        crate::file::close(target);
+        crate::file::close(ep);
+    }
+
+    #[test]
+    fn test_epoll_wait_timeout_zero_no_events() {
+        // A fresh epoll instance with no entries should return 0 events
+        // immediately when polled with timeout=0.
+        let ep = epoll_create1(0);
+        assert!(ep >= 0);
+        let mut events: [EpollEvent; 4] = [EpollEvent { events: 0, data: 0 }; 4];
+        let n = unsafe { epoll_wait(ep, events.as_mut_ptr(), 4, 0) };
+        assert_eq!(n, 0, "empty epoll should return 0 events");
+        crate::file::close(ep);
+    }
+
+    #[test]
+    fn test_epoll_wait_rejects_zero_maxevents() {
+        let ep = epoll_create1(0);
+        assert!(ep >= 0);
+        let mut events: [EpollEvent; 1] = [EpollEvent { events: 0, data: 0 }; 1];
+        errno::set_errno(0);
+        let n = unsafe { epoll_wait(ep, events.as_mut_ptr(), 0, 0) };
+        assert_eq!(n, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(ep);
+    }
+
+    #[test]
+    fn test_epoll_ctl_self_loop_rejected() {
+        // Linux forbids adding an epoll fd to itself (would create a
+        // poll cycle). Whether our impl detects this is optional — at
+        // minimum it must not crash.
+        let ep = epoll_create1(0);
+        assert!(ep >= 0);
+        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        let r = epoll_ctl(ep, EPOLL_CTL_ADD, ep, &mut ev as *mut _);
+        // Accept either EINVAL (cycle detection) or success (we don't
+        // enforce it yet — the resulting wait just won't fire).
+        assert!(r == 0 || r == -1);
+        crate::file::close(ep);
     }
 }

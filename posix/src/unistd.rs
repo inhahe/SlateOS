@@ -889,8 +889,25 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
         _SC_HOST_NAME_MAX => HOST_NAME_MAX as i64,
         _SC_LINE_MAX => i64::from(crate::limits::LINE_MAX),
         _SC_THREAD_STACK_MIN => 65536,  // 64 KiB minimum thread stack.
-        _SC_PHYS_PAGES => 8192,         // ~128 MiB at 16 KiB pages (TODO: query kernel).
-        _SC_AVPHYS_PAGES => 4096,       // ~64 MiB available (TODO: query kernel).
+        _SC_PHYS_PAGES => {
+            // 16 KiB pages — kernel returns the count of 16 KiB frames it manages.
+            #[cfg(target_os = "none")]
+            {
+                let n = crate::syscall::syscall0(crate::syscall::SYS_PHYS_PAGES_TOTAL);
+                if n >= 1 { n } else { 1 }
+            }
+            #[cfg(not(target_os = "none"))]
+            { 8192 }                    // host test fallback (~128 MiB at 16 KiB pages)
+        }
+        _SC_AVPHYS_PAGES => {
+            #[cfg(target_os = "none")]
+            {
+                let n = crate::syscall::syscall0(crate::syscall::SYS_PHYS_PAGES_AVAIL);
+                if n >= 0 { n } else { 0 }
+            }
+            #[cfg(not(target_os = "none"))]
+            { 4096 }                    // host test fallback (~64 MiB at 16 KiB pages)
+        }
         _SC_GETPW_R_SIZE_MAX => 1024,   // Suggested passwd buffer size (glibc default).
         _SC_GETGR_R_SIZE_MAX => 1024,   // Suggested group buffer size.
         _SC_SYMLOOP_MAX => 40,          // Max symlink resolution depth (Linux default).

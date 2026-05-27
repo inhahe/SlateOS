@@ -7217,6 +7217,35 @@ pub fn sys_cpu_count(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(n as i64)
 }
 
+/// `SYS_PHYS_PAGES_TOTAL` — get total physical pages (16 KiB each).
+///
+/// Reads `crate::mm::frame::stats()` for the total frame count.  The
+/// kernel page size *is* 16 KiB, so frame count equals page count.
+/// Returns 1 if frame stats are unavailable (kernel still booting),
+/// matching POSIX's "always ≥ 1" expectation from sysconf.
+///
+/// Returns: total physical pages.
+pub fn sys_phys_pages_total(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    let total = crate::mm::frame::stats().map_or(1, |s| s.total_frames);
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    SyscallResult::ok(total.max(1) as i64)
+}
+
+/// `SYS_PHYS_PAGES_AVAIL` — get currently-free physical pages.
+///
+/// Reads `crate::mm::frame::stats().free_frames`.  Snapshot is racy by
+/// design — the count can change between the read and the syscall
+/// return, so callers should treat the result as a hint.
+///
+/// Returns: free physical pages (may be 0).
+pub fn sys_phys_pages_avail(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    let free = crate::mm::frame::stats().map_or(0, |s| s.free_frames);
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    SyscallResult::ok(free as i64)
+}
+
 // ---------------------------------------------------------------------------
 // Sysctl — kernel parameter registry (60–69)
 // ---------------------------------------------------------------------------

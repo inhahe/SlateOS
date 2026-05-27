@@ -335,6 +335,28 @@ pub const SYS_SCHED_GET_PROFILE: u64 = 54;
 /// Returns: number of online CPUs (always ≥ 1).
 pub const SYS_CPU_COUNT: u64 = 55;
 
+/// Get the total number of physical pages on the system.
+///
+/// Page size matches our hardware page size (16 KiB), so this is the
+/// total count of 16 KiB frames managed by the kernel's frame
+/// allocator.  Used by libc's `sysconf(_SC_PHYS_PAGES)` /
+/// `get_phys_pages()`, by `/proc/meminfo` consumers, and by language
+/// runtimes that size caches based on RAM footprint.
+///
+/// Returns: total physical pages (≥ 1 on any working system).
+pub const SYS_PHYS_PAGES_TOTAL: u64 = 56;
+
+/// Get the number of available (free) physical pages.
+///
+/// Returns the snapshot of currently-free frames in the buddy
+/// allocator at the time of the call.  Free count is racy by design
+/// — callers should treat the result as a hint, not a guarantee.
+/// Used by libc's `sysconf(_SC_AVPHYS_PAGES)` / `get_avphys_pages()`
+/// and by memory-pressure monitors.
+///
+/// Returns: free physical pages.
+pub const SYS_PHYS_PAGES_AVAIL: u64 = 57;
+
 /// Read a kernel tunable parameter (sysctl-like interface).
 ///
 /// `arg0`: parameter ID (e.g., 0 = mm.max_stack_frames).

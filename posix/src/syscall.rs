@@ -35,6 +35,8 @@ pub const SYS_MPROTECT: u64 = 32;
 // Scheduler / thread
 pub const SYS_SCHED_SET_PROFILE: u64 = 53;
 pub const SYS_CPU_COUNT: u64 = 55;
+pub const SYS_PHYS_PAGES_TOTAL: u64 = 56;
+pub const SYS_PHYS_PAGES_AVAIL: u64 = 57;
 
 // Process management
 pub const SYS_PROCESS_SPAWN: u64 = 500;

@@ -4,7 +4,6 @@
 //! file timestamps.  This is the legacy interface; prefer `utimensat()`
 //! from `<sys/stat.h>` for nanosecond precision.
 
-use crate::errno;
 use crate::types::TimeT;
 
 // ---------------------------------------------------------------------------
@@ -28,14 +27,39 @@ pub struct Utimbuf {
 /// Set file access and modification times.
 ///
 /// If `times` is null, both timestamps are set to the current time.
-/// Returns 0 on success, -1 on error.
+/// Otherwise, the `actime`/`modtime` fields of `*times` are used for
+/// access and modification times respectively.  Returns 0 on success,
+/// -1 on error.
 ///
-/// Stub — always returns -1 with `ENOSYS` on the bare-metal target.
-/// On the test host, delegates to `utimensat` internally.
+/// Delegates to `utimensat(AT_FDCWD, path, &ts[2], 0)` which is the
+/// modern equivalent.  The legacy `utime()` only carries second
+/// precision, so the `tv_nsec` fields of the converted timespecs are
+/// always zero.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn utime(_path: *const u8, _times: *const Utimbuf) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn utime(path: *const u8, times: *const Utimbuf) -> i32 {
+    if times.is_null() {
+        // Pass NULL through — utimensat treats it as "set both
+        // timestamps to the current time".
+        return crate::file::utimensat(
+            crate::file::AT_FDCWD,
+            path,
+            core::ptr::null(),
+            0,
+        );
+    }
+    // SAFETY: caller contract — `times` points to a valid Utimbuf.
+    let buf = unsafe { *times };
+    let ts = [
+        crate::stat::Timespec {
+            tv_sec: buf.actime,
+            tv_nsec: 0,
+        },
+        crate::stat::Timespec {
+            tv_sec: buf.modtime,
+            tv_nsec: 0,
+        },
+    ];
+    crate::file::utimensat(crate::file::AT_FDCWD, path, ts.as_ptr(), 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -65,19 +89,21 @@ mod tests {
     }
 
     #[test]
-    fn test_utime_stub() {
+    fn test_utime_null_times_succeeds() {
+        // utime(path, NULL) delegates to utimensat which is a no-op
+        // stub returning 0 in our current filesystem.
         let ret = utime(b"/nonexistent\0".as_ptr(), core::ptr::null());
-        assert_eq!(ret, -1);
+        assert_eq!(ret, 0);
     }
 
     #[test]
-    fn test_utime_with_times() {
+    fn test_utime_with_times_succeeds() {
         let buf = Utimbuf {
             actime: 100,
             modtime: 200,
         };
         let ret = utime(b"/nonexistent\0".as_ptr(), &buf);
-        assert_eq!(ret, -1);
+        assert_eq!(ret, 0);
     }
 
     #[test]

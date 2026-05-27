@@ -2,6 +2,22 @@
 //!
 //! Provides types and constants for the `perf_event_open()` syscall
 //! and the hardware/software performance counters.
+//!
+//! # Status
+//!
+//! `perf_event_open()` now performs full input validation matching
+//! Linux's contract — bad attr pointer, bad size, unknown type/config
+//! pairs, invalid pid/cpu combinations, unknown flag bits, and stale
+//! group_fds all surface clean POSIX errnos (EFAULT/EINVAL/E2BIG/EBADF)
+//! instead of "ENOSYS for everything." Once every input is valid, the
+//! call still returns -1/ENOSYS because there is no kernel-side PMU
+//! driver yet — but real callers (`perf record`, `perf stat`, eBPF
+//! tracers, Java JIT counter profiles, the Linux `bcc` and `bpftrace`
+//! toolchains) detect this exact shape and either fall back to
+//! software-only timing or disable PMC-based profiling entirely,
+//! matching their behavior on a Linux kernel with
+//! `perf_event_paranoid = 3` or a kernel built without
+//! `CONFIG_PERF_EVENTS=y`.
 
 use crate::errno;
 
@@ -21,6 +37,10 @@ pub const PERF_TYPE_HW_CACHE: u32 = 3;
 pub const PERF_TYPE_RAW: u32 = 4;
 /// Breakpoint event.
 pub const PERF_TYPE_BREAKPOINT: u32 = 5;
+/// Highest defined static perf type. Linux also accepts dynamic
+/// PMU types ≥ `PERF_TYPE_MAX` if they were registered, but we
+/// don't have a dynamic-PMU registry.
+const PERF_TYPE_MAX: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // perf_hw_id — hardware events
@@ -46,6 +66,8 @@ pub const PERF_COUNT_HW_STALLED_CYCLES_FRONTEND: u64 = 7;
 pub const PERF_COUNT_HW_STALLED_CYCLES_BACKEND: u64 = 8;
 /// Total reference cycles (not affected by frequency scaling).
 pub const PERF_COUNT_HW_REF_CPU_CYCLES: u64 = 9;
+/// Highest defined hardware event ID (exclusive upper bound).
+const PERF_COUNT_HW_MAX: u64 = 10;
 
 // ---------------------------------------------------------------------------
 // perf_sw_ids — software events
@@ -69,19 +91,31 @@ pub const PERF_COUNT_SW_PAGE_FAULTS_MAJ: u64 = 6;
 pub const PERF_COUNT_SW_ALIGNMENT_FAULTS: u64 = 7;
 /// Emulation faults.
 pub const PERF_COUNT_SW_EMULATION_FAULTS: u64 = 8;
+/// BPF output (Linux 4.4+).
+pub const PERF_COUNT_SW_BPF_OUTPUT: u64 = 10;
+/// cgroup switches (Linux 5.13+).
+pub const PERF_COUNT_SW_CGROUP_SWITCHES: u64 = 11;
+/// Highest defined software event ID (exclusive upper bound).
+const PERF_COUNT_SW_MAX: u64 = 12;
 
 // ---------------------------------------------------------------------------
 // perf_event_open flags
 // ---------------------------------------------------------------------------
 
-/// Count in disabled state.
-pub const PERF_FLAG_FD_NO_GROUP: u64 = 1;
-/// Write event on every overflow.
-pub const PERF_FLAG_FD_OUTPUT: u64 = 2;
-/// Create a PID cgroup event.
-pub const PERF_FLAG_PID_CGROUP: u64 = 4;
-/// Close-on-exec for the returned fd.
-pub const PERF_FLAG_FD_CLOEXEC: u64 = 8;
+/// Don't put new event in a group (matches Linux's PERF_FLAG_FD_NO_GROUP).
+pub const PERF_FLAG_FD_NO_GROUP: u64 = 1 << 0;
+/// Use group_fd's mmap'd ringbuffer for output.
+pub const PERF_FLAG_FD_OUTPUT: u64 = 1 << 1;
+/// `pid` argument is actually a cgroup file descriptor.
+pub const PERF_FLAG_PID_CGROUP: u64 = 1 << 2;
+/// Set close-on-exec on returned fd.
+pub const PERF_FLAG_FD_CLOEXEC: u64 = 1 << 3;
+
+/// OR of every flag bit `perf_event_open` accepts.
+const PERF_FLAG_VALID: u64 = PERF_FLAG_FD_NO_GROUP
+    | PERF_FLAG_FD_OUTPUT
+    | PERF_FLAG_PID_CGROUP
+    | PERF_FLAG_FD_CLOEXEC;
 
 // ---------------------------------------------------------------------------
 // PERF_EVENT_IOC_* ioctl commands
@@ -153,11 +187,107 @@ pub struct PerfEventAttr {
 
 impl PerfEventAttr {
     /// Create a zeroed `PerfEventAttr` with `size` set correctly.
+    #[must_use]
     pub fn new() -> Self {
+        // SAFETY: `PerfEventAttr` is a plain-old-data POD layout; the
+        // all-zero bit pattern is a valid instance.
         let mut attr: Self = unsafe { core::mem::zeroed() };
         attr.size = core::mem::size_of::<Self>() as u32;
         attr
     }
+}
+
+impl Default for PerfEventAttr {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Linux PERF_ATTR_SIZE_VER constants (smallest historically-shipped sizes)
+// ---------------------------------------------------------------------------
+
+/// Linux's smallest perf_event_attr size that we accept — anything
+/// smaller means the caller is targeting a kernel older than 2.6.32,
+/// which we don't support. Matches Linux's `PERF_ATTR_SIZE_VER0 = 64`.
+const PERF_ATTR_SIZE_MIN: u32 = 64;
+/// Sanity cap on attr size. Linux uses `PAGE_SIZE`. We use 4096 (the
+/// smallest reasonable page).
+const PERF_ATTR_SIZE_MAX: u32 = 4096;
+
+/// Sentinel passed as `pid` to mean "any process" (whole-cpu mode).
+const PERF_PID_ANY: i32 = -1;
+/// Sentinel passed as `pid` to mean "the calling process".
+/// Documented for future use; not referenced in current validation logic
+/// because pid==0 is a normal "specific pid" case as far as our stub is
+/// concerned (we don't yet attach to a real task, so we treat it like
+/// any other non-negative pid).
+#[allow(dead_code)]
+const PERF_PID_SELF: i32 = 0;
+/// Sentinel passed as `cpu` to mean "any cpu" (per-process mode).
+const PERF_CPU_ANY: i32 = -1;
+/// Sanity cap on cpu argument. Linux uses `num_possible_cpus()`; we
+/// use a generous 1024 to mirror the upstream `CPU_SETSIZE`.
+const PERF_CPU_MAX: i32 = 1024;
+/// Sentinel passed as `group_fd` to mean "no group" (event is its own group leader).
+const PERF_GROUP_FD_NONE: i32 = -1;
+
+// ---------------------------------------------------------------------------
+// Validators
+// ---------------------------------------------------------------------------
+
+/// Validate a `PerfEventAttr` shape.
+fn validate_attr(attr: &PerfEventAttr) -> Result<(), i32> {
+    // Size must be in the documented version range. Linux returns
+    // E2BIG when size exceeds PAGE_SIZE (so callers know the kernel
+    // is older than the struct they shipped with) and EINVAL when
+    // size is below the smallest ever-shipped version.
+    if attr.size < PERF_ATTR_SIZE_MIN {
+        return Err(errno::EINVAL);
+    }
+    if attr.size > PERF_ATTR_SIZE_MAX {
+        return Err(errno::E2BIG);
+    }
+
+    // Type must be a known top-level perf class.
+    if attr.type_ >= PERF_TYPE_MAX {
+        return Err(errno::EINVAL);
+    }
+
+    // Type-specific config validation.
+    match attr.type_ {
+        PERF_TYPE_HARDWARE => {
+            if attr.config >= PERF_COUNT_HW_MAX {
+                return Err(errno::EINVAL);
+            }
+        }
+        PERF_TYPE_SOFTWARE => {
+            // Software events have a sparse layout: 0..=8 are
+            // sequential, then 10 (BPF_OUTPUT) and 11 (CGROUP_SWITCHES).
+            // 9 was never assigned. Anything beyond CGROUP_SWITCHES is
+            // unknown.
+            if attr.config >= PERF_COUNT_SW_MAX || attr.config == 9 {
+                return Err(errno::EINVAL);
+            }
+        }
+        PERF_TYPE_HW_CACHE => {
+            // Encoded as cache_id | (op_id << 8) | (result_id << 16).
+            // Linux accepts any 24-bit value but the kernel later
+            // returns ENOENT for unsupported combinations. We do the
+            // shape check only — bits above the 24-bit window are
+            // invalid.
+            if (attr.config >> 24) != 0 {
+                return Err(errno::EINVAL);
+            }
+        }
+        PERF_TYPE_TRACEPOINT | PERF_TYPE_RAW | PERF_TYPE_BREAKPOINT => {
+            // Linux doesn't pre-validate config for these — the
+            // tracepoint id / raw event code / breakpoint config is
+            // handed off to the PMU. We follow the same approach.
+        }
+        _ => unreachable!(), // already vetted by type_ range check above
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -166,15 +296,114 @@ impl PerfEventAttr {
 
 /// Open a performance monitoring event.
 ///
-/// Stub — returns `-1` / sets `ENOSYS`.
+/// Returns `-1` on failure with errno set. Error precedence:
+///
+/// * `EFAULT` — `attr` is NULL.
+/// * `EINVAL` — bad attr.size (too small), bad attr.type_, bad config
+///   for the type, unknown flag bit, bad pid/cpu combination, bad
+///   pid value (< -1), bad cpu value (out of range), or PID_CGROUP
+///   flag with pid < 0.
+/// * `E2BIG` — attr.size larger than what the kernel knows (the
+///   caller is from the future).
+/// * `EBADF` — `group_fd` is non-negative but isn't a known perf fd
+///   (since we don't allocate perf fds, this catches every positive
+///   group_fd).
+/// * `ENOSYS` — everything valid, but the kernel has no PMU driver
+///   yet. Real callers treat this identically to a Linux kernel
+///   built without `CONFIG_PERF_EVENTS=y`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn perf_event_open(
-    _attr: *mut PerfEventAttr,
-    _pid: i32,
-    _cpu: i32,
-    _group_fd: i32,
-    _flags: u64,
+    attr: *mut PerfEventAttr,
+    pid: i32,
+    cpu: i32,
+    group_fd: i32,
+    flags: u64,
 ) -> i32 {
+    if attr.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // SAFETY: caller promises `attr` points to a readable
+    // `PerfEventAttr`. We use `read_unaligned` so a misaligned attr
+    // doesn't UB; the read is local and we don't dereference the
+    // pointer again.
+    let attr_val = unsafe { core::ptr::read_unaligned(attr) };
+
+    if let Err(e) = validate_attr(&attr_val) {
+        errno::set_errno(e);
+        return -1;
+    }
+
+    // Flag bits: only the well-known PERF_FLAG_* values are accepted.
+    if (flags & !PERF_FLAG_VALID) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // pid validation.
+    // -1 = any process, 0 = self, > 0 = specific process, < -1 = bad.
+    if pid < PERF_PID_ANY {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // PID_CGROUP flag re-interprets `pid` as a cgroup fd, which must
+    // be non-negative.
+    if (flags & PERF_FLAG_PID_CGROUP) != 0 && pid < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // cpu validation: -1 = any cpu, 0..PERF_CPU_MAX = specific cpu.
+    if cpu < PERF_CPU_ANY || cpu >= PERF_CPU_MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // pid == -1 AND cpu == -1 is meaningless (no anchor) — Linux
+    // EINVAL. Cgroup mode is excepted because the cgroup itself
+    // anchors the event.
+    if pid == PERF_PID_ANY
+        && cpu == PERF_CPU_ANY
+        && (flags & PERF_FLAG_PID_CGROUP) == 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // group_fd: -1 = leader-of-own-group, >= 0 must be a real perf
+    // fd. We have no perf fd table, so any non-negative group_fd is
+    // EBADF. FLAG_FD_OUTPUT and FLAG_FD_NO_GROUP both require
+    // group_fd >= 0 to be meaningful — if a caller sets those with
+    // group_fd == -1, Linux EINVAL.
+    if group_fd < PERF_GROUP_FD_NONE {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if group_fd == PERF_GROUP_FD_NONE
+        && (flags & (PERF_FLAG_FD_OUTPUT | PERF_FLAG_FD_NO_GROUP)) != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if group_fd >= 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    // Privilege check: Linux requires CAP_PERFMON (or paranoid level
+    // ≤ allowed). We have no privilege model — anyone passes. The
+    // ENOSYS we return below is the truthful answer about kernel
+    // capability.
+    //
+    // All inputs valid — but we have no kernel-side PMU driver to
+    // hand back a counter fd. Real callers (`perf record`, `perf
+    // stat`, JFR-on-Linux, the BPF observability stack) detect this
+    // and fall back to software-only timing, just like on a kernel
+    // built without CONFIG_PERF_EVENTS.
+    let _ = pid;
+    let _ = cpu;
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -187,6 +416,10 @@ pub extern "C" fn perf_event_open(
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------
+    // Constant invariants
+    // -----------------------------------------------------------------
+
     #[test]
     fn test_perf_types_distinct() {
         let types = [
@@ -198,6 +431,7 @@ mod tests {
                 assert_ne!(types[i], types[j]);
             }
         }
+        assert_eq!(PERF_TYPE_MAX, 6);
     }
 
     #[test]
@@ -205,12 +439,17 @@ mod tests {
         assert_eq!(PERF_COUNT_HW_CPU_CYCLES, 0);
         assert_eq!(PERF_COUNT_HW_INSTRUCTIONS, 1);
         assert_eq!(PERF_COUNT_HW_REF_CPU_CYCLES, 9);
+        assert_eq!(PERF_COUNT_HW_MAX, 10);
     }
 
     #[test]
     fn test_sw_events_sequential() {
         assert_eq!(PERF_COUNT_SW_CPU_CLOCK, 0);
         assert_eq!(PERF_COUNT_SW_EMULATION_FAULTS, 8);
+        // 9 is the historical hole.
+        assert_eq!(PERF_COUNT_SW_BPF_OUTPUT, 10);
+        assert_eq!(PERF_COUNT_SW_CGROUP_SWITCHES, 11);
+        assert_eq!(PERF_COUNT_SW_MAX, 12);
     }
 
     #[test]
@@ -219,6 +458,13 @@ mod tests {
         assert_eq!(attr.type_, 0);
         assert_eq!(attr.size as usize, core::mem::size_of::<PerfEventAttr>());
         assert_eq!(attr.config, 0);
+    }
+
+    #[test]
+    fn test_perf_event_attr_default() {
+        let attr: PerfEventAttr = Default::default();
+        assert_eq!(attr.type_, 0);
+        assert_eq!(attr.size as usize, core::mem::size_of::<PerfEventAttr>());
     }
 
     #[test]
@@ -242,9 +488,369 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_perf_event_open_stub() {
+    // -----------------------------------------------------------------
+    // Helpers used by tests
+    // -----------------------------------------------------------------
+
+    fn make_valid_hw_attr() -> PerfEventAttr {
         let mut attr = PerfEventAttr::new();
-        assert_eq!(perf_event_open(&mut attr, -1, 0, -1, 0), -1);
+        attr.type_ = PERF_TYPE_HARDWARE;
+        attr.config = PERF_COUNT_HW_CPU_CYCLES;
+        attr
+    }
+
+    fn make_valid_sw_attr() -> PerfEventAttr {
+        let mut attr = PerfEventAttr::new();
+        attr.type_ = PERF_TYPE_SOFTWARE;
+        attr.config = PERF_COUNT_SW_CPU_CLOCK;
+        attr
+    }
+
+    // -----------------------------------------------------------------
+    // attr pointer / size validation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_null_attr_efault() {
+        errno::set_errno(0);
+        let ret = perf_event_open(core::ptr::null_mut(), 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_attr_size_below_min_einval() {
+        let mut attr = make_valid_hw_attr();
+        attr.size = PERF_ATTR_SIZE_MIN - 1;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_attr_size_at_min_ok() {
+        let mut attr = make_valid_hw_attr();
+        attr.size = PERF_ATTR_SIZE_MIN;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_attr_size_above_max_e2big() {
+        let mut attr = make_valid_hw_attr();
+        attr.size = PERF_ATTR_SIZE_MAX + 1;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::E2BIG);
+    }
+
+    // -----------------------------------------------------------------
+    // type / config validation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_unknown_type_einval() {
+        let mut attr = make_valid_hw_attr();
+        attr.type_ = PERF_TYPE_MAX;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_hw_config_out_of_range_einval() {
+        let mut attr = make_valid_hw_attr();
+        attr.config = PERF_COUNT_HW_MAX;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_hw_config_max_minus_one_ok() {
+        let mut attr = make_valid_hw_attr();
+        attr.config = PERF_COUNT_HW_MAX - 1;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_sw_config_hole_9_einval() {
+        let mut attr = make_valid_sw_attr();
+        attr.config = 9; // historical hole
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sw_config_out_of_range_einval() {
+        let mut attr = make_valid_sw_attr();
+        attr.config = PERF_COUNT_SW_MAX;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sw_bpf_output_ok() {
+        let mut attr = make_valid_sw_attr();
+        attr.config = PERF_COUNT_SW_BPF_OUTPUT;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_hw_cache_high_bits_einval() {
+        let mut attr = make_valid_hw_attr();
+        attr.type_ = PERF_TYPE_HW_CACHE;
+        attr.config = 1u64 << 24; // bit 24 set — out of the 24-bit window
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_hw_cache_low_24_bits_ok() {
+        let mut attr = make_valid_hw_attr();
+        attr.type_ = PERF_TYPE_HW_CACHE;
+        attr.config = 0x0011_2233;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_breakpoint_arbitrary_config_ok() {
+        // PERF_TYPE_BREAKPOINT skips config validation.
+        let mut attr = make_valid_hw_attr();
+        attr.type_ = PERF_TYPE_BREAKPOINT;
+        attr.config = 0xDEAD_BEEF_CAFE_BABE;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -----------------------------------------------------------------
+    // flags validation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_unknown_flag_bit_einval() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 1 << 16);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_cloexec_flag_ok() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, PERF_FLAG_FD_CLOEXEC);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -----------------------------------------------------------------
+    // pid validation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_pid_minus_2_einval() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, -2, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pid_self_ok() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pid_specific_ok() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 12345, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pid_cgroup_with_pid_negative_einval() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, -1, 0, -1, PERF_FLAG_PID_CGROUP);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pid_cgroup_with_pid_positive_ok() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        // pid here is reinterpreted as a cgroup fd.
+        let ret = perf_event_open(&mut attr, 5, 0, -1, PERF_FLAG_PID_CGROUP);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -----------------------------------------------------------------
+    // cpu validation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_cpu_minus_2_einval() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, -2, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_cpu_too_large_einval() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, PERF_CPU_MAX, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_cpu_max_minus_one_ok() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, PERF_CPU_MAX - 1, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pid_any_cpu_any_einval() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, -1, -1, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pid_any_cpu_any_with_cgroup_ok() {
+        // CGROUP-mode events anchor on the cgroup, not pid/cpu.
+        // Linux accepts pid==-1, cpu==-1 here.
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 5, -1, -1, PERF_FLAG_PID_CGROUP);
+        // pid=5 (cgroup fd), cpu=-1 (any), still valid for cgroup mode.
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -----------------------------------------------------------------
+    // group_fd validation
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_group_fd_minus_2_ebadf() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -2, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_group_fd_positive_ebadf() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, 7, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_fd_output_without_group_einval() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, PERF_FLAG_FD_OUTPUT);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fd_no_group_without_group_einval() {
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, PERF_FLAG_FD_NO_GROUP);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------
+    // Workflow
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_typical_perf_stat_workflow() {
+        // `perf stat -e cycles` calls perf_event_open with:
+        //   type = HARDWARE, config = CPU_CYCLES, pid = -1 (any), cpu = 0,
+        //   group_fd = -1, flags = FD_CLOEXEC.
+        let mut attr = PerfEventAttr::new();
+        attr.type_ = PERF_TYPE_HARDWARE;
+        attr.config = PERF_COUNT_HW_CPU_CYCLES;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, -1, 0, -1, PERF_FLAG_FD_CLOEXEC);
+        assert_eq!(ret, -1);
+        // Real callers detect ENOSYS as "kernel has no PMU driver" and
+        // fall back to clock_gettime-based timing.
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_misaligned_attr_pointer_handled() {
+        // Build a byte buffer big enough to hold a PerfEventAttr and
+        // offset by 1 to guarantee misalignment.
+        let mut buf: [u8; core::mem::size_of::<PerfEventAttr>() + 8] =
+            [0; core::mem::size_of::<PerfEventAttr>() + 8];
+        // Stamp a valid hardware attr at offset 1.
+        let template = make_valid_hw_attr();
+        let template_bytes = unsafe {
+            core::slice::from_raw_parts(
+                (&template as *const PerfEventAttr).cast::<u8>(),
+                core::mem::size_of::<PerfEventAttr>(),
+            )
+        };
+        for (i, &b) in template_bytes.iter().enumerate() {
+            buf[i + 1] = b;
+        }
+        let misaligned = unsafe { buf.as_mut_ptr().add(1) }.cast::<PerfEventAttr>();
+        errno::set_errno(0);
+        let ret = perf_event_open(misaligned, 0, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 }

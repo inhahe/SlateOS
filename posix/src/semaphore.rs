@@ -237,37 +237,351 @@ pub extern "C" fn sem_getvalue(sem: *mut SemT, sval: *mut i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// Named semaphores — stubs
+// Named semaphores
 // ---------------------------------------------------------------------------
+//
+// Named semaphores live in a static pool, identified by a leading-slash
+// name (POSIX convention).  `sem_open` either looks up an existing slot
+// or, with `O_CREAT`, allocates and initialises a new one.  The pointer
+// returned to userspace is the address of the slot's `SemT` field, so
+// `sem_wait`/`sem_post`/`sem_getvalue` work unchanged.
+//
+// A separate refcount tracks how many open handles reference each slot;
+// `sem_close` decrements it and `sem_unlink` marks the slot for removal.
+// A slot is reclaimed only after it has been unlinked *and* its
+// refcount drops to zero, matching POSIX unlink-while-open semantics.
+
+/// Maximum number of distinct named semaphores live at once.
+const MAX_NAMED_SEMS: usize = 16;
+
+/// Maximum length of a semaphore name (including the leading `/`).
+const MAX_SEM_NAME: usize = 64;
+
+#[repr(C)]
+struct NamedSem {
+    in_use: bool,
+    unlinked: bool,
+    name: [u8; MAX_SEM_NAME],
+    name_len: usize,
+    refcount: u32,
+    sem: SemT,
+}
+
+// SAFETY: the table is only mutated under `SEM_LOCK`; readers also hold
+// the lock.  `NamedSem` itself contains `AtomicI32` for the value, so
+// once the lock is dropped concurrent `sem_wait`/`sem_post` are safe.
+static SEM_LOCK: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+static mut NAMED_SEMS: [NamedSem; MAX_NAMED_SEMS] = [const {
+    NamedSem {
+        in_use: false,
+        unlinked: false,
+        name: [0u8; MAX_SEM_NAME],
+        name_len: 0,
+        refcount: 0,
+        sem: SemT {
+            value: core::sync::atomic::AtomicI32::new(0),
+        },
+    }
+}; MAX_NAMED_SEMS];
+
+/// RAII guard that releases `SEM_LOCK` on drop.
+struct SemLockGuard;
+
+impl Drop for SemLockGuard {
+    fn drop(&mut self) {
+        SEM_LOCK.store(false, core::sync::atomic::Ordering::Release);
+    }
+}
+
+fn acquire_sem_lock() -> SemLockGuard {
+    while SEM_LOCK
+        .compare_exchange_weak(
+            false,
+            true,
+            core::sync::atomic::Ordering::Acquire,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        core::hint::spin_loop();
+    }
+    SemLockGuard
+}
+
+/// Validate a POSIX semaphore name: starts with `/`, no further `/`,
+/// fits in `MAX_SEM_NAME` bytes.  Returns the name length on success.
+fn validate_sem_name(name: *const u8) -> Result<usize, i32> {
+    if name.is_null() {
+        return Err(errno::EFAULT);
+    }
+    let mut len: usize = 0;
+    while len <= MAX_SEM_NAME {
+        // SAFETY: caller contract — `name` is NUL-terminated.
+        let b = unsafe { *name.add(len) };
+        if b == 0 {
+            break;
+        }
+        len = len.wrapping_add(1);
+    }
+    if len == 0 || len > MAX_SEM_NAME {
+        return Err(errno::EINVAL);
+    }
+    // SAFETY: bounded above.
+    let first = unsafe { *name };
+    if first != b'/' {
+        return Err(errno::EINVAL);
+    }
+    let mut i: usize = 1;
+    while i < len {
+        // SAFETY: i < len.
+        let b = unsafe { *name.add(i) };
+        if b == b'/' {
+            return Err(errno::EINVAL);
+        }
+        i = i.wrapping_add(1);
+    }
+    Ok(len)
+}
+
+/// Find the slot index whose name matches `name[..len]`, considering
+/// only live (not-yet-fully-reclaimed) entries.  Returns `None` if no
+/// match.  Caller must hold `SEM_LOCK`.
+fn find_named_sem(name: *const u8, len: usize) -> Option<usize> {
+    for i in 0..MAX_NAMED_SEMS {
+        // SAFETY: SEM_LOCK is held.
+        let slot = unsafe { &*core::ptr::addr_of!(NAMED_SEMS[i]) };
+        if !slot.in_use || slot.unlinked {
+            continue;
+        }
+        if slot.name_len != len {
+            continue;
+        }
+        // SAFETY: caller-provided name has at least `len` bytes.
+        let in_name = unsafe { core::slice::from_raw_parts(name, len) };
+        let stored = match slot.name.get(..len) {
+            Some(s) => s,
+            None => continue,
+        };
+        if stored == in_name {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Find a free slot index.  Caller must hold `SEM_LOCK`.
+fn find_free_sem_slot() -> Option<usize> {
+    for i in 0..MAX_NAMED_SEMS {
+        // SAFETY: SEM_LOCK is held.
+        let slot = unsafe { &*core::ptr::addr_of!(NAMED_SEMS[i]) };
+        if !slot.in_use {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Find the slot that owns the given `SemT*`.  Caller must hold
+/// `SEM_LOCK`.  Returns `None` if the pointer isn't a named-semaphore
+/// address (i.e. it's an unnamed semaphore).
+fn slot_for_ptr(sem: *mut SemT) -> Option<usize> {
+    for i in 0..MAX_NAMED_SEMS {
+        // SAFETY: SEM_LOCK is held; stable addresses in `static mut`.
+        let p = unsafe { core::ptr::addr_of!(NAMED_SEMS[i].sem) } as *mut SemT;
+        if p == sem {
+            return Some(i);
+        }
+    }
+    None
+}
 
 /// Open a named semaphore.
 ///
-/// Stub: returns `SEM_FAILED` (not supported).
+/// Two-arg form (`sem_open(name, oflag)`) looks up an existing
+/// semaphore.  Four-arg form with `O_CREAT` set in `oflag` creates the
+/// semaphore if it doesn't exist, initialising its value to `value`.
+/// `O_CREAT | O_EXCL` fails with `EEXIST` if the semaphore already
+/// exists.  `mode` is accepted but unused (we have no per-object
+/// permission model yet).
+///
+/// On x86_64 SysV ABI the variadic `mode`/`value` args are passed in
+/// registers regardless of caller-side declaration, so a 2-arg caller
+/// leaves them undefined: we read them only when `O_CREAT` is set, at
+/// which point the caller is contractually required to supply them.
+///
+/// # Errors
+///
+/// - `EFAULT` — `name` is NULL.
+/// - `EINVAL` — name doesn't start with `/`, contains internal `/`, is
+///   empty, or exceeds `MAX_SEM_NAME` bytes; or `value` exceeds
+///   `i32::MAX`.
+/// - `EEXIST` — `O_CREAT | O_EXCL` and the name already exists.
+/// - `ENOENT` — name doesn't exist and `O_CREAT` is not set.
+/// - `ENOSPC` — the named-sem pool is exhausted.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_open(
-    _name: *const u8,
-    _oflag: i32,
+    name: *const u8,
+    oflag: i32,
+    mode: u32,
+    value: u32,
 ) -> *mut SemT {
-    errno::set_errno(errno::ENOSYS);
-    SEM_FAILED
+    let _ = mode;
+    let name_len = match validate_sem_name(name) {
+        Ok(n) => n,
+        Err(e) => {
+            errno::set_errno(e);
+            return SEM_FAILED;
+        }
+    };
+
+    let _guard = acquire_sem_lock();
+
+    let existing = find_named_sem(name, name_len);
+    let create = oflag & crate::fcntl::O_CREAT != 0;
+    let exclusive = oflag & crate::fcntl::O_EXCL != 0;
+
+    if let Some(idx) = existing {
+        if create && exclusive {
+            errno::set_errno(errno::EEXIST);
+            return SEM_FAILED;
+        }
+        // Bump refcount; return slot's SemT pointer.
+        // SAFETY: SEM_LOCK is held.
+        unsafe {
+            NAMED_SEMS[idx].refcount = NAMED_SEMS[idx].refcount.wrapping_add(1);
+        }
+        // SAFETY: stable static address.
+        return unsafe { core::ptr::addr_of_mut!(NAMED_SEMS[idx].sem) };
+    }
+    // Not found.
+    if !create {
+        errno::set_errno(errno::ENOENT);
+        return SEM_FAILED;
+    }
+    if value > i32::MAX as u32 {
+        errno::set_errno(errno::EINVAL);
+        return SEM_FAILED;
+    }
+    let Some(idx) = find_free_sem_slot() else {
+        errno::set_errno(errno::ENOSPC);
+        return SEM_FAILED;
+    };
+    // SAFETY: SEM_LOCK is held; idx is in bounds.
+    unsafe {
+        let slot = &raw mut NAMED_SEMS[idx];
+        (*slot).in_use = true;
+        (*slot).unlinked = false;
+        (*slot).name_len = name_len;
+        (*slot).refcount = 1;
+        let name_dst: *mut u8 = core::ptr::addr_of_mut!((*slot).name) as *mut u8;
+        // Copy name bytes.
+        for j in 0..name_len {
+            *name_dst.add(j) = *name.add(j);
+        }
+        // Zero-fill the rest of the name buffer for tidiness.
+        for j in name_len..MAX_SEM_NAME {
+            *name_dst.add(j) = 0;
+        }
+        (*slot).sem.value.store(
+            value as i32,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        core::ptr::addr_of_mut!((*slot).sem)
+    }
 }
 
-/// Close a named semaphore.
+/// Close a named semaphore handle.
 ///
-/// Stub: returns -1.
+/// Decrements the slot's refcount.  If the slot was previously
+/// `sem_unlink`ed and the refcount reaches zero, the slot is reclaimed.
+///
+/// # Errors
+///
+/// - `EINVAL` — `sem` is NULL or doesn't refer to a known named
+///   semaphore.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sem_close(_sem: *mut SemT) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn sem_close(sem: *mut SemT) -> i32 {
+    if sem.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let _guard = acquire_sem_lock();
+    let Some(idx) = slot_for_ptr(sem) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+    // SAFETY: SEM_LOCK is held; idx is in bounds.
+    unsafe {
+        if NAMED_SEMS[idx].refcount > 0 {
+            NAMED_SEMS[idx].refcount = NAMED_SEMS[idx].refcount.wrapping_sub(1);
+        }
+        if NAMED_SEMS[idx].unlinked && NAMED_SEMS[idx].refcount == 0 {
+            // Reclaim.
+            NAMED_SEMS[idx].in_use = false;
+            NAMED_SEMS[idx].unlinked = false;
+            NAMED_SEMS[idx].name_len = 0;
+        }
+    }
+    0
 }
 
-/// Remove a named semaphore.
+/// Remove a named semaphore from the namespace.
 ///
-/// Stub: returns -1.
+/// The slot is marked unlinked but stays alive until all open handles
+/// are closed, at which point it is reclaimed.  A subsequent
+/// `sem_open` with the same name and `O_CREAT` creates a fresh
+/// semaphore unrelated to the unlinked one.
+///
+/// # Errors
+///
+/// - `EFAULT` — `name` is NULL.
+/// - `EINVAL` — invalid name format.
+/// - `ENOENT` — no semaphore with this name exists.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sem_unlink(_name: *const u8) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn sem_unlink(name: *const u8) -> i32 {
+    let name_len = match validate_sem_name(name) {
+        Ok(n) => n,
+        Err(e) => {
+            errno::set_errno(e);
+            return -1;
+        }
+    };
+    let _guard = acquire_sem_lock();
+    let Some(idx) = find_named_sem(name, name_len) else {
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    };
+    // SAFETY: SEM_LOCK is held; idx is in bounds.
+    unsafe {
+        NAMED_SEMS[idx].unlinked = true;
+        if NAMED_SEMS[idx].refcount == 0 {
+            NAMED_SEMS[idx].in_use = false;
+            NAMED_SEMS[idx].unlinked = false;
+            NAMED_SEMS[idx].name_len = 0;
+        }
+    }
+    0
+}
+
+/// Reset the named-semaphore table.  Test-only.
+#[cfg(test)]
+fn reset_named_sems() {
+    let _guard = acquire_sem_lock();
+    for i in 0..MAX_NAMED_SEMS {
+        // SAFETY: SEM_LOCK is held.
+        unsafe {
+            NAMED_SEMS[i].in_use = false;
+            NAMED_SEMS[i].unlinked = false;
+            NAMED_SEMS[i].name_len = 0;
+            NAMED_SEMS[i].refcount = 0;
+            NAMED_SEMS[i]
+                .sem
+                .value
+                .store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -495,23 +809,233 @@ mod tests {
         assert_eq!(sem_trywait(&raw mut sem), -1);
     }
 
-    // -- Named semaphore stubs --
+    // -- Named semaphores --
 
-    #[test]
-    fn test_sem_open_returns_failed() {
-        let ret = sem_open(b"/mysem\0".as_ptr(), 0);
-        assert_eq!(ret, SEM_FAILED);
-        assert!(SEM_FAILED.is_null());
+    /// Serialise tests that touch the shared NAMED_SEMS pool.
+    static NAMED_SEM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_named_sem_lock<F: FnOnce()>(f: F) {
+        let _guard = NAMED_SEM_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_named_sems();
+        f();
+        reset_named_sems();
     }
 
     #[test]
-    fn test_sem_close_returns_error() {
+    fn test_sem_open_missing_no_create_enoent() {
+        with_named_sem_lock(|| {
+            crate::errno::set_errno(0);
+            let p = sem_open(b"/missing\0".as_ptr(), 0, 0, 0);
+            assert_eq!(p, SEM_FAILED);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+        });
+    }
+
+    #[test]
+    fn test_sem_open_creates_and_returns_valid() {
+        with_named_sem_lock(|| {
+            let p = sem_open(b"/a\0".as_ptr(), crate::fcntl::O_CREAT, 0o600, 3);
+            assert!(!p.is_null());
+            // Verify the value via sem_getvalue.
+            let mut v: i32 = -1;
+            assert_eq!(sem_getvalue(p, &raw mut v), 0);
+            assert_eq!(v, 3);
+            assert_eq!(sem_close(p), 0);
+        });
+    }
+
+    #[test]
+    fn test_sem_open_excl_existing_eexist() {
+        with_named_sem_lock(|| {
+            let p1 = sem_open(b"/excl\0".as_ptr(), crate::fcntl::O_CREAT, 0, 1);
+            assert!(!p1.is_null());
+            crate::errno::set_errno(0);
+            let p2 = sem_open(
+                b"/excl\0".as_ptr(),
+                crate::fcntl::O_CREAT | crate::fcntl::O_EXCL,
+                0,
+                1,
+            );
+            assert_eq!(p2, SEM_FAILED);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EEXIST);
+            assert_eq!(sem_close(p1), 0);
+        });
+    }
+
+    #[test]
+    fn test_sem_open_same_name_returns_same_pointer() {
+        with_named_sem_lock(|| {
+            let p1 = sem_open(b"/share\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+            let p2 = sem_open(b"/share\0".as_ptr(), 0, 0, 0);
+            assert!(!p1.is_null());
+            assert_eq!(p1, p2);
+            // Cross-handle visibility: post via p1, see via p2.
+            assert_eq!(sem_post(p1), 0);
+            let mut v: i32 = -1;
+            assert_eq!(sem_getvalue(p2, &raw mut v), 0);
+            assert_eq!(v, 1);
+            assert_eq!(sem_close(p1), 0);
+            assert_eq!(sem_close(p2), 0);
+        });
+    }
+
+    #[test]
+    fn test_sem_open_invalid_name() {
+        with_named_sem_lock(|| {
+            // No leading '/'.
+            crate::errno::set_errno(0);
+            let p = sem_open(b"bad\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+            assert_eq!(p, SEM_FAILED);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            // Embedded '/'.
+            let p = sem_open(b"/a/b\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+            assert_eq!(p, SEM_FAILED);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            // Empty.
+            let p = sem_open(b"\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+            assert_eq!(p, SEM_FAILED);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        });
+    }
+
+    #[test]
+    fn test_sem_open_null_name_efault() {
+        with_named_sem_lock(|| {
+            crate::errno::set_errno(0);
+            let p = sem_open(core::ptr::null(), crate::fcntl::O_CREAT, 0, 0);
+            assert_eq!(p, SEM_FAILED);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        });
+    }
+
+    #[test]
+    fn test_sem_open_value_overflow_einval() {
+        with_named_sem_lock(|| {
+            crate::errno::set_errno(0);
+            let p = sem_open(
+                b"/big\0".as_ptr(),
+                crate::fcntl::O_CREAT,
+                0,
+                (i32::MAX as u32).wrapping_add(1),
+            );
+            assert_eq!(p, SEM_FAILED);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        });
+    }
+
+    #[test]
+    fn test_sem_open_pool_exhaustion_enospc() {
+        with_named_sem_lock(|| {
+            // Open MAX_NAMED_SEMS distinct semaphores.
+            let names: [&[u8]; 16] = [
+                b"/s00\0", b"/s01\0", b"/s02\0", b"/s03\0",
+                b"/s04\0", b"/s05\0", b"/s06\0", b"/s07\0",
+                b"/s08\0", b"/s09\0", b"/s10\0", b"/s11\0",
+                b"/s12\0", b"/s13\0", b"/s14\0", b"/s15\0",
+            ];
+            let mut ptrs = [SEM_FAILED; 16];
+            for (i, n) in names.iter().enumerate() {
+                ptrs[i] = sem_open(n.as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+                assert!(!ptrs[i].is_null(), "open {i} should succeed");
+            }
+            crate::errno::set_errno(0);
+            let extra = sem_open(b"/overflow\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+            assert_eq!(extra, SEM_FAILED);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSPC);
+            for p in &ptrs {
+                let _ = sem_close(*p);
+            }
+        });
+    }
+
+    #[test]
+    fn test_sem_unlink_basic_then_open_fresh() {
+        with_named_sem_lock(|| {
+            let p1 = sem_open(b"/u\0".as_ptr(), crate::fcntl::O_CREAT, 0, 5);
+            assert!(!p1.is_null());
+            assert_eq!(sem_close(p1), 0);
+            // No open handles, so unlink should free the slot immediately.
+            assert_eq!(sem_unlink(b"/u\0".as_ptr()), 0);
+            // Opening the same name with O_CREAT now creates a new slot.
+            let p2 = sem_open(b"/u\0".as_ptr(), crate::fcntl::O_CREAT, 0, 7);
+            assert!(!p2.is_null());
+            let mut v: i32 = -1;
+            sem_getvalue(p2, &raw mut v);
+            assert_eq!(v, 7);
+            assert_eq!(sem_close(p2), 0);
+            assert_eq!(sem_unlink(b"/u\0".as_ptr()), 0);
+        });
+    }
+
+    #[test]
+    fn test_sem_unlink_while_open_delays_reclaim() {
+        with_named_sem_lock(|| {
+            let p1 = sem_open(b"/d\0".as_ptr(), crate::fcntl::O_CREAT, 0, 1);
+            assert!(!p1.is_null());
+            // Unlink while still open — slot stays alive.
+            assert_eq!(sem_unlink(b"/d\0".as_ptr()), 0);
+            // sem_open(no O_CREAT) for the same name now returns ENOENT
+            // because the slot has been marked unlinked.
+            crate::errno::set_errno(0);
+            let p2 = sem_open(b"/d\0".as_ptr(), 0, 0, 0);
+            assert_eq!(p2, SEM_FAILED);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+            // p1 is still usable.
+            let mut v: i32 = -1;
+            assert_eq!(sem_getvalue(p1, &raw mut v), 0);
+            assert_eq!(v, 1);
+            // Closing p1 finishes the reclaim.
+            assert_eq!(sem_close(p1), 0);
+        });
+    }
+
+    #[test]
+    fn test_sem_unlink_missing_enoent() {
+        with_named_sem_lock(|| {
+            crate::errno::set_errno(0);
+            let r = sem_unlink(b"/nope\0".as_ptr());
+            assert_eq!(r, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+        });
+    }
+
+    #[test]
+    fn test_sem_close_null_einval() {
+        crate::errno::set_errno(0);
         assert_eq!(sem_close(core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
-    fn test_sem_unlink_returns_error() {
-        assert_eq!(sem_unlink(b"/mysem\0".as_ptr()), -1);
+    fn test_sem_close_unknown_pointer_einval() {
+        // A pointer to an unnamed semaphore on the stack is not a named-
+        // semaphore slot; closing it should EINVAL rather than corrupt
+        // anything.
+        with_named_sem_lock(|| {
+            let mut sem = SemT { value: core::sync::atomic::AtomicI32::new(0) };
+            crate::errno::set_errno(0);
+            assert_eq!(sem_close(&raw mut sem), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        });
+    }
+
+    #[test]
+    fn test_sem_open_refcount_close_balance() {
+        with_named_sem_lock(|| {
+            let p1 = sem_open(b"/rc\0".as_ptr(), crate::fcntl::O_CREAT, 0, 0);
+            let p2 = sem_open(b"/rc\0".as_ptr(), 0, 0, 0);
+            let p3 = sem_open(b"/rc\0".as_ptr(), 0, 0, 0);
+            assert_eq!(p1, p2);
+            assert_eq!(p2, p3);
+            assert_eq!(sem_close(p1), 0);
+            assert_eq!(sem_close(p2), 0);
+            // Slot must still be live for p3 (and unlink).
+            assert_eq!(sem_unlink(b"/rc\0".as_ptr()), 0);
+            // p3 still usable.
+            let mut v: i32 = -1;
+            assert_eq!(sem_getvalue(p3, &raw mut v), 0);
+            assert_eq!(sem_close(p3), 0);
+        });
     }
 
     // -- SemT layout --
@@ -601,28 +1125,8 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    // -- Named semaphore stubs set ENOSYS --
-
-    #[test]
-    fn test_sem_open_sets_enosys() {
-        crate::errno::set_errno(0);
-        let _ = sem_open(b"/test\0".as_ptr(), 0);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_sem_close_sets_enosys() {
-        crate::errno::set_errno(0);
-        let _ = sem_close(core::ptr::null_mut());
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_sem_unlink_sets_enosys() {
-        crate::errno::set_errno(0);
-        let _ = sem_unlink(b"/test\0".as_ptr());
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
+    // (Named-semaphore implementations no longer ENOSYS — see the
+    // dedicated section above for full coverage.)
 
     // -- sem_timedwait null checks --
 

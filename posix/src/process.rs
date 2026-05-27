@@ -501,17 +501,202 @@ pub extern "C" fn tcsetpgrp(_fd: crate::types::Fd, pgrp: PidT) -> i32 {
 // Linux-specific process control stubs
 // ===========================================================================
 
+/// Maximum exit-signal value accepted in `clone(flags) & CSIGNAL`.
+///
+/// Linux accepts any signal number `0..=_NSIG` (64 on x86_64) in the
+/// low byte of the flags argument.  `0` is allowed and means "no
+/// notification on child exit" (used implicitly with `CLONE_THREAD`).
+/// Values 65..=255 are rejected with `EINVAL` — they would request a
+/// non-existent signal.
+pub const CLONE_CSIGNAL_MAX: u64 = 64;
+
+/// All CLONE_* flag bits accepted by `clone(2)` (excluding the
+/// `CSIGNAL` exit-signal byte).
+///
+/// Mostly a superset of [`UNSHARE_FLAGS_VALID`] — clone additionally
+/// accepts the runtime flags that don't make sense for unshare:
+/// `CLONE_PIDFD`, `CLONE_PTRACE`, `CLONE_VFORK`, `CLONE_PARENT`,
+/// `CLONE_DETACHED` (historical, ignored), `CLONE_UNTRACED`,
+/// `CLONE_SETTLS`, `CLONE_PARENT_SETTID`, `CLONE_CHILD_SETTID`,
+/// `CLONE_CHILD_CLEARTID`, and `CLONE_IO`.
+///
+/// **`CLONE_NEWTIME` is intentionally excluded** even though it's in
+/// `UNSHARE_FLAGS_VALID`: its bit value `0x80` collides with the
+/// `CSIGNAL` exit-signal byte, so legacy `clone(2)` cannot express it
+/// unambiguously.  Linux therefore accepts time-namespace cloning only
+/// through `clone3(2)`.  Userspace needing it must use `clone3` or
+/// `unshare(CLONE_NEWTIME)`.
+///
+/// The 64-bit `clone3`-only bits `CLONE_INTO_CGROUP` and
+/// `CLONE_CLEAR_SIGHAND` are also excluded — they live above bit 32
+/// and cannot be reached through the legacy `clone(2)` argument
+/// register on x86_64 anyway, but we guard the comparison against
+/// `i32`-sign-extended inputs just in case.
+pub const CLONE_FLAGS_VALID: u64 = crate::linux_clone_args::CLONE_VM
+    | crate::linux_clone_args::CLONE_FS
+    | crate::linux_clone_args::CLONE_FILES
+    | crate::linux_clone_args::CLONE_SIGHAND
+    | crate::linux_clone_args::CLONE_PIDFD
+    | crate::linux_clone_args::CLONE_PTRACE
+    | crate::linux_clone_args::CLONE_VFORK
+    | crate::linux_clone_args::CLONE_PARENT
+    | crate::linux_clone_args::CLONE_THREAD
+    | crate::linux_clone_args::CLONE_NEWNS
+    | crate::linux_clone_args::CLONE_SYSVSEM
+    | crate::linux_clone_args::CLONE_SETTLS
+    | crate::linux_clone_args::CLONE_PARENT_SETTID
+    | crate::linux_clone_args::CLONE_CHILD_CLEARTID
+    | crate::linux_clone_args::CLONE_DETACHED
+    | crate::linux_clone_args::CLONE_UNTRACED
+    | crate::linux_clone_args::CLONE_CHILD_SETTID
+    | crate::linux_clone_args::CLONE_NEWCGROUP
+    | crate::linux_clone_args::CLONE_NEWUTS
+    | crate::linux_clone_args::CLONE_NEWIPC
+    | crate::linux_clone_args::CLONE_NEWUSER
+    | crate::linux_clone_args::CLONE_NEWPID
+    | crate::linux_clone_args::CLONE_NEWNET
+    | crate::linux_clone_args::CLONE_IO;
+
 /// Linux `clone` — create a new process/thread.
 ///
-/// Stub: returns -1 with ENOSYS.  Our OS uses `posix_spawn` for
-/// process creation and doesn't support Linux-style clone flags.
+/// # Linux behaviour
+///
+/// The glibc wrapper `int clone(int (*fn)(void *), void *stack,
+/// int flags, void *arg, ...)` performs its own argument checks
+/// before issuing the `SYS_clone` syscall; the kernel then runs the
+/// full `copy_process` flag-combination matrix.  We enforce both
+/// layers here, in the order they fail on real Linux + glibc:
+///
+/// 1. `fn == NULL`                                    → `EINVAL`
+///    (glibc's `clone.S` rejects this before the syscall)
+/// 2. `stack == NULL`                                 → `EINVAL`
+///    (glibc must initialise the child's stack pointer; the kernel
+///    also requires it whenever `CLONE_VM` is set because the child
+///    would otherwise share the parent's stack)
+/// 3. exit-signal byte `flags & CSIGNAL > 64`         → `EINVAL`
+/// 4. `flags & ~(CSIGNAL | CLONE_FLAGS_VALID)`        → `EINVAL`
+///    (rejects clone3-only bits and any other reserved bits)
+/// 5. `CLONE_THREAD` without `CLONE_SIGHAND`          → `EINVAL`
+///    (a thread group must share signal handlers)
+/// 6. `CLONE_SIGHAND` without `CLONE_VM`              → `EINVAL`
+///    (Linux 5.0+: shared handlers require shared address space)
+/// 7. `CLONE_THREAD` with non-zero exit signal        → `EINVAL`
+///    (thread death is reported via futex/CLEARTID, not signals)
+/// 8. `CLONE_FS | CLONE_NEWUSER`                      → `EINVAL`
+///    (`copy_process` forbids inheriting fs-state into a new userns)
+/// 9. `CLONE_THREAD | CLONE_NEWUSER`                  → `EINVAL`
+///    (a thread group cannot span user namespaces)
+/// 10. `CLONE_PIDFD | CLONE_DETACHED`                 → `EINVAL`
+///    (DETACHED means "no parent notification"; PIDFD requires a
+///    referent in the parent's fd table)
+/// 11. `CLONE_NEWNS | CLONE_FS`                       → `EINVAL`
+///    (a new mount namespace cannot share filesystem-state)
+///
+/// All combinations that survive validation reach `ENOSYS`: the
+/// microkernel doesn't expose a `clone`-style primitive — userspace
+/// uses `posix_spawn`, threads come from the kernel's lightweight
+/// thread syscall, namespaces are managed via capability handles.
+///
+/// # Safety
+///
+/// `fn_ptr` and `child_stack` are not dereferenced by this validator;
+/// the caller's contract is the usual "valid pointer to an executable
+/// function" / "valid writable stack region" pair, which would only
+/// matter if the syscall actually reached the kernel.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clone(
-    _fn_ptr: *const u8,
-    _child_stack: *mut u8,
-    _flags: i32,
+    fn_ptr: *const u8,
+    child_stack: *mut u8,
+    flags: i32,
     _arg: *mut u8,
 ) -> i32 {
+    // (1) glibc rejects NULL fn before issuing the syscall.
+    if fn_ptr.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // (2) child_stack is mandatory in the glibc wrapper (it has to
+    // arrange for the child to return into the user-provided fn) and
+    // in the kernel whenever CLONE_VM is set.
+    if child_stack.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Bit-pattern preserved across i32→u32→u64 via zero-extend so the
+    // negative-flag attack (e.g. `flags = i32::MIN` = CLONE_IO) is
+    // detected by the whitelist below rather than sign-extended into
+    // every high bit.
+    let bits = (flags as u32) as u64;
+
+    // (3) Exit signal in the low byte must be a valid signal number.
+    let exit_signal = bits & crate::linux_clone_args::CSIGNAL;
+    if exit_signal > CLONE_CSIGNAL_MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (4) Reject any CLONE_* bit not in the clone(2) whitelist.
+    if (bits & !(crate::linux_clone_args::CSIGNAL | CLONE_FLAGS_VALID)) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (5) CLONE_THREAD requires CLONE_SIGHAND.
+    if (bits & crate::linux_clone_args::CLONE_THREAD) != 0
+        && (bits & crate::linux_clone_args::CLONE_SIGHAND) == 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (6) CLONE_SIGHAND requires CLONE_VM (Linux 5.0+).
+    if (bits & crate::linux_clone_args::CLONE_SIGHAND) != 0
+        && (bits & crate::linux_clone_args::CLONE_VM) == 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (7) Threads must not request a parent-death signal.
+    if (bits & crate::linux_clone_args::CLONE_THREAD) != 0 && exit_signal != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (8) New user namespace cannot share filesystem state.
+    if (bits & crate::linux_clone_args::CLONE_NEWUSER) != 0
+        && (bits & crate::linux_clone_args::CLONE_FS) != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (9) New user namespace cannot span a thread group.
+    if (bits & crate::linux_clone_args::CLONE_NEWUSER) != 0
+        && (bits & crate::linux_clone_args::CLONE_THREAD) != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (10) PIDFD and DETACHED are mutually exclusive.
+    if (bits & crate::linux_clone_args::CLONE_PIDFD) != 0
+        && (bits & crate::linux_clone_args::CLONE_DETACHED) != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (11) New mount namespace cannot share filesystem state.
+    if (bits & crate::linux_clone_args::CLONE_NEWNS) != 0
+        && (bits & crate::linux_clone_args::CLONE_FS) != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // All combinations validated; clone primitive not implemented.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -2044,8 +2229,13 @@ mod tests {
 
     #[test]
     fn test_clone_sets_enosys() {
+        // Pass valid (non-NULL) fn/stack so the call survives the
+        // argument-domain checks added in Phase 54 and reaches the
+        // ENOSYS-returning subsystem stub.
         crate::errno::set_errno(0);
-        clone(core::ptr::null(), core::ptr::null_mut(), 0, core::ptr::null_mut());
+        let fn_ptr = 0x2_0000_usize as *const u8;
+        let stack = 0x1_0000_usize as *mut u8;
+        clone(fn_ptr, stack, 0, core::ptr::null_mut());
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -5123,5 +5313,499 @@ mod tests {
         );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------
+    // clone(2) — argument-domain validation (Phase 54)
+    // -----------------------------------------------------------------
+
+    /// A stack pointer that's "good enough" for validation tests —
+    /// the bytes are never dereferenced by the validator.
+    fn clone_dummy_stack() -> *mut u8 {
+        // 64 KiB above null; well-formed for sniff tests.
+        0x1_0000_usize as *mut u8
+    }
+    fn clone_dummy_fn() -> *const u8 {
+        0x2_0000_usize as *const u8
+    }
+
+    #[test]
+    fn test_clone_csignal_max_constant() {
+        // SIGRTMAX on Linux/x86_64 is 64 — must match.
+        assert_eq!(CLONE_CSIGNAL_MAX, 64);
+    }
+
+    #[test]
+    fn test_clone_flags_valid_covers_unshare_minus_newtime() {
+        // clone(2) accepts every unshare(2) flag except CLONE_NEWTIME
+        // (CLONE_NEWTIME = 0x80 collides with the CSIGNAL exit-signal
+        // byte, so it can only be expressed via clone3 or unshare).
+        let unshare_no_newtime =
+            UNSHARE_FLAGS_VALID as u64 & !crate::linux_clone_args::CLONE_NEWTIME;
+        assert_eq!(CLONE_FLAGS_VALID & unshare_no_newtime, unshare_no_newtime);
+        // And CLONE_NEWTIME is in unshare's set but not clone's.
+        assert_ne!(
+            UNSHARE_FLAGS_VALID as u64 & crate::linux_clone_args::CLONE_NEWTIME,
+            0
+        );
+        assert_eq!(CLONE_FLAGS_VALID & crate::linux_clone_args::CLONE_NEWTIME, 0);
+    }
+
+    #[test]
+    fn test_clone_flags_valid_excludes_clone3_only_bits() {
+        // CLONE_INTO_CGROUP and CLONE_CLEAR_SIGHAND live above bit 32
+        // and are rejected by clone(2).
+        assert_eq!(
+            CLONE_FLAGS_VALID & crate::linux_clone_args::CLONE_INTO_CGROUP,
+            0
+        );
+        assert_eq!(
+            CLONE_FLAGS_VALID & crate::linux_clone_args::CLONE_CLEAR_SIGHAND,
+            0
+        );
+    }
+
+    #[test]
+    fn test_clone_null_fn_einval() {
+        crate::errno::set_errno(0);
+        let ret = clone(
+            core::ptr::null(),
+            clone_dummy_stack(),
+            0,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_null_stack_einval() {
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_null_fn_takes_precedence_over_null_stack() {
+        // (1) is checked before (2): NULL fn always reports first.
+        crate::errno::set_errno(0);
+        let ret = clone(
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_exit_signal_too_large_einval() {
+        // 65 is one past CLONE_CSIGNAL_MAX.
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            65,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_exit_signal_255_einval() {
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            0xff,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_exit_signal_sigchld_passes_to_enosys() {
+        // SIGCHLD (17) is the canonical fork() exit signal.
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            17,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone_exit_signal_64_max_passes() {
+        // Exactly SIGRTMAX is permitted.
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            64,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone_reserved_signal_byte_bit_einval() {
+        // 0x40 sits inside the CSIGNAL byte (low 8 bits) but is not a
+        // valid signal number when combined with SIGCHLD (0x11):
+        // 0x40 | 0x11 = 0x51 = 81 > SIGRTMAX(64).  The exit-signal
+        // overflow check rejects the call.
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            0x40 | 17, // signal 81 — past SIGRTMAX
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_i32_min_treated_as_clone_io() {
+        // i32::MIN == 0x8000_0000 == CLONE_IO — valid, should reach ENOSYS.
+        // This verifies our `as u32 as u64` zero-extend doesn't sign-
+        // extend into the high half (which would set every reserved
+        // bit above 32).
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            i32::MIN, // == CLONE_IO with exit-signal 0
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone_thread_without_sighand_einval() {
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            crate::linux_clone_args::CLONE_THREAD as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_sighand_without_vm_einval() {
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            crate::linux_clone_args::CLONE_SIGHAND as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_thread_with_exit_signal_einval() {
+        // Threads cannot request a parent-death signal.
+        let flags = crate::linux_clone_args::CLONE_THREAD
+            | crate::linux_clone_args::CLONE_SIGHAND
+            | crate::linux_clone_args::CLONE_VM
+            | 17; // SIGCHLD
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_newuser_with_fs_einval() {
+        let flags =
+            crate::linux_clone_args::CLONE_NEWUSER | crate::linux_clone_args::CLONE_FS;
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_newuser_with_thread_einval() {
+        let flags = crate::linux_clone_args::CLONE_NEWUSER
+            | crate::linux_clone_args::CLONE_THREAD
+            | crate::linux_clone_args::CLONE_SIGHAND
+            | crate::linux_clone_args::CLONE_VM;
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_pidfd_with_detached_einval() {
+        let flags = crate::linux_clone_args::CLONE_PIDFD
+            | crate::linux_clone_args::CLONE_DETACHED;
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_newns_with_fs_einval() {
+        let flags = crate::linux_clone_args::CLONE_NEWNS
+            | crate::linux_clone_args::CLONE_FS;
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_full_thread_flags_pass_to_enosys() {
+        // Canonical pthread_create flag set:
+        //   VM | FS | FILES | SIGHAND | THREAD | SYSVSEM |
+        //   SETTLS | PARENT_SETTID | CHILD_CLEARTID
+        // exit_signal must be 0 because of CLONE_THREAD.
+        let flags = crate::linux_clone_args::CLONE_VM
+            | crate::linux_clone_args::CLONE_FS
+            | crate::linux_clone_args::CLONE_FILES
+            | crate::linux_clone_args::CLONE_SIGHAND
+            | crate::linux_clone_args::CLONE_THREAD
+            | crate::linux_clone_args::CLONE_SYSVSEM
+            | crate::linux_clone_args::CLONE_SETTLS
+            | crate::linux_clone_args::CLONE_PARENT_SETTID
+            | crate::linux_clone_args::CLONE_CHILD_CLEARTID;
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone_workflow_glibc_pthread_create() {
+        // glibc's NPTL pthread_create issues exactly:
+        //   CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+        //   CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS |
+        //   CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID
+        // exit_signal = 0 (threads don't notify on death).
+        let flags = crate::linux_clone_args::CLONE_VM
+            | crate::linux_clone_args::CLONE_FS
+            | crate::linux_clone_args::CLONE_FILES
+            | crate::linux_clone_args::CLONE_SIGHAND
+            | crate::linux_clone_args::CLONE_THREAD
+            | crate::linux_clone_args::CLONE_SYSVSEM
+            | crate::linux_clone_args::CLONE_SETTLS
+            | crate::linux_clone_args::CLONE_PARENT_SETTID
+            | crate::linux_clone_args::CLONE_CHILD_CLEARTID;
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone_workflow_vfork_emulation() {
+        // glibc's vfork() falls back to clone(CLONE_VM | CLONE_VFORK,
+        //                                     SIGCHLD) when the vfork
+        // syscall is unavailable.
+        let flags = crate::linux_clone_args::CLONE_VM
+            | crate::linux_clone_args::CLONE_VFORK
+            | 17; // SIGCHLD
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone_workflow_runc_user_namespace() {
+        // runc's user-namespace setup: new userns + new mountns +
+        // new netns + new pidns + new IPC + new UTS + SIGCHLD.
+        // FS is shared with the parent before the child re-execs
+        // into the container init.
+        let flags = crate::linux_clone_args::CLONE_NEWUSER
+            | crate::linux_clone_args::CLONE_NEWNET
+            | crate::linux_clone_args::CLONE_NEWPID
+            | crate::linux_clone_args::CLONE_NEWIPC
+            | crate::linux_clone_args::CLONE_NEWUTS
+            | crate::linux_clone_args::CLONE_NEWCGROUP
+            | 17; // SIGCHLD
+        // NB: CLONE_NEWNS deliberately omitted — runc uses MS_PRIVATE
+        // remount instead of namespace clone here.  CLONE_FS is also
+        // omitted (which is why runc isn't EINVAL'd by check 8).
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone_workflow_chrome_sandbox_zygote() {
+        // Chromium's zygote spawns renderers via clone with
+        //   CLONE_FS | CLONE_FILES | SIGCHLD
+        // — shares fd table for the IPC socket, separate addr space.
+        let flags = crate::linux_clone_args::CLONE_FS
+            | crate::linux_clone_args::CLONE_FILES
+            | 17; // SIGCHLD
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone_workflow_pidfd_for_async_wait() {
+        // Modern post-Linux-5.2 fork that produces a pidfd for the
+        // child so the parent can poll(2) on its exit.
+        // Combined with SIGCHLD for the death notification.
+        let flags = crate::linux_clone_args::CLONE_PIDFD | 17;
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone_workflow_buggy_thread_without_sighand() {
+        // Real bug from a CRIU restore patch (fixed in v3.15):
+        // restoring a thread group with CLONE_THREAD but the SIGHAND
+        // bit cleared because the dump format used a stale enum.
+        // Linux rejects this combo immediately.
+        let flags = crate::linux_clone_args::CLONE_THREAD
+            | crate::linux_clone_args::CLONE_VM
+            | crate::linux_clone_args::CLONE_FILES;
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_workflow_buggy_signal_overflow() {
+        // A Go runtime bug from gccgo 4.7 passed the full sigset_t
+        // word (0xffff_ffff) instead of just the signal number,
+        // overflowing CSIGNAL and triggering EINVAL on every clone.
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            0xff_i32, // signal 255 = invalid
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_workflow_buggy_clone3_only_bit() {
+        // Caller migrating from clone3 → clone forgot to strip
+        // CLONE_NEWTIME (0x80) — accepted by clone3 and unshare but
+        // rejected by clone(2) because the bit overlaps CSIGNAL.  Our
+        // validator catches this either via the CSIGNAL>SIGRTMAX check
+        // (0x80 = signal 128) or via the reserved-bit whitelist
+        // (CLONE_NEWTIME is not in CLONE_FLAGS_VALID for clone).  Both
+        // paths report EINVAL.
+        let flags = crate::linux_clone_args::CLONE_NEWCGROUP
+            | crate::linux_clone_args::CLONE_NEWTIME;
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            flags as i32,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone_zero_flags_passes_to_enosys() {
+        // The simplest possible call: clone(fn, stack, 0, arg).
+        // Equivalent to a fresh process with no shared state and no
+        // exit signal.  Should pass validation and reach ENOSYS.
+        crate::errno::set_errno(0);
+        let ret = clone(
+            clone_dummy_fn(),
+            clone_dummy_stack(),
+            0,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 }

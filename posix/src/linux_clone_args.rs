@@ -19,6 +19,12 @@ pub const CLONE_FILES: u64 = 0x0000_0400;
 pub const CLONE_SIGHAND: u64 = 0x0000_0800;
 /// Create pidfd for the child.
 pub const CLONE_PIDFD: u64 = 0x0000_1000;
+/// Trace the child if the parent is being traced (clone-only).
+pub const CLONE_PTRACE: u64 = 0x0000_2000;
+/// Parent blocks until child calls exec or _exit (clone-only).
+pub const CLONE_VFORK: u64 = 0x0000_4000;
+/// Same parent as the calling task (sibling rather than child).
+pub const CLONE_PARENT: u64 = 0x0000_8000;
 /// Same thread group (CLONE_THREAD implies CLONE_SIGHAND+CLONE_VM).
 pub const CLONE_THREAD: u64 = 0x0001_0000;
 /// New mount namespace.
@@ -31,6 +37,9 @@ pub const CLONE_SETTLS: u64 = 0x0008_0000;
 pub const CLONE_PARENT_SETTID: u64 = 0x0010_0000;
 /// Clear child TID and wake futex on exit.
 pub const CLONE_CHILD_CLEARTID: u64 = 0x0020_0000;
+/// Historical "detached" flag — ignored by Linux since 2.5.32 but
+/// still accepted in the flag mask for ABI compatibility.
+pub const CLONE_DETACHED: u64 = 0x0040_0000;
 /// Unused (was CLONE_DETACHED).
 pub const CLONE_UNTRACED: u64 = 0x0080_0000;
 /// Store child TID at child-provided address.
@@ -52,9 +61,18 @@ pub const CLONE_IO: u64 = 0x8000_0000;
 /// New time namespace.
 pub const CLONE_NEWTIME: u64 = 0x0000_0080;
 /// Place child in specific cgroup (clone3 only).
-pub const CLONE_INTO_CGROUP: u64 = 0x0000_0000_2000_0000_u64;
+///
+/// **Bit 33** in Linux's `<linux/sched.h>` — `0x2_0000_0000`.  Earlier
+/// revisions of this file mistakenly used `0x2000_0000` which is a
+/// 32-bit value colliding with `CLONE_NEWPID`; that has been corrected.
+pub const CLONE_INTO_CGROUP: u64 = 0x0000_0002_0000_0000_u64;
 /// Clear signal mask in child.
 pub const CLONE_CLEAR_SIGHAND: u64 = 0x0000_0001_0000_0000_u64;
+
+/// Low byte of `clone(2)` flags — the exit signal delivered to the
+/// parent when the child terminates.  Any value 0..=SIGRTMAX is
+/// accepted; the kernel masks `flags & CSIGNAL` to extract it.
+pub const CSIGNAL: u64 = 0x0000_00ff;
 
 // ---------------------------------------------------------------------------
 // clone3 struct size

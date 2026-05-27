@@ -515,6 +515,16 @@ Remaining net improvements (diminishing returns):
   `serial_test` dev-dep) or restructure getopt to take a context
   pointer so the tests don't share global state.
 
+- (2026-05-27) Flaky test: `posix::stdio::tests::test_alloc_file_pool_exhaustion`
+  intermittently fails during full `cargo test -p posix --lib` with
+  "pool should be exhausted" but passes cleanly in isolation.  Cause:
+  stdio's `FILE` pool is a process-wide static array; concurrent tests
+  that allocate and free FILE handles in parallel cause an
+  fclose-in-another-thread to free a slot just as this test is checking
+  pool fullness.  Same fix class as the getopt flake: either serialize
+  the stdio FILE-pool tests with `#[serial]` or make the FILE pool
+  per-process-context for tests.
+
 - (2026-05-26) Linux eventfd(): EFD_SEMAPHORE flag is unsupported.
   [DONE 2026-05-27] Kernel EventFd grew a `semaphore` field and a new
   `create_with_flags(initial, semaphore)` constructor; read(),

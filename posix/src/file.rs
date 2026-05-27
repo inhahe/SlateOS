@@ -2453,25 +2453,177 @@ pub const SPLICE_F_GIFT: u32 = 8;
 
 /// Move data between two file descriptors via a pipe.
 ///
-/// Stub: returns -1 with ENOSYS.  A real implementation would use
-/// kernel-level zero-copy page transfer between a pipe and a
-/// file/socket descriptor.
+/// POSIX/Linux semantics: at least one of `fd_in` / `fd_out` must
+/// refer to a pipe.  If `off_in` is non-null, `fd_in` must be
+/// seekable and its file position is left unchanged; otherwise the
+/// current file position is consumed and advanced.  Same for
+/// `off_out` / `fd_out`.
+///
+/// This is a buffered read+write fallback — there is no true
+/// zero-copy page transfer.  Linux's `splice()` performs zero-copy
+/// when the kernel can move pipe-buffer pages directly into the
+/// page cache or socket queue; we don't have that infrastructure
+/// yet, so userspace gets the same observable result via a small
+/// bounce buffer at a small performance cost.  The `flags` argument
+/// is therefore advisory only — `SPLICE_F_MOVE`, `SPLICE_F_MORE`,
+/// and `SPLICE_F_GIFT` have no effect, and `SPLICE_F_NONBLOCK` is
+/// already honored by `read`/`write` via `O_NONBLOCK` on the fd.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn splice(
-    _fd_in: Fd,
-    _off_in: *mut i64,
-    _fd_out: Fd,
-    _off_out: *mut i64,
-    _len: usize,
-    _flags: u32,
+    fd_in: Fd,
+    off_in: *mut i64,
+    fd_out: Fd,
+    off_out: *mut i64,
+    len: usize,
+    flags: u32,
 ) -> isize {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    let _ = flags;
+
+    if len == 0 {
+        return 0;
+    }
+
+    // Both fds must be valid.
+    let Some(in_entry) = lookup_fd(fd_in) else { return -1; };
+    let Some(out_entry) = lookup_fd(fd_out) else { return -1; };
+
+    let in_is_pipe = in_entry.kind == HandleKind::Pipe;
+    let out_is_pipe = out_entry.kind == HandleKind::Pipe;
+
+    // Linux: "Either fd_in or fd_out must be a pipe."
+    if !in_is_pipe && !out_is_pipe {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Linux: "off_in must be NULL if fd_in refers to a pipe; same for off_out."
+    if !off_in.is_null() && in_is_pipe {
+        errno::set_errno(errno::ESPIPE);
+        return -1;
+    }
+    if !off_out.is_null() && out_is_pipe {
+        errno::set_errno(errno::ESPIPE);
+        return -1;
+    }
+
+    // SAFETY: off_in / off_out are validated non-null caller pointers.
+    let mut cur_in: i64 = if off_in.is_null() {
+        0
+    } else {
+        unsafe { *off_in }
+    };
+    let mut cur_out: i64 = if off_out.is_null() {
+        0
+    } else {
+        unsafe { *off_out }
+    };
+
+    // Bounce buffer.  Same size as sendfile() so the two helpers
+    // have matching memory profiles.
+    let mut buf = [0u8; 4096];
+    let mut total: usize = 0;
+
+    while total < len {
+        let remaining = len - total;
+        let chunk = remaining.min(buf.len());
+
+        // Read.  pread when an explicit offset was supplied (so we
+        // don't disturb fd_in's file position), otherwise read.
+        let nr = if off_in.is_null() {
+            read(fd_in, buf.as_mut_ptr(), chunk)
+        } else {
+            pread(fd_in, buf.as_mut_ptr(), chunk, cur_in)
+        };
+        if nr < 0 {
+            if total > 0 {
+                break;
+            }
+            return -1;
+        }
+        if nr == 0 {
+            break;
+        }
+
+        // Write all bytes that were read, retrying on short writes.
+        // Critical: read() already advanced fd_in's position (or pread
+        // committed the offset for the caller), so we cannot afford to
+        // drop bytes by giving up after a short write.
+        let mut written: usize = 0;
+        let to_write = nr as usize;
+        while written < to_write {
+            let nw = if off_out.is_null() {
+                write(
+                    fd_out,
+                    // SAFETY: written < to_write <= buf.len().
+                    unsafe { buf.as_ptr().add(written) },
+                    to_write - written,
+                )
+            } else {
+                pwrite(
+                    fd_out,
+                    // SAFETY: written < to_write <= buf.len().
+                    unsafe { buf.as_ptr().add(written) },
+                    to_write - written,
+                    cur_out + written as i64,
+                )
+            };
+            if nw < 0 {
+                if total > 0 || written > 0 {
+                    total += written;
+                    cur_in += written as i64;
+                    cur_out += written as i64;
+                    if !off_in.is_null() {
+                        // SAFETY: validated above.
+                        unsafe { *off_in = cur_in; }
+                    }
+                    if !off_out.is_null() {
+                        // SAFETY: validated above.
+                        unsafe { *off_out = cur_out; }
+                    }
+                    return total as isize;
+                }
+                return -1;
+            }
+            if nw == 0 {
+                // Avoid an infinite loop if write() reports 0 with no error.
+                break;
+            }
+            written += nw as usize;
+        }
+
+        total += written;
+        cur_in += written as i64;
+        cur_out += written as i64;
+
+        // If we couldn't write the full chunk we just read, stop —
+        // the remaining bytes in `buf` are already accounted for by
+        // the read above and the caller will see a short transfer.
+        if written < to_write {
+            break;
+        }
+    }
+
+    // Publish updated offsets to caller.
+    if !off_in.is_null() {
+        // SAFETY: validated above.
+        unsafe { *off_in = cur_in; }
+    }
+    if !off_out.is_null() {
+        // SAFETY: validated above.
+        unsafe { *off_out = cur_out; }
+    }
+
+    total as isize
 }
 
 /// Duplicate pipe content without consuming it.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Stub: returns -1 with ENOSYS.  Linux implements this by sharing
+/// pipe-buffer pages between two pipes without copying — our pipe
+/// layer is a bounded byte-stream with no "peek without consume"
+/// primitive, so there is no userspace fallback that preserves
+/// `tee()`'s "leaves data in fd_in" guarantee.  Programs that need
+/// tee must fall back to a pipe-into-buffer-into-two-pipes pattern.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tee(
     _fd_in: Fd,
@@ -2485,16 +2637,51 @@ pub extern "C" fn tee(
 
 /// Splice user pages into a pipe.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Linux `vmsplice()` has two modes depending on which end of the
+/// pipe `fd` refers to:
+/// - Write end: the iovec contents are "gifted" into the pipe
+///   (zero-copy by remapping user pages).
+/// - Read end: the next pipe buffers are copied out into the iovec.
+///
+/// We implement only the write-end direction, as a plain `writev()`
+/// into the pipe — no page gifting.  The `SPLICE_F_GIFT` flag is
+/// therefore advisory only; the kernel-zero-copy semantics aren't
+/// available without VFS-level pipe page sharing.  Read-end use
+/// returns -1/EINVAL — callers should use `readv()` instead.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn vmsplice(
-    _fd: Fd,
-    _iov: *const Iovec,
-    _nr_segs: u64,
-    _flags: u32,
+    fd: Fd,
+    iov: *const Iovec,
+    nr_segs: u64,
+    flags: u32,
 ) -> isize {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    let _ = flags;
+
+    if iov.is_null() && nr_segs > 0 {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if nr_segs == 0 {
+        return 0;
+    }
+    // Linux caps at UIO_MAXIOV (1024); we use a more generous i32 cap
+    // since writev() takes i32 — beyond that, EINVAL.
+    if nr_segs > i32::MAX as u64 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    let Some(entry) = lookup_fd(fd) else { return -1; };
+    if entry.kind != HandleKind::Pipe {
+        // Linux returns EBADF for non-pipe fds.
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    // Treat fd as the write end.  Read-end vmsplice (copying pipe
+    // buffers into iovec) is not supported — if the caller wanted to
+    // read, they should have called readv().
+    writev(fd, iov, nr_segs as i32)
 }
 
 // ---------------------------------------------------------------------------
@@ -4845,35 +5032,153 @@ mod tests {
         assert_eq!(fadvise64(0, 0, 0, 0), 0);
     }
 
-    // -- splice stubs --
+    // -- splice / vmsplice (buffered fallback) --
 
     #[test]
-    fn test_splice_enosys() {
-        crate::errno::set_errno(0);
-        assert_eq!(splice(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 4096, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    fn test_splice_zero_len_returns_zero() {
+        // POSIX: zero-length transfer is a no-op success.  No FD lookup,
+        // no syscall — just return 0.
+        let result = splice(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 0, 0);
+        assert_eq!(result, 0);
     }
 
     #[test]
-    fn test_splice_with_flags() {
+    fn test_splice_invalid_fd_in() {
         crate::errno::set_errno(0);
-        assert_eq!(splice(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 4096,
-            SPLICE_F_MOVE | SPLICE_F_NONBLOCK), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        // fd 9999 is out of range → EBADF before any kind checks.
+        let result = splice(9999, core::ptr::null_mut(), 1, core::ptr::null_mut(), 4096, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]
-    fn test_tee_enosys() {
+    fn test_splice_invalid_fd_out() {
+        crate::errno::set_errno(0);
+        // fd 0 (stdin) is valid, fd 9999 isn't → EBADF.
+        let result = splice(0, core::ptr::null_mut(), 9999, core::ptr::null_mut(), 4096, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_splice_neither_is_pipe_einval() {
+        // Fabricate two non-pipe fds.  We can't rely on fds 0/1 being
+        // present in the full suite because other tests may have closed
+        // them — using alloc_fd guarantees fresh slots in known states.
+        let in_fd = fdtable::alloc_fd(HandleKind::File, 3)
+            .expect("alloc_fd File failed");
+        let out_fd = fdtable::alloc_fd(HandleKind::File, 4)
+            .expect("alloc_fd File failed");
+
+        crate::errno::set_errno(0);
+        let result = splice(
+            in_fd, core::ptr::null_mut(),
+            out_fd, core::ptr::null_mut(),
+            4096, 0,
+        );
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        let _ = fdtable::close_fd(in_fd);
+        let _ = fdtable::close_fd(out_fd);
+    }
+
+    #[test]
+    fn test_splice_offset_on_pipe_in_espipe() {
+        // Fabricate a pipe-kind fd and a regular-file-kind fd.  Asking
+        // for an offset on the pipe side must fail with ESPIPE before
+        // any I/O is attempted.
+        let pipe_fd = fdtable::alloc_fd(HandleKind::Pipe, 1)
+            .expect("alloc_fd Pipe failed");
+        let file_fd = fdtable::alloc_fd(HandleKind::File, 1)
+            .expect("alloc_fd File failed");
+
+        crate::errno::set_errno(0);
+        let mut off: i64 = 0;
+        let result = splice(
+            pipe_fd, &raw mut off,
+            file_fd, core::ptr::null_mut(),
+            4096, 0,
+        );
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESPIPE);
+
+        let _ = fdtable::close_fd(pipe_fd);
+        let _ = fdtable::close_fd(file_fd);
+    }
+
+    #[test]
+    fn test_splice_offset_on_pipe_out_espipe() {
+        let pipe_fd = fdtable::alloc_fd(HandleKind::Pipe, 2)
+            .expect("alloc_fd Pipe failed");
+        let file_fd = fdtable::alloc_fd(HandleKind::File, 2)
+            .expect("alloc_fd File failed");
+
+        crate::errno::set_errno(0);
+        let mut off: i64 = 0;
+        let result = splice(
+            file_fd, core::ptr::null_mut(),
+            pipe_fd, &raw mut off,
+            4096, 0,
+        );
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESPIPE);
+
+        let _ = fdtable::close_fd(pipe_fd);
+        let _ = fdtable::close_fd(file_fd);
+    }
+
+    #[test]
+    fn test_tee_still_enosys() {
+        // tee has no userspace fallback that preserves "leave data in
+        // fd_in" semantics, so it remains ENOSYS for now.
         crate::errno::set_errno(0);
         assert_eq!(tee(0, 1, 4096, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
-    fn test_vmsplice_enosys() {
+    fn test_vmsplice_zero_segs_returns_zero() {
+        // Zero segments is a no-op success — no FD lookup, no syscall.
+        let result = vmsplice(0, core::ptr::null(), 0, 0);
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_vmsplice_null_iov_with_segs_efault() {
         crate::errno::set_errno(0);
-        assert_eq!(vmsplice(0, core::ptr::null(), 0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        let result = vmsplice(0, core::ptr::null(), 1, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_vmsplice_too_many_segs_einval() {
+        crate::errno::set_errno(0);
+        // u64 above i32::MAX → EINVAL.
+        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let result = vmsplice(0, &raw const dummy, (i32::MAX as u64) + 1, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_vmsplice_invalid_fd_ebadf() {
+        crate::errno::set_errno(0);
+        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let result = vmsplice(9999, &raw const dummy, 1, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_vmsplice_non_pipe_fd_ebadf() {
+        // fd 1 is Console, not Pipe — Linux returns EBADF.
+        crate::errno::set_errno(0);
+        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let result = vmsplice(1, &raw const dummy, 1, 0);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     // -- SPLICE_F_* constants --

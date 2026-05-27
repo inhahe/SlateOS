@@ -21,6 +21,24 @@
 //! on keyboard input using [`crate::keyboard::read_char`] (which HLTs
 //! between interrupts).  This keeps the idle loop power-efficient while
 //! still processing input promptly when keys arrive.
+//!
+//! ## Lint policy
+//!
+//! The shell is an interactive diagnostic tool — the operator is at the
+//! keyboard.  A panic here halts the shell loop but doesn't compromise
+//! the kernel proper.  Defensive `?`/`.get()`/`checked_*` boilerplate
+//! across thousands of command-handler sites would make the dispatch
+//! code unreadable for no defence-in-depth benefit (untrusted input
+//! to the shell already requires kernel access).  We therefore allow
+//! the panicking-style lints at module scope.
+
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+)]
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};

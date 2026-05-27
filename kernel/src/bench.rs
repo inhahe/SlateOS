@@ -29,6 +29,23 @@
 //! - Interrupts are not disabled during benchmarks (we measure
 //!   realistic conditions).  For tight micro-benchmarks, take the
 //!   minimum as the most representative value.
+//!
+//! ## Lint policy
+//!
+//! Benchmarks run at boot under controlled conditions, not on attacker
+//! input.  Panicking here means the benchmark itself is broken, which
+//! is fine to surface loudly.  Defensive `?`/`.get()`/`checked_*`
+//! boilerplate would obscure the measurement code without adding any
+//! defence-in-depth value.  Allow the panicking-style lints at module
+//! scope.
+
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+)]
 
 use alloc::string::String;
 use alloc::vec::Vec;

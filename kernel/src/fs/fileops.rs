@@ -843,7 +843,7 @@ pub fn self_test() -> KernelResult<()> {
         let renamed = auto_rename("/tmp/file.txt");
         // Should produce /tmp/file (2).txt or similar (depends on VFS state).
         assert!(renamed.contains("file"));
-        assert!(renamed.contains("("));
+        assert!(renamed.contains('('));
         serial_println!("[fileops] test 1 passed: auto_rename");
     }
 

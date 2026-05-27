@@ -308,7 +308,7 @@ pub fn send_email(
     let smtp_port = if port == 0 { SMTP_PORT } else { port };
 
     // Connect.
-    let handle = super::tcp::connect(crate::netns::ROOT_NS, server.into(), smtp_port)?;
+    let handle = super::tcp::connect(crate::netns::ROOT_NS, server, smtp_port)?;
 
     for _ in 0..CONNECT_TIMEOUT_POLLS {
         super::poll();

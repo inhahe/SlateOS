@@ -86,7 +86,7 @@ const DEV_FILES: &[&str] = &[
 // ---------------------------------------------------------------------------
 
 impl FileSystem for DevFs {
-    fn fs_type(&self) -> &str {
+    fn fs_type(&self) -> &'static str {
         "devfs"
     }
 

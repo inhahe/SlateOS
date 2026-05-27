@@ -292,7 +292,7 @@ fn strip_root(path: &str) -> &str {
 // ---------------------------------------------------------------------------
 
 impl FileSystem for SysFs {
-    fn fs_type(&self) -> &str {
+    fn fs_type(&self) -> &'static str {
         "sysfs"
     }
 

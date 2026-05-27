@@ -135,7 +135,7 @@ pub fn parse_reply(data: &[u8]) -> Option<FtpReply> {
     };
 
     Some(FtpReply {
-        code: code.into(),
+        code: code,
         message,
     })
 }
@@ -188,7 +188,7 @@ struct FtpSession {
 fn ftp_connect(host: super::interface::IpAddr) -> KernelResult<(FtpSession, FtpReply)> {
     CONNECTIONS.fetch_add(1, Ordering::Relaxed);
 
-    let handle = super::tcp::connect(crate::netns::ROOT_NS, host.into(), FTP_PORT)?;
+    let handle = super::tcp::connect(crate::netns::ROOT_NS, host, FTP_PORT)?;
 
     // Wait for connection and welcome banner.
     for _ in 0..CONNECT_TIMEOUT_POLLS {

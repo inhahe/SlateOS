@@ -236,11 +236,11 @@ pub fn sys_irq_register(args: &SyscallArgs) -> SyscallResult {
     // First try per-IRQ check (resource_id = IRQ number), fall back
     // to type-level check (any DeviceIrq cap with WRITE grants access
     // to all IRQs — for drivers with broad hardware access).
-    if let Err(_) = require_cap(
+    if require_cap(
         crate::cap::ResourceType::DeviceIrq,
         irq,
         crate::cap::Rights::WRITE,
-    ) {
+    ).is_err() {
         // Per-IRQ check failed — try type-level (any DeviceIrq cap).
         if let Err(e) = require_cap_type(
             crate::cap::ResourceType::DeviceIrq,
@@ -349,11 +349,11 @@ pub fn sys_port_read(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Capability check: per-port first, then type-level fallback.
-    if let Err(_) = require_cap(
+    if require_cap(
         crate::cap::ResourceType::PortIo,
         port,
         crate::cap::Rights::READ,
-    ) {
+    ).is_err() {
         if let Err(e) = require_cap_type(
             crate::cap::ResourceType::PortIo,
             crate::cap::Rights::READ,
@@ -395,11 +395,11 @@ pub fn sys_port_write(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Capability check: per-port first, then type-level fallback.
-    if let Err(_) = require_cap(
+    if require_cap(
         crate::cap::ResourceType::PortIo,
         port,
         crate::cap::Rights::WRITE,
-    ) {
+    ).is_err() {
         if let Err(e) = require_cap_type(
             crate::cap::ResourceType::PortIo,
             crate::cap::Rights::WRITE,

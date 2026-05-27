@@ -4501,16 +4501,15 @@ fn glob_match_inner(name: &[u8], pattern: &[u8], ci: bool) -> bool {
                     return false;
                 }
             }
-        } else {
-            // Pattern exhausted.  Backtrack if we had a `*`.
-            if let Some(sp) = star_pi {
-                star_ni += 1;
-                ni = star_ni;
-                pi = sp + 1;
-                continue;
-            }
-            return false;
         }
+        // Pattern exhausted.  Backtrack if we had a `*`.
+        if let Some(sp) = star_pi {
+            star_ni += 1;
+            ni = star_ni;
+            pi = sp + 1;
+            continue;
+        }
+        return false;
     }
 
     // Name exhausted.  Skip any remaining `*`s in pattern.

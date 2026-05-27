@@ -643,7 +643,7 @@ pub fn self_test() -> KernelResult<()> {
     {
         assert!(format_duration(500) == "500ns", "500ns");
         assert!(format_duration(1_500_000).contains("ms"), "1.5ms");
-        assert!(format_duration(2_000_000_000).contains("s"), "2s");
+        assert!(format_duration(2_000_000_000).contains('s'), "2s");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[iperf]   test 3 (duration formatting) PASSED");

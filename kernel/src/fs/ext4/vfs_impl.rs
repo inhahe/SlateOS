@@ -43,7 +43,7 @@ impl Ext4Fs {
 }
 
 impl FileSystem for Ext4Fs {
-    fn fs_type(&self) -> &str {
+    fn fs_type(&self) -> &'static str {
         "ext4"
     }
 
@@ -669,7 +669,7 @@ impl FileSystem for Ext4Fs {
                 Ok(_first_block) => {
                     // Update block count (not file size — that's the point
                     // of fallocate).
-                    let total_sectors = u64::from(needed_blocks)
+                    let total_sectors = needed_blocks
                         .saturating_mul(u64::from(self.driver.superblock().block_size / 512));
                     set_inode_blocks_48(&mut new_inode, total_sectors);
 

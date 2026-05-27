@@ -493,7 +493,7 @@ fn execute_request(req: Request, redirect_count: u8) -> KernelResult<Response> {
     );
 
     // Connect to the remote server.
-    let handle = super::tcp::connect(crate::netns::ROOT_NS, ip.into(), req.url.port)?;
+    let handle = super::tcp::connect(crate::netns::ROOT_NS, ip, req.url.port)?;
 
     // Build the raw HTTP request bytes.
     let raw_request = req.build();

@@ -1046,7 +1046,7 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
             0x58, 0x65,
         ];
         assert!(okm.len() == 42, "HKDF output length");
-        assert!(&okm[..] == &expected_okm[..], "HKDF expand output");
+        assert!(okm[..] == expected_okm[..], "HKDF expand output");
         passed = passed.saturating_add(1);
         crate::serial_println!("[crypto]   HKDF-SHA256 (RFC 5869 A.1): PASSED");
     }
@@ -1073,11 +1073,11 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
             0x6e, 0x2e, 0x35, 0x9a, 0x25, 0x68, 0xf9, 0x80,
             0x41, 0xba, 0x07, 0x28, 0xdd, 0x0d, 0x69, 0x81,
         ];
-        assert!(&data[..16] == &expected_start[..], "ChaCha20 ciphertext start");
+        assert!(data[..16] == expected_start[..], "ChaCha20 ciphertext start");
 
         // Decrypt and verify round-trip.
         chacha20_xor(&key, &nonce, 1, &mut data);
-        assert!(&data[..] == &plaintext[..], "ChaCha20 round-trip");
+        assert!(data[..] == plaintext[..], "ChaCha20 round-trip");
         passed = passed.saturating_add(1);
         crate::serial_println!("[crypto]   ChaCha20 (RFC 8439 §2.4.2): PASSED");
     }
@@ -1131,7 +1131,7 @@ pub fn self_test_tls_crypto() -> crate::error::KernelResult<()> {
         // Decrypt and verify.
         let ok = chacha20_poly1305_decrypt(&key, &nonce, &aad, &mut ct, &tag);
         assert!(ok, "AEAD decrypt auth");
-        assert!(&ct[..] == &plaintext[..], "AEAD round-trip");
+        assert!(ct[..] == plaintext[..], "AEAD round-trip");
 
         // Tamper test: flip a byte and verify decryption fails.
         let mut tampered = plaintext.to_vec();

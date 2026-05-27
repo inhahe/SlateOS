@@ -1108,7 +1108,7 @@ pub fn recv_timeout(handle: ChannelHandle, timeout_ns: u64) -> KernelResult<Mess
         }
     }
 
-    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, u64::from(task_id));
+    let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task_id);
 
     // Block loop: try to receive, block if empty, re-check on wake.
     loop {

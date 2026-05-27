@@ -1122,9 +1122,8 @@ fn serve_file(vfs_path: &str, method: &str, if_none_match: &Option<String>, rang
                     if let Some((start, end)) = parse_range(range_header, data.len()) {
                         PARTIAL_COUNT.fetch_add(1, Ordering::Relaxed);
                         return partial_content_response(content_type, &data, start, end, &etag);
-                    } else {
-                        return range_not_satisfiable(data.len());
                     }
+                    return range_not_satisfiable(data.len());
                 }
             }
 

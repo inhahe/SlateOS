@@ -565,7 +565,7 @@ pub fn self_test() -> KernelResult<()> {
         }];
         let formatted = format_udp_sockets(&entries);
         assert!(formatted.contains("0.0.0.0:53"), "udp addr");
-        assert!(formatted.contains("5"), "rx queue v4");
+        assert!(formatted.contains('5'), "rx queue v4");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[netstat]   test 6 (UDP formatting) PASSED");

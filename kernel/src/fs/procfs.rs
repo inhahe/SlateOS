@@ -10465,7 +10465,7 @@ fn classify_path(rel: &str) -> ProcPath<'_> {
 // ---------------------------------------------------------------------------
 
 impl FileSystem for ProcFs {
-    fn fs_type(&self) -> &str {
+    fn fs_type(&self) -> &'static str {
         "procfs"
     }
 
@@ -10723,7 +10723,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[procfs]   stat /nonexistent: NotFound OK");
 
     // Test read on directory.
-    if let Ok(_) = fs.read_file("/") {
+    if fs.read_file("/").is_ok() {
         serial_println!("[procfs]   FAIL: read_file / should fail (IsADirectory)");
         return Err(KernelError::InternalError);
     }

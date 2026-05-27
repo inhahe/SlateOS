@@ -537,7 +537,7 @@ impl MemFs {
 }
 
 impl FileSystem for MemFs {
-    fn fs_type(&self) -> &str {
+    fn fs_type(&self) -> &'static str {
         "memfs"
     }
 

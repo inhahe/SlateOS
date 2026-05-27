@@ -196,10 +196,9 @@ impl CaptureFilter {
                 return self.matches_ipv4(data);
             } else if etype == ETHERTYPE_IPV6 {
                 return self.matches_ipv6(data);
-            } else {
-                // Non-IP packet can't match protocol/port filters.
-                return self.ip_proto == 0 && self.port == 0;
             }
+            // Non-IP packet can't match protocol/port filters.
+            return self.ip_proto == 0 && self.port == 0;
         }
 
         true

@@ -290,10 +290,9 @@ pub fn check_access(
         if let Some(entry) = acl.entries.iter().find(|e| e.tag == AclTag::UserObj) {
             if request.is_satisfied_by(entry.perm) {
                 return Ok(());
-            } else {
-                inner.denials = inner.denials.saturating_add(1);
-                return Err(KernelError::PermissionDenied);
             }
+            inner.denials = inner.denials.saturating_add(1);
+            return Err(KernelError::PermissionDenied);
         }
     }
 
@@ -302,10 +301,9 @@ pub fn check_access(
         let effective = entry.perm.intersect(mask);
         if request.is_satisfied_by(effective) {
             return Ok(());
-        } else {
-            inner.denials = inner.denials.saturating_add(1);
-            return Err(KernelError::PermissionDenied);
         }
+        inner.denials = inner.denials.saturating_add(1);
+        return Err(KernelError::PermissionDenied);
     }
 
     // Step 3: Owning group check.

@@ -755,7 +755,7 @@ pub fn self_test() -> KernelResult<()> {
         };
 
         let formatted = format_trace(&result);
-        assert!(formatted.contains("*"), "timeout star");
+        assert!(formatted.contains('*'), "timeout star");
         assert!(formatted.contains("NOT reached"), "not reached");
 
         passed = passed.saturating_add(1);
@@ -933,7 +933,7 @@ pub fn self_test() -> KernelResult<()> {
         };
 
         let formatted = format_trace6(&result);
-        assert!(formatted.contains("*"), "v6 timeout star");
+        assert!(formatted.contains('*'), "v6 timeout star");
         assert!(formatted.contains("NOT reached"), "v6 not reached");
 
         passed = passed.saturating_add(1);

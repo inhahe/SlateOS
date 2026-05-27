@@ -633,7 +633,7 @@ fn test_glob_files() {
 fn test_unique_name() {
     // Without a file existing, find_unique_name should still work.
     let name = find_unique_name("/tmp/nonexistent.txt");
-    assert!(name.contains("(2)") || name.contains("_"), "should generate unique name");
+    assert!(name.contains("(2)") || name.contains('_'), "should generate unique name");
 
     serial_println!("[batch]   unique name: ok");
 }

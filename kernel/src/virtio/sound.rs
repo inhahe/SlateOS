@@ -548,7 +548,7 @@ fn control_stream_cmd(dev: &mut VirtioSndDevice, code: u32, stream_id: u32) -> K
     // Poll for completion.
     let mut attempts = 0u32;
     loop {
-        if let Some(_) = dev.controlq.poll_used() {
+        if dev.controlq.poll_used().is_some() {
             break;
         }
         attempts = attempts.wrapping_add(1);
@@ -625,7 +625,7 @@ fn set_params(
     // Poll.
     let mut attempts = 0u32;
     loop {
-        if let Some(_) = dev.controlq.poll_used() {
+        if dev.controlq.poll_used().is_some() {
             break;
         }
         attempts = attempts.wrapping_add(1);

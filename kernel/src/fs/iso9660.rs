@@ -346,7 +346,7 @@ impl Iso9660Fs {
 }
 
 impl FileSystem for Iso9660Fs {
-    fn fs_type(&self) -> &str {
+    fn fs_type(&self) -> &'static str {
         "iso9660"
     }
 

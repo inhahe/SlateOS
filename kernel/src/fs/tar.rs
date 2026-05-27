@@ -518,7 +518,7 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::CorruptedData);
         }
         let data = entry_data(&archive, &parsed[1])?;
-        if data != &[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33] {
+        if data != [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33] {
             return Err(KernelError::CorruptedData);
         }
         serial_println!("[tar]   multi-entry round-trip OK (dir + file + symlink)");

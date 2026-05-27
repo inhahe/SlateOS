@@ -599,7 +599,7 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::CorruptedData);
         }
         let data = entry_data(&archive, &entries[1])?;
-        if data != &[0xDE, 0xAD, 0xBE, 0xEF] {
+        if data != [0xDE, 0xAD, 0xBE, 0xEF] {
             serial_println!("[rar]   ERROR: extracted data mismatch");
             return Err(KernelError::CorruptedData);
         }

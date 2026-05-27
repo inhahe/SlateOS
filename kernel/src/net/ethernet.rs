@@ -162,7 +162,7 @@ fn test_parse_valid_frame() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
-    if frame.payload != &[1, 2, 3, 4] {
+    if frame.payload != [1, 2, 3, 4] {
         crate::serial_println!("[ethernet]   FAIL: payload");
         return Err(KernelError::InternalError);
     }
@@ -227,7 +227,7 @@ fn test_build_frame_roundtrip() -> KernelResult<()> {
         crate::serial_println!("[ethernet]   FAIL: roundtrip ethertype");
         return Err(KernelError::InternalError);
     }
-    if parsed.payload != &payload {
+    if parsed.payload != payload {
         crate::serial_println!("[ethernet]   FAIL: roundtrip payload");
         return Err(KernelError::InternalError);
     }

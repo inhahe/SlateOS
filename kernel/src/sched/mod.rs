@@ -1227,10 +1227,9 @@ pub fn try_wake(task_id: TaskId) -> bool {
                 drop(state);
                 signal_cpu(target_cpu);
                 return true;
-            } else {
-                // Same pending-wake logic as wake() — see comment there.
-                task.pending_wake = true;
             }
+            // Same pending-wake logic as wake() — see comment there.
+            task.pending_wake = true;
         }
     }
     false
@@ -3120,7 +3119,7 @@ pub fn sleep_ns(duration_ns: u64) {
         }
     }
 
-    let _handle = crate::hrtimer::schedule_ns(duration_ns, wake_callback, u64::from(task_id));
+    let _handle = crate::hrtimer::schedule_ns(duration_ns, wake_callback, task_id);
 
     // Block until the timer fires and wakes us.
     block_current();

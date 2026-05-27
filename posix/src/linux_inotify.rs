@@ -81,9 +81,13 @@ mod tests {
     }
 
     #[test]
-    fn test_inotify_init_stub() {
+    fn test_inotify_init_reexport() {
+        // Functional now: returns an fd or EMFILE if the static
+        // instance table is exhausted by concurrent tests.
         let fd = inotify_init();
-        assert_eq!(fd, -1);
+        if fd >= 0 {
+            crate::file::close(fd);
+        }
     }
 
     #[test]

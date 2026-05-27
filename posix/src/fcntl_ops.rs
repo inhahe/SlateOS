@@ -427,10 +427,12 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         | fdtable::HandleKind::TcpListener
         | fdtable::HandleKind::UdpSocket
         | fdtable::HandleKind::Eventfd => entry.handle,
-        fdtable::HandleKind::Epoll | fdtable::HandleKind::Timerfd => {
-            // F_DUPFD on an epoll/timerfd fd shares the instance.  No
-            // addref needed: close() uses is_handle_referenced() to
-            // skip instance teardown while another fd still references it.
+        fdtable::HandleKind::Epoll | fdtable::HandleKind::Timerfd
+        | fdtable::HandleKind::Inotify => {
+            // F_DUPFD on an epoll/timerfd/inotify fd shares the
+            // instance.  No addref needed: close() uses
+            // is_handle_referenced() to skip instance teardown while
+            // another fd still references it.
             entry.handle
         }
     };

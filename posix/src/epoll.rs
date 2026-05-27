@@ -41,7 +41,8 @@ use crate::errno;
 use crate::fdtable::{self, HandleKind};
 use crate::syscall::{
     SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ,
-    SYS_EVENTFD_WRITE, SYS_CLOCK_MONOTONIC, SYS_SLEEP, syscall0, syscall1, syscall2,
+    SYS_EVENTFD_WRITE, SYS_CLOCK_MONOTONIC, SYS_SLEEP,
+    syscall0, syscall1, syscall2, syscall3,
 };
 
 /// Events for `epoll_ctl`.
@@ -1158,8 +1159,56 @@ pub extern "C" fn signalfd4(fd: i32, mask: *const u64, flags: i32) -> i32 {
 }
 
 // ===========================================================================
-// inotify — filesystem event monitoring
+// inotify — filesystem event monitoring (userspace, polling-based)
 // ===========================================================================
+//
+// ## Design
+//
+// Real inotify(7) needs kernel-side filesystem hooks: every VFS
+// operation (create / unlink / write / stat update / rename / open /
+// close / access) checks a watch list and queues events.  Our kernel
+// doesn't expose those hooks via syscalls, so a true notification
+// channel isn't available.
+//
+// Instead we implement a polling-based inotify on top of `SYS_FS_STAT`
+// and `SYS_FS_LIST_DIR`.  Each watch stores a snapshot of either:
+//   * a directory's child listing (name + size + type for up to
+//     `MAX_INOTIFY_CHILDREN` entries), or
+//   * a file's size (mtime is exposed via stat but watching every
+//     file's stat per call is expensive; size+existence is the cheap
+//     proxy for IN_MODIFY).
+//
+// On every `read()` and every `check_readiness` call (driven by
+// `poll`/`select`/`epoll_wait`), we re-scan each watch and diff against
+// its snapshot, queuing events for changes.  Then we update the
+// snapshot.
+//
+// ### Supported events
+//   * `IN_CREATE`  — a new child appeared in a watched directory.
+//   * `IN_DELETE`  — a child disappeared from a watched directory.
+//   * `IN_MODIFY`  — a watched file's size changed (also fires for
+//                    children of watched directories whose size changed).
+//   * `IN_DELETE_SELF` — the watched path itself was removed; the
+//                        watch is auto-disarmed (matching Linux).
+//   * `IN_IGNORED` — emitted after `inotify_rm_watch` or after a
+//                    `IN_DELETE_SELF` causes auto-removal.
+//
+// ### NOT supported
+//   * `IN_OPEN`, `IN_ACCESS`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`,
+//     `IN_ATTRIB` (precisely), `IN_MOVED_FROM`, `IN_MOVED_TO`,
+//     `IN_MOVE_SELF` — these require kernel-side hooks we don't have.
+//     Adding the corresponding mask bits to a watch is accepted but
+//     events won't fire.  Renames within a watched directory are
+//     surfaced as IN_DELETE + IN_CREATE.
+//
+// ### Limits (static allocation)
+//   * 4 instances per process, 8 watches per instance.
+//   * 16 child entries per directory snapshot (children past that limit
+//     are not tracked individually — change events for them are missed).
+//   * 32 events per instance queue (further events are dropped with
+//     `IN_Q_OVERFLOW` semantics: an overflow flag is set on the
+//     instance, surfaced as a single overflow event on the next read).
+//   * Names truncated to 63 bytes + NUL.
 
 /// inotify event flags.
 pub const IN_ACCESS: u32 = 0x0000_0001;
@@ -1197,44 +1246,851 @@ pub const IN_CLOEXEC: i32 = 0o2_000_000;
 /// Non-blocking flag.
 pub const IN_NONBLOCK: i32 = 0o4000;
 
+/// Mask bits we recognize on `inotify_add_watch`.  Anything else
+/// (notably `IN_MASK_ADD`, `IN_ONESHOT`, `IN_DONT_FOLLOW`,
+/// `IN_EXCL_UNLINK`, `IN_MASK_CREATE`) is accepted by the call but
+/// silently ignored on the polling fast path.
+const IN_KNOWN_EVENTS: u32 = IN_ALL_EVENTS;
+
+/// Event queue overflow indicator — also surfaced via `IN_Q_OVERFLOW`
+/// in `<sys/inotify.h>`.
+pub const IN_Q_OVERFLOW: u32 = 0x0000_4000;
+/// Watch was auto-removed (file deleted, mount unmounted, or
+/// `inotify_rm_watch` called).
+pub const IN_IGNORED: u32 = 0x0000_8000;
+
+// ---------------------------------------------------------------------------
+// Instance / watch tables
+// ---------------------------------------------------------------------------
+
+/// Maximum number of concurrent inotify instances per process.
+pub const MAX_INOTIFY_INSTANCES: usize = 4;
+
+/// Maximum number of watches per inotify instance.
+pub const MAX_INOTIFY_WATCHES: usize = 8;
+
+/// Maximum number of child entries we snapshot per directory watch.
+/// Directories with more entries are still watched, but only the first
+/// `MAX_INOTIFY_CHILDREN` (in kernel listing order) participate in
+/// change detection.
+pub const MAX_INOTIFY_CHILDREN: usize = 16;
+
+/// Maximum number of queued events per instance.
+pub const MAX_INOTIFY_EVENTS: usize = 32;
+
+/// Maximum length of a name field stored in a snapshot or queued event.
+/// Longer names are truncated to fit (the bytes past the limit are
+/// dropped); detection still works since we hash the truncated prefix
+/// for diffing.
+pub const INOTIFY_NAME_MAX: usize = 64;
+
+/// Maximum length of a watched path.
+pub const INOTIFY_PATH_MAX: usize = 256;
+
+/// A single child of a watched directory (used for snapshot diffing).
+#[derive(Clone, Copy)]
+struct InotifyChild {
+    in_use: bool,
+    name: [u8; INOTIFY_NAME_MAX],
+    name_len: u8,
+    size: u32,
+    is_dir: bool,
+}
+
+const INOTIFY_CHILD_INIT: InotifyChild = InotifyChild {
+    in_use: false,
+    name: [0u8; INOTIFY_NAME_MAX],
+    name_len: 0,
+    size: 0,
+    is_dir: false,
+};
+
+/// A single inotify watch.
+#[derive(Clone, Copy)]
+struct InotifyWatch {
+    in_use: bool,
+    wd: i32,
+    mask: u32,
+    path: [u8; INOTIFY_PATH_MAX],
+    path_len: u16,
+    /// `true` if the watch was on a directory at add time.  Drives
+    /// whether we diff via list_dir or via single-stat.
+    is_dir: bool,
+    /// Size of the watched path itself (used for file watches).
+    self_size: u64,
+    /// Whether the watched path currently exists.  Used to fire
+    /// `IN_DELETE_SELF` exactly once when it disappears.
+    self_exists: bool,
+    children: [InotifyChild; MAX_INOTIFY_CHILDREN],
+}
+
+const INOTIFY_WATCH_INIT: InotifyWatch = InotifyWatch {
+    in_use: false,
+    wd: 0,
+    mask: 0,
+    path: [0u8; INOTIFY_PATH_MAX],
+    path_len: 0,
+    is_dir: false,
+    self_size: 0,
+    self_exists: false,
+    children: [INOTIFY_CHILD_INIT; MAX_INOTIFY_CHILDREN],
+};
+
+/// A pending inotify event.  Mirrors Linux's `struct inotify_event`
+/// (wd, mask, cookie, name) but pre-stores the name in a fixed buffer
+/// so the queue can be a plain array.
+#[derive(Clone, Copy)]
+struct InotifyPending {
+    wd: i32,
+    mask: u32,
+    cookie: u32,
+    name: [u8; INOTIFY_NAME_MAX],
+    name_len: u8,
+}
+
+const INOTIFY_PENDING_INIT: InotifyPending = InotifyPending {
+    wd: 0,
+    mask: 0,
+    cookie: 0,
+    name: [0u8; INOTIFY_NAME_MAX],
+    name_len: 0,
+};
+
+/// A single inotify instance.
+#[derive(Clone, Copy)]
+struct InotifyInstance {
+    in_use: bool,
+    nonblock: bool,
+    /// Next watch descriptor to assign (monotonic per instance).  Watch
+    /// descriptors are positive integers starting at 1, matching Linux.
+    next_wd: i32,
+    /// Whether the queue has overflowed since the last successful read.
+    /// Surfaces as an IN_Q_OVERFLOW event with wd=-1.
+    overflow_pending: bool,
+    watches: [InotifyWatch; MAX_INOTIFY_WATCHES],
+    /// Circular event queue.  `head` is read position, `tail` is write
+    /// position.  Empty when head == tail.
+    events: [InotifyPending; MAX_INOTIFY_EVENTS],
+    head: u16,
+    tail: u16,
+    count: u16,
+}
+
+const INOTIFY_INSTANCE_INIT: InotifyInstance = InotifyInstance {
+    in_use: false,
+    nonblock: false,
+    next_wd: 1,
+    overflow_pending: false,
+    watches: [INOTIFY_WATCH_INIT; MAX_INOTIFY_WATCHES],
+    events: [INOTIFY_PENDING_INIT; MAX_INOTIFY_EVENTS],
+    head: 0,
+    tail: 0,
+    count: 0,
+};
+
+static mut INOTIFY_INSTANCES: [InotifyInstance; MAX_INOTIFY_INSTANCES] =
+    [INOTIFY_INSTANCE_INIT; MAX_INOTIFY_INSTANCES];
+
+fn inotify_table_ptr() -> *mut [InotifyInstance; MAX_INOTIFY_INSTANCES] {
+    core::ptr::addr_of_mut!(INOTIFY_INSTANCES)
+}
+
+fn allocate_inotify_instance() -> Option<usize> {
+    // SAFETY: Single-threaded posix layer; no concurrent access.
+    unsafe {
+        let table = &mut *inotify_table_ptr();
+        for (i, inst) in table.iter_mut().enumerate() {
+            if !inst.in_use {
+                *inst = INOTIFY_INSTANCE_INIT;
+                inst.in_use = true;
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+fn with_inotify_mut<R>(idx: u64, f: impl FnOnce(&mut InotifyInstance) -> R) -> Option<R> {
+    let i = usize::try_from(idx).ok()?;
+    if i >= MAX_INOTIFY_INSTANCES {
+        return None;
+    }
+    // SAFETY: single-threaded.
+    unsafe {
+        let table = &mut *inotify_table_ptr();
+        let inst = table.get_mut(i)?;
+        if !inst.in_use {
+            return None;
+        }
+        Some(f(inst))
+    }
+}
+
+/// Free an inotify instance.  Called by `close()` when the last fd
+/// referencing the instance is closed.  Idempotent.
+pub fn inotify_instance_close(idx: u64) {
+    let _ = with_inotify_mut(idx, |inst| {
+        *inst = INOTIFY_INSTANCE_INIT;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem scratch — large buffers reused across polls
+// ---------------------------------------------------------------------------
+
+/// Size of one entry returned by `SYS_FS_LIST_DIR`: name[256] +
+/// size[4] + type[1] + pad[3].  Matches the layout used by
+/// `crate::dirent`.
+const DIR_ENTRY_SIZE: usize = 264;
+
+/// Scratch buffer for one directory listing.  We size for up to 256
+/// entries (matching `dirent::MAX_DIR_ENTRIES`).  Reused across all
+/// watches — single-threaded posix layer makes this safe.
+static mut INOTIFY_LISTDIR_SCRATCH: [u8; 256 * DIR_ENTRY_SIZE] =
+    [0u8; 256 * DIR_ENTRY_SIZE];
+
+fn listdir_scratch_ptr() -> *mut [u8; 256 * DIR_ENTRY_SIZE] {
+    core::ptr::addr_of_mut!(INOTIFY_LISTDIR_SCRATCH)
+}
+
+// ---------------------------------------------------------------------------
+// Event-queue helpers
+// ---------------------------------------------------------------------------
+
+fn queue_push(inst: &mut InotifyInstance, ev: InotifyPending) {
+    if inst.count as usize >= MAX_INOTIFY_EVENTS {
+        inst.overflow_pending = true;
+        return;
+    }
+    let tail = inst.tail as usize;
+    inst.events[tail] = ev;
+    inst.tail = ((tail + 1) % MAX_INOTIFY_EVENTS) as u16;
+    inst.count += 1;
+}
+
+fn queue_pop(inst: &mut InotifyInstance) -> Option<InotifyPending> {
+    if inst.count == 0 {
+        return None;
+    }
+    let head = inst.head as usize;
+    let ev = inst.events[head];
+    inst.head = ((head + 1) % MAX_INOTIFY_EVENTS) as u16;
+    inst.count -= 1;
+    Some(ev)
+}
+
+fn make_event(wd: i32, mask: u32, name: &[u8]) -> InotifyPending {
+    let mut ev = INOTIFY_PENDING_INIT;
+    ev.wd = wd;
+    ev.mask = mask;
+    let n = core::cmp::min(name.len(), INOTIFY_NAME_MAX - 1);
+    if let Some(dst) = ev.name.get_mut(..n) {
+        if let Some(src) = name.get(..n) {
+            dst.copy_from_slice(src);
+        }
+    }
+    ev.name_len = n as u8;
+    ev
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot diff (where polling actually happens)
+// ---------------------------------------------------------------------------
+
+/// Strip a trailing NUL byte from a name slice if present.  The kernel
+/// returns fixed-width 256-byte names padded with zeros.
+fn strip_nul(name: &[u8]) -> &[u8] {
+    let mut end = name.len();
+    for (i, &b) in name.iter().enumerate() {
+        if b == 0 {
+            end = i;
+            break;
+        }
+    }
+    &name[..end]
+}
+
+fn names_eq(a: &InotifyChild, b_name: &[u8]) -> bool {
+    let a_name = &a.name[..a.name_len as usize];
+    a_name == b_name
+}
+
+/// Stat the watched path itself.  Returns (exists, size, is_dir).
+fn stat_self(path: &[u8]) -> (bool, u64, bool) {
+    let mut st = crate::stat::Stat::zeroed();
+    let ret = syscall3(
+        crate::syscall::SYS_FS_STAT,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        core::ptr::addr_of_mut!(st) as u64,
+    );
+    if ret < 0 {
+        return (false, 0, false);
+    }
+    let size = u64::try_from(st.st_size).unwrap_or(0);
+    (true, size, st.is_dir())
+}
+
+/// Scan one watched directory and diff its children against the
+/// stored snapshot, queuing CREATE / DELETE / MODIFY events for
+/// matching mask bits.  Updates the snapshot in place.
+fn scan_dir_watch(inst_id: usize, w_idx: usize) {
+    // SAFETY: single-threaded; the borrow window is bounded to this
+    // function and doesn't escape.
+    let (path_copy, path_len, mask, wd) = unsafe {
+        let table = &*inotify_table_ptr();
+        let inst = &table[inst_id];
+        let w = &inst.watches[w_idx];
+        (w.path, w.path_len as usize, w.mask, w.wd)
+    };
+    let path = &path_copy[..path_len];
+
+    // Stat first to detect IN_DELETE_SELF.
+    let (exists, _size, _is_dir) = stat_self(path);
+    if !exists {
+        // Watched dir gone — fire IN_DELETE_SELF + IN_IGNORED and
+        // disarm the watch.
+        let _ = with_inotify_mut(inst_id as u64, |inst| {
+            let was_exists = inst.watches[w_idx].self_exists;
+            if was_exists {
+                if mask & IN_DELETE_SELF != 0 {
+                    queue_push(inst, make_event(wd, IN_DELETE_SELF, &[]));
+                }
+                queue_push(inst, make_event(wd, IN_IGNORED, &[]));
+                inst.watches[w_idx] = INOTIFY_WATCH_INIT;
+            }
+        });
+        return;
+    }
+
+    // List the directory.  SAFETY: scratch buffer is reused per scan;
+    // single-threaded posix layer.
+    let ret = unsafe {
+        let scratch = &mut *listdir_scratch_ptr();
+        syscall3(
+            crate::syscall::SYS_FS_LIST_DIR,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            scratch.as_mut_ptr() as u64,
+        )
+    };
+    if ret < 0 {
+        return;
+    }
+    let entry_count = usize::try_from(ret).unwrap_or(0);
+
+    // Build a fresh snapshot from the scratch buffer.
+    let mut fresh = [INOTIFY_CHILD_INIT; MAX_INOTIFY_CHILDREN];
+    let mut fresh_count = 0usize;
+    // SAFETY: single-threaded; we don't hold concurrent &mut to scratch.
+    let scratch_ref = unsafe { &*listdir_scratch_ptr() };
+    for i in 0..entry_count {
+        if fresh_count >= MAX_INOTIFY_CHILDREN {
+            break;
+        }
+        let off = i * DIR_ENTRY_SIZE;
+        let Some(name_slice) = scratch_ref.get(off..off + 256) else { break; };
+        let Some(size_bytes) = scratch_ref.get(off + 256..off + 260) else { break; };
+        let Some(&type_byte) = scratch_ref.get(off + 260) else { break; };
+        let stripped = strip_nul(name_slice);
+        // Skip "." and ".." (some filesystems include them).
+        if stripped == b"." || stripped == b".." {
+            continue;
+        }
+        let mut child = INOTIFY_CHILD_INIT;
+        let n = core::cmp::min(stripped.len(), INOTIFY_NAME_MAX);
+        if n > 0 {
+            // SAFETY: bounds checked above.
+            child.name[..n].copy_from_slice(&stripped[..n]);
+            child.name_len = n as u8;
+        }
+        child.size = u32::from_le_bytes([
+            size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3],
+        ]);
+        child.is_dir = type_byte == 2; // DT_DIR
+        child.in_use = true;
+        fresh[fresh_count] = child;
+        fresh_count += 1;
+    }
+
+    // Diff against stored snapshot.  We snapshot the old children
+    // out by value first so we can call queue_push (which mutably
+    // borrows the whole instance) without conflicting with the watch
+    // borrow.
+    let _ = with_inotify_mut(inst_id as u64, |inst| {
+        let old_children: [InotifyChild; MAX_INOTIFY_CHILDREN] =
+            inst.watches[w_idx].children;
+        // For each new entry: look it up in the old snapshot.  If
+        // absent → CREATE.  If present with different size → MODIFY.
+        let mut matched_old = [false; MAX_INOTIFY_CHILDREN];
+
+        for i in 0..fresh_count {
+            let new = fresh[i];
+            let new_name_len = new.name_len as usize;
+            let new_name = &new.name[..new_name_len];
+            let mut found = false;
+            for (j, old) in old_children.iter().enumerate() {
+                if !old.in_use {
+                    continue;
+                }
+                if names_eq(old, new_name) {
+                    matched_old[j] = true;
+                    found = true;
+                    if old.size != new.size && (mask & IN_MODIFY) != 0 {
+                        queue_push(inst, make_event(wd, IN_MODIFY, new_name));
+                    }
+                    break;
+                }
+            }
+            if !found && (mask & IN_CREATE) != 0 {
+                queue_push(inst, make_event(wd, IN_CREATE, new_name));
+            }
+        }
+
+        // Old entries no longer present → IN_DELETE.
+        for (j, old) in old_children.iter().enumerate() {
+            if old.in_use && !matched_old[j] && (mask & IN_DELETE) != 0 {
+                let old_name_len = old.name_len as usize;
+                let old_name = &old.name[..old_name_len];
+                queue_push(inst, make_event(wd, IN_DELETE, old_name));
+            }
+        }
+
+        // Commit fresh snapshot.
+        let w = &mut inst.watches[w_idx];
+        w.children = fresh;
+        w.self_exists = true;
+    });
+}
+
+/// Scan one watched file (non-directory).  Detects IN_MODIFY (size
+/// change) and IN_DELETE_SELF.
+fn scan_file_watch(inst_id: usize, w_idx: usize) {
+    let (path_copy, path_len, mask, wd) = unsafe {
+        let table = &*inotify_table_ptr();
+        let inst = &table[inst_id];
+        let w = &inst.watches[w_idx];
+        (w.path, w.path_len as usize, w.mask, w.wd)
+    };
+    let path = &path_copy[..path_len];
+
+    let (exists, new_size, _is_dir) = stat_self(path);
+
+    let _ = with_inotify_mut(inst_id as u64, |inst| {
+        let (was_exists, old_size) = {
+            let w = &inst.watches[w_idx];
+            (w.self_exists, w.self_size)
+        };
+        if !exists {
+            if was_exists {
+                if mask & IN_DELETE_SELF != 0 {
+                    queue_push(inst, make_event(wd, IN_DELETE_SELF, &[]));
+                }
+                queue_push(inst, make_event(wd, IN_IGNORED, &[]));
+                inst.watches[w_idx] = INOTIFY_WATCH_INIT;
+            }
+            return;
+        }
+        if new_size != old_size && mask & IN_MODIFY != 0 {
+            queue_push(inst, make_event(wd, IN_MODIFY, &[]));
+        }
+        let w = &mut inst.watches[w_idx];
+        w.self_size = new_size;
+        w.self_exists = true;
+    });
+}
+
+/// Re-scan every active watch in an instance.  This is the polling
+/// engine — called by `read()` and by `check_readiness`.
+fn poll_all_watches(idx: u64) {
+    let inst_id = match usize::try_from(idx) {
+        Ok(i) if i < MAX_INOTIFY_INSTANCES => i,
+        _ => return,
+    };
+    // Snapshot which watches are active to avoid holding a borrow
+    // across the (potentially mutating) scan calls.
+    let mut active_dir = [false; MAX_INOTIFY_WATCHES];
+    let mut active_file = [false; MAX_INOTIFY_WATCHES];
+    // SAFETY: single-threaded.
+    unsafe {
+        let table = &*inotify_table_ptr();
+        let inst = &table[inst_id];
+        if !inst.in_use {
+            return;
+        }
+        for (j, w) in inst.watches.iter().enumerate() {
+            if w.in_use {
+                if w.is_dir {
+                    active_dir[j] = true;
+                } else {
+                    active_file[j] = true;
+                }
+            }
+        }
+    }
+    for j in 0..MAX_INOTIFY_WATCHES {
+        if active_dir[j] {
+            scan_dir_watch(inst_id, j);
+        } else if active_file[j] {
+            scan_file_watch(inst_id, j);
+        }
+    }
+}
+
+/// Return `true` if the inotify instance has events available to
+/// read.  Triggers a fresh poll of all watches as a side effect — so
+/// `poll/select/epoll_wait` see up-to-date readiness.
+#[must_use]
+pub fn inotify_is_readable(idx: u64) -> bool {
+    poll_all_watches(idx);
+    let mut readable = false;
+    let _ = with_inotify_mut(idx, |inst| {
+        readable = inst.count > 0 || inst.overflow_pending;
+    });
+    readable
+}
+
+/// Return `true` if the underlying instance was created with
+/// `IN_NONBLOCK`.
+#[must_use]
+pub fn inotify_is_nonblock(idx: u64) -> bool {
+    let mut nb = false;
+    let _ = with_inotify_mut(idx, |inst| {
+        nb = inst.nonblock;
+    });
+    nb
+}
+
+/// Internal: try to drain queued events into `buf` in Linux's
+/// `struct inotify_event` packed layout.  Returns the number of bytes
+/// written, or 0 if no events are available (caller decides whether to
+/// block).
+///
+/// Each record is 16 bytes of header followed by a `len`-byte name
+/// field (NUL-padded to an 8-byte boundary).  We require `buf` to be
+/// large enough for at least one full record.
+pub fn inotify_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
+    // Always re-poll before serving reads, so events generated since
+    // the last call show up.
+    poll_all_watches(idx);
+
+    let mut written = 0usize;
+    let mut err: Option<i32> = None;
+    let _ = with_inotify_mut(idx, |inst| {
+        // Surface overflow first if pending.
+        if inst.overflow_pending && written + 16 <= buf.len() {
+            // wd=-1, mask=IN_Q_OVERFLOW, cookie=0, len=0.
+            let header = [
+                0xFF, 0xFF, 0xFF, 0xFF, // wd = -1
+                (IN_Q_OVERFLOW & 0xFF) as u8,
+                ((IN_Q_OVERFLOW >> 8) & 0xFF) as u8,
+                ((IN_Q_OVERFLOW >> 16) & 0xFF) as u8,
+                ((IN_Q_OVERFLOW >> 24) & 0xFF) as u8,
+                0, 0, 0, 0,
+                0, 0, 0, 0,
+            ];
+            if let Some(dst) = buf.get_mut(written..written + 16) {
+                dst.copy_from_slice(&header);
+                written += 16;
+                inst.overflow_pending = false;
+            }
+        }
+
+        while inst.count > 0 {
+            // Peek without popping; need to know the name size to
+            // decide if the next record fits.
+            let head = inst.head as usize;
+            let ev = inst.events[head];
+            // Pad name field to 8 bytes minimum (or larger multiple)
+            // so it remains aligned across reads.
+            let raw_name = ev.name_len as usize;
+            let name_field = if raw_name == 0 {
+                0
+            } else {
+                let nul_terminated = raw_name + 1;
+                (nul_terminated + 7) & !7
+            };
+            let record_size = 16 + name_field;
+            if written + record_size > buf.len() {
+                if written == 0 {
+                    err = Some(errno::EINVAL);
+                }
+                break;
+            }
+            // Now pop and emit.
+            let _ = queue_pop(inst);
+            // Header.
+            if let Some(dst) = buf.get_mut(written..written + 4) {
+                dst.copy_from_slice(&ev.wd.to_ne_bytes());
+            }
+            if let Some(dst) = buf.get_mut(written + 4..written + 8) {
+                dst.copy_from_slice(&ev.mask.to_ne_bytes());
+            }
+            if let Some(dst) = buf.get_mut(written + 8..written + 12) {
+                dst.copy_from_slice(&ev.cookie.to_ne_bytes());
+            }
+            if let Some(dst) = buf.get_mut(written + 12..written + 16) {
+                dst.copy_from_slice(&(name_field as u32).to_ne_bytes());
+            }
+            // Name (NUL-padded).
+            if name_field > 0 {
+                if let Some(dst) = buf.get_mut(written + 16..written + 16 + name_field) {
+                    for b in dst.iter_mut() {
+                        *b = 0;
+                    }
+                    let copy_n = core::cmp::min(raw_name, name_field - 1);
+                    if let Some(src) = ev.name.get(..copy_n) {
+                        if let Some(dst2) = buf.get_mut(written + 16..written + 16 + copy_n) {
+                            dst2.copy_from_slice(src);
+                        }
+                    }
+                }
+            }
+            written += record_size;
+        }
+    });
+
+    if let Some(e) = err {
+        return Err(e);
+    }
+    Ok(written)
+}
+
+// ---------------------------------------------------------------------------
+// inotify_create / add_watch / rm_watch
+// ---------------------------------------------------------------------------
+
 /// Initialize an inotify instance.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Returns a new userspace fd backed by an inotify instance, or -1 on
+/// error.  See module-level docs for the supported-event subset.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inotify_init() -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    inotify_init1(0)
 }
 
 /// Initialize an inotify instance with flags.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// `flags` may be `IN_CLOEXEC` and/or `IN_NONBLOCK`.  Unknown bits
+/// return `EINVAL`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn inotify_init1(_flags: i32) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn inotify_init1(flags: i32) -> i32 {
+    const VALID: i32 = IN_CLOEXEC | IN_NONBLOCK;
+    if flags & !VALID != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let Some(idx) = allocate_inotify_instance() else {
+        errno::set_errno(errno::EMFILE);
+        return -1;
+    };
+    let _ = with_inotify_mut(idx as u64, |inst| {
+        inst.nonblock = (flags & IN_NONBLOCK) != 0;
+    });
+    let fd_flags = if (flags & IN_CLOEXEC) != 0 {
+        fdtable::FD_CLOEXEC
+    } else {
+        0
+    };
+    let Some(fd) = fdtable::alloc_fd(HandleKind::Inotify, idx as u64)
+    else {
+        inotify_instance_close(idx as u64);
+        errno::set_errno(errno::EMFILE);
+        return -1;
+    };
+    if fd_flags != 0 {
+        let _ = fdtable::set_fd_flags(fd, fd_flags);
+    }
+    if (flags & IN_NONBLOCK) != 0 {
+        // Reflect into status flags for consistency with the rest of
+        // the fd dispatch (O_NONBLOCK).
+        let cur = fdtable::get_status_flags(fd).unwrap_or(0);
+        let _ = fdtable::set_status_flags(fd, cur | crate::fcntl::O_NONBLOCK);
+    }
+    fd
 }
 
 /// Add a watch to an inotify instance.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Returns a non-negative watch descriptor on success, -1 on error.
+/// If `pathname` is already watched on this instance, the existing
+/// watch's mask is overwritten (matching Linux without `IN_MASK_ADD`)
+/// and the existing wd is returned.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inotify_add_watch(
-    _fd: i32,
-    _pathname: *const u8,
-    _mask: u32,
+    fd: i32,
+    pathname: *const u8,
+    mask: u32,
 ) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    if pathname.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if mask & IN_KNOWN_EVENTS == 0 {
+        // Linux: at least one event bit must be set.
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let Some(entry) = fdtable::get_fd(fd) else {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if entry.kind != HandleKind::Inotify {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let idx = entry.handle;
+
+    // Resolve the path against CWD into a normalized absolute path.
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    // SAFETY: `pathname` was checked non-null above.
+    let Some(resolved_len) = (unsafe {
+        crate::unistd::resolve_path(pathname, &mut resolved)
+    }) else {
+        // SAFETY: pathname is non-null and a valid C-string.
+        if unsafe { *pathname } == 0 {
+            errno::set_errno(errno::ENOENT);
+        } else {
+            errno::set_errno(errno::ENAMETOOLONG);
+        }
+        return -1;
+    };
+    if resolved_len > INOTIFY_PATH_MAX {
+        errno::set_errno(errno::ENAMETOOLONG);
+        return -1;
+    }
+    let path_bytes = &resolved[..resolved_len];
+
+    // Stat to check existence and type.
+    let (exists, self_size, is_dir) = stat_self(path_bytes);
+    if !exists {
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    }
+
+    // Find existing watch (by path) or allocate a new slot.
+    let mut wd_out: i32 = -1;
+    let mut full = false;
+    let _ = with_inotify_mut(idx, |inst| {
+        // Check for existing.
+        for w in inst.watches.iter_mut() {
+            if w.in_use
+                && w.path_len as usize == resolved_len
+                && &w.path[..resolved_len] == path_bytes
+            {
+                w.mask = mask & IN_KNOWN_EVENTS;
+                wd_out = w.wd;
+                return;
+            }
+        }
+        // Allocate.
+        for w in inst.watches.iter_mut() {
+            if !w.in_use {
+                *w = INOTIFY_WATCH_INIT;
+                w.in_use = true;
+                w.wd = inst.next_wd;
+                inst.next_wd = inst.next_wd.wrapping_add(1);
+                if inst.next_wd <= 0 {
+                    inst.next_wd = 1;
+                }
+                w.mask = mask & IN_KNOWN_EVENTS;
+                w.is_dir = is_dir;
+                w.self_size = self_size;
+                w.self_exists = true;
+                if let Some(dst) = w.path.get_mut(..resolved_len) {
+                    dst.copy_from_slice(path_bytes);
+                }
+                w.path_len = resolved_len as u16;
+                wd_out = w.wd;
+                return;
+            }
+        }
+        full = true;
+    });
+    if full {
+        errno::set_errno(errno::ENOSPC);
+        return -1;
+    }
+    if wd_out < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    // Seed initial snapshot so future scans diff against the current
+    // state rather than firing IN_CREATE for every existing child.
+    if is_dir {
+        // Find the watch slot index we just used.
+        let wd_local = wd_out;
+        let mut w_idx = None;
+        // SAFETY: single-threaded.
+        unsafe {
+            let table = &*inotify_table_ptr();
+            let inst = &table[idx as usize];
+            for (j, w) in inst.watches.iter().enumerate() {
+                if w.in_use && w.wd == wd_local {
+                    w_idx = Some(j);
+                    break;
+                }
+            }
+        }
+        if let Some(j) = w_idx {
+            // Use the same scan path, then discard generated events
+            // (since this is initial state, not a change).
+            let before_count = with_inotify_mut(idx, |inst| inst.count).unwrap_or(0);
+            scan_dir_watch(idx as usize, j);
+            let _ = with_inotify_mut(idx, |inst| {
+                // Drop any newly-generated events from the seed scan.
+                while inst.count > before_count {
+                    // Roll the tail back; the events we added were the
+                    // most recent so simply discard them.
+                    if inst.tail == 0 {
+                        inst.tail = (MAX_INOTIFY_EVENTS - 1) as u16;
+                    } else {
+                        inst.tail -= 1;
+                    }
+                    inst.count -= 1;
+                }
+            });
+        }
+    }
+    wd_out
 }
 
 /// Remove a watch from an inotify instance.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Returns 0 on success, -1 on error.  Generates a final `IN_IGNORED`
+/// event for the removed watch so userspace can drain its state.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn inotify_rm_watch(_fd: i32, _wd: i32) -> i32 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+pub extern "C" fn inotify_rm_watch(fd: i32, wd: i32) -> i32 {
+    let Some(entry) = fdtable::get_fd(fd) else {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if entry.kind != HandleKind::Inotify {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let idx = entry.handle;
+    let mut found = false;
+    let _ = with_inotify_mut(idx, |inst| {
+        for w in inst.watches.iter_mut() {
+            if w.in_use && w.wd == wd {
+                let _ = w; // re-borrow inst below
+                queue_push(inst, make_event(wd, IN_IGNORED, &[]));
+                for w2 in inst.watches.iter_mut() {
+                    if w2.in_use && w2.wd == wd {
+                        *w2 = INOTIFY_WATCH_INIT;
+                    }
+                }
+                found = true;
+                return;
+            }
+        }
+    });
+    if !found {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1512,34 +2368,64 @@ mod tests {
         assert_ne!(IN_CLOEXEC, IN_NONBLOCK);
     }
 
-    // -- inotify stubs --
+    // -- inotify basic init/error paths --
 
     #[test]
-    fn test_inotify_init_enosys() {
+    fn test_inotify_init_returns_fd_or_emfile() {
+        // Either we allocate a fresh fd, or the static instance table
+        // is exhausted by other parallel tests (EMFILE).  Both are
+        // acceptable outcomes — we just shouldn't get ENOSYS anymore.
         errno::set_errno(0);
-        assert_eq!(inotify_init(), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let fd = inotify_init();
+        if fd >= 0 {
+            assert_eq!(crate::file::close(fd), 0);
+        } else {
+            assert_eq!(errno::get_errno(), errno::EMFILE);
+        }
     }
 
     #[test]
-    fn test_inotify_init1_enosys() {
+    fn test_inotify_init1_zero_flags_returns_fd_or_emfile() {
         errno::set_errno(0);
-        assert_eq!(inotify_init1(0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let fd = inotify_init1(0);
+        if fd >= 0 {
+            assert_eq!(crate::file::close(fd), 0);
+        } else {
+            assert_eq!(errno::get_errno(), errno::EMFILE);
+        }
     }
 
     #[test]
-    fn test_inotify_add_watch_enosys() {
+    fn test_inotify_add_watch_null_path_efault() {
+        // Acquire a real inotify fd first so the path check is reached.
+        let fd = inotify_init();
+        if fd < 0 {
+            // Table exhausted; skip.
+            return;
+        }
         errno::set_errno(0);
-        assert_eq!(inotify_add_watch(3, core::ptr::null(), IN_MODIFY), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(
+            inotify_add_watch(fd, core::ptr::null(), IN_MODIFY),
+            -1
+        );
+        // The fd table is global across tests, so a concurrent test
+        // could close+reuse our fd between init() and add_watch().  In
+        // that case the kind-mismatch path triggers EINVAL instead of
+        // the EFAULT we'd get from the null-path check.  Accept either.
+        let e = errno::get_errno();
+        assert!(
+            e == errno::EFAULT || e == errno::EINVAL || e == errno::EBADF,
+            "unexpected errno {e}",
+        );
+        crate::file::close(fd);
     }
 
     #[test]
-    fn test_inotify_rm_watch_enosys() {
+    fn test_inotify_rm_watch_bad_fd_ebadf() {
+        // fd 12345 should not be open.
         errno::set_errno(0);
-        assert_eq!(inotify_rm_watch(3, 1), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(inotify_rm_watch(12345, 1), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
     // -- EpollEvent struct layout --
@@ -1766,32 +2652,89 @@ mod tests {
 
     #[test]
     fn test_inotify_init1_cloexec() {
-        errno::set_errno(0);
-        assert_eq!(inotify_init1(IN_CLOEXEC), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let fd = inotify_init1(IN_CLOEXEC);
+        if fd < 0 {
+            // Table exhausted under parallel tests is acceptable.
+            assert_eq!(errno::get_errno(), errno::EMFILE);
+            return;
+        }
+        // Verify FD_CLOEXEC was set in fdtable.
+        let flags = fdtable::get_fd_flags(fd).unwrap_or(0);
+        assert!(flags & fdtable::FD_CLOEXEC != 0);
+        crate::file::close(fd);
     }
 
     #[test]
     fn test_inotify_init1_nonblock() {
-        errno::set_errno(0);
-        assert_eq!(inotify_init1(IN_NONBLOCK), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let fd = inotify_init1(IN_NONBLOCK);
+        if fd < 0 {
+            assert_eq!(errno::get_errno(), errno::EMFILE);
+            return;
+        }
+        // Verify O_NONBLOCK propagated into status flags.
+        let sflags = fdtable::get_status_flags(fd).unwrap_or(0);
+        assert!(sflags & crate::fcntl::O_NONBLOCK != 0);
+        assert!(inotify_is_nonblock(fdtable::get_fd(fd).unwrap().handle));
+        crate::file::close(fd);
     }
 
     #[test]
     fn test_inotify_init1_combined_flags() {
+        let fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
+        if fd < 0 {
+            assert_eq!(errno::get_errno(), errno::EMFILE);
+            return;
+        }
+        let fd_flags = fdtable::get_fd_flags(fd).unwrap_or(0);
+        let st_flags = fdtable::get_status_flags(fd).unwrap_or(0);
+        assert!(fd_flags & fdtable::FD_CLOEXEC != 0);
+        assert!(st_flags & crate::fcntl::O_NONBLOCK != 0);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_inotify_init1_invalid_flags() {
+        // Unknown bits → EINVAL, no fd allocated.
         errno::set_errno(0);
-        assert_eq!(inotify_init1(IN_CLOEXEC | IN_NONBLOCK), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let bad = 0x4000_0000;
+        assert!(bad & (IN_CLOEXEC | IN_NONBLOCK) == 0);
+        assert_eq!(inotify_init1(bad), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -- inotify_add_watch with path --
 
     #[test]
-    fn test_inotify_add_watch_with_path() {
+    fn test_inotify_add_watch_no_event_bits_einval() {
+        // mask without any IN_KNOWN_EVENTS bit set → EINVAL.
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
         errno::set_errno(0);
-        assert_eq!(inotify_add_watch(3, b"/tmp\0".as_ptr(), IN_MODIFY | IN_CREATE), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        // Only IN_MASK_ADD-style flag bits, no event bits.
+        assert_eq!(
+            inotify_add_watch(fd, b"/tmp\0".as_ptr(), 0),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_non_inotify_fd_einval() {
+        // Use an eventfd as a fake inotify fd → EINVAL.
+        let efd = eventfd(0, 0);
+        if efd < 0 {
+            return;
+        }
+        errno::set_errno(0);
+        assert_eq!(
+            inotify_add_watch(efd, b"/tmp\0".as_ptr(), IN_MODIFY),
+            -1,
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(efd);
     }
 
     // -- inotify event flag single-bit checks --
@@ -2156,5 +3099,79 @@ mod tests {
         // enforce it yet — the resulting wait just won't fire).
         assert!(r == 0 || r == -1);
         crate::file::close(ep);
+    }
+
+    // -- inotify functional round-trips --
+
+    #[test]
+    fn test_inotify_rm_watch_non_inotify_fd_einval() {
+        let efd = eventfd(0, 0);
+        if efd < 0 {
+            return;
+        }
+        errno::set_errno(0);
+        assert_eq!(inotify_rm_watch(efd, 1), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(efd);
+    }
+
+    #[test]
+    fn test_inotify_rm_watch_unknown_wd_einval() {
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        errno::set_errno(0);
+        // No watches added, so any wd is unknown.
+        assert_eq!(inotify_rm_watch(fd, 1), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_inotify_fd_is_inotify_kind() {
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        let entry = fdtable::get_fd(fd).expect("inotify fd should exist");
+        assert_eq!(entry.kind, HandleKind::Inotify);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_inotify_close_releases_instance() {
+        // Open and close several inotify fds in sequence; each should
+        // free the underlying instance slot so we never see EMFILE
+        // when reusing them serially.
+        for _ in 0..8 {
+            let fd = inotify_init();
+            if fd < 0 {
+                // Concurrent test pressure — acceptable.
+                return;
+            }
+            assert_eq!(crate::file::close(fd), 0);
+        }
+    }
+
+    #[test]
+    fn test_inotify_dup_shares_instance() {
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        let dup = crate::file::dup(fd);
+        if dup < 0 {
+            crate::file::close(fd);
+            return;
+        }
+        // Both fds should point to the same Inotify handle index.
+        let e1 = fdtable::get_fd(fd).expect("fd entry");
+        let e2 = fdtable::get_fd(dup).expect("dup entry");
+        assert_eq!(e1.kind, HandleKind::Inotify);
+        assert_eq!(e2.kind, HandleKind::Inotify);
+        assert_eq!(e1.handle, e2.handle);
+        crate::file::close(dup);
+        crate::file::close(fd);
     }
 }

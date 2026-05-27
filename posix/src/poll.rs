@@ -448,6 +448,15 @@ pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, 
             let readable = crate::epoll::timerfd_is_readable(handle);
             (readable, false, false, false)
         }
+
+        // Inotify: readable when at least one event is queued.  The
+        // readiness check side-effects: it triggers a fresh scan of
+        // every watch, so events that occurred between calls show up.
+        // Never writable.
+        HandleKind::Inotify => {
+            let readable = crate::epoll::inotify_is_readable(handle);
+            (readable, false, false, false)
+        }
     }
 }
 

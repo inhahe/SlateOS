@@ -529,6 +529,35 @@ Remaining net improvements (diminishing returns):
   initial_fds (previously fell into the FILE branch which silently
   no-op'd).  Self-test `test_dup_refcount` covers dup+partial close+
   final close+post-close dup-failure.
+
+- (2026-05-27) posix inotify is polling-based, not event-driven.
+  posix::epoll provides functional inotify_init/init1/add_watch/rm_watch
+  by snapshotting directory listings (SYS_FS_LIST_DIR) and file stats
+  (SYS_FS_STAT) on every read() call, diffing against the previous
+  snapshot.  This means:
+    * Events derivable from polling work: IN_CREATE, IN_DELETE,
+      IN_MODIFY (file size change), IN_DELETE_SELF, IN_IGNORED.
+    * Events that require kernel hooks are silently dropped from the
+      mask: IN_OPEN, IN_ACCESS, IN_CLOSE_WRITE, IN_CLOSE_NOWRITE,
+      IN_MOVED_FROM, IN_MOVED_TO, IN_MOVE_SELF, and precise IN_ATTRIB
+      (we use size-change as a proxy for MODIFY but cannot detect
+      pure-attribute changes like chmod/chown).
+    * Move events appear as DELETE on the source watch and CREATE on
+      the destination watch, not as MOVED_FROM/MOVED_TO with matching
+      cookies.
+    * Detection latency = read() call frequency × poll_all_watches
+      cost.  No background notification; readers must call read()
+      (or poll/select/epoll on the fd) actively.
+    * No coalescing — burst changes between two reads collapse to
+      the net diff, not the full sequence.
+  Proper fix: add SYS_FS_NOTIFY_* kernel syscalls that hook into the
+  VFS layer's existing fnotify (kernel/src/fs/fnotify.rs already
+  exists per roadmap line 1019).  Until then, polling is acceptable
+  for inotifywait-style use cases and most file watcher daemons.
+  Limits: MAX_INOTIFY_INSTANCES=4, MAX_INOTIFY_WATCHES=8 per instance,
+  MAX_INOTIFY_CHILDREN=16 per directory watch, MAX_INOTIFY_EVENTS=32
+  queued events, INOTIFY_NAME_MAX=64, INOTIFY_PATH_MAX=256.
+
 ## Clippy lint cleanup
 
 UPDATE (2026-05-27): Workspace lint policy relaxed in commit 948fd5ff.

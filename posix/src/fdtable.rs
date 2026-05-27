@@ -113,6 +113,23 @@ pub enum HandleKind {
     /// timerfd instances are not shared between processes — posix_spawn
     /// does not propagate them to the child.
     Timerfd,
+
+    /// A Linux-compatible inotify instance (userspace, polling-based).
+    ///
+    /// The `handle` is an index into a per-process inotify instance
+    /// table in [`crate::epoll`].  Each instance owns a watch list and
+    /// a pending-event queue.  Watches are scanned lazily on `read()`
+    /// and on every `check_readiness` call (driven by `poll`/`select`/
+    /// `epoll_wait`); changes are detected by comparing fresh
+    /// `SYS_FS_LIST_DIR` / `SYS_FS_STAT` results against per-watch
+    /// snapshots.  See the docs in [`crate::epoll`]'s inotify section
+    /// for the supported-event subset (CREATE/DELETE/MODIFY/
+    /// DELETE_SELF — IN_OPEN / IN_ACCESS / IN_CLOSE_* / IN_MOVED_*
+    /// require kernel hooks that aren't implemented).
+    ///
+    /// inotify instances are not shared between processes — posix_spawn
+    /// does not propagate them to the child.
+    Inotify,
 }
 
 /// An entry in the file descriptor table.

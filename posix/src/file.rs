@@ -10482,7 +10482,7 @@ mod tests {
             .expect("alloc fd");
             crate::errno::set_errno(0);
             assert_eq!(fchown(fd, 1000, 1000), 0);
-            crate::fdtable::close_fd(fd);
+            let _ = crate::fdtable::close_fd(fd);
         }
 
         /// fchown without CAP_CHOWN returns EPERM.
@@ -10498,7 +10498,7 @@ mod tests {
             crate::errno::set_errno(0);
             assert_eq!(fchown(fd, 1000, 1000), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
-            crate::fdtable::close_fd(fd);
+            let _ = crate::fdtable::close_fd(fd);
         }
 
         /// fchown no-op (both -1) bypasses cap gate.
@@ -10513,7 +10513,7 @@ mod tests {
             drop_cap_chown();
             crate::errno::set_errno(0);
             assert_eq!(fchown(fd, u32::MAX, u32::MAX), 0);
-            crate::fdtable::close_fd(fd);
+            let _ = crate::fdtable::close_fd(fd);
         }
 
         /// EBADF takes priority over EPERM for negative fd.

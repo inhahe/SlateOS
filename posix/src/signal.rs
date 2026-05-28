@@ -3654,7 +3654,7 @@ mod tests {
         }
 
         RECEIVED.store(0, Ordering::Relaxed);
-        let old = signal(SIGUSR1, handler as SighandlerT);
+        let old = signal(SIGUSR1, handler as *const () as SighandlerT);
         crate::errno::set_errno(0);
         let ret = raise(SIGUSR1);
         assert_eq!(ret, 0, "raise with handler should return 0");
@@ -3688,7 +3688,7 @@ mod tests {
         }
 
         GOT.store(0, Ordering::Relaxed);
-        let old = signal(SIGUSR2, my_handler as SighandlerT);
+        let old = signal(SIGUSR2, my_handler as *const () as SighandlerT);
         // kill(self, SIGUSR2) → dispatch_self_signal → handler.
         // We use pid = SYS_PROCESS_ID result.  In test builds this is
         // inline asm so we use SIGUSR2 directly via raise() as proxy.
@@ -3749,7 +3749,7 @@ mod tests {
         }
 
         CALLED.store(false, Ordering::Relaxed);
-        signal(SIGUSR1, h as SighandlerT);
+        signal(SIGUSR1, h as *const () as SighandlerT);
         signal(SIGUSR1, SIG_IGN);
         crate::errno::set_errno(0);
         assert_eq!(raise(SIGUSR1), 0);

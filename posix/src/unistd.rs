@@ -1706,19 +1706,69 @@ pub const PR_GET_SECCOMP: i32 = 21;
 
 /// Process control operations (Linux).
 ///
-/// Stub: `PR_SET_NAME` and `PR_SET_NO_NEW_PRIVS` succeed silently.
-/// Other operations return -1 with EINVAL.
+/// Stub: implements `PR_SET_NAME` / `PR_GET_NAME` as a name buffer
+/// pass-through and `PR_SET_NO_NEW_PRIVS` / `PR_GET_NO_NEW_PRIVS` as
+/// trivial accept-and-return operations.  All other options return
+/// `-1` with `EINVAL`.
+///
+/// Argument-domain validation matches `kernel/sys.c::sys_prctl` in
+/// Linux:
+///
+/// * `PR_SET_NAME` (15) / `PR_GET_NAME` (16):
+///   - `arg2 == 0` → `EFAULT` (Linux's `copy_{from,to}_user` faults
+///     on a NULL pointer).
+///   - `arg3`, `arg4`, `arg5` are *not* checked here.  Linux ignores
+///     extra args for these two opcodes (the names predate the strict
+///     "all extra args must be 0" convention introduced in 2.6.x).
+///
+/// * `PR_SET_NO_NEW_PRIVS` (38):
+///   - `arg2 != 1` → `EINVAL`.  The flag is one-way; only the value
+///     `1` is accepted (setting it back to `0` is impossible by design).
+///   - `arg3 != 0 || arg4 != 0 || arg5 != 0` → `EINVAL`.
+///
+/// * `PR_GET_NO_NEW_PRIVS` (39):
+///   - `arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0` → `EINVAL`.
+///   - On success, returns the current bit (0 in our stub — we don't
+///     track per-process state).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn prctl(option: i32, arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64) -> i32 {
+pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64) -> i32 {
     match option {
-        PR_SET_NAME | PR_SET_NO_NEW_PRIVS | PR_GET_NO_NEW_PRIVS => 0,
-        PR_GET_NAME => {
-            // Would need to write a name into arg2 as a buffer.
-            // Return empty name for now.
-            if arg2 != 0 {
-                // SAFETY: Caller provides valid buffer per prctl contract.
-                unsafe { *(arg2 as *mut u8) = 0; }
+        PR_SET_NAME => {
+            // NULL buffer would fault inside Linux's copy_from_user.
+            if arg2 == 0 {
+                crate::errno::set_errno(crate::errno::EFAULT);
+                return -1;
             }
+            // We don't actually store the name — accept silently.
+            0
+        }
+        PR_GET_NAME => {
+            // PR_GET_NAME writes 16 bytes; a NULL destination faults.
+            if arg2 == 0 {
+                crate::errno::set_errno(crate::errno::EFAULT);
+                return -1;
+            }
+            // SAFETY: caller's prctl contract guarantees a 16-byte
+            // buffer at arg2 for PR_GET_NAME.
+            unsafe { *(arg2 as *mut u8) = 0; }
+            0
+        }
+        PR_SET_NO_NEW_PRIVS => {
+            // Linux: only arg2 == 1 is accepted; arg3..5 must be zero.
+            if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                return -1;
+            }
+            0
+        }
+        PR_GET_NO_NEW_PRIVS => {
+            // Linux: all extra args must be zero.
+            if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                crate::errno::set_errno(crate::errno::EINVAL);
+                return -1;
+            }
+            // We don't track no_new_privs per process — report 0
+            // (the flag is not set).
             0
         }
         _ => {
@@ -2984,8 +3034,11 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_prctl_set_name_succeeds() {
-        assert_eq!(prctl(PR_SET_NAME, 0, 0, 0, 0), 0);
+    fn test_prctl_set_name_with_buffer_succeeds() {
+        // Post-Phase-76 PR_SET_NAME requires a non-NULL buffer; with
+        // one, the call succeeds (we accept and discard).
+        let name = b"hello\0";
+        assert_eq!(prctl(PR_SET_NAME, name.as_ptr() as u64, 0, 0, 0), 0);
     }
 
     #[test]
@@ -3004,6 +3057,194 @@ mod tests {
     #[test]
     fn test_prctl_unknown_fails() {
         assert_eq!(prctl(-999, 0, 0, 0, 0), -1);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 76 — prctl argument-domain validation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_phase76_prctl_set_name_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_NAME, 0, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase76_prctl_get_name_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_GET_NAME, 0, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase76_prctl_get_name_valid_buf_zeroes_first_byte() {
+        let mut buf = [b'X'; 16];
+        let ret = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(ret, 0);
+        assert_eq!(buf[0], 0);
+        // Rest of buffer untouched (we only NUL-terminate; we don't
+        // zero the whole thing).  Verify byte 1 still has the sentinel.
+        assert_eq!(buf[1], b'X');
+    }
+
+    #[test]
+    fn test_phase76_prctl_set_no_new_privs_arg2_zero_einval() {
+        // arg2 must be 1 — not 0.
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 0, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_set_no_new_privs_arg2_two_einval() {
+        // arg2 == 2 is not a valid boolean.
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 2, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_set_no_new_privs_arg2_max_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, u64::MAX, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_set_no_new_privs_arg3_nonzero_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 1, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_set_no_new_privs_arg4_nonzero_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 99, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_set_no_new_privs_arg5_nonzero_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, u64::MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_set_no_new_privs_all_extra_args_max_einval() {
+        // Garbage in every extra slot — must still be EINVAL.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            prctl(PR_SET_NO_NEW_PRIVS, 1, u64::MAX, u64::MAX, u64::MAX),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_get_no_new_privs_arg2_nonzero_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 1, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_get_no_new_privs_arg3_nonzero_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 1, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_get_no_new_privs_all_zero_ok() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 0);
+        // Success path must not stamp errno.
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_phase76_prctl_set_no_new_privs_correct_call_ok() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_phase76_prctl_unknown_option_still_einval() {
+        // Regression: changing the dispatch must not break the
+        // catch-all path.
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(9_999, 0, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_negative_option_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(-1, 0, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_int_min_option_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(i32::MIN, u64::MAX, u64::MAX, u64::MAX, u64::MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- Ordering: NULL-buf check beats unrelated extra-arg checks --
+
+    #[test]
+    fn test_phase76_prctl_set_name_null_beats_extra_args() {
+        // PR_SET_NAME doesn't validate arg3..5 (matches Linux's lax
+        // policy for pre-2.6 opcodes), so EFAULT must still surface
+        // regardless of what's in the trailing slots.
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_NAME, 0, u64::MAX, u64::MAX, u64::MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase76_prctl_get_name_null_beats_extra_args() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_GET_NAME, 0, 1, 2, 3), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- Buggy-caller patterns --
+
+    #[test]
+    fn test_phase76_prctl_buggy_caller_uses_pthread_setname_style() {
+        // glibc's pthread_setname_np internally does
+        //   prctl(PR_SET_NAME, name).  A buggy caller forgets to set
+        // arg2 and passes 0 — must surface EFAULT, not silently succeed.
+        crate::errno::set_errno(0);
+        let ret = prctl(PR_SET_NAME, 0, 0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase76_prctl_buggy_caller_set_nnp_with_zero() {
+        // Caller mis-remembers PR_SET_NO_NEW_PRIVS and passes 0
+        // thinking "0 = enable".  Must reject — only 1 is accepted.
+        crate::errno::set_errno(0);
+        let ret = prctl(PR_SET_NO_NEW_PRIVS, 0, 0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase76_prctl_workflow_roundtrip_get_after_set() {
+        // SET succeeds, GET also succeeds and returns 0 (our stub
+        // doesn't actually flip the bit).
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+        assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 0);
+        assert_eq!(crate::errno::get_errno(), 0);
     }
 
     // ------------------------------------------------------------------

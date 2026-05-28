@@ -417,24 +417,54 @@ const IORING_MAX_REGISTER_NR_ARGS: u32 = 1 << 20; // 1M entries
 // ---------------------------------------------------------------------------
 
 /// Validates a caller-supplied `IoUringParams` for `io_uring_setup`.
+///
+/// Validation order matches Linux's `io_uring/io_uring.c::io_uring_setup`
+/// prologue followed by `io_uring_create`:
+///
+///   1. reserved fields nonzero       → EINVAL  (prologue, right after
+///                                                copy_from_user)
+///   2. unknown flag bits             → EINVAL  (prologue)
+///   3. entries == 0                  → EINVAL  (io_uring_create)
+///   4. entries > MAX without CLAMP   → EINVAL  (io_uring_create)
+///   5. SQ_AFF without SQPOLL         → EINVAL  (ring-specific)
+///   6. CQSIZE bounds                 → EINVAL  (ring-specific)
+///   7. ATTACH_WQ wq_fd < 0           → EBADF   (ring-specific)
+///   8. DEFER_TASKRUN w/o SINGLE_ISSUER → EINVAL
+///   9. SQPOLL + IOPOLL conflict      → EINVAL
+///
+/// Phase 117: the previous order checked entries before resv/flag-mask,
+/// which surfaced an "entries=0" verdict for a caller passing both
+/// entries=0 AND a nonzero resv field — Linux would surface the resv
+/// failure first.  Both return EINVAL, but the precedence matters for
+/// callers bisecting which argument is wrong.
 fn validate_setup_params(entries: u32, p: &IoUringParams) -> Result<(), i32> {
-    if entries == 0 {
+    // (1) Reserved fields must be zero — Linux uses these for future
+    // expansion and rejects any nonzero value to prevent silently
+    // accepting attr structs from a newer caller.  Linux checks these
+    // immediately after copy_from_user, before any flag/entries logic.
+    if p.resv != [0; 3] {
         return Err(errno::EINVAL);
     }
-    if entries > IORING_MAX_ENTRIES && (p.flags & IORING_SETUP_CLAMP) == 0 {
-        // Without CLAMP, Linux returns EINVAL; with CLAMP it silently
-        // clamps to the max.
-        return Err(errno::EINVAL);
-    }
+    // (2) Unknown flag bits — Linux's prologue check, before any
+    // ring-creation logic.
     if (p.flags & !IORING_SETUP_FLAGS_VALID) != 0 {
         return Err(errno::EINVAL);
     }
-    // SQ_AFF requires SQPOLL — the affinity setting is meaningless
+    // (3) entries == 0 (io_uring_create).
+    if entries == 0 {
+        return Err(errno::EINVAL);
+    }
+    // (4) Without CLAMP, Linux returns EINVAL; with CLAMP it silently
+    // clamps to the max.
+    if entries > IORING_MAX_ENTRIES && (p.flags & IORING_SETUP_CLAMP) == 0 {
+        return Err(errno::EINVAL);
+    }
+    // (5) SQ_AFF requires SQPOLL — the affinity setting is meaningless
     // without a SQ poll thread to bind.
     if (p.flags & IORING_SETUP_SQ_AFF) != 0 && (p.flags & IORING_SETUP_SQPOLL) == 0 {
         return Err(errno::EINVAL);
     }
-    // CQSIZE must come with a sane cq_entries field.
+    // (6) CQSIZE must come with a sane cq_entries field.
     if (p.flags & IORING_SETUP_CQSIZE) != 0 {
         if p.cq_entries == 0 {
             return Err(errno::EINVAL);
@@ -448,7 +478,7 @@ fn validate_setup_params(entries: u32, p: &IoUringParams) -> Result<(), i32> {
             return Err(errno::EINVAL);
         }
     }
-    // ATTACH_WQ requires a sane wq_fd. We accept any non-zero value
+    // (7) ATTACH_WQ requires a sane wq_fd. We accept any non-zero value
     // because we'll EBADF below — the validation here is just to
     // catch "ATTACH_WQ with wq_fd=0" which is almost always a bug.
     if (p.flags & IORING_SETUP_ATTACH_WQ) != 0 {
@@ -457,13 +487,7 @@ fn validate_setup_params(entries: u32, p: &IoUringParams) -> Result<(), i32> {
             return Err(errno::EBADF);
         }
     }
-    // Reserved fields must be zero — Linux uses these for future
-    // expansion and rejects any nonzero value to prevent silently
-    // accepting attr structs from a newer caller.
-    if p.resv != [0; 3] {
-        return Err(errno::EINVAL);
-    }
-    // DEFER_TASKRUN requires SINGLE_ISSUER (Linux strictly enforces
+    // (8) DEFER_TASKRUN requires SINGLE_ISSUER (Linux strictly enforces
     // this — task-run deferral only makes sense if there's one issuer
     // to defer to).
     if (p.flags & IORING_SETUP_DEFER_TASKRUN) != 0
@@ -471,7 +495,7 @@ fn validate_setup_params(entries: u32, p: &IoUringParams) -> Result<(), i32> {
     {
         return Err(errno::EINVAL);
     }
-    // SQPOLL + IOPOLL: incompatible (SQPOLL needs the kernel to wake
+    // (9) SQPOLL + IOPOLL: incompatible (SQPOLL needs the kernel to wake
     // and process; IOPOLL needs the caller to busy-poll — Linux 5.x+
     // rejects the combination on most filesystems).
     // (Linux actually accepts it on blkio devices, but we conservatively
@@ -1329,6 +1353,169 @@ mod tests {
         errno::set_errno(errno::EBADF);
         let mut p = good_params();
         let r = io_uring_setup(32, &mut p);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // ---- Phase 117: io_uring_setup prologue order parity with Linux ----
+    //
+    // Linux checks reserved fields and the flag mask in the prologue
+    // (right after copy_from_user), BEFORE the entries==0 / entries>MAX
+    // checks (which live in io_uring_create).  These tests pin the new
+    // ordering in.  All previously-failing single-condition tests still
+    // pass because each only ever trips one check.
+
+    #[test]
+    fn test_setup_phase117_resv_wins_over_zero_entries() {
+        // entries==0 AND resv[0]!=0 → Linux returns EINVAL from the
+        // resv check (position 1 in the prologue); we now match.
+        let mut p = good_params();
+        p.resv[0] = 1;
+        errno::set_errno(0);
+        let r = io_uring_setup(0, &mut p);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setup_phase117_resv_wins_over_too_many_entries() {
+        // entries > MAX AND resv[0]!=0 → resv first.
+        let mut p = good_params();
+        p.resv[1] = 0xDEAD_BEEFu32;
+        errno::set_errno(0);
+        let r = io_uring_setup(IORING_MAX_ENTRIES + 1, &mut p);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setup_phase117_resv_wins_over_unknown_flag() {
+        // resv[2]!=0 AND flags has unknown bit → resv first.
+        let mut p = good_params();
+        p.resv[2] = 7;
+        p.flags = 1u32 << 31;
+        errno::set_errno(0);
+        let r = io_uring_setup(32, &mut p);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setup_phase117_flag_mask_wins_over_zero_entries() {
+        // entries==0 AND unknown flag bit → Linux returns EINVAL via
+        // the flag-mask check (position 2), before reaching
+        // io_uring_create's entries check (position 3).
+        let mut p = good_params();
+        p.flags = 1u32 << 31;
+        errno::set_errno(0);
+        let r = io_uring_setup(0, &mut p);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setup_phase117_flag_mask_wins_over_too_many_entries() {
+        let mut p = good_params();
+        p.flags = 1u32 << 30;
+        errno::set_errno(0);
+        let r = io_uring_setup(IORING_MAX_ENTRIES + 1, &mut p);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setup_phase117_resv_high_64bit_value_einval() {
+        // A caller writing through an old header who happens to leave
+        // garbage in resv[1] (a u32 in our header) should be caught.
+        let mut p = good_params();
+        p.resv[1] = u32::MAX;
+        errno::set_errno(0);
+        let r = io_uring_setup(32, &mut p);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setup_phase117_zero_entries_with_valid_resv_and_flags_still_einval() {
+        // Pure entries==0 path: resv all zero, flags=0.  Must still
+        // return EINVAL via the entries check (now at position 3).
+        let mut p = good_params();
+        errno::set_errno(0);
+        let r = io_uring_setup(0, &mut p);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setup_phase117_unknown_flag_with_clean_resv_and_entries_einval() {
+        // Pure unknown-flag path.
+        let mut p = good_params();
+        p.flags = 0x4000_0000;
+        errno::set_errno(0);
+        let r = io_uring_setup(32, &mut p);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setup_phase117_resv_check_runs_before_efault_already_handled() {
+        // The EFAULT (NULL params) path runs in io_uring_setup itself,
+        // BEFORE entering validate_setup_params.  This test just
+        // confirms NULL still wins.
+        errno::set_errno(0);
+        let r = io_uring_setup(0, ptr::null_mut());
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_setup_phase117_recovery_after_resv_einval() {
+        // Reject one call with bad resv, then submit a clean one.
+        let mut bad = good_params();
+        bad.resv[0] = 1;
+        let _ = io_uring_setup(32, &mut bad);
+        let mut ok = good_params();
+        errno::set_errno(0);
+        let r = io_uring_setup(32, &mut ok);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_setup_phase117_resv_wins_over_sq_aff_without_sqpoll() {
+        // SQ_AFF without SQPOLL is a flag-combo failure (position 5);
+        // resv check is position 1.  Both bad → resv wins.
+        let mut p = good_params();
+        p.flags = IORING_SETUP_SQ_AFF;
+        p.resv[0] = 1;
+        errno::set_errno(0);
+        let r = io_uring_setup(32, &mut p);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setup_phase117_flag_mask_wins_over_attach_wq_negative() {
+        // ATTACH_WQ with wq_fd<0 returns EBADF (position 7); an
+        // unknown flag bit returns EINVAL (position 2).  When both
+        // are set the flag-mask check fires first → EINVAL, not
+        // EBADF.  This pins in that an unknown flag bit cannot be
+        // masked by a later EBADF verdict.
+        let mut p = good_params();
+        p.flags = IORING_SETUP_ATTACH_WQ | 0x8000_0000;
+        p.wq_fd = u32::MAX; // -1 as i32
+        errno::set_errno(0);
+        let r = io_uring_setup(32, &mut p);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setup_phase117_clean_args_still_reach_enosys() {
+        // No regression: valid args → ENOSYS terminal (no real ring).
+        let mut p = good_params();
+        errno::set_errno(0);
+        let r = io_uring_setup(64, &mut p);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }

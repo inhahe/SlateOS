@@ -83,20 +83,100 @@ pub extern "C" fn __res_init() -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers for resolver argument validation
+// ---------------------------------------------------------------------------
+
+/// Length of a null-terminated `dname`, walked at most `cap` bytes.
+///
+/// Returns `Some(len)` where `len` is the number of bytes before the
+/// terminating NUL, or `None` if no NUL was found in the first `cap`
+/// bytes (i.e. the name is over-long or unterminated).
+///
+/// `dname` must be non-null.
+fn dname_len_capped(dname: *const u8, cap: usize) -> Option<usize> {
+    let mut i: usize = 0;
+    while i < cap {
+        // SAFETY: caller ensures non-null; we walk no further than cap.
+        if unsafe { *dname.add(i) } == 0 {
+            return Some(i);
+        }
+        i = i.wrapping_add(1);
+    }
+    None
+}
+
+/// Validate a DNS domain-name argument for `res_query`/`res_search`/
+/// `res_mkquery`.
+///
+/// Returns `Ok(())` if `dname` is non-NULL, non-empty, and at most
+/// `MAXDNAME` bytes long.  Sets errno and returns `Err(())` otherwise:
+///
+/// * NULL pointer       -> `EFAULT`
+/// * empty string       -> `EINVAL`  (libresolv treats `""` as invalid)
+/// * length > MAXDNAME  -> `EINVAL`  (Linux resolver caps at MAXDNAME)
+fn validate_dname(dname: *const u8) -> Result<(), ()> {
+    if dname.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return Err(());
+    }
+    match dname_len_capped(dname, MAXDNAME.wrapping_add(1)) {
+        Some(0) => {
+            errno::set_errno(errno::EINVAL);
+            Err(())
+        }
+        Some(len) if len > MAXDNAME => {
+            errno::set_errno(errno::EINVAL);
+            Err(())
+        }
+        Some(_) => Ok(()),
+        None => {
+            // No NUL within MAXDNAME+1 bytes — definitionally over-long.
+            errno::set_errno(errno::EINVAL);
+            Err(())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // res_query / res_search
 // ---------------------------------------------------------------------------
 
 /// `res_query` — make a DNS query.
 ///
-/// Stub: always fails with -1 and sets errno to ENOSYS.
+/// Phase 69: previously returned -1+ENOSYS for every call.  Now
+/// validates arguments first so buggy callers (DNS clients that
+/// don't go through `getaddrinfo`) see Linux-matching errnos:
+///
+/// 1. `dname == NULL`                  -> `EFAULT`
+/// 2. `*dname == 0` (empty name)       -> `EINVAL`
+/// 3. dname longer than `MAXDNAME`     -> `EINVAL`
+/// 4. `anslen <= 0`                    -> `EINVAL`
+/// 5. `answer == NULL && anslen > 0`   -> `EFAULT`
+/// 6. otherwise                        -> `ENOSYS`
+///
+/// `class` and `type_` are not validated — Linux's libresolv passes
+/// them through to the wire packet and lets the upstream server
+/// reject unknown values.  Inventing EINVAL paths for unknown
+/// class/type would diverge from glibc/musl.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn res_query(
-    _dname: *const u8,
+    dname: *const u8,
     _class: i32,
     _type_: i32,
-    _answer: *mut u8,
-    _anslen: i32,
+    answer: *mut u8,
+    anslen: i32,
 ) -> i32 {
+    if validate_dname(dname).is_err() {
+        return -1;
+    }
+    if anslen <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if answer.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -145,19 +225,47 @@ pub extern "C" fn __res_search(
 
 /// `res_mkquery` — construct a DNS query message.
 ///
-/// Stub: always fails with -1.
+/// Phase 69: previously returned -1+ENOSYS for every call.  Now
+/// validates arguments before reporting ENOSYS:
+///
+/// 1. `op` is not `QUERY` or `IQUERY`  -> `EINVAL`
+/// 2. `dname` validation               -> `EFAULT`/`EINVAL` (see
+///    `validate_dname`)
+/// 3. `buf == NULL`                    -> `EFAULT`
+/// 4. `buflen < HFIXEDSZ`              -> `EINVAL`  (header alone
+///    won't fit, so no valid packet can be produced)
+/// 5. otherwise                        -> `ENOSYS`
+///
+/// `class`, `type_`, and the inverse-query `data`/`newrr` pointers
+/// are not validated.  `data == NULL` with `datalen == 0` is the
+/// normal case for forward queries and must be accepted.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn res_mkquery(
-    _op: i32,
-    _dname: *const u8,
+    op: i32,
+    dname: *const u8,
     _class: i32,
     _type_: i32,
     _data: *const u8,
     _datalen: i32,
     _newrr: *const u8,
-    _buf: *mut u8,
-    _buflen: i32,
+    buf: *mut u8,
+    buflen: i32,
 ) -> i32 {
+    if op != QUERY && op != IQUERY {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if validate_dname(dname).is_err() {
+        return -1;
+    }
+    if buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if (buflen as i64) < (HFIXEDSZ as i64) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -168,14 +276,38 @@ pub extern "C" fn res_mkquery(
 
 /// `res_send` — send a pre-formatted DNS query.
 ///
-/// Stub: always fails with -1.
+/// Phase 69: previously returned -1+ENOSYS for every call.  Now
+/// validates arguments first:
+///
+/// 1. `msg == NULL`              -> `EFAULT`
+/// 2. `msglen < HFIXEDSZ`        -> `EINVAL`  (a DNS message must
+///    contain at least a 12-byte header to be parseable)
+/// 3. `anslen <= 0`              -> `EINVAL`
+/// 4. `answer == NULL`           -> `EFAULT`  (anslen > 0 by step 3)
+/// 5. otherwise                  -> `ENOSYS`
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn res_send(
-    _msg: *const u8,
-    _msglen: i32,
-    _answer: *mut u8,
-    _anslen: i32,
+    msg: *const u8,
+    msglen: i32,
+    answer: *mut u8,
+    anslen: i32,
 ) -> i32 {
+    if msg.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if (msglen as i64) < (HFIXEDSZ as i64) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if anslen <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if answer.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -1238,5 +1370,584 @@ mod tests {
             buf.len() as i32,
         );
         assert_eq!(qret, -1); // query fails (no resolver)
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 69 — resolver argument validators
+    // -----------------------------------------------------------------
+
+    // --- dname_len_capped helper ---
+
+    #[test]
+    fn test_dname_len_capped_finds_terminator() {
+        let s = b"abc\0";
+        assert_eq!(dname_len_capped(s.as_ptr(), 16), Some(3));
+    }
+
+    #[test]
+    fn test_dname_len_capped_empty_string() {
+        let s = b"\0";
+        assert_eq!(dname_len_capped(s.as_ptr(), 16), Some(0));
+    }
+
+    #[test]
+    fn test_dname_len_capped_no_terminator() {
+        // 8 'a's, no NUL — capped at 8 should return None.
+        let s = [b'a'; 8];
+        assert_eq!(dname_len_capped(s.as_ptr(), 8), None);
+    }
+
+    #[test]
+    fn test_dname_len_capped_exact_terminator_at_cap() {
+        // String fits exactly: "abc\0" with cap=4 finds NUL at index 3.
+        let s = b"abc\0";
+        assert_eq!(dname_len_capped(s.as_ptr(), 4), Some(3));
+    }
+
+    // --- res_query per-error-class ---
+
+    #[test]
+    fn test_res_query_null_dname_efault() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_query(
+            core::ptr::null(),
+            C_IN,
+            T_A,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_res_query_empty_dname_einval() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_query(
+            b"\0".as_ptr(),
+            C_IN,
+            T_A,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_res_query_overlong_dname_einval() {
+        // MAXDNAME+1 'a's, then NUL.  validate_dname caps the walk at
+        // MAXDNAME+1 and rejects.
+        let mut name = [b'a'; MAXDNAME + 2];
+        name[MAXDNAME + 1] = 0;
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_query(
+            name.as_ptr(),
+            C_IN,
+            T_A,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_res_query_zero_anslen_einval() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_query(
+            b"example.com\0".as_ptr(),
+            C_IN,
+            T_A,
+            buf.as_mut_ptr(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_res_query_negative_anslen_einval() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_query(
+            b"example.com\0".as_ptr(),
+            C_IN,
+            T_A,
+            buf.as_mut_ptr(),
+            -1,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_res_query_null_answer_efault() {
+        crate::errno::set_errno(0);
+        let ret = res_query(
+            b"example.com\0".as_ptr(),
+            C_IN,
+            T_A,
+            core::ptr::null_mut(),
+            512,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_res_query_valid_reaches_enosys() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_query(
+            b"example.com\0".as_ptr(),
+            C_IN,
+            T_A,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- res_query ordering ---
+
+    #[test]
+    fn test_res_query_null_dname_beats_zero_anslen() {
+        // dname is checked before anslen.
+        crate::errno::set_errno(0);
+        let ret = res_query(core::ptr::null(), C_IN, T_A, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_res_query_empty_dname_beats_zero_anslen() {
+        crate::errno::set_errno(0);
+        let ret = res_query(b"\0".as_ptr(), C_IN, T_A, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_res_query_zero_anslen_beats_null_answer() {
+        // anslen <= 0 is reported as EINVAL before we check answer ptr.
+        crate::errno::set_errno(0);
+        let ret = res_query(b"x\0".as_ptr(), C_IN, T_A, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- res_search (delegates to res_query) ---
+
+    #[test]
+    fn test_res_search_null_dname_efault() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_search(
+            core::ptr::null(),
+            C_IN,
+            T_A,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_res_search_empty_dname_einval() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_search(
+            b"\0".as_ptr(),
+            C_IN,
+            T_A,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- res_mkquery per-error-class ---
+
+    fn mkquery_valid(buf: &mut [u8]) -> i32 {
+        res_mkquery(
+            QUERY,
+            b"example.com\0".as_ptr(),
+            C_IN,
+            T_A,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        )
+    }
+
+    #[test]
+    fn test_res_mkquery_bad_op_einval() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        // op=42 is neither QUERY nor IQUERY.
+        let ret = res_mkquery(
+            42,
+            b"x\0".as_ptr(),
+            C_IN,
+            T_A,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_res_mkquery_iquery_op_accepted() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_mkquery(
+            IQUERY,
+            b"x\0".as_ptr(),
+            C_IN,
+            T_A,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        // Valid op + valid args reaches the ENOSYS sentinel.
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_res_mkquery_null_dname_efault() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_mkquery(
+            QUERY,
+            core::ptr::null(),
+            C_IN,
+            T_A,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_res_mkquery_empty_dname_einval() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_mkquery(
+            QUERY,
+            b"\0".as_ptr(),
+            C_IN,
+            T_A,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_res_mkquery_null_buf_efault() {
+        crate::errno::set_errno(0);
+        let ret = res_mkquery(
+            QUERY,
+            b"x\0".as_ptr(),
+            C_IN,
+            T_A,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            512,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_res_mkquery_buflen_too_small_einval() {
+        // buflen=11 is less than HFIXEDSZ=12.
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 16];
+        let ret = res_mkquery(
+            QUERY,
+            b"x\0".as_ptr(),
+            C_IN,
+            T_A,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            buf.as_mut_ptr(),
+            11,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_res_mkquery_valid_reaches_enosys() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = mkquery_valid(&mut buf);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- res_mkquery ordering ---
+
+    #[test]
+    fn test_res_mkquery_bad_op_beats_null_dname() {
+        // op check fires before dname validation.
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_mkquery(
+            99,
+            core::ptr::null(),
+            C_IN,
+            T_A,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_res_mkquery_dname_beats_null_buf() {
+        // dname validation fires before buf check.
+        crate::errno::set_errno(0);
+        let ret = res_mkquery(
+            QUERY,
+            core::ptr::null(),
+            C_IN,
+            T_A,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            512,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // --- res_send per-error-class ---
+
+    #[test]
+    fn test_res_send_null_msg_efault() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 512];
+        let ret = res_send(core::ptr::null(), 32, buf.as_mut_ptr(), buf.len() as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_res_send_msglen_too_small_einval() {
+        crate::errno::set_errno(0);
+        let msg = [0u8; 32];
+        let mut buf = [0u8; 512];
+        let ret = res_send(msg.as_ptr(), 11, buf.as_mut_ptr(), buf.len() as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_res_send_zero_anslen_einval() {
+        crate::errno::set_errno(0);
+        let msg = [0u8; 32];
+        let mut buf = [0u8; 512];
+        let ret = res_send(msg.as_ptr(), 32, buf.as_mut_ptr(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_res_send_null_answer_efault() {
+        crate::errno::set_errno(0);
+        let msg = [0u8; 32];
+        let ret = res_send(msg.as_ptr(), 32, core::ptr::null_mut(), 512);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_res_send_valid_reaches_enosys() {
+        crate::errno::set_errno(0);
+        let msg = [0u8; 32];
+        let mut buf = [0u8; 512];
+        let ret = res_send(msg.as_ptr(), msg.len() as i32, buf.as_mut_ptr(), buf.len() as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- res_send ordering ---
+
+    #[test]
+    fn test_res_send_null_msg_beats_short_msglen() {
+        crate::errno::set_errno(0);
+        let ret = res_send(core::ptr::null(), 4, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_res_send_short_msglen_beats_zero_anslen() {
+        crate::errno::set_errno(0);
+        let msg = [0u8; 4];
+        let ret = res_send(msg.as_ptr(), 4, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- real-world workflows ---
+
+    #[test]
+    fn test_workflow_dig_style_query() {
+        // A dig-style tool calls res_init, then res_query for an A
+        // record.  With validators in place, the query reaches
+        // ENOSYS — not some silent garbage that the tool would parse
+        // as a real DNS response.
+        assert_eq!(res_init(), 0);
+        let mut buf = [0u8; 1024];
+        crate::errno::set_errno(0);
+        let ret = res_query(
+            b"www.example.org\0".as_ptr(),
+            C_IN,
+            T_A,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_mkquery_then_send() {
+        // A custom resolver builds a packet via res_mkquery, then
+        // sends it via res_send.  Both should fail with ENOSYS.
+        let mut packet = [0u8; 512];
+        crate::errno::set_errno(0);
+        let n = res_mkquery(
+            QUERY,
+            b"host.local\0".as_ptr(),
+            C_IN,
+            T_AAAA,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            packet.as_mut_ptr(),
+            packet.len() as i32,
+        );
+        assert_eq!(n, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+
+        // Pretend we somehow got a packet.  res_send must also reject
+        // it (ENOSYS), not silently succeed.
+        let mut answer = [0u8; 512];
+        crate::errno::set_errno(0);
+        let s = res_send(
+            packet.as_ptr(),
+            packet.len() as i32,
+            answer.as_mut_ptr(),
+            answer.len() as i32,
+        );
+        assert_eq!(s, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- buggy callers ---
+
+    #[test]
+    fn test_buggy_res_query_with_uninitialised_dname() {
+        // A caller forgot to fill the dname buffer, leaving it all
+        // NUL bytes.  Linux rejects an empty name with EINVAL.
+        crate::errno::set_errno(0);
+        let dname = [0u8; 64];
+        let mut buf = [0u8; 512];
+        let ret = res_query(
+            dname.as_ptr(),
+            C_IN,
+            T_A,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_buggy_res_query_with_unterminated_dname() {
+        // A caller passes a buffer with no NUL anywhere.  Treat as
+        // over-long: EINVAL.
+        crate::errno::set_errno(0);
+        let dname = [b'a'; MAXDNAME + 2]; // no NUL
+        let mut buf = [0u8; 512];
+        let ret = res_query(
+            dname.as_ptr(),
+            C_IN,
+            T_A,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_buggy_res_mkquery_with_tiny_buf() {
+        // Caller miscomputes the buffer size as smaller than even
+        // the header.  Must produce EINVAL, not write garbage.
+        crate::errno::set_errno(0);
+        let mut tiny = [0u8; 4];
+        let ret = res_mkquery(
+            QUERY,
+            b"h\0".as_ptr(),
+            C_IN,
+            T_A,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            tiny.as_mut_ptr(),
+            tiny.len() as i32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_buggy_res_send_with_empty_message() {
+        // Caller passes a 0-byte message (forgot to fill the header).
+        crate::errno::set_errno(0);
+        let msg = [0u8; 4];
+        let mut buf = [0u8; 512];
+        let ret = res_send(msg.as_ptr(), 0, buf.as_mut_ptr(), buf.len() as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 }

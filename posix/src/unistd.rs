@@ -1542,25 +1542,71 @@ pub extern "C" fn getloadavg(loadavg: *mut f64, nelem: i32) -> i32 {
 // ---------------------------------------------------------------------------
 
 /// Flags for `getrandom`.
-pub const GRND_NONBLOCK: u32 = 1;
+pub const GRND_NONBLOCK: u32 = 0x0001;
 /// Use the random source (not urandom).
-pub const GRND_RANDOM: u32 = 2;
+pub const GRND_RANDOM: u32 = 0x0002;
+/// Use the insecure (non-blocking, non-validated) entropy source.
+///
+/// Linux 5.17+ flag.  `GRND_INSECURE` is mutually exclusive with
+/// `GRND_RANDOM` — passing both returns `EINVAL`.
+pub const GRND_INSECURE: u32 = 0x0004;
+
+/// Mask of all flag bits accepted by `getrandom`.
+///
+/// Any bit set outside this mask causes `getrandom` to return `EINVAL`,
+/// matching Linux's kernel-side validation.
+pub const GRND_VALID_FLAGS: u32 = GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE;
 
 /// Fill a buffer with random bytes.
 ///
 /// Uses `rdrand` x86_64 instruction where available.  Falls back to
 /// a simple LCG seeded from the monotonic clock if RDRAND fails.
 ///
+/// # Flag validation
+///
+/// Matches the Linux kernel's `SYSCALL_DEFINE3(getrandom, ...)` prologue:
+///
+/// 1. `flags & ~GRND_VALID_FLAGS != 0` → `EINVAL` (unknown flag bit).
+/// 2. `flags & (GRND_RANDOM|GRND_INSECURE) == (GRND_RANDOM|GRND_INSECURE)`
+///    → `EINVAL` (mutually exclusive flags).
+/// 3. `buf` null with non-zero `buflen` → `EFAULT` (matches Linux's
+///    `copy_to_user` failure mode).
+/// 4. `buflen > isize::MAX` → `EINVAL` (local guard so the return value
+///    cannot be misread as an error).
+///
+/// On success returns the number of bytes filled (always `buflen` in our
+/// implementation — we never short-read).
+///
 /// Returns the number of bytes filled, or -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> isize {
+pub extern "C" fn getrandom(buf: *mut u8, buflen: usize, flags: u32) -> isize {
+    // 1. Unknown flag bits → EINVAL.  This check comes before any buffer
+    //    inspection, matching Linux: invalid flags are rejected before
+    //    copy_to_user is ever called.
+    if (flags & !GRND_VALID_FLAGS) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // 2. GRND_RANDOM and GRND_INSECURE are mutually exclusive.
+    if (flags & (GRND_RANDOM | GRND_INSECURE)) == (GRND_RANDOM | GRND_INSECURE) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // 3. A null buffer with non-zero length is a fault.  Linux reports
+    //    this via copy_to_user → EFAULT.  A zero-length call with a null
+    //    buffer is allowed (and returns 0) since no bytes need to move.
     if buf.is_null() {
+        if buflen == 0 {
+            return 0;
+        }
         errno::set_errno(errno::EFAULT);
         return -1;
     }
 
-    // Guard against buflen > isize::MAX to avoid returning a negative
-    // value that callers would interpret as an error.
+    // 4. Guard against buflen > isize::MAX to avoid returning a negative
+    //    value that callers would interpret as an error.
     if buflen > isize::MAX as usize {
         errno::set_errno(errno::EINVAL);
         return -1;

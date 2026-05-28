@@ -2525,6 +2525,11 @@ pub const SPLICE_F_NONBLOCK: u32 = 2;
 pub const SPLICE_F_MORE: u32 = 4;
 /// Gift pages to the pipe (vmsplice only).
 pub const SPLICE_F_GIFT: u32 = 8;
+/// Mask of all defined `splice`/`tee`/`vmsplice` flag bits.  Any bit
+/// outside this mask is rejected with EINVAL — matches Linux's
+/// `SPLICE_F_ALL` check in `fs/splice.c`.
+pub const SPLICE_F_VALID: u32 =
+    SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
 
 /// Move data between two file descriptors via a pipe.
 ///
@@ -2693,19 +2698,63 @@ pub extern "C" fn splice(
 
 /// Duplicate pipe content without consuming it.
 ///
-/// Stub: returns -1 with ENOSYS.  Linux implements this by sharing
-/// pipe-buffer pages between two pipes without copying — our pipe
-/// layer is a bounded byte-stream with no "peek without consume"
-/// primitive, so there is no userspace fallback that preserves
-/// `tee()`'s "leaves data in fd_in" guarantee.  Programs that need
-/// tee must fall back to a pipe-into-buffer-into-two-pipes pattern.
+/// Returns -1 with `ENOSYS` after argument-domain validation.  Linux
+/// implements `tee` by sharing pipe-buffer pages between two pipes
+/// without copying — our pipe layer is a bounded byte-stream with no
+/// "peek without consume" primitive, so there is no userspace
+/// fallback that preserves `tee()`'s "leaves data in fd_in" guarantee.
+/// Programs that need tee must fall back to a
+/// pipe-into-buffer-into-two-pipes pattern.
+///
+/// Validation order matches `fs/splice.c::do_tee` in Linux:
+/// 1. Reject unknown flag bits with `EINVAL`.
+/// 2. Reject negative fds with `EBADF` (cheap pre-check; `lookup_fd`
+///    would set the same errno but only after a hashmap probe).
+/// 3. Look up both fds — `EBADF` for either missing.
+/// 4. Both fds must refer to pipes — `EINVAL` otherwise.
+/// 5. After all validation, return `-1`/`ENOSYS` because we have no
+///    page-sharing primitive.  A `len == 0` call still validates and
+///    then returns `0` (Linux short-circuits before fd checks; we keep
+///    that behavior because zero-length tee is unobservable).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn tee(
-    _fd_in: Fd,
-    _fd_out: Fd,
-    _len: usize,
-    _flags: u32,
+    fd_in: Fd,
+    fd_out: Fd,
+    len: usize,
+    flags: u32,
 ) -> isize {
+    // 1. Unknown flag bits.  Checked first so callers that pass garbage
+    //    flags learn about it regardless of fd state.
+    if flags & !SPLICE_F_VALID != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // 2. Negative fd short-circuit — avoids two fdtable probes for an
+    //    obviously-invalid request.  Linux returns EBADF for negative
+    //    fds via the fdget path; we match that.
+    if fd_in < 0 || fd_out < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    // 3. Both fds must be open.  lookup_fd sets EBADF on miss.
+    let Some(in_entry) = lookup_fd(fd_in) else { return -1; };
+    let Some(out_entry) = lookup_fd(fd_out) else { return -1; };
+
+    // 4. Both ends must be pipes — Linux's `do_tee` returns EINVAL
+    //    when either side is a regular file, socket, etc.
+    if in_entry.kind != HandleKind::Pipe || out_entry.kind != HandleKind::Pipe {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // 5. Zero-length tee is observably a no-op on Linux too.
+    if len == 0 {
+        return 0;
+    }
+
+    // Validated, but we have no page-sharing primitive.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -3341,31 +3390,90 @@ pub struct FileHandle {
     // f_handle follows — variable-length.
 }
 
+/// Mask of `AT_*` flag bits accepted by `name_to_handle_at`.
+///
+/// Linux accepts `AT_SYMLINK_FOLLOW` (follow the final-component
+/// symlink) and `AT_EMPTY_PATH` (operate on `dirfd` itself when
+/// `pathname` is empty).  Newer kernels also accept `AT_HANDLE_FID`
+/// (0x200), which we do not yet model.  Any bit outside this mask
+/// produces `EINVAL`.
+pub const NAME_TO_HANDLE_AT_FLAGS_VALID: i32 = AT_SYMLINK_FOLLOW | AT_EMPTY_PATH;
+
 /// Obtain a file handle for a path.
 ///
-/// Stub: returns -1 with ENOSYS.  File handles require kernel support
-/// for exporting/importing filesystem-level identifiers.
+/// Returns -1 with `ENOSYS` after argument-domain validation.  Full
+/// file handles require filesystem-level identifiers we don't export
+/// yet — but invalid callers should still see Linux-matching errno
+/// values so portable code (rsync, criu, glibc's nfsd helpers) reads
+/// us correctly.
+///
+/// Validation order matches `fs/fhandle.c::sys_name_to_handle_at`:
+/// 1. Unknown flag bits → `EINVAL`.
+/// 2. `pathname`, `handle`, or `mount_id` NULL → `EFAULT`.  Linux
+///    actually defers `handle`/`mount_id` checks until after
+///    `user_path_at`, but our model can do the cheap NULL check up
+///    front without observable difference.
+/// 3. If `dirfd != AT_FDCWD`, it must be a valid open fd → `EBADF`.
+/// 4. All validated → `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn name_to_handle_at(
-    _dirfd: Fd,
-    _pathname: *const u8,
-    _handle: *mut FileHandle,
-    _mount_id: *mut i32,
-    _flags: i32,
+    dirfd: Fd,
+    pathname: *const u8,
+    handle: *mut FileHandle,
+    mount_id: *mut i32,
+    flags: i32,
 ) -> i32 {
+    if flags & !NAME_TO_HANDLE_AT_FLAGS_VALID != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if pathname.is_null() || handle.is_null() || mount_id.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if dirfd != AT_FDCWD {
+        if dirfd < 0 {
+            errno::set_errno(errno::EBADF);
+            return -1;
+        }
+        if lookup_fd(dirfd).is_none() {
+            // lookup_fd already set EBADF.
+            return -1;
+        }
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
 
 /// Open a file using a file handle.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Returns -1 with `ENOSYS` after argument-domain validation.
+///
+/// Validation order matches `fs/fhandle.c::sys_open_by_handle_at`:
+/// 1. `handle` NULL → `EFAULT`.
+/// 2. If `mount_fd != AT_FDCWD`, it must be a valid open fd → `EBADF`.
+///    Linux additionally requires `CAP_DAC_READ_SEARCH`, which we do
+///    not model (single-user OS).
+/// 3. All validated → `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn open_by_handle_at(
-    _mount_fd: Fd,
-    _handle: *mut FileHandle,
+    mount_fd: Fd,
+    handle: *mut FileHandle,
     _flags: i32,
 ) -> i32 {
+    if handle.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if mount_fd != AT_FDCWD {
+        if mount_fd < 0 {
+            errno::set_errno(errno::EBADF);
+            return -1;
+        }
+        if lookup_fd(mount_fd).is_none() {
+            return -1;
+        }
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -5341,10 +5449,23 @@ mod tests {
     #[test]
     fn test_tee_still_enosys() {
         // tee has no userspace fallback that preserves "leave data in
-        // fd_in" semantics, so it remains ENOSYS for now.
+        // fd_in" semantics, so it remains ENOSYS for now — but only
+        // after argument validation passes.  Need two real pipe fds.
+        let mut pf1 = [0i32; 2];
+        let mut pf2 = [0i32; 2];
+        if crate::pipe::pipe(pf1.as_mut_ptr()) != 0
+            || crate::pipe::pipe(pf2.as_mut_ptr()) != 0
+        {
+            return;
+        }
         crate::errno::set_errno(0);
-        assert_eq!(tee(0, 1, 4096, 0), -1);
+        // Read end of pf1, write end of pf2 — both pipes, valid.
+        assert_eq!(tee(pf1[0], pf2[1], 4096, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        let _ = fdtable::close_fd(pf1[0]);
+        let _ = fdtable::close_fd(pf1[1]);
+        let _ = fdtable::close_fd(pf2[0]);
+        let _ = fdtable::close_fd(pf2[1]);
     }
 
     #[test]
@@ -5606,12 +5727,16 @@ mod tests {
 
     #[test]
     fn test_name_to_handle_at_returns_enosys() {
+        // Valid inputs must reach the ENOSYS sentinel — all earlier
+        // error classes are exercised in dedicated tests below.
+        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut mount_id: i32 = 0;
         crate::errno::set_errno(0);
         let ret = name_to_handle_at(
-            -100, // AT_FDCWD
+            AT_FDCWD,
             b"/tmp\0".as_ptr(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
+            &raw mut fh,
+            &raw mut mount_id,
             0,
         );
         assert_eq!(ret, -1);
@@ -5620,8 +5745,11 @@ mod tests {
 
     #[test]
     fn test_open_by_handle_at_returns_enosys() {
+        // Valid pointer + AT_FDCWD must pass validation and surface
+        // ENOSYS rather than EFAULT/EBADF.
+        let mut fh = FileHandle { handle_bytes: 0, handle_type: 0 };
         crate::errno::set_errno(0);
-        let ret = open_by_handle_at(3, core::ptr::null_mut(), 0);
+        let ret = open_by_handle_at(AT_FDCWD, &raw mut fh, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -5837,5 +5965,478 @@ mod tests {
     fn test_statx_all_includes_btime() {
         assert_eq!(STATX_ALL, 0x0FFF);
         assert_ne!(STATX_ALL & STATX_BTIME, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 62: tee / name_to_handle_at / open_by_handle_at validators
+    // -----------------------------------------------------------------------
+
+    // --- splice flag constants -------------------------------------------
+
+    #[test]
+    fn test_splice_f_valid_mask() {
+        assert_eq!(
+            SPLICE_F_VALID,
+            SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT,
+        );
+        // Mask must equal the OR of the four defined bits (1|2|4|8 = 15).
+        assert_eq!(SPLICE_F_VALID, 0xF);
+    }
+
+    #[test]
+    fn test_splice_f_valid_rejects_unknown_bits() {
+        // First unknown bit is 0x10.
+        assert_eq!(0x10u32 & !SPLICE_F_VALID, 0x10);
+        assert_eq!(0xFFFFu32 & !SPLICE_F_VALID, 0xFFF0);
+    }
+
+    // --- tee: flag validation --------------------------------------------
+
+    #[test]
+    fn test_tee_unknown_flag_bit_einval() {
+        // Unknown flag must be rejected before any fd lookup.  Use
+        // negative fds to prove flags are checked first.
+        crate::errno::set_errno(0);
+        let ret = tee(-1, -1, 1, 0x10);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_tee_high_garbage_flag_einval() {
+        crate::errno::set_errno(0);
+        let ret = tee(-1, -1, 1, 0xFFFF_FFFF);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_tee_all_known_flags_pass_flag_check() {
+        // All four defined bits together must not produce EINVAL.
+        // Either the fd check fails (EBADF) or we get further.
+        crate::errno::set_errno(0);
+        let ret = tee(-1, -1, 1, SPLICE_F_VALID);
+        assert_eq!(ret, -1);
+        // -1 was rejected for fd reasons, not flag reasons.
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- tee: fd validation ---------------------------------------------
+
+    #[test]
+    fn test_tee_negative_fd_in_ebadf() {
+        crate::errno::set_errno(0);
+        let ret = tee(-1, 1, 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tee_negative_fd_out_ebadf() {
+        crate::errno::set_errno(0);
+        let ret = tee(0, -1, 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tee_both_negative_fds_ebadf() {
+        crate::errno::set_errno(0);
+        let ret = tee(-5, -7, 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tee_nonexistent_fd_in_ebadf() {
+        // 100000 is far above any open fd index in tests.
+        crate::errno::set_errno(0);
+        let ret = tee(100_000, 100_001, 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- tee: pipe-only requirement -------------------------------------
+
+    #[test]
+    fn test_tee_non_pipe_fd_in_einval() {
+        // Open a regular file as fd_in and a pipe as fd_out — Linux
+        // returns EINVAL because tee requires both ends to be pipes.
+        use crate::fdtable;
+        let path = "tee_nonpipe_in.tmp\0";
+        let fd_file = open(path.as_ptr(), crate::fcntl::O_CREAT | crate::fcntl::O_RDWR, 0o644);
+        if fd_file < 0 {
+            return;
+        }
+        let mut pf = [0i32; 2];
+        if crate::pipe::pipe(pf.as_mut_ptr()) != 0 {
+            let _ = fdtable::close_fd(fd_file);
+            let _ = unlink(path.as_ptr());
+            return;
+        }
+        crate::errno::set_errno(0);
+        let ret = tee(fd_file, pf[1], 16, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd_file);
+        let _ = fdtable::close_fd(pf[0]);
+        let _ = fdtable::close_fd(pf[1]);
+        let _ = unlink(path.as_ptr());
+    }
+
+    #[test]
+    fn test_tee_non_pipe_fd_out_einval() {
+        use crate::fdtable;
+        let path = "tee_nonpipe_out.tmp\0";
+        let fd_file = open(path.as_ptr(), crate::fcntl::O_CREAT | crate::fcntl::O_RDWR, 0o644);
+        if fd_file < 0 {
+            return;
+        }
+        let mut pf = [0i32; 2];
+        if crate::pipe::pipe(pf.as_mut_ptr()) != 0 {
+            let _ = fdtable::close_fd(fd_file);
+            let _ = unlink(path.as_ptr());
+            return;
+        }
+        crate::errno::set_errno(0);
+        let ret = tee(pf[0], fd_file, 16, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd_file);
+        let _ = fdtable::close_fd(pf[0]);
+        let _ = fdtable::close_fd(pf[1]);
+        let _ = unlink(path.as_ptr());
+    }
+
+    // --- tee: zero-length short-circuit ---------------------------------
+
+    #[test]
+    fn test_tee_zero_len_validates_then_succeeds() {
+        use crate::fdtable;
+        let mut pf1 = [0i32; 2];
+        let mut pf2 = [0i32; 2];
+        if crate::pipe::pipe(pf1.as_mut_ptr()) != 0
+            || crate::pipe::pipe(pf2.as_mut_ptr()) != 0
+        {
+            return;
+        }
+        crate::errno::set_errno(0);
+        // Zero length still goes through fd + pipe-kind validation.
+        assert_eq!(tee(pf1[0], pf2[1], 0, 0), 0);
+        let _ = fdtable::close_fd(pf1[0]);
+        let _ = fdtable::close_fd(pf1[1]);
+        let _ = fdtable::close_fd(pf2[0]);
+        let _ = fdtable::close_fd(pf2[1]);
+    }
+
+    #[test]
+    fn test_tee_zero_len_with_bad_fd_still_ebadf() {
+        // Zero length does not exempt the caller from validation.
+        crate::errno::set_errno(0);
+        let ret = tee(-1, -1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- tee: ordering ---------------------------------------------------
+
+    #[test]
+    fn test_tee_flag_check_before_fd_check() {
+        // Bad flags AND bad fds — flag error must win.
+        crate::errno::set_errno(0);
+        let ret = tee(-1, -1, 1, 0x80);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_tee_fd_check_before_pipe_kind_check() {
+        // Negative fd takes precedence over pipe-kind — we never
+        // dereference a missing fd to check its kind.
+        crate::errno::set_errno(0);
+        let ret = tee(-1, -2, 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- name_to_handle_at: flag validation ------------------------------
+
+    #[test]
+    fn test_name_to_handle_at_flags_valid_mask() {
+        assert_eq!(NAME_TO_HANDLE_AT_FLAGS_VALID, AT_SYMLINK_FOLLOW | AT_EMPTY_PATH);
+        // 0x800 is between FOLLOW(0x400) and EMPTY_PATH(0x1000) and
+        // must not be in the accepted set.
+        assert_eq!(0x800 & !NAME_TO_HANDLE_AT_FLAGS_VALID, 0x800);
+    }
+
+    #[test]
+    fn test_name_to_handle_at_unknown_flag_einval() {
+        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut mid: i32 = 0;
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &raw mut fh,
+            &raw mut mid,
+            0x800,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_name_to_handle_at_accepts_at_symlink_follow() {
+        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut mid: i32 = 0;
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &raw mut fh,
+            &raw mut mid,
+            AT_SYMLINK_FOLLOW,
+        );
+        assert_eq!(ret, -1);
+        // AT_SYMLINK_FOLLOW is accepted — we should reach the ENOSYS
+        // sentinel, not EINVAL.
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_name_to_handle_at_accepts_at_empty_path() {
+        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut mid: i32 = 0;
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            AT_FDCWD,
+            b"\0".as_ptr(),
+            &raw mut fh,
+            &raw mut mid,
+            AT_EMPTY_PATH,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- name_to_handle_at: NULL-pointer validation ---------------------
+
+    #[test]
+    fn test_name_to_handle_at_null_pathname_efault() {
+        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut mid: i32 = 0;
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            AT_FDCWD,
+            core::ptr::null(),
+            &raw mut fh,
+            &raw mut mid,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_name_to_handle_at_null_handle_efault() {
+        let mut mid: i32 = 0;
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            core::ptr::null_mut(),
+            &raw mut mid,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_name_to_handle_at_null_mount_id_efault() {
+        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &raw mut fh,
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // --- name_to_handle_at: dirfd validation ----------------------------
+
+    #[test]
+    fn test_name_to_handle_at_negative_dirfd_ebadf() {
+        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut mid: i32 = 0;
+        crate::errno::set_errno(0);
+        // -5 is not AT_FDCWD (-100), so it must be a valid open fd.
+        let ret = name_to_handle_at(
+            -5,
+            b"foo\0".as_ptr(),
+            &raw mut fh,
+            &raw mut mid,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_name_to_handle_at_nonexistent_dirfd_ebadf() {
+        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut mid: i32 = 0;
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            100_000,
+            b"foo\0".as_ptr(),
+            &raw mut fh,
+            &raw mut mid,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- name_to_handle_at: ordering -------------------------------------
+
+    #[test]
+    fn test_name_to_handle_at_flag_check_before_pointer_check() {
+        // Bad flags AND NULL pathname — flag check wins.
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            AT_FDCWD,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            0x800,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_name_to_handle_at_pointer_check_before_dirfd_check() {
+        // NULL pathname AND bad dirfd — EFAULT wins.
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            -5,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // --- open_by_handle_at: pointer validation --------------------------
+
+    #[test]
+    fn test_open_by_handle_at_null_handle_efault() {
+        crate::errno::set_errno(0);
+        let ret = open_by_handle_at(AT_FDCWD, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_open_by_handle_at_negative_mountfd_ebadf() {
+        let mut fh = FileHandle { handle_bytes: 0, handle_type: 0 };
+        crate::errno::set_errno(0);
+        let ret = open_by_handle_at(-5, &raw mut fh, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_open_by_handle_at_nonexistent_mountfd_ebadf() {
+        let mut fh = FileHandle { handle_bytes: 0, handle_type: 0 };
+        crate::errno::set_errno(0);
+        let ret = open_by_handle_at(100_000, &raw mut fh, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_open_by_handle_at_pointer_check_before_fd_check() {
+        // NULL handle AND bad mount_fd — EFAULT wins.
+        crate::errno::set_errno(0);
+        let ret = open_by_handle_at(-5, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // --- workflow + real-world buggy callers ----------------------------
+
+    #[test]
+    fn test_workflow_tee_pipeline_short_circuit() {
+        // A real workflow: program decides at runtime whether to tee
+        // into a backup pipe.  When len==0 (nothing to forward yet),
+        // tee must still validate args but return 0.
+        use crate::fdtable;
+        let mut a = [0i32; 2];
+        let mut b = [0i32; 2];
+        if crate::pipe::pipe(a.as_mut_ptr()) != 0
+            || crate::pipe::pipe(b.as_mut_ptr()) != 0
+        {
+            return;
+        }
+        assert_eq!(tee(a[0], b[1], 0, SPLICE_F_NONBLOCK), 0);
+        // And with payload: ENOSYS (not yet supported in our pipe layer).
+        crate::errno::set_errno(0);
+        assert_eq!(tee(a[0], b[1], 4096, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        let _ = fdtable::close_fd(a[0]);
+        let _ = fdtable::close_fd(a[1]);
+        let _ = fdtable::close_fd(b[0]);
+        let _ = fdtable::close_fd(b[1]);
+    }
+
+    #[test]
+    fn test_buggy_caller_tee_passes_uninitialized_fd() {
+        // Some real-world bug: caller forgot to initialize fd_in (left
+        // at its uninitialized i32 default which we simulate with -1).
+        crate::errno::set_errno(0);
+        let ret = tee(-1, 1, 1024, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_buggy_caller_name_to_handle_at_swaps_flag_constants() {
+        // Caller confuses AT_SYMLINK_NOFOLLOW (which is for stat-family)
+        // with AT_SYMLINK_FOLLOW (which is what name_to_handle_at wants).
+        // AT_SYMLINK_NOFOLLOW is 0x100 — outside our valid mask.
+        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut mid: i32 = 0;
+        crate::errno::set_errno(0);
+        let ret = name_to_handle_at(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &raw mut fh,
+            &raw mut mid,
+            AT_SYMLINK_NOFOLLOW,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_buggy_caller_open_by_handle_at_stack_zero_handle() {
+        // Caller declared a FileHandle on the stack but forgot to fill
+        // it.  Validation must pass (pointer is non-NULL) and we
+        // surface ENOSYS — the caller's bug is observable through the
+        // syscall *succeeding* validation, not through a misleading
+        // EFAULT.
+        let mut fh = FileHandle { handle_bytes: 0, handle_type: 0 };
+        crate::errno::set_errno(0);
+        let ret = open_by_handle_at(AT_FDCWD, &raw mut fh, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 }

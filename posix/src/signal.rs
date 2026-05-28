@@ -276,6 +276,17 @@ pub unsafe extern "C" fn sigaction(
 /// `pid <= 0` selects process groups or "all processes" on Linux.  We
 /// have no Unix process-group concept (the design uses IPC), so those
 /// forms return `ENOSYS`.
+///
+/// # Capability gate (Phase 203)
+///
+/// Linux gates cross-uid signal delivery on `CAP_KILL` inside
+/// `check_kill_permission()` → `kill_ok_by_cred()`.  In our
+/// single-uid environment, same-uid is always true so the cap never
+/// blocks in practice.  We still enforce it for correctness: after
+/// the EINVAL signal check and the self-pid SIGABRT fast path, a
+/// non-self `kill()` with `pid > 0` requires `CAP_KILL`.  This
+/// lets unprivileged callers see EPERM rather than ENOSYS — the
+/// correct signal for "you lack permission" vs. "not implemented."
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     // sig == 0 is a pure existence/permission check; honour it.
@@ -318,6 +329,27 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
         if pid == self_pid {
             crate::unistd::abort();
         }
+    }
+
+    // Phase 203: CAP_KILL gate for non-self signal delivery.
+    // Linux's check_kill_permission() calls kill_ok_by_cred():
+    //   - same thread group → always allowed
+    //   - same uid → allowed
+    //   - CAP_KILL → allowed
+    //   - otherwise → EPERM
+    //
+    // Self-signals already took the SIGABRT fast path above.  For
+    // pid <= 0 (process groups) we still fall through to ENOSYS
+    // because we can't enumerate the group membership — the cap
+    // gate only runs for positive pids where the caller intends to
+    // signal a specific target.
+    if pid > 0
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_KILL,
+        )
+    {
+        errno::set_errno(errno::EPERM);
+        return -1;
     }
 
     errno::set_errno(errno::ENOSYS);
@@ -1828,6 +1860,215 @@ mod tests {
                 "kill(1, {sig}) should set ENOSYS"
             );
         }
+    }
+
+    // =================================================================
+    // Phase 203 — CAP_KILL gate on kill() for cross-process signals
+    //
+    // Linux's check_kill_permission() → kill_ok_by_cred() gates
+    // cross-uid signal delivery on CAP_KILL.  The gate runs after
+    // the EINVAL signal check and the self-SIGABRT fast path, and
+    // only for pid > 0 (process-group forms fall through to ENOSYS).
+    // =================================================================
+
+    mod phase203_cap {
+        pub(super) struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            pub(super) fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        pub(super) fn drop_cap_kill() {
+            let cap = crate::sys_capability::CAP_KILL;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << cap);
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed dropping cap");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+    }
+
+    // -- cap held: kill reaches ENOSYS (unchanged) ------------------------
+
+    /// With CAP_KILL (default), kill(1, SIGHUP) still reaches ENOSYS.
+    #[test]
+    fn test_phase203_kill_with_cap_enosys() {
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_KILL,
+        ));
+        crate::errno::set_errno(0);
+        let ret = kill(1, SIGHUP);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- cap dropped: cross-process kill → EPERM --------------------------
+
+    /// Without CAP_KILL, kill(1, SIGHUP) → EPERM.
+    #[test]
+    fn test_phase203_kill_no_cap_eperm() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let ret = kill(1, SIGHUP);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    /// Without CAP_KILL, kill(42, SIGTERM) → EPERM.
+    #[test]
+    fn test_phase203_kill_sigterm_no_cap_eperm() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let ret = kill(42, SIGTERM);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    // -- sig==0 existence check bypasses the cap gate ---------------------
+
+    /// sig==0 is a pure existence check — it never signals, so
+    /// CAP_KILL is not required.  The sig==0 branch returns before
+    /// the cap gate.
+    #[test]
+    fn test_phase203_kill_sig0_bypasses_cap_gate() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        // pid <= 0 is ENOSYS for sig==0 (process group); that's
+        // tested elsewhere.  For pid > 0, sig==0 does a
+        // SYS_PROCESS_IS_READY syscall — the result depends on
+        // whether pid 1 actually exists.  Either ESRCH or 0 is
+        // acceptable; what matters is it's NOT EPERM.
+        let ret = kill(1, 0);
+        // We don't assert ret because pid 1 may or may not exist.
+        // The key invariant is that errno != EPERM.
+        assert_ne!(
+            crate::errno::get_errno(),
+            crate::errno::EPERM,
+            "sig==0 must bypass CAP_KILL gate"
+        );
+        let _ = ret; // suppress unused warning
+    }
+
+    // -- pid <= 0 bypasses the cap gate (falls to ENOSYS) -----------------
+
+    /// pid == 0 (process group) with no cap → ENOSYS, not EPERM.
+    /// The cap gate only fires for pid > 0.
+    #[test]
+    fn test_phase203_kill_pid0_no_cap_enosys() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let ret = kill(0, SIGHUP);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ENOSYS,
+            "pid <= 0 must bypass CAP_KILL gate"
+        );
+    }
+
+    /// pid == -1 (all processes) with no cap → ENOSYS.
+    #[test]
+    fn test_phase203_kill_pidneg1_no_cap_enosys() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let ret = kill(-1, SIGTERM);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ENOSYS,
+            "pid == -1 must bypass CAP_KILL gate"
+        );
+    }
+
+    // -- ordering: EINVAL beats EPERM -------------------------------------
+
+    /// Invalid signal + no cap → EINVAL (sig check before cap).
+    #[test]
+    fn test_phase203_kill_invalid_sig_einval_before_eperm() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let ret = kill(1, 0x7FFF);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "EINVAL for bad signal must precede EPERM"
+        );
+    }
+
+    // -- restoration: cap drop/restore cycle ------------------------------
+
+    /// After restoring CAP_KILL, kill reaches ENOSYS again.
+    #[test]
+    fn test_phase203_kill_cap_restore() {
+        {
+            let _g = phase203_cap::CapGuard::snapshot();
+            phase203_cap::drop_cap_kill();
+            crate::errno::set_errno(0);
+            let ret = kill(1, SIGHUP);
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_KILL,
+        ));
+        crate::errno::set_errno(0);
+        let ret = kill(1, SIGHUP);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     // -- sigtimedwait / sigqueue stubs --

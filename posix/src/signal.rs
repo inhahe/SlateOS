@@ -324,13 +324,27 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     -1
 }
 
-/// Send a signal to the calling process.
+/// Send a signal to the calling process / calling thread.
 ///
-/// For SIGABRT, calls abort().  Otherwise returns -1/ENOSYS.
+/// POSIX `raise(sig)`:
+/// * Returns 0 on success, non-zero on error (errno set).
+/// * For `SIGABRT`, defers to `abort()` — matches glibc and musl, which
+///   route `raise(SIGABRT)` through their `__GI_raise` / `abort` paths.
+/// * For every other signal we have no kernel-side delivery mechanism,
+///   so the call fails with `ENOSYS` after validation.
+///
+/// Errors (Linux-matching):
+/// * `EINVAL` — `sig` is not a valid signal number (`sig <= 0`
+///   or `sig >= NSIG`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn raise(sig: i32) -> i32 {
     if sig == SIGABRT {
+        // abort() is divergent; never returns.
         crate::unistd::abort();
+    }
+    if !(1..NSIG).contains(&sig) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
     }
     errno::set_errno(errno::ENOSYS);
     -1
@@ -698,26 +712,77 @@ pub extern "C" fn sigwait(_set: *const SigsetT, sig: *mut i32) -> i32 {
     crate::errno::EINTR
 }
 
+/// Maximum valid value for `timespec.tv_nsec` (one less than a second
+/// in nanoseconds).  Anything outside `[0, NSEC_PER_SEC)` is `EINVAL`
+/// per Linux's `kernel/time/posix-timers.c::do_sigtimedwait`.
+pub const SIGTIMEDWAIT_NSEC_MAX: i64 = 999_999_999;
+
 /// Wait for a signal with a timeout.
 ///
-/// Stub: returns -1 with `EAGAIN` (timeout expired, no signal
-/// delivered).  The `timeout` parameter is ignored since we don't
-/// have signal delivery.
+/// Stub: validates arguments per Linux `kernel/signal.c::do_sigtimedwait`,
+/// then returns `-1` with `EAGAIN` (timeout expired, no signal delivered).
+///
+/// Errors (Linux-matching priority order):
+/// * `EFAULT` — `set` is NULL (kernel copies it into a kernel sigset
+///   via `copy_from_user`; NULL faults immediately).
+/// * `EINVAL` — `timeout` is non-NULL and contains a negative `tv_sec`
+///   or an out-of-range `tv_nsec` (must be in `[0, 999_999_999]`).
+///
+/// Behaviour notes:
+/// * A NULL `timeout` is the "wait forever" form; we still surface
+///   `EAGAIN` because no signal can ever be delivered in this stub.
+/// * `info` may be NULL — POSIX explicitly allows callers that don't
+///   care about siginfo to pass NULL.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigtimedwait(
-    _set: *const SigsetT,
+    set: *const SigsetT,
     _info: *mut core::ffi::c_void,
-    _timeout: *const crate::stat::Timespec,
+    timeout: *const crate::stat::Timespec,
 ) -> i32 {
+    if set.is_null() {
+        crate::errno::set_errno(crate::errno::EFAULT);
+        return -1;
+    }
+    if !timeout.is_null() {
+        // SAFETY: timeout was just confirmed non-NULL.  We read fields
+        // by-value; alignment is the caller's responsibility per the
+        // documented C ABI.
+        let ts = unsafe { core::ptr::read_unaligned(timeout) };
+        if ts.tv_sec < 0 || !(0..=SIGTIMEDWAIT_NSEC_MAX).contains(&ts.tv_nsec) {
+            crate::errno::set_errno(crate::errno::EINVAL);
+            return -1;
+        }
+    }
     crate::errno::set_errno(crate::errno::EAGAIN);
     -1
 }
 
-/// Queue a signal to a process.
+/// Queue a signal to a process with an attached `sigval`.
 ///
-/// Stub: returns -1 with `ENOSYS` (no signal delivery mechanism).
+/// Stub: validates arguments per Linux
+/// `kernel/signal.c::sys_rt_sigqueueinfo`, then returns `-1` with
+/// `ENOSYS` (no signal delivery mechanism).
+///
+/// Errors (Linux-matching priority order):
+/// * `EINVAL` — `sig` is not a valid signal number (`sig < 0` or
+///   `sig >= NSIG`).  `sig == 0` is permitted (existence-probe form).
+/// * `ESRCH` — `pid <= 0`.  Unlike `kill(2)`, `sigqueue(3)` does not
+///   accept process-group or "all processes" forms; the target must be
+///   an existing process.  Linux's `find_task_by_vpid` rejects
+///   non-positive PIDs with `ESRCH`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sigqueue(_pid: crate::types::PidT, _sig: i32, _value: usize) -> i32 {
+pub extern "C" fn sigqueue(pid: crate::types::PidT, sig: i32, _value: usize) -> i32 {
+    // sig validation first: kernel checks valid_signal() before any
+    // task lookup so callers with bogus sigs see EINVAL regardless of
+    // whether the pid exists.
+    if !(0..NSIG).contains(&sig) {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    if pid <= 0 {
+        crate::errno::set_errno(crate::errno::ESRCH);
+        return -1;
+    }
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
@@ -1822,10 +1887,12 @@ mod tests {
 
     #[test]
     fn test_raise_zero_returns_enosys() {
-        // Signal 0 is not SIGABRT → ENOSYS.
+        // sig == 0 is out of the valid signal range (1..NSIG); raise()
+        // now returns EINVAL per Linux semantics, ahead of the ENOSYS
+        // fall-through for valid-but-unsupported signals.
         errno::set_errno(0);
         assert_eq!(raise(0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -- pthread_sigmask --
@@ -1997,5 +2064,314 @@ mod tests {
         let mut si = SiginfoT::default();
         si.si_signo = SIGINT;
         unsafe { psiginfo(&si, core::ptr::null()); }
+    }
+
+    // -----------------------------------------------------------------
+    // raise / sigqueue / sigtimedwait — argument-domain validation (Phase 59)
+    // -----------------------------------------------------------------
+
+    // ---- raise() ----
+
+    #[test]
+    fn test_raise_zero_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(raise(0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_raise_negative_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(raise(-1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_raise_nsig_einval() {
+        // sig == NSIG is out of range (valid range is 1..NSIG).
+        crate::errno::set_errno(0);
+        assert_eq!(raise(NSIG), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_raise_way_above_nsig_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(raise(1000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_raise_min_signal_enosys() {
+        // sig == 1 (SIGHUP) is valid → falls through to ENOSYS.
+        crate::errno::set_errno(0);
+        assert_eq!(raise(1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_raise_max_signal_enosys() {
+        // sig == NSIG - 1 (top of the valid range) → ENOSYS.
+        crate::errno::set_errno(0);
+        assert_eq!(raise(NSIG - 1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_raise_rt_signal_enosys() {
+        // Realtime signals (SIGRTMIN..=SIGRTMAX) pass validation.
+        crate::errno::set_errno(0);
+        assert_eq!(raise(SIGRTMIN), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // ---- sigqueue() ----
+
+    #[test]
+    fn test_sigqueue_negative_sig_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(1, -1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sigqueue_sig_at_nsig_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(1, NSIG, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sigqueue_sig_way_above_nsig_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(1, 1000, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sigqueue_sig_zero_existence_probe_passes() {
+        // sig == 0 is the existence/permission-probe form; should not
+        // trip EINVAL but instead reach the pid/ENOSYS leg.
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(1, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_sigqueue_zero_pid_esrch() {
+        // Unlike kill(), sigqueue does not accept pid == 0
+        // (process-group "self") — only a real positive pid.
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(0, SIGTERM, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_sigqueue_negative_pid_esrch() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(-1, SIGTERM, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_sigqueue_pgrp_form_esrch() {
+        // pid < -1 in kill() means "process group |pid|"; sigqueue
+        // rejects it as ESRCH.
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(-100, SIGTERM, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_sigqueue_sig_checked_before_pid() {
+        // Bad sig + bad pid → EINVAL (sig check is first).
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(-1, -1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sigqueue_valid_args_reach_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(1234, SIGUSR1, 42), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // ---- sigtimedwait() ----
+
+    #[test]
+    fn test_sigtimedwait_null_set_efault() {
+        crate::errno::set_errno(0);
+        let ret = sigtimedwait(
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_sigtimedwait_negative_tv_sec_einval() {
+        let set = SigsetT { bits: [0; 16] };
+        let ts = crate::stat::Timespec { tv_sec: -1, tv_nsec: 0 };
+        crate::errno::set_errno(0);
+        let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sigtimedwait_nsec_at_billion_einval() {
+        let set = SigsetT { bits: [0; 16] };
+        let ts = crate::stat::Timespec { tv_sec: 1, tv_nsec: 1_000_000_000 };
+        crate::errno::set_errno(0);
+        let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sigtimedwait_nsec_way_too_big_einval() {
+        let set = SigsetT { bits: [0; 16] };
+        let ts = crate::stat::Timespec { tv_sec: 1, tv_nsec: i64::MAX };
+        crate::errno::set_errno(0);
+        let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sigtimedwait_negative_nsec_einval() {
+        let set = SigsetT { bits: [0; 16] };
+        let ts = crate::stat::Timespec { tv_sec: 1, tv_nsec: -1 };
+        crate::errno::set_errno(0);
+        let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sigtimedwait_set_check_before_timeout() {
+        // NULL set + bad timeout → EFAULT (set is checked first).
+        let ts = crate::stat::Timespec { tv_sec: -1, tv_nsec: -1 };
+        crate::errno::set_errno(0);
+        let ret = sigtimedwait(core::ptr::null(), core::ptr::null_mut(), &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_sigtimedwait_max_valid_nsec_reaches_eagain() {
+        let set = SigsetT { bits: [0; 16] };
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: SIGTIMEDWAIT_NSEC_MAX,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAGAIN);
+    }
+
+    #[test]
+    fn test_sigtimedwait_zero_timeout_reaches_eagain() {
+        // POSIX poll-form: timeout = {0, 0} → "return immediately if no
+        // signal is pending"; our stub reports EAGAIN.
+        let set = SigsetT { bits: [0; 16] };
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        crate::errno::set_errno(0);
+        let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAGAIN);
+    }
+
+    #[test]
+    fn test_sigtimedwait_null_timeout_reaches_eagain() {
+        // NULL timeout = "wait forever"; stub still reports EAGAIN.
+        let set = SigsetT { bits: [0; 16] };
+        crate::errno::set_errno(0);
+        let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAGAIN);
+    }
+
+    #[test]
+    fn test_sigtimedwait_nsec_max_constant() {
+        assert_eq!(SIGTIMEDWAIT_NSEC_MAX, 999_999_999);
+    }
+
+    // ---- Real-world workflows ----
+
+    #[test]
+    fn test_workflow_raise_sigusr1_libev() {
+        // libev uses raise(SIGUSR1) to wake the event loop from a
+        // signal handler.  On our stub it gracefully fails with ENOSYS
+        // so libev's fallback (pipe self-wakeup) is selected at init.
+        crate::errno::set_errno(0);
+        assert_eq!(raise(SIGUSR1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_sigqueue_realtime_with_data() {
+        // Modern threading libraries use sigqueue() with an RT signal
+        // and a sival_int payload to wake worker threads with a
+        // cookie.  Validates and falls through to ENOSYS.
+        crate::errno::set_errno(0);
+        let ret = sigqueue(4321, SIGRTMIN + 1, 0xDEAD_BEEF);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_sigtimedwait_dbus_poll() {
+        // dbus poll: sigtimedwait with a small timeout while servicing
+        // incoming messages.  No signals delivered → EAGAIN.
+        let set = SigsetT { bits: [0xFFFF_FFFF_FFFF_FFFF; 16] };
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 100_000 };
+        crate::errno::set_errno(0);
+        let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAGAIN);
+    }
+
+    // ---- Real-world buggy callers ----
+
+    #[test]
+    fn test_workflow_buggy_raise_sigkill() {
+        // Buggy caller tries raise(SIGKILL) thinking it'll self-kill.
+        // Validates fine (SIGKILL is a real signal), reaches ENOSYS.
+        // (POSIX says raise(SIGKILL) is unspecified, but ENOSYS is a
+        // safe, non-fatal answer for our stub.)
+        crate::errno::set_errno(0);
+        assert_eq!(raise(SIGKILL), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_buggy_sigqueue_oversigned_sig() {
+        // A caller passes (sig + 100) to a signal-relay function that
+        // forgets to subtract 100 before sigqueue.  Out of range →
+        // EINVAL is the correct diagnostic.
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(1234, SIGUSR1 + 100, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_workflow_buggy_sigtimedwait_microseconds() {
+        // Caller passes microseconds in tv_nsec (a classic units bug).
+        // 500_000 μs in tv_nsec is fine (= 500 μs of nanoseconds), but
+        // 1_500_000_000 μs (= 25 minutes) blows past NSEC_MAX → EINVAL.
+        let set = SigsetT { bits: [0; 16] };
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_500_000_000,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 }

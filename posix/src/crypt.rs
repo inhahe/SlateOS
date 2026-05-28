@@ -28,7 +28,7 @@ static mut CRYPT_BUF: [u8; CRYPT_OUTPUT_LEN] = [0u8; CRYPT_OUTPUT_LEN];
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn crypt(key: *const u8, salt: *const u8) -> *mut u8 {
     if key.is_null() || salt.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return core::ptr::null_mut();
     }
 
@@ -74,7 +74,7 @@ pub extern "C" fn crypt_r(
     data: *mut u8,
 ) -> *mut u8 {
     if key.is_null() || salt.is_null() || data.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return core::ptr::null_mut();
     }
 
@@ -196,7 +196,7 @@ mod tests {
         crate::errno::set_errno(0);
         let result = crypt(core::ptr::null(), b"salt\0".as_ptr());
         assert!(result.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -205,7 +205,7 @@ mod tests {
         crate::errno::set_errno(0);
         let result = crypt(b"key\0".as_ptr(), core::ptr::null());
         assert!(result.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -245,7 +245,7 @@ mod tests {
         crate::errno::set_errno(0);
         let result = crypt_r(b"key\0".as_ptr(), b"salt\0".as_ptr(), core::ptr::null_mut());
         assert!(result.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -254,7 +254,7 @@ mod tests {
         crate::errno::set_errno(0);
         let result = crypt_r(core::ptr::null(), b"salt\0".as_ptr(), buf.as_mut_ptr());
         assert!(result.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -412,6 +412,94 @@ mod tests {
         crate::errno::set_errno(0);
         encrypt(core::ptr::null_mut(), 0);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 213: NULL-pointer EINVAL→EFAULT corrections
+    // -----------------------------------------------------------------------
+
+    /// crypt(): NULL key → EFAULT (bad pointer), not EINVAL.
+    #[test]
+    fn test_phase213_crypt_null_key_efault() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::errno::set_errno(0);
+        let result = crypt(core::ptr::null(), b"salt\0".as_ptr());
+        assert!(result.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// crypt(): NULL salt → EFAULT.
+    #[test]
+    fn test_phase213_crypt_null_salt_efault() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::errno::set_errno(0);
+        let result = crypt(b"key\0".as_ptr(), core::ptr::null());
+        assert!(result.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// crypt(): both NULL → EFAULT.
+    #[test]
+    fn test_phase213_crypt_both_null_efault() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::errno::set_errno(0);
+        let result = crypt(core::ptr::null(), core::ptr::null());
+        assert!(result.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// crypt_r(): NULL key → EFAULT.
+    #[test]
+    fn test_phase213_crypt_r_null_key_efault() {
+        let mut buf = [0u8; CRYPT_OUTPUT_LEN];
+        crate::errno::set_errno(0);
+        let result = crypt_r(core::ptr::null(), b"salt\0".as_ptr(), buf.as_mut_ptr());
+        assert!(result.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// crypt_r(): NULL salt → EFAULT.
+    #[test]
+    fn test_phase213_crypt_r_null_salt_efault() {
+        let mut buf = [0u8; CRYPT_OUTPUT_LEN];
+        crate::errno::set_errno(0);
+        let result = crypt_r(b"key\0".as_ptr(), core::ptr::null(), buf.as_mut_ptr());
+        assert!(result.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// crypt_r(): NULL data buffer → EFAULT.
+    #[test]
+    fn test_phase213_crypt_r_null_data_efault() {
+        crate::errno::set_errno(0);
+        let result = crypt_r(b"key\0".as_ptr(), b"salt\0".as_ptr(), core::ptr::null_mut());
+        assert!(result.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// crypt_r(): all three NULL → EFAULT.
+    #[test]
+    fn test_phase213_crypt_r_all_null_efault() {
+        crate::errno::set_errno(0);
+        let result = crypt_r(core::ptr::null(), core::ptr::null(), core::ptr::null_mut());
+        assert!(result.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// Recovery: crypt() NULL key → EFAULT, then valid call succeeds.
+    #[test]
+    fn test_phase213_crypt_efault_recovery() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::errno::set_errno(0);
+        let bad = crypt(core::ptr::null(), b"salt\0".as_ptr());
+        assert!(bad.is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+
+        // Valid call succeeds.
+        let good = crypt(b"ok\0".as_ptr(), b"xx\0".as_ptr());
+        assert!(!good.is_null());
+        let s = unsafe { core::ffi::CStr::from_ptr(good.cast()) };
+        assert_eq!(s.to_bytes(), b"$0$ok");
     }
 
     #[test]

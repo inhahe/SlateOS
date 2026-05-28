@@ -217,7 +217,7 @@ fn free_aio_record(cb_ptr: usize) {
 /// if OK.  On failure sets errno and returns None.
 fn validate_aiocb(cb: *const Aiocb) -> Option<(i32, *mut u8, usize, i64)> {
     if cb.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return None;
     }
     // SAFETY: caller contract — cb points to a valid Aiocb if non-null.
@@ -266,7 +266,7 @@ fn classify_result(n: crate::types::SsizeT) -> (i32, isize) {
 /// Performs `pread(fd, buf, nbytes, offset)` immediately and stores
 /// the result for retrieval via `aio_error` / `aio_return`.  Returns
 /// 0 on successful submission, -1 with errno on validation failure
-/// (EINVAL / EBADF / EFAULT).
+/// (EFAULT / EBADF / EINVAL).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn aio_read(aiocbp: *mut Aiocb) -> i32 {
     let Some((fd, buf, nbytes, off)) = validate_aiocb(aiocbp) else {
@@ -323,7 +323,7 @@ pub extern "C" fn aio_error(aiocbp: *const Aiocb) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn aio_return(aiocbp: *mut Aiocb) -> isize {
     if aiocbp.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     let Some(idx) = find_aio_record(aiocbp as usize) else {
@@ -366,7 +366,11 @@ pub extern "C" fn aio_suspend(
     nent: i32,
     _timeout: *const crate::stat::Timespec,
 ) -> i32 {
-    if list.is_null() || nent <= 0 {
+    if list.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if nent <= 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -394,13 +398,13 @@ pub extern "C" fn aio_suspend(
 /// checking the obvious pointer/descriptor errors before the
 /// flag-domain check):
 ///
-/// 1. `aiocbp` NULL → `EINVAL`.
+/// 1. `aiocbp` NULL → `EFAULT`.
 /// 2. `aiocbp->aio_fildes < 0` → `EBADF`.
 /// 3. `op` not `O_SYNC` and not `O_DSYNC` → `EINVAL`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn aio_fsync(op: i32, aiocbp: *mut Aiocb) -> i32 {
     if aiocbp.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: aiocbp is non-null by check above; caller's contract.
@@ -437,7 +441,11 @@ pub extern "C" fn lio_listio(
     nent: i32,
     _sig: *mut u8,
 ) -> i32 {
-    if list.is_null() || nent < 0 {
+    if list.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if nent < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -530,10 +538,10 @@ mod tests {
     // -- aio_read: validation --
 
     #[test]
-    fn test_aio_read_null_einval() {
+    fn test_aio_read_null_efault() {
         errno::set_errno(0);
         assert_eq!(aio_read(core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -569,10 +577,10 @@ mod tests {
     // -- aio_write: same validation paths --
 
     #[test]
-    fn test_aio_write_null_einval() {
+    fn test_aio_write_null_efault() {
         errno::set_errno(0);
         assert_eq!(aio_write(core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -599,10 +607,10 @@ mod tests {
     }
 
     #[test]
-    fn test_aio_return_null_einval() {
+    fn test_aio_return_null_efault() {
         errno::set_errno(0);
         assert_eq!(aio_return(core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -639,10 +647,10 @@ mod tests {
     // -- aio_suspend: ops are always already complete --
 
     #[test]
-    fn test_aio_suspend_null_einval() {
+    fn test_aio_suspend_null_efault() {
         errno::set_errno(0);
-        assert_eq!(aio_suspend(core::ptr::null(), 0, core::ptr::null()), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(aio_suspend(core::ptr::null(), 1, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -664,10 +672,10 @@ mod tests {
     // -- aio_fsync: validation --
 
     #[test]
-    fn test_aio_fsync_null_einval() {
+    fn test_aio_fsync_null_efault() {
         errno::set_errno(0);
         assert_eq!(aio_fsync(0, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -746,8 +754,7 @@ mod tests {
     }
 
     /// Validation order: NULL aiocbp wins over an invalid `op` — the
-    /// errno is still EINVAL but the path is reachable without
-    /// dereferencing the (null) aiocbp.
+    /// errno is EFAULT (bad pointer), not EINVAL.
     #[test]
     fn test_aio_fsync_null_aiocbp_short_circuits_op_check() {
         // If we mistakenly checked op before aiocbp, a null pointer
@@ -755,7 +762,7 @@ mod tests {
         // proves the null check is first.
         errno::set_errno(0);
         assert_eq!(aio_fsync(i32::MIN, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     /// Validation order: a negative fd wins over an invalid `op`,
@@ -825,13 +832,13 @@ mod tests {
     // -- lio_listio --
 
     #[test]
-    fn test_lio_listio_null_einval() {
+    fn test_lio_listio_null_efault() {
         errno::set_errno(0);
         assert_eq!(
             lio_listio(LIO_WAIT, core::ptr::null(), 0, core::ptr::null_mut()),
             -1,
         );
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -957,5 +964,125 @@ mod tests {
         assert_ne!(AIO_CANCELED, AIO_NOTCANCELED);
         assert_ne!(AIO_CANCELED, AIO_ALLDONE);
         assert_ne!(AIO_NOTCANCELED, AIO_ALLDONE);
+    }
+
+    // -- Phase 213: NULL-pointer EINVAL→EFAULT corrections ---------------
+
+    /// validate_aiocb reports EFAULT (not EINVAL) for a NULL aiocb
+    /// pointer — a NULL pointer is a bad address, not an invalid value.
+    #[test]
+    fn test_phase213_validate_aiocb_null_efault() {
+        errno::set_errno(0);
+        assert!(validate_aiocb(core::ptr::null()).is_none());
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// aio_return reports EFAULT for NULL aiocbp.
+    #[test]
+    fn test_phase213_aio_return_null_efault() {
+        errno::set_errno(0);
+        assert_eq!(aio_return(core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// aio_fsync reports EFAULT for NULL aiocbp, even with a valid op.
+    #[test]
+    fn test_phase213_aio_fsync_null_efault_valid_op() {
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(crate::fcntl::O_SYNC, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// aio_fsync: EFAULT (NULL pointer) beats EINVAL (bad op).
+    #[test]
+    fn test_phase213_aio_fsync_efault_beats_einval() {
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(0xBAD, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// aio_suspend: NULL list → EFAULT even when nent > 0.
+    #[test]
+    fn test_phase213_aio_suspend_null_list_efault() {
+        errno::set_errno(0);
+        assert_eq!(aio_suspend(core::ptr::null(), 5, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// aio_suspend: non-null list with nent == 0 → EINVAL (still).
+    #[test]
+    fn test_phase213_aio_suspend_zero_nent_einval() {
+        let cb: Aiocb = unsafe { core::mem::zeroed() };
+        let p: *const Aiocb = &cb;
+        let list = [p];
+        errno::set_errno(0);
+        assert_eq!(aio_suspend(list.as_ptr(), 0, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// aio_suspend: NULL list with nent == 0 → EFAULT beats EINVAL.
+    #[test]
+    fn test_phase213_aio_suspend_null_list_beats_zero_nent() {
+        errno::set_errno(0);
+        assert_eq!(aio_suspend(core::ptr::null(), 0, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// lio_listio: NULL list → EFAULT even with valid mode and nent.
+    #[test]
+    fn test_phase213_lio_listio_null_list_efault() {
+        errno::set_errno(0);
+        assert_eq!(
+            lio_listio(LIO_WAIT, core::ptr::null(), 1, core::ptr::null_mut()),
+            -1,
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// lio_listio: non-null list with negative nent → EINVAL (still).
+    #[test]
+    fn test_phase213_lio_listio_negative_nent_einval() {
+        let list: [*mut Aiocb; 0] = [];
+        errno::set_errno(0);
+        assert_eq!(
+            lio_listio(LIO_WAIT, list.as_ptr(), -1, core::ptr::null_mut()),
+            -1,
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// lio_listio: NULL list beats negative nent — EFAULT wins.
+    #[test]
+    fn test_phase213_lio_listio_null_list_beats_negative_nent() {
+        errno::set_errno(0);
+        assert_eq!(
+            lio_listio(LIO_WAIT, core::ptr::null(), -1, core::ptr::null_mut()),
+            -1,
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// aio_error: NULL still returns EINVAL (unchanged — aio_error
+    /// returns error codes directly, not via errno, and POSIX says
+    /// EINVAL for "does not refer to an outstanding request").
+    #[test]
+    fn test_phase213_aio_error_null_still_einval() {
+        assert_eq!(aio_error(core::ptr::null()), errno::EINVAL);
+    }
+
+    /// Recovery: aio_read with NULL cb gets EFAULT, then valid cb
+    /// proceeds normally.
+    #[test]
+    fn test_phase213_aio_read_efault_then_valid() {
+        errno::set_errno(0);
+        assert_eq!(aio_read(core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+
+        // Valid cb with bad fd — should reach the EBADF check.
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = -1;
+        errno::set_errno(0);
+        assert_eq!(aio_read(&raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
     }
 }

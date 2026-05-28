@@ -599,6 +599,15 @@ pub extern "C" fn io_uring_setup(entries: u32, params: *mut IoUringParams) -> i3
 /// - `EFAULT`: would apply once sig dereferencing is wired up — kept
 ///   reserved for that path.
 /// - `ENOSYS`: all checks pass.
+///
+/// # Validation order (Linux parity, Phase 110)
+///
+/// Mirrors Linux's `io_uring/io_uring.c::SYSCALL_DEFINE6(io_uring_enter)`:
+/// the flag-mask check runs *before* `fget(fd)`, so an unknown flag bit
+/// wins over a bad fd.  The previous ordering returned `EBADF` first,
+/// which fooled callers (notably tokio-uring's syscall-availability
+/// probe) into thinking the kernel didn't recognise io_uring at all,
+/// when in fact they had passed a flag bit Linux had also rejected.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn io_uring_enter(
     fd: i32,
@@ -608,18 +617,16 @@ pub extern "C" fn io_uring_enter(
     sig: *const u8,
     sigsz: usize,
 ) -> i32 {
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
+    // (1) Linux's io_uring_enter checks `flags` at the very top of
+    // the syscall handler — before the file-table lookup.
     if (flags & !IORING_ENTER_FLAGS_VALID) != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if min_complete > IORING_MAX_MIN_COMPLETE {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
+    // (2) sig/sigsz consistency.  Linux performs this check while
+    // copying the `io_uring_getevents_arg` from userspace, also
+    // before the ring is touched.
+    //
     // sig pointer must be consistent with sigsz: either both zero or
     // both nonzero. If sig is non-NULL, sigsz must equal
     // sizeof(sigset_t) for the kernel (Linux uses 8 on most arches).
@@ -631,6 +638,19 @@ pub extern "C" fn io_uring_enter(
     }
     if sig.is_null() && sigsz != 0 {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // (3) min_complete bound.  Linux doesn't pre-validate this — it
+    // bails out later when the CQ ring is too small.  We pre-validate
+    // because we have no ring at all; treating an impossibly large
+    // request as EINVAL is friendlier than EBADF.
+    if min_complete > IORING_MAX_MIN_COMPLETE {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // (4) fd lookup, last — matches `fget(fd)` placement in Linux.
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
         return -1;
     }
     // No real rings exist yet — any positive fd is dangling.
@@ -653,6 +673,13 @@ pub extern "C" fn io_uring_enter(
 /// - `EFAULT`: register op that requires a buffer but `arg == NULL`.
 /// - `E2BIG`: `nr_args` above the safety cap.
 /// - `ENOSYS`: all checks pass (no real ring to register against).
+///
+/// # Validation order (Linux parity, Phase 110)
+///
+/// Linux's `io_uring/register.c::__do_sys_io_uring_register` validates
+/// `opcode >= IORING_REGISTER_LAST -> EINVAL` *before* fetching the
+/// ring file (`fget(fd)`), so an unknown opcode wins over a bad fd.
+/// We mirror that ordering: opcode/arg shape first, fd last.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn io_uring_register(
     fd: i32,
@@ -660,12 +687,14 @@ pub extern "C" fn io_uring_register(
     arg: *mut u8,
     nr_args: u32,
 ) -> i32 {
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
+    // Opcode and per-opcode argument shape are validated before the
+    // fd lookup, per Linux's __do_sys_io_uring_register.
     if let Err(e) = validate_register(opcode, arg, nr_args) {
         errno::set_errno(e);
+        return -1;
+    }
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
         return -1;
     }
     // No real ring exists — match Linux's "fd is not a ring" error.
@@ -1041,7 +1070,11 @@ mod tests {
 
     #[test]
     fn test_register_negative_fd_ebadf() {
-        let r = io_uring_register(-1, IORING_REGISTER_BUFFERS, ptr::null_mut(), 0);
+        // Use an opcode whose argument shape is satisfied by
+        // (arg=NULL, nr_args=0) so the post-Phase-110 reorder still
+        // reaches the fd check.  IORING_REGISTER_ENABLE_RINGS is the
+        // canonical "no argument" register op.
+        let r = io_uring_register(-1, IORING_REGISTER_ENABLE_RINGS, ptr::null_mut(), 0);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
@@ -1119,6 +1152,133 @@ mod tests {
         let mut buf = [0u8; 64];
         let r = io_uring_register(3, IORING_REGISTER_BUFFERS, buf.as_mut_ptr(), 4);
         assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 110: Linux-parity validation order
+    //
+    // Linux validates `flags` (enter) / `opcode` (register) before the
+    // fd lookup, so a malformed flag bit or unknown opcode wins over
+    // a bad fd.  These tests pin that ordering.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_enter_phase110_einval_flags_wins_over_ebadf_negative_fd() {
+        // fd=-1 + unknown flag bit: Linux returns EINVAL because the
+        // flag mask is checked before fget(fd).
+        let r = io_uring_enter(-1, 0, 0, 1u32 << 31, ptr::null(), 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_enter_phase110_einval_sig_inconsistent_wins_over_ebadf() {
+        // fd=-1 + sig=null + sigsz=8: Linux validates the sig/sigsz
+        // tuple while copying the getevents arg, before any fd work.
+        let r = io_uring_enter(-1, 0, 0, 0, ptr::null(), 8);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_enter_phase110_einval_sig_nonnull_zero_size_wins_over_ebadf() {
+        // fd=-1 + sig=non-null + sigsz=0: same as above, the sig/sigsz
+        // mismatch is caught before the fd lookup.
+        let mut buf = [0u8; 8];
+        let r = io_uring_enter(-1, 0, 0, 0, buf.as_mut_ptr() as *const u8, 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_enter_phase110_einval_min_complete_wins_over_ebadf() {
+        // fd=-1 + huge min_complete: our extra pre-validation runs
+        // before the fd lookup.  (Linux itself doesn't pre-validate
+        // min_complete, but our cap is reached before the fd path —
+        // EINVAL is still the right answer for "impossibly large".)
+        let r = io_uring_enter(-1, 0, IORING_MAX_MIN_COMPLETE + 1, 0, ptr::null(), 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_enter_phase110_valid_flags_then_bad_fd_ebadf() {
+        // Valid flag + valid sig tuple + good min_complete + fd=-1:
+        // EBADF is correct because all the prologue checks pass.
+        let r = io_uring_enter(-1, 0, 0, IORING_ENTER_GETEVENTS, ptr::null(), 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_enter_phase110_recovery_after_einval() {
+        // After an EINVAL-rejected call, a well-formed call still
+        // produces the expected EBADF — the validator is stateless.
+        let r1 = io_uring_enter(-1, 0, 0, 1u32 << 31, ptr::null(), 0);
+        assert_eq!(r1, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        let r2 = io_uring_enter(3, 0, 0, 0, ptr::null(), 0);
+        assert_eq!(r2, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_register_phase110_einval_opcode_wins_over_ebadf_negative_fd() {
+        // fd=-1 + unknown opcode: Linux's __do_sys_io_uring_register
+        // checks the opcode bound before fget(fd), so EINVAL beats
+        // EBADF.
+        let r = io_uring_register(-1, u32::MAX, ptr::null_mut(), 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_register_phase110_einval_arg_shape_wins_over_ebadf() {
+        // fd=-1 + unregister opcode with non-NULL arg: arg-shape
+        // validation runs before the fd lookup -> EINVAL.
+        let mut x = 0u8;
+        let r = io_uring_register(-1, IORING_UNREGISTER_BUFFERS, &mut x, 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_register_phase110_efault_arg_wins_over_ebadf_negative_fd() {
+        // fd=-1 + register-with-required-arg opcode + arg=NULL:
+        // validate_register reports EFAULT before the fd lookup.
+        let r = io_uring_register(-1, IORING_REGISTER_EVENTFD, ptr::null_mut(), 1);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_register_phase110_e2big_nr_args_wins_over_ebadf() {
+        // fd=-1 + huge nr_args: E2BIG from validate_register beats
+        // EBADF from the fd lookup.
+        let mut x = 0u8;
+        let r = io_uring_register(-1, IORING_REGISTER_BUFFERS, &mut x, u32::MAX);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::E2BIG);
+    }
+
+    #[test]
+    fn test_register_phase110_valid_opcode_then_bad_fd_ebadf() {
+        // All shape checks pass + fd=-1: EBADF is the right answer.
+        let r = io_uring_register(-1, IORING_REGISTER_ENABLE_RINGS, ptr::null_mut(), 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_register_phase110_recovery_after_einval() {
+        // After a bad-opcode rejection, a well-formed register still
+        // produces the expected EBADF.
+        let r1 = io_uring_register(-1, u32::MAX, ptr::null_mut(), 0);
+        assert_eq!(r1, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        let r2 = io_uring_register(3, IORING_REGISTER_ENABLE_RINGS, ptr::null_mut(), 0);
+        assert_eq!(r2, -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
 

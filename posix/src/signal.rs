@@ -269,7 +269,7 @@ pub unsafe extern "C" fn sigaction(
 // ---------------------------------------------------------------------------
 
 /// Linux default signal disposition.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DefaultAction {
     /// Terminate the process.
     Terminate,

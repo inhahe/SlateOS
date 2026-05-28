@@ -2276,8 +2276,26 @@ mod tests {
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
-                crate::sys_capability::test_helpers::restore_caps(
-                    self.lo, self.hi,
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ = crate::sys_capability::capset(
+                    &mut hdr,
+                    data.as_ptr(),
                 );
             }
         }
@@ -2285,8 +2303,8 @@ mod tests {
         fn drop_cap_sys_nice() {
             let (lo, hi) = crate::sys_capability::current_caps_effective();
             let new_lo = lo & !(1u32 << CAP_SYS_NICE);
-            let hdr = crate::sys_capability::CapUserHeader {
-                version: crate::sys_capability::VFS_CAP_REVISION_3,
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2302,7 +2320,7 @@ mod tests {
                 },
             ];
             let rc = crate::sys_capability::capset(
-                &hdr as *const _,
+                &mut hdr,
                 data.as_ptr(),
             );
             assert_eq!(rc, 0);

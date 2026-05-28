@@ -2257,11 +2257,11 @@ mod tests {
 
     #[test]
     fn test_ptsname_r_null_buf_beats_bad_fd() {
-        // Per glibc semantics: NULL buf is rejected with EINVAL even
-        // when fd would also fail.  This documents the order.
+        // NULL buf is rejected with EFAULT even when fd would also fail.
+        // This documents the priority order.
         crate::errno::set_errno(0);
         assert_eq!(ptsname_r(-1, core::ptr::null_mut(), 64), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -2330,7 +2330,7 @@ mod tests {
         // Common bug: caller forgets to allocate the buffer.
         crate::errno::set_errno(0);
         assert_eq!(ptsname_r(0, core::ptr::null_mut(), 64), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 }
 

@@ -262,15 +262,34 @@ pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
 ///
 /// On host builds, the buffer is zero-filled (preserves existing test
 /// behavior).
+///
+/// Validation order matches Linux's `kernel/sys.c::sys_getrusage`:
+///
+///     if (who != RUSAGE_SELF && who != RUSAGE_CHILDREN &&
+///         who != RUSAGE_THREAD)
+///         return -EINVAL;
+///     getrusage(current, who, &r);
+///     return copy_to_user(ru, &r, sizeof(r)) ? -EFAULT : 0;
+///
+/// `who` is validated BEFORE the user pointer is ever touched, so a
+/// caller passing both an invalid `who` and a NULL `usage` pointer
+/// observes EINVAL — not EFAULT.  Pre-Phase 140 we checked the
+/// pointer first and returned EFAULT for that combination, which
+/// misdirected callers at the pointer when the real bug was the
+/// `who` argument.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getrusage(who: i32, usage: *mut Rusage) -> i32 {
-    if usage.is_null() {
-        errno::set_errno(errno::EFAULT);
+    // Phase 140: `who` validation precedes the user-pointer check
+    // because Linux's `sys_getrusage` rejects bad `who` before any
+    // copy_to_user can fault.  This gives diagnostic priority to
+    // the value-domain error over the pointer error.
+    if who != RUSAGE_SELF && who != RUSAGE_CHILDREN && who != RUSAGE_THREAD {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
 
-    if who != RUSAGE_SELF && who != RUSAGE_CHILDREN && who != RUSAGE_THREAD {
-        errno::set_errno(errno::EINVAL);
+    if usage.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -889,6 +908,197 @@ mod tests {
         let ret = getrusage(99, &mut usage);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 140 — getrusage validates `who` before touching the user
+    // pointer, matching Linux's `kernel/sys.c::sys_getrusage`.
+    //
+    // Pre-Phase 140:
+    //     usage NULL → EFAULT (first)
+    //     invalid who → EINVAL (second)
+    // Linux / Phase 140+:
+    //     invalid who → EINVAL (first)
+    //     usage NULL → EFAULT (second; copy_to_user happens last)
+    //
+    // Observable when both arguments are bad at once: pre-Phase 140
+    // returned EFAULT and misdirected callers at the pointer when
+    // the `who` argument was the real bug.
+    // ------------------------------------------------------------------
+
+    // --- per-error-class smoke tests under the new ordering ---------
+
+    #[test]
+    fn getrusage_phase140_invalid_who_alone_einval() {
+        // Sanity: invalid who with a valid pointer still EINVAL.
+        let mut usage = unsafe { core::mem::MaybeUninit::<Rusage>::zeroed().assume_init() };
+        errno::set_errno(0);
+        let ret = getrusage(99, &mut usage);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn getrusage_phase140_null_pointer_alone_efault() {
+        // Sanity: valid who + NULL pointer still EFAULT.
+        errno::set_errno(0);
+        let ret = getrusage(RUSAGE_SELF, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // --- core regression: ordering matrix ----------------------------
+
+    #[test]
+    fn getrusage_phase140_invalid_who_beats_null_pointer() {
+        // CORE: invalid who + NULL pointer.  Pre-Phase 140 returned
+        // EFAULT; Linux / Phase 140+ returns EINVAL.
+        errno::set_errno(0);
+        let ret = getrusage(99, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn getrusage_phase140_negative_who_beats_null_pointer() {
+        // Negative `who` (e.g. -2 from an integer underflow in the
+        // caller) + NULL pointer.  EINVAL must still win.  We use
+        // -2 rather than -1 because RUSAGE_CHILDREN == -1 is a
+        // valid `who` value on Linux and on us.
+        errno::set_errno(0);
+        let ret = getrusage(-2, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn getrusage_phase140_extremely_large_who_beats_null_pointer() {
+        // i32::MAX `who` + NULL.  EINVAL.
+        errno::set_errno(0);
+        let ret = getrusage(i32::MAX, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn getrusage_phase140_i32_min_who_beats_null_pointer() {
+        // i32::MIN `who` (sign-bit set) + NULL.  EINVAL.
+        errno::set_errno(0);
+        let ret = getrusage(i32::MIN, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // --- "near-miss" who values ---------------------------------------
+
+    #[test]
+    fn getrusage_phase140_one_past_self_beats_null() {
+        // RUSAGE_SELF is typically 0; 1 is between SELF (0) and
+        // CHILDREN (-1) etc. — invalid.
+        let near = RUSAGE_SELF.wrapping_add(1);
+        if near == RUSAGE_CHILDREN || near == RUSAGE_THREAD {
+            // Skip: the near value happens to coincide with another
+            // valid constant on this build; pick a different test.
+            return;
+        }
+        errno::set_errno(0);
+        let ret = getrusage(near, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // --- buggy callers ------------------------------------------------
+
+    #[test]
+    fn getrusage_phase140_buggy_caller_uninit_who_with_null() {
+        // Caller does `int who; getrusage(who, NULL);` — stack
+        // garbage `who` is very likely outside the SELF/CHILDREN/
+        // THREAD set.  EINVAL points at the real bug (uninit who).
+        let bad_values = [42i32, 0x4242_4242i32, -42i32, 1234567i32];
+        for &who in &bad_values {
+            if who == RUSAGE_SELF || who == RUSAGE_CHILDREN || who == RUSAGE_THREAD {
+                continue;
+            }
+            errno::set_errno(0);
+            let ret = getrusage(who, core::ptr::null_mut());
+            assert_eq!(ret, -1, "who={who}");
+            assert_eq!(errno::get_errno(), errno::EINVAL, "who={who}");
+        }
+    }
+
+    #[test]
+    fn getrusage_phase140_buggy_caller_uses_pid_as_who_with_null() {
+        // Real bug: caller confuses getrusage(2) arguments and
+        // passes a pid as `who`.  Pid is positive and not in the
+        // valid set.  Plus NULL pointer (forgot to allocate).
+        // EINVAL.
+        errno::set_errno(0);
+        let ret = getrusage(1234, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // --- workflow + recovery -----------------------------------------
+
+    #[test]
+    fn getrusage_phase140_recovery_after_einval_fix_who() {
+        // Caller corrects `who`, retries with valid pointer.  No
+        // stale errno from the previous failure.
+        errno::set_errno(0);
+        assert_eq!(getrusage(99, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let mut usage = unsafe { core::mem::MaybeUninit::<Rusage>::zeroed().assume_init() };
+        errno::set_errno(0);
+        let ret = getrusage(RUSAGE_SELF, &mut usage);
+        assert_eq!(ret, 0);
+        // errno is not set on success path.
+    }
+
+    #[test]
+    fn getrusage_phase140_recovery_after_einval_fix_pointer() {
+        // Caller fixes the pointer but didn't realise the `who`
+        // value was also wrong — the second call still returns
+        // EINVAL (because the `who` is still wrong), proving the
+        // value-domain check is independent of the pointer.
+        errno::set_errno(0);
+        assert_eq!(getrusage(99, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let mut usage = unsafe { core::mem::MaybeUninit::<Rusage>::zeroed().assume_init() };
+        errno::set_errno(0);
+        let ret = getrusage(99, &mut usage);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn getrusage_phase140_workflow_glibc_rusage_probe() {
+        // glibc's wrapper is straightforward, but a userspace
+        // sanity probe ("does my libc map who correctly?") will
+        // pass garbage `who` to check the EINVAL surface.  Such
+        // probes must see EINVAL even if they forgot to bind a
+        // pointer — pre-Phase 140 they got EFAULT and concluded
+        // their pointer handling was broken.
+        errno::set_errno(0);
+        let ret = getrusage(0xDEAD_BEEFu32 as i32, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn getrusage_phase140_no_side_effect_on_einval_loop() {
+        // 100 invalid-who rejections must not corrupt anything.
+        // The follow-up valid call must succeed.
+        for _ in 0..100 {
+            errno::set_errno(0);
+            assert_eq!(getrusage(99, core::ptr::null_mut()), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+        let mut usage = unsafe { core::mem::MaybeUninit::<Rusage>::zeroed().assume_init() };
+        errno::set_errno(0);
+        let ret = getrusage(RUSAGE_SELF, &mut usage);
+        assert_eq!(ret, 0);
     }
 
     // -----------------------------------------------------------------------

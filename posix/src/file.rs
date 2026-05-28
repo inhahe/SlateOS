@@ -1841,7 +1841,14 @@ pub unsafe fn c_strlen_pub(s: *const u8) -> usize {
 ///
 /// Returns 0 on success, -1 on error (errno set).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
+pub extern "C" fn access(path: *const u8, mode: i32) -> i32 {
+    // Linux semantics (fs/open.c::do_faccessat): `mode & ~S_IRWXO`
+    // (i.e. bits outside R_OK | W_OK | X_OK = 0b111) → EINVAL.
+    // F_OK == 0 is implicit since mode == 0 passes the mask test.
+    if mode & !(crate::fcntl::R_OK | crate::fcntl::W_OK | crate::fcntl::X_OK) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -1878,7 +1885,17 @@ pub extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, _flags: i32) -> i32 {
+pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, flags: i32) -> i32 {
+    // Linux semantics (fs/open.c::do_faccessat) validates mode and
+    // flags in the prologue before any path resolution.
+    if mode & !(crate::fcntl::R_OK | crate::fcntl::W_OK | crate::fcntl::X_OK) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return access(path, mode);
     }
@@ -6733,6 +6750,201 @@ mod tests {
             crate::fcntl::F_OK,
             AT_SYMLINK_NOFOLLOW,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 91: access / faccessat mode + flags validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_access_phase91_mode_constants_distinct() {
+        assert_eq!(crate::fcntl::F_OK, 0);
+        assert_eq!(crate::fcntl::R_OK, 4);
+        assert_eq!(crate::fcntl::W_OK, 2);
+        assert_eq!(crate::fcntl::X_OK, 1);
+        // R_OK | W_OK | X_OK == 7 (S_IRWXO equivalent for mode check).
+        assert_eq!(crate::fcntl::R_OK | crate::fcntl::W_OK | crate::fcntl::X_OK, 7);
+    }
+
+    #[test]
+    fn test_access_phase91_unknown_mode_bit_einval() {
+        // Bit 3 (0b1000) is not a defined access mode bit.
+        crate::errno::set_errno(0);
+        let ret = access(b"/tmp\0".as_ptr(), 0b1000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_access_phase91_high_bit_mode_einval() {
+        crate::errno::set_errno(0);
+        let ret = access(b"/tmp\0".as_ptr(), i32::MIN);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_access_phase91_f_ok_passes_mode_check() {
+        // F_OK == 0 must not fail the mode mask check.  Whether the
+        // file exists is unrelated; we only assert errno is NOT EINVAL
+        // from the prologue.
+        crate::errno::set_errno(0);
+        let _ret = access(b"/nonexistent_xyz\0".as_ptr(), crate::fcntl::F_OK);
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_access_phase91_all_valid_modes_pass_mode_check() {
+        crate::errno::set_errno(0);
+        let _ret = access(
+            b"/nonexistent_xyz\0".as_ptr(),
+            crate::fcntl::R_OK | crate::fcntl::W_OK | crate::fcntl::X_OK,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_access_phase91_mode_check_beats_null_path() {
+        // Bad mode + null path → EINVAL (mode check fires first),
+        // not EFAULT (null path).
+        crate::errno::set_errno(0);
+        let ret = access(core::ptr::null(), 0b1000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat_phase91_unknown_mode_bit_einval() {
+        crate::errno::set_errno(0);
+        let ret = faccessat(AT_FDCWD, b"/tmp\0".as_ptr(), 0b1000, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat_phase91_unknown_flag_einval() {
+        // Bit not in (AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH).
+        crate::errno::set_errno(0);
+        let ret = faccessat(AT_FDCWD, b"/tmp\0".as_ptr(), 0, 0x4000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat_phase91_at_symlink_follow_rejected() {
+        // AT_SYMLINK_FOLLOW (0x400) is NOT a valid faccessat flag —
+        // only AT_SYMLINK_NOFOLLOW is.
+        crate::errno::set_errno(0);
+        let ret = faccessat(AT_FDCWD, b"/tmp\0".as_ptr(), 0, AT_SYMLINK_FOLLOW);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat_phase91_eaccess_flag_accepted() {
+        // AT_EACCESS must pass the flag check.
+        crate::errno::set_errno(0);
+        let _ret = faccessat(
+            AT_FDCWD,
+            b"/nonexistent_xyz\0".as_ptr(),
+            crate::fcntl::F_OK,
+            AT_EACCESS,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat_phase91_symlink_nofollow_flag_accepted() {
+        crate::errno::set_errno(0);
+        let _ret = faccessat(
+            AT_FDCWD,
+            b"/nonexistent_xyz\0".as_ptr(),
+            crate::fcntl::F_OK,
+            AT_SYMLINK_NOFOLLOW,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat_phase91_empty_path_flag_accepted() {
+        crate::errno::set_errno(0);
+        let _ret = faccessat(
+            AT_FDCWD,
+            b"/nonexistent_xyz\0".as_ptr(),
+            crate::fcntl::F_OK,
+            AT_EMPTY_PATH,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat_phase91_all_valid_flags_accepted() {
+        crate::errno::set_errno(0);
+        let _ret = faccessat(
+            AT_FDCWD,
+            b"/nonexistent_xyz\0".as_ptr(),
+            crate::fcntl::F_OK,
+            AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat_phase91_mode_check_beats_flag_check() {
+        // Both bad → mode check fires first (matches Linux's
+        // do_faccessat prologue order).
+        crate::errno::set_errno(0);
+        let ret = faccessat(AT_FDCWD, b"/tmp\0".as_ptr(), 0b1000, 0x4000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat_phase91_mode_check_beats_null_path() {
+        crate::errno::set_errno(0);
+        let ret = faccessat(AT_FDCWD, core::ptr::null(), 0b1000, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat_phase91_flag_check_beats_null_path() {
+        // valid mode + bad flag + null path → EINVAL (not EFAULT).
+        crate::errno::set_errno(0);
+        let ret = faccessat(AT_FDCWD, core::ptr::null(), 0, 0x4000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat2_phase91_unknown_mode_bit_einval() {
+        // faccessat2 delegates to faccessat — it must inherit
+        // the same EINVAL behaviour.
+        crate::errno::set_errno(0);
+        let ret = faccessat2(AT_FDCWD, b"/tmp\0".as_ptr(), 0b1000, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_faccessat2_phase91_unknown_flag_einval() {
+        crate::errno::set_errno(0);
+        let ret = faccessat2(AT_FDCWD, b"/tmp\0".as_ptr(), 0, 0x4000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_access_phase91_einval_then_valid_progression() {
+        crate::errno::set_errno(0);
+        let ret = access(b"/nonexistent_xyz\0".as_ptr(), 0b1000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Subsequent valid call passes the mode check.
+        crate::errno::set_errno(0);
+        let _ret = access(b"/nonexistent_xyz\0".as_ptr(), crate::fcntl::F_OK);
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     // -----------------------------------------------------------------------

@@ -91,13 +91,18 @@ pub extern "C" fn sched_getscheduler(pid: i32) -> i32 {
 
 /// Set the scheduling policy and parameters of a process.
 ///
-/// Linux validation order (`kernel/sched/syscalls.c::sched_setscheduler`):
+/// Linux validation order (`kernel/sched/syscalls.c::__sched_setscheduler`):
 ///   1. `pid < 0` → `EINVAL`.
 ///   2. Unknown policy → `EINVAL`.
 ///   3. `param == NULL` → `EINVAL` (we keep `EINVAL` for ABI
 ///      stability with the rest of this module; Linux uses `EFAULT`
 ///      via `copy_from_user`).
 ///   4. `sched_priority` outside `[min(policy), max(policy)]` → `EINVAL`.
+///   5. **Phase 170**: switching to a real-time policy (`SCHED_FIFO`,
+///      `SCHED_RR`) or `SCHED_DEADLINE` without `CAP_SYS_NICE` → `EPERM`.
+///      Linux gates this on `task_rlimit(RLIMIT_RTPRIO) == 0` and the
+///      cap; in our flat model (no per-task rlimit) the test
+///      collapses to a pure cap probe.
 ///
 /// After validation we have no real scheduler hookup, so we report
 /// success without altering any task state.  Tests that wanted a
@@ -133,6 +138,22 @@ pub extern "C" fn sched_setscheduler(
     };
     if prio < lo || prio > hi {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Phase 170: RT / deadline policies require CAP_SYS_NICE under
+    // the default RLIMIT_RTPRIO = 0.  Linux's __sched_setscheduler
+    // performs this check after argument validation but before any
+    // scheduler state mutation.  Our current task is always
+    // SCHED_OTHER, so any switch into FIFO/RR/DEADLINE is a "change
+    // of policy" requiring the cap.
+    let is_rt = matches!(policy, SCHED_FIFO | SCHED_RR);
+    let is_deadline = policy == SCHED_DEADLINE;
+    if (is_rt || is_deadline)
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_NICE,
+        )
+    {
+        errno::set_errno(errno::EPERM);
         return -1;
     }
     0
@@ -1836,5 +1857,383 @@ mod tests {
             ),
             0
         );
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 170: sched_setscheduler — CAP_SYS_NICE gate on RT / deadline.
+    //
+    // Pre-Phase-170 behaviour: any caller could call
+    // `sched_setscheduler(0, SCHED_FIFO, &{ .sched_priority = 99 })` and
+    // succeed.  No capability check.  Linux's
+    // `kernel/sched/syscalls.c::__sched_setscheduler` requires
+    // CAP_SYS_NICE for any switch into a realtime policy (SCHED_FIFO,
+    // SCHED_RR) when the task's RLIMIT_RTPRIO is 0 (the default), and
+    // for SCHED_DEADLINE unconditionally.
+    //
+    // Implementation: after argument validation (policy, param, prio
+    // range), if the requested policy is RT or DEADLINE and
+    // CAP_SYS_NICE is not held, return -1 / EPERM without mutating
+    // any state.
+    //
+    // The validation order matters: EINVAL on bad policy / prio fires
+    // before EPERM — Linux validates arguments first, then consults
+    // the cap.
+    // ----------------------------------------------------------------------
+
+    mod sched_setscheduler_cap_phase170 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase
+        /// 77 / 164–169.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_nice() {
+            use crate::sys_capability::CAP_SYS_NICE;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_NICE < 32 {
+                (lo & !(1u32 << CAP_SYS_NICE), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_NICE - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_NICE");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
+        }
+
+        // -- Per-error-class ----------------------------------------------
+
+        /// Switching to SCHED_FIFO without CAP_SYS_NICE returns -1
+        /// with EPERM (Linux's __sched_setscheduler RT-policy gate).
+        #[test]
+        fn test_sched_setscheduler_phase170_fifo_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let p = SchedParam { sched_priority: 50 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_FIFO, &raw const p),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Same gate for SCHED_RR.
+        #[test]
+        fn test_sched_setscheduler_phase170_rr_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let p = SchedParam { sched_priority: 1 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_RR, &raw const p),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// SCHED_DEADLINE requires CAP_SYS_NICE unconditionally on
+        /// Linux (no rlim fallback).
+        #[test]
+        fn test_sched_setscheduler_phase170_deadline_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            // SCHED_DEADLINE's priority range is (0, 0).
+            let p = SchedParam { sched_priority: 0 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_DEADLINE, &raw const p),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering matrix ----------------------------------------------
+
+        /// EINVAL on bad pid beats EPERM — Linux checks pid first.
+        #[test]
+        fn test_sched_setscheduler_phase170_einval_pid_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let p = SchedParam { sched_priority: 50 };
+            errno::set_errno(0);
+            // Negative pid + RT policy + no cap → EINVAL (not EPERM).
+            assert_eq!(
+                sched_setscheduler(-1, SCHED_FIFO, &raw const p),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// EINVAL on unknown policy beats EPERM (policy validated
+        /// before cap probe).
+        #[test]
+        fn test_sched_setscheduler_phase170_einval_policy_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let p = SchedParam { sched_priority: 50 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, 99, &raw const p),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// EINVAL on NULL param beats EPERM (we deliberately keep
+        /// EINVAL here for ABI; see sched_setscheduler doc).
+        #[test]
+        fn test_sched_setscheduler_phase170_einval_null_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_FIFO, core::ptr::null()),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// EINVAL on out-of-range priority beats EPERM (Linux
+        /// validates priority bounds before the cap probe).
+        #[test]
+        fn test_sched_setscheduler_phase170_einval_prio_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            // SCHED_FIFO range is [1, 99]; 0 is out of range.
+            let p = SchedParam { sched_priority: 0 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_FIFO, &raw const p),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// SCHED_OTHER without cap still succeeds (no-RT, no cap
+        /// needed).
+        #[test]
+        fn test_sched_setscheduler_phase170_other_no_cap_ok() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let p = SchedParam { sched_priority: 0 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_OTHER, &raw const p),
+                0,
+            );
+        }
+
+        /// SCHED_BATCH / SCHED_IDLE without cap still succeed.
+        #[test]
+        fn test_sched_setscheduler_phase170_batch_idle_no_cap_ok() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let p = SchedParam { sched_priority: 0 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_BATCH, &raw const p),
+                0,
+            );
+            assert_eq!(
+                sched_setscheduler(0, SCHED_IDLE, &raw const p),
+                0,
+            );
+        }
+
+        // -- Workflow -----------------------------------------------------
+
+        /// Audio-server-style workflow: under default caps, switch
+        /// to SCHED_FIFO @ 80 (succeeds); drop CAP_SYS_NICE; further
+        /// attempt to set SCHED_RR @ 50 (EPERM); falling back to
+        /// SCHED_OTHER still works.
+        #[test]
+        fn test_sched_setscheduler_phase170_workflow_rt_then_drop_then_fallback()
+        {
+            let _g = CapGuard::snapshot();
+            let p_rt = SchedParam { sched_priority: 80 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_FIFO, &raw const p_rt),
+                0,
+            );
+            drop_cap_sys_nice();
+            let p_rr = SchedParam { sched_priority: 50 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_RR, &raw const p_rr),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Fall back to SCHED_OTHER: no cap needed.
+            let p_other = SchedParam { sched_priority: 0 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_OTHER, &raw const p_other),
+                0,
+            );
+        }
+
+        // -- Buggy caller -------------------------------------------------
+
+        /// A non-RT caller passing a positive pid (any value) with
+        /// SCHED_FIFO and no cap → EPERM.  Confirms the gate fires
+        /// regardless of pid.
+        #[test]
+        fn test_sched_setscheduler_phase170_positive_pid_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let p = SchedParam { sched_priority: 99 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(1234, SCHED_FIFO, &raw const p),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Recovery -----------------------------------------------------
+
+        /// After EPERM, restoring CAP_SYS_NICE lets the same call
+        /// succeed — dynamic cap evaluation.
+        #[test]
+        fn test_sched_setscheduler_phase170_recovery_restore_cap() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let p = SchedParam { sched_priority: 25 };
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_FIFO, &raw const p),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Restore caps to default-all.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            errno::set_errno(0);
+            assert_eq!(
+                sched_setscheduler(0, SCHED_FIFO, &raw const p),
+                0,
+            );
+        }
+
+        // -- Sentinel -----------------------------------------------------
+
+        /// With CAP_SYS_NICE held, SCHED_FIFO/RR/DEADLINE all
+        /// succeed.  Confirms the privileged path is preserved.
+        #[test]
+        fn test_sched_setscheduler_phase170_sentinel_with_cap_rt_ok() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+            let p_rt = SchedParam { sched_priority: 50 };
+            assert_eq!(
+                sched_setscheduler(0, SCHED_FIFO, &raw const p_rt),
+                0,
+            );
+            assert_eq!(
+                sched_setscheduler(0, SCHED_RR, &raw const p_rt),
+                0,
+            );
+            let p_dl = SchedParam { sched_priority: 0 };
+            assert_eq!(
+                sched_setscheduler(0, SCHED_DEADLINE, &raw const p_dl),
+                0,
+            );
+        }
+
+        // -- Cross-checks -------------------------------------------------
+
+        /// `sched_getscheduler` (read-only) is never gated and must
+        /// succeed without cap.
+        #[test]
+        fn test_sched_setscheduler_phase170_getscheduler_unaffected() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            assert_eq!(sched_getscheduler(0), SCHED_OTHER);
+        }
+
+        /// `sched_get_priority_min/max` are never gated and must
+        /// return the correct RT range without cap.
+        #[test]
+        fn test_sched_setscheduler_phase170_priority_min_max_unaffected() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            assert_eq!(sched_get_priority_min(SCHED_FIFO), 1);
+            assert_eq!(sched_get_priority_max(SCHED_FIFO), 99);
+            assert_eq!(sched_get_priority_min(SCHED_RR), 1);
+            assert_eq!(sched_get_priority_max(SCHED_RR), 99);
+        }
     }
 }

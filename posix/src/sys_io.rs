@@ -127,22 +127,81 @@ pub extern "C" fn ioperm(from: u64, num: u64, turn_on: i32) -> i32 {
 /// Sets the I/O privilege level (IOPL) of the calling process. Level
 /// must be 0–3; only level 3 grants unrestricted port access on x86.
 ///
-/// Linux semantics (`arch/x86/kernel/ioport.c::sys_iopl`):
-/// - `level > 3` → EINVAL.
-/// - Raising IOPL above current requires `CAP_SYS_RAWIO` → EPERM.
-/// - On modern kernels (5.5+) the syscall returns ENOSYS regardless,
-///   per the deprecation. We follow that: any well-formed call →
-///   ENOSYS so callers (X servers, dosemu2, legacy serial tools) fall
-///   back to their alternative paths.
+/// ## Linux semantics (`arch/x86/kernel/ioport.c::sys_iopl`)
+///
+/// ```c
+/// SYSCALL_DEFINE1(iopl, unsigned int, level)
+/// {
+///     if (level > 3) return -EINVAL;
+///     if (level > old) {
+///         if (!capable(CAP_SYS_RAWIO))
+///             return -EPERM;
+///     }
+///     ...
+/// }
+/// ```
+///
+/// Linux does NOT unconditionally return `ENOSYS` — that was a
+/// misreading in pre-Phase-180 comments.  iopl remains functional on
+/// x86 (though deprecated in favour of ioperm).  The cap check fires
+/// only on a *raise*: lowering to level 0, or re-asserting the
+/// current level, never needs `CAP_SYS_RAWIO`.
+///
+/// ## Our model (Phase 180)
+///
+/// Our microkernel never grants any IOPL level to userspace (drivers
+/// live in their own process per design.txt — they don't run with
+/// CPL 3 + IOPL>0).  The notional "current level" is therefore
+/// always 0.  Under that model:
+///
+/// 1. `level < 0 || level > 3`        → `EINVAL`  (range)
+/// 2. `level == 0`                    → `0`       (no-op release;
+///                                                 no cap required)
+/// 3. `level > 0 && !CAP_SYS_RAWIO`   → `EPERM`   (Linux's `level >
+///                                                 old` branch)
+/// 4. `level > 0` with cap            → `ENOSYS`  (we have no
+///                                                 IO-bitmap install
+///                                                 path; callers fall
+///                                                 back to ioperm /
+///                                                 character devices)
+///
+/// Pre-Phase-180 we returned `ENOSYS` unconditionally for any valid
+/// `level`, which conflated the "no backend" case with the
+/// "unprivileged caller" case and let unprivileged programs probe
+/// for privileged behaviour without the EPERM signal Linux gives.
 ///
 /// We treat negative levels (which would have the sign bit set if cast
-/// to `unsigned`) as EINVAL to be defensive.
+/// to `unsigned`) as `EINVAL` to be defensive — Linux's `unsigned int`
+/// parameter would wrap them to huge positives that fail the `> 3`
+/// check anyway.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iopl(level: i32) -> i32 {
     if !(0..=IOPL_LEVEL_MAX).contains(&level) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // Phase 180: level == 0 is a "release any IOPL grant" call.  Our
+    // notional current level is 0, so this is a no-op — and Linux's
+    // `level > old` cap check never fires.  Succeed without probing
+    // CAP_SYS_RAWIO so unprivileged code can defensively call
+    // `iopl(0)` (e.g. on shutdown paths) without spurious EPERM.
+    if level == 0 {
+        return 0;
+    }
+    // Phase 180: level > 0 is a *raise* relative to our current 0.
+    // Linux's `if (level > old) capable(CAP_SYS_RAWIO)` gates this;
+    // mirror it so unprivileged callers get EPERM (matching what
+    // dosemu2 / X servers / DOS emulators see on real Linux when
+    // they're missing the cap).
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_RAWIO,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    // Cap held but no IO-bitmap install path exists in our
+    // microkernel (drivers run in userspace per design.txt) — surface
+    // ENOSYS so callers fall back.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -315,8 +374,22 @@ mod tests {
     }
 
     #[test]
-    fn test_iopl_each_valid_level_reaches_enosys() {
-        for level in 0..=3 {
+    fn test_iopl_level_zero_is_noop_success() {
+        // Phase 180: level==0 is a release; succeeds without cap and
+        // without setting errno (POSIX successful-call rule).
+        errno::set_errno(errno::EBADF);
+        let r = iopl(0);
+        assert_eq!(r, 0);
+        // Errno must be untouched on success.
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_iopl_each_raise_level_reaches_enosys_with_cap() {
+        // Phase 180: levels 1..=3 are raises; with CAP_SYS_RAWIO held
+        // (the host-build default) they pass the cap probe and fall
+        // through to ENOSYS (no IO-bitmap install path).
+        for level in 1..=3 {
             errno::set_errno(errno::EBADF);
             let r = iopl(level);
             assert_eq!(r, -1, "level={level}");
@@ -867,6 +940,390 @@ mod tests {
             let r = ioperm(0x3F8, 8, 0);
             assert_eq!(r, 0);
             assert_eq!(errno::get_errno(), errno::EBADF);
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 180: iopl — CAP_SYS_RAWIO gate on level-raise +
+    // unconditional ENOSYS for level==0 success.
+    //
+    // Pre-Phase-180 behaviour: iopl returned ENOSYS for every valid
+    // level (0..=3) regardless of capability state.  That conflated
+    // two distinct error modes:
+    //   - "level 0 release" should be a no-op SUCCESS;
+    //   - "level > 0 raise without CAP_SYS_RAWIO" is EPERM.
+    // Returning ENOSYS in both cases lets unprivileged code probe
+    // privileged behaviour and misleads userspace fallback paths
+    // (dosemu2, X11 legacy port-IO clients) into thinking the syscall
+    // is wholly absent rather than just unavailable to them.
+    //
+    // Linux semantics (arch/x86/kernel/ioport.c::sys_iopl):
+    //     if (level > 3)            return -EINVAL;
+    //     if (level > old) {
+    //         if (!capable(CAP_SYS_RAWIO))
+    //             return -EPERM;
+    //     }
+    //     /* install IO-bitmap ... */
+    //     return 0;
+    // Our notional current-level is always 0 (we never grant IOPL),
+    // so `level > old` collapses to `level > 0`.
+    //
+    // Implementation:
+    //   1. range check (EINVAL) — already in place;
+    //   2. level == 0 → return 0 (no cap probe);
+    //   3. level > 0 without CAP_SYS_RAWIO → EPERM;
+    //   4. level > 0 with cap → ENOSYS (no IO-bitmap backend).
+    // ----------------------------------------------------------------------
+
+    mod iopl_cap_phase180 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase 178.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_rawio() {
+            use crate::sys_capability::CAP_SYS_RAWIO;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_RAWIO < 32 {
+                (lo & !(1u32 << CAP_SYS_RAWIO), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_RAWIO - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_RAWIO");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_RAWIO));
+        }
+
+        // -- Per-error-class ----------------------------------------------
+
+        /// `iopl(1)` without CAP_SYS_RAWIO returns -1/EPERM.  The
+        /// smallest raise hits Linux's `level > old` branch.
+        #[test]
+        fn test_iopl_phase180_level_one_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(iopl(1), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// `iopl(3)` (the max raise) without cap is also EPERM.
+        #[test]
+        fn test_iopl_phase180_level_three_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(iopl(3), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// `iopl(2)` (intermediate) without cap is EPERM too —
+        /// confirms the gate fires on every raise, not just the
+        /// minimum or maximum.
+        #[test]
+        fn test_iopl_phase180_level_two_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(iopl(2), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Errno is specifically EPERM, not EACCES (that's the
+        /// setpriority gate) and not ENOSYS (that's the backend
+        /// fall-through).
+        #[test]
+        fn test_iopl_phase180_errno_is_eperm_not_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(iopl(1), -1);
+            assert_ne!(errno::get_errno(), errno::ENOSYS);
+            assert_ne!(errno::get_errno(), errno::EACCES);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering matrix ----------------------------------------------
+
+        /// EINVAL on out-of-range level beats the cap probe.  A
+        /// no-cap caller passing level=4 sees EINVAL, not EPERM.
+        #[test]
+        fn test_iopl_phase180_einval_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(iopl(4), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// EINVAL on negative level beats EPERM too.
+        #[test]
+        fn test_iopl_phase180_einval_negative_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(iopl(-1), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// `iopl(0)` — release/no-op — succeeds without cap.  Linux's
+        /// `level > old` branch is false (0 > 0 is false) so the cap
+        /// check never fires.
+        #[test]
+        fn test_iopl_phase180_level_zero_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(errno::EBADF);
+            assert_eq!(iopl(0), 0);
+            // Errno must be untouched on success.
+            assert_eq!(errno::get_errno(), errno::EBADF);
+        }
+
+        // -- Workflow -----------------------------------------------------
+
+        /// Daemon workflow: a process raises iopl with cap held
+        /// (reaches ENOSYS — the backend signal), then drops the cap
+        /// and re-tries (EPERM), then releases with iopl(0) (succeeds
+        /// even without cap).  Models a privileged tool dropping
+        /// caps mid-flight.
+        #[test]
+        fn test_iopl_phase180_workflow_raise_drop_cap_raise_release() {
+            let _g = CapGuard::snapshot();
+            // With cap: raise reaches ENOSYS.
+            errno::set_errno(0);
+            assert_eq!(iopl(3), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+            // Drop cap and raise again: EPERM.
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(iopl(2), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Release: succeeds even without cap.
+            errno::set_errno(errno::EBADF);
+            assert_eq!(iopl(0), 0);
+            assert_eq!(errno::get_errno(), errno::EBADF);
+        }
+
+        /// dosemu2's startup probe: `iopl(3)`.  With cap held it
+        /// reaches ENOSYS (dosemu2 falls back to v86 emulation); with
+        /// cap dropped it gets EPERM (dosemu2 also falls back).
+        /// Same end-user outcome via different errnos — both must be
+        /// distinguishable for strace-style tooling.
+        #[test]
+        fn test_iopl_phase180_workflow_dosemu_probe_distinguishes_errno() {
+            let _g = CapGuard::snapshot();
+            // With cap: ENOSYS.
+            errno::set_errno(0);
+            assert_eq!(iopl(3), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+            // Without cap: EPERM.
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(iopl(3), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Buggy caller -------------------------------------------------
+
+        /// A no-cap caller passing i32::MAX (a wildly invalid level)
+        /// must hit EINVAL — the range check fires before the cap
+        /// probe, so we don't misdiagnose an obvious bug as a
+        /// permission problem.
+        #[test]
+        fn test_iopl_phase180_buggy_caller_int_max_no_cap_einval() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(iopl(i32::MAX), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// A no-cap caller passing i32::MIN likewise hits EINVAL via
+        /// the lower bound, not EPERM.
+        #[test]
+        fn test_iopl_phase180_buggy_caller_int_min_no_cap_einval() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(iopl(i32::MIN), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- Recovery -----------------------------------------------------
+
+        /// After an EPERM rejection, restoring CAP_SYS_RAWIO lets the
+        /// same iopl(N>0) call reach ENOSYS.  Confirms dynamic cap
+        /// evaluation per call.
+        #[test]
+        fn test_iopl_phase180_recovery_restore_cap_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(iopl(3), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Restore caps.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            errno::set_errno(0);
+            assert_eq!(iopl(3), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- No-side-effect ----------------------------------------------
+
+        /// `iopl(0)` success preserves errno — POSIX rule.
+        #[test]
+        fn test_iopl_phase180_level_zero_success_preserves_errno() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(errno::EBADF);
+            assert_eq!(iopl(0), 0);
+            assert_eq!(errno::get_errno(), errno::EBADF);
+        }
+
+        // -- Sentinel -----------------------------------------------------
+
+        /// With CAP_SYS_RAWIO held (default), `iopl(3)` reaches
+        /// ENOSYS — confirms the privileged path is unbroken.
+        #[test]
+        fn test_iopl_phase180_sentinel_with_cap_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_RAWIO,
+            ));
+            errno::set_errno(0);
+            assert_eq!(iopl(3), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Cross-checks -------------------------------------------------
+
+        /// Dropping CAP_SYS_RAWIO must not affect other caps —
+        /// CAP_SYS_ADMIN remains held, so ioperm's other check paths
+        /// behave normally.  Defends against a stray bit-clear
+        /// regression.
+        #[test]
+        fn test_iopl_phase180_drop_sys_rawio_leaves_other_caps() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_RAWIO,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_BOOT,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+        }
+
+        /// Cross-check vs ioperm (Phase 178): both gate on
+        /// CAP_SYS_RAWIO, both return EPERM when the cap is missing
+        /// and the operation is a real grant.  Pin that they remain
+        /// consistent — if one gate regresses, the other still
+        /// catches the violation.
+        #[test]
+        fn test_iopl_phase180_consistent_with_ioperm_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            // iopl raise without cap → EPERM.
+            assert_eq!(iopl(1), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // ioperm turn_on without cap → EPERM.
+            errno::set_errno(0);
+            assert_eq!(ioperm(0x3F8, 8, 1), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Cross-check the "no-op release" semantics: just as
+        /// `ioperm(_, _, 0)` short-circuits to success without a cap
+        /// probe (Phase 178), `iopl(0)` short-circuits the same way.
+        /// Symmetry guard.
+        #[test]
+        fn test_iopl_phase180_consistent_with_ioperm_turn_off_release() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            // iopl(0) — release.
+            errno::set_errno(0);
+            assert_eq!(iopl(0), 0);
+            // ioperm(_, _, 0) — release.
+            errno::set_errno(0);
+            assert_eq!(ioperm(0x3F8, 8, 0), 0);
         }
     }
 }

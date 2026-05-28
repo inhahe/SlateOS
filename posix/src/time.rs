@@ -2185,9 +2185,53 @@ pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
 
 /// Get the overrun count for a timer.
 ///
-/// Always returns 0 (timers don't actually fire).
+/// For our stub, timers never fire, so the overrun count is always 0
+/// on success.  But the timer_id must still validate — Linux's
+/// `sys_timer_getoverrun` calls `lock_timer(timer_id)` first and
+/// returns `-1`/`EINVAL` for a non-existent timer.
+///
+/// # Linux validation order
+///
+/// `kernel/time/posix-timers.c::sys_timer_getoverrun`:
+///
+/// ```c
+/// timr = lock_timer(timer_id, &flag);
+/// if (!timr)
+///     return -EINVAL;
+/// overrun = timer_overrun_to_int(timr);
+/// ...
+/// return overrun;
+/// ```
+///
+///   1. `lock_timer(timer_id)` returns NULL → `EINVAL`
+///   2. Return the overrun count.
+///
+/// **Phase 149**: pre-Phase-149 we ignored `timerid` entirely and
+/// always returned 0.  This let callers query overrun on bogus IDs
+/// (e.g. uninitialised stack data, deleted timers) without any
+/// diagnostic — a real bug for code that uses overrun as a "did this
+/// timer fire?" signal.  Fix: look up the timer_id and return
+/// `-1`/`EINVAL` for misses; on hit, still return 0 (stub).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn timer_getoverrun(_timerid: TimerT) -> i32 {
+pub extern "C" fn timer_getoverrun(timerid: TimerT) -> i32 {
+    // SAFETY: single-threaded access by convention.
+    let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
+    let Some(table) = table else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+
+    let Some(slot) = table.get(timerid as usize) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+
+    if slot.is_none() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Stub: timers never fire, so overrun count is always 0.
     0
 }
 
@@ -4393,10 +4437,231 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// Phase 149: `timer_getoverrun` validates timer_id.  Was a no-
+    /// op stub returning 0 for any id; now returns -1/EINVAL on
+    /// misses.  Renamed from `test_timer_getoverrun_returns_zero`.
     #[test]
-    fn test_timer_getoverrun_returns_zero() {
-        assert_eq!(timer_getoverrun(0), 0);
-        assert_eq!(timer_getoverrun(99), 0);
+    fn test_timer_getoverrun_returns_zero_for_valid_timer_phase149() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        // Stub: timers never fire, so a valid timer has 0 overruns.
+        assert_eq!(timer_getoverrun(id), 0);
+        timer_delete(id);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 149: timer_getoverrun validates timer_id.
+    //
+    //   1. lock_timer(timer_id) returns NULL → -1/EINVAL
+    //   2. return timer_overrun_to_int(timr) (0 for our stub)
+    //
+    // Pre-Phase-149 the function was a no-op stub that returned 0
+    // regardless of `timerid`.  This let callers query overrun on
+    // bogus IDs (uninitialised data, deleted timers) without any
+    // diagnostic.
+    // ---------------------------------------------------------------
+
+    // -- per-error-class --
+
+    /// Per-error-class: out-of-range timer_id → -1/EINVAL.
+    #[test]
+    fn test_timer_getoverrun_bad_timer_id_einval_phase149() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        let ret = timer_getoverrun(99);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Per-error-class: negative timer_id → -1/EINVAL.
+    #[test]
+    fn test_timer_getoverrun_negative_timer_id_einval_phase149() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        let ret = timer_getoverrun(-1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Per-error-class: in-range but unused timer_id → -1/EINVAL.
+    #[test]
+    fn test_timer_getoverrun_unused_timer_id_einval_phase149() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        let ret = timer_getoverrun(0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Per-error-class: valid timer_id → 0 (stub: timers never fire).
+    #[test]
+    fn test_timer_getoverrun_valid_timer_zero_phase149() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let ret = timer_getoverrun(id);
+        assert_eq!(ret, 0);
+        timer_delete(id);
+    }
+
+    // -- workflow --
+
+    /// Workflow: create timer, arm it, query overrun — succeeds with 0.
+    #[test]
+    fn test_timer_getoverrun_after_arm_phase149() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 100 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 100 },
+        };
+        assert_eq!(timer_settime(id, 0, &raw const val, core::ptr::null_mut()), 0);
+        // Stub never fires, so overrun count stays at 0.
+        assert_eq!(timer_getoverrun(id), 0);
+        timer_delete(id);
+    }
+
+    /// Workflow: query overrun on a freshly-created (unarmed) timer —
+    /// succeeds with 0.
+    #[test]
+    fn test_timer_getoverrun_fresh_timer_phase149() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        assert_eq!(timer_getoverrun(id), 0);
+        timer_delete(id);
+    }
+
+    // -- buggy caller --
+
+    /// Buggy caller: queries overrun on a deleted timer.  Linux's
+    /// `lock_timer` returns NULL after delete; we must return
+    /// -1/EINVAL.  Pre-Phase-149 would have returned 0, hiding the
+    /// use-after-free.
+    #[test]
+    fn test_timer_getoverrun_deleted_timer_einval_phase149() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        assert_eq!(timer_delete(id), 0);
+
+        crate::errno::set_errno(0);
+        let ret = timer_getoverrun(id);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
+            "use-after-delete must be diagnosed, not silently 0'd");
+    }
+
+    /// Buggy caller: queries overrun before any timer_create.  ID 0
+    /// is uninitialised stack data; pre-Phase-149 silently returned
+    /// 0.  Phase 149 diagnoses with EINVAL.
+    #[test]
+    fn test_timer_getoverrun_uninit_id_einval_phase149() {
+        reset_timers();
+        let uninit: TimerT = 0;
+        crate::errno::set_errno(0);
+        let ret = timer_getoverrun(uninit);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- ordering matrix --
+
+    /// Ordering matrix: timer_getoverrun has only one error path
+    /// (timer_id lookup), so ordering tests degenerate into "every
+    /// invalid id produces EINVAL".  Coverage of negative, oob, and
+    /// unused is already done; this test interleaves a valid id
+    /// between two invalid ones to confirm no state leaks.
+    #[test]
+    fn test_timer_getoverrun_interleaved_valid_invalid_phase149() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+
+        crate::errno::set_errno(0);
+        assert_eq!(timer_getoverrun(99), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        assert_eq!(timer_getoverrun(id), 0);
+
+        crate::errno::set_errno(0);
+        assert_eq!(timer_getoverrun(-2), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        timer_delete(id);
+    }
+
+    // -- recovery --
+
+    /// Recovery: after EINVAL from bad id, switching to a valid id
+    /// succeeds.
+    #[test]
+    fn test_timer_getoverrun_recovery_after_einval_phase149() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        assert_eq!(timer_getoverrun(99), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        assert_eq!(timer_getoverrun(id), 0);
+        timer_delete(id);
+    }
+
+    /// Recovery: after deleted-timer EINVAL, recreating the timer
+    /// makes the same id work.
+    #[test]
+    fn test_timer_getoverrun_recovery_after_delete_recreate_phase149() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let first_id = id;
+        timer_delete(id);
+
+        crate::errno::set_errno(0);
+        assert_eq!(timer_getoverrun(first_id), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Recreate — should land in the same slot.
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        assert_eq!(id, first_id, "slot should be reused");
+        assert_eq!(timer_getoverrun(id), 0);
+        timer_delete(id);
+    }
+
+    // -- no-side-effect loop --
+
+    /// No-side-effect loop: repeated EINVAL calls don't leak.
+    #[test]
+    fn test_timer_getoverrun_einval_loop_phase149() {
+        reset_timers();
+        for _ in 0..64 {
+            crate::errno::set_errno(0);
+            assert_eq!(timer_getoverrun(99), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+        // Table still empty.
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        assert_eq!(id, 0);
+        assert_eq!(timer_getoverrun(id), 0);
+        timer_delete(id);
+    }
+
+    /// No-side-effect loop: success path doesn't touch errno.
+    #[test]
+    fn test_timer_getoverrun_success_doesnt_touch_errno_phase149() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        crate::errno::set_errno(13579);
+        let ret = timer_getoverrun(id);
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 13579,
+            "success path must not touch errno");
+        timer_delete(id);
     }
 
     // ---------------------------------------------------------------

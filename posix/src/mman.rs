@@ -1626,11 +1626,15 @@ mod tests {
 
     #[test]
     fn test_mremap_dontunmap_with_maymove_reaches_enosys() {
+        // Phase 125: DONTUNMAP requires old_len == new_len.  This
+        // test used to pass 16384 → 32768, which Linux 5.7+ rejects
+        // with EINVAL.  Updated to keep sizes equal so the validated
+        // path reaches ENOSYS as the test name promises.
         crate::errno::set_errno(0);
         let ret = mremap(
             0x4000 as *mut core::ffi::c_void,
             16384,
-            32768,
+            16384,
             MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
         );
         assert_eq!(ret, MAP_FAILED);
@@ -1645,6 +1649,227 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = mremap(0x4000 as *mut core::ffi::c_void, 0, 16384, MREMAP_MAYMOVE);
         assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- Phase 125: MREMAP_DONTUNMAP requires old_size == new_size ---
+    //
+    // Linux ≥ 5.7's mm/mremap.c rejects DONTUNMAP with size change
+    // (the destination mapping must have the same size as the source
+    // since DONTUNMAP preserves the original in place).  Previously
+    // our stub only checked the MAYMOVE half of the DONTUNMAP rule.
+
+    /// Phase 125: DONTUNMAP + MAYMOVE + growing the mapping → EINVAL.
+    #[test]
+    fn test_mremap_phase125_dontunmap_grow_einval() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            32768,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 125: DONTUNMAP + MAYMOVE + shrinking → EINVAL.
+    #[test]
+    fn test_mremap_phase125_dontunmap_shrink_einval() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            32768,
+            16384,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 125: DONTUNMAP + MAYMOVE + minimal size difference (one
+    /// page) → EINVAL.  The rule is exact, not "approximately".
+    #[test]
+    fn test_mremap_phase125_dontunmap_one_page_grow_einval() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            32768,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 125: DONTUNMAP + MAYMOVE + same size → reaches ENOSYS
+    /// (the validated path).  Regression for the size-equal case.
+    #[test]
+    fn test_mremap_phase125_dontunmap_same_size_enosys() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            16384,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Phase 125: DONTUNMAP + MAYMOVE + same size at a different
+    /// scale (multi-page region) → ENOSYS.
+    #[test]
+    fn test_mremap_phase125_dontunmap_same_size_large_enosys() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384 * 8,
+            16384 * 8,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Phase 125: DONTUNMAP without MAYMOVE — was already rejected;
+    /// confirm size equality doesn't accidentally let it through now
+    /// that the size check is separate.
+    #[test]
+    fn test_mremap_phase125_dontunmap_no_maymove_same_size_einval() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            16384,
+            MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 125: DONTUNMAP without MAYMOVE *and* with a size change.
+    /// Both halves of the DONTUNMAP rule fail; result is EINVAL.
+    #[test]
+    fn test_mremap_phase125_dontunmap_no_maymove_grow_einval() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            32768,
+            MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 125: precedence — misaligned addr beats DONTUNMAP size
+    /// check (alignment is the first prologue step).
+    #[test]
+    fn test_mremap_phase125_misaligned_addr_beats_dontunmap_size() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x1000 as *mut core::ffi::c_void,  // not 16 KiB aligned
+            16384,
+            32768,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 125: precedence — unknown flag bit beats DONTUNMAP size
+    /// check (flag-mask is the second prologue step).
+    #[test]
+    fn test_mremap_phase125_unknown_flag_beats_dontunmap_size() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            32768,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP | 0x100,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 125: precedence — DONTUNMAP size check beats new_size=0.
+    /// Both would EINVAL; this exercises the order.  Pass DONTUNMAP
+    /// + MAYMOVE + old=16384 + new=0 → DONTUNMAP requires equal
+    /// sizes and fires first.
+    #[test]
+    fn test_mremap_phase125_dontunmap_size_beats_new_size_zero() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            0,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 125 workflow: a JIT compiler maps a code buffer and
+    /// wants to remap it elsewhere for security (W^X transition)
+    /// while keeping the original mapping live.  Correct usage is
+    /// `MREMAP_MAYMOVE | MREMAP_DONTUNMAP` with old_size == new_size.
+    /// Confirms the supported pattern reaches the stub's ENOSYS leg.
+    #[test]
+    fn test_mremap_phase125_workflow_jit_w_xor_x_relocate() {
+        crate::errno::set_errno(0);
+        let page_count = 4;
+        let size = 16384 * page_count;
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            size,
+            size,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Phase 125 buggy-caller: a userspace allocator wants
+    /// "expand-in-place but keep the old mapping around for readers"
+    /// — semantically incoherent.  The caller passes
+    /// `MAYMOVE | DONTUNMAP` with a growing size, expecting either
+    /// silent acceptance or a clear error.  Linux gives a clear
+    /// error; we now do too.
+    #[test]
+    fn test_mremap_phase125_buggy_caller_allocator_grow_einval() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            16384 * 2,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 125 recovery: EINVAL from DONTUNMAP+grow, then ENOSYS
+    /// from a clean DONTUNMAP+same-size call — confirms errno
+    /// overwrites cleanly between calls.
+    #[test]
+    fn test_mremap_phase125_recovery_after_dontunmap_einval() {
+        crate::errno::set_errno(0);
+        let bad = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            32768,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(bad, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let good = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            16384,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(good, MAP_FAILED);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -2443,8 +2668,11 @@ pub extern "C" fn mmap64(
 /// * `EINVAL` — `old_address` is not page-aligned.
 /// * `EINVAL` — `flags` contains bits outside `MREMAP_FLAGS_VALID`.
 /// * `EINVAL` — `MREMAP_FIXED` set without `MREMAP_MAYMOVE`.
-/// * `EINVAL` — `MREMAP_DONTUNMAP` set without `MREMAP_MAYMOVE`
-///   (Linux 5.7+ requirement).
+/// * `EINVAL` — `MREMAP_DONTUNMAP` rejection (Linux 5.7+):
+///   - set without `MREMAP_MAYMOVE`, *or*
+///   - set with `old_size != new_size`.  DONTUNMAP preserves the
+///     original mapping in place, so a resize would have no defined
+///     meaning — `mm/mremap.c` explicitly rejects it.
 /// * `EINVAL` — `new_size == 0` (cannot shrink to zero in-place; the
 ///   correct way to free a mapping is `munmap`).
 /// * `EINVAL` — `old_address + old_size` overflows the address space.
@@ -2467,7 +2695,16 @@ pub extern "C" fn mremap(
         errno::set_errno(errno::EINVAL);
         return MAP_FAILED;
     }
-    if (flags & MREMAP_DONTUNMAP) != 0 && (flags & MREMAP_MAYMOVE) == 0 {
+    // MREMAP_DONTUNMAP (Linux 5.7+): requires MAYMOVE *and* same size.
+    // From mm/mremap.c::SYSCALL_DEFINE5(mremap):
+    //     if (flags & MREMAP_DONTUNMAP &&
+    //         (!(flags & MREMAP_MAYMOVE) || old_len != new_len))
+    //         return -EINVAL;
+    // DONTUNMAP creates a new mapping at the destination while
+    // preserving the original — a size change has no defined meaning.
+    if (flags & MREMAP_DONTUNMAP) != 0
+        && ((flags & MREMAP_MAYMOVE) == 0 || old_size != new_size)
+    {
         errno::set_errno(errno::EINVAL);
         return MAP_FAILED;
     }

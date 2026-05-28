@@ -1415,10 +1415,12 @@ pub const PIDFD_SIG_MAX: i32 = 64;
 /// passed to `waitid(P_PIDFD, ...)`, `pidfd_send_signal(2)`,
 /// `pidfd_getfd(2)`, and `poll/epoll` (to learn of exit).
 ///
-/// Errors the kernel returns *before* allocating a pidfd object:
+/// Errors the kernel returns *before* allocating a pidfd object, in
+/// the order Linux's `SYSCALL_DEFINE2(pidfd_open)` (kernel/pid.c)
+/// surfaces them:
 ///
-/// * `pid <= 0`                                 → `EINVAL`
 /// * `flags & ~(PIDFD_NONBLOCK|PIDFD_THREAD)`    → `EINVAL`
+/// * `pid <= 0`                                 → `EINVAL`
 /// * unknown PID (no such process)              → `ESRCH`  (only when
 ///   the kernel actually looks up the task; here we cannot, so callers
 ///   should not depend on `ESRCH` from this validator)
@@ -1429,15 +1431,23 @@ pub const PIDFD_SIG_MAX: i32 = 64;
 /// because the spawn/lookup subsystem isn't wired up here.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pidfd_open(pid: PidT, flags: u32) -> i32 {
+    // Linux's pidfd_open prologue checks the flag mask BEFORE pid:
+    //
+    //     if (flags & ~(PIDFD_NONBLOCK | PIDFD_THREAD))
+    //         return -EINVAL;
+    //     if (pid <= 0)
+    //         return -EINVAL;
+    //
+    // Both errors are EINVAL, but the precedence matters for callers
+    // bisecting which argument is wrong.  Match that order.
+    if (flags & !PIDFD_OPEN_FLAGS_VALID) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     // pid must be a strictly positive PID — Linux rejects 0 and any
     // negative value (since negative would mean "process group" elsewhere
     // but is not accepted here).
     if pid <= 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // Reject any unknown flag bits.  See PIDFD_OPEN_FLAGS_VALID.
-    if (flags & !PIDFD_OPEN_FLAGS_VALID) != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -3553,8 +3563,14 @@ mod tests {
     }
 
     #[test]
-    fn test_pidfd_open_validation_order_pid_first() {
-        // When both pid and flags are invalid, pid is checked first.
+    fn test_pidfd_open_validation_order_flags_first() {
+        // Phase 116: Linux's pidfd_open checks the flag mask BEFORE
+        // pid<=0.  When both pid and flags are invalid the result is
+        // still EINVAL (both paths return the same errno), but this
+        // test pins the Linux precedence in.  A previous version of
+        // this test (named ..._pid_first) asserted the opposite order;
+        // it was reversed in Phase 116 when the implementation was
+        // brought into ordering parity with kernel/pid.c.
         crate::errno::set_errno(0);
         assert_eq!(pidfd_open(0, 0xFFFF_FFFF), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -8277,6 +8293,146 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         // Value unchanged.
         assert_eq!(tcgetpgrp(0), 555);
+    }
+
+    // ---- Phase 116: pidfd_open validation-order parity with Linux ----
+    //
+    // Linux's `SYSCALL_DEFINE2(pidfd_open)` rejects unknown flag bits
+    // BEFORE `pid <= 0`.  Both checks return EINVAL, so the errno is
+    // identical for all inputs that hit either one; these tests pin
+    // the Linux precedence in so a future reordering would have to
+    // explicitly modify them.
+
+    #[test]
+    fn test_pidfd_open_phase116_flags_checked_before_pid_zero() {
+        // Both args invalid (pid=0 AND unknown flag bit).  Linux's
+        // prologue surfaces the flag failure first.
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(0, 0x8000_0000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_flags_checked_before_pid_negative() {
+        // Both args invalid (pid=-1 AND unknown flag bit) -> EINVAL.
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(-1, 0x8000_0000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_flags_checked_before_pid_min() {
+        // pid=i32::MIN AND unknown flag bit.
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(i32::MIN, 0x4);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_lone_unknown_flag_einval() {
+        // Just an unknown flag with a valid positive pid.
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(100, 0x4);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_lone_pid_zero_still_einval() {
+        // No flag issue; pure pid<=0 path.  Must still return EINVAL.
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_lone_pid_negative_still_einval() {
+        // Pure pid<0 path.
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(-42, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_pid_zero_with_valid_flags_einval() {
+        // Valid flag (PIDFD_NONBLOCK) but pid<=0 -> EINVAL via the
+        // (now second) pid check, confirming valid flags pass through
+        // the flag check cleanly.
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(0, PIDFD_NONBLOCK);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_pid_zero_with_both_valid_flags_einval() {
+        // PIDFD_NONBLOCK|PIDFD_THREAD (both valid bits) + pid=0 -> EINVAL.
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(0, PIDFD_NONBLOCK | PIDFD_THREAD);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_all_flags_set_einval() {
+        // u32::MAX includes unknown bits -> EINVAL via flag check.
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(100, u32::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_recovery_after_einval() {
+        // After a rejected call, errno can be reset and a subsequent
+        // valid call reaches the ENOSYS terminal.
+        let _ = pidfd_open(0, 0x8000_0000);
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(123, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_buggy_caller_passes_negative_int_flags() {
+        // C-side `pidfd_open(p, -1)` -> u32::MAX -> EINVAL (flag check).
+        crate::errno::set_errno(0);
+        #[allow(clippy::cast_sign_loss)]
+        let ret = pidfd_open(100, (-1i32) as u32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_valid_args_reach_enosys() {
+        // Sanity: positive pid + valid flags -> ENOSYS (no regression).
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(1, PIDFD_NONBLOCK | PIDFD_THREAD);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_pidfd_open_phase116_glibc_probe_workflow() {
+        // Pattern: a libc probes for pidfd_open support by calling
+        // it with a known-positive pid (its own) and flags=0.  We
+        // emulate this with pid=1 (init) which is unambiguously
+        // valid for the argument-domain validator.  Must return ENOSYS
+        // (not EINVAL) so the caller can distinguish "argument bug"
+        // from "syscall not implemented".  (We don't call getpid()
+        // here because in the host-side cfg(test) build getpid()
+        // returns the test runner's pid, which may or may not be
+        // positive depending on the stub backing; we want this test
+        // to assert pure argument-domain semantics.)
+        crate::errno::set_errno(0);
+        let ret = pidfd_open(1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 }
 

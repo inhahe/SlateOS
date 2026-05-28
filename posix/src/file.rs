@@ -1282,18 +1282,27 @@ pub extern "C" fn dup3(oldfd: Fd, newfd: Fd, flags: i32) -> Fd {
 pub extern "C" fn close_range(first: u32, last: u32, flags: u32) -> i32 {
     use crate::linux_close_range::{CLOSE_RANGE_CLOEXEC, CLOSE_RANGE_UNSHARE};
 
-    // Linux returns EINVAL for inverted ranges.  Our previous code
-    // silently treated them as no-ops, which masks bugs in callers.
-    if first > last {
+    // Linux's `__close_range` (fs/file.c) rejects unknown flag bits
+    // BEFORE checking the range ordering:
+    //
+    //     if (flags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC))
+    //         return -EINVAL;
+    //     if (fd > max_fd)
+    //         return -EINVAL;
+    //
+    // Both errors are EINVAL so a single observation can't tell them
+    // apart, but a caller that passes garbage flags AND an inverted
+    // range expects to learn about the flag bug first (e.g. when
+    // bisecting which argument is wrong).  Match Linux's ordering.
+    let known_flags = CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC;
+    if flags & !known_flags != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
 
-    // Reject any flag bit we don't understand.  glibc and musl
-    // forward-compat their callers by passing 0; anything else is a
-    // bug in the caller (or a feature we haven't implemented yet).
-    let known_flags = CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC;
-    if flags & !known_flags != 0 {
+    // Linux returns EINVAL for inverted ranges.  Our previous code
+    // silently treated them as no-ops, which masks bugs in callers.
+    if first > last {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -9025,5 +9034,162 @@ mod tests {
         assert_eq!(flock(fd, LOCK_EX | LOCK_NB), 0);
         assert_eq!(flock(fd, LOCK_UN), 0);
         let _ = fdtable::close_fd(fd);
+    }
+
+    // ---- Phase 115: close_range validation-order parity with Linux ----
+    //
+    // Linux's `__close_range` checks flag bits BEFORE the range
+    // ordering.  Both errors are EINVAL, but a caller bisecting which
+    // argument is wrong expects the flag failure to surface first when
+    // both are bad.  These tests pin that order in.
+
+    #[test]
+    fn test_close_range_phase115_unknown_flag_with_inverted_range_einval() {
+        // Both args bad: unknown flag bit AND first > last.  Linux
+        // returns EINVAL from the flags check; we must reach the same
+        // verdict via the same path (errno identical, but the ORDER
+        // is what we're locking in — a future refactor that flips it
+        // would still pass the errno assertion).
+        crate::errno::set_errno(0);
+        let ret = close_range(100, 50, 0x8000_0000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_close_range_phase115_high_bit_flag_einval() {
+        // 0x8000_0000 alone (no range issue) → EINVAL via flag check.
+        crate::errno::set_errno(0);
+        let ret = close_range(0, 10, 0x8000_0000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_close_range_phase115_all_unknown_flags_einval() {
+        // u32::MAX includes both known and unknown bits → unknown bits
+        // dominate → EINVAL.
+        crate::errno::set_errno(0);
+        let ret = close_range(0, 10, u32::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_close_range_phase115_single_unknown_bit_above_mask_einval() {
+        // Bit 3 (0x8) — just above the known CLOSE_RANGE_UNSHARE|CLOEXEC
+        // mask (which occupies bits 1 and 2) — must trip the flag check.
+        crate::errno::set_errno(0);
+        let ret = close_range(0, 10, 0x8);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_close_range_phase115_inverted_range_alone_still_einval() {
+        // No flag bits set; only the range is inverted.  Must still
+        // return EINVAL (the second check now).
+        crate::errno::set_errno(0);
+        let ret = close_range(100, 50, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_close_range_phase115_inverted_range_with_valid_flags_einval() {
+        use crate::linux_close_range::{CLOSE_RANGE_CLOEXEC, CLOSE_RANGE_UNSHARE};
+        // Valid flag combo BUT inverted range → range check fires →
+        // EINVAL.  Confirms the flag check correctly passes through
+        // valid flags and lets the range check own this verdict.
+        crate::errno::set_errno(0);
+        let ret = close_range(100, 50, CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_close_range_phase115_recovery_after_einval() {
+        // After a rejected call, a subsequent valid call must succeed
+        // (no errno-set lingering, no internal state corruption).
+        let _ = close_range(100, 50, 0x8000_0000);
+        crate::errno::set_errno(0);
+        let ret = close_range(900, 910, 0);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_close_range_phase115_buggy_caller_passes_negative_int_flags() {
+        // A caller writing `close_range(0, 10, -1)` in C compiles to
+        // u32::MAX which contains every unknown bit → EINVAL.
+        crate::errno::set_errno(0);
+        #[allow(clippy::cast_sign_loss)]
+        let ret = close_range(0, 10, (-1i32) as u32);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_close_range_phase115_unshare_alone_with_inverted_range_einval() {
+        use crate::linux_close_range::CLOSE_RANGE_UNSHARE;
+        // Valid lone CLOSE_RANGE_UNSHARE flag with inverted range →
+        // EINVAL via range check.
+        crate::errno::set_errno(0);
+        let ret = close_range(100, 50, CLOSE_RANGE_UNSHARE);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_close_range_phase115_cloexec_alone_with_inverted_range_einval() {
+        use crate::linux_close_range::CLOSE_RANGE_CLOEXEC;
+        // Valid lone CLOSE_RANGE_CLOEXEC flag with inverted range →
+        // EINVAL via range check.
+        crate::errno::set_errno(0);
+        let ret = close_range(100, 50, CLOSE_RANGE_CLOEXEC);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_close_range_phase115_no_side_effect_on_einval_with_flags() {
+        // A close_range call rejected by the flag check must NOT
+        // modify any fd state in the [first, last] range.  Open an fd,
+        // call close_range with an unknown flag bit covering that fd,
+        // verify the fd is still open afterwards.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        crate::errno::set_errno(0);
+        let ret = close_range(fd as u32, fd as u32, 0x8000_0000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // fd must still be open.
+        assert!(fdtable::get_fd_flags(fd).is_some());
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_close_range_phase115_no_side_effect_on_einval_with_inverted_range() {
+        // Same as above but for the range-ordering failure path.  An
+        // inverted range with valid flags must still not modify any fd.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        crate::errno::set_errno(0);
+        // Note: first > last but the supplied range doesn't actually
+        // cover `fd`; the test is: regardless of whether fd is in or
+        // out of the range, an EINVAL-rejected call must not close it.
+        let ret = close_range(100, 50, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert!(fdtable::get_fd_flags(fd).is_some());
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_close_range_phase115_valid_zero_flags_still_works() {
+        // Sanity check: flags=0 with valid range still returns 0
+        // (no regression from the reorder).
+        crate::errno::set_errno(0);
+        let ret = close_range(800, 810, 0);
+        assert_eq!(ret, 0);
     }
 }

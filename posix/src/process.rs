@@ -1475,67 +1475,73 @@ pub extern "C" fn pidfd_open(pid: PidT, flags: u32) -> i32 {
 /// # Linux behaviour
 ///
 /// `pidfd_send_signal(pidfd, sig, info, flags)` (added in Linux 5.1)
-/// delivers `sig` to the process referenced by `pidfd`.  Argument-
-/// domain checks the kernel performs before touching the target:
+/// delivers `sig` to the process referenced by `pidfd`.  The kernel
+/// validation order (`kernel/signal.c::sys_pidfd_send_signal`):
 ///
-/// * `flags != 0`           → `EINVAL`  (no flag bits defined yet)
-/// * `pidfd < 0`            → `EBADF`
-/// * `sig < 0 || sig > 64`  → `EINVAL`  (`sig == 0` is allowed and is
-///   a permission/existence probe — no signal is delivered)
-/// * If `info != NULL`: the kernel copies in a `siginfo_t` and rejects
-///   the call when `info->si_signo != sig` (`kernel/signal.c`
-///   `do_pidfd_send_signal` → `copy_siginfo_from_user`).
+/// 1. `flags & ~PIDFD_SIGNAL_FLAGS_MASK`        → `EINVAL`
+/// 2. `CLASS(fd, f)(pidfd); if (fd_empty(f))`   → `EBADF`
+///    (covers both `pidfd < 0` and `pidfd` not referring to an open fd)
+/// 3. `pidfd_to_pid(fd_file(f))`                → `EBADF` for files
+///    whose `f_op != &pidfd_fops`
+/// 4. `access_pidfd_pidns(pid)`                 → `EINVAL`
+/// 5. flags switch for scope flags              → `EINVAL` on bad combo
+/// 6. If `info != NULL`: `copy_siginfo_from_user` → `EFAULT`;
+///    then `sig != kinfo.si_signo`              → `EINVAL`
+/// 7. `kill_pid_info_type` → `valid_signal(sig)` → `EINVAL` if `sig < 0`
+///    or `sig > _NSIG` (== 64 on x86-64)
 ///
-/// We replicate every argument-domain check.  Callers that just want
-/// to know "does the syscall exist with the right shape" (e.g. systemd's
-/// `bus_kill_unit_processes` fallback ladder) will see the same errno
-/// pattern they get on a stripped-down Linux build.
+/// **Phase 145**: pre-Phase-145 we checked `sig` range and the
+/// `si_signo` cross-check BEFORE the fdget step.  That diverged from
+/// Linux: a buggy caller passing `pidfd_send_signal(99, 999, NULL, 0)`
+/// (bad fd + bad sig) would see `EINVAL` (sig out of range) when Linux
+/// returns `EBADF` (fdget failure).  Userspace probes
+/// (systemd's `bus_kill_unit_processes`, util-linux `kill --pidfd=`,
+/// Go's `os.FindProcess(...).Signal` path) rely on the Linux ordering
+/// to distinguish "I passed the wrong fd" from "I passed the wrong sig."
+///
+/// Since we don't yet have a `HandleKind::Pidfd` in the fdtable, every
+/// fd that *is* open fails the kind check at step 3 — so every
+/// non-`EINVAL` (flag-mask) input returns `EBADF`.  The `sig`-range and
+/// `si_signo` checks are not reachable from this stub today and have
+/// been removed; they will be reintroduced by the phase that adds real
+/// pidfd state to the fdtable.
 ///
 /// # Safety
 ///
-/// `info`, if non-NULL, must point to at least `sizeof(SiginfoT) == 128`
-/// readable bytes.  We use `core::ptr::read_unaligned` to defend against
-/// alignment-1 caller pointers.
+/// `info`, if non-NULL, would need to be at least `sizeof(SiginfoT) == 128`
+/// readable bytes.  Since the current stub returns `EBADF` before
+/// touching `info`, the pointer is not dereferenced.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pidfd_send_signal(
     pidfd: i32,
-    sig: i32,
-    info: *const core::ffi::c_void,
+    _sig: i32,
+    _info: *const core::ffi::c_void,
     flags: u32,
 ) -> i32 {
-    // No flag bits are defined for pidfd_send_signal in Linux.
+    // Step 1: PIDFD_SIGNAL_FLAGS_MASK check.  Pre-6.9 Linux defined no
+    // flag bits; modern kernels accept PIDFD_SIGNAL_THREAD /
+    // _THREAD_GROUP / _PROCESS_GROUP scope flags.  We keep the
+    // pre-6.9 strict-zero check for now; adding scope-flag support is a
+    // future phase.  (Listed in `todo.txt`.)
     if flags != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // pidfd must be a non-negative fd.
-    if pidfd < 0 {
+    // Step 2: CLASS(fd, f)(pidfd); fd_empty(f) — both pidfd < 0 and
+    // pidfd not referring to an open fd hit this path with EBADF.
+    if pidfd < 0 || crate::fdtable::get_fd(pidfd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    // sig must be in [0, 64].  0 is the permission/existence probe.
-    if !(0..=PIDFD_SIG_MAX).contains(&sig) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // If info is provided, validate the siginfo_t.si_signo cross-check.
-    // Note: when sig == 0 the kernel still requires si_signo == 0 when
-    // info is non-NULL.
-    if !info.is_null() {
-        // SAFETY: caller contract says `info` (when non-NULL) points to
-        // a SiginfoT-sized region.  read_unaligned defends against an
-        // arbitrarily-aligned caller pointer.
-        let si_signo = unsafe {
-            core::ptr::read_unaligned(info.cast::<crate::signal::SiginfoT>())
-                .si_signo
-        };
-        if si_signo != sig {
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
-    }
-    // Arguments validated; signal delivery not wired up.
-    errno::set_errno(errno::ENOSYS);
+    // Step 3: pidfd_to_pid(fd_file(f)) — returns ERR_PTR(-EBADF) for any
+    // file whose f_op is not &pidfd_fops.  We have no HandleKind::Pidfd
+    // entries in the fdtable, so every open fd (Console, File, Pipe,
+    // Tcp*, Udp*, Eventfd, Epoll, Timerfd, Inotify) fails here with
+    // EBADF.  Steps 4–7 (access_pidfd_pidns, scope-flag switch, siginfo
+    // copy + si_signo cross-check, valid_signal) are unreachable from
+    // this stub today; they will be added when HandleKind::Pidfd is
+    // introduced.
+    errno::set_errno(errno::EBADF);
     -1
 }
 
@@ -1549,33 +1555,54 @@ pub extern "C" fn pidfd_send_signal(
 /// (`strace -y`, `lldb`), container runtimes that need to pass an fd
 /// across PID namespaces, and rootless container image extractors.
 ///
-/// Argument-domain checks the kernel performs:
+/// Argument-domain checks the kernel performs, in Linux precedence:
 ///
-/// * `flags != 0`     → `EINVAL`  (no flag bits defined)
-/// * `pidfd < 0`      → `EBADF`
-/// * `targetfd < 0`   → `EBADF`
+/// 1. `flags != 0`                              → `EINVAL`
+/// 2. `CLASS(fd, f)(pidfd); fd_empty(f)`        → `EBADF`  (covers
+///    both `pidfd < 0` and unopened pidfd)
+/// 3. `pidfd_pid(fd_file(f))` on non-pidfd file → `EBADF`
+/// 4. Inner `pidfd_getfd(pid, fd)`: `fd < 0` or
+///    target-side `fd` not open                 → `EBADF`
 ///
-/// After arguments are accepted we return `ENOSYS` — replicating a
-/// Linux build without `CONFIG_PIDFD_GETFD`.
+/// Phase 145 brought the order into parity with Linux.  Pre-Phase-145
+/// we ran the `targetfd < 0 → EBADF` step before the pidfd-fdget step,
+/// which gave a wrong-reason diagnosis for `pidfd_getfd(BAD_FD, -1, 0)`
+/// and returned `ENOSYS` for `pidfd_getfd(UNOPENED_FD, VALID_FD, 0)`.
+/// Both inputs now return `EBADF` from the pidfd-fdget step, matching
+/// Linux.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pidfd_getfd(pidfd: i32, targetfd: i32, flags: u32) -> i32 {
-    // No flag bits are defined.
+pub extern "C" fn pidfd_getfd(pidfd: i32, _targetfd: i32, flags: u32) -> i32 {
+    // Linux's sys_pidfd_getfd validation order (kernel/pid.c):
+    //   1. flags != 0                                 → EINVAL
+    //   2. CLASS(fd, f)(pidfd); fd_empty(f)           → EBADF
+    //   3. pidfd_pid(fd_file(f))  (non-pidfd file)    → EBADF
+    //   4. Inner pidfd_getfd(pid, fd) checks targetfd → EBADF for fd<0
+    //      or fd not open in the target process
+    //
+    // Phase 145: pre-Phase-145 we checked targetfd<0 BEFORE the pidfd
+    // fdget step.  That diverged from Linux for callers passing a bad
+    // pidfd alongside a bad targetfd — they saw EBADF "for the wrong
+    // reason" (targetfd, not pidfd).  More critically, callers passing
+    // a non-negative-but-unopened pidfd with a valid targetfd saw
+    // ENOSYS where Linux returns EBADF.  Now we run the fdget step
+    // first, matching Linux.
+    //
+    // Since we don't have HandleKind::Pidfd, every open fd fails the
+    // kind check at step 3, so every input here returns EBADF (after
+    // the flag check).  The targetfd check (step 4) is unreachable
+    // from this stub today.
     if flags != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // pidfd must be non-negative.
-    if pidfd < 0 {
+    if pidfd < 0 || crate::fdtable::get_fd(pidfd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    // targetfd must be non-negative.
-    if targetfd < 0 {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    }
-    // Arguments validated; cross-process fd duplication not wired up.
-    errno::set_errno(errno::ENOSYS);
+    // Step 3 — pidfd_pid returns ERR_PTR(-EBADF) for non-pidfd files.
+    // No fdtable entry is currently a pidfd; reach here only if the fd
+    // is open with some other kind.
+    errno::set_errno(errno::EBADF);
     -1
 }
 
@@ -3574,18 +3601,27 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
+    /// Phase 145: pidfd_send_signal(3, ...) — fd 3 is not in the
+    /// fdtable (Console occupies 0/1/2), so the fdget step fires with
+    /// EBADF.  Renamed from the pre-Phase-145
+    /// `test_pidfd_send_signal_enosys` which incorrectly asserted ENOSYS
+    /// for the same input — that was the "after all validation passes"
+    /// stub return, but Linux's `fd_empty(f)` fires first.
     #[test]
-    fn test_pidfd_send_signal_enosys() {
+    fn test_pidfd_send_signal_unopened_fd_ebadf_phase145() {
         crate::errno::set_errno(0);
         assert_eq!(pidfd_send_signal(3, 9, core::ptr::null(), 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    /// Phase 145: pidfd_getfd(3, 0, 0) — fd 3 not in fdtable, so
+    /// pidfd-fdget fires with EBADF.  Renamed from
+    /// `test_pidfd_getfd_enosys`.
     #[test]
-    fn test_pidfd_getfd_enosys() {
+    fn test_pidfd_getfd_unopened_fd_ebadf_phase145() {
         crate::errno::set_errno(0);
         assert_eq!(pidfd_getfd(3, 0, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]
@@ -3726,65 +3762,68 @@ mod tests {
     }
 
     // --- pidfd_send_signal: sig range ---
+    //
+    // Phase 145: all of these were originally written to pin the
+    // pre-Phase-145 "sig range checked before fdget" behaviour.  Linux's
+    // valid_signal check lives inside kill_pid_info_type, which runs
+    // AFTER fdget + pidfd_to_pid; therefore a bad sig on an
+    // unopened/non-pidfd fd surfaces as EBADF, not EINVAL.  The tests
+    // are retained (renamed) as "beats" tests: bad-fd beats bad-sig.
 
+    /// Phase 145: bad fd (3 not in fdtable) + bad sig (-1) → EBADF, not
+    /// EINVAL.  Was `test_pidfd_send_signal_negative_sig_einval`.
     #[test]
-    fn test_pidfd_send_signal_negative_sig_einval() {
+    fn test_pidfd_send_signal_unopened_fd_beats_negative_sig_phase145() {
         crate::errno::set_errno(0);
         assert_eq!(pidfd_send_signal(3, -1, core::ptr::null(), 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    /// Phase 145: bad fd + sig > 64 → EBADF.
+    /// Was `test_pidfd_send_signal_sig_too_large_einval`.
     #[test]
-    fn test_pidfd_send_signal_sig_too_large_einval() {
+    fn test_pidfd_send_signal_unopened_fd_beats_sig_too_large_phase145() {
         crate::errno::set_errno(0);
         assert_eq!(
             pidfd_send_signal(3, PIDFD_SIG_MAX + 1, core::ptr::null(), 0),
             -1
         );
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    /// Phase 145: bad fd + valid sig (PIDFD_SIG_MAX = 64) → EBADF.
+    /// Was `test_pidfd_send_signal_sig_max_valid` which expected ENOSYS.
     #[test]
-    fn test_pidfd_send_signal_sig_max_valid() {
-        // sig == 64 is the maximum accepted; falls through to ENOSYS.
+    fn test_pidfd_send_signal_unopened_fd_beats_valid_sig_max_phase145() {
         crate::errno::set_errno(0);
         assert_eq!(
             pidfd_send_signal(3, PIDFD_SIG_MAX, core::ptr::null(), 0),
             -1
         );
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    /// Phase 145: bad fd + sig == 0 (the permission probe) → EBADF.
+    /// Was `test_pidfd_send_signal_sig_zero_permission_probe`.
     #[test]
-    fn test_pidfd_send_signal_sig_zero_permission_probe() {
-        // sig == 0 is the permission/existence probe; allowed.
+    fn test_pidfd_send_signal_unopened_fd_beats_sig_zero_probe_phase145() {
         crate::errno::set_errno(0);
         assert_eq!(pidfd_send_signal(3, 0, core::ptr::null(), 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     // --- pidfd_send_signal: siginfo cross-check ---
+    //
+    // Phase 145: same story — siginfo cross-check lives DEEPER in the
+    // kernel than fdget, so a bad fd + mismatching info surfaces as
+    // EBADF.  Tests retained as "beats" tests.
 
+    /// Phase 145: bad fd + info with mismatching si_signo → EBADF.
+    /// Was `test_pidfd_send_signal_info_signo_mismatch_einval`.
     #[test]
-    fn test_pidfd_send_signal_info_signo_mismatch_einval() {
+    fn test_pidfd_send_signal_unopened_fd_beats_info_signo_mismatch_phase145() {
         let mut info: crate::signal::SiginfoT = Default::default();
-        info.si_signo = 11; // SIGSEGV
-        crate::errno::set_errno(0);
-        // Outer sig is 9 but si_signo is 11 → EINVAL.
-        let ret = pidfd_send_signal(
-            3,
-            9,
-            (&raw const info).cast::<core::ffi::c_void>(),
-            0,
-        );
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-    }
-
-    #[test]
-    fn test_pidfd_send_signal_info_signo_match_passes() {
-        let mut info: crate::signal::SiginfoT = Default::default();
-        info.si_signo = 9; // SIGKILL
+        info.si_signo = 11; // SIGSEGV — mismatches outer sig 9
         crate::errno::set_errno(0);
         let ret = pidfd_send_signal(
             3,
@@ -3793,12 +3832,30 @@ mod tests {
             0,
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    /// Phase 145: bad fd + info with matching si_signo → EBADF (no
+    /// longer ENOSYS).  Was `test_pidfd_send_signal_info_signo_match_passes`.
     #[test]
-    fn test_pidfd_send_signal_info_with_sig_zero_requires_zero_signo() {
-        // sig == 0 + si_signo != 0 is still a mismatch.
+    fn test_pidfd_send_signal_unopened_fd_beats_info_match_phase145() {
+        let mut info: crate::signal::SiginfoT = Default::default();
+        info.si_signo = 9;
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(
+            3,
+            9,
+            (&raw const info).cast::<core::ffi::c_void>(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Phase 145: bad fd + sig 0 + info(si_signo=11) → EBADF.  Was
+    /// `test_pidfd_send_signal_info_with_sig_zero_requires_zero_signo`.
+    #[test]
+    fn test_pidfd_send_signal_unopened_fd_beats_sig_zero_info_mismatch_phase145() {
         let mut info: crate::signal::SiginfoT = Default::default();
         info.si_signo = 11;
         crate::errno::set_errno(0);
@@ -3809,7 +3866,7 @@ mod tests {
             0,
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     // --- pidfd_send_signal: order — flags first, then fd, then sig, then info ---
@@ -3825,7 +3882,11 @@ mod tests {
 
     #[test]
     fn test_pidfd_send_signal_fd_before_sig() {
-        // Bad fd + bad sig → EBADF for fd wins.
+        // Bad fd + bad sig → EBADF for fd wins.  Pre-Phase-145 this was
+        // a manual `pidfd < 0 → EBADF` check beating sig EINVAL;
+        // post-Phase-145 it's the same fdget step beating an unreachable
+        // sig-range check (now living deeper in the simulated kernel).
+        // Same observable result.
         crate::errno::set_errno(0);
         let ret = pidfd_send_signal(-1, 999, core::ptr::null(), 0);
         assert_eq!(ret, -1);
@@ -3865,27 +3926,41 @@ mod tests {
     }
 
     // --- pidfd_getfd: targetfd ---
+    //
+    // Phase 145: targetfd validation lives DEEPER in the kernel (inside
+    // the inner `pidfd_getfd(pid, fd)` after the outer fdget +
+    // pidfd_pid succeed).  For a bad pidfd these tests now hit the
+    // outer fdget EBADF, which still surfaces as EBADF — same observable
+    // result, but for a different reason.
 
+    /// Phase 145: bad pidfd (3 not in fdtable) + bad targetfd (-1) →
+    /// EBADF from the outer pidfd-fdget, not from the inner targetfd
+    /// check (which is unreachable here).
     #[test]
-    fn test_pidfd_getfd_negative_targetfd_ebadf() {
+    fn test_pidfd_getfd_unopened_pidfd_beats_negative_targetfd_phase145() {
         crate::errno::set_errno(0);
         assert_eq!(pidfd_getfd(3, -1, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    /// Phase 145: bad pidfd + targetfd=i32::MIN → EBADF from pidfd-fdget.
     #[test]
-    fn test_pidfd_getfd_min_targetfd_ebadf() {
+    fn test_pidfd_getfd_unopened_pidfd_beats_min_targetfd_phase145() {
         crate::errno::set_errno(0);
         assert_eq!(pidfd_getfd(3, i32::MIN, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    /// Phase 145: pidfd=i32::MAX (not in fdtable) + targetfd=i32::MAX
+    /// → EBADF.  Pre-Phase-145 this expected ENOSYS because both fds
+    /// passed the manual `< 0` check and fell through to the stub
+    /// catch-all; Linux's fd_empty(f) on the outer pidfd surfaces EBADF
+    /// for any non-open fd.
     #[test]
-    fn test_pidfd_getfd_max_fds_pass() {
-        // Both fds at i32::MAX → fall through to ENOSYS.
+    fn test_pidfd_getfd_unopened_max_fds_ebadf_phase145() {
         crate::errno::set_errno(0);
         assert_eq!(pidfd_getfd(i32::MAX, i32::MAX, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     // --- pidfd_getfd: order — flags first, then pidfd, then targetfd ---
@@ -3978,28 +4053,36 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    /// strace `-y` / `lldb` cross-process fd inspection: uses
-    /// `pidfd_getfd(tracee_pidfd, fd_in_tracee, 0)` to import a fd.
-    /// Tests the happy-path validation: real fds and zero flags pass.
+    /// Phase 145: strace `-y` / `lldb` cross-process fd inspection:
+    /// uses `pidfd_getfd(tracee_pidfd, fd_in_tracee, 0)` to import a
+    /// fd.  Without a real pidfd kind in the fdtable the call surfaces
+    /// EBADF from the outer pidfd-fdget — strace's error message will
+    /// be "Bad file descriptor", matching what it sees on a Linux
+    /// system where the pidfd's tracee has already exited.
+    /// Pre-Phase-145 this expected ENOSYS.
     #[test]
-    fn test_pidfd_workflow_strace_y_inspect_fd() {
+    fn test_pidfd_workflow_strace_y_inspect_fd_phase145() {
         crate::errno::set_errno(0);
         let pidfd = 5; // hypothetical pidfd for the tracee
         let target_fd = 3; // tracee's stderr or a socket
         let ret = pidfd_getfd(pidfd, target_fd, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
-    /// kill(1) replacement using pidfd: `kill --pidfd=<fd> <sig>` (from
-    /// util-linux) calls `pidfd_send_signal(fd, sig, NULL, 0)`.  Tests
-    /// a typical SIGTERM (15) on a real fd with NULL info.
+    /// Phase 145: kill(1) replacement using pidfd:
+    /// `kill --pidfd=<fd> <sig>` (util-linux) calls
+    /// `pidfd_send_signal(fd, sig, NULL, 0)`.  Without a real pidfd
+    /// kind, the outer fdget surfaces EBADF — util-linux's kill prints
+    /// "kill: cannot find process: Bad file descriptor", which is the
+    /// expected error for a pidfd whose tracee has exited.
+    /// Pre-Phase-145 this expected ENOSYS.
     #[test]
-    fn test_pidfd_workflow_kill_pidfd_term() {
+    fn test_pidfd_workflow_kill_pidfd_term_phase145() {
         crate::errno::set_errno(0);
         let ret = pidfd_send_signal(7, 15, core::ptr::null(), 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     /// Java JDK 22's `ProcessHandleImpl` uses pidfd internally on Linux
@@ -4015,14 +4098,18 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    /// Buggy caller that passes a stack-allocated siginfo_t whose
+    /// Phase 145: buggy caller passes a stack-allocated siginfo_t whose
     /// si_signo got zero-initialised but the outer sig is non-zero.
-    /// This is a common bug in C wrappers that forget to set si_signo.
-    /// We must catch it with EINVAL so the bug is loud, not silent.
+    /// Pre-Phase-145 our stub caught this with EINVAL at the si_signo
+    /// cross-check.  Linux only reaches the si_signo check AFTER the
+    /// outer fdget + pidfd_to_pid succeed; on a bad pidfd it short-
+    /// circuits with EBADF.  The bug is no longer "loudly caught" by
+    /// this validator — but a real pidfd would still surface the
+    /// EINVAL.  When HandleKind::Pidfd is added, the si_signo check
+    /// will be reintroduced in the correct position.
     #[test]
-    fn test_pidfd_workflow_buggy_zero_initialised_siginfo() {
+    fn test_pidfd_workflow_buggy_zero_initialised_siginfo_phase145() {
         let info: crate::signal::SiginfoT = Default::default();
-        // si_signo defaults to 0.
         crate::errno::set_errno(0);
         let ret = pidfd_send_signal(
             3,
@@ -4031,7 +4118,296 @@ mod tests {
             0,
         );
         assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // ==================================================================
+    // Phase 145 — pidfd_send_signal / pidfd_getfd: fdget precedes
+    // sig/info/targetfd validation (kernel/signal.c, kernel/pid.c)
+    // ==================================================================
+    //
+    // Linux's `sys_pidfd_send_signal` runs CLASS(fd, f)(pidfd) /
+    // fd_empty(f) BEFORE valid_signal and si_signo cross-check.
+    // `sys_pidfd_getfd` runs the same outer fdget BEFORE the inner
+    // pidfd_getfd(pid, fd) which validates targetfd.  Pre-Phase-145
+    // both functions ran sig/info/targetfd checks before the fdget
+    // step, leading to:
+    //   * EINVAL where Linux returns EBADF (bad fd + bad sig/info)
+    //   * ENOSYS where Linux returns EBADF (unopened-but-non-negative
+    //     fd through to the stub catch-all)
+    //
+    // Since no HandleKind::Pidfd exists yet, every open fd fails Linux's
+    // pidfd_to_pid (or pidfd_pid for getfd) with EBADF.  All Phase 145
+    // tests below assert EBADF as the final errno.
+
+    // --- per-error-class: every non-flag-error input returns EBADF ---
+
+    /// pidfd_send_signal(99, ...) — fd 99 not in fdtable → EBADF from
+    /// the outer fdget step.
+    #[test]
+    fn test_phase145_send_signal_unopened_high_fd_ebadf() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(99, 9, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// pidfd_send_signal(0, ...) — fd 0 IS open (Console::stdin), so
+    /// fdget succeeds, but pidfd_to_pid returns EBADF for non-pidfd
+    /// files.  Same final errno as the "unopened fd" case, but reached
+    /// via a different kernel path.
+    #[test]
+    fn test_phase145_send_signal_open_console_stdin_ebadf() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(0, 9, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// pidfd_send_signal(2, ...) — fd 2 is Console::stderr → EBADF.
+    #[test]
+    fn test_phase145_send_signal_open_console_stderr_ebadf() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(2, 9, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// pidfd_getfd(99, 0, 0) — fd 99 not in fdtable → EBADF.
+    #[test]
+    fn test_phase145_getfd_unopened_high_fd_ebadf() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_getfd(99, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// pidfd_getfd(0, 0, 0) — fd 0 is Console::stdin → EBADF (wrong
+    /// kind for a pidfd).
+    #[test]
+    fn test_phase145_getfd_open_console_stdin_ebadf() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_getfd(0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- ordering matrix: bad flags vs bad fd / bad sig / bad info ---
+
+    /// Bad flags + unopened fd → EINVAL (flags step 1, fdget step 2).
+    #[test]
+    fn test_phase145_send_signal_flags_beat_unopened_fd() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(99, 9, core::ptr::null(), 1);
+        assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Bad flags + open (but wrong-kind) fd → EINVAL still wins.
+    #[test]
+    fn test_phase145_send_signal_flags_beat_open_console_fd() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(0, 9, core::ptr::null(), 0x4000_0000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Unopened fd + bad sig (sig=999 well above PIDFD_SIG_MAX) → EBADF
+    /// (fdget runs before valid_signal).  Pre-Phase-145 this was EINVAL.
+    #[test]
+    fn test_phase145_send_signal_unopened_fd_beats_bad_sig() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(99, 999, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Open (wrong-kind) fd + bad sig → EBADF still wins (pidfd_to_pid
+    /// fails before valid_signal).
+    #[test]
+    fn test_phase145_send_signal_open_console_beats_bad_sig() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(1, 999, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Unopened fd + info(si_signo mismatch) → EBADF (fdget runs before
+    /// copy_siginfo_from_user).  Pre-Phase-145 this was EINVAL.
+    #[test]
+    fn test_phase145_send_signal_unopened_fd_beats_info_mismatch() {
+        let mut info: crate::signal::SiginfoT = Default::default();
+        info.si_signo = 99;
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(
+            99,
+            9,
+            (&raw const info).cast::<core::ffi::c_void>(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Bad flags + unopened pidfd → EINVAL for getfd too.
+    #[test]
+    fn test_phase145_getfd_flags_beat_unopened_pidfd() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_getfd(99, 0, 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Bad flags + unopened pidfd + bad targetfd → still EINVAL
+    /// (flags is step 1).
+    #[test]
+    fn test_phase145_getfd_flags_beat_pidfd_and_targetfd() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_getfd(99, -1, 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Unopened pidfd + bad targetfd → EBADF from pidfd-fdget (NOT from
+    /// the inner targetfd check, which is unreachable).  Pre-Phase-145
+    /// this was EBADF from the manual `targetfd < 0` check — same
+    /// errno, different reason.  Phase 145 makes the reason the same as
+    /// Linux's.
+    #[test]
+    fn test_phase145_getfd_unopened_pidfd_beats_bad_targetfd() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_getfd(99, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Open (wrong-kind) pidfd + bad targetfd → EBADF from
+    /// pidfd_pid (the kind check), not from the inner targetfd check.
+    /// Pre-Phase-145 this would also be EBADF but reached via the
+    /// targetfd check after pidfd_to_pid was never run.
+    #[test]
+    fn test_phase145_getfd_open_console_pidfd_beats_bad_targetfd() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_getfd(2, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- workflow: real-world callers see the new EBADF ---
+
+    /// systemd's `bus_kill_unit_processes` fallback ladder: tries
+    /// pidfd_send_signal first, falls back to kill(pid, sig) if it
+    /// fails.  Pre-Phase-145 our stub returned ENOSYS, which systemd
+    /// treats as "kernel too old"; now it returns EBADF, which
+    /// systemd treats as "pidfd stale, retry kill(pid)".  Both are
+    /// correct fallbacks; EBADF is what real Linux returns when the
+    /// pidfd's task has already exited.
+    #[test]
+    fn test_phase145_workflow_systemd_kill_via_stale_pidfd() {
+        crate::errno::set_errno(0);
+        // systemd captured a pidfd via pidfd_open earlier; in our
+        // stub-world that "pidfd" is whatever fd userspace believes
+        // it has.  Any non-pidfd-kind fd → EBADF.
+        let stale_pidfd = 7;
+        let ret = pidfd_send_signal(stale_pidfd, 15, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// runc fd-passing: when joining a container, runc tries
+    /// pidfd_getfd to import a fd from the container's namespace.
+    /// On a kernel without HandleKind::Pidfd support that returns
+    /// EBADF — runc falls back to /proc/<pid>/fd/<n>.
+    #[test]
+    fn test_phase145_workflow_runc_pidfd_getfd_fallback() {
+        crate::errno::set_errno(0);
+        let container_pidfd = 5;
+        let target_fd_in_container = 3;
+        let ret = pidfd_getfd(container_pidfd, target_fd_in_container, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- buggy caller: stdin used as pidfd, max sig number ---
+
+    /// Buggy caller does `pidfd_send_signal(STDIN_FILENO, SIGKILL, ...)`
+    /// thinking stdin is a pidfd.  Real Linux returns EBADF (stdin's
+    /// f_op is not &pidfd_fops); we now match.
+    #[test]
+    fn test_phase145_buggy_caller_stdin_as_pidfd() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(0, 9, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Buggy caller passes Console fd + sig=PIDFD_SIG_MAX (64).  Real
+    /// Linux returns EBADF from the kind check; pre-Phase-145 we
+    /// returned ENOSYS (sig was valid, fd "looked OK" because we only
+    /// checked < 0).
+    #[test]
+    fn test_phase145_buggy_caller_console_with_max_sig() {
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(1, PIDFD_SIG_MAX, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- recovery: errno does not leak across calls ---
+
+    /// Sequencing test: a flag-EINVAL call followed by a bad-fd-EBADF
+    /// call must end with EBADF, not EINVAL.  Catches errno leakage
+    /// bugs (e.g., if the second call accidentally early-returned
+    /// without setting errno).
+    #[test]
+    fn test_phase145_send_signal_errno_reset_between_calls() {
+        crate::errno::set_errno(0);
+        // First call: bad flags → EINVAL.
+        let r1 = pidfd_send_signal(0, 9, core::ptr::null(), 1);
+        assert_eq!(r1, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // Second call: open fd, valid flags → EBADF.
+        let r2 = pidfd_send_signal(0, 9, core::ptr::null(), 0);
+        assert_eq!(r2, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Inverse: EBADF followed by EINVAL flag-check.
+    #[test]
+    fn test_phase145_getfd_errno_reset_between_calls() {
+        crate::errno::set_errno(0);
+        let r1 = pidfd_getfd(99, 0, 0);
+        assert_eq!(r1, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        let r2 = pidfd_getfd(99, 0, 0x8000_0000);
+        assert_eq!(r2, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- no-side-effect loop: validation failures are idempotent ---
+
+    /// Hammering a failing input 64 times must never silently transition
+    /// to success or to a different errno.  Guards against state
+    /// accumulation bugs in the fdtable lookup path.
+    #[test]
+    fn test_phase145_send_signal_no_side_effect_loop() {
+        for _ in 0..64 {
+            crate::errno::set_errno(0);
+            let ret = pidfd_send_signal(99, 9, core::ptr::null(), 0);
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        }
+    }
+
+    /// Same loop for pidfd_getfd.
+    #[test]
+    fn test_phase145_getfd_no_side_effect_loop() {
+        for _ in 0..64 {
+            crate::errno::set_errno(0);
+            let ret = pidfd_getfd(99, 0, 0);
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        }
     }
 
     // ------------------------------------------------------------------

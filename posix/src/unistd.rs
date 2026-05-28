@@ -634,13 +634,33 @@ pub extern "C" fn getgroups(_size: i32, _list: *mut GidT) -> i32 {
 
 /// Set the supplementary group IDs.
 ///
-/// Stub: succeeds silently (single-user OS, no group enforcement).
-/// Programs that drop privileges by calling `setgroups(0, NULL)` will
-/// succeed without error.
+/// Linux-matching argument-domain validation:
+///   - `size > NGROUPS_MAX` (65536) → `-1` with `EINVAL`.
+///   - `size > 0 && list == NULL` → `-1` with `EFAULT`.
+///   - `size == 0` succeeds regardless of `list` (drops all
+///     supplementary groups; Linux explicitly permits a NULL `list`
+///     when `size == 0`).
+///   - Otherwise: accepted as a no-op success.  We are a single-user
+///     system with no group enforcement, so once the call is
+///     well-formed there is no `EPERM` path.
+///
+/// Note: our `_SC_NGROUPS_MAX` advertises 32 (the POSIX minimum
+/// guarantee), but Linux's kernel ceiling is 65536 and we accept up
+/// to that for binary-compat parity with programs probing the kernel
+/// limit directly.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setgroups(_size: usize, _list: *const GidT) -> i32 {
+pub extern "C" fn setgroups(size: usize, list: *const GidT) -> i32 {
+    const NGROUPS_KERNEL_MAX: usize = 65536;
+    if size > NGROUPS_KERNEL_MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if size > 0 && list.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
     0
 }
 
@@ -3693,6 +3713,155 @@ mod tests {
     fn test_setgroups_non_empty() {
         let groups: [GidT; 3] = [100, 200, 300];
         assert_eq!(setgroups(3, groups.as_ptr()), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 85 — setgroups argument-domain validation
+    //
+    // Linux semantics being validated:
+    //   - size > 65536 → -1, EINVAL
+    //   - size > 0 && list NULL → -1, EFAULT
+    //   - size == 0 → 0 regardless of list
+    //   - Well-formed call → 0 (single-user, no EPERM path)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_setgroups_phase85_zero_size_null_list_ok() {
+        errno::set_errno(0);
+        assert_eq!(setgroups(0, core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_zero_size_with_nonnull_list_ok() {
+        // Linux: size==0 means "drop all", list pointer is ignored.
+        let groups: [GidT; 1] = [42];
+        errno::set_errno(0);
+        assert_eq!(setgroups(0, groups.as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_nonzero_size_null_list_efault() {
+        errno::set_errno(0);
+        let ret = setgroups(1, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_large_nonzero_size_null_list_efault() {
+        errno::set_errno(0);
+        let ret = setgroups(1000, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_size_one_above_max_einval() {
+        // 65537 > 65536 → EINVAL.  The pointer is irrelevant because
+        // size validation comes first.
+        let groups: [GidT; 1] = [0];
+        errno::set_errno(0);
+        let ret = setgroups(65537, groups.as_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_einval_takes_precedence_over_efault() {
+        // size > NGROUPS_MAX AND list NULL → EINVAL (size check first).
+        errno::set_errno(0);
+        let ret = setgroups(usize::MAX, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_size_at_max_ok() {
+        // size == 65536 is the maximum permitted by Linux.  We can't
+        // actually allocate a 65536-element array on the test stack,
+        // but a non-NULL pointer is what the validator needs.
+        let groups: [GidT; 1] = [0];
+        errno::set_errno(0);
+        let ret = setgroups(65536, groups.as_ptr());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_size_one_below_max_ok() {
+        let groups: [GidT; 1] = [0];
+        errno::set_errno(0);
+        let ret = setgroups(65535, groups.as_ptr());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_typical_group_set_ok() {
+        let groups: [GidT; 5] = [0, 10, 100, 1000, 65534];
+        errno::set_errno(0);
+        let ret = setgroups(5, groups.as_ptr());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_drop_all_groups_idiom() {
+        // The classic privilege-drop idiom: setgroups(0, NULL).
+        errno::set_errno(0);
+        let ret = setgroups(0, core::ptr::null());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_einval_then_valid_call_progression() {
+        // An EINVAL failure must not taint a subsequent valid call.
+        errno::set_errno(0);
+        assert_eq!(setgroups(usize::MAX, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        errno::set_errno(0);
+        assert_eq!(setgroups(0, core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_efault_then_valid_call_progression() {
+        // An EFAULT failure must not taint a subsequent valid call.
+        errno::set_errno(0);
+        assert_eq!(setgroups(1, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+
+        let groups: [GidT; 1] = [1];
+        errno::set_errno(0);
+        assert_eq!(setgroups(1, groups.as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_repeated_valid_calls_stable() {
+        // No hidden global state — repeated calls behave identically.
+        let groups: [GidT; 2] = [50, 60];
+        for _ in 0..4 {
+            errno::set_errno(0);
+            assert_eq!(setgroups(2, groups.as_ptr()), 0);
+        }
+    }
+
+    #[test]
+    fn test_setgroups_phase85_size_one_with_valid_list_ok() {
+        let groups: [GidT; 1] = [12345];
+        errno::set_errno(0);
+        let ret = setgroups(1, groups.as_ptr());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_setgroups_phase85_size_just_above_max_einval() {
+        // 65537 → EINVAL, and 65538 → EINVAL, so confirm the boundary
+        // condition isn't off-by-one in either direction.
+        let groups: [GidT; 1] = [0];
+        for size in [65537usize, 65538, 100_000, 1_000_000] {
+            errno::set_errno(0);
+            let ret = setgroups(size, groups.as_ptr());
+            assert_eq!(ret, -1, "size={} should fail", size);
+            assert_eq!(errno::get_errno(), errno::EINVAL, "size={}", size);
+        }
     }
 
     // ------------------------------------------------------------------

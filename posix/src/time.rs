@@ -259,17 +259,37 @@ pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
 /// then returns `-1` with `EPERM` because our kernel does not yet
 /// expose a settable wall clock.
 ///
-/// Linux validation order (matches
-/// `kernel/time/posix-timers.c::SYSCALL_DEFINE2(clock_settime, ...)`):
+/// # Linux validation order
 ///
-/// 1. `tp` is null → `EFAULT` (via `copy_from_user`).
-/// 2. `clk_id` is not a recognised clock → `EINVAL`.
-/// 3. `clk_id` is recognised but not settable (e.g. monotonic,
-///    cputime, coarse clocks) → `EINVAL`.
-/// 4. `tv_sec < 0` or `tv_nsec` outside `[0, 999_999_999]`
-///    → `EINVAL` (the `timespec64_valid_strict` check).
-/// 5. Otherwise → `EPERM` (caller lacks `CAP_SYS_TIME` or, in our
-///    case, the operation is simply not implemented yet).
+/// `kernel/time/posix-timers.c::sys_clock_settime`:
+///
+/// ```c
+/// const struct k_clock *kc = clockid_to_kclock(which_clock);
+/// struct timespec64 new_tp;
+///
+/// if (!kc || !kc->clock_set)
+///     return -EINVAL;
+/// if (get_timespec64(&new_tp, tp))
+///     return -EFAULT;
+/// return kc->clock_set(which_clock, &new_tp);
+/// ```
+///
+/// The kernel dispatches on `which_clock` FIRST.  Only after the
+/// clock is found and confirmed settable does the kernel touch the
+/// user pointer via `get_timespec64` → `copy_from_user`.  Precedence:
+///
+///   1. `clockid_to_kclock(which_clock)` returns NULL → `EINVAL`
+///   2. `!kc->clock_set` (clock is read-only)         → `EINVAL`
+///   3. `get_timespec64(tp)` user-copy fails          → `EFAULT`
+///   4. `kc->clock_set(...)` validates timespec       → `EINVAL`
+///      on `tv_sec < 0` / `tv_nsec ∉ [0, 999_999_999]`
+///   5. Otherwise: kernel writes the clock; with insufficient caps
+///      the kernel may return `EPERM`.
+///
+/// **Phase 151**: pre-Phase-151 we ran the NULL `tp` check FIRST
+/// (returning EFAULT) and the clock check SECOND.  Linux dispatches
+/// the clock first.  Observable divergence: `clock_settime(BAD_CLOCK,
+/// NULL)` returned EFAULT here; Linux returns EINVAL.
 ///
 /// The validation order matters: callers using `clock_settime` to
 /// probe whether a clock is supported (a common libc test idiom)
@@ -278,25 +298,23 @@ pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
 /// positive on the "permission denied" path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_settime(clk_id: ClockidT, tp: *const Timespec) -> i32 {
-    // 1. EFAULT before any clock-id inspection.  Linux reaches this
-    //    via copy_from_user, which runs before the clock dispatch.
-    if tp.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
-    // 2. Unknown clock → EINVAL.
+    // 1. Unknown clock → EINVAL.  Linux's clockid_to_kclock runs
+    //    before the get_timespec64 user-copy step.
     if !is_valid_clock(clk_id) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
 
-    // 3. Known but read-only clock → EINVAL.  Same errno as (2) but
-    //    a different *reason*; the test suite distinguishes by
-    //    checking that the unsettable list (MONOTONIC, BOOTTIME,
-    //    CPUTIME, COARSE variants, RAW) all report EINVAL.
+    // 2. Known but read-only clock → EINVAL.  Linux's `!kc->clock_set`
+    //    check; same errno as (1) but a different *reason*.
     if !is_settable_clock(clk_id) {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // 3. NULL tp → EFAULT (Linux's get_timespec64 / copy_from_user).
+    if tp.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -6789,10 +6807,12 @@ mod tests {
     // ------------------------------------------------------------------
     // Phase 83 — clock_settime argument-domain validation
     //
-    // Validation order matches Linux:
-    //   tp == NULL                       -> EFAULT
+    // Validation order (CORRECTED in Phase 151 to actually match
+    // Linux; the pre-Phase-151 comment below was wrong about the
+    // tp NULL check order):
     //   unknown clock_id                 -> EINVAL
     //   recognised but unsettable clock  -> EINVAL
+    //   tp == NULL                       -> EFAULT
     //   tv_sec < 0 or bad tv_nsec        -> EINVAL
     //   otherwise                        -> EPERM
     // ------------------------------------------------------------------
@@ -6817,15 +6837,19 @@ mod tests {
         }
     }
 
+    /// Phase 151: Linux dispatches the clock BEFORE touching the
+    /// user pointer via get_timespec64.  So a bogus clock with a
+    /// NULL tp returns EINVAL, not EFAULT.  The pre-Phase-151
+    /// implementation had this backwards and the test asserted the
+    /// wrong order; renamed from
+    /// `test_clock_settime_efault_precedes_clock_check`.
     #[test]
-    fn test_clock_settime_efault_precedes_clock_check() {
-        // Even with an obviously bogus clock id, a null tp must
-        // surface EFAULT first.  This matches the Linux ordering:
-        // copy_from_user runs before the clock-id dispatch.
+    fn test_clock_settime_bad_clock_beats_null_tp_phase151() {
         errno::set_errno(0);
         let ret = clock_settime(0x7FFF_FFFF, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL,
+            "Linux dispatches the clock before reaching get_timespec64");
     }
 
     #[test]
@@ -6951,6 +6975,191 @@ mod tests {
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 151 — clock_settime: clock_id dispatched before user pointer
+    //
+    // Linux's sys_clock_settime:
+    //   1. clockid_to_kclock(which_clock) returns NULL  -> EINVAL
+    //   2. !kc->clock_set (read-only clock)             -> EINVAL
+    //   3. get_timespec64(tp) user-copy fails           -> EFAULT
+    //   4. kc->clock_set validates timespec             -> EINVAL
+    //   5. otherwise: kernel writes; may be EPERM for unpriv caller
+    //
+    // Pre-Phase-151 we ran the tp == NULL check FIRST.  Phase 151
+    // reorders to match Linux: clock check, settable check, THEN
+    // user-pointer check.
+    // ------------------------------------------------------------------
+
+    // -- per-error-class --
+
+    /// Per-error-class: unsettable clock with valid tp → EINVAL
+    /// (matches Linux's `!kc->clock_set` check).
+    #[test]
+    fn test_clock_settime_unsettable_clock_einval_phase151() {
+        let ts = valid_ts();
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_MONOTONIC, &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Per-error-class: settable clock with NULL tp → EFAULT.
+    #[test]
+    fn test_clock_settime_settable_clock_null_tp_efault_phase151() {
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_REALTIME, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // -- ordering matrix --
+
+    /// Ordering: unknown clock BEATS NULL tp.  Linux returns EINVAL
+    /// from `clockid_to_kclock`; pre-Phase-151 returned EFAULT.
+    #[test]
+    fn test_clock_settime_unknown_clock_beats_null_tp_phase151() {
+        errno::set_errno(0);
+        let ret = clock_settime(0xDEAD, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Ordering: unsettable (read-only) clock BEATS NULL tp.
+    #[test]
+    fn test_clock_settime_unsettable_clock_beats_null_tp_phase151() {
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_MONOTONIC, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL,
+            "read-only clock check (EINVAL) must beat NULL tp (EFAULT)");
+    }
+
+    /// Ordering: negative clock id BEATS NULL tp.
+    #[test]
+    fn test_clock_settime_negative_clock_beats_null_tp_phase151() {
+        errno::set_errno(0);
+        let ret = clock_settime(-5, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Ordering: NULL tp BEATS bad timespec (no way to construct;
+    /// degenerate case — but a settable clock + NULL tp must return
+    /// EFAULT before any timespec-validity check).  Tested by
+    /// confirming EFAULT, not EINVAL, on the NULL path.
+    #[test]
+    fn test_clock_settime_null_tp_beats_timespec_validation_phase151() {
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_REALTIME, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// Ordering: every unsettable clock with NULL tp → EINVAL (the
+    /// settability check fires before the tp check).
+    #[test]
+    fn test_clock_settime_every_unsettable_clock_null_tp_einval_phase151() {
+        for &c in &[
+            CLOCK_MONOTONIC,
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+            CLOCK_BOOTTIME,
+        ] {
+            errno::set_errno(0);
+            let ret = clock_settime(c, core::ptr::null());
+            assert_eq!(ret, -1, "clock {c}");
+            assert_eq!(errno::get_errno(), errno::EINVAL,
+                "clock {c} unsettable check must fire before NULL tp");
+        }
+    }
+
+    // -- workflow --
+
+    /// Workflow: probe whether CLOCK_REALTIME is settable with a
+    /// NULL tp — must surface as EFAULT (i.e. clock passed validation
+    /// and we reached the user-pointer step).
+    #[test]
+    fn test_clock_settime_realtime_probe_with_null_tp_phase151() {
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_REALTIME, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT,
+            "CLOCK_REALTIME with NULL tp must reach the user-pointer step");
+    }
+
+    /// Workflow: a libc probe-then-set sequence sees EINVAL for
+    /// MONOTONIC then EFAULT/EPERM for REALTIME — confirming the
+    /// "is it settable" diagnostic isn't masked by a NULL pointer.
+    #[test]
+    fn test_clock_settime_probe_then_set_workflow_phase151() {
+        // Probe MONOTONIC (read-only) with NULL — must be EINVAL.
+        errno::set_errno(0);
+        assert_eq!(clock_settime(CLOCK_MONOTONIC, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // Now set REALTIME with a valid value — EPERM (capability lack).
+        let ts = valid_ts();
+        errno::set_errno(0);
+        assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    // -- buggy caller --
+
+    /// Buggy caller: forgets to take the address of their timespec
+    /// AND passes a bad clock.  Phase 151 gives them EINVAL (fix
+    /// the clock), not the misleading EFAULT (fix the pointer).
+    #[test]
+    fn test_clock_settime_buggy_caller_phase151() {
+        errno::set_errno(0);
+        let ret = clock_settime(0xBAD, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL,
+            "buggy clock+pointer combo must diagnose the clock first");
+    }
+
+    // -- recovery --
+
+    /// Recovery: after EINVAL from bad clock+NULL tp, fixing the
+    /// clock surfaces EFAULT (the NULL is now the limiting factor).
+    #[test]
+    fn test_clock_settime_recovery_phase151() {
+        errno::set_errno(0);
+        assert_eq!(clock_settime(999, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // Fix the clock; NULL tp now surfaces.
+        errno::set_errno(0);
+        assert_eq!(clock_settime(CLOCK_REALTIME, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+
+        // Fix the tp; now the EPERM (cap-lack) path lands.
+        let ts = valid_ts();
+        errno::set_errno(0);
+        assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    // -- no-side-effect loop --
+
+    /// No-side-effect loop: repeated bad-clock+NULL-tp calls
+    /// consistently produce EINVAL.
+    #[test]
+    fn test_clock_settime_einval_loop_phase151() {
+        for _ in 0..32 {
+            errno::set_errno(0);
+            assert_eq!(clock_settime(999, core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+
+            errno::set_errno(0);
+            assert_eq!(clock_settime(CLOCK_REALTIME, core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
     }
 
     #[test]

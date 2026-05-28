@@ -1814,33 +1814,56 @@ pub extern "C" fn ioprio_get(which: i32, who: i32) -> i32 {
 
 /// Set the I/O scheduling class and priority of a process.
 ///
-/// Stub: validates arguments per Linux `block/ioprio.c`, then succeeds
-/// silently without actually adjusting any scheduler state (we have no
-/// per-process ioprio storage yet — see todo.txt).
+/// Stub: validates arguments per Linux `block/ioprio.c::sys_ioprio_set`,
+/// then succeeds silently without actually adjusting any scheduler
+/// state (we have no per-process ioprio storage yet — see todo.txt).
+///
+/// # Linux semantics
+///
+/// Linux validates the class/data field *first*, then enters the
+/// `which` switch — so a malformed `ioprio` argument is rejected with
+/// EINVAL before the `who` lookup runs.  Within the class switch:
+///
+/// * `IOPRIO_CLASS_RT`  — `data ∈ [0, IOPRIO_NR_LEVELS)`, else EINVAL.
+///                        (Also requires `CAP_SYS_NICE`/`CAP_SYS_ADMIN`
+///                        → EPERM; we don't model caps yet.)
+/// * `IOPRIO_CLASS_BE`  — same `data` range as RT.
+/// * `IOPRIO_CLASS_IDLE` — any `data` value is accepted (priority is
+///                        effectively fixed).
+/// * `IOPRIO_CLASS_NONE` — `data` must be `0`, else EINVAL.  This is
+///                        a strict check in modern Linux even though
+///                        the data field is otherwise unused for NONE
+///                        (it falls back to nice-derived priority).
+/// * any other class → EINVAL.
 ///
 /// Errors (Linux-matching priority order):
-/// * `EINVAL` — `which` not in valid set, or decoded class > `IOPRIO_CLASS_IDLE`,
-///   or `RT`/`BE` data >= `IOPRIO_BE_NR` (8).
-/// * `ESRCH` — `who` is negative.
-///
-/// Linux additionally requires `CAP_SYS_ADMIN` to set `IOPRIO_CLASS_RT`,
-/// returning `EPERM`. We don't model capabilities in this stub; that
-/// gate belongs in the kernel-side syscall implementation.
+/// 1. malformed `class` / out-of-range RT or BE `data` / non-zero
+///    NONE `data` → `EINVAL`
+/// 2. `which` not in `{IOPRIO_WHO_PROCESS, _PGRP, _USER}` → `EINVAL`
+///    (Linux: switch default arm.)
+/// 3. `who < 0` → `ESRCH` (matches Linux's find_task_by_vpid /
+///    find_vpid / make_kuid rejection of negative inputs).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i32 {
-    if !ioprio_which_valid(which) {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
+    // 1. Class/data validation first — matches Linux's prologue
+    //    order in sys_ioprio_set.
     let class = ioprio >> IOPRIO_CLASS_SHIFT;
     let data = ioprio & IOPRIO_PRIO_MASK;
     match class {
-        IOPRIO_CLASS_NONE | IOPRIO_CLASS_IDLE => {
-            // Data is ignored for NONE (fall back to nice-derived) and
-            // IDLE (always priority 7). Linux accepts any data here.
+        IOPRIO_CLASS_NONE => {
+            // Modern Linux (≥ 5.x) rejects non-zero data for NONE.
+            if data != 0 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+        }
+        IOPRIO_CLASS_IDLE => {
+            // IDLE accepts any data value — priority is always 7 in
+            // the scheduler regardless of what was passed.
         }
         IOPRIO_CLASS_RT | IOPRIO_CLASS_BE => {
-            // 3-bit priority field: 0..7.
+            // 3-bit priority field: 0..7.  Data is masked from a
+            // u13 already, so the only way to fail is data >= 8.
             if !(0..IOPRIO_BE_NR).contains(&data) {
                 errno::set_errno(errno::EINVAL);
                 return -1;
@@ -1851,6 +1874,12 @@ pub extern "C" fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i32 {
             return -1;
         }
     }
+    // 2. which validation — Linux's switch default arm returns EINVAL.
+    if !ioprio_which_valid(which) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // 3. who < 0 → ESRCH (find_task_by_vpid / make_kuid reject).
     if who < 0 {
         errno::set_errno(errno::ESRCH);
         return -1;
@@ -8189,10 +8218,14 @@ mod tests {
     }
 
     #[test]
-    fn test_ioprio_set_which_checked_before_class() {
-        // Bad which + bad class → EINVAL from which check (it's first;
-        // both happen to return EINVAL, but verify ordering by using a
-        // class that would otherwise pass).
+    fn test_ioprio_set_bad_which_valid_class_einval() {
+        // Phase 124: Bad which + valid class — class passes, which
+        // fails → EINVAL.  Both Linux's sys_ioprio_set order and ours
+        // produce EINVAL here, since the which-switch default arm
+        // also returns EINVAL.  Renamed from
+        // test_ioprio_set_which_checked_before_class (the old name
+        // reflected the pre-Phase-124 ordering; class is now checked
+        // first per Linux).
         let prio = (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | 4;
         crate::errno::set_errno(0);
         assert_eq!(ioprio_set(99, 0, prio), -1);
@@ -8206,6 +8239,159 @@ mod tests {
         crate::errno::set_errno(0);
         assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, -1, prio), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- Phase 124: ioprio_set CLASS_NONE rejects non-zero data,
+    //                prologue order matches Linux sys_ioprio_set ---
+    //
+    // Previous behaviour silently accepted any `data` for
+    // IOPRIO_CLASS_NONE, contrary to modern Linux which explicitly
+    // rejects non-zero data for NONE with EINVAL.  The prologue also
+    // ran the `which` check before class/data validation; Linux's
+    // order is class first.  All EINVAL cases collapse to the same
+    // observable value, but a few asserts below exercise the new
+    // ordering plus the new NONE+data check.
+
+    /// Phase 124: CLASS_NONE with data=1 — Linux rejects, we now do
+    /// too.
+    #[test]
+    fn test_ioprio_set_phase124_none_data_one_einval() {
+        let prio = (IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT) | 1;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 124: CLASS_NONE with data=7 (boundary of RT/BE range
+    /// but for NONE still EINVAL).
+    #[test]
+    fn test_ioprio_set_phase124_none_data_seven_einval() {
+        let prio = (IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT) | 7;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 124: CLASS_NONE with full data mask (8191) — EINVAL.
+    #[test]
+    fn test_ioprio_set_phase124_none_data_full_mask_einval() {
+        let prio =
+            (IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT) | IOPRIO_PRIO_MASK;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 124: regression — CLASS_NONE with data=0 still succeeds.
+    /// Confirms the rejection is strictly for non-zero data.
+    #[test]
+    fn test_ioprio_set_phase124_none_data_zero_succeeds() {
+        let prio = IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+    }
+
+    /// Phase 124: CLASS_IDLE accepts any data (regression — the new
+    /// per-class match arms don't accidentally tighten IDLE).
+    #[test]
+    fn test_ioprio_set_phase124_idle_data_one_succeeds() {
+        let prio = (IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT) | 1;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+    }
+
+    /// Phase 124: CLASS_IDLE + full data mask still succeeds.
+    #[test]
+    fn test_ioprio_set_phase124_idle_data_full_mask_succeeds() {
+        let prio =
+            (IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT) | IOPRIO_PRIO_MASK;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+    }
+
+    /// Phase 124: ordering — CLASS_NONE+data + bad which → EINVAL.
+    /// Class check fires first (new order), so the which-default arm
+    /// is never reached.  Both arms produce EINVAL, but this exercises
+    /// the Linux-matching order.
+    #[test]
+    fn test_ioprio_set_phase124_none_data_bad_which_einval() {
+        let prio = (IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT) | 3;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(99, 0, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 124: ordering — CLASS_NONE+data + negative who → EINVAL
+    /// (class fires before who check; ESRCH never observed).
+    #[test]
+    fn test_ioprio_set_phase124_none_data_neg_who_einval() {
+        let prio = (IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT) | 5;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, -1, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 124: ordering — valid NONE + bad which → EINVAL (which
+    /// fires before who).
+    #[test]
+    fn test_ioprio_set_phase124_clean_none_bad_which_einval() {
+        let prio = IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(99, -5, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 124: ordering — valid NONE + valid which + negative who
+    /// → ESRCH (only path to ESRCH is class-clean and which-valid).
+    #[test]
+    fn test_ioprio_set_phase124_clean_args_neg_who_esrch() {
+        let prio = IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, -1, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    /// Phase 124 recovery: EINVAL on NONE+data, then ENOSYS-shaped
+    /// success on a clean call.
+    #[test]
+    fn test_ioprio_set_phase124_recovery_after_einval() {
+        let bad = (IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT) | 4;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, bad), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let good = IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT;
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 1234, good), 0);
+    }
+
+    /// Phase 124 workflow: a process inheriting an ioprio value from
+    /// a parent that used CLASS_BE then tries to "reset" it by
+    /// passing the raw `ioprio` int (which now happens to be
+    /// `BE << 13 | 4`) but accidentally truncates to just `4` — i.e.
+    /// CLASS_NONE | 4.  Must EINVAL so the bug surfaces instead of
+    /// silently doing nothing.
+    #[test]
+    fn test_ioprio_set_phase124_workflow_reset_typo_einval() {
+        let truncated_prio = 4;  // intent was BE | 4 = (2 << 13) | 4
+        crate::errno::set_errno(0);
+        assert_eq!(
+            ioprio_set(IOPRIO_WHO_PROCESS, 0, truncated_prio),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 124 buggy-caller: caller passes `IOPRIO_CLASS_NONE | 0`
+    /// computed via `class | data` (no shift) — yields 0 (CLASS_NONE
+    /// + data 0), which is the well-formed "use defaults" call.
+    /// Must succeed; documents that the legitimate "no priority"
+    /// idiom still works under the new rule.
+    #[test]
+    fn test_ioprio_set_phase124_buggy_caller_no_shift_succeeds() {
+        let prio = IOPRIO_CLASS_NONE | 0;  // accidentally not shifted
+        // Result: prio == 0, class == 0 (NONE), data == 0 → OK
+        assert_eq!(prio, 0);
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
     }
 
     // ---- ioprio_set success paths ----
@@ -8292,18 +8478,28 @@ mod tests {
 
     #[test]
     fn test_ioprio_workflow_buggy_raw_priority_no_encoding() {
-        // A caller forgets the (class << 13) encoding and passes the
-        // priority data directly as the ioprio value.  With data <
-        // 0x2000 the class field is 0 (NONE), so this *succeeds*
-        // silently on Linux too — match that behavior.
-        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, 4), 0);
+        // Phase 124: a caller forgets the (class << 13) encoding and
+        // passes the priority data directly as the ioprio value.  The
+        // result is class=0 (NONE) with data=4.  Modern Linux rejects
+        // NONE+data!=0 with EINVAL (matching `block/ioprio.c`); we
+        // now do too.  This surfaces the encoding bug instead of
+        // silently doing nothing — strictly better for callers.
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, 4), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_ioprio_workflow_buggy_class_only_no_shift() {
-        // A caller passes the class number directly (e.g. ioprio=2
-        // intending CLASS_BE).  Same as above: class=0 NONE, success.
-        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, IOPRIO_CLASS_BE), 0);
+        // Phase 124: a caller passes the class number directly (e.g.
+        // ioprio=2 intending CLASS_BE).  Same NONE+data!=0 → EINVAL
+        // surface as the test above.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            ioprio_set(IOPRIO_WHO_PROCESS, 0, IOPRIO_CLASS_BE),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]

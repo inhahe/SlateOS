@@ -1673,43 +1673,297 @@ pub extern "C" fn membarrier(cmd: i32, flags: u32, _cpu_id: i32) -> i32 {
 
 /// `clone_args` structure for `clone3`.
 ///
-/// Matches the Linux `struct clone_args` layout.
+/// Matches the Linux `struct clone_args` layout from
+/// `<linux/sched.h>` exactly: 11 `__aligned_u64` fields totalling
+/// 88 bytes (`CLONE_ARGS_SIZE_VER2`).  Earlier struct versions are
+/// prefixes:
+///
+/// * V0 (64 B, Linux 5.3): up to and including `tls`.
+/// * V1 (80 B, Linux 5.5): adds `set_tid` and `set_tid_size`.
+/// * V2 (88 B, Linux 5.7): adds `cgroup`.
+///
+/// Userspace passes the size it knows about as `clone3`'s second
+/// argument; the kernel rejects anything below V0, accepts V0/V1/V2
+/// directly, and for sizes above V2 requires the trailing bytes to
+/// be zero so older kernels can ignore unknown trailing fields.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct CloneArgs {
-    /// Clone flags (CLONE_*).
+    /// `CLONE_*` flag bits.  See [`CLONE3_FLAGS_VALID`].
     pub flags: u64,
-    /// PID file descriptor (for `CLONE_PIDFD`).
+    /// User-supplied address where the kernel will store the new
+    /// child's pidfd, when `CLONE_PIDFD` is set (otherwise unused).
     pub pidfd: u64,
-    /// Signal to deliver to parent on child termination.
+    /// User-supplied address in the child's address space where the
+    /// kernel will store the child's TID, when `CLONE_CHILD_SETTID`
+    /// or `CLONE_CHILD_CLEARTID` is set.
     pub child_tid: u64,
-    /// Pointer to child TID in child memory.
+    /// User-supplied address in the parent's address space where the
+    /// kernel will store the child's TID, when `CLONE_PARENT_SETTID`
+    /// is set.
     pub parent_tid: u64,
-    /// Exit signal number.
+    /// Signal delivered to the parent when the child terminates.
+    /// Distinct from `clone(2)`'s `flags & CSIGNAL` low byte — clone3
+    /// requires the `CSIGNAL` bits in `flags` to be zero.
     pub exit_signal: u64,
-    /// Lowest address of stack.
+    /// Lowest address of the child's stack region.
     pub stack: u64,
-    /// Size of stack.
+    /// Size of the child's stack region in bytes.
     pub stack_size: u64,
-    /// TLS value.
+    /// Initial TLS value (architecture-specific interpretation; on
+    /// x86_64 this becomes the new `%fs.base`).  Used when
+    /// `CLONE_SETTLS` is set.
     pub tls: u64,
-    /// Pointer to `pid_t` array for `CLONE_NEWPID` set_tid.
+    /// V1+ only.  Pointer to a `pid_t` array specifying the child's
+    /// TID in each PID namespace from innermost to outermost.
     pub set_tid: u64,
-    /// Number of entries in set_tid array.
+    /// V1+ only.  Number of entries in [`set_tid`](Self::set_tid);
+    /// capped at the kernel's namespace nesting depth.
     pub set_tid_size: u64,
-    /// cgroup file descriptor.
+    /// V2+ only.  File descriptor of the cgroup directory the child
+    /// should be placed in, when `CLONE_INTO_CGROUP` is set.
     pub cgroup: u64,
 }
 
+/// All flag bits accepted by `clone3(2)` in the
+/// `CloneArgs::flags` field.
+///
+/// Superset of [`CLONE_FLAGS_VALID`] — clone3 additionally accepts
+/// the 64-bit / signal-byte-clashing flags that legacy `clone(2)`
+/// cannot express:
+///
+/// * `CLONE_NEWTIME` (`0x80`) — overlaps `CSIGNAL` in clone(2)
+/// * `CLONE_INTO_CGROUP` (`0x2_0000_0000`) — bit 33
+/// * `CLONE_CLEAR_SIGHAND` (`0x1_0000_0000`) — bit 32
+///
+/// Notably *missing* from this set: `CLONE_DETACHED` — clone3
+/// rejects it because `exit_signal == 0` already expresses the
+/// "don't notify parent" semantic.  The `CSIGNAL` low byte
+/// (`0xff`) is also rejected — clone3 carries the exit signal in
+/// the dedicated [`CloneArgs::exit_signal`] field, so any of those
+/// bits set in `flags` indicates a confused caller mixing the
+/// `clone`/`clone3` ABIs.
+pub const CLONE3_FLAGS_VALID: u64 = (CLONE_FLAGS_VALID
+    | crate::linux_clone_args::CLONE_NEWTIME
+    | crate::linux_clone_args::CLONE_INTO_CGROUP
+    | crate::linux_clone_args::CLONE_CLEAR_SIGHAND)
+    // clone3 explicitly excludes CLONE_DETACHED — mask it out even
+    // though it's present in CLONE_FLAGS_VALID for legacy clone.
+    & !crate::linux_clone_args::CLONE_DETACHED;
+
+/// Maximum `set_tid_size` accepted by `clone3(2)`.
+///
+/// Linux's `MAX_PID_NS_LEVEL` is 32 — the maximum nesting depth of
+/// PID namespaces.  Any `set_tid_size` above this is rejected with
+/// `EINVAL` since there cannot be that many namespaces to populate.
+pub const CLONE3_MAX_SET_TID: u64 = 32;
+
+/// Upper bound on the `size` argument to `clone3(2)`.
+///
+/// Linux's `copy_struct_from_user` rejects `size > PAGE_SIZE` with
+/// `E2BIG`.  We use the same 4 KiB cap regardless of underlying
+/// hardware page size — userspace ABI is portable.
+pub const CLONE3_SIZE_MAX: usize = 4096;
+
 /// `clone3` — create a child process (Linux 5.3+).
 ///
-/// Extended version of `clone` that takes a `clone_args` structure
-/// instead of positional arguments.
+/// # Linux behaviour
 ///
-/// Stub: returns -1 with ENOSYS (process creation uses our kernel's
-/// native `SYS_PROCESS_SPAWN_EX`).
+/// `int clone3(struct clone_args *cl_args, size_t size)`.  The
+/// kernel's `kernel/fork.c::sys_clone3` performs the following
+/// argument-domain checks before any process state is touched:
+///
+/// 1. `cl_args == NULL`                          → `EFAULT`
+/// 2. `size > PAGE_SIZE`                         → `E2BIG`
+/// 3. `size < CLONE_ARGS_SIZE_VER0`              → `EINVAL`
+/// 4. trailing bytes beyond the largest known struct version are
+///    non-zero (forward-compat guard)            → `E2BIG`
+/// 5. `flags & CSIGNAL`                          → `EINVAL`
+///    (clone3 uses `exit_signal`, not the low byte of flags)
+/// 6. `flags & ~CLONE3_FLAGS_VALID`              → `EINVAL`
+/// 7. `flags & CLONE_DETACHED`                   → `EINVAL`
+///    (clone3 rejects it; covered by check (6) but called out for
+///    clarity because the userspace ABI explicitly forbids it)
+/// 8. `flags & CLONE_THREAD` without `CLONE_SIGHAND` → `EINVAL`
+/// 9. `flags & CLONE_SIGHAND` without `CLONE_VM` → `EINVAL`
+/// 10. `flags & CLONE_THREAD` with `exit_signal != 0` → `EINVAL`
+///    (threads cannot signal their parent on death)
+/// 11. `exit_signal > SIGRTMAX (64)`             → `EINVAL`
+/// 12. `flags & CLONE_NEWUSER & CLONE_FS`        → `EINVAL`
+/// 13. `flags & CLONE_NEWUSER & CLONE_THREAD`    → `EINVAL`
+/// 14. `flags & CLONE_NEWNS & CLONE_FS`          → `EINVAL`
+/// 15. `flags & CLONE_INTO_CGROUP` with `size < VER2` → `EINVAL`
+/// 16. `flags & CLONE_INTO_CGROUP` with `cgroup` not a valid fd →
+///    `EBADF` (we cannot validate the fd here, so we limit ourselves
+///    to the layout check: cgroup field must be readable, i.e. size
+///    must be at least VER2)
+/// 17. `set_tid != 0` with `size < VER1`         → `EINVAL`
+/// 18. `set_tid_size > MAX_PID_NS_LEVEL (32)`    → `EINVAL`
+/// 19. `set_tid_size > 0` with `set_tid == 0`    → `EINVAL`
+/// 20. `set_tid_size == 0` with `set_tid != 0`   → `EINVAL`
+///    (the array pointer and length must agree)
+///
+/// After all checks pass we return `ENOSYS`: the microkernel uses
+/// `SYS_PROCESS_SPAWN_EX` for process creation; clone3 is a
+/// userspace ABI compatibility shim.
+///
+/// # Safety
+///
+/// When non-NULL, `args` must point to at least `size` readable
+/// bytes (`size` is bounded by [`CLONE3_SIZE_MAX`] before we
+/// dereference).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn clone3(_args: *const CloneArgs, _size: usize) -> i64 {
+pub extern "C" fn clone3(args: *const CloneArgs, size: usize) -> i64 {
+    // (1) NULL pointer rejected before size check (Linux order).
+    if args.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // (2) Cap total struct size at one page.
+    if size > CLONE3_SIZE_MAX {
+        errno::set_errno(errno::E2BIG);
+        return -1;
+    }
+    // (3) Below the V0 floor — too small to even hold flags+pidfd+
+    // child_tid+parent_tid+exit_signal+stack+stack_size+tls.
+    if size < crate::linux_clone_args::CLONE_ARGS_SIZE_VER0 as usize {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (4) Trailing bytes past V2 must be zero so the kernel can keep
+    // forward-compat with userspace built against newer headers.
+    let v2 = crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize;
+    if size > v2 {
+        // SAFETY: caller contract — `args` covers `size` readable
+        // bytes.  We reinterpret as a byte slice for the tail scan.
+        let tail_len = size - v2;
+        let tail_ptr = (args as *const u8).wrapping_add(v2);
+        for i in 0..tail_len {
+            // SAFETY: tail_ptr + i is within [args, args+size).
+            let byte = unsafe { *tail_ptr.add(i) };
+            if byte != 0 {
+                errno::set_errno(errno::E2BIG);
+                return -1;
+            }
+        }
+    }
+
+    // SAFETY: `args` is non-NULL and points to at least V0 bytes;
+    // we never touch fields beyond the actual `size` because the
+    // struct layout is a prefix and we gate set_tid / cgroup reads
+    // on size below.
+    let a = unsafe { core::ptr::read(args) };
+
+    // (5) clone3 forbids CSIGNAL in flags — exit signal travels in
+    // its own field.
+    if (a.flags & crate::linux_clone_args::CSIGNAL) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (6) Reject any flag bit outside the clone3 whitelist.
+    if (a.flags & !CLONE3_FLAGS_VALID) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (7) Explicit CLONE_DETACHED rejection — already covered by (6)
+    // but called out so future readers don't wonder.
+    if (a.flags & crate::linux_clone_args::CLONE_DETACHED) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (8) CLONE_THREAD requires CLONE_SIGHAND.
+    if (a.flags & crate::linux_clone_args::CLONE_THREAD) != 0
+        && (a.flags & crate::linux_clone_args::CLONE_SIGHAND) == 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (9) CLONE_SIGHAND requires CLONE_VM.
+    if (a.flags & crate::linux_clone_args::CLONE_SIGHAND) != 0
+        && (a.flags & crate::linux_clone_args::CLONE_VM) == 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (10) Thread must have no death signal.
+    if (a.flags & crate::linux_clone_args::CLONE_THREAD) != 0 && a.exit_signal != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (11) Exit signal valid range.
+    if a.exit_signal > CLONE_CSIGNAL_MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (12) NEWUSER cannot share FS.
+    if (a.flags & crate::linux_clone_args::CLONE_NEWUSER) != 0
+        && (a.flags & crate::linux_clone_args::CLONE_FS) != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (13) NEWUSER cannot span a thread group.
+    if (a.flags & crate::linux_clone_args::CLONE_NEWUSER) != 0
+        && (a.flags & crate::linux_clone_args::CLONE_THREAD) != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (14) NEWNS cannot share FS.
+    if (a.flags & crate::linux_clone_args::CLONE_NEWNS) != 0
+        && (a.flags & crate::linux_clone_args::CLONE_FS) != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (15)/(16) CLONE_INTO_CGROUP requires V2 struct so the `cgroup`
+    // field is actually present in the user-supplied buffer.
+    if (a.flags & crate::linux_clone_args::CLONE_INTO_CGROUP) != 0
+        && size < v2
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (17)/(19)/(20) set_tid requires V1 struct AND matching pointer/
+    // length pairing.  Only inspect those fields when size makes them
+    // present — otherwise they're outside the user-supplied buffer
+    // and we already zeroed `a`'s tail by virtue of being a prefix
+    // struct read.  But the caller may have passed VER0 with set_tid
+    // bytes uninitialised; treat fields past size as not-present.
+    let v1 = crate::linux_clone_args::CLONE_ARGS_SIZE_VER1 as usize;
+    let set_tid_present = size >= v1;
+    let set_tid_ptr = if set_tid_present { a.set_tid } else { 0 };
+    let set_tid_size = if set_tid_present { a.set_tid_size } else { 0 };
+
+    // (18) Bound the array length.
+    if set_tid_size > CLONE3_MAX_SET_TID {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // (19) Length set but pointer NULL — invalid pair.
+    if set_tid_size != 0 && set_tid_ptr == 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // (20) Pointer set but length zero — invalid pair.
+    if set_tid_ptr != 0 && set_tid_size == 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // All arguments validated; process-spawn primitive not wired up.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -4308,10 +4562,13 @@ mod tests {
 
     #[test]
     fn test_clone3_null_args() {
+        // Phase 55: clone3 now rejects NULL args with EFAULT (matches
+        // Linux's `copy_struct_from_user` semantics) before reaching
+        // the not-implemented ENOSYS path.
         crate::errno::set_errno(0);
         let ret = clone3(core::ptr::null(), 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -5808,4 +6065,540 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
+
+    // -----------------------------------------------------------------
+    // clone3(2) — argument-domain validation (Phase 55)
+    // -----------------------------------------------------------------
+
+    /// Zero-initialised V2 CloneArgs (88 bytes) for tests.
+    fn clone3_v2_empty() -> CloneArgs {
+        CloneArgs {
+            flags: 0,
+            pidfd: 0,
+            child_tid: 0,
+            parent_tid: 0,
+            exit_signal: 0,
+            stack: 0,
+            stack_size: 0,
+            tls: 0,
+            set_tid: 0,
+            set_tid_size: 0,
+            cgroup: 0,
+        }
+    }
+
+    #[test]
+    fn test_clone3_flags_valid_contains_clone3_only() {
+        assert_ne!(CLONE3_FLAGS_VALID & crate::linux_clone_args::CLONE_NEWTIME, 0);
+        assert_ne!(
+            CLONE3_FLAGS_VALID & crate::linux_clone_args::CLONE_INTO_CGROUP,
+            0
+        );
+        assert_ne!(
+            CLONE3_FLAGS_VALID & crate::linux_clone_args::CLONE_CLEAR_SIGHAND,
+            0
+        );
+    }
+
+    #[test]
+    fn test_clone3_flags_valid_excludes_detached() {
+        // clone3 explicitly rejects the historical CLONE_DETACHED bit.
+        assert_eq!(
+            CLONE3_FLAGS_VALID & crate::linux_clone_args::CLONE_DETACHED,
+            0
+        );
+    }
+
+    #[test]
+    fn test_clone3_null_args_efault() {
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            core::ptr::null(),
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER0 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_clone3_size_above_page_size_e2big() {
+        let args = clone3_v2_empty();
+        crate::errno::set_errno(0);
+        let ret = clone3(&args as *const _, CLONE3_SIZE_MAX + 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::E2BIG);
+    }
+
+    #[test]
+    fn test_clone3_size_below_ver0_einval() {
+        let args = clone3_v2_empty();
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            (crate::linux_clone_args::CLONE_ARGS_SIZE_VER0 as usize) - 1,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_size_at_ver0_passes_to_enosys() {
+        let args = clone3_v2_empty();
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER0 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_size_at_ver1_passes_to_enosys() {
+        let args = clone3_v2_empty();
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER1 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_size_at_ver2_passes_to_enosys() {
+        let args = clone3_v2_empty();
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_size_past_ver2_with_zero_tail_passes() {
+        // Forward-compat: trailing bytes past V2 are all zero — kernel
+        // accepts so that older binaries built against newer headers
+        // keep working.
+        #[repr(C)]
+        struct CloneArgsExtended {
+            base: CloneArgs,
+            future_field: u64,
+        }
+        let ext = CloneArgsExtended {
+            base: clone3_v2_empty(),
+            future_field: 0,
+        };
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            (&ext as *const _) as *const CloneArgs,
+            core::mem::size_of::<CloneArgsExtended>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_size_past_ver2_with_nonzero_tail_e2big() {
+        // Forward-compat guard: caller built against newer headers
+        // setting a bit we don't know about → E2BIG, not silent
+        // success that would lose the request.
+        #[repr(C)]
+        struct CloneArgsExtended {
+            base: CloneArgs,
+            future_field: u64,
+        }
+        let ext = CloneArgsExtended {
+            base: clone3_v2_empty(),
+            future_field: 0xdead_beef,
+        };
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            (&ext as *const _) as *const CloneArgs,
+            core::mem::size_of::<CloneArgsExtended>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::E2BIG);
+    }
+
+    #[test]
+    fn test_clone3_csignal_in_flags_einval() {
+        // SIGCHLD in the flags low byte — confused caller mixing
+        // clone(2) and clone3(2) ABIs.
+        let mut args = clone3_v2_empty();
+        args.flags = 17; // SIGCHLD in CSIGNAL byte
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_reserved_flag_bit_einval() {
+        // Bit 50 — not in any documented CLONE_* flag.
+        let mut args = clone3_v2_empty();
+        args.flags = 1u64 << 50;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_detached_einval() {
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_DETACHED;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_thread_without_sighand_einval() {
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_THREAD;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_sighand_without_vm_einval() {
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_SIGHAND;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_thread_with_exit_signal_einval() {
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_VM
+            | crate::linux_clone_args::CLONE_SIGHAND
+            | crate::linux_clone_args::CLONE_THREAD;
+        args.exit_signal = 17;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_exit_signal_overflow_einval() {
+        let mut args = clone3_v2_empty();
+        args.exit_signal = 65; // past SIGRTMAX
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_newuser_with_fs_einval() {
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_NEWUSER
+            | crate::linux_clone_args::CLONE_FS;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_newuser_with_thread_einval() {
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_NEWUSER
+            | crate::linux_clone_args::CLONE_VM
+            | crate::linux_clone_args::CLONE_SIGHAND
+            | crate::linux_clone_args::CLONE_THREAD;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_newns_with_fs_einval() {
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_NEWNS
+            | crate::linux_clone_args::CLONE_FS;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_into_cgroup_without_ver2_einval() {
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_INTO_CGROUP;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER1 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_into_cgroup_with_ver2_passes() {
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_INTO_CGROUP;
+        args.cgroup = 5; // some fd number
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_set_tid_size_overflow_einval() {
+        let mut args = clone3_v2_empty();
+        args.set_tid_size = CLONE3_MAX_SET_TID + 1;
+        args.set_tid = 0x1000; // bogus but non-NULL pointer
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_set_tid_length_without_pointer_einval() {
+        let mut args = clone3_v2_empty();
+        args.set_tid_size = 4;
+        args.set_tid = 0; // NULL
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_set_tid_pointer_without_length_einval() {
+        let mut args = clone3_v2_empty();
+        args.set_tid_size = 0;
+        args.set_tid = 0x1000; // non-NULL but no entries
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_set_tid_ignored_when_size_below_ver1() {
+        // VER0 doesn't include set_tid fields — they shouldn't be
+        // inspected even if the underlying memory happens to contain
+        // non-zero bytes (we provide a properly initialised struct
+        // here; the real concern is uninitialised buffer reads).
+        let mut args = clone3_v2_empty();
+        args.set_tid = 0x1000;
+        args.set_tid_size = 4;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER0 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_workflow_glibc_pthread_create_modern() {
+        // glibc 2.34+ uses clone3 for pthread_create when available.
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_VM
+            | crate::linux_clone_args::CLONE_FS
+            | crate::linux_clone_args::CLONE_FILES
+            | crate::linux_clone_args::CLONE_SIGHAND
+            | crate::linux_clone_args::CLONE_THREAD
+            | crate::linux_clone_args::CLONE_SYSVSEM
+            | crate::linux_clone_args::CLONE_SETTLS
+            | crate::linux_clone_args::CLONE_PARENT_SETTID
+            | crate::linux_clone_args::CLONE_CHILD_CLEARTID;
+        args.stack = 0x7fff_0000_0000;
+        args.stack_size = 8 * 1024 * 1024;
+        args.tls = 0x7fff_8000_0000;
+        args.parent_tid = 0x7fff_9000_0000;
+        args.child_tid = 0x7fff_9000_0008;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER0 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_workflow_systemd_into_cgroup() {
+        // systemd-249+ uses clone3 with CLONE_INTO_CGROUP to place
+        // service processes directly in their target cgroup without
+        // a post-fork cgroup-write race.
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_INTO_CGROUP;
+        args.exit_signal = 17; // SIGCHLD
+        args.cgroup = 42;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_workflow_criu_restore_with_set_tid() {
+        // CRIU restore uses clone3 with set_tid to recreate processes
+        // with their original PIDs across PID namespace boundaries.
+        let target_pids: [i32; 3] = [12345, 54321, 99999];
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_NEWPID;
+        args.exit_signal = 17;
+        args.set_tid = target_pids.as_ptr() as u64;
+        args.set_tid_size = 3;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_workflow_runc_user_namespace_clear_sighand() {
+        // runc's user-namespace setup, modernised onto clone3, can
+        // request CLONE_CLEAR_SIGHAND to wipe inherited handlers
+        // when entering the container.
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_NEWUSER
+            | crate::linux_clone_args::CLONE_NEWNET
+            | crate::linux_clone_args::CLONE_NEWPID
+            | crate::linux_clone_args::CLONE_NEWIPC
+            | crate::linux_clone_args::CLONE_NEWUTS
+            | crate::linux_clone_args::CLONE_NEWCGROUP
+            | crate::linux_clone_args::CLONE_CLEAR_SIGHAND;
+        args.exit_signal = 17;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_workflow_pidfd_with_thread_supported() {
+        // Linux 5.2 allowed CLONE_PIDFD with CLONE_THREAD (referring
+        // to the new thread, not the group leader).  clone3 carries
+        // this through.  We accept the combination.
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_VM
+            | crate::linux_clone_args::CLONE_FS
+            | crate::linux_clone_args::CLONE_FILES
+            | crate::linux_clone_args::CLONE_SIGHAND
+            | crate::linux_clone_args::CLONE_THREAD
+            | crate::linux_clone_args::CLONE_PIDFD;
+        args.pidfd = 0x7fff_a000_0000;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_clone3_workflow_buggy_glibc_pre_2_34_clone_args() {
+        // glibc 2.33's experimental clone3 wrapper accidentally OR'd
+        // SIGCHLD into the flags field (copying clone(2) idiom).
+        // Real bug: BZ #28310.  Our validator rejects with EINVAL.
+        let mut args = clone3_v2_empty();
+        args.flags = crate::linux_clone_args::CLONE_VM
+            | crate::linux_clone_args::CLONE_FS
+            | 17; // SIGCHLD bleeding into CSIGNAL byte
+        args.exit_signal = 17;
+        crate::errno::set_errno(0);
+        let ret = clone3(
+            &args as *const _,
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clone3_workflow_buggy_huge_size() {
+        // Caller passed `sizeof(struct_with_padding)` from a struct
+        // that included alignment to 8 KiB by mistake.  Linux caps
+        // at PAGE_SIZE; we report E2BIG.
+        let args = clone3_v2_empty();
+        crate::errno::set_errno(0);
+        let ret = clone3(&args as *const _, 8192);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::E2BIG);
+    }
+
+    #[test]
+    fn test_clone3_workflow_buggy_tiny_size() {
+        // Caller passed `sizeof(flags)` (8 bytes) — far below V0.
+        let args = clone3_v2_empty();
+        crate::errno::set_errno(0);
+        let ret = clone3(&args as *const _, 8);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
 }
+

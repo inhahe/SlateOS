@@ -740,3 +740,44 @@ OBSOLETE NOTE BELOW (pre-relaxation):
   Reproduce: run the full suite repeatedly; the failure rate
   appears to be < 50%.  Symptom: test reports failure but the
   next run of the same command passes.
+
+## PERF_ATTR_FLAG_EXCLUDE_KERNEL — conflicting in-tree definitions
+
+  NOTICED (2026-05-28, Phase 181, posix):
+  Two modules in the posix crate define
+  `PERF_ATTR_FLAG_EXCLUDE_KERNEL` with DIFFERENT values:
+
+    posix/src/linux_perf_attr_types.rs:40
+        pub const PERF_ATTR_FLAG_EXCLUDE_KERNEL: u64 = 1 << 5;
+        (CORRECT — matches Linux uapi `perf_event_attr` bitfield
+        layout: disabled=0, inherit=1, pinned=2, exclusive=3,
+        exclude_user=4, exclude_kernel=5.)
+
+    posix/src/linux_perf_types.rs:85
+        pub const PERF_ATTR_FLAG_EXCLUDE_KERNEL: u64 = 1 << 3;
+        (WRONG — bit 3 is `exclusive` in Linux's canonical layout.
+        Worse, the entire flag list in linux_perf_types.rs is shifted
+        relative to Linux's layout: it omits pinned/exclusive
+        entirely and renumbers exclude_user as bit 2.)
+
+  Phase 181 worked around the conflict by defining a local copy of
+  the constant in linux_perf_event.rs (with the correct 1<<5 value)
+  so the new CAP_PERFMON gate's exclude_kernel check is reliable
+  regardless of which import path future code uses.
+
+  Correct fix (TODO): pick one canonical module
+  (linux_perf_attr_types.rs is the right one — its bit layout is
+  faithful to Linux) and delete the conflicting flag block from
+  linux_perf_types.rs.  Update any callers that imported the wrong
+  set.  Be careful: any code that currently does
+  `attr.flags & PERF_ATTR_FLAG_EXCLUDE_KERNEL` via the wrong import
+  has been silently checking the EXCLUSIVE bit, not the
+  EXCLUDE_KERNEL bit — that's a latent semantic bug worth grep'ing
+  for before deletion.
+
+  Why deferred: cleaning this up requires auditing every importer
+  of linux_perf_types::PERF_ATTR_FLAG_* and possibly fixing latent
+  semantic bugs.  Phase 181's scope was a single capability gate;
+  doing the rename in the same commit would have mixed two
+  unrelated changes.  Trigger to fix: next time anyone touches
+  perf-event flag handling.

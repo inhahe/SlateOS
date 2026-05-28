@@ -232,6 +232,22 @@ const PERF_CPU_MAX: i32 = 1024;
 /// Sentinel passed as `group_fd` to mean "no group" (event is its own group leader).
 const PERF_GROUP_FD_NONE: i32 = -1;
 
+/// Bit position of `exclude_kernel` in `PerfEventAttr.flags`.
+///
+/// The Linux uapi `perf_event_attr` is a packed bitfield whose first
+/// six 1-bit slots are: `disabled`, `inherit`, `pinned`, `exclusive`,
+/// `exclude_user`, `exclude_kernel`.  Bit 5 is therefore
+/// `exclude_kernel`.
+///
+/// Phase 181: there are two conflicting in-tree definitions of this
+/// constant — `linux_perf_attr_types::PERF_ATTR_FLAG_EXCLUDE_KERNEL`
+/// (correctly `1 << 5`) and `linux_perf_types::PERF_ATTR_FLAG_EXCLUDE_KERNEL`
+/// (incorrectly `1 << 3`, which collides with `PERF_ATTR_FLAG_EXCLUSIVE`
+/// in the canonical layout).  We define a local copy with the correct
+/// value here to avoid coupling to either module's public surface
+/// while the conflict is resolved.  See todo.txt for the bug entry.
+const PERF_ATTR_FLAG_EXCLUDE_KERNEL: u64 = 1 << 5;
+
 // ---------------------------------------------------------------------------
 // Validators
 // ---------------------------------------------------------------------------
@@ -305,13 +321,23 @@ fn validate_attr(attr: &PerfEventAttr) -> Result<(), i32> {
 ///
 /// 1. `if (flags & ~PERF_FLAG_ALL) return -EINVAL;` — runs first, even
 ///    before `perf_copy_attr()` touches the userspace pointer.
-/// 2. `security_perf_event_open(...)` — the `CAP_PERFMON` /
-///    `perf_event_paranoid` gate (we skip; no privilege model yet).
-/// 3. `perf_copy_attr(attr_uptr, &attr)` — runs `get_user(size,
+/// 2. `perf_copy_attr(attr_uptr, &attr)` — runs `get_user(size,
 ///    &uattr->size)` which yields `-EFAULT` if `attr_uptr` is NULL,
 ///    then validates `size` (`-EINVAL` if too small, `-E2BIG` if
 ///    larger than `PAGE_SIZE`), then copies the body.
-/// 4. type/config validation, pid/cpu range checks, group_fd lookup.
+/// 3. type/config validation, pid/cpu range checks, group_fd lookup.
+/// 4. `if (!attr.exclude_kernel) perf_allow_kernel(&attr)` — the
+///    `CAP_PERFMON` / `perf_event_paranoid` gate.  Returns `-EACCES`
+///    when `sysctl_perf_event_paranoid > 1 && !perfmon_capable()`.
+///    Note Linux uses **EACCES**, not EPERM, for this rejection —
+///    it's a "policy denies you" not a "you can't perform this
+///    operation" signal, and the perf tooling distinguishes them.
+///
+/// Phase 181 wires the privilege step into our implementation.  Before
+/// Phase 181 we skipped it ("no privilege model"); now we have one
+/// (`sys_capability::has_capability`) and we model
+/// `perf_event_paranoid > 1` (the strictest setting) so the gate
+/// fires for every kernel-space measurement without CAP_PERFMON.
 ///
 /// Phase 129 reorders our checks to match steps 1→3→4 exactly. The
 /// previous arrangement (`attr` NULL check first, then `validate_attr`,
@@ -333,9 +359,13 @@ fn validate_attr(attr: &PerfEventAttr) -> Result<(), i32> {
 /// * `EBADF` — `group_fd` is non-negative but isn't a known perf fd
 ///   (since we don't allocate perf fds, this catches every positive
 ///   `group_fd`).
-/// * `ENOSYS` — everything valid, but the kernel has no PMU driver
-///   yet. Real callers treat this identically to a Linux kernel
-///   built without `CONFIG_PERF_EVENTS=y`.
+/// * `EACCES` — caller wants kernel-space events (i.e.
+///   `attr.exclude_kernel == 0`) but lacks both `CAP_PERFMON` and
+///   `CAP_SYS_ADMIN`.  Matches Linux's `perf_allow_kernel` under
+///   `perf_event_paranoid > 1`.
+/// * `ENOSYS` — everything valid and privilege held, but the kernel
+///   has no PMU driver yet. Real callers treat this identically to a
+///   Linux kernel built without `CONFIG_PERF_EVENTS=y`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn perf_event_open(
     attr: *mut PerfEventAttr,
@@ -366,6 +396,48 @@ pub extern "C" fn perf_event_open(
 
     if let Err(e) = validate_attr(&attr_val) {
         errno::set_errno(e);
+        return -1;
+    }
+
+    // Phase 181: privilege check.  Linux's `perf_event_open` calls
+    // `perf_allow_kernel(&attr)` after `perf_copy_attr` and the type/
+    // config validators *and before* the pid/cpu/group_fd lookups —
+    // see `kernel/events/core.c::SYSCALL_DEFINE5(perf_event_open)`.
+    // It returns `-EACCES` (NOT `-EPERM`) when:
+    //
+    //     sysctl_perf_event_paranoid > 1 && !perfmon_capable()
+    //
+    // (`perfmon_capable() == capable(CAP_PERFMON) ||
+    // capable(CAP_SYS_ADMIN)`).
+    //
+    // The check only fires for events that measure kernel-space —
+    // `attr.exclude_kernel == 0`.  A caller asking exclusively for
+    // user-mode counters never trips the gate, which matches Linux's
+    // behaviour on a `perf_event_paranoid = 2` system (Debian/Ubuntu
+    // default): unprivileged users can profile their own user-mode
+    // code, but reading kernel PMCs requires CAP_PERFMON.
+    //
+    // We do not model `perf_event_paranoid` (would need a sysctl
+    // backend); we assume the strictest setting (`> 1`) so the cap
+    // gate fires whenever a kernel-space event is requested without
+    // CAP_PERFMON/CAP_SYS_ADMIN.  Real Linux callers (`perf record`
+    // without `-e user`, eBPF tracers, JFR, libpfm probes) handle
+    // EACCES by either re-running with `--exclude-kernel`, retrying
+    // with reduced privilege, or surfacing a clear "missing
+    // CAP_PERFMON" diagnostic — all of which are now reachable.
+    //
+    // Placement note: this is *before* the pid/cpu/group_fd checks
+    // so a no-cap caller passing bad pid/cpu sees EACCES first —
+    // matching Linux's source-order behaviour.
+    if (attr_val.flags & PERF_ATTR_FLAG_EXCLUDE_KERNEL) == 0
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_PERFMON,
+        )
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_ADMIN,
+        )
+    {
+        errno::set_errno(errno::EACCES);
         return -1;
     }
 
@@ -420,16 +492,11 @@ pub extern "C" fn perf_event_open(
         return -1;
     }
 
-    // Privilege check: Linux requires CAP_PERFMON (or paranoid level
-    // ≤ allowed). We have no privilege model — anyone passes. The
-    // ENOSYS we return below is the truthful answer about kernel
-    // capability.
-    //
-    // All inputs valid — but we have no kernel-side PMU driver to
-    // hand back a counter fd. Real callers (`perf record`, `perf
-    // stat`, JFR-on-Linux, the BPF observability stack) detect this
-    // and fall back to software-only timing, just like on a kernel
-    // built without CONFIG_PERF_EVENTS.
+    // All inputs valid and privilege held — but we have no kernel-side
+    // PMU driver to hand back a counter fd. Real callers (`perf
+    // record`, `perf stat`, JFR-on-Linux, the BPF observability stack)
+    // detect this and fall back to software-only timing, just like on
+    // a kernel built without CONFIG_PERF_EVENTS.
     let _ = pid;
     let _ = cpu;
     errno::set_errno(errno::ENOSYS);
@@ -1081,5 +1148,459 @@ mod tests {
         let ret = perf_event_open(&mut attr, 0, 0, -1, 1 << 4);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 181: perf_event_open — CAP_PERFMON (or CAP_SYS_ADMIN) gate
+    // on kernel-space measurements.
+    //
+    // Pre-Phase-181 behaviour: every well-formed perf_event_open call
+    // fell through to ENOSYS regardless of capability, because the
+    // docstring's privilege step ("we have no privilege model") was
+    // unimplemented.  That let unprivileged code probe kernel-PMC
+    // access without ever seeing EACCES, which:
+    //   - misleads tools like `perf record` and `bpftrace` that
+    //     inspect errno to decide whether to retry with
+    //     `--exclude-kernel` (they now retry on EACCES, but our stub
+    //     gave ENOSYS so they gave up entirely);
+    //   - hides the capability requirement from the audit layer
+    //     (a sandboxed callee can no longer be distinguished from
+    //     "kernel built without CONFIG_PERF_EVENTS=y" until it tries
+    //     a forbidden flag).
+    //
+    // Linux semantics (kernel/events/core.c::perf_event_open):
+    //     if (!attr.exclude_kernel) {
+    //         err = perf_allow_kernel(&attr);
+    //         if (err) return err;        // -EACCES
+    //     }
+    // where perf_allow_kernel returns -EACCES when
+    //     sysctl_perf_event_paranoid > 1 && !perfmon_capable()
+    // and perfmon_capable() ::= capable(CAP_PERFMON) ||
+    //                            capable(CAP_SYS_ADMIN).
+    //
+    // Implementation: assume paranoid > 1 (strictest setting); gate
+    // every kernel-space event behind CAP_PERFMON OR CAP_SYS_ADMIN.
+    // Either capability suffices, matching Linux.  Errno is EACCES,
+    // not EPERM.  Placement is after attr/flags validation but
+    // before pid/cpu/group_fd validation — matching Linux source
+    // order — so a no-cap caller passing bad pid sees EACCES first.
+    // ----------------------------------------------------------------------
+
+    mod perf_event_open_cap_phase181 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase 180.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap(cap: u32) {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if cap < 32 {
+                (lo & !(1u32 << cap), hi)
+            } else {
+                (lo, hi & !(1u32 << (cap - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping cap");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+
+        fn drop_cap_perfmon_and_sys_admin() {
+            drop_cap(crate::sys_capability::CAP_PERFMON);
+            drop_cap(crate::sys_capability::CAP_SYS_ADMIN);
+        }
+
+        // -- Per-error-class ----------------------------------------------
+
+        /// Kernel-mode event (exclude_kernel == 0, the default) with
+        /// neither CAP_PERFMON nor CAP_SYS_ADMIN held → -1/EACCES.
+        #[test]
+        fn test_perf_phase181_kernel_event_no_cap_returns_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_hw_attr();
+            errno::set_errno(0);
+            let r = perf_event_open(&mut attr, 0, 0, -1, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        /// User-only event (exclude_kernel == 1) passes the cap gate
+        /// even without CAP_PERFMON — same as Linux under
+        /// `perf_event_paranoid = 2`.  Falls through to ENOSYS
+        /// (no PMU backend).
+        #[test]
+        fn test_perf_phase181_user_only_event_no_cap_succeeds_to_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_hw_attr();
+            attr.flags = PERF_ATTR_FLAG_EXCLUDE_KERNEL;
+            errno::set_errno(0);
+            let r = perf_event_open(&mut attr, 0, 0, -1, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// Errno is specifically EACCES (Linux's chosen errno for
+        /// `perf_allow_kernel`), not EPERM (the generic-cap errno) and
+        /// not ENOSYS (the backend signal).
+        #[test]
+        fn test_perf_phase181_errno_is_eacces_not_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_hw_attr();
+            errno::set_errno(0);
+            assert_eq!(perf_event_open(&mut attr, 0, 0, -1, 0), -1);
+            assert_ne!(errno::get_errno(), errno::EPERM);
+            assert_ne!(errno::get_errno(), errno::ENOSYS);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        /// Holding CAP_SYS_ADMIN alone (without CAP_PERFMON) is
+        /// sufficient — matches `perfmon_capable() = CAP_PERFMON ||
+        /// CAP_SYS_ADMIN`.  CAP_SYS_ADMIN is the historical
+        /// "superuser" cap; CAP_PERFMON (Linux 5.8+) is the modern
+        /// fine-grained alternative.
+        #[test]
+        fn test_perf_phase181_sys_admin_alone_satisfies_gate() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_PERFMON);
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_PERFMON
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            let mut attr = make_valid_hw_attr();
+            errno::set_errno(0);
+            let r = perf_event_open(&mut attr, 0, 0, -1, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// Holding CAP_PERFMON alone is sufficient — confirms the
+        /// gate is OR'd, not AND'd, across the two caps.
+        #[test]
+        fn test_perf_phase181_perfmon_alone_satisfies_gate() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SYS_ADMIN);
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_PERFMON
+            ));
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            let mut attr = make_valid_hw_attr();
+            errno::set_errno(0);
+            let r = perf_event_open(&mut attr, 0, 0, -1, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// Dropping BOTH CAP_PERFMON and CAP_SYS_ADMIN denies — the
+        /// only path to ENOSYS is via one of those caps.
+        #[test]
+        fn test_perf_phase181_drop_both_caps_denies() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_hw_attr();
+            errno::set_errno(0);
+            assert_eq!(perf_event_open(&mut attr, 0, 0, -1, 0), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        // -- Ordering matrix ----------------------------------------------
+
+        /// Bad flag bits beat EACCES.  A no-cap caller passing
+        /// `flags = 1 << 30` sees EINVAL — confirms the flag mask
+        /// check runs before perf_allow_kernel (matching Linux's
+        /// source-order: SYSCALL_DEFINE5 prologue checks flags first).
+        #[test]
+        fn test_perf_phase181_einval_flags_beats_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_hw_attr();
+            errno::set_errno(0);
+            let r = perf_event_open(&mut attr, 0, 0, -1, 1 << 30);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// NULL attr beats EACCES.  Linux's perf_copy_attr runs
+        /// `get_user(size, &uattr->size)` first, which faults on NULL
+        /// — that's before perf_allow_kernel.
+        #[test]
+        fn test_perf_phase181_efault_null_attr_beats_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            errno::set_errno(0);
+            let r =
+                perf_event_open(core::ptr::null_mut(), 0, 0, -1, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        /// Bad attr.size (too small) beats EACCES.  validate_attr
+        /// runs before perf_allow_kernel.
+        #[test]
+        fn test_perf_phase181_einval_bad_size_beats_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_hw_attr();
+            attr.size = 1; // < PERF_ATTR_SIZE_MIN
+            errno::set_errno(0);
+            let r = perf_event_open(&mut attr, 0, 0, -1, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// E2BIG (oversize attr) also beats EACCES — same reason.
+        #[test]
+        fn test_perf_phase181_e2big_oversize_attr_beats_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_hw_attr();
+            attr.size = 8192; // > PERF_ATTR_SIZE_MAX (4096)
+            errno::set_errno(0);
+            let r = perf_event_open(&mut attr, 0, 0, -1, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::E2BIG);
+        }
+
+        /// EACCES beats EINVAL for bad pid.  Linux runs
+        /// perf_allow_kernel BEFORE pid validation, so a no-cap caller
+        /// passing pid = -42 (a bad pid) sees EACCES, not EINVAL.
+        #[test]
+        fn test_perf_phase181_eacces_beats_einval_bad_pid() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_hw_attr();
+            errno::set_errno(0);
+            let r = perf_event_open(&mut attr, -42, 0, -1, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        /// EACCES beats EBADF for stale group_fd.  Same placement
+        /// argument — group_fd lookup is after perf_allow_kernel.
+        #[test]
+        fn test_perf_phase181_eacces_beats_ebadf_stale_group_fd() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_hw_attr();
+            errno::set_errno(0);
+            let r = perf_event_open(&mut attr, 0, 0, 999, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        // -- Workflow -----------------------------------------------------
+
+        /// `perf record` retry workflow: first call requests kernel
+        /// events without CAP_PERFMON (EACCES); caller responds by
+        /// setting exclude_kernel and retrying (ENOSYS — backend
+        /// missing, which `perf record` then handles by falling
+        /// back to software-only).
+        #[test]
+        fn test_perf_phase181_workflow_perf_record_retry_with_exclude_kernel() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            // 1st: default attr → EACCES.
+            let mut attr = make_valid_hw_attr();
+            errno::set_errno(0);
+            assert_eq!(perf_event_open(&mut attr, 0, 0, -1, 0), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+            // 2nd: same attr but exclude_kernel set → ENOSYS.
+            attr.flags |= PERF_ATTR_FLAG_EXCLUDE_KERNEL;
+            errno::set_errno(0);
+            assert_eq!(perf_event_open(&mut attr, 0, 0, -1, 0), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// Sandbox workflow: a privileged daemon spawns a child that
+        /// drops CAP_PERFMON and CAP_SYS_ADMIN before exec'ing
+        /// untrusted code.  The child can no longer open kernel
+        /// events even though the parent could.
+        #[test]
+        fn test_perf_phase181_workflow_sandbox_drops_then_denied() {
+            let _g = CapGuard::snapshot();
+            // Parent with caps: ENOSYS (backend missing).
+            let mut attr = make_valid_hw_attr();
+            errno::set_errno(0);
+            assert_eq!(perf_event_open(&mut attr, 0, 0, -1, 0), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+            // After sandbox drop: EACCES.
+            drop_cap_perfmon_and_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(perf_event_open(&mut attr, 0, 0, -1, 0), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        // -- Buggy caller -------------------------------------------------
+
+        /// A no-cap caller passing both bad flags and bad attr-size
+        /// (multiple errors) sees EINVAL (flags check) — the
+        /// earliest-failing check wins, just like Linux.
+        #[test]
+        fn test_perf_phase181_buggy_caller_multi_error_flags_wins() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_hw_attr();
+            attr.size = 1;
+            errno::set_errno(0);
+            let r = perf_event_open(&mut attr, -42, 0, 999, 1 << 30);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- Recovery -----------------------------------------------------
+
+        /// After EACCES, restoring CAP_PERFMON lets the same call
+        /// reach ENOSYS.  Confirms dynamic cap evaluation per call.
+        #[test]
+        fn test_perf_phase181_recovery_restore_perfmon_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_hw_attr();
+            errno::set_errno(0);
+            assert_eq!(perf_event_open(&mut attr, 0, 0, -1, 0), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+            // Restore caps via CapGuard drop semantics is end-of-test
+            // — for in-test recovery, re-grant CAP_PERFMON manually.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: (1u32 << 9) - 1,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0
+            );
+            errno::set_errno(0);
+            assert_eq!(perf_event_open(&mut attr, 0, 0, -1, 0), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- No-side-effect ----------------------------------------------
+
+        /// EACCES rejection leaves capability sets untouched —
+        /// perf_event_open does not silently drop or grant caps.
+        #[test]
+        fn test_perf_phase181_eacces_preserves_other_caps() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            // Snapshot the post-drop caps.
+            let (lo_before, hi_before) =
+                crate::sys_capability::current_caps_effective();
+            let mut attr = make_valid_hw_attr();
+            let _ = perf_event_open(&mut attr, 0, 0, -1, 0);
+            let (lo_after, hi_after) =
+                crate::sys_capability::current_caps_effective();
+            assert_eq!(lo_before, lo_after);
+            assert_eq!(hi_before, hi_after);
+        }
+
+        // -- Sentinel ----------------------------------------------------
+
+        /// Software events (PERF_TYPE_SOFTWARE) also require the cap
+        /// when exclude_kernel == 0 — Linux's perf_allow_kernel does
+        /// not distinguish event types.  Even a CPU_CLOCK event is
+        /// kernel-measured by default.
+        #[test]
+        fn test_perf_phase181_software_event_also_gated() {
+            let _g = CapGuard::snapshot();
+            drop_cap_perfmon_and_sys_admin();
+            let mut attr = make_valid_sw_attr();
+            errno::set_errno(0);
+            let r = perf_event_open(&mut attr, 0, 0, -1, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        // -- Cross-checks ------------------------------------------------
+
+        /// Exclude_kernel is bit 5 of attr.flags (Linux's bitfield
+        /// position).  Confirm our local constant matches Linux's
+        /// uapi: disabled=0, inherit=1, pinned=2, exclusive=3,
+        /// exclude_user=4, exclude_kernel=5.
+        #[test]
+        fn test_perf_phase181_exclude_kernel_is_bit_five() {
+            assert_eq!(PERF_ATTR_FLAG_EXCLUDE_KERNEL, 1u64 << 5);
+        }
+
+        /// Exclude_kernel bit does not collide with exclusive
+        /// (bit 3, in the canonical Linux layout) — this is the bug
+        /// observed in `linux_perf_types.rs`.  Documents the
+        /// expected non-overlap.
+        #[test]
+        fn test_perf_phase181_exclude_kernel_distinct_from_exclusive() {
+            const PERF_ATTR_FLAG_EXCLUSIVE: u64 = 1 << 3;
+            assert_eq!(
+                PERF_ATTR_FLAG_EXCLUDE_KERNEL & PERF_ATTR_FLAG_EXCLUSIVE,
+                0
+            );
+        }
     }
 }

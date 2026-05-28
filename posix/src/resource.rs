@@ -206,6 +206,31 @@ pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
 ///
 /// Note: limits are stored but not enforced by the kernel.
 /// Returns 0 on success, -1 on error.
+///
+/// ## Capability and ceiling checks (Phase 179)
+///
+/// Linux's `kernel/sys.c::do_prlimit` enforces two post-validation
+/// guards:
+///
+/// ```text
+/// if (resource == RLIMIT_NOFILE && new_rlim->rlim_max > sysctl_nr_open)
+///     retval = -EPERM;
+/// else if (new_rlim->rlim_max > old_rlim->rlim_max &&
+///          !capable(CAP_SYS_RESOURCE))
+///     retval = -EPERM;
+/// ```
+///
+/// - The **`RLIMIT_NOFILE` ceiling** is absolute: even with
+///   `CAP_SYS_RESOURCE`, you cannot raise the hard fd cap above the
+///   kernel-wide upper bound (our `fdtable::MAX_FDS`).  This protects
+///   the fd table from a privileged process asking for a value it
+///   could never actually use.
+/// - **Raising any other resource's hard limit** above its current
+///   value requires `CAP_SYS_RESOURCE`.  Lowering the hard limit, or
+///   leaving it unchanged while editing the soft limit, is always
+///   permitted.  Pre-Phase-179 we silently accepted hard-limit raises
+///   from any caller, which let unprivileged code claim impossible
+///   resources and broke `prlimit`-based privilege separation.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
     if rlp.is_null() {
@@ -234,13 +259,38 @@ pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
         return -1;
     };
 
-    if let Some(slot) = limits.get_mut(resource as usize) {
-        *slot = new_limit;
-        0
-    } else {
+    let Some(slot) = limits.get_mut(resource as usize) else {
         errno::set_errno(errno::EINVAL);
-        -1
+        return -1;
+    };
+
+    let old = *slot;
+
+    // Phase 179: RLIMIT_NOFILE absolute ceiling.  Linux's
+    // `do_prlimit` rejects any rlim_max above sysctl_nr_open
+    // unconditionally — CAP_SYS_RESOURCE does NOT lift this cap.
+    // Our equivalent of sysctl_nr_open is `fdtable::MAX_FDS`.
+    if resource == RLIMIT_NOFILE
+        && new_limit.rlim_max > crate::fdtable::MAX_FDS as u64
+    {
+        errno::set_errno(errno::EPERM);
+        return -1;
     }
+
+    // Phase 179: raising rlim_max above its current value requires
+    // CAP_SYS_RESOURCE (matches Linux's `do_prlimit`).  Lowering or
+    // holding equal — and any soft-only change — is always allowed.
+    if new_limit.rlim_max > old.rlim_max
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_RESOURCE,
+        )
+    {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+
+    *slot = new_limit;
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -2340,6 +2390,534 @@ mod tests {
             errno::set_errno(0);
             assert_eq!(nice(-3), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 179: setrlimit/prlimit — CAP_SYS_RESOURCE gate on
+    // hard-limit raise + unconditional RLIMIT_NOFILE ceiling.
+    //
+    // Pre-Phase-179 behaviour: setrlimit accepted any rlim_max from
+    // any caller — including raises above the existing hard limit and
+    // raises of RLIMIT_NOFILE above fdtable::MAX_FDS.  That diverges
+    // from Linux's `do_prlimit` (`kernel/sys.c`):
+    //
+    //     if (resource == RLIMIT_NOFILE &&
+    //         new_rlim->rlim_max > sysctl_nr_open)
+    //         retval = -EPERM;
+    //     else if (new_rlim->rlim_max > old_rlim->rlim_max &&
+    //              !capable(CAP_SYS_RESOURCE))
+    //         retval = -EPERM;
+    //
+    // Implementation: after the existing EFAULT / EINVAL(resource) /
+    // EINVAL(cur>max) checks, read the current limit; reject NOFILE
+    // hard-raises above MAX_FDS unconditionally; reject other
+    // hard-raises without CAP_SYS_RESOURCE.  Errno is EPERM in both
+    // cases — Linux uses EPERM, not EACCES, here.
+    // ----------------------------------------------------------------------
+
+    mod setrlimit_cap_phase179 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase 168
+        /// / 169 et al.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_resource() {
+            use crate::sys_capability::CAP_SYS_RESOURCE;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_RESOURCE < 32 {
+                (lo & !(1u32 << CAP_SYS_RESOURCE), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_RESOURCE - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_RESOURCE");
+            assert!(!crate::sys_capability::has_capability(
+                CAP_SYS_RESOURCE,
+            ));
+        }
+
+        /// Helper: seed a known starting hard limit on a resource so
+        /// tests can then attempt to raise it.  Runs under default
+        /// caps so the seed itself isn't blocked.
+        fn seed_limit(res: i32, cur: u64, max: u64) {
+            let rl = Rlimit { rlim_cur: cur, rlim_max: max };
+            assert_eq!(setrlimit(res, &rl), 0,
+                "seed setrlimit for resource {res} must succeed under \
+                 default caps");
+        }
+
+        // -- Per-error-class ----------------------------------------------
+
+        /// Without CAP_SYS_RESOURCE, raising the hard limit above its
+        /// current value returns -1 with EPERM.  Mirrors Linux's
+        /// `do_prlimit` "new_rlim->rlim_max > old_rlim->rlim_max &&
+        /// !capable(CAP_SYS_RESOURCE)" branch.
+        #[test]
+        fn test_setrlimit_phase179_raise_hard_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            // Lower the hard limit to a finite value first so the
+            // subsequent raise is observable (default is INFINITY).
+            seed_limit(RLIMIT_CPU, 100, 200);
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            let new = Rlimit { rlim_cur: 100, rlim_max: 500 };
+            assert_eq!(setrlimit(RLIMIT_CPU, &new), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Errno is EPERM specifically — not EACCES (which the
+        /// setpriority gate uses) and not EINVAL (which inverted
+        /// soft/hard yields).  Locks the Linux choice.
+        #[test]
+        fn test_setrlimit_phase179_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 0, 10);
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            let new = Rlimit { rlim_cur: 0, rlim_max: 20 };
+            assert_eq!(setrlimit(RLIMIT_CPU, &new), -1);
+            assert_ne!(errno::get_errno(), errno::EACCES);
+            assert_ne!(errno::get_errno(), errno::EINVAL);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// RLIMIT_NOFILE rlim_max above fdtable::MAX_FDS is rejected
+        /// EVEN when CAP_SYS_RESOURCE is held.  Linux makes the
+        /// sysctl_nr_open ceiling absolute.
+        #[test]
+        fn test_setrlimit_phase179_nofile_above_max_fds_eperm_with_cap()
+        {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            // Default RLIMIT_NOFILE is (MAX_FDS, MAX_FDS).
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_RESOURCE,
+            ));
+            errno::set_errno(0);
+            let new = Rlimit {
+                rlim_cur: crate::fdtable::MAX_FDS as u64,
+                rlim_max: crate::fdtable::MAX_FDS as u64 + 1,
+            };
+            assert_eq!(setrlimit(RLIMIT_NOFILE, &new), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// And without CAP_SYS_RESOURCE: same EPERM (the NOFILE
+        /// branch fires before the cap-gated branch in our impl, but
+        /// the externally-visible result is identical).
+        #[test]
+        fn test_setrlimit_phase179_nofile_above_max_fds_eperm_no_cap() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            let new = Rlimit {
+                rlim_cur: crate::fdtable::MAX_FDS as u64,
+                rlim_max: crate::fdtable::MAX_FDS as u64 + 1,
+            };
+            assert_eq!(setrlimit(RLIMIT_NOFILE, &new), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering matrix ----------------------------------------------
+
+        /// EFAULT on a NULL pointer must beat the cap probe — Linux
+        /// does `copy_from_user` before any cap check.
+        #[test]
+        fn test_setrlimit_phase179_efault_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            // NULL pointer + would-be-raise intent: NULL wins → EFAULT.
+            assert_eq!(setrlimit(RLIMIT_CPU, core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        /// EINVAL on a bad resource ordinal must beat the cap probe.
+        #[test]
+        fn test_setrlimit_phase179_einval_resource_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            let new = Rlimit { rlim_cur: 1, rlim_max: u64::MAX };
+            assert_eq!(setrlimit(9999, &new), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// EINVAL on rlim_cur > rlim_max must also beat the cap probe.
+        #[test]
+        fn test_setrlimit_phase179_einval_inverted_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 0, 10);
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            // Inverted soft/hard AND a hard-raise intent.  EINVAL wins.
+            let new = Rlimit { rlim_cur: 50, rlim_max: 20 };
+            assert_eq!(setrlimit(RLIMIT_CPU, &new), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// Lowering the hard limit is allowed without cap.  Linux's
+        /// gate fires only on `new > old`.
+        #[test]
+        fn test_setrlimit_phase179_lower_hard_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 100, 1000);
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            let new = Rlimit { rlim_cur: 50, rlim_max: 500 };
+            assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
+        }
+
+        /// Holding hard equal (re-asserting the same hard) is allowed
+        /// without cap — `new == old` is NOT `new > old`.
+        #[test]
+        fn test_setrlimit_phase179_equal_hard_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 100, 200);
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            let new = Rlimit { rlim_cur: 50, rlim_max: 200 };
+            assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
+        }
+
+        /// Soft-only change (hard kept identical) is allowed without
+        /// cap, even when soft is raised — only the *hard* gate matters.
+        #[test]
+        fn test_setrlimit_phase179_soft_only_raise_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 10, 1000);
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            let new = Rlimit { rlim_cur: 900, rlim_max: 1000 };
+            assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
+            let mut rb = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
+            assert_eq!(rb.rlim_cur, 900);
+            assert_eq!(rb.rlim_max, 1000);
+        }
+
+        // -- Workflow -----------------------------------------------------
+
+        /// Privilege-separation workflow: a daemon starts with all
+        /// caps, sets RLIMIT_CPU=(100,200), drops CAP_SYS_RESOURCE,
+        /// then a child or post-init code path tries to raise the
+        /// hard limit — must be EPERM.  After re-acquiring caps (via
+        /// the CapGuard's drop or explicit restore) the raise works.
+        #[test]
+        fn test_setrlimit_phase179_workflow_seed_drop_raise_then_restore()
+        {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 100, 200);
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            let raise = Rlimit { rlim_cur: 100, rlim_max: 400 };
+            assert_eq!(setrlimit(RLIMIT_CPU, &raise), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Restore caps and try again.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            errno::set_errno(0);
+            assert_eq!(setrlimit(RLIMIT_CPU, &raise), 0);
+        }
+
+        /// prlimit delegates to setrlimit: a raise via prlimit
+        /// without cap must also EPERM.
+        #[test]
+        fn test_setrlimit_phase179_workflow_prlimit_raise_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_FSIZE, 0, 100);
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            let new = Rlimit { rlim_cur: 0, rlim_max: 200 };
+            assert_eq!(
+                prlimit(0, RLIMIT_FSIZE, &new, core::ptr::null_mut()),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Buggy caller -------------------------------------------------
+
+        /// A buggy unprivileged caller asking for RLIM_INFINITY hard
+        /// after a lowered seed must hit EPERM, not silently raise
+        /// back to unlimited.
+        #[test]
+        fn test_setrlimit_phase179_buggy_caller_raise_to_infinity_eperm()
+        {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_AS, 0, 1 << 20);
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            let new = Rlimit {
+                rlim_cur: 0,
+                rlim_max: RLIM_INFINITY,
+            };
+            assert_eq!(setrlimit(RLIMIT_AS, &new), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// A privileged caller asking for MAX_FDS exactly on NOFILE
+        /// is at the ceiling (not above) and must succeed.  Boundary
+        /// check on the strict-greater-than NOFILE guard.
+        #[test]
+        fn test_setrlimit_phase179_nofile_exactly_max_fds_succeeds() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            errno::set_errno(0);
+            let new = Rlimit {
+                rlim_cur: crate::fdtable::MAX_FDS as u64,
+                rlim_max: crate::fdtable::MAX_FDS as u64,
+            };
+            assert_eq!(setrlimit(RLIMIT_NOFILE, &new), 0);
+        }
+
+        // -- Recovery -----------------------------------------------------
+
+        /// After an EPERM rejection, restoring CAP_SYS_RESOURCE lets
+        /// the same call succeed.  Confirms dynamic cap evaluation
+        /// (not cached).
+        #[test]
+        fn test_setrlimit_phase179_recovery_restore_cap_lets_raise() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 0, 50);
+            drop_cap_sys_resource();
+            let raise = Rlimit { rlim_cur: 0, rlim_max: 75 };
+            errno::set_errno(0);
+            assert_eq!(setrlimit(RLIMIT_CPU, &raise), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Restore caps.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            errno::set_errno(0);
+            assert_eq!(setrlimit(RLIMIT_CPU, &raise), 0);
+        }
+
+        // -- No-side-effect ----------------------------------------------
+
+        /// An EPERM rejection must leave the stored Rlimit unchanged
+        /// — Linux returns from `do_prlimit` before the slot write.
+        #[test]
+        fn test_setrlimit_phase179_eperm_does_not_mutate_state() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 100, 200);
+            drop_cap_sys_resource();
+            errno::set_errno(0);
+            let raise = Rlimit { rlim_cur: 100, rlim_max: 500 };
+            assert_eq!(setrlimit(RLIMIT_CPU, &raise), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Read back: still (100, 200).
+            let mut rb = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
+            assert_eq!(rb.rlim_cur, 100);
+            assert_eq!(rb.rlim_max, 200);
+        }
+
+        /// NOFILE EPERM rejection (the unconditional branch) likewise
+        /// leaves the stored limit unchanged.
+        #[test]
+        fn test_setrlimit_phase179_nofile_eperm_does_not_mutate_state() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            let before_cur = crate::fdtable::MAX_FDS as u64;
+            let before_max = crate::fdtable::MAX_FDS as u64;
+            errno::set_errno(0);
+            let new = Rlimit {
+                rlim_cur: before_cur,
+                rlim_max: before_max + 1,
+            };
+            assert_eq!(setrlimit(RLIMIT_NOFILE, &new), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            let mut rb = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            assert_eq!(getrlimit(RLIMIT_NOFILE, &mut rb), 0);
+            assert_eq!(rb.rlim_cur, before_cur);
+            assert_eq!(rb.rlim_max, before_max);
+        }
+
+        // -- Sentinel -----------------------------------------------------
+
+        /// With CAP_SYS_RESOURCE held (default), raising the hard
+        /// limit works — confirms the privileged path is unbroken.
+        #[test]
+        fn test_setrlimit_phase179_sentinel_with_cap_raise_succeeds() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 0, 100);
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_RESOURCE,
+            ));
+            errno::set_errno(0);
+            let new = Rlimit { rlim_cur: 0, rlim_max: 1000 };
+            assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
+            let mut rb = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
+            assert_eq!(rb.rlim_max, 1000);
+        }
+
+        // -- Cross-checks -------------------------------------------------
+
+        /// Dropping CAP_SYS_RESOURCE must not affect other caps —
+        /// CAP_SYS_NICE / CAP_SYS_ADMIN remain held, so other syscalls
+        /// that gate on those are unaffected.  Defends against a
+        /// stray bit-clear regression in `drop_cap_sys_resource`.
+        #[test]
+        fn test_setrlimit_phase179_drop_sys_resource_leaves_other_caps() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_resource();
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_RESOURCE,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_TIME,
+            ));
+        }
+
+        /// Raising a non-NOFILE resource above MAX_FDS is fine — the
+        /// MAX_FDS ceiling is RLIMIT_NOFILE-only.  Sentinel against
+        /// the NOFILE branch accidentally applying to other
+        /// resources.
+        #[test]
+        fn test_setrlimit_phase179_non_nofile_above_max_fds_ok_with_cap()
+        {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_CPU, 0, 100);
+            errno::set_errno(0);
+            let new = Rlimit {
+                rlim_cur: 0,
+                rlim_max: crate::fdtable::MAX_FDS as u64 * 10,
+            };
+            assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
+        }
+
+        /// prlimit's get-old + set-new path: when the set fails with
+        /// EPERM, the old buffer should still have been populated
+        /// (Linux fills the old buffer before attempting the set).
+        #[test]
+        fn test_setrlimit_phase179_prlimit_get_old_succeeds_set_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            seed_limit(RLIMIT_FSIZE, 50, 100);
+            drop_cap_sys_resource();
+            let new = Rlimit { rlim_cur: 50, rlim_max: 999 };
+            let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            errno::set_errno(0);
+            assert_eq!(prlimit(0, RLIMIT_FSIZE, &new, &mut old), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // old should have been populated with the pre-call value.
+            assert_eq!(old.rlim_cur, 50);
+            assert_eq!(old.rlim_max, 100);
         }
     }
 }

@@ -289,6 +289,65 @@ fn range_overflows(addr: *const core::ffi::c_void, len: SizeT) -> bool {
     (addr as u64).checked_add(len as u64).is_none()
 }
 
+/// Phase 171 helper: read the current `RLIMIT_MEMLOCK` soft limit.
+///
+/// Wraps `crate::resource::getrlimit` and returns the `rlim_cur` value
+/// (u64).  On the (unreachable) failure path returns `u64::MAX`,
+/// which keeps the gate open — matching "infinity" / "no limit"
+/// semantics.
+fn current_memlock_limit() -> u64 {
+    let mut rl = crate::resource::Rlimit { rlim_cur: 0, rlim_max: 0 };
+    let rc = crate::resource::getrlimit(
+        crate::resource::RLIMIT_MEMLOCK,
+        &mut rl,
+    );
+    if rc == 0 { rl.rlim_cur } else { u64::MAX }
+}
+
+/// Phase 171: replicate Linux's `mm/mlock.c::can_do_mlock` /
+/// over-limit checks for a request of `len` bytes.
+///
+/// Linux logic:
+///   bool can_do_mlock(void) {
+///       if (rlimit(RLIMIT_MEMLOCK) != 0) return true;
+///       if (capable(CAP_IPC_LOCK))       return true;
+///       return false;
+///   }
+/// then in `do_mlock`:
+///   locked = current->mm->locked_vm + (len >> PAGE_SHIFT);
+///   if (locked > lock_limit && !capable(CAP_IPC_LOCK))
+///       return -ENOMEM;
+///
+/// In our flat model we have no per-task locked_vm tracker, so the
+/// over-limit check collapses to `len > rlim_cur`.  Returns:
+///   - `Ok(())` on pass (CAP_IPC_LOCK held, or within the limit);
+///   - `Err(EPERM)` on the `can_do_mlock` failure (rlim == 0 and no cap);
+///   - `Err(ENOMEM)` on the over-limit failure (len > rlim, no cap).
+///
+/// Callers should immediately convert the error to an errno-set and
+/// `-1` return.  The check happens *after* argument-domain validation
+/// (page alignment, overflow) — Linux's order.
+fn check_mlock_caps(len: u64) -> Result<(), i32> {
+    let has_cap = crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_IPC_LOCK,
+    );
+    if has_cap {
+        return Ok(());
+    }
+    let lim = current_memlock_limit();
+    // can_do_mlock: rlim == 0 → EPERM.
+    if lim == 0 {
+        return Err(errno::EPERM);
+    }
+    // Over-limit: len > rlim → ENOMEM.  Linux's check is on
+    // `locked_vm + new pages`; with locked_vm = 0 in our flat model
+    // this simplifies to `len > rlim`.
+    if len > lim {
+        return Err(errno::ENOMEM);
+    }
+    Ok(())
+}
+
 /// Lock pages in memory.
 ///
 /// Validates inputs (addr must be page-aligned; addr + len must not
@@ -296,10 +355,22 @@ fn range_overflows(addr: *const core::ffi::c_void, len: SizeT) -> bool {
 /// page-pinning yet, so the lock is logically a no-op, but caller
 /// bugs (unaligned addr, wrap-around range) now produce real EINVAL
 /// instead of silent success.
+///
+/// Phase 171: also enforce Linux's `can_do_mlock` /
+/// `over-RLIMIT_MEMLOCK` gates for callers without `CAP_IPC_LOCK`:
+///   - `RLIMIT_MEMLOCK == 0` and no cap → `EPERM`;
+///   - `len > RLIMIT_MEMLOCK` and no cap → `ENOMEM`.
+/// Validation order matches Linux's `mm/mlock.c::do_mlock`: EINVAL
+/// for argument-domain failures fires before EPERM/ENOMEM for the
+/// capability/rlimit gate.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mlock(addr: *const core::ffi::c_void, len: SizeT) -> i32 {
     if !is_page_aligned(addr) || range_overflows(addr, len) {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if let Err(e) = check_mlock_caps(len as u64) {
+        errno::set_errno(e);
         return -1;
     }
     0
@@ -322,6 +393,14 @@ pub extern "C" fn munlock(addr: *const core::ffi::c_void, len: SizeT) -> i32 {
 /// Validates `flags`: must contain at least one of MCL_CURRENT or
 /// MCL_FUTURE (Linux rejects bare 0), and no unknown bits.  MCL_ONFAULT
 /// requires either MCL_CURRENT or MCL_FUTURE.
+///
+/// Phase 171: enforce Linux's `can_do_mlock` gate for callers
+/// without `CAP_IPC_LOCK` — if `RLIMIT_MEMLOCK == 0` and the cap is
+/// not held, return `-1`/EPERM.  The over-limit ENOMEM gate doesn't
+/// apply here because `mlockall` has no explicit `len`; Linux uses
+/// `mm->total_vm` against the rlimit, which we approximate by only
+/// firing the EPERM branch (no caller can ask for "at most N bytes
+/// locked" through mlockall).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mlockall(flags: i32) -> i32 {
     let known = MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT;
@@ -333,6 +412,13 @@ pub extern "C" fn mlockall(flags: i32) -> i32 {
     // Must have at least one of MCL_CURRENT or MCL_FUTURE.
     if flags & (MCL_CURRENT | MCL_FUTURE) == 0 {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Phase 171: can_do_mlock gate.  Pass len=0 so only the EPERM
+    // branch (rlim == 0 + no cap) can fire; the ENOMEM branch is
+    // suppressed because mlockall has no caller-supplied length.
+    if let Err(e) = check_mlock_caps(0) {
+        errno::set_errno(e);
         return -1;
     }
     0
@@ -2502,6 +2588,401 @@ mod tests {
             let _ = crate::file::close(r);
         }
     }
+
+    // ----------------------------------------------------------------------
+    // Phase 171: mlock / mlock2 / mlockall — CAP_IPC_LOCK + RLIMIT_MEMLOCK
+    // gating per Linux's `mm/mlock.c::can_do_mlock` and over-limit ENOMEM.
+    //
+    // Pre-Phase-171 behaviour: any caller could call `mlock(addr, len)`
+    // and succeed (after EINVAL alignment / overflow checks).  No cap
+    // probe, no rlimit consultation.  An unprivileged process could
+    // logically pin arbitrary amounts of memory.
+    //
+    // Linux semantics:
+    //   can_do_mlock(): true iff rlim(RLIMIT_MEMLOCK) > 0 OR CAP_IPC_LOCK.
+    //   do_mlock(): if !can_do_mlock() → -EPERM;
+    //               if locked_vm + new > rlim && !CAP_IPC_LOCK → -ENOMEM.
+    //
+    // Our flat model has no per-task locked_vm — we approximate the
+    // over-limit check as `len > rlim_cur`.  Default RLIMIT_MEMLOCK in
+    // our reset_global_state is RLIM_INFINITY, so the privileged path
+    // (held cap or infinite rlim) lets every call succeed; the gates
+    // become observable only when (a) caps are dropped *and* (b) the
+    // rlimit is set to a finite value via setrlimit.
+    //
+    // Validation order: EINVAL (alignment, overflow, unknown flags)
+    // beats EPERM/ENOMEM, matching Linux's `do_mlock` order.
+    // ----------------------------------------------------------------------
+
+    mod mlock_cap_phase171 {
+        use super::*;
+        use crate::resource::{
+            Rlimit, RLIMIT_MEMLOCK, RLIM_INFINITY, setrlimit,
+        };
+
+        const PAGE: usize = 16384;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase
+        /// 77 / 164–170.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        /// RAII rlimit restorer for `RLIMIT_MEMLOCK`.  Snapshots
+        /// the current `(rlim_cur, rlim_max)` and restores it on
+        /// drop so tests don't poison the global RLIMITS table.
+        struct MemlockGuard {
+            saved: Rlimit,
+        }
+        impl MemlockGuard {
+            fn snapshot() -> Self {
+                let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+                let rc = crate::resource::getrlimit(RLIMIT_MEMLOCK, &mut rl);
+                assert_eq!(rc, 0);
+                Self { saved: rl }
+            }
+        }
+        impl Drop for MemlockGuard {
+            fn drop(&mut self) {
+                // Restore via the raw setrlimit path — note Linux's
+                // unprivileged setrlimit cannot raise rlim_max, but
+                // our setrlimit stub doesn't enforce that, so the
+                // restore is reliable.
+                let _ = setrlimit(RLIMIT_MEMLOCK, &self.saved as *const _);
+            }
+        }
+
+        fn drop_cap_ipc_lock() {
+            use crate::sys_capability::CAP_IPC_LOCK;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_IPC_LOCK < 32 {
+                (lo & !(1u32 << CAP_IPC_LOCK), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_IPC_LOCK - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_IPC_LOCK");
+            assert!(!crate::sys_capability::has_capability(CAP_IPC_LOCK));
+        }
+
+        fn set_memlock(cur: u64, max: u64) {
+            let rl = Rlimit { rlim_cur: cur, rlim_max: max };
+            let rc = setrlimit(RLIMIT_MEMLOCK, &rl as *const _);
+            assert_eq!(rc, 0);
+        }
+
+        // -- Per-error-class ---------------------------------------------
+
+        /// `mlock` with rlim==0 and no cap → EPERM (can_do_mlock fails).
+        #[test]
+        fn test_mlock_phase171_rlim_zero_no_cap_eperm() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(0, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            let r = mlock(core::ptr::null(), PAGE);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// `mlock` with finite rlim and oversized len without cap →
+        /// ENOMEM (over-limit branch).
+        #[test]
+        fn test_mlock_phase171_over_limit_no_cap_enomem() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            // 1 page worth of rlim — request 2 pages.
+            set_memlock(PAGE as u64, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            let r = mlock(core::ptr::null(), 2 * PAGE);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::ENOMEM);
+        }
+
+        /// `mlock` with finite rlim and request within rlim without
+        /// cap → success.  Confirms the gate is len-sensitive.
+        #[test]
+        fn test_mlock_phase171_within_limit_no_cap_ok() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(8 * PAGE as u64, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            let r = mlock(core::ptr::null(), 4 * PAGE);
+            assert_eq!(r, 0);
+        }
+
+        // -- Ordering matrix ---------------------------------------------
+
+        /// EINVAL on unaligned addr beats EPERM (alignment check
+        /// fires before cap probe).
+        #[test]
+        fn test_mlock_phase171_einval_alignment_beats_eperm() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(0, RLIM_INFINITY); // rlim==0 → would be EPERM
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            let r = mlock(1 as *const core::ffi::c_void, PAGE);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// EINVAL on overflow beats ENOMEM (overflow check fires
+        /// before the over-limit branch).
+        #[test]
+        fn test_mlock_phase171_einval_overflow_beats_enomem() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(PAGE as u64, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            let r = mlock(usize::MAX as *const core::ffi::c_void, PAGE);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- mlock2 -------------------------------------------------------
+
+        /// `mlock2` shares the gate.
+        #[test]
+        fn test_mlock2_phase171_rlim_zero_no_cap_eperm() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(0, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            let r = mlock2(core::ptr::null(), PAGE, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// `mlock2` with unknown flag beats the cap gate (EINVAL
+        /// first).
+        #[test]
+        fn test_mlock2_phase171_einval_flag_beats_eperm() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(0, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            // 1 << 30 is not MLOCK_ONFAULT.
+            let r = mlock2(core::ptr::null(), PAGE, 1 << 30);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- mlockall -----------------------------------------------------
+
+        /// `mlockall` with rlim==0 and no cap → EPERM.
+        #[test]
+        fn test_mlockall_phase171_rlim_zero_no_cap_eperm() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(0, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            let r = mlockall(MCL_CURRENT);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// `mlockall` doesn't ENOMEM under no cap + finite rlim —
+        /// only the EPERM branch is reachable because mlockall has
+        /// no caller-supplied length.
+        #[test]
+        fn test_mlockall_phase171_finite_rlim_no_cap_ok() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(PAGE as u64, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            let r = mlockall(MCL_CURRENT);
+            assert_eq!(r, 0);
+        }
+
+        /// `mlockall` EINVAL on unknown flag beats EPERM.
+        #[test]
+        fn test_mlockall_phase171_einval_flag_beats_eperm() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(0, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            let r = mlockall(1 << 30);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- Workflow -----------------------------------------------------
+
+        /// Realtime-audio-daemon workflow: while privileged,
+        /// mlockall succeeds; daemon drops cap; subsequent mlock of
+        /// an oversize buffer ENOMEMs; a sized-down mlock succeeds.
+        #[test]
+        fn test_mlock_phase171_workflow_lock_then_drop_then_size_down() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            // Privileged: lockall succeeds.
+            errno::set_errno(0);
+            assert_eq!(mlockall(MCL_CURRENT | MCL_FUTURE), 0);
+            // Drop cap, set 4-page rlim.
+            set_memlock(4 * PAGE as u64, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            // Oversize → ENOMEM.
+            errno::set_errno(0);
+            assert_eq!(mlock(core::ptr::null(), 8 * PAGE), -1);
+            assert_eq!(errno::get_errno(), errno::ENOMEM);
+            // Sized-down → ok.
+            errno::set_errno(0);
+            assert_eq!(mlock(core::ptr::null(), 2 * PAGE), 0);
+        }
+
+        // -- Recovery -----------------------------------------------------
+
+        /// After EPERM, restoring CAP_IPC_LOCK lets the same call
+        /// succeed.
+        #[test]
+        fn test_mlock_phase171_recovery_restore_cap_lets_lock_succeed() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(0, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            assert_eq!(mlock(core::ptr::null(), PAGE), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Restore caps to default-all.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            errno::set_errno(0);
+            assert_eq!(mlock(core::ptr::null(), PAGE), 0);
+        }
+
+        // -- Sentinel -----------------------------------------------------
+
+        /// With CAP_IPC_LOCK held, even rlim==0 doesn't block mlock —
+        /// the cap short-circuits both branches.
+        #[test]
+        fn test_mlock_phase171_sentinel_with_cap_rlim_zero_ok() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(0, RLIM_INFINITY);
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_IPC_LOCK,
+            ));
+            errno::set_errno(0);
+            assert_eq!(mlock(core::ptr::null(), 16 * PAGE), 0);
+        }
+
+        // -- Cross-checks -------------------------------------------------
+
+        /// `munlock` is *not* gated (matches Linux — unlocking is
+        /// always permitted).
+        #[test]
+        fn test_mlock_phase171_munlock_unaffected() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(0, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            errno::set_errno(0);
+            assert_eq!(munlock(core::ptr::null(), PAGE), 0);
+        }
+
+        /// `munlockall` is *not* gated.
+        #[test]
+        fn test_mlock_phase171_munlockall_unaffected() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(0, RLIM_INFINITY);
+            drop_cap_ipc_lock();
+            assert_eq!(munlockall(), 0);
+        }
+
+        /// Default state (default caps, RLIM_INFINITY memlock) is
+        /// fully permissive — confirms no regression in the common
+        /// case after Phase 171.
+        #[test]
+        fn test_mlock_phase171_default_state_permissive() {
+            let _gc = CapGuard::snapshot();
+            let _gl = MemlockGuard::snapshot();
+            set_memlock(RLIM_INFINITY, RLIM_INFINITY);
+            errno::set_errno(0);
+            assert_eq!(mlock(core::ptr::null(), 64 * PAGE), 0);
+            assert_eq!(mlockall(MCL_CURRENT | MCL_FUTURE), 0);
+            assert_eq!(mlock2(core::ptr::null(), 16 * PAGE, MLOCK_ONFAULT), 0);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3025,6 +3506,10 @@ pub const MLOCK_ONFAULT: i32 = 1;
 /// Validates inputs the same way `mlock` does (page-aligned addr,
 /// non-overflowing range), plus rejects unknown flag bits with EINVAL.
 /// Otherwise no-op: no kernel page-pinning yet.
+///
+/// Phase 171: shares the `check_mlock_caps` gate with `mlock` —
+/// callers without `CAP_IPC_LOCK` and a zero or exceeded
+/// `RLIMIT_MEMLOCK` fail with EPERM / ENOMEM matching Linux.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mlock2(
     addr: *const core::ffi::c_void,
@@ -3037,6 +3522,10 @@ pub extern "C" fn mlock2(
     }
     if flags & !MLOCK_ONFAULT != 0 {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if let Err(e) = check_mlock_caps(len as u64) {
+        errno::set_errno(e);
         return -1;
     }
     0

@@ -473,15 +473,45 @@ pub extern "C" fn posix_spawn_file_actions_addclosefrom_np(
 // posix_spawnattr
 // ---------------------------------------------------------------------------
 
-/// Spawn attribute flags.
-#[allow(dead_code)] // Forward-compatible flag constants.
-const POSIX_SPAWN_RESETIDS: i16 = 0x01;
-#[allow(dead_code)]
-const POSIX_SPAWN_SETPGROUP: i16 = 0x02;
-#[allow(dead_code)]
-const POSIX_SPAWN_SETSIGDEF: i16 = 0x04;
-#[allow(dead_code)]
-const POSIX_SPAWN_SETSIGMASK: i16 = 0x08;
+// ---------------------------------------------------------------------------
+// Spawn attribute flag constants
+//
+// The values are fixed by POSIX.1-2008 / POSIX.1-2017 and the GNU
+// extensions, and match the bit layout used by glibc, FreeBSD, and
+// musl.  They are exposed publicly so callers (and our own tests)
+// can compose flag words by name without hard-coding magic numbers.
+// ---------------------------------------------------------------------------
+
+/// Reset effective uid/gid to real uid/gid in the child.
+pub const POSIX_SPAWN_RESETIDS: i16 = 0x01;
+/// Place the child in the process group given by `pgroup`.
+pub const POSIX_SPAWN_SETPGROUP: i16 = 0x02;
+/// Reset signals listed in `sigdefault` to SIG_DFL in the child.
+pub const POSIX_SPAWN_SETSIGDEF: i16 = 0x04;
+/// Replace the child's signal mask with `sigmask`.
+pub const POSIX_SPAWN_SETSIGMASK: i16 = 0x08;
+/// Apply `schedparam` to the child (with the current scheduler).
+pub const POSIX_SPAWN_SETSCHEDPARAM: i16 = 0x10;
+/// Apply `schedpolicy` and `schedparam` to the child.
+pub const POSIX_SPAWN_SETSCHEDULER: i16 = 0x20;
+/// Use a vfork-style spawn for the child (GNU extension).
+pub const POSIX_SPAWN_USEVFORK: i16 = 0x40;
+/// Place the child in a new session (POSIX.1-2018).
+pub const POSIX_SPAWN_SETSID: i16 = 0x80;
+
+/// Union of every flag bit currently accepted by
+/// `posix_spawnattr_setflags`.  Any bit outside this mask causes
+/// `posix_spawnattr_setflags` to return `EINVAL`, matching glibc's
+/// `__POSIX_SPAWN_MASK` check.
+pub const POSIX_SPAWN_VALID_FLAGS: i16 =
+    POSIX_SPAWN_RESETIDS
+        | POSIX_SPAWN_SETPGROUP
+        | POSIX_SPAWN_SETSIGDEF
+        | POSIX_SPAWN_SETSIGMASK
+        | POSIX_SPAWN_SETSCHEDPARAM
+        | POSIX_SPAWN_SETSCHEDULER
+        | POSIX_SPAWN_USEVFORK
+        | POSIX_SPAWN_SETSID;
 
 /// Spawn attributes object.
 ///
@@ -523,12 +553,29 @@ pub extern "C" fn posix_spawnattr_destroy(
 }
 
 /// Set flags on a spawn attributes object.
+///
+/// Returns `EINVAL` if any bit outside `POSIX_SPAWN_VALID_FLAGS` is set
+/// in `flags`, or if `attr` is null.  This matches POSIX:
+///
+/// > If the value of the attribute being set is not valid,
+/// > posix_spawnattr_setflags() shall return [EINVAL].
+///
+/// and glibc's `__POSIX_SPAWN_MASK` validation.  We validate the null
+/// pointer first so a caller passing a junk attribute alongside a
+/// bogus flag word still gets the more informative `EINVAL` for
+/// `attr` rather than silently storing into garbage memory.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnattr_setflags(
     attr: *mut PosixSpawnattrT,
     flags: i16,
 ) -> i32 {
     if attr.is_null() {
+        return errno::EINVAL;
+    }
+    // Reject any bit outside the accepted mask.  Using bitwise-AND
+    // against the inverted mask avoids assumptions about sign — the
+    // i16 cast preserves the bit pattern.
+    if (flags & !POSIX_SPAWN_VALID_FLAGS) != 0 {
         return errno::EINVAL;
     }
     // SAFETY: attr is non-null (checked above).
@@ -2372,5 +2419,223 @@ mod tests {
         }
         let ret = posix_spawn_file_actions_addclosefrom_np(&raw mut acts, 3);
         assert_eq!(ret, crate::errno::ENOMEM, "full actions should return ENOMEM");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 81 — posix_spawnattr_setflags flag-mask validation
+    //
+    // POSIX:
+    //   If the value of the attribute being set is not valid,
+    //   posix_spawnattr_setflags() shall return [EINVAL].
+    //
+    // glibc applies a mask check (`flags & ~__POSIX_SPAWN_MASK`) and
+    // returns EINVAL on any unrecognised bit.  These tests pin that
+    // behaviour for our implementation.
+    // -----------------------------------------------------------------------
+
+    fn fresh_attr() -> PosixSpawnattrT {
+        let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
+        posix_spawnattr_init(&raw mut attr);
+        attr
+    }
+
+    // ---- (a) Mask invariants --------------------------------------------
+
+    #[test]
+    fn test_posix_spawn_valid_flags_equals_union() {
+        assert_eq!(
+            POSIX_SPAWN_VALID_FLAGS,
+            POSIX_SPAWN_RESETIDS
+                | POSIX_SPAWN_SETPGROUP
+                | POSIX_SPAWN_SETSIGDEF
+                | POSIX_SPAWN_SETSIGMASK
+                | POSIX_SPAWN_SETSCHEDPARAM
+                | POSIX_SPAWN_SETSCHEDULER
+                | POSIX_SPAWN_USEVFORK
+                | POSIX_SPAWN_SETSID
+        );
+    }
+
+    #[test]
+    fn test_posix_spawn_valid_flags_value() {
+        // Every flag from RESETIDS (0x01) through SETSID (0x80) =
+        // 0xFF.  This catches accidental gaps in the constants.
+        assert_eq!(POSIX_SPAWN_VALID_FLAGS, 0xFF);
+    }
+
+    #[test]
+    fn test_posix_spawn_flags_are_distinct_bits() {
+        for f in [
+            POSIX_SPAWN_RESETIDS,
+            POSIX_SPAWN_SETPGROUP,
+            POSIX_SPAWN_SETSIGDEF,
+            POSIX_SPAWN_SETSIGMASK,
+            POSIX_SPAWN_SETSCHEDPARAM,
+            POSIX_SPAWN_SETSCHEDULER,
+            POSIX_SPAWN_USEVFORK,
+            POSIX_SPAWN_SETSID,
+        ] {
+            assert_eq!(f.count_ones(), 1, "flag {f:#x} must be a single bit");
+        }
+    }
+
+    #[test]
+    fn test_new_flag_constants_have_expected_values() {
+        assert_eq!(POSIX_SPAWN_SETSCHEDPARAM, 0x10);
+        assert_eq!(POSIX_SPAWN_SETSCHEDULER, 0x20);
+        assert_eq!(POSIX_SPAWN_USEVFORK, 0x40);
+        assert_eq!(POSIX_SPAWN_SETSID, 0x80);
+    }
+
+    // ---- (b) Rejection of unknown bits ----------------------------------
+
+    #[test]
+    fn test_setflags_rejects_single_unknown_high_bit() {
+        let mut attr = fresh_attr();
+        // i16::MIN = -0x8000 — sets the sign bit only; outside mask.
+        let ret = posix_spawnattr_setflags(&raw mut attr, i16::MIN);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setflags_rejects_bit_just_above_setsid() {
+        // First bit outside the mask = 0x100.
+        let mut attr = fresh_attr();
+        let ret = posix_spawnattr_setflags(&raw mut attr, 0x100);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setflags_rejects_unknown_bit_combined_with_valid() {
+        // POSIX_SPAWN_SETSID | 0x100 — partially valid, must still fail.
+        let mut attr = fresh_attr();
+        let bad = POSIX_SPAWN_SETSID | 0x100;
+        let ret = posix_spawnattr_setflags(&raw mut attr, bad);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setflags_rejects_negative_one() {
+        // -1 in i16 = 0xFFFF — has every high bit set, must fail.
+        let mut attr = fresh_attr();
+        let ret = posix_spawnattr_setflags(&raw mut attr, -1);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setflags_rejection_does_not_mutate_attr() {
+        // Critical invariant: a failed setflags must leave the previous
+        // flag word untouched, otherwise callers can be left with a
+        // half-configured attr object.
+        let mut attr = fresh_attr();
+        let ok = posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_RESETIDS);
+        assert_eq!(ok, 0);
+        let bad = posix_spawnattr_setflags(&raw mut attr, 0x4000);
+        assert_eq!(bad, errno::EINVAL);
+        // attr.flags should still hold the previous value.
+        let mut got: i16 = 0;
+        let r = posix_spawnattr_getflags(&raw const attr, &raw mut got);
+        assert_eq!(r, 0);
+        assert_eq!(got, POSIX_SPAWN_RESETIDS);
+    }
+
+    // ---- (c) Acceptance of every valid bit ------------------------------
+
+    #[test]
+    fn test_setflags_accepts_each_valid_bit_individually() {
+        for f in [
+            POSIX_SPAWN_RESETIDS,
+            POSIX_SPAWN_SETPGROUP,
+            POSIX_SPAWN_SETSIGDEF,
+            POSIX_SPAWN_SETSIGMASK,
+            POSIX_SPAWN_SETSCHEDPARAM,
+            POSIX_SPAWN_SETSCHEDULER,
+            POSIX_SPAWN_USEVFORK,
+            POSIX_SPAWN_SETSID,
+        ] {
+            let mut attr = fresh_attr();
+            let ret = posix_spawnattr_setflags(&raw mut attr, f);
+            assert_eq!(ret, 0, "flag {f:#x} should be accepted");
+            let mut got: i16 = 0;
+            assert_eq!(posix_spawnattr_getflags(&raw const attr, &raw mut got), 0);
+            assert_eq!(got, f);
+        }
+    }
+
+    #[test]
+    fn test_setflags_accepts_full_mask() {
+        let mut attr = fresh_attr();
+        let ret = posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_VALID_FLAGS);
+        assert_eq!(ret, 0);
+        let mut got: i16 = 0;
+        assert_eq!(posix_spawnattr_getflags(&raw const attr, &raw mut got), 0);
+        assert_eq!(got, POSIX_SPAWN_VALID_FLAGS);
+    }
+
+    #[test]
+    fn test_setflags_accepts_zero() {
+        // Zero (no flags) must succeed — it's the post-init default.
+        let mut attr = fresh_attr();
+        let ret = posix_spawnattr_setflags(&raw mut attr, 0);
+        assert_eq!(ret, 0);
+    }
+
+    // ---- (d) Validation order -------------------------------------------
+
+    #[test]
+    fn test_setflags_null_attr_precedes_flag_check() {
+        // Both errors apply (null attr AND bad flag); EINVAL is the
+        // shared code so result is the same, but make sure we don't
+        // crash by dereferencing a null pointer when the flag is bad.
+        let ret = posix_spawnattr_setflags(core::ptr::null_mut(), 0x4000);
+        assert_eq!(ret, errno::EINVAL);
+    }
+
+    // ---- (e) Workflow / buggy-caller patterns ---------------------------
+
+    #[test]
+    fn test_setflags_then_getflags_roundtrip_full_mask() {
+        let mut attr = fresh_attr();
+        assert_eq!(
+            posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_VALID_FLAGS),
+            0,
+        );
+        let mut got: i16 = 0;
+        assert_eq!(posix_spawnattr_getflags(&raw const attr, &raw mut got), 0);
+        assert_eq!(got, POSIX_SPAWN_VALID_FLAGS);
+    }
+
+    #[test]
+    fn test_setflags_replace_overwrites_prior_flags() {
+        let mut attr = fresh_attr();
+        assert_eq!(
+            posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_RESETIDS | POSIX_SPAWN_SETSID),
+            0,
+        );
+        // Replace with a smaller value.  setflags() is whole-word, not
+        // bitwise-OR, so the second call must overwrite, not merge.
+        assert_eq!(
+            posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_USEVFORK),
+            0,
+        );
+        let mut got: i16 = 0;
+        assert_eq!(posix_spawnattr_getflags(&raw const attr, &raw mut got), 0);
+        assert_eq!(got, POSIX_SPAWN_USEVFORK);
+    }
+
+    #[test]
+    fn test_setflags_init_clears_flags() {
+        // After a successful setflags, a second init() must reset the
+        // attr to zero flags.  Otherwise reuse of a stale attr object
+        // would silently carry old flags into a fresh spawn.
+        let mut attr = fresh_attr();
+        assert_eq!(
+            posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_VALID_FLAGS),
+            0,
+        );
+        posix_spawnattr_init(&raw mut attr);
+        let mut got: i16 = 0;
+        assert_eq!(posix_spawnattr_getflags(&raw const attr, &raw mut got), 0);
+        assert_eq!(got, 0);
     }
 }

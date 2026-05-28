@@ -377,15 +377,42 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
 /// If `new_limit` is non-null, sets the new limit.
 /// If `old_limit` is non-null, stores the old limit.
 ///
-/// Since our kernel doesn't track per-process resource limits, this
-/// delegates to the global getrlimit/setrlimit.
+/// Argument-domain validation (Linux-matching):
+///   - `pid < 0` → `-1` with `ESRCH`.  Linux's `find_get_task_by_vpid`
+///     can't resolve a negative pid; the syscall surface reports it as
+///     ESRCH (no such process), not EINVAL.
+///   - `resource < 0 || resource >= RLIMIT_NLIMITS` → `-1` with
+///     `EINVAL`, even when both limit pointers are NULL.  This matches
+///     Linux's `do_prlimit`, which validates the resource ordinal
+///     before doing any pointer work — a bare `prlimit(0, 9999, NULL,
+///     NULL)` is a malformed call and must report it.
+///   - If `new_limit` is non-NULL: `setrlimit` enforces `rlim_cur <=
+///     rlim_max` and returns `EINVAL` on violation.
+///
+/// Since our kernel doesn't track per-process resource limits, valid
+/// requests delegate to the global getrlimit/setrlimit; `pid` is
+/// otherwise ignored (single-user, single-process resource view).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn prlimit(
-    _pid: i32,
+    pid: i32,
     resource: i32,
     new_limit: *const Rlimit,
     old_limit: *mut Rlimit,
 ) -> i32 {
+    // pid: 0 means "self", positive means a real pid.  Negative is
+    // never a valid pid value — report it as ESRCH ("no such process").
+    if pid < 0 {
+        errno::set_errno(errno::ESRCH);
+        return -1;
+    }
+
+    // Validate resource ordinal up front so a malformed call with both
+    // pointers NULL still fails loudly.
+    if resource < 0 || (resource as usize) >= RLIMIT_NLIMITS {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     // Get old limit first (if requested).
     if !old_limit.is_null() {
         let ret = getrlimit(resource, old_limit);
@@ -957,6 +984,202 @@ mod tests {
         assert_eq!(ret, 0);
         assert_eq!(old.rlim_cur, crate::fdtable::MAX_FDS as u64);
         assert_eq!(old.rlim_max, crate::fdtable::MAX_FDS as u64);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 86 — prlimit/prlimit64 argument-domain validation
+    //
+    // Linux semantics being validated:
+    //   - pid < 0 → -1, ESRCH (no such process)
+    //   - resource out of range → -1, EINVAL (even when both pointers NULL)
+    //   - new_limit with rlim_cur > rlim_max → -1, EINVAL (via setrlimit)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_prlimit_phase86_negative_pid_is_esrch() {
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = prlimit(-1, RLIMIT_STACK, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_intmin_pid_is_esrch() {
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = prlimit(i32::MIN, RLIMIT_CPU, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_zero_pid_means_self() {
+        // pid == 0 is "self" and must succeed for a valid resource.
+        reset_global_state();
+        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        errno::set_errno(0);
+        let ret = prlimit(0, RLIMIT_CPU, core::ptr::null(), &mut old);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_positive_pid_accepted() {
+        // We don't track other processes, so a positive pid behaves like
+        // self.  Just verify it doesn't fall into the ESRCH path.
+        reset_global_state();
+        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        errno::set_errno(0);
+        let ret = prlimit(1234, RLIMIT_CPU, core::ptr::null(), &mut old);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_invalid_resource_with_null_ptrs_einval() {
+        // The bug being fixed: a malformed call with both pointers NULL
+        // used to return 0 silently.  It must now report EINVAL.
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = prlimit(0, 99, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_negative_resource_with_null_ptrs_einval() {
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = prlimit(0, -1, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_resource_at_nlimits_einval() {
+        // The first invalid index is RLIMIT_NLIMITS itself (16).
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = prlimit(
+            0,
+            RLIMIT_NLIMITS as i32,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_esrch_precedes_einval() {
+        // pid < 0 with an invalid resource: ESRCH wins (pid check first).
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = prlimit(-5, 9999, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_invalid_resource_with_get_buf_einval() {
+        // Bad resource with non-NULL old_limit still EINVAL, and the
+        // buffer must not be written.
+        reset_global_state();
+        let mut old = Rlimit { rlim_cur: 0xDEAD, rlim_max: 0xBEEF };
+        errno::set_errno(0);
+        let ret = prlimit(0, 100, core::ptr::null(), &mut old);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(old.rlim_cur, 0xDEAD, "old must not be overwritten on EINVAL");
+        assert_eq!(old.rlim_max, 0xBEEF);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_invalid_resource_with_set_buf_einval() {
+        reset_global_state();
+        let new = Rlimit { rlim_cur: 1, rlim_max: 2 };
+        errno::set_errno(0);
+        let ret = prlimit(0, 100, &new, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_set_rlim_cur_above_max_einval() {
+        // Inverted rlim_cur/rlim_max via prlimit's setrlimit delegate.
+        reset_global_state();
+        let new = Rlimit { rlim_cur: 200, rlim_max: 100 };
+        errno::set_errno(0);
+        let ret = prlimit(0, RLIMIT_CPU, &new, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_both_ptrs_null_valid_resource_ok() {
+        // A degenerate but well-formed call: pid==0, valid resource,
+        // both pointers NULL — succeeds.  Linux returns 0 here too.
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = prlimit(0, RLIMIT_CPU, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_prlimit64_phase86_negative_pid_is_esrch() {
+        // Verify prlimit64 inherits the new validation.
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = prlimit64(-1, RLIMIT_STACK, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_prlimit64_phase86_invalid_resource_einval() {
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = prlimit64(0, 50, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_does_not_mutate_state_on_einval() {
+        // A bad-resource EINVAL must not touch the global RLIMITS array.
+        reset_global_state();
+        let original = Rlimit { rlim_cur: 8 * 1024 * 1024, rlim_max: RLIM_INFINITY };
+        let mut sentinel = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_STACK, &mut sentinel), 0);
+        assert_eq!(sentinel.rlim_cur, original.rlim_cur);
+
+        // Bogus call.
+        let new = Rlimit { rlim_cur: 1, rlim_max: 2 };
+        errno::set_errno(0);
+        let ret = prlimit(0, 9999, &new, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // Stack limit unchanged.
+        let mut after = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_STACK, &mut after), 0);
+        assert_eq!(after.rlim_cur, original.rlim_cur);
+        assert_eq!(after.rlim_max, original.rlim_max);
+    }
+
+    #[test]
+    fn test_prlimit_phase86_esrch_then_valid_call_progression() {
+        reset_global_state();
+        errno::set_errno(0);
+        assert_eq!(
+            prlimit(-1, RLIMIT_CPU, core::ptr::null(), core::ptr::null_mut()),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+
+        // Subsequent valid call succeeds and reports no error.
+        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        errno::set_errno(0);
+        assert_eq!(prlimit(0, RLIMIT_CPU, core::ptr::null(), &mut old), 0);
     }
 
     // -----------------------------------------------------------------------

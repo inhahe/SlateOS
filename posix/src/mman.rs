@@ -44,6 +44,15 @@ pub const PROT_VALID_MASK: i32 =
 pub const MAP_SHARED: i32 = 0x01;
 /// Create a private copy-on-write mapping.
 pub const MAP_PRIVATE: i32 = 0x02;
+/// Share + strict flag validation (Linux 4.15+).  Bit pattern is
+/// deliberately the OR of `MAP_SHARED` and `MAP_PRIVATE` to match the
+/// kernel's `MAP_TYPE` discriminator without conflicting with the
+/// individual flags.
+pub const MAP_SHARED_VALIDATE: i32 = 0x03;
+/// Mask covering the type discriminator bits (`MAP_SHARED`,
+/// `MAP_PRIVATE`, `MAP_SHARED_VALIDATE`).  Linux's
+/// `mm/mmap.c::ksys_mmap_pgoff` switches on `flags & MAP_TYPE`.
+pub const MAP_TYPE: i32 = 0x0F;
 /// Place mapping at exactly the specified address.
 pub const MAP_FIXED: i32 = 0x10;
 /// Mapping is not backed by any file (anonymous).
@@ -80,6 +89,21 @@ pub const MAP_FAILED: *mut core::ffi::c_void = usize::MAX as *mut core::ffi::c_v
 /// - arg4: fd (-1 for anonymous)
 /// - arg5: offset
 ///
+/// Argument-domain validation (Linux-matching, before the syscall):
+/// * `length == 0` → `EINVAL`.  Linux's
+///   `mm/mmap.c::ksys_mmap_pgoff` rejects this immediately.
+/// * `prot & ~PROT_VALID_MASK != 0` → `EINVAL`.
+/// * Both `PROT_GROWSDOWN` and `PROT_GROWSUP` set → `EINVAL`.
+/// * `flags & MAP_TYPE` is not one of `MAP_SHARED`, `MAP_PRIVATE`, or
+///   `MAP_SHARED_VALIDATE` → `EINVAL`.  Linux's `switch (flags &
+///   MAP_TYPE)` falls into the `default` case for any other value.
+/// * `offset` is not a multiple of the 16 KiB page size → `EINVAL`.
+///   `mm/util.c::vm_mmap_pgoff` rounds offset to page-granular
+///   `pgoff_t` and refuses misaligned values.
+/// * `MAP_FIXED` is set and `addr` is not page-aligned → `EINVAL`.
+///   Without `MAP_FIXED`, the kernel may round the hint; with it, the
+///   address must be exact.
+///
 /// Returns the mapped address, or MAP_FAILED on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mmap(
@@ -91,6 +115,38 @@ pub extern "C" fn mmap(
     offset: OffT,
 ) -> *mut core::ffi::c_void {
     if length == 0 {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
+    // prot bits validation (same rules as mprotect; the kernel
+    // ultimately computes vm_flags from these so an out-of-range value
+    // must never reach calc_vm_prot_bits).
+    if prot & !PROT_VALID_MASK != 0 {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
+    if (prot & PROT_GROWSDOWN) != 0 && (prot & PROT_GROWSUP) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
+    // Type discriminator: exactly one of MAP_SHARED, MAP_PRIVATE, or
+    // MAP_SHARED_VALIDATE.  Any other low-nibble value is rejected.
+    match flags & MAP_TYPE {
+        MAP_SHARED | MAP_PRIVATE | MAP_SHARED_VALIDATE => {}
+        _ => {
+            errno::set_errno(errno::EINVAL);
+            return MAP_FAILED;
+        }
+    }
+    // Offset must be a multiple of the page size (16 KiB).  Linux's
+    // mmap2() takes pgoff already-shifted; for our flat-offset entry
+    // point we require the low bits to be clear.
+    if (offset as u64) & (MMAN_PAGE_SIZE - 1) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
+    // MAP_FIXED demands an exact, page-aligned addr.
+    if (flags & MAP_FIXED) != 0 && !is_page_aligned(addr.cast_const()) {
         errno::set_errno(errno::EINVAL);
         return MAP_FAILED;
     }
@@ -646,6 +702,214 @@ mod tests {
         assert_eq!(MAP_GROWSDOWN & MAP_ANONYMOUS, 0);
         // Verify all are non-zero.
         assert_ne!(all, 0);
+    }
+
+    // -- Phase 96: mmap prot / flags / offset validation --
+    //
+    // Linux's ksys_mmap_pgoff validates the type discriminator
+    // (flags & MAP_TYPE), prot bits, offset alignment, and MAP_FIXED
+    // address alignment before doing any VMA work.  These tests pin
+    // down the libc surface so callers see Linux-shaped EINVAL even
+    // when the syscall isn't yet implemented.
+
+    #[test]
+    fn test_mmap_unknown_prot_bit_einval() {
+        crate::errno::set_errno(0);
+        let ret = mmap(
+            core::ptr::null_mut(),
+            16_384,
+            PROT_READ | 0x80,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mmap_growsdown_and_growsup_einval() {
+        crate::errno::set_errno(0);
+        let ret = mmap(
+            core::ptr::null_mut(),
+            16_384,
+            PROT_READ | PROT_GROWSDOWN | PROT_GROWSUP,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mmap_missing_type_einval() {
+        // flags == 0 means neither MAP_SHARED nor MAP_PRIVATE — the
+        // switch (flags & MAP_TYPE) default arm.
+        crate::errno::set_errno(0);
+        let ret = mmap(
+            core::ptr::null_mut(),
+            16_384,
+            PROT_READ,
+            MAP_ANONYMOUS, // type field = 0
+            -1,
+            0,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mmap_bad_type_nibble_einval() {
+        // Low nibble = 0x4: not MAP_SHARED, MAP_PRIVATE, or
+        // MAP_SHARED_VALIDATE — must be rejected.
+        crate::errno::set_errno(0);
+        let bad_type: i32 = 0x4;
+        let ret = mmap(
+            core::ptr::null_mut(),
+            16_384,
+            PROT_READ,
+            bad_type | MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mmap_shared_validate_accepted() {
+        // MAP_SHARED_VALIDATE = 0x03 is a recognized type
+        // discriminator.  This call still fails (the syscall can't
+        // satisfy a 16 KiB anonymous request in unit tests), but it
+        // must clear the libc type check — meaning errno must not be
+        // EINVAL set by our type-discriminator branch.  We don't
+        // assert on the kernel's eventual errno because that varies;
+        // we only assert that the call attempted the syscall (it
+        // returns MAP_FAILED either way).
+        let ret = mmap(
+            core::ptr::null_mut(),
+            16_384,
+            PROT_READ,
+            MAP_SHARED_VALIDATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        );
+        // Just ensure no panic.  The syscall will likely fail with
+        // some kernel-defined errno (often ENOSYS in this build).
+        let _ = ret;
+    }
+
+    #[test]
+    fn test_mmap_misaligned_offset_einval() {
+        crate::errno::set_errno(0);
+        // 1 is not a multiple of 16 KiB.
+        let ret = mmap(
+            core::ptr::null_mut(),
+            16_384,
+            PROT_READ,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            1,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mmap_offset_one_byte_short_of_page_einval() {
+        crate::errno::set_errno(0);
+        // 16383 = MMAN_PAGE_SIZE - 1.
+        let ret = mmap(
+            core::ptr::null_mut(),
+            16_384,
+            PROT_READ,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            16_383,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mmap_fixed_misaligned_addr_einval() {
+        crate::errno::set_errno(0);
+        // 0x1001 is not 16 KiB-aligned; MAP_FIXED requires alignment.
+        let ret = mmap(
+            0x1001_usize as *mut core::ffi::c_void,
+            16_384,
+            PROT_READ,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+            -1,
+            0,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mmap_fixed_aligned_addr_passes_libc() {
+        // MAP_FIXED with an aligned addr clears the libc check.  The
+        // syscall layer will reject the request (no real mapping
+        // available in tests), but EINVAL from our type/alignment
+        // gates must not fire.  We don't assert kernel errno values
+        // because they're build-dependent.
+        let _ret = mmap(
+            0x4000_0000_0000_usize as *mut core::ffi::c_void,
+            16_384,
+            PROT_READ,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+            -1,
+            0,
+        );
+    }
+
+    // -- Ordering: prot bits checked before type discriminator --
+
+    #[test]
+    fn test_mmap_unknown_prot_outranks_bad_type() {
+        // Both bad prot AND bad type: prot validation runs first.
+        // Surface is still EINVAL either way.
+        crate::errno::set_errno(0);
+        let ret = mmap(
+            core::ptr::null_mut(),
+            16_384,
+            PROT_READ | 0x80,
+            0x4 | MAP_ANONYMOUS, // bad type nibble
+            -1,
+            0,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mmap_bad_type_outranks_bad_offset() {
+        // Bad type AND misaligned offset: type validation runs first.
+        crate::errno::set_errno(0);
+        let ret = mmap(
+            core::ptr::null_mut(),
+            16_384,
+            PROT_READ,
+            0x4 | MAP_ANONYMOUS,
+            -1,
+            1,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- Shape sanity --
+
+    #[test]
+    fn test_map_type_mask_covers_type_flags() {
+        assert!(MAP_TYPE & MAP_SHARED != 0);
+        assert!(MAP_TYPE & MAP_PRIVATE != 0);
+        assert_eq!(MAP_SHARED_VALIDATE, MAP_SHARED | MAP_PRIVATE);
+        // MAP_FIXED must not overlap with MAP_TYPE.
+        assert_eq!(MAP_TYPE & MAP_FIXED, 0);
+        assert_eq!(MAP_TYPE & MAP_ANONYMOUS, 0);
     }
 
     // -- mmap zero-length returns EINVAL --

@@ -2052,6 +2052,15 @@ static mut ITIMER_STATE: [Itimerval; ITIMER_COUNT] = [Itimerval {
     it_value: Timeval { tv_sec: 0, tv_usec: 0 },
 }; ITIMER_COUNT];
 
+/// Check that a `Timeval` is well-formed for itimer use.
+///
+/// Mirrors Linux's `timeval_valid` (`kernel/time/itimer.c`):
+/// both fields must be non-negative and `tv_usec` must be strictly
+/// below 1,000,000.
+fn itimer_timeval_valid(tv: &Timeval) -> bool {
+    tv.tv_sec >= 0 && tv.tv_usec >= 0 && tv.tv_usec < 1_000_000
+}
+
 /// Set an interval timer.
 ///
 /// Stores the timer value so `getitimer` can retrieve it.  The timer
@@ -2059,6 +2068,15 @@ static mut ITIMER_STATE: [Itimerval; ITIMER_COUNT] = [Itimerval {
 /// Programs that use `setitimer` for periodic alarms won't get
 /// SIGALRM/SIGVTALRM/SIGPROF, but they will see their own settings
 /// reflected back via `getitimer`.
+///
+/// Argument-domain validation (Linux-matching):
+///   - `which` ∉ {ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF} → EINVAL.
+///   - `new_value == NULL` → EFAULT.
+///   - Either `it_interval` or `it_value` has a negative `tv_sec`,
+///     negative `tv_usec`, or `tv_usec >= 1_000_000` → EINVAL.
+///   - On EINVAL the stored state is **not** mutated and `old_value`
+///     is **not** written, matching Linux's "validate before commit"
+///     ordering.
 ///
 /// # Safety
 ///
@@ -2075,6 +2093,14 @@ pub extern "C" fn setitimer(
     }
     if new_value.is_null() {
         errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // SAFETY: new_value is non-NULL (just checked).  Read unaligned to
+    // tolerate caller buffers that aren't naturally aligned.
+    let val = unsafe { core::ptr::read_unaligned(new_value) };
+    if !itimer_timeval_valid(&val.it_value) || !itimer_timeval_valid(&val.it_interval) {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
 
@@ -2097,7 +2123,7 @@ pub extern "C" fn setitimer(
     unsafe {
         let state = core::ptr::addr_of_mut!(ITIMER_STATE);
         if let Some(entry) = (*state).get_mut(idx) {
-            *entry = *new_value;
+            *entry = val;
         }
     }
 
@@ -4322,6 +4348,210 @@ mod tests {
         crate::errno::set_errno(0);
         assert_eq!(getitimer(ITIMER_REAL, core::ptr::null_mut()), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 87 — setitimer Itimerval-field validation
+    //
+    // Linux semantics being validated (kernel/time/itimer.c
+    // ::do_setitimer → timeval_valid):
+    //   - it_value or it_interval with tv_sec < 0 → EINVAL
+    //   - tv_usec < 0 or tv_usec >= 1_000_000 → EINVAL
+    //   - EINVAL must not mutate stored state or write old_value
+    //   - which-check still takes precedence over field validation
+    // ---------------------------------------------------------------------
+
+    fn itimerval(s1: i64, u1: SusecondsT, s2: i64, u2: SusecondsT) -> Itimerval {
+        Itimerval {
+            it_interval: Timeval { tv_sec: s1, tv_usec: u1 },
+            it_value: Timeval { tv_sec: s2, tv_usec: u2 },
+        }
+    }
+
+    #[test]
+    fn test_setitimer_phase87_neg_value_tv_sec_einval() {
+        reset_timers();
+        let val = itimerval(0, 0, -1, 0);
+        errno::set_errno(0);
+        let ret = setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_neg_value_tv_usec_einval() {
+        reset_timers();
+        let val = itimerval(0, 0, 0, -1);
+        errno::set_errno(0);
+        let ret = setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_value_tv_usec_at_million_einval() {
+        reset_timers();
+        let val = itimerval(0, 0, 0, 1_000_000);
+        errno::set_errno(0);
+        let ret = setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_value_tv_usec_above_million_einval() {
+        reset_timers();
+        let val = itimerval(0, 0, 0, 5_000_000);
+        errno::set_errno(0);
+        let ret = setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_neg_interval_tv_sec_einval() {
+        reset_timers();
+        let val = itimerval(-1, 0, 0, 0);
+        errno::set_errno(0);
+        let ret = setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_neg_interval_tv_usec_einval() {
+        reset_timers();
+        let val = itimerval(0, -1, 0, 0);
+        errno::set_errno(0);
+        let ret = setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_interval_tv_usec_at_million_einval() {
+        reset_timers();
+        let val = itimerval(0, 1_000_000, 0, 0);
+        errno::set_errno(0);
+        let ret = setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_max_valid_usec_succeeds() {
+        // 999_999 is the maximum valid microsecond value.
+        reset_timers();
+        let val = itimerval(0, 999_999, 0, 999_999);
+        errno::set_errno(0);
+        let ret = setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_invalid_which_takes_precedence() {
+        // Bad `which` AND bad timeval: which-check wins (it comes first).
+        reset_timers();
+        let val = itimerval(0, 0, -1, -1);
+        errno::set_errno(0);
+        let ret = setitimer(42, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_efault_takes_precedence_over_field_check() {
+        // NULL pointer beats bogus fields we can't even read.
+        reset_timers();
+        errno::set_errno(0);
+        let ret = setitimer(ITIMER_REAL, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_einval_does_not_mutate_stored_state() {
+        // First store a valid value.
+        reset_timers();
+        let good = itimerval(2, 200, 3, 300);
+        assert_eq!(
+            setitimer(ITIMER_REAL, &raw const good, core::ptr::null_mut()),
+            0
+        );
+
+        // Now a bogus call must fail without overwriting it.
+        let bad = itimerval(0, 0, 0, 2_000_000);
+        errno::set_errno(0);
+        assert_eq!(setitimer(ITIMER_REAL, &raw const bad, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // Verify the previous good value is still in place.
+        let mut got = itimerval(99, 99, 99, 99);
+        assert_eq!(getitimer(ITIMER_REAL, &raw mut got), 0);
+        assert_eq!(got.it_interval.tv_sec, 2);
+        assert_eq!(got.it_interval.tv_usec, 200);
+        assert_eq!(got.it_value.tv_sec, 3);
+        assert_eq!(got.it_value.tv_usec, 300);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_einval_does_not_write_old_value() {
+        // old_value buffer must remain untouched on validation failure.
+        reset_timers();
+        let bad = itimerval(0, 0, -5, 0);
+        let mut old = itimerval(7, 7, 8, 8);
+        errno::set_errno(0);
+        let ret = setitimer(ITIMER_REAL, &raw const bad, &raw mut old);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(old.it_interval.tv_sec, 7);
+        assert_eq!(old.it_interval.tv_usec, 7);
+        assert_eq!(old.it_value.tv_sec, 8);
+        assert_eq!(old.it_value.tv_usec, 8);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_zero_value_zero_interval_succeeds() {
+        // Disarming a timer with all-zero values is valid.
+        reset_timers();
+        let val = itimerval(0, 0, 0, 0);
+        errno::set_errno(0);
+        assert_eq!(setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut()), 0);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_all_three_which_values_validate_fields() {
+        // Validation must apply equally to all three timers.
+        reset_timers();
+        let bad = itimerval(0, 0, 0, 1_000_000);
+        for which in [ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF] {
+            errno::set_errno(0);
+            let ret = setitimer(which, &raw const bad, core::ptr::null_mut());
+            assert_eq!(ret, -1, "which={}", which);
+            assert_eq!(errno::get_errno(), errno::EINVAL, "which={}", which);
+        }
+    }
+
+    #[test]
+    fn test_setitimer_phase87_large_positive_tv_sec_succeeds() {
+        // Far-future timer values are valid.
+        reset_timers();
+        let val = itimerval(1_000_000, 0, 2_000_000, 0);
+        errno::set_errno(0);
+        assert_eq!(setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut()), 0);
+    }
+
+    #[test]
+    fn test_setitimer_phase87_einval_then_valid_call_progression() {
+        reset_timers();
+        let bad = itimerval(0, -1, 0, 0);
+        errno::set_errno(0);
+        assert_eq!(setitimer(ITIMER_REAL, &raw const bad, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let good = itimerval(1, 1, 1, 1);
+        errno::set_errno(0);
+        assert_eq!(setitimer(ITIMER_REAL, &raw const good, core::ptr::null_mut()), 0);
     }
 
     // -- Itimerval / Itimerspec constants --

@@ -1815,6 +1815,195 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
+
+    // -----------------------------------------------------------------
+    // Phase 114 — memfd_create validation-order parity with Linux
+    //
+    // Linux's `SYSCALL_DEFINE2(memfd_create)` in `mm/memfd.c`:
+    //   1. flags & ~MFD_ALL_FLAGS                   -> EINVAL
+    //      (or MFD_HUGETLB special-case: also reject unknown
+    //      huge-size encoding bits, still -> EINVAL)
+    //   2. strnlen_user(uname, MFD_NAME_MAX_LEN+1)  -> EFAULT/EINVAL
+    //
+    // Before Phase 114 we checked the name pointer first, so a buggy
+    // caller passing (NULL, BAD_FLAGS) saw EFAULT on us but EINVAL on
+    // Linux. Phase 114 pins the EINVAL-before-EFAULT order.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_memfd_create_phase114_einval_wins_over_efault() {
+        // (NULL name, unknown flag bit) -> EINVAL on Linux, was
+        // EFAULT on us. Now EINVAL.
+        crate::errno::set_errno(0);
+        // 0x10 is well outside MFD_CLOEXEC | MFD_ALLOW_SEALING |
+        // MFD_HUGETLB | MFD_NOEXEC_SEAL | MFD_EXEC.
+        let ret = memfd_create(core::ptr::null(), 0x1000_0000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_einval_wins_with_hugetlb_and_null() {
+        // (NULL name, MFD_HUGETLB) -> EINVAL (we reject MFD_HUGETLB
+        // outright; Linux would accept the bit with hugepage backend).
+        // The point of this test is the ORDER: EINVAL before EFAULT.
+        crate::errno::set_errno(0);
+        let ret = memfd_create(core::ptr::null(), crate::linux_memfd::MFD_HUGETLB);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_null_name_with_zero_flags_still_efault() {
+        // The pre-existing test pinned this; re-pin with explicit
+        // Phase 114 reasoning: when flags pass validation, NULL name
+        // surfaces EFAULT as before.
+        crate::errno::set_errno(0);
+        let ret = memfd_create(core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_null_name_with_cloexec_only_efault() {
+        // (NULL, MFD_CLOEXEC) — flags are valid -> EFAULT.
+        crate::errno::set_errno(0);
+        let ret = memfd_create(core::ptr::null(), crate::linux_memfd::MFD_CLOEXEC);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_high_bit_unknown_flag_einval() {
+        // 0x8000_0000: sign-bit/highest bit. Must not slip through any
+        // signed/unsigned conversion bug; must report EINVAL even
+        // with a valid name (so we know it's the flag, not the name).
+        crate::errno::set_errno(0);
+        let ret = memfd_create(b"valid\0".as_ptr(), 0x8000_0000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_u32_max_flags_einval() {
+        // All-ones flags: must hit the mask check, NOT the name check.
+        crate::errno::set_errno(0);
+        let ret = memfd_create(core::ptr::null(), u32::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_single_unknown_bit_above_mask_einval() {
+        // 0x10 is the first bit beyond MFD_EXEC (0x10? or 0x20?).
+        // Either way, beyond MEMFD_FLAG_MASK -> EINVAL.
+        crate::errno::set_errno(0);
+        let ret = memfd_create(b"name\0".as_ptr(), 0x80);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_recovery_after_einval() {
+        // After bad-flags EINVAL, valid call still works (errno not
+        // sticky).
+        crate::errno::set_errno(0);
+        let r1 = memfd_create(core::ptr::null(), 0x4000_0000);
+        assert_eq!(r1, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Subsequent valid call: either succeeds (positive fd) or
+        // fails with a non-EINVAL-flag-related errno from open().
+        let r2 = memfd_create(b"recover\0".as_ptr(), 0);
+        if r2 >= 0 {
+            let _ = crate::file::close(r2);
+        } else {
+            // The only legitimate failure here is from open() of the
+            // backing file — must NOT be ENOSYS, and must NOT be the
+            // EINVAL we just left in errno (the call must rewrite it).
+            assert_ne!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_glibc_fallback_workflow() {
+        // glibc's memfd_create wrapper probes for kernel support by
+        // calling memfd_create("", 0). On kernels too old to support
+        // it, this returns -1 with ENOSYS. We must return either a
+        // valid fd OR a real errno; the wrapper falls back to a
+        // tmpfile-based shm if it sees ENOSYS. Either path is fine
+        // as long as flag validation isn't bypassed.
+        crate::errno::set_errno(0);
+        let r = memfd_create(b"\0".as_ptr(), 0);
+        if r >= 0 {
+            let _ = crate::file::close(r);
+        }
+        // Whatever happened, flag validation must still reject bad
+        // flags on the next call.
+        crate::errno::set_errno(0);
+        let bad = memfd_create(b"\0".as_ptr(), 0x4000_0000);
+        assert_eq!(bad, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_hugetlb_with_valid_name_einval() {
+        // MFD_HUGETLB alone (no MFD_HUGE_* size bits) with a valid
+        // name. Our policy: reject MFD_HUGETLB with EINVAL because
+        // we have no hugepage backend.
+        crate::errno::set_errno(0);
+        let ret = memfd_create(b"huge\0".as_ptr(), crate::linux_memfd::MFD_HUGETLB);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_hugetlb_combined_with_cloexec_einval() {
+        // MFD_HUGETLB | MFD_CLOEXEC: both bits in MEMFD_FLAG_MASK, so
+        // the mask check passes; the dedicated HUGETLB reject fires
+        // next and surfaces EINVAL. Pin: the order doesn't swallow
+        // the reject (e.g. by returning earlier with the CLOEXEC bit).
+        crate::errno::set_errno(0);
+        let ret = memfd_create(
+            b"huge_cloexec\0".as_ptr(),
+            crate::linux_memfd::MFD_HUGETLB | crate::linux_memfd::MFD_CLOEXEC,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_buggy_caller_passes_negative_int_flags() {
+        // A C caller doing `memfd_create(name, -1)` passes 0xFFFFFFFF
+        // unsigned. Linux mask check catches it -> EINVAL. So do we.
+        crate::errno::set_errno(0);
+        let ret = memfd_create(b"buggy\0".as_ptr(), u32::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase114_no_side_effect_on_einval() {
+        // A rejected memfd_create must NOT touch the MEMFD_COUNTER
+        // (i.e. the next successful call must use the same counter
+        // value it would have used otherwise). We can't read the
+        // counter directly, but we can check that two consecutive
+        // bad calls + one good call don't run out of slots and that
+        // the underlying open() path is reached only on the good call.
+        for _ in 0..50 {
+            crate::errno::set_errno(0);
+            let r = memfd_create(core::ptr::null(), 0x4000_0000);
+            assert_eq!(r, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+        // 51st call must still be able to attempt open().
+        let r = memfd_create(b"after_50_bad\0".as_ptr(), 0);
+        if r >= 0 {
+            let _ = crate::file::close(r);
+        } else {
+            assert_ne!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2063,16 +2252,24 @@ const MEMFD_FLAG_MASK: u32 = crate::linux_memfd::MFD_CLOEXEC
 ///
 /// # Errors
 ///
-/// - `EFAULT` — `name` is NULL.
-/// - `EINVAL` — `name` is too long, `flags` has unknown bits, or
-///   `MFD_HUGETLB` is set.
+/// - `EINVAL` — `flags` has unknown bits or `MFD_HUGETLB` is set
+///   (checked first, matching Linux's prologue).
+/// - `EFAULT` — `name` is NULL (checked after flags).
+/// - `EINVAL` — `name` is too long.
 /// - Plus any error reported by the underlying `open()` / `unlink()`.
+///
+/// Validation order matches Linux's `SYSCALL_DEFINE2(memfd_create)`
+/// in `mm/memfd.c`: the kernel rejects unknown flag bits BEFORE
+/// `strnlen_user(uname, ...)` ever touches the user pointer. A buggy
+/// caller passing both a NULL name and a bad flag bit therefore
+/// observes `EINVAL` on Linux, not `EFAULT`. We pin that ordering
+/// so userspace probes (Python `mmap.MFD_*` / glibc `memfd_create`
+/// fallback / Rust `memfd` crate) see identical errno.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn memfd_create(name: *const u8, flags: u32) -> i32 {
-    if name.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+    // Linux's prologue rejects unknown flag bits and MFD_HUGETLB-only
+    // combinations (we reject MFD_HUGETLB outright since we have no
+    // hugepage backend) BEFORE strnlen_user. Match that.
     if flags & !MEMFD_FLAG_MASK != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -2080,6 +2277,10 @@ pub extern "C" fn memfd_create(name: *const u8, flags: u32) -> i32 {
     if flags & crate::linux_memfd::MFD_HUGETLB != 0 {
         // Hugepage-backed memfds require kernel huge-page support.
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 

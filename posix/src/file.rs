@@ -3154,46 +3154,160 @@ pub struct Timeval {
     pub tv_usec: i64,
 }
 
-/// Set file access and modification times (microsecond precision).
-///
-/// Stub: always returns 0.  Our filesystem doesn't track per-file
-/// timestamps yet.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn utimes(_path: *const u8, _times: *const Timeval) -> i32 {
-    0
-}
-
-/// Set file access and modification times on an open fd.
-///
-/// Stub: always returns 0.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn futimes(_fd: Fd, _times: *const Timeval) -> i32 {
-    0
-}
-
 /// `UTIME_NOW` — set timestamp to current time.
 pub const UTIME_NOW: i64 = (1 << 30) - 1;
 /// `UTIME_OMIT` — leave timestamp unchanged.
 pub const UTIME_OMIT: i64 = (1 << 30) - 2;
 
+/// Valid `tv_usec` range for `utimes`/`futimes`: 0..=999_999.
+const USEC_MAX: i64 = 999_999;
+/// Valid `tv_nsec` range for `utimensat`/`futimens`: 0..=999_999_999
+/// (plus the two sentinels `UTIME_NOW` and `UTIME_OMIT`).
+const NSEC_MAX: i64 = 999_999_999;
+
+/// Returns true iff `usec` is in the POSIX-legal range for a `timeval`
+/// passed to `utimes`/`futimes` (microsecond precision).
+fn timeval_usec_valid(usec: i64) -> bool {
+    (0..=USEC_MAX).contains(&usec)
+}
+
+/// Returns true iff `nsec` is legal for a `timespec` passed to
+/// `utimensat`/`futimens` — either a normal 0..=999_999_999 value or one
+/// of the two sentinels (`UTIME_NOW`, `UTIME_OMIT`).
+fn timespec_nsec_valid(nsec: i64) -> bool {
+    (0..=NSEC_MAX).contains(&nsec) || nsec == UTIME_NOW || nsec == UTIME_OMIT
+}
+
+/// Set file access and modification times (microsecond precision).
+///
+/// Validates `path` and the `times` array.  Body is a no-op success
+/// (our filesystem doesn't track per-file timestamps yet) — well-formed
+/// callers see 0, buggy callers see the Linux-shaped error.
+///
+/// Errors:
+///   * `EFAULT` — `path` is NULL.
+///   * `EINVAL` — `times[i].tv_usec` is outside [0, 999_999].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn utimes(path: *const u8, times: *const Timeval) -> i32 {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if !times.is_null() {
+        // SAFETY: caller contract — `times` points to two valid Timevals.
+        let a = unsafe { times.read() };
+        let m = unsafe { times.add(1).read() };
+        if !timeval_usec_valid(a.tv_usec) || !timeval_usec_valid(m.tv_usec) {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    }
+    0
+}
+
+/// Set file access and modification times on an open fd.
+///
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
+///   * `EINVAL` — `times[i].tv_usec` is outside [0, 999_999].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn futimes(fd: Fd, times: *const Timeval) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if !times.is_null() {
+        // SAFETY: caller contract — `times` points to two valid Timevals.
+        let a = unsafe { times.read() };
+        let m = unsafe { times.add(1).read() };
+        if !timeval_usec_valid(a.tv_usec) || !timeval_usec_valid(m.tv_usec) {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    }
+    0
+}
+
 /// Set file timestamps with nanosecond precision (relative to dirfd).
 ///
-/// Stub: always returns 0.
+/// Errors:
+///   * `EINVAL` — `flags` contains bits other than `AT_SYMLINK_NOFOLLOW`,
+///     or `times[i].tv_nsec` is outside [0, 999_999_999] and not
+///     `UTIME_NOW`/`UTIME_OMIT`.
+///   * `EFAULT` — `path` is NULL (POSIX; Linux has a `NULL`-path GNU
+///     extension that equates this with `futimens(dirfd, ...)`, but we
+///     follow POSIX until that extension is needed).
+///   * `EBADF` — `dirfd` is not `AT_FDCWD` and refers to no open fd,
+///     while `path` is relative.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn utimensat(
-    _dirfd: Fd,
-    _path: *const u8,
-    _times: *const crate::stat::Timespec,
-    _flags: i32,
+    dirfd: Fd,
+    path: *const u8,
+    times: *const crate::stat::Timespec,
+    flags: i32,
 ) -> i32 {
+    // Linux validates `flags` first.
+    if (flags & !AT_SYMLINK_NOFOLLOW) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // `times` validation matches what the VFS does before any path lookup.
+    if !times.is_null() {
+        // SAFETY: caller contract — `times` points to two valid Timespecs.
+        let a = unsafe { times.read() };
+        let m = unsafe { times.add(1).read() };
+        if !timespec_nsec_valid(a.tv_nsec) || !timespec_nsec_valid(m.tv_nsec) {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    }
+    // Validate dirfd only for relative paths; absolute paths ignore it.
+    if dirfd != AT_FDCWD && !is_absolute_path(path) {
+        if dirfd < 0 {
+            errno::set_errno(errno::EBADF);
+            return -1;
+        }
+        if fdtable::get_fd(dirfd).is_none() {
+            errno::set_errno(errno::EBADF);
+            return -1;
+        }
+    }
     0
 }
 
 /// Set file timestamps with nanosecond precision on an open fd.
 ///
-/// Stub: always returns 0.
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
+///   * `EINVAL` — `times[i].tv_nsec` is outside [0, 999_999_999] and not
+///     `UTIME_NOW`/`UTIME_OMIT`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn futimens(_fd: Fd, _times: *const crate::stat::Timespec) -> i32 {
+pub extern "C" fn futimens(fd: Fd, times: *const crate::stat::Timespec) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if !times.is_null() {
+        // SAFETY: caller contract — `times` points to two valid Timespecs.
+        let a = unsafe { times.read() };
+        let m = unsafe { times.add(1).read() };
+        if !timespec_nsec_valid(a.tv_nsec) || !timespec_nsec_valid(m.tv_nsec) {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    }
     0
 }
 
@@ -4479,7 +4593,10 @@ mod tests {
 
     #[test]
     fn test_futimes_stub_succeeds() {
-        assert_eq!(futimes(0, core::ptr::null()), 0);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(futimes(fd, core::ptr::null()), 0);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
@@ -4489,7 +4606,10 @@ mod tests {
 
     #[test]
     fn test_futimens_stub_succeeds() {
-        assert_eq!(futimens(0, core::ptr::null()), 0);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(futimens(fd, core::ptr::null()), 0);
+        let _ = fdtable::close_fd(fd);
     }
 
     // -- creat is equivalent to open --
@@ -6716,5 +6836,399 @@ mod tests {
         // see a spurious failure.
         assert_eq!(chmod(b"/usr/bin/foo\0".as_ptr(), 0o755), 0);
         assert_eq!(chown(b"/usr/bin/foo\0".as_ptr(), 0, 0), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 71 — utimes / futimes / utimensat / futimens validators
+    //
+    // Body is still a no-op success (filesystem doesn't track per-file
+    // timestamps), but the prologue catches NULL pointers, bad fds, bad
+    // flags, and out-of-range tv_usec / tv_nsec values the way Linux does.
+    // -----------------------------------------------------------------
+
+    // ---- helpers ----
+
+    #[test]
+    fn test_timeval_usec_valid_helper() {
+        assert!(timeval_usec_valid(0));
+        assert!(timeval_usec_valid(500_000));
+        assert!(timeval_usec_valid(USEC_MAX));
+        assert!(!timeval_usec_valid(-1));
+        assert!(!timeval_usec_valid(USEC_MAX + 1));
+        assert!(!timeval_usec_valid(1_000_000));
+    }
+
+    #[test]
+    fn test_timespec_nsec_valid_helper() {
+        assert!(timespec_nsec_valid(0));
+        assert!(timespec_nsec_valid(500_000_000));
+        assert!(timespec_nsec_valid(NSEC_MAX));
+        assert!(timespec_nsec_valid(UTIME_NOW));
+        assert!(timespec_nsec_valid(UTIME_OMIT));
+        assert!(!timespec_nsec_valid(-1));
+        assert!(!timespec_nsec_valid(NSEC_MAX + 1));
+        assert!(!timespec_nsec_valid(2_000_000_000));
+    }
+
+    // ---- utimes ----
+
+    #[test]
+    fn test_utimes_null_path_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(utimes(core::ptr::null(), core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_utimes_null_times_returns_zero() {
+        // NULL times = "set both to current time" — well-formed.
+        assert_eq!(utimes(b"/tmp/f\0".as_ptr(), core::ptr::null()), 0);
+    }
+
+    #[test]
+    fn test_utimes_valid_times_returns_zero() {
+        let tv = [
+            Timeval { tv_sec: 1, tv_usec: 0 },
+            Timeval { tv_sec: 2, tv_usec: USEC_MAX },
+        ];
+        assert_eq!(utimes(b"/tmp/f\0".as_ptr(), tv.as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_utimes_negative_usec_einval() {
+        let tv = [
+            Timeval { tv_sec: 0, tv_usec: -1 },
+            Timeval { tv_sec: 0, tv_usec: 0 },
+        ];
+        crate::errno::set_errno(0);
+        assert_eq!(utimes(b"/tmp/f\0".as_ptr(), tv.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_utimes_overflow_usec_einval() {
+        let tv = [
+            Timeval { tv_sec: 0, tv_usec: 0 },
+            Timeval { tv_sec: 0, tv_usec: 1_000_000 },
+        ];
+        crate::errno::set_errno(0);
+        assert_eq!(utimes(b"/tmp/f\0".as_ptr(), tv.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_utimes_null_path_beats_bad_times() {
+        // NULL path is checked before times[].tv_usec range.
+        let tv = [
+            Timeval { tv_sec: 0, tv_usec: -1 },
+            Timeval { tv_sec: 0, tv_usec: -1 },
+        ];
+        crate::errno::set_errno(0);
+        assert_eq!(utimes(core::ptr::null(), tv.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // ---- futimes ----
+
+    #[test]
+    fn test_futimes_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(futimes(-1, core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_futimes_unopen_fd_ebadf() {
+        let probe: i32 = 0x4000_0011;
+        if fdtable::get_fd(probe).is_some() {
+            let _ = fdtable::close_fd(probe);
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(futimes(probe, core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_futimes_valid_returns_zero() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let tv = [
+            Timeval { tv_sec: 0, tv_usec: 0 },
+            Timeval { tv_sec: 0, tv_usec: 0 },
+        ];
+        assert_eq!(futimes(fd, tv.as_ptr()), 0);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_futimes_bad_times_einval() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let tv = [
+            Timeval { tv_sec: 0, tv_usec: 0 },
+            Timeval { tv_sec: 0, tv_usec: 2_000_000 },
+        ];
+        crate::errno::set_errno(0);
+        assert_eq!(futimes(fd, tv.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_futimes_bad_fd_beats_bad_times() {
+        let tv = [
+            Timeval { tv_sec: 0, tv_usec: -1 },
+            Timeval { tv_sec: 0, tv_usec: -1 },
+        ];
+        crate::errno::set_errno(0);
+        assert_eq!(futimes(-1, tv.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // ---- utimensat ----
+
+    #[test]
+    fn test_utimensat_null_path_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            utimensat(AT_FDCWD, core::ptr::null(), core::ptr::null(), 0),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_utimensat_unknown_flag_einval() {
+        crate::errno::set_errno(0);
+        // 0x200 is not AT_SYMLINK_NOFOLLOW.
+        assert_eq!(
+            utimensat(AT_FDCWD, b"/tmp/f\0".as_ptr(), core::ptr::null(), 0x200),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_utimensat_at_symlink_nofollow_accepted() {
+        assert_eq!(
+            utimensat(
+                AT_FDCWD,
+                b"/tmp/f\0".as_ptr(),
+                core::ptr::null(),
+                AT_SYMLINK_NOFOLLOW,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn test_utimensat_utime_now_sentinel_accepted() {
+        let ts = [
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_NOW },
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_OMIT },
+        ];
+        assert_eq!(
+            utimensat(AT_FDCWD, b"/tmp/f\0".as_ptr(), ts.as_ptr(), 0),
+            0
+        );
+    }
+
+    #[test]
+    fn test_utimensat_negative_nsec_einval() {
+        let ts = [
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: -1 },
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+        ];
+        crate::errno::set_errno(0);
+        assert_eq!(
+            utimensat(AT_FDCWD, b"/tmp/f\0".as_ptr(), ts.as_ptr(), 0),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_utimensat_overflow_nsec_einval() {
+        let ts = [
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 },
+        ];
+        crate::errno::set_errno(0);
+        assert_eq!(
+            utimensat(AT_FDCWD, b"/tmp/f\0".as_ptr(), ts.as_ptr(), 0),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_utimensat_bad_flag_beats_null_path() {
+        crate::errno::set_errno(0);
+        // Unknown flag is checked before NULL path; both bug-shaped, but
+        // the flag check is first in the prologue.
+        assert_eq!(
+            utimensat(AT_FDCWD, core::ptr::null(), core::ptr::null(), 0x4000),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_utimensat_relative_path_bad_dirfd_ebadf() {
+        crate::errno::set_errno(0);
+        // Relative path + non-AT_FDCWD bad dirfd → EBADF.
+        assert_eq!(
+            utimensat(-2, b"relative\0".as_ptr(), core::ptr::null(), 0),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_utimensat_relative_path_unopen_dirfd_ebadf() {
+        let probe: i32 = 0x4000_0021;
+        if fdtable::get_fd(probe).is_some() {
+            let _ = fdtable::close_fd(probe);
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(
+            utimensat(probe, b"relative\0".as_ptr(), core::ptr::null(), 0),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_utimensat_absolute_path_ignores_dirfd() {
+        // Absolute path: bad dirfd is fine.
+        assert_eq!(
+            utimensat(-2, b"/tmp/f\0".as_ptr(), core::ptr::null(), 0),
+            0
+        );
+    }
+
+    #[test]
+    fn test_utimensat_relative_path_open_dirfd_returns_zero() {
+        let dirfd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(
+            utimensat(dirfd, b"relative\0".as_ptr(), core::ptr::null(), 0),
+            0
+        );
+        let _ = fdtable::close_fd(dirfd);
+    }
+
+    // ---- futimens ----
+
+    #[test]
+    fn test_futimens_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(futimens(-1, core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_futimens_unopen_fd_ebadf() {
+        let probe: i32 = 0x4000_0031;
+        if fdtable::get_fd(probe).is_some() {
+            let _ = fdtable::close_fd(probe);
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(futimens(probe, core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_futimens_bad_nsec_einval() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let ts = [
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 },
+        ];
+        crate::errno::set_errno(0);
+        assert_eq!(futimens(fd, ts.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_futimens_utime_sentinels_accepted() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let ts = [
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_NOW },
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_OMIT },
+        ];
+        assert_eq!(futimens(fd, ts.as_ptr()), 0);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_futimens_bad_fd_beats_bad_times() {
+        let ts = [
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: -1 },
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: -1 },
+        ];
+        crate::errno::set_errno(0);
+        assert_eq!(futimens(-1, ts.as_ptr()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // ---- buggy callers ----
+
+    #[test]
+    fn test_buggy_caller_utimes_with_uninitialised_pointer() {
+        crate::errno::set_errno(0);
+        assert_eq!(utimes(core::ptr::null(), core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_buggy_caller_futimens_stale_fd() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let _ = fdtable::close_fd(fd);
+        crate::errno::set_errno(0);
+        assert_eq!(futimens(fd, core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_buggy_caller_utimensat_with_garbage_flags() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            utimensat(AT_FDCWD, b"/tmp/f\0".as_ptr(), core::ptr::null(), -1),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // ---- workflows ----
+
+    #[test]
+    fn test_workflow_touch_via_utimensat_now() {
+        // What `touch` does: set both times to now via UTIME_NOW sentinels.
+        let ts = [
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_NOW },
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_NOW },
+        ];
+        assert_eq!(
+            utimensat(AT_FDCWD, b"/tmp/new\0".as_ptr(), ts.as_ptr(), 0),
+            0
+        );
+    }
+
+    #[test]
+    fn test_workflow_preserve_atime_via_utime_omit() {
+        // `cp --preserve=mtime` style: only change mtime, leave atime.
+        let ts = [
+            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_OMIT },
+            crate::stat::Timespec { tv_sec: 1_700_000_000, tv_nsec: 0 },
+        ];
+        assert_eq!(
+            utimensat(AT_FDCWD, b"/tmp/x\0".as_ptr(), ts.as_ptr(), 0),
+            0
+        );
     }
 }

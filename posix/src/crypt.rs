@@ -101,21 +101,47 @@ pub extern "C" fn crypt_r(
 
 /// `encrypt` — encrypt a block using DES.
 ///
-/// Stub: does nothing (DES is not implemented).  Sets errno to ENOSYS.
+/// Stub: does nothing (DES is not implemented).  Sets errno after
+/// argument-domain validation matching POSIX semantics:
+///
+/// * `EFAULT` — `block` is NULL.  POSIX doesn't name this errno
+///   explicitly, but every implementation that bothers to check
+///   reports `EFAULT` rather than crashing.
+/// * `EINVAL` — `edflag` is not 0 (encrypt) or 1 (decrypt).
+/// * `ENOSYS` — fully validated, but no DES backend.
 ///
 /// POSIX: `encrypt` takes a 64-byte array of 0s and 1s representing
-/// the 64-bit block.  `edflag` controls direction (0 = encrypt,
-/// 1 = decrypt).
+/// the 64-bit block.  `edflag` controls direction.  The function
+/// returns `void`; callers must check `errno` after the call.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn encrypt(_block: *mut u8, _edflag: i32) {
+pub extern "C" fn encrypt(block: *mut u8, edflag: i32) {
+    if block.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return;
+    }
+    if edflag != 0 && edflag != 1 {
+        errno::set_errno(errno::EINVAL);
+        return;
+    }
     errno::set_errno(errno::ENOSYS);
 }
 
 /// `setkey` — set the DES encryption key.
 ///
-/// Stub: does nothing (DES is not implemented).  Sets errno to ENOSYS.
+/// Stub: does nothing (DES is not implemented).  Sets errno after
+/// argument-domain validation:
+///
+/// * `EFAULT` — `key` is NULL.
+/// * `ENOSYS` — fully validated, but no DES backend.
+///
+/// POSIX: `key` points to a 64-byte array of 0s and 1s representing
+/// the 64-bit key.  The function returns `void`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setkey(_key: *const u8) {
+pub extern "C" fn setkey(key: *const u8) {
+    if key.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return;
+    }
     errno::set_errno(errno::ENOSYS);
 }
 
@@ -266,9 +292,12 @@ mod tests {
 
     #[test]
     fn test_encrypt_null_block() {
+        // After Phase 65 validation, NULL block surfaces as EFAULT
+        // before reaching ENOSYS — callers can distinguish "no
+        // backend" from "you passed garbage."
         crate::errno::set_errno(0);
         encrypt(core::ptr::null_mut(), 0);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -280,9 +309,11 @@ mod tests {
 
     #[test]
     fn test_setkey_null() {
+        // After Phase 65 validation, NULL key surfaces as EFAULT
+        // before reaching ENOSYS.
         crate::errno::set_errno(0);
         setkey(core::ptr::null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     // -----------------------------------------------------------------------
@@ -292,5 +323,109 @@ mod tests {
     #[test]
     fn test_crypt_output_len() {
         assert_eq!(CRYPT_OUTPUT_LEN, 128);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 65: encrypt / setkey validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_encrypt_invalid_edflag_einval() {
+        // edflag must be 0 (encrypt) or 1 (decrypt).
+        let mut block = [0u8; 64];
+        crate::errno::set_errno(0);
+        encrypt(block.as_mut_ptr(), 2);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_encrypt_negative_edflag_einval() {
+        let mut block = [0u8; 64];
+        crate::errno::set_errno(0);
+        encrypt(block.as_mut_ptr(), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_encrypt_huge_edflag_einval() {
+        let mut block = [0u8; 64];
+        crate::errno::set_errno(0);
+        encrypt(block.as_mut_ptr(), i32::MAX);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_encrypt_valid_zero_reaches_enosys() {
+        let mut block = [0u8; 64];
+        crate::errno::set_errno(0);
+        encrypt(block.as_mut_ptr(), 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_encrypt_valid_one_reaches_enosys() {
+        let mut block = [0u8; 64];
+        crate::errno::set_errno(0);
+        encrypt(block.as_mut_ptr(), 1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- ordering -----------------------------------------------------
+
+    #[test]
+    fn test_encrypt_null_check_before_edflag_check() {
+        // NULL block AND bad edflag — EFAULT must win.
+        crate::errno::set_errno(0);
+        encrypt(core::ptr::null_mut(), 99);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // --- setkey: NULL check -------------------------------------------
+
+    #[test]
+    fn test_setkey_valid_reaches_enosys() {
+        let key = [0u8; 64];
+        crate::errno::set_errno(0);
+        setkey(key.as_ptr());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- buggy callers ------------------------------------------------
+
+    #[test]
+    fn test_buggy_caller_encrypt_passes_boolean_edflag() {
+        // C-callers sometimes pass `true` (which is 1, fine) or
+        // worse, an enum value cast from a struct field that wasn't
+        // initialised.  Anything outside {0, 1} must surface EINVAL,
+        // not silently behave as encrypt(0).
+        let mut block = [0u8; 64];
+        crate::errno::set_errno(0);
+        encrypt(block.as_mut_ptr(), 42);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_buggy_caller_encrypt_uninitialized_pointer() {
+        // Caller has `uint8_t *block;` declared but never assigned.
+        // On Windows MSVC debug builds this is typically 0xCCCC...,
+        // but the most common bug pattern is leaving it NULL.
+        crate::errno::set_errno(0);
+        encrypt(core::ptr::null_mut(), 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_workflow_encrypt_then_decrypt_both_valid() {
+        // Real workflow: program tries to round-trip a block.  Both
+        // calls must reach ENOSYS (not EFAULT, not EINVAL) so the
+        // caller can distinguish "I passed valid arguments to a stub"
+        // from "I passed garbage."
+        let mut block = [0u8; 64];
+        crate::errno::set_errno(0);
+        encrypt(block.as_mut_ptr(), 0);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        crate::errno::set_errno(0);
+        encrypt(block.as_mut_ptr(), 1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 }

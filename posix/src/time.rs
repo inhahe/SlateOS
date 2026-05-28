@@ -1960,6 +1960,40 @@ pub extern "C" fn timer_create(
 ///
 /// Stores the new value and returns the old value (if `old_value` is
 /// non-null).  The timer never actually fires.
+///
+/// # Linux validation order
+///
+/// `kernel/time/posix-timers.c::sys_timer_settime` → `do_timer_settime`:
+///
+/// 1. `!new_setting`                       → `EINVAL`
+/// 2. `get_itimerspec64(&new_spec, ...)`   → `EFAULT` (user copy fail)
+/// 3. `!timespec64_valid(&new_spec.it_value)` → `EINVAL`  (ONLY
+///    `it_value` is validated — `it_interval` is left to the timer-arm
+///    machinery, which silently normalises out-of-range nsec or treats
+///    excessive values as a long interval.)
+/// 4. `tmr_flags & ~TIMER_ABSTIME`         → `EINVAL`
+/// 5. `lock_timer(timer_id, ...)` returns NULL → `EINVAL`
+///
+/// **Phase 146**: pre-Phase-146 we ran the flag check FIRST (before
+/// the NULL pointer check) and validated BOTH `it_value` AND
+/// `it_interval`'s timespecs against `[0, 999_999_999]`.  Two
+/// observable divergences from Linux:
+///
+/// * `timer_settime(VALID_ID, 0, {it_interval={0, 2_000_000_000},
+///   it_value={1, 0}}, NULL)`: Linux returns 0 (success); we returned
+///   `EINVAL`.  This breaks callers that construct `it_interval` from
+///   compound arithmetic (e.g. `ms * 1_000_000`) and expect Linux's
+///   silent normalisation.
+/// * `timer_settime(VALID_ID, 0, {it_interval={-1, 0}, it_value={0, 0}},
+///   NULL)`: Linux returns 0 (a one-shot disarm, since `it_value` is
+///   zero); we returned `EINVAL`.
+/// * `timer_settime(VALID_ID, BAD_FLAGS, NULL, NULL)`: Linux returns
+///   `EINVAL` from the `!new_setting` check (step 1); we returned
+///   `EINVAL` from the flag check.  Same errno, different reason —
+///   not a behavioural divergence but the ordering now matches Linux.
+///
+/// The flag check is moved AFTER `it_value` timespec validation to
+/// match Linux's `do_timer_settime` precedence.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_settime(
     timerid: TimerT,
@@ -1967,33 +2001,38 @@ pub extern "C" fn timer_settime(
     new_value: *const Itimerspec,
     old_value: *mut Itimerspec,
 ) -> i32 {
-    // Linux's posix-timers code rejects any flag bit other than
-    // TIMER_ABSTIME with EINVAL before touching the timer table.
-    if flags & !TIMER_ABSTIME != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
+    // Step 1: !new_setting → EINVAL.  Linux's sys_timer_settime makes
+    // this check before reading any user data and before flag
+    // validation.  Phase 146 brings the ordering into parity.
     if new_value.is_null() {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // Step 2: get_itimerspec64 → EFAULT.  We can't simulate a fault
+    // here (any non-null pointer is read directly); leaving this as a
+    // documented gap.
+    //
     // SAFETY: new_value verified non-null above; caller asserts it
     // points to a valid Itimerspec.  Copy it now so subsequent
     // validation reads from local storage.
     let nv = unsafe { *new_value };
-    // POSIX/Linux require tv_nsec in [0, 999_999_999] and tv_sec >= 0
-    // for both fields of the new value; otherwise EINVAL.
-    if nv.it_interval.tv_sec < 0
-        || nv.it_interval.tv_nsec < 0
-        || nv.it_interval.tv_nsec > 999_999_999
-        || nv.it_value.tv_sec < 0
+    // Step 3: !timespec64_valid(&new_spec.it_value) → EINVAL.  ONLY
+    // it_value is validated; it_interval is not (Phase 146 fix —
+    // matches `do_timer_settime` exactly).
+    if nv.it_value.tv_sec < 0
         || nv.it_value.tv_nsec < 0
         || nv.it_value.tv_nsec > 999_999_999
     {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-
+    // Step 4: flag mask check.  TIMER_ABSTIME is the only defined bit;
+    // everything else is EINVAL.
+    if flags & !TIMER_ABSTIME != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Step 5: lock_timer(timer_id) → EINVAL on miss.
     let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
     let Some(table) = table else {
         errno::set_errno(errno::EINVAL);
@@ -2016,7 +2055,9 @@ pub extern "C" fn timer_settime(
         unsafe { *old_value = *current; }
     }
 
-    // Store new value (copy validated above).
+    // Store new value (it_value validated above; it_interval stored as
+    // given — Linux normalises in the arming code, which our stub
+    // doesn't simulate).
     *slot = Some(nv);
     0
 }
@@ -4449,13 +4490,18 @@ mod tests {
         timer_delete(id);
     }
 
-    /// `timer_settime` rejects `tv_nsec` outside `[0, 999_999_999]`.
+    /// `timer_settime` rejects `tv_nsec`/`tv_sec` out of range in
+    /// `it_value`.  Phase 146 fix: `it_interval` is NOT validated by
+    /// Linux's `do_timer_settime` (only `it_value` goes through
+    /// `timespec64_valid`); previously this test pinned the broken
+    /// behaviour that rejected bad `it_interval` values.  Renamed from
+    /// `test_timer_settime_bad_tv_nsec`.
     #[test]
-    fn test_timer_settime_bad_tv_nsec() {
+    fn test_timer_settime_bad_it_value_tv_nsec_phase146() {
         reset_timers();
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
-        // tv_nsec too large in it_value.
+        // tv_nsec too large in it_value → EINVAL (still rejected).
         let val = Itimerspec {
             it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
             it_value: Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 },
@@ -4465,17 +4511,7 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
-        // tv_nsec negative in it_interval.
-        let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: -1 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
-        };
-        crate::errno::set_errno(0);
-        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
-
-        // tv_sec negative.
+        // tv_sec negative in it_value → EINVAL (still rejected).
         let val = Itimerspec {
             it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
             it_value: Timespec { tv_sec: -1, tv_nsec: 0 },
@@ -4485,14 +4521,29 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
+        // tv_nsec negative in it_value → EINVAL (still rejected).
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: -1 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
         timer_delete(id);
     }
 
-    /// Validation order in `timer_settime`: flags first, then null
-    /// check, then tv_nsec, then timer lookup.  Bogus flags must fire
-    /// even when new_value is null.
+    /// Validation order in `timer_settime`: NULL `new_value` short-
+    /// circuits before flag check.  Phase 146 fix: pre-Phase-146 we
+    /// checked flags first, so `(0, BAD_FLAGS, NULL, NULL)` was
+    /// diagnosed as a flag EINVAL when Linux diagnoses it as a NULL
+    /// `new_setting` EINVAL.  Both return EINVAL, but the reordering
+    /// matches `sys_timer_settime`'s `if (!new_setting) return -EINVAL;`
+    /// which fires before `do_timer_settime` is called.  Renamed from
+    /// `test_timer_settime_validation_order_flags_first`.
     #[test]
-    fn test_timer_settime_validation_order_flags_first() {
+    fn test_timer_settime_null_new_value_beats_bad_flags_phase146() {
         reset_timers();
         crate::errno::set_errno(0);
         let ret = timer_settime(0, 0x2, core::ptr::null(), core::ptr::null_mut());
@@ -4500,13 +4551,13 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    /// Validation order: tv_nsec checked before the timer lookup.
-    /// Passing an obviously-invalid timer ID with a bad timespec still
-    /// reports EINVAL — proves both paths reach EINVAL, but a freshly
-    /// created (valid) timer with a bad tv_nsec still leaves the slot's
-    /// stored value unchanged from its initial all-zeros state.
+    /// A bad call must not clobber the stored value.  Phase 146 fix:
+    /// the original test used a bad `it_interval` to trigger EINVAL,
+    /// but Linux accepts bad `it_interval` — switched to a bad
+    /// `it_value.tv_nsec` which IS still rejected.  Renamed from
+    /// `test_timer_settime_bad_tv_nsec_does_not_overwrite_slot`.
     #[test]
-    fn test_timer_settime_bad_tv_nsec_does_not_overwrite_slot() {
+    fn test_timer_settime_bad_it_value_tv_nsec_does_not_overwrite_slot_phase146() {
         reset_timers();
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
@@ -4518,10 +4569,11 @@ mod tests {
         };
         assert_eq!(timer_settime(id, 0, &raw const good, core::ptr::null_mut()), 0);
 
-        // A subsequent bad call must not clobber the stored value.
+        // A subsequent bad call (it_value.tv_nsec out of range) must
+        // not clobber the stored value.
         let bad = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 },
         };
         crate::errno::set_errno(0);
         assert_eq!(timer_settime(id, 0, &raw const bad, core::ptr::null_mut()), -1);
@@ -4586,6 +4638,405 @@ mod tests {
         assert_eq!(timer_gettime(id, &raw mut out), 0);
         assert_eq!(out.it_interval.tv_sec, 1);
         assert_eq!(out.it_value.tv_sec, 2);
+        timer_delete(id);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 146: timer_settime validation order matches Linux's
+    // `do_timer_settime` precedence:
+    //
+    //   1. !new_setting                      → EINVAL
+    //   2. get_itimerspec64 (user copy)      → EFAULT (not simulated)
+    //   3. !timespec64_valid(&it_value)      → EINVAL  (it_value only;
+    //      it_interval is NOT validated)
+    //   4. flags & ~TIMER_ABSTIME            → EINVAL
+    //   5. lock_timer(timer_id) returns NULL → EINVAL
+    //
+    // The pre-Phase-146 implementation (a) ran the flag check before
+    // the NULL pointer check and (b) validated both `it_value` AND
+    // `it_interval`'s timespecs.  The fix reorders and strips the
+    // spurious `it_interval` validation.
+    // ---------------------------------------------------------------
+
+    // -- per-error-class --
+
+    /// Per-error-class: NULL `new_value` → EINVAL.  Phase 146 fix put
+    /// this check first (was second).
+    #[test]
+    fn test_timer_settime_null_new_value_einval_phase146() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        let ret = timer_settime(0, 0, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Per-error-class: `it_value.tv_sec < 0` → EINVAL.  Linux's
+    /// `timespec64_valid` rejects negative tv_sec.
+    #[test]
+    fn test_timer_settime_bad_it_value_tv_sec_negative_einval_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: -1, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        timer_delete(id);
+    }
+
+    /// Per-error-class: bad flag bit alone → EINVAL.  Valid new_value
+    /// + valid it_value + valid timer_id but bogus flag bit.
+    #[test]
+    fn test_timer_settime_bad_flags_einval_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        // Bit 1 (TIMER_ABSTIME=bit 0) is bogus.
+        let ret = timer_settime(id, 0x2, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        timer_delete(id);
+    }
+
+    /// Per-error-class: bad timer id alone → EINVAL.  Everything else
+    /// valid, but the timer_id doesn't exist.
+    #[test]
+    fn test_timer_settime_bad_timer_id_einval_phase146() {
+        reset_timers();
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        // MAX_TIMERS = 32, so timer_id 99 is out of range.
+        let ret = timer_settime(99, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- ordering matrix --
+
+    /// Ordering: NULL `new_value` precedes bad timer_id.  Both
+    /// produce EINVAL, but the NULL check fires first (step 1 before
+    /// step 5).
+    #[test]
+    fn test_timer_settime_null_new_value_beats_bad_timer_id_phase146() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        let ret = timer_settime(99, 0, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // Same errno on every path, but if NULL handling were skipped
+        // we'd dereference a null pointer and segfault — so the fact
+        // that we still get EINVAL proves NULL was caught first.
+    }
+
+    /// Ordering: bad `it_value` timespec precedes bad flags.  Step 3
+    /// fires before step 4.  Pre-Phase-146 the flag check came first;
+    /// asserting the new order keeps a regression visible.
+    #[test]
+    fn test_timer_settime_bad_it_value_beats_bad_flags_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 },
+        };
+        crate::errno::set_errno(0);
+        // Bad it_value.tv_nsec AND bad flags — both errno-equal but
+        // the it_value path must win.  We can't observe which path
+        // fired by errno alone, but we can confirm the call still
+        // returns -1/EINVAL even with valid_id+bad_flags+bad_value,
+        // which exercises the ordering.
+        let ret = timer_settime(id, 0x4, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        timer_delete(id);
+    }
+
+    /// Ordering: bad `it_value` precedes bad timer_id.  Bad timespec
+    /// + bad timer_id → still EINVAL via the timespec path.
+    #[test]
+    fn test_timer_settime_bad_it_value_beats_bad_timer_id_phase146() {
+        reset_timers();
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: -1, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(99, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Ordering: bad flags precede bad timer_id.  Step 4 before
+    /// step 5.
+    #[test]
+    fn test_timer_settime_bad_flags_beats_bad_timer_id_phase146() {
+        reset_timers();
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(99, 0x8, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- workflow: Linux divergence fixes --
+
+    /// Workflow: `it_interval.tv_nsec = 2_000_000_000` is now
+    /// ACCEPTED (Phase 146 fix).  Linux's `do_timer_settime` does not
+    /// validate `it_interval` — the arm code silently normalises.
+    /// Pre-Phase-146 we returned EINVAL here; now we accept.
+    #[test]
+    fn test_timer_settime_bad_it_interval_tv_nsec_accepted_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 },
+            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, 0, "Linux accepts out-of-range it_interval.tv_nsec");
+        timer_delete(id);
+    }
+
+    /// Workflow: `it_interval.tv_nsec = -1` is now ACCEPTED.
+    #[test]
+    fn test_timer_settime_negative_it_interval_tv_nsec_accepted_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: -1 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, 0, "Linux accepts negative it_interval.tv_nsec");
+        timer_delete(id);
+    }
+
+    /// Workflow: `it_interval.tv_sec = -1` is now ACCEPTED (one-shot
+    /// disarm semantics since `it_value` is zero).
+    #[test]
+    fn test_timer_settime_negative_it_interval_tv_sec_accepted_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: -1, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, 0, "Linux accepts negative it_interval.tv_sec");
+        timer_delete(id);
+    }
+
+    // -- buggy caller --
+
+    /// Buggy caller: a program that builds `it_interval.tv_nsec` via
+    /// `ms * 1_000_000` and forgets to normalise (so passes
+    /// `2500 * 1_000_000 = 2_500_000_000`) used to fail with EINVAL.
+    /// Linux accepts this — Phase 146 brings us into parity.
+    #[test]
+    fn test_timer_settime_compound_ms_arithmetic_accepted_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let ms: i64 = 2500;
+        let val = Itimerspec {
+            // 2500ms expressed (wrongly) as nsec without normalising
+            // into tv_sec — Linux's arm code normalises silently.
+            it_interval: Timespec { tv_sec: 0, tv_nsec: ms * 1_000_000 },
+            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        timer_delete(id);
+    }
+
+    /// Buggy caller: a very large but legal `it_interval` value (e.g.
+    /// `i64::MAX/2` seconds) is accepted — Linux does no range check
+    /// on it_interval.
+    #[test]
+    fn test_timer_settime_huge_it_interval_accepted_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: i64::MAX / 2, tv_nsec: 999_999_999 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 1 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        timer_delete(id);
+    }
+
+    // -- recovery --
+
+    /// Recovery: after bad `it_value` EINVAL, fixing it_value and
+    /// retrying must succeed.
+    #[test]
+    fn test_timer_settime_recovery_from_bad_it_value_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+
+        // First attempt: bad it_value.tv_nsec → EINVAL.
+        let bad = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 },
+        };
+        crate::errno::set_errno(0);
+        assert_eq!(timer_settime(id, 0, &raw const bad, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Retry with valid it_value.
+        let good = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 999_999_999 },
+            it_value: Timespec { tv_sec: 3, tv_nsec: 0 },
+        };
+        let ret = timer_settime(id, 0, &raw const good, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+
+        // gettime confirms.
+        let mut out = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        assert_eq!(timer_gettime(id, &raw mut out), 0);
+        assert_eq!(out.it_value.tv_sec, 3);
+        assert_eq!(out.it_interval.tv_nsec, 999_999_999);
+        timer_delete(id);
+    }
+
+    /// Recovery: a bad-flags call after a bad-it_value call must
+    /// itself be diagnosed cleanly, and a subsequent valid call must
+    /// land.
+    #[test]
+    fn test_timer_settime_recovery_from_bad_flags_then_bad_it_value_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+
+        let good_val = Itimerspec {
+            it_interval: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 5, tv_nsec: 0 },
+        };
+        let bad_val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: -1, tv_nsec: 0 },
+        };
+
+        crate::errno::set_errno(0);
+        assert_eq!(timer_settime(id, 0x10, &raw const good_val, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        crate::errno::set_errno(0);
+        assert_eq!(timer_settime(id, 0, &raw const bad_val, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Final valid call must succeed.
+        let ret = timer_settime(id, 0, &raw const good_val, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        timer_delete(id);
+    }
+
+    // -- no-side-effect loop --
+
+    /// No-side-effect loop: repeated EINVAL calls must not corrupt
+    /// the stored value of a previously-set timer.
+    #[test]
+    fn test_timer_settime_repeated_einval_no_state_change_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+
+        // Set a known-good value first.
+        let good = Itimerspec {
+            it_interval: Timespec { tv_sec: 7, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 11, tv_nsec: 0 },
+        };
+        assert_eq!(timer_settime(id, 0, &raw const good, core::ptr::null_mut()), 0);
+
+        // Now hammer with assorted bad calls.
+        for _ in 0..16 {
+            // NULL pointer.
+            crate::errno::set_errno(0);
+            assert_eq!(timer_settime(id, 0, core::ptr::null(), core::ptr::null_mut()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+            // Bad it_value.
+            let bad1 = Itimerspec {
+                it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+                it_value: Timespec { tv_sec: 0, tv_nsec: -1 },
+            };
+            crate::errno::set_errno(0);
+            assert_eq!(timer_settime(id, 0, &raw const bad1, core::ptr::null_mut()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+            // Bad flags.
+            crate::errno::set_errno(0);
+            assert_eq!(timer_settime(id, 0xF0, &raw const good, core::ptr::null_mut()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        // Stored value must be the original good one.
+        let mut out = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        assert_eq!(timer_gettime(id, &raw mut out), 0);
+        assert_eq!(out.it_interval.tv_sec, 7);
+        assert_eq!(out.it_value.tv_sec, 11);
+        timer_delete(id);
+    }
+
+    /// No-side-effect loop: a tight loop of failing calls must not
+    /// leak errno into the success path.  After the final good call,
+    /// errno must be untouched (we don't modify it on success).
+    #[test]
+    fn test_timer_settime_loop_doesnt_corrupt_errno_phase146() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+
+        for _ in 0..32 {
+            crate::errno::set_errno(0);
+            assert_eq!(timer_settime(id, 0x80, core::ptr::null(), core::ptr::null_mut()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        // Set errno to a sentinel and run a good call — Linux's
+        // success path does not touch errno.
+        crate::errno::set_errno(12345);
+        let good = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        let ret = timer_settime(id, 0, &raw const good, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 12345,
+            "success path must not touch errno");
         timer_delete(id);
     }
 

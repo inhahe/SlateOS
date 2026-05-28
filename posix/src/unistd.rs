@@ -2223,17 +2223,90 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
 
 /// Set real, effective, and saved set-user-ID.
 ///
-/// Stub: succeeds silently (single-user system).
+/// # Linux semantics (`kernel/sys.c::sys_setresuid`)
+///
+/// Each of `ruid`, `euid`, `suid` is independently permission-checked.
+/// A value of `(uid_t)-1` (= `UidT::MAX`) means "leave this field
+/// alone" and bypasses its check.  Linux uses a single CAP_SETUID
+/// fast-path that skips all three field checks if the cap is held:
+///
+/// ```text
+/// if (!ns_capable_setid(old->user_ns, CAP_SETUID)) {
+///     if (ruid != (uid_t)-1 && !uid_eq(kruid, old->uid) &&
+///         !uid_eq(kruid, old->euid) && !uid_eq(kruid, old->suid))
+///         return -EPERM;
+///     if (euid != (uid_t)-1 && !uid_eq(keuid, old->uid) &&
+///         !uid_eq(keuid, old->euid) && !uid_eq(keuid, old->suid))
+///         return -EPERM;
+///     if (suid != (uid_t)-1 && !uid_eq(ksuid, old->uid) &&
+///         !uid_eq(ksuid, old->euid) && !uid_eq(ksuid, old->suid))
+///         return -EPERM;
+/// }
+/// ```
+///
+/// In our flat single-uid (always 0) model each non-sentinel field
+/// must be 0 (matches current uid/euid/suid) OR the caller must
+/// hold CAP_SETUID.  Order: ruid → euid → suid (matches Linux).
+///
+/// **Phase 195:** pre-Phase-195 returned `0` for every triple,
+/// continuing the silent-success bug pattern Phases 192-194 fixed
+/// for setuid/seteuid/setreuid.  Worth flagging because setresuid
+/// is the syscall sandbox/jail code uses to clamp all three uids
+/// simultaneously — a silent no-op here was particularly dangerous.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setresuid(_ruid: UidT, _euid: UidT, _suid: UidT) -> i32 {
+pub extern "C" fn setresuid(ruid: UidT, euid: UidT, suid: UidT) -> i32 {
+    // Phase 195: short-circuit on CAP_SETUID — if held, all three
+    // fields are accepted as-is (matches Linux's outer `if (!cap)`
+    // guard).  Otherwise check each non-sentinel field against the
+    // current uid (always 0 in our flat model).
+    if crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SETUID,
+    ) {
+        return 0;
+    }
+    if ruid != UidT::MAX && ruid != 0 {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    if euid != UidT::MAX && euid != 0 {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    if suid != UidT::MAX && suid != 0 {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
     0
 }
 
 /// Set real, effective, and saved set-group-ID.
 ///
-/// Stub: succeeds silently.
+/// # Linux semantics (`kernel/sys.c::sys_setresgid`)
+///
+/// Mirror of [`setresuid`] for gids.  Gated by `CAP_SETGID`.  Each
+/// field of `(rgid, egid, sgid)` independently checked; `(gid_t)-1`
+/// (= `GidT::MAX`) means "leave alone".
+///
+/// **Phase 195:** previous stub silently succeeded.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setresgid(_rgid: GidT, _egid: GidT, _sgid: GidT) -> i32 {
+pub extern "C" fn setresgid(rgid: GidT, egid: GidT, sgid: GidT) -> i32 {
+    if crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SETGID,
+    ) {
+        return 0;
+    }
+    if rgid != GidT::MAX && rgid != 0 {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    if egid != GidT::MAX && egid != 0 {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
+    if sgid != GidT::MAX && sgid != 0 {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
     0
 }
 
@@ -6636,6 +6709,414 @@ mod tests {
             let e = errno::get_errno();
             assert_eq!(e, errno::EPERM);
             assert_ne!(e, errno::EACCES);
+        }
+    }
+
+    // ==================================================================
+    // Phase 195: setresuid / setresgid gate on CAP_SETUID / CAP_SETGID
+    // ==================================================================
+    //
+    // The three-arg saved-id variants.  Linux's sys_setresuid uses a
+    // single CAP_SETUID outer-guard: if the cap is held, all three
+    // fields are accepted; otherwise each non-sentinel field must
+    // match a currently-held id.  Order: ruid → euid → suid.  Our
+    // flat single-uid (always 0) model collapses to "value == 0 or
+    // value == MAX always OK; any other value requires the cap".
+    //
+    // This was the highest-stakes silent-success bug in the
+    // setuid-family series — setresuid is what sandbox/jail code
+    // uses to clamp all three uids simultaneously and is the
+    // recommended privilege-drop syscall in modern Linux APIs.
+    mod setresuid_cap_phase195 {
+        use super::*;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap(cap: u32) {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if cap < 32 {
+                (lo & !(1u32 << cap), hi)
+            } else {
+                (lo, hi & !(1u32 << (cap - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping cap {cap}");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+
+        // -- Per-error-class: each field independently fails ---------------
+
+        #[test]
+        fn test_setresuid_phase195_no_cap_bad_ruid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(setresuid(1000, UidT::MAX, UidT::MAX), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_setresuid_phase195_no_cap_bad_euid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(setresuid(UidT::MAX, 1000, UidT::MAX), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_setresuid_phase195_no_cap_bad_suid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(setresuid(UidT::MAX, UidT::MAX, 1000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_setresgid_phase195_no_cap_bad_rgid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETGID);
+            errno::set_errno(0);
+            assert_eq!(setresgid(1000, GidT::MAX, GidT::MAX), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_setresgid_phase195_no_cap_bad_egid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETGID);
+            errno::set_errno(0);
+            assert_eq!(setresgid(GidT::MAX, 1000, GidT::MAX), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_setresgid_phase195_no_cap_bad_sgid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETGID);
+            errno::set_errno(0);
+            assert_eq!(setresgid(GidT::MAX, GidT::MAX, 1000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering: ruid → euid → suid ----------------------------------
+
+        /// (bad, bad, bad) → EPERM on ruid arm; later fields never
+        /// reached.  Matches Linux's top-down evaluation.
+        #[test]
+        fn test_setresuid_phase195_all_bad_eperms_on_first_arm() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(setresuid(1, 2, 3), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// (0, bad, bad) skips the ruid arm and EPERMs on euid arm.
+        #[test]
+        fn test_setresuid_phase195_zero_ruid_reaches_euid_arm() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(setresuid(0, 2, 3), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// (0, 0, bad) reaches the suid arm and EPERMs there.
+        #[test]
+        fn test_setresuid_phase195_zero_ruid_euid_reaches_suid_arm() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(setresuid(0, 0, 3), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Sentinel (-1) bypass -----------------------------------------
+
+        /// All three sentinels — always succeeds with no cap.
+        #[test]
+        fn test_setresuid_phase195_all_sentinels_succeed_no_cap() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(setresuid(UidT::MAX, UidT::MAX, UidT::MAX), 0);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        #[test]
+        fn test_setresgid_phase195_all_sentinels_succeed_no_cap() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETGID);
+            errno::set_errno(0);
+            assert_eq!(setresgid(GidT::MAX, GidT::MAX, GidT::MAX), 0);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        /// All zeros — every field matches current, no cap needed.
+        #[test]
+        fn test_setresuid_phase195_all_zero_succeed_no_cap() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(setresuid(0, 0, 0), 0);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        /// Mix of sentinel + zero — every combination passes.
+        #[test]
+        fn test_setresuid_phase195_sentinel_zero_mix_succeed_no_cap() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(setresuid(0, UidT::MAX, 0), 0);
+            assert_eq!(setresuid(UidT::MAX, 0, UidT::MAX), 0);
+            assert_eq!(setresuid(UidT::MAX, UidT::MAX, 0), 0);
+            assert_eq!(setresuid(0, 0, UidT::MAX), 0);
+        }
+
+        // -- With-cap success path ----------------------------------------
+
+        #[test]
+        fn test_setresuid_phase195_with_cap_arbitrary_succeeds() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            assert_eq!(setresuid(1, 2, 3), 0);
+            assert_eq!(setresuid(u32::MAX - 1, u32::MAX - 2, u32::MAX - 3), 0);
+        }
+
+        #[test]
+        fn test_setresgid_phase195_with_cap_arbitrary_succeeds() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            assert_eq!(setresgid(1, 2, 3), 0);
+        }
+
+        // -- Workflow ------------------------------------------------------
+
+        /// The canonical sandbox-drop pattern using setresuid:
+        /// `setresuid(N, N, N)` to clamp all three.  Pre-Phase-195
+        /// this silently succeeded even without CAP_SETUID — exactly
+        /// the privilege-drop boundary callers expect to be enforced.
+        #[test]
+        fn test_setresuid_phase195_sandbox_drop_workflow() {
+            let _g = CapGuard::snapshot();
+            // 1. Privileged: clamp to uid 1000 across all three.
+            errno::set_errno(0);
+            assert_eq!(setresuid(1000, 1000, 1000), 0);
+            // 2. Sandbox drops CAP_SETUID.
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            // 3. Sentinel probe — still works.
+            errno::set_errno(0);
+            assert_eq!(setresuid(UidT::MAX, UidT::MAX, UidT::MAX), 0);
+            // 4. Confused re-clamp to uid 2000 — EPERMs.
+            errno::set_errno(0);
+            assert_eq!(setresuid(2000, 2000, 2000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Buggy-caller --------------------------------------------------
+
+        #[test]
+        fn test_setresuid_phase195_buggy_caller_stale_errno_replaced() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(errno::ENOENT);
+            assert_eq!(setresuid(7, 8, 9), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// (MAX-1, MAX-1, MAX-1) NOT treated as the sentinel triple.
+        #[test]
+        fn test_setresuid_phase195_max_minus_one_not_sentinel() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(
+                setresuid(u32::MAX - 1, u32::MAX - 1, u32::MAX - 1),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Recovery ------------------------------------------------------
+
+        #[test]
+        fn test_setresuid_phase195_capguard_restore_clears_state() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap(crate::sys_capability::CAP_SETUID);
+                errno::set_errno(0);
+                assert_eq!(setresuid(1, 2, 3), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+            errno::set_errno(0);
+            assert_eq!(setresuid(1, 2, 3), 0);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        // -- No-side-effect ------------------------------------------------
+
+        #[test]
+        fn test_setresuid_phase195_repeated_failed_calls_stable() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            for _ in 0..8 {
+                errno::set_errno(0);
+                assert_eq!(setresuid(3, 4, 5), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+        }
+
+        #[test]
+        fn test_setresuid_phase195_failed_call_no_observable_uid_change() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            let pre_uid = getuid();
+            let pre_euid = geteuid();
+            errno::set_errno(0);
+            assert_eq!(setresuid(9, 10, 11), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(getuid(), pre_uid);
+            assert_eq!(geteuid(), pre_euid);
+        }
+
+        // -- Cross-check ---------------------------------------------------
+
+        /// Dropping CAP_SETGID alone must NOT affect setresuid.
+        #[test]
+        fn test_setresuid_phase195_setgid_drop_does_not_affect_setresuid() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETGID);
+            errno::set_errno(0);
+            assert_eq!(setresuid(1000, 2000, 3000), 0);
+        }
+
+        /// Dropping CAP_SETUID alone must NOT affect setresgid.
+        #[test]
+        fn test_setresgid_phase195_setuid_drop_does_not_affect_setresgid() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(setresgid(1000, 2000, 3000), 0);
+        }
+
+        /// Dropping CAP_SETUID gates the full uid-setter fan-out:
+        /// setuid, seteuid, setreuid, setresuid all EPERM.
+        #[test]
+        fn test_setresuid_phase195_drop_gates_all_uid_setters() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            for (rc, name) in [
+                (setuid(1000), "setuid"),
+                (seteuid(1000), "seteuid"),
+                (setreuid(1000, 2000), "setreuid"),
+                (setresuid(1000, 2000, 3000), "setresuid"),
+            ] {
+                assert_eq!(rc, -1, "{name} must EPERM without CAP_SETUID");
+            }
+        }
+
+        /// Dropping CAP_SETGID gates the full gid-setter fan-out:
+        /// setgid, setegid, setregid, setresgid, setgroups all EPERM.
+        #[test]
+        fn test_setresgid_phase195_drop_gates_all_gid_setters() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETGID);
+            for (rc, name) in [
+                (setgid(1000), "setgid"),
+                (setegid(1000), "setegid"),
+                (setregid(1000, 2000), "setregid"),
+                (setresgid(1000, 2000, 3000), "setresgid"),
+                (setgroups(0, core::ptr::null()), "setgroups"),
+            ] {
+                assert_eq!(rc, -1, "{name} must EPERM without CAP_SETGID");
+            }
+        }
+
+        #[test]
+        fn test_setresuid_phase195_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            errno::set_errno(0);
+            assert_eq!(setresuid(99, 88, 77), -1);
+            let e = errno::get_errno();
+            assert_eq!(e, errno::EPERM);
+            assert_ne!(e, errno::EACCES);
+        }
+
+        /// getresuid/getresgid are pure readers — unaffected by cap
+        /// drops.  Pin the read-vs-write cap invariant.
+        #[test]
+        fn test_setresuid_phase195_getters_unaffected_by_cap_drop() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            drop_cap(crate::sys_capability::CAP_SETGID);
+            let mut r: UidT = 99;
+            let mut e: UidT = 99;
+            let mut s: UidT = 99;
+            assert_eq!(getresuid(&raw mut r, &raw mut e, &raw mut s), 0);
+            assert_eq!((r, e, s), (0, 0, 0));
+            let mut rg: GidT = 99;
+            let mut eg: GidT = 99;
+            let mut sg: GidT = 99;
+            assert_eq!(
+                getresgid(&raw mut rg, &raw mut eg, &raw mut sg),
+                0
+            );
+            assert_eq!((rg, eg, sg), (0, 0, 0));
         }
     }
 

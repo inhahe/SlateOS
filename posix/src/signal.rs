@@ -812,24 +812,38 @@ pub extern "C" fn sigtimedwait(
 /// `kernel/signal.c::sys_rt_sigqueueinfo`, then returns `-1` with
 /// `ENOSYS` (no signal delivery mechanism).
 ///
+/// # Linux semantics
+///
+/// `sys_rt_sigqueueinfo` calls `do_rt_sigqueueinfo`, which rejects
+/// `pid <= 0` with `-EINVAL` at the very top — *before* any task
+/// lookup.  Unlike `kill(2)`, `sigqueue(3)` does not accept
+/// process-group, "self", or "all-processes" forms; the target must
+/// be a real positive PID.
+///
 /// Errors (Linux-matching priority order):
-/// * `EINVAL` — `sig` is not a valid signal number (`sig < 0` or
-///   `sig >= NSIG`).  `sig == 0` is permitted (existence-probe form).
-/// * `ESRCH` — `pid <= 0`.  Unlike `kill(2)`, `sigqueue(3)` does not
-///   accept process-group or "all processes" forms; the target must be
-///   an existing process.  Linux's `find_task_by_vpid` rejects
-///   non-positive PIDs with `ESRCH`.
+///
+/// 1. `pid <= 0`                                       → `EINVAL`
+///    (Linux: `do_rt_sigqueueinfo` — fires before `find_vpid`.)
+/// 2. `sig < 0 || sig >= NSIG`                         → `EINVAL`
+///    `sig == 0` is permitted (existence-probe form).  Linux
+///    validates sig deep in `__send_signal_locked::valid_signal`,
+///    after process lookup; here the stub mirrors that EINVAL value
+///    without modelling process existence.
+/// 3. (EPERM for impersonation, ESRCH for find_vpid failure —
+///    skipped; the stub has no process model.)
+/// 4. `ENOSYS` for any otherwise-valid call.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigqueue(pid: crate::types::PidT, sig: i32, _value: usize) -> i32 {
-    // sig validation first: kernel checks valid_signal() before any
-    // task lookup so callers with bogus sigs see EINVAL regardless of
-    // whether the pid exists.
-    if !(0..NSIG).contains(&sig) {
+    // 1. pid <= 0 → EINVAL.  Linux's do_rt_sigqueueinfo rejects this
+    //    before any task lookup, so it fires before sig validation.
+    if pid <= 0 {
         crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
-    if pid <= 0 {
-        crate::errno::set_errno(crate::errno::ESRCH);
+    // 2. sig validation: in Linux this lives inside the per-task send
+    //    path and surfaces as EINVAL once the process is found.
+    if !(0..NSIG).contains(&sig) {
+        crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
     crate::errno::set_errno(crate::errno::ENOSYS);
@@ -2212,33 +2226,37 @@ mod tests {
     }
 
     #[test]
-    fn test_sigqueue_zero_pid_esrch() {
-        // Unlike kill(), sigqueue does not accept pid == 0
-        // (process-group "self") — only a real positive pid.
+    fn test_sigqueue_zero_pid_einval() {
+        // Phase 123: unlike kill(), sigqueue does not accept pid == 0
+        // (process-group "self"); Linux's do_rt_sigqueueinfo rejects
+        // pid <= 0 with EINVAL before any task lookup.
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(0, SIGTERM, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
-    fn test_sigqueue_negative_pid_esrch() {
+    fn test_sigqueue_negative_pid_einval() {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(-1, SIGTERM, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
-    fn test_sigqueue_pgrp_form_esrch() {
+    fn test_sigqueue_pgrp_form_einval() {
         // pid < -1 in kill() means "process group |pid|"; sigqueue
-        // rejects it as ESRCH.
+        // rejects it as EINVAL per do_rt_sigqueueinfo.
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(-100, SIGTERM, 0), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
-    fn test_sigqueue_sig_checked_before_pid() {
-        // Bad sig + bad pid → EINVAL (sig check is first).
+    fn test_sigqueue_pid_checked_before_sig() {
+        // Phase 123: Bad sig + bad pid → EINVAL.  Both checks return
+        // EINVAL, so the observable errno is the same, but the
+        // implementation order now matches Linux (pid <= 0 fires in
+        // do_rt_sigqueueinfo before send_signal validates sig).
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(-1, -1, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -2249,6 +2267,147 @@ mod tests {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(1234, SIGUSR1, 42), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- Phase 123: pid<=0 errno corrected, prologue order matches
+    //                Linux do_rt_sigqueueinfo ---
+    //
+    // Previous behaviour returned ESRCH for pid <= 0 citing
+    // find_task_by_vpid; that lookup is never reached because
+    // do_rt_sigqueueinfo intercepts the case with EINVAL before
+    // anything else.
+
+    /// Phase 123: i32::MIN as pid → EINVAL.  Confirms the `pid <= 0`
+    /// check uses signed comparison, not a `pid == 0 || pid < 0` pair
+    /// that might trip on signed-overflow corner cases.
+    #[test]
+    fn test_sigqueue_phase123_i32_min_pid_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(i32::MIN, SIGTERM, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 123: smallest positive pid (1) with a valid sig reaches
+    /// ENOSYS — confirms `pid > 0` opens the gate.
+    #[test]
+    fn test_sigqueue_phase123_pid_one_reaches_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(1, SIGTERM, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Phase 123: i32::MAX as pid with a valid sig reaches ENOSYS —
+    /// no upper bound on the pid check.
+    #[test]
+    fn test_sigqueue_phase123_i32_max_pid_reaches_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(i32::MAX, SIGUSR1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Phase 123: pid <= 0 with sig == 0 (existence probe).  pid
+    /// check fires first → EINVAL, even though sig is benign.
+    #[test]
+    fn test_sigqueue_phase123_zero_pid_existence_probe_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 123: negative pid with sig == NSIG (above range).  Both
+    /// pid and sig would fault; pid check (Linux do_rt_sigqueueinfo)
+    /// fires first.  Same EINVAL value, but order now matches Linux.
+    #[test]
+    fn test_sigqueue_phase123_neg_pid_sig_at_nsig_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(-5, NSIG, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 123: pid <= 0 with i32::MAX sig.  Pid check fires before
+    /// sig range check.
+    #[test]
+    fn test_sigqueue_phase123_neg_pid_sig_i32_max_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(-1, i32::MAX, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 123: errno recovery — EINVAL followed by ENOSYS cleanly
+    /// overwrites.
+    #[test]
+    fn test_sigqueue_phase123_recovery_einval_then_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(0, SIGTERM, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(sigqueue(100, SIGUSR1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Phase 123: errno recovery — ENOSYS followed by EINVAL.
+    #[test]
+    fn test_sigqueue_phase123_recovery_enosys_then_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(100, SIGUSR1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(sigqueue(-1, SIGTERM, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 123 workflow: glibc's `sigqueue(3)` from a service
+    /// daemon that misuses `getpid()` returning 0 for an
+    /// unregistered thread state.  pid==0 must surface EINVAL so the
+    /// daemon's error path triggers, not a "no such process" misread.
+    #[test]
+    fn test_sigqueue_phase123_workflow_daemon_self_pid_zero() {
+        crate::errno::set_errno(0);
+        // sig is valid; pid is 0 (programmer mistake — used pid_t
+        // zero-init field without populating it).
+        assert_eq!(sigqueue(0, SIGUSR1, 0xDEAD_BEEF_usize), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 123 workflow: realtime-signal queue from a media
+    /// pipeline — `sigqueue(buddy_pid, SIGRTMIN+3, frame_id)`.  Must
+    /// reach ENOSYS (stub) rather than be misread as ESRCH for a
+    /// supposedly-vanished buddy.
+    #[test]
+    fn test_sigqueue_phase123_workflow_realtime_queue_reaches_enosys() {
+        crate::errno::set_errno(0);
+        let sigrtmin_plus_3 = SIGRTMIN + 3;
+        assert_eq!(sigqueue(4242, sigrtmin_plus_3, 7), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Phase 123 buggy-caller: caller computes `pid = strtol(arg, ..)`
+    /// on a malformed arg, getting `0`.  Subsequent `sigqueue(0,
+    /// SIGTERM, ...)` must EINVAL — not silently target some random
+    /// process group as `kill(2)` would.
+    #[test]
+    fn test_sigqueue_phase123_buggy_caller_strtol_zero_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(0, SIGTERM, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 123 buggy-caller: pid arithmetic underflow.  Subtracting
+    /// from a small pid in a buggy script produces a negative pid;
+    /// must EINVAL.
+    #[test]
+    fn test_sigqueue_phase123_buggy_caller_underflow_pid_einval() {
+        crate::errno::set_errno(0);
+        let bogus_pid: crate::types::PidT = 3_i32.wrapping_sub(10);
+        assert_eq!(sigqueue(bogus_pid, SIGTERM, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 123: pid <= 0 with sig == 0 + arbitrary value param —
+    /// confirms `_value` is ignored by the validation chain.
+    #[test]
+    fn test_sigqueue_phase123_value_ignored_on_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigqueue(-1, 0, usize::MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     // ---- sigtimedwait() ----

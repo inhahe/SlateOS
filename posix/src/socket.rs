@@ -1123,9 +1123,17 @@ pub unsafe extern "C" fn inet_aton(cp: *const u8, inp: *mut u32) -> i32 {
 
 /// Create a socket.
 ///
-/// Only `AF_INET` with `SOCK_STREAM` (TCP) or `SOCK_DGRAM` (UDP) is
-/// supported.  The kernel handle is not created until `connect()` or
+/// `AF_INET` with `SOCK_STREAM` (TCP) or `SOCK_DGRAM` (UDP) is
+/// supported.  `SOCK_RAW` is recognized but not yet implemented
+/// (returns `ENOSYS` with `CAP_NET_RAW`, `EACCES` without).
+/// The kernel handle is not created until `connect()` or
 /// `bind()`/`listen()`.
+///
+/// # Capability gate (Phase 205)
+///
+/// `SOCK_RAW` requires `CAP_NET_RAW`, matching Linux's check inside
+/// `inet_create()`.  Without the cap, `EACCES`; with the cap, `ENOSYS`
+/// (raw socket backend not implemented).
 ///
 /// Returns a file descriptor on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -1176,6 +1184,23 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
                 errno::set_errno(errno::EPROTONOSUPPORT);
                 return -1;
             }
+        }
+        SOCK_RAW => {
+            // Phase 205: Linux gates raw socket creation on
+            // CAP_NET_RAW inside inet_create() (net/ipv4/af_inet.c).
+            // The cap check runs after domain and type validation
+            // but before the actual socket allocation.  Without the
+            // cap, return EACCES (matching Linux's errno for
+            // unprivileged raw socket attempts).  With the cap,
+            // return ENOSYS: raw sockets aren't implemented yet.
+            if !crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_NET_RAW,
+            ) {
+                errno::set_errno(errno::EACCES);
+                return -1;
+            }
+            errno::set_errno(errno::ENOSYS);
+            return -1;
         }
         _ => {
             errno::set_errno(errno::EPROTONOSUPPORT);
@@ -7062,12 +7087,15 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EPROTONOSUPPORT);
     }
 
+    /// Phase 205: SOCK_RAW is now recognized — with CAP_NET_RAW held
+    /// (default), it returns ENOSYS (not implemented) rather than
+    /// EPROTONOSUPPORT (unknown type).
     #[test]
-    fn test_socket_unsupported_type() {
+    fn test_socket_raw_with_cap_enosys() {
         crate::errno::set_errno(0);
         let ret = socket(AF_INET, SOCK_RAW, 0);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EPROTONOSUPPORT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     // -----------------------------------------------------------------------
@@ -7793,5 +7821,192 @@ mod tests {
         };
         assert_eq!(ret, 0, "must succeed after cap restored");
         crate::file::close(fd);
+    }
+
+    // ===================================================================
+    // Phase 205 — CAP_NET_RAW gate on socket(SOCK_RAW)
+    //
+    // Linux gates raw socket creation on CAP_NET_RAW inside inet_create().
+    // SOCK_RAW is now recognized as a valid type: with cap → ENOSYS
+    // (not implemented), without cap → EACCES.
+    // ===================================================================
+
+    mod phase205_cap {
+        pub(super) struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            pub(super) fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        pub(super) fn drop_cap_net_raw() {
+            let cap = crate::sys_capability::CAP_NET_RAW;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << cap);
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed dropping cap");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+    }
+
+    // -- cap held: SOCK_RAW → ENOSYS (not implemented) --------------------
+
+    /// With CAP_NET_RAW (default), socket(SOCK_RAW) → ENOSYS.
+    #[test]
+    fn test_phase205_socket_raw_with_cap_enosys() {
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_NET_RAW,
+        ));
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET, SOCK_RAW, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- cap dropped: SOCK_RAW → EACCES -----------------------------------
+
+    /// Without CAP_NET_RAW, socket(SOCK_RAW) → EACCES.
+    #[test]
+    fn test_phase205_socket_raw_no_cap_eacces() {
+        let _g = phase205_cap::CapGuard::snapshot();
+        phase205_cap::drop_cap_net_raw();
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET, SOCK_RAW, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EACCES);
+    }
+
+    /// Without CAP_NET_RAW, SOCK_RAW with IPPROTO_ICMP → EACCES.
+    #[test]
+    fn test_phase205_socket_raw_icmp_no_cap_eacces() {
+        let _g = phase205_cap::CapGuard::snapshot();
+        phase205_cap::drop_cap_net_raw();
+        crate::errno::set_errno(0);
+        // IPPROTO_ICMP = 1
+        let ret = socket(AF_INET, SOCK_RAW, 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EACCES);
+    }
+
+    // -- other socket types unaffected by cap drop ------------------------
+
+    /// Without CAP_NET_RAW, SOCK_STREAM still works.
+    #[test]
+    fn test_phase205_socket_stream_no_cap_ok() {
+        let _g = phase205_cap::CapGuard::snapshot();
+        phase205_cap::drop_cap_net_raw();
+        let fd = socket(AF_INET, SOCK_STREAM, 0);
+        assert!(fd >= 0, "SOCK_STREAM must not be affected by CAP_NET_RAW drop");
+        crate::file::close(fd);
+    }
+
+    /// Without CAP_NET_RAW, SOCK_DGRAM still works.
+    #[test]
+    fn test_phase205_socket_dgram_no_cap_ok() {
+        let _g = phase205_cap::CapGuard::snapshot();
+        phase205_cap::drop_cap_net_raw();
+        let fd = socket(AF_INET, SOCK_DGRAM, 0);
+        assert!(fd >= 0, "SOCK_DGRAM must not be affected by CAP_NET_RAW drop");
+        crate::file::close(fd);
+    }
+
+    // -- ordering: domain check beats cap check ---------------------------
+
+    /// Bad domain + SOCK_RAW + no cap → EAFNOSUPPORT (domain check first).
+    #[test]
+    fn test_phase205_socket_raw_bad_domain_eafnosupport() {
+        let _g = phase205_cap::CapGuard::snapshot();
+        phase205_cap::drop_cap_net_raw();
+        crate::errno::set_errno(0);
+        let ret = socket(AF_UNIX, SOCK_RAW, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EAFNOSUPPORT,
+            "domain check must precede cap check"
+        );
+    }
+
+    /// Bad flag bits + SOCK_RAW + no cap → EINVAL (flag check first).
+    #[test]
+    fn test_phase205_socket_raw_bad_flags_einval() {
+        let _g = phase205_cap::CapGuard::snapshot();
+        phase205_cap::drop_cap_net_raw();
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET, SOCK_RAW | (1 << 15), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "flag check must precede cap check"
+        );
+    }
+
+    // -- restoration: cap restore re-enables ENOSYS path ------------------
+
+    /// After restoring CAP_NET_RAW, SOCK_RAW returns ENOSYS again.
+    #[test]
+    fn test_phase205_socket_raw_cap_restore() {
+        {
+            let _g = phase205_cap::CapGuard::snapshot();
+            phase205_cap::drop_cap_net_raw();
+            crate::errno::set_errno(0);
+            let ret = socket(AF_INET, SOCK_RAW, 0);
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EACCES);
+        }
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_NET_RAW,
+        ));
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET, SOCK_RAW, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 }

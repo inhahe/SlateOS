@@ -479,6 +479,18 @@ pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, 
 ///
 /// Returns the total number of ready fds across all sets, or -1 on error.
 ///
+/// # Linux semantics
+///
+/// Errno precedence (matches `fs/select.c::core_sys_select`):
+///
+/// 1. `nfds < 0` → EINVAL.
+/// 2. `nfds > max_fds` → **silently clamped** (NOT EINVAL).  Linux
+///    clamps `n` to the process's `fdt->max_fds`; we clamp to
+///    `FD_SETSIZE`, which equals `fdtable::MAX_FDS` (256) so no fd in
+///    our table can ever sit beyond the clamp.
+/// 3. The `timeout` pointer is dereferenced only after the nfds check.
+/// 4. An fd that is set in any input mask but not open → EBADF.
+///
 /// # Safety
 ///
 /// All non-null pointers must point to valid `FdSet` / `Timeval` structures.
@@ -493,10 +505,22 @@ pub unsafe extern "C" fn select(
     // Sleep interval for polling: 10ms (balance responsiveness vs CPU).
     const POLL_INTERVAL_NS: u64 = 10_000_000;
 
-    if nfds < 0 || nfds as usize > FD_SETSIZE {
+    // Phase 155: only `nfds < 0` is EINVAL.  `nfds > FD_SETSIZE` is
+    // silently clamped, matching Linux's `core_sys_select` (fs/select.c)
+    // which sets `n = max_fds` when the caller's `n` exceeds it.
+    if nfds < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // Clamp nfds to FD_SETSIZE.  Our fdtable cannot hold an fd >=
+    // FD_SETSIZE, so iterating past it would just check unset bits.
+    // Doing the clamp here also prevents the inner loop from running
+    // for absurdly large nfds values (e.g. `i32::MAX`).
+    let nfds = if (nfds as usize) > FD_SETSIZE {
+        FD_SETSIZE as i32
+    } else {
+        nfds
+    };
 
     // Compute deadline from timeout.
     // NULL = block indefinitely, {0,0} = non-blocking poll.
@@ -1109,5 +1133,353 @@ mod tests {
         assert!(!is_set_in(65, &set));
         assert!(!is_set_in(129, &set));
         assert!(!is_set_in(193, &set));
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 155 — `select(nfds > FD_SETSIZE)` is no longer EINVAL.
+    //
+    // Linux's `core_sys_select` (fs/select.c) silently clamps `n` to
+    // the process's `fdt->max_fds` when the caller's `n` exceeds it.
+    // We previously returned EINVAL, which diverged from Linux.  The
+    // fix preserves the `nfds < 0 → EINVAL` rule but treats any
+    // larger-than-FD_SETSIZE value as an in-range request capped to
+    // FD_SETSIZE.  All tests below use NULL fdsets + a {0,0} timeout
+    // so the function returns without crossing the syscall boundary —
+    // we exercise only the validation and clamping logic.
+    // -----------------------------------------------------------------
+
+    // -- Per-error-class --------------------------------------------------
+
+    /// `nfds < 0` is still EINVAL after the clamp refactor.
+    #[test]
+    fn test_select_negative_nfds_einval_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let ret = unsafe {
+            select(
+                -1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// `nfds == FD_SETSIZE` is in-range and no longer EINVAL.
+    #[test]
+    fn test_select_nfds_equal_to_setsize_no_longer_einval_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let ret = unsafe {
+            select(
+                FD_SETSIZE as i32,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    /// `nfds == FD_SETSIZE + 1` is silently clamped, not EINVAL.
+    #[test]
+    fn test_select_nfds_one_past_setsize_no_longer_einval_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let ret = unsafe {
+            select(
+                (FD_SETSIZE as i32) + 1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    /// `nfds == i32::MAX` is silently clamped and returns promptly
+    /// (no infinite loop iterating to billions).
+    #[test]
+    fn test_select_nfds_i32_max_clamped_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let ret = unsafe {
+            select(
+                i32::MAX,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    // -- Ordering matrix --------------------------------------------------
+
+    /// `nfds < 0` takes precedence over an oversized nfds magnitude:
+    /// the sign check fires before the clamp can mask it.
+    #[test]
+    fn test_select_negative_beats_oversize_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        // `i32::MIN` is both negative and oversized in magnitude.
+        let ret = unsafe {
+            select(
+                i32::MIN,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Oversized nfds + NULL timeout would have hit the indefinite-block
+    /// path; but with a `{0,0}` timeval it must return 0 immediately.
+    /// Verifies the clamp completes before the timeout dispatch.
+    #[test]
+    fn test_select_oversize_nfds_nonblocking_returns_zero_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let ret = unsafe {
+            select(
+                10_000,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, 0);
+    }
+
+    // -- Workflow ---------------------------------------------------------
+
+    /// Caller passes a sensible mid-range value (e.g. 32 fds).  Validates
+    /// the common path is unaffected by the Phase 155 refactor.
+    #[test]
+    fn test_select_typical_nfds_unchanged_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let ret = unsafe {
+            select(
+                32,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    /// `nfds == 0` returns 0 without inspecting any fds — also unchanged
+    /// by Phase 155 but verified to make sure the clamp didn't break it.
+    #[test]
+    fn test_select_zero_nfds_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let ret = unsafe {
+            select(
+                0,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    // -- Buggy-caller -----------------------------------------------------
+
+    /// Glibc-style caller mistakenly passes FD_SETSIZE * 4 because they
+    /// confused the bit-set size with the byte size.  Linux silently
+    /// clamps; we must too.
+    #[test]
+    fn test_select_glibc_size_confusion_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let ret = unsafe {
+            select(
+                (FD_SETSIZE * 4) as i32,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    /// Caller passes `1` with a `{0,0}` timeout — minimal smoke check
+    /// that the lower bound of the now-uncapped nfds range works.
+    #[test]
+    fn test_select_nfds_one_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let ret = unsafe {
+            select(
+                1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    // -- Recovery / no-side-effect loop -----------------------------------
+
+    /// The oversized-nfds path must not set errno on success.  A leftover
+    /// errno from a previous call must be preserved (Phase 155 keeps the
+    /// "no side effects on success" Linux invariant).
+    #[test]
+    fn test_select_oversize_does_not_clobber_errno_phase155() {
+        // Seed a sentinel errno that would have been overwritten if the
+        // old EINVAL path still fired.
+        crate::errno::set_errno(crate::errno::EIO);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let ret = unsafe {
+            select(
+                (FD_SETSIZE as i32) + 100,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, 0);
+        // errno preserved at the EIO sentinel — proves success path
+        // didn't touch errno.
+        assert_eq!(crate::errno::get_errno(), crate::errno::EIO);
+    }
+
+    /// Re-issuing select() after an EINVAL still works (errno isn't
+    /// latched into the state machine).
+    #[test]
+    fn test_select_recover_after_einval_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let _ = unsafe {
+            select(
+                -1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // Now retry with a sane oversized nfds — should silently clamp.
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            select(
+                (FD_SETSIZE as i32) + 1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    // -- Sentinel ---------------------------------------------------------
+
+    /// Explicit sentinel: the old `nfds > FD_SETSIZE → EINVAL` behaviour
+    /// has been removed.  If a future regression re-introduces it this
+    /// test fails loudly.
+    #[test]
+    fn test_select_oversize_nfds_no_longer_einval_phase155() {
+        crate::errno::set_errno(0);
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let ret = unsafe {
+            select(
+                (FD_SETSIZE as i32) + 1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw mut tv,
+            )
+        };
+        // Pre-Phase-155: ret == -1 && errno == EINVAL.
+        // Post-Phase-155: ret == 0 && errno untouched.
+        assert_ne!(ret, -1, "oversize nfds must no longer return -1");
+        assert_ne!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "oversize nfds must no longer set EINVAL"
+        );
+    }
+
+    // -- Cross-checks -----------------------------------------------------
+
+    /// `pselect` delegates to `select` and so inherits the clamp.
+    /// Verify the oversized-nfds path produces no error through pselect.
+    #[test]
+    fn test_pselect_inherits_select_nfds_clamp_phase155() {
+        crate::errno::set_errno(0);
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = unsafe {
+            pselect(
+                (FD_SETSIZE as i32) + 1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw const ts,
+                core::ptr::null(),
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    /// `pselect` with `nfds < 0` still produces EINVAL via select.
+    #[test]
+    fn test_pselect_negative_nfds_einval_phase155() {
+        crate::errno::set_errno(0);
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = unsafe {
+            pselect(
+                -1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                &raw const ts,
+                core::ptr::null(),
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Clamp boundary equals the `FD_SETSIZE == fdtable::MAX_FDS`
+    /// invariant — if either constant moves, this test surfaces the
+    /// inconsistency.
+    #[test]
+    fn test_select_clamp_matches_fd_setsize_max_fds_invariant_phase155() {
+        assert_eq!(
+            FD_SETSIZE,
+            fdtable::MAX_FDS,
+            "Phase 155 clamp assumes FD_SETSIZE == fdtable::MAX_FDS"
+        );
     }
 }

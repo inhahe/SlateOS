@@ -1124,7 +1124,19 @@ pub extern "C" fn mount(
         }
     }
 
-    // All arguments validated; VFS/mount subsystem not implemented.
+    // (8) may_mount → EPERM (Phase 165).  Linux's path_mount checks
+    //     this *after* path resolution and the MS_NOUSER / security
+    //     hook, so an unprivileged caller with bad path or unknown
+    //     flag bits still sees the argument errno — only well-formed
+    //     calls trip EPERM.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_ADMIN,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    // All arguments validated and caller is privileged; VFS/mount
+    // subsystem not implemented.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -1175,14 +1187,19 @@ unsafe fn umount_cstr_len(s: *const u8, max: usize) -> Option<usize> {
 ///
 /// `umount(const char *target)` (Linux's old single-arg form, kept for
 /// backward compat with libc; `umount(8)` actually calls `umount2`).
-/// Argument checks:
+/// Linux dispatches this through `ksys_umount(target, 0)`, where the
+/// flag-mask check passes vacuously and `may_mount()` runs *before*
+/// the user-pointer is dereferenced.
 ///
-/// * `target == NULL`                         → `EFAULT`
-/// * `*target == 0` (empty path)              → `ENOENT`
-/// * not NUL-terminated within `PATH_MAX`     → `ENAMETOOLONG`
+/// Argument checks, in Linux order:
 ///
-/// After path validation we return `ENOSYS` because no filesystem-
-/// namespace subsystem is wired up here.
+/// 1. `!may_mount()` (CAP_SYS_ADMIN)          → `EPERM`  (Phase 165)
+/// 2. `target == NULL`                         → `EFAULT`
+/// 3. `*target == 0` (empty path)              → `ENOENT`
+/// 4. not NUL-terminated within `PATH_MAX`     → `ENAMETOOLONG`
+///
+/// After argument and capability validation we return `ENOSYS`
+/// because no filesystem-namespace subsystem is wired up here.
 ///
 /// # Safety
 ///
@@ -1190,6 +1207,15 @@ unsafe fn umount_cstr_len(s: *const u8, max: usize) -> Option<usize> {
 /// or to at least `UMOUNT_PATH_MAX + 1` readable bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn umount(target: *const u8) -> i32 {
+    // 1. may_mount → EPERM.  Phase 165: Linux performs this before
+    //    user_path_at, so an unprivileged caller never learns whether
+    //    `target` is mapped or empty.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_ADMIN,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
     if target.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -1225,11 +1251,13 @@ pub extern "C" fn umount(target: *const u8) -> i32 {
 /// them in `fs/namespace.c::ksys_umount` / `path_umount`:
 ///
 /// 1. `flags & ~UMOUNT2_FLAGS_VALID`                   → `EINVAL`
-///    Linux performs this check *before* `user_path_at`, so an
-///    unknown flag bit beats every path-related errno (including
-///    NULL-pointer EFAULT and empty-path ENOENT).
-/// 2. (Capability check `may_mount` → `EPERM` — skipped here, we
-///    have no cred model yet.)
+///    Linux performs this check *before* `may_mount`, so an unknown
+///    flag bit beats every other error (including EPERM).
+/// 2. `!may_mount()` (CAP_SYS_ADMIN)                   → `EPERM`
+///    (Phase 165.)  Linux's `ksys_umount` checks this between the
+///    flag mask and `user_path_at`, so an unprivileged caller with
+///    a well-formed flag word gets EPERM regardless of the target
+///    pointer.
 /// 3. `target == NULL`                                 → `EFAULT`
 ///    Linux: `user_path_at → getname → strncpy_from_user` on a NULL
 ///    user pointer returns `-EFAULT`.
@@ -1256,12 +1284,22 @@ pub extern "C" fn umount2(target: *const u8, flags: i32) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // 2. NULL target → EFAULT (Linux: getname/strncpy_from_user).
+    // 2. may_mount → EPERM (Phase 165).  Linux's ksys_umount checks
+    //    this between the flag mask and user_path_at, so a clean
+    //    flag word + unprivileged caller short-circuits to EPERM
+    //    before the target pointer is inspected.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_ADMIN,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    // 3. NULL target → EFAULT (Linux: getname/strncpy_from_user).
     if target.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // 3. Path string validation.  SAFETY: same contract as umount above.
+    // 4. Path string validation.  SAFETY: same contract as umount above.
     let len = unsafe { umount_cstr_len(target, UMOUNT_PATH_MAX) };
     match len {
         None => {
@@ -1274,7 +1312,7 @@ pub extern "C" fn umount2(target: *const u8, flags: i32) -> i32 {
         }
         Some(_) => {}
     }
-    // 4. MNT_EXPIRE is mutually exclusive with MNT_FORCE and MNT_DETACH
+    // 5. MNT_EXPIRE is mutually exclusive with MNT_FORCE and MNT_DETACH
     //    (Linux's `do_umount`, after path resolution).
     if (flags & crate::sys_mount::MNT_EXPIRE) != 0
         && (flags
@@ -7167,6 +7205,481 @@ mod tests {
         );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 165: mount / umount / umount2 — may_mount CAP_SYS_ADMIN gate
+    //
+    // Linux's `fs/namespace.c::ksys_umount` checks `may_mount()`
+    // (which is `ns_capable(mnt_ns->user_ns, CAP_SYS_ADMIN)`) between
+    // the flag-mask check and `user_path_at` — i.e. EINVAL beats
+    // EPERM beats every path-related errno.  `mount(2)` resolves the
+    // target path *before* checking `may_mount` in `path_mount`, so
+    // EPERM follows all argument-domain errors but precedes ENOSYS.
+    //
+    // Pre-Phase-165 these stubs skipped the cap check entirely (the
+    // doc comments said "skipped — no cred model yet"), so a process
+    // that had dropped CAP_SYS_ADMIN could probe the path-validation
+    // lattice instead of seeing the unconditional EPERM Linux returns.
+    // -----------------------------------------------------------------
+
+    mod mount_cap_phase165 {
+        use super::*;
+        use crate::sys_mount::{MNT_DETACH, MNT_EXPIRE, MNT_FORCE};
+
+        /// Snapshot/restore-on-drop guard mirroring sys_reboot
+        /// Phase 77 and unistd swap_cap_phase164.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_admin() {
+            use crate::sys_capability::CAP_SYS_ADMIN;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_ADMIN < 32 {
+                (lo & !(1u32 << CAP_SYS_ADMIN), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_ADMIN");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
+        }
+
+        // -- Per-error-class --------------------------------------------------
+
+        /// `umount("/mnt")` with no CAP_SYS_ADMIN must return EPERM,
+        /// not the ENOSYS the stub used to return.
+        #[test]
+        fn test_umount_phase165_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(umount(b"/mnt\0".as_ptr()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// Same for `umount2("/mnt", 0)`.
+        #[test]
+        fn test_umount2_phase165_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(umount2(b"/mnt\0".as_ptr(), 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// `mount(...)` with no CAP_SYS_ADMIN must return EPERM once
+        /// all arguments validate.  Linux checks `may_mount` after
+        /// path resolution — our stub mirrors that by checking after
+        /// every argument check.
+        #[test]
+        fn test_mount_phase165_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            let ret = mount(
+                b"/dev/sda1\0".as_ptr(),
+                b"/mnt\0".as_ptr(),
+                b"ext4\0".as_ptr(),
+                0,
+                core::ptr::null(),
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        // -- Ordering matrix --------------------------------------------------
+
+        /// `umount` with no cap: EPERM beats EFAULT for a NULL path
+        /// (Linux: may_mount runs before user_path_at).
+        #[test]
+        fn test_umount_phase165_eperm_beats_efault_null_path() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(umount(core::ptr::null()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// `umount` with no cap: EPERM beats ENOENT for an empty path.
+        #[test]
+        fn test_umount_phase165_eperm_beats_enoent_empty_path() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(umount(b"\0".as_ptr()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// `umount2` with no cap and bad flag bit: EINVAL beats
+        /// EPERM (Linux performs the flag mask check *before*
+        /// may_mount).
+        #[test]
+        fn test_umount2_phase165_einval_beats_eperm_bad_flag() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                umount2(b"/mnt\0".as_ptr(), 0x100),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        /// `umount2` with no cap and the i32::MIN sign bit: EINVAL
+        /// still beats EPERM, because the flag check is first.
+        #[test]
+        fn test_umount2_phase165_einval_beats_eperm_high_bit() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(umount2(b"/mnt\0".as_ptr(), i32::MIN), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        /// `umount2` with no cap, clean flags, NULL path: EPERM beats
+        /// EFAULT (the cap check runs between the flag mask and the
+        /// path lookup).
+        #[test]
+        fn test_umount2_phase165_eperm_beats_efault_null_path() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(umount2(core::ptr::null(), 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// `umount2` with no cap, clean flags, empty path: EPERM
+        /// beats ENOENT.
+        #[test]
+        fn test_umount2_phase165_eperm_beats_enoent_empty_path() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(umount2(b"\0".as_ptr(), MNT_DETACH), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// `umount2` no cap + clean flags + MNT_EXPIRE+MNT_FORCE
+        /// combo: EPERM still beats the late EINVAL combo check
+        /// because may_mount runs before path resolution.
+        #[test]
+        fn test_umount2_phase165_eperm_beats_late_einval_combo() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                umount2(b"/mnt\0".as_ptr(), MNT_EXPIRE | MNT_FORCE),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// `mount` no cap + bad flag bit: EINVAL beats EPERM (flag
+        /// check runs first in our stub, matching Linux's MS_NOUSER /
+        /// path_mount basic-sanity ordering).
+        #[test]
+        fn test_mount_phase165_einval_beats_eperm_bad_flag() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            let ret = mount(
+                b"/dev/sda1\0".as_ptr(),
+                b"/mnt\0".as_ptr(),
+                b"ext4\0".as_ptr(),
+                1u64 << 30,
+                core::ptr::null(),
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        /// `mount` no cap + NULL target: EFAULT beats EPERM (target
+        /// path lookup runs before may_mount on Linux).
+        #[test]
+        fn test_mount_phase165_efault_beats_eperm_null_target() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            let ret = mount(
+                b"/dev/sda1\0".as_ptr(),
+                core::ptr::null(),
+                b"ext4\0".as_ptr(),
+                0,
+                core::ptr::null(),
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
+
+        /// `mount` no cap + empty target: ENOENT beats EPERM.
+        #[test]
+        fn test_mount_phase165_enoent_beats_eperm_empty_target() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            let ret = mount(
+                b"/dev/sda1\0".as_ptr(),
+                b"\0".as_ptr(),
+                b"ext4\0".as_ptr(),
+                0,
+                core::ptr::null(),
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+        }
+
+        // -- Workflow ---------------------------------------------------------
+
+        /// Workflow: un-suid'd `mount -t tmpfs none /tmp/foo` from a
+        /// container with CAP_SYS_ADMIN dropped — Linux returns
+        /// EPERM, we now do too.
+        #[test]
+        fn test_mount_phase165_workflow_unprivileged_container_mount() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            let ret = mount(
+                b"none\0".as_ptr(),
+                b"/tmp/foo\0".as_ptr(),
+                b"tmpfs\0".as_ptr(),
+                0,
+                core::ptr::null(),
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// Workflow: a user-level `umount -l /mnt/usb` (MNT_DETACH)
+        /// after caps were dropped — returns EPERM.
+        #[test]
+        fn test_umount2_phase165_workflow_user_lazy_umount() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                umount2(b"/mnt/usb\0".as_ptr(), MNT_DETACH),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        // -- Buggy-caller -----------------------------------------------------
+
+        /// Buggy caller: a program that forgot to set up its cred and
+        /// calls umount with garbage flag bits — they still get EINVAL
+        /// (the flag mask runs first), regardless of caps.
+        #[test]
+        fn test_umount2_phase165_buggy_caller_garbage_flags_no_cap() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(umount2(b"/mnt\0".as_ptr(), -1), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        // -- Recovery ---------------------------------------------------------
+
+        /// After EPERM, restoring CAP_SYS_ADMIN lets the next umount
+        /// reach ENOSYS for a well-formed path.
+        #[test]
+        fn test_umount_phase165_recovery_after_eperm_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(umount(b"/mnt\0".as_ptr()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            drop(_g);
+            crate::errno::set_errno(0);
+            assert_eq!(umount(b"/mnt\0".as_ptr()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        /// After EPERM, restoring CAP_SYS_ADMIN lets the next umount2
+        /// surface the late EINVAL combo check (proving the cap check
+        /// no longer short-circuits the deeper validators).
+        #[test]
+        fn test_umount2_phase165_recovery_after_eperm_late_einval() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                umount2(b"/mnt\0".as_ptr(), MNT_EXPIRE | MNT_FORCE),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            drop(_g);
+            crate::errno::set_errno(0);
+            assert_eq!(
+                umount2(b"/mnt\0".as_ptr(), MNT_EXPIRE | MNT_FORCE),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        // -- Sentinels --------------------------------------------------------
+
+        /// Pre-Phase-165 stub returned ENOSYS for `umount` regardless
+        /// of caps.  This sentinel locks the new contract.
+        #[test]
+        fn test_umount_phase165_no_longer_silently_skips_cap_check() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(umount(b"/mnt\0".as_ptr()), -1);
+            assert_ne!(crate::errno::get_errno(), crate::errno::ENOSYS,
+                "Pre-Phase-165: unprivileged caller saw ENOSYS — \
+                 may_mount check missing.");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// Sentinel for mount: pre-Phase-165 returned ENOSYS for
+        /// argument-clean calls regardless of caps.
+        #[test]
+        fn test_mount_phase165_no_longer_silently_skips_cap_check() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            let ret = mount(
+                b"/dev/sda1\0".as_ptr(),
+                b"/mnt\0".as_ptr(),
+                b"ext4\0".as_ptr(),
+                0,
+                core::ptr::null(),
+            );
+            assert_eq!(ret, -1);
+            assert_ne!(crate::errno::get_errno(), crate::errno::ENOSYS,
+                "Pre-Phase-165: unprivileged caller saw ENOSYS — \
+                 may_mount check missing.");
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        // -- Cross-checks -----------------------------------------------------
+
+        /// All three syscalls share the same EPERM precedence for a
+        /// stripped-cap caller with otherwise-valid arguments.
+        #[test]
+        fn test_mount_umount_umount2_phase165_share_eperm_precedence() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+
+            crate::errno::set_errno(0);
+            let mret = mount(
+                b"/dev/sda1\0".as_ptr(),
+                b"/mnt\0".as_ptr(),
+                b"ext4\0".as_ptr(),
+                0,
+                core::ptr::null(),
+            );
+            assert_eq!(mret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+
+            crate::errno::set_errno(0);
+            assert_eq!(umount(b"/mnt\0".as_ptr()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+
+            crate::errno::set_errno(0);
+            assert_eq!(umount2(b"/mnt\0".as_ptr(), MNT_FORCE), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// Regression: default-cap caller still gets ENOSYS for clean
+        /// umount.  Confirms Phase 165 doesn't over-gate.
+        #[test]
+        fn test_umount_phase165_capable_default_still_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            crate::errno::set_errno(0);
+            assert_eq!(umount(b"/mnt\0".as_ptr()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        /// Regression: default-cap caller still gets EINVAL for bad
+        /// umount2 flag, proving the EINVAL→EPERM ordering only
+        /// applies to the stripped-cap case.
+        #[test]
+        fn test_umount2_phase165_capable_default_still_reaches_einval() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            crate::errno::set_errno(0);
+            assert_eq!(umount2(b"/mnt\0".as_ptr(), 0x100), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        /// Regression: default-cap mount still surfaces EFAULT for a
+        /// NULL target.
+        #[test]
+        fn test_mount_phase165_capable_default_still_reaches_efault() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            crate::errno::set_errno(0);
+            let ret = mount(
+                b"/dev/sda1\0".as_ptr(),
+                core::ptr::null(),
+                b"ext4\0".as_ptr(),
+                0,
+                core::ptr::null(),
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
     }
 
     // -----------------------------------------------------------------

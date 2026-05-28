@@ -958,12 +958,38 @@ pub fn timerfd_is_nonblock(idx: u64) -> bool {
 
 /// Create a timerfd file descriptor.
 ///
-/// `clockid` is accepted for API compatibility but all timerfds use the
-/// monotonic clock (see module note).  Valid `flags`: `TFD_CLOEXEC`,
-/// `TFD_NONBLOCK`.
+/// `clockid` is validated per Linux semantics
+/// (kernel/time/timerfd.c::SYSCALL_DEFINE2(timerfd_create)):
+/// only `CLOCK_REALTIME`, `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME`,
+/// `CLOCK_REALTIME_ALARM`, and `CLOCK_BOOTTIME_ALARM` are accepted;
+/// any other value (including the otherwise-valid CLOCK_TAI,
+/// CLOCK_PROCESS_CPUTIME_ID, etc.) yields EINVAL.
+/// Internally all timerfds use the monotonic clock (see module note),
+/// but the prologue still enforces the Linux-shaped surface so callers
+/// see the same error for the same wrong input.
+///
+/// Valid `flags`: `TFD_CLOEXEC`, `TFD_NONBLOCK`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn timerfd_create(_clockid: i32, flags: i32) -> i32 {
+pub extern "C" fn timerfd_create(clockid: i32, flags: i32) -> i32 {
     if flags & !(TFD_CLOEXEC | TFD_NONBLOCK) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Linux's accepted clockid set for timerfd_create.  These are the
+    // only values the upstream switch in `timerfd_setup` recognises;
+    // anything else (including CLOCK_PROCESS_CPUTIME_ID,
+    // CLOCK_THREAD_CPUTIME_ID, CLOCK_TAI, and any garbage integer) is
+    // rejected with EINVAL.
+    const CLOCK_REALTIME_ALARM_I32: i32 = 8;
+    const CLOCK_BOOTTIME_ALARM_I32: i32 = 9;
+    let clockid_ok = matches!(
+        clockid,
+        crate::time::CLOCK_REALTIME
+            | crate::time::CLOCK_MONOTONIC
+            | crate::time::CLOCK_BOOTTIME
+    ) || clockid == CLOCK_REALTIME_ALARM_I32
+        || clockid == CLOCK_BOOTTIME_ALARM_I32;
+    if !clockid_ok {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -2923,6 +2949,143 @@ mod tests {
         let fd = timerfd_create(1, 0xDEAD_BEEFu32 as i32);
         assert_eq!(fd, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -- Phase 93: clockid validation --
+
+    #[test]
+    fn test_timerfd_create_phase93_clock_realtime_accepted() {
+        errno::set_errno(0);
+        let fd = timerfd_create(crate::time::CLOCK_REALTIME, 0);
+        assert!(fd >= 0);
+        assert_ne!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_clock_monotonic_accepted() {
+        errno::set_errno(0);
+        let fd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        assert!(fd >= 0);
+        assert_ne!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_clock_boottime_accepted() {
+        errno::set_errno(0);
+        let fd = timerfd_create(crate::time::CLOCK_BOOTTIME, 0);
+        assert!(fd >= 0);
+        assert_ne!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_clock_realtime_alarm_accepted() {
+        // CLOCK_REALTIME_ALARM = 8.
+        errno::set_errno(0);
+        let fd = timerfd_create(8, 0);
+        assert!(fd >= 0);
+        assert_ne!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_clock_boottime_alarm_accepted() {
+        // CLOCK_BOOTTIME_ALARM = 9.
+        errno::set_errno(0);
+        let fd = timerfd_create(9, 0);
+        assert!(fd >= 0);
+        assert_ne!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_clock_process_cputime_rejected() {
+        // CLOCK_PROCESS_CPUTIME_ID = 2.  Valid clock_gettime clock,
+        // NOT a valid timerfd_create clock — Linux rejects it.
+        errno::set_errno(0);
+        let fd = timerfd_create(crate::time::CLOCK_PROCESS_CPUTIME_ID, 0);
+        assert_eq!(fd, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_clock_thread_cputime_rejected() {
+        // CLOCK_THREAD_CPUTIME_ID = 3.
+        errno::set_errno(0);
+        let fd = timerfd_create(crate::time::CLOCK_THREAD_CPUTIME_ID, 0);
+        assert_eq!(fd, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_clock_monotonic_raw_rejected() {
+        // CLOCK_MONOTONIC_RAW = 4.  Valid for clock_gettime but not
+        // for timerfd_create (no kernel support for it as a timer base).
+        errno::set_errno(0);
+        let fd = timerfd_create(crate::time::CLOCK_MONOTONIC_RAW, 0);
+        assert_eq!(fd, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_clock_realtime_coarse_rejected() {
+        // CLOCK_REALTIME_COARSE = 5.
+        errno::set_errno(0);
+        let fd = timerfd_create(crate::time::CLOCK_REALTIME_COARSE, 0);
+        assert_eq!(fd, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_clock_tai_rejected() {
+        // CLOCK_TAI = 11.  Not accepted by Linux timerfd_create.
+        errno::set_errno(0);
+        let fd = timerfd_create(11, 0);
+        assert_eq!(fd, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_negative_clockid_rejected() {
+        errno::set_errno(0);
+        let fd = timerfd_create(-1, 0);
+        assert_eq!(fd, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_garbage_clockid_rejected() {
+        errno::set_errno(0);
+        let fd = timerfd_create(9999, 0);
+        assert_eq!(fd, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_flag_check_beats_clockid_check() {
+        // Both bad → EINVAL.  Order matches Linux: flags first.
+        // (Both return EINVAL, but the function returns from the flag
+        // branch first — easier to maintain a single error pathway.)
+        errno::set_errno(0);
+        let fd = timerfd_create(9999, 0xDEAD_BEEFu32 as i32);
+        assert_eq!(fd, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timerfd_create_phase93_einval_then_valid_progression() {
+        // CLOCK_TAI = 11 is not in `crate::time`; use the literal.
+        errno::set_errno(0);
+        let bad = timerfd_create(11, 0);
+        assert_eq!(bad, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        errno::set_errno(0);
+        let good = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        assert!(good >= 0);
+        crate::file::close(good);
     }
 
     #[test]

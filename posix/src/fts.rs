@@ -616,7 +616,7 @@ pub extern "C" fn fts_open(
     >,
 ) -> *mut Fts {
     if path_argv.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return core::ptr::null_mut();
     }
     // Exactly one of FTS_LOGICAL / FTS_PHYSICAL is required.
@@ -1014,7 +1014,7 @@ pub extern "C" fn fts_set(
         return -1;
     };
     if f.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     if !matches!(instr, FTS_SKIP | FTS_AGAIN | FTS_FOLLOW | FTS_NOINSTR) {
@@ -1161,11 +1161,11 @@ mod tests {
     // -- fts_open argument validation -- ------------------------------------
 
     #[test]
-    fn test_fts_open_null_argv_einval() {
+    fn test_fts_open_null_argv_efault() {
         errno::set_errno(0);
         let r = fts_open(core::ptr::null(), FTS_PHYSICAL, None);
         assert!(r.is_null());
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -1240,7 +1240,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fts_set_null_ent_einval() {
+    fn test_fts_set_null_ent_efault() {
         let path = b"/\0".as_ptr();
         let argv: [*const u8; 2] = [path, core::ptr::null()];
         let r = fts_open(argv.as_ptr(), FTS_PHYSICAL, None);
@@ -1249,7 +1249,7 @@ mod tests {
         }
         errno::set_errno(0);
         assert_eq!(fts_set(r, core::ptr::null_mut(), FTS_SKIP), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
         fts_close(r);
     }
 

@@ -352,7 +352,7 @@ pub extern "C" fn scandir(
     compar: Option<extern "C" fn(*const *const Dirent, *const *const Dirent) -> i32>,
 ) -> i32 {
     if dirname.is_null() || namelist.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -499,7 +499,7 @@ pub extern "C" fn readdir_r(
     result: *mut *mut Dirent,
 ) -> i32 {
     if dirp.is_null() || entry.is_null() || result.is_null() {
-        return errno::EINVAL;
+        return errno::EFAULT;
     }
 
     let ent = readdir(dirp);
@@ -1106,7 +1106,7 @@ pub extern "C" fn scandirat(
     compar: Option<extern "C" fn(*const *const Dirent, *const *const Dirent) -> i32>,
 ) -> i32 {
     if dirname.is_null() || namelist.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -1447,7 +1447,7 @@ mod tests {
         };
         let mut result: *mut Dirent = core::ptr::null_mut();
         let ret = readdir_r(core::ptr::null_mut(), &raw mut entry, &raw mut result);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1456,7 +1456,7 @@ mod tests {
         let fake_dirp = 0x1000 as *mut Dir;
         let mut result: *mut Dirent = core::ptr::null_mut();
         let ret = readdir_r(fake_dirp, core::ptr::null_mut(), &raw mut result);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1467,7 +1467,7 @@ mod tests {
             d_name: [0u8; 256],
         };
         let ret = readdir_r(fake_dirp, &raw mut entry, core::ptr::null_mut());
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     // -- scandir null pointer handling --
@@ -1482,7 +1482,7 @@ mod tests {
             None,
         );
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -1494,7 +1494,7 @@ mod tests {
             None,
         );
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     // -- fdopendir error handling --
@@ -1557,14 +1557,14 @@ mod tests {
         };
         let mut result: *mut Dirent = core::ptr::null_mut();
         let ret = unsafe { readdir_r64(core::ptr::null_mut(), &mut entry, &mut result) };
-        assert_eq!(ret, crate::errno::EINVAL);
+        assert_eq!(ret, crate::errno::EFAULT);
     }
 
     #[test]
     fn test_readdir_r64_null_entry() {
         let mut result: *mut Dirent = core::ptr::null_mut();
         let ret = unsafe { readdir_r64(core::ptr::null_mut(), core::ptr::null_mut(), &mut result) };
-        assert_eq!(ret, crate::errno::EINVAL);
+        assert_eq!(ret, crate::errno::EFAULT);
     }
 
     #[test]
@@ -1641,7 +1641,7 @@ mod tests {
             None,
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -1655,7 +1655,7 @@ mod tests {
             None,
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]

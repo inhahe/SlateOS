@@ -285,7 +285,7 @@ pub unsafe extern "C" fn getpwnam_r(
     result: *mut *const Passwd,
 ) -> i32 {
     if result.is_null() || pwd.is_null() || buf.is_null() {
-        return crate::errno::EINVAL;
+        return crate::errno::EFAULT;
     }
 
     // Default: not found.
@@ -315,7 +315,7 @@ pub unsafe extern "C" fn getpwuid_r(
     result: *mut *const Passwd,
 ) -> i32 {
     if result.is_null() || pwd.is_null() || buf.is_null() {
-        return crate::errno::EINVAL;
+        return crate::errno::EFAULT;
     }
 
     unsafe { *result = core::ptr::null(); }
@@ -337,7 +337,7 @@ pub unsafe extern "C" fn getgrnam_r(
     result: *mut *const Group,
 ) -> i32 {
     if result.is_null() || grp.is_null() || buf.is_null() {
-        return crate::errno::EINVAL;
+        return crate::errno::EFAULT;
     }
 
     unsafe { *result = core::ptr::null(); }
@@ -364,7 +364,7 @@ pub unsafe extern "C" fn getgrgid_r(
     result: *mut *const Group,
 ) -> i32 {
     if result.is_null() || grp.is_null() || buf.is_null() {
-        return crate::errno::EINVAL;
+        return crate::errno::EFAULT;
     }
 
     unsafe { *result = core::ptr::null(); }
@@ -781,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn getpwnam_r_null_args_einval() {
+    fn getpwnam_r_null_args_efault() {
         reset_state();
         let mut pwd: Passwd = unsafe { core::mem::zeroed() };
         let mut buf = [0u8; 128];
@@ -797,7 +797,7 @@ mod tests {
                 core::ptr::null_mut(),
             )
         };
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
 
         // Null pwd pointer.
         let ret = unsafe {
@@ -809,7 +809,7 @@ mod tests {
                 &mut result,
             )
         };
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
 
         // Null buf pointer.
         let ret = unsafe {
@@ -821,7 +821,7 @@ mod tests {
                 &mut result,
             )
         };
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]

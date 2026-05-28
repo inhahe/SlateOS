@@ -261,7 +261,7 @@ pub extern "C" fn posix_spawn_file_actions_init(
     acts: *mut PosixSpawnFileActionsT,
 ) -> i32 {
     if acts.is_null() {
-        return errno::EINVAL;
+        return errno::EFAULT;
     }
     // SAFETY: `acts` is non-null and caller guarantees it points to
     // writable memory of at least `size_of::<PosixSpawnFileActionsT>()`.
@@ -300,7 +300,10 @@ pub extern "C" fn posix_spawn_file_actions_addclose(
     acts: *mut PosixSpawnFileActionsT,
     fd: Fd,
 ) -> i32 {
-    if acts.is_null() || fd < 0 {
+    if acts.is_null() {
+        return errno::EFAULT;
+    }
+    if fd < 0 {
         return errno::EINVAL;
     }
     // SAFETY: acts is non-null (checked above).
@@ -324,7 +327,10 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
     fd: Fd,
     newfd: Fd,
 ) -> i32 {
-    if acts.is_null() || fd < 0 || newfd < 0 {
+    if acts.is_null() {
+        return errno::EFAULT;
+    }
+    if fd < 0 || newfd < 0 {
         return errno::EINVAL;
     }
     // SAFETY: acts is non-null (checked above).
@@ -351,7 +357,10 @@ pub extern "C" fn posix_spawn_file_actions_addopen(
     oflag: i32,
     mode: ModeT,
 ) -> i32 {
-    if acts.is_null() || path.is_null() || fd < 0 {
+    if acts.is_null() || path.is_null() {
+        return errno::EFAULT;
+    }
+    if fd < 0 {
         return errno::EINVAL;
     }
     // SAFETY: acts and path are non-null (checked above).
@@ -403,7 +412,7 @@ pub extern "C" fn posix_spawn_file_actions_addchdir_np(
     path: *const u8,
 ) -> i32 {
     if acts.is_null() || path.is_null() {
-        return errno::EINVAL;
+        return errno::EFAULT;
     }
     let a = unsafe { &mut *acts };
     if a.count >= MAX_FILE_ACTIONS {
@@ -448,7 +457,7 @@ pub extern "C" fn posix_spawn_file_actions_addclosefrom_np(
     lowfd: i32,
 ) -> i32 {
     if acts.is_null() {
-        return errno::EINVAL;
+        return errno::EFAULT;
     }
     if lowfd < 0 {
         return errno::EBADF;
@@ -534,7 +543,7 @@ pub extern "C" fn posix_spawnattr_init(
     attr: *mut PosixSpawnattrT,
 ) -> i32 {
     if attr.is_null() {
-        return errno::EINVAL;
+        return errno::EFAULT;
     }
     // SAFETY: attr is non-null (checked above).
     unsafe {
@@ -554,15 +563,15 @@ pub extern "C" fn posix_spawnattr_destroy(
 
 /// Set flags on a spawn attributes object.
 ///
-/// Returns `EINVAL` if any bit outside `POSIX_SPAWN_VALID_FLAGS` is set
-/// in `flags`, or if `attr` is null.  This matches POSIX:
+/// Returns `EFAULT` if `attr` is null, or `EINVAL` if any bit outside
+/// `POSIX_SPAWN_VALID_FLAGS` is set in `flags`.  This matches POSIX:
 ///
 /// > If the value of the attribute being set is not valid,
 /// > posix_spawnattr_setflags() shall return [EINVAL].
 ///
 /// and glibc's `__POSIX_SPAWN_MASK` validation.  We validate the null
 /// pointer first so a caller passing a junk attribute alongside a
-/// bogus flag word still gets the more informative `EINVAL` for
+/// bogus flag word still gets the more informative `EFAULT` for
 /// `attr` rather than silently storing into garbage memory.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_spawnattr_setflags(
@@ -570,7 +579,7 @@ pub extern "C" fn posix_spawnattr_setflags(
     flags: i16,
 ) -> i32 {
     if attr.is_null() {
-        return errno::EINVAL;
+        return errno::EFAULT;
     }
     // Reject any bit outside the accepted mask.  Using bitwise-AND
     // against the inverted mask avoids assumptions about sign — the
@@ -590,7 +599,7 @@ pub extern "C" fn posix_spawnattr_getflags(
     flags: *mut i16,
 ) -> i32 {
     if attr.is_null() || flags.is_null() {
-        return errno::EINVAL;
+        return errno::EFAULT;
     }
     // SAFETY: both pointers are non-null (checked above).
     unsafe { *flags = (*attr).flags; }
@@ -604,7 +613,7 @@ pub extern "C" fn posix_spawnattr_setpgroup(
     pgroup: PidT,
 ) -> i32 {
     if attr.is_null() {
-        return errno::EINVAL;
+        return errno::EFAULT;
     }
     // SAFETY: attr is non-null (checked above).
     unsafe { (*attr).pgroup = pgroup; }
@@ -618,7 +627,7 @@ pub extern "C" fn posix_spawnattr_getpgroup(
     pgroup: *mut PidT,
 ) -> i32 {
     if attr.is_null() || pgroup.is_null() {
-        return errno::EINVAL;
+        return errno::EFAULT;
     }
     // SAFETY: both pointers are non-null (checked above).
     unsafe { *pgroup = (*attr).pgroup; }
@@ -876,7 +885,7 @@ pub extern "C" fn posix_spawn(
     envp: *const *const u8,
 ) -> i32 {
     if path.is_null() {
-        return errno::EINVAL;
+        return errno::EFAULT;
     }
 
     // Build the fd_map from the parent's fd table + file_actions.
@@ -980,7 +989,7 @@ pub extern "C" fn posix_spawnp(
     envp: *const *const u8,
 ) -> i32 {
     if file.is_null() {
-        return errno::EINVAL;
+        return errno::EFAULT;
     }
 
     // If `file` contains a '/', use it directly (no PATH search).
@@ -1554,7 +1563,7 @@ mod tests {
     #[test]
     fn test_file_actions_init_null() {
         let ret = posix_spawn_file_actions_init(core::ptr::null_mut());
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1589,7 +1598,7 @@ mod tests {
     #[test]
     fn test_file_actions_addclose_null() {
         let ret = posix_spawn_file_actions_addclose(core::ptr::null_mut(), 3);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1632,7 +1641,7 @@ mod tests {
     #[test]
     fn test_file_actions_adddup2_null() {
         let ret = posix_spawn_file_actions_adddup2(core::ptr::null_mut(), 3, 1);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1676,7 +1685,7 @@ mod tests {
         let ret = posix_spawn_file_actions_addopen(
             core::ptr::null_mut(), 0, path.as_ptr(), 0, 0,
         );
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1686,7 +1695,7 @@ mod tests {
         let ret = posix_spawn_file_actions_addopen(
             &raw mut acts, 0, core::ptr::null(), 0, 0,
         );
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1737,7 +1746,7 @@ mod tests {
     #[test]
     fn test_spawnattr_init_null() {
         let ret = posix_spawnattr_init(core::ptr::null_mut());
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1768,7 +1777,7 @@ mod tests {
     #[test]
     fn test_spawnattr_setflags_null() {
         let ret = posix_spawnattr_setflags(core::ptr::null_mut(), 0);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1786,7 +1795,7 @@ mod tests {
     fn test_spawnattr_getflags_null_attr() {
         let mut flags: i16 = 0;
         let ret = posix_spawnattr_getflags(core::ptr::null(), &raw mut flags);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1794,7 +1803,7 @@ mod tests {
         let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
         posix_spawnattr_init(&raw mut attr);
         let ret = posix_spawnattr_getflags(&raw const attr, core::ptr::null_mut());
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     // -- posix_spawnattr_setpgroup/getpgroup --
@@ -1811,7 +1820,7 @@ mod tests {
     #[test]
     fn test_spawnattr_setpgroup_null() {
         let ret = posix_spawnattr_setpgroup(core::ptr::null_mut(), 42);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1829,7 +1838,7 @@ mod tests {
     fn test_spawnattr_getpgroup_null_attr() {
         let mut pg: PidT = 0;
         let ret = posix_spawnattr_getpgroup(core::ptr::null(), &raw mut pg);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     #[test]
@@ -1837,7 +1846,7 @@ mod tests {
         let mut attr = unsafe { core::mem::zeroed::<PosixSpawnattrT>() };
         posix_spawnattr_init(&raw mut attr);
         let ret = posix_spawnattr_getpgroup(&raw const attr, core::ptr::null_mut());
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     // -- contains_slash --
@@ -2277,7 +2286,7 @@ mod tests {
             core::ptr::null_mut(),
             b"/tmp\0".as_ptr(),
         );
-        assert_eq!(ret, crate::errno::EINVAL);
+        assert_eq!(ret, crate::errno::EFAULT);
     }
 
     #[test]
@@ -2289,7 +2298,7 @@ mod tests {
         };
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addchdir_np(&raw mut acts, core::ptr::null());
-        assert_eq!(ret, crate::errno::EINVAL);
+        assert_eq!(ret, crate::errno::EFAULT);
     }
 
     #[test]
@@ -2376,7 +2385,7 @@ mod tests {
     #[test]
     fn test_addclosefrom_np_null_acts() {
         let ret = posix_spawn_file_actions_addclosefrom_np(core::ptr::null_mut(), 3);
-        assert_eq!(ret, crate::errno::EINVAL);
+        assert_eq!(ret, crate::errno::EFAULT);
     }
 
     #[test]
@@ -2584,11 +2593,10 @@ mod tests {
 
     #[test]
     fn test_setflags_null_attr_precedes_flag_check() {
-        // Both errors apply (null attr AND bad flag); EINVAL is the
-        // shared code so result is the same, but make sure we don't
-        // crash by dereferencing a null pointer when the flag is bad.
+        // Both errors apply (null attr AND bad flag); EFAULT for the
+        // null pointer takes priority over EINVAL for the bad flag.
         let ret = posix_spawnattr_setflags(core::ptr::null_mut(), 0x4000);
-        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(ret, errno::EFAULT);
     }
 
     // ---- (e) Workflow / buggy-caller patterns ---------------------------

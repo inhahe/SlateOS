@@ -181,7 +181,7 @@ pub unsafe extern "C" fn iconv(
     }
 
     if outbuf.is_null() || unsafe { (*outbuf).is_null() } || inbytesleft.is_null() || outbytesleft.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return usize::MAX;
     }
 

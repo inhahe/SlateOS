@@ -230,7 +230,7 @@ pub unsafe extern "C" fn malloc_usable_size(ptr: *mut u8) -> usize {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_memalign(memptr: *mut *mut u8, alignment: usize, size: usize) -> i32 {
     if memptr.is_null() {
-        return crate::errno::EINVAL;
+        return crate::errno::EFAULT;
     }
 
     // Alignment must be power of two and >= sizeof(void*).
@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn posix_memalign_null_memptr() {
         let ret = posix_memalign(core::ptr::null_mut(), 16, 100);
-        assert_eq!(ret, crate::errno::EINVAL);
+        assert_eq!(ret, crate::errno::EFAULT);
     }
 
     #[test]

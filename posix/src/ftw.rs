@@ -88,7 +88,7 @@ pub extern "C" fn ftw(
     nopenfd: i32,
 ) -> i32 {
     if dirpath.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -206,7 +206,7 @@ pub extern "C" fn nftw(
     flags: i32,
 ) -> i32 {
     if dirpath.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 

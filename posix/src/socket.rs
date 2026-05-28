@@ -4454,7 +4454,7 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
     const STACK_BUF: usize = 4096;
     const LARGE_BUF: usize = 16384;
     if msg.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -4661,7 +4661,7 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
     const STACK_BUF_SMALL: usize = 4096;
     const STACK_BUF_LARGE: usize = 16384; // One 16 KiB page.
     if msg.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 

@@ -45,7 +45,7 @@ pub const SEM_FAILED: *mut SemT = core::ptr::null_mut();
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_init(sem: *mut SemT, _pshared: i32, value: u32) -> i32 {
     if sem.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -79,7 +79,7 @@ pub extern "C" fn sem_destroy(_sem: *mut SemT) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_wait(sem: *mut SemT) -> i32 {
     if sem.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -111,7 +111,7 @@ pub extern "C" fn sem_wait(sem: *mut SemT) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_trywait(sem: *mut SemT) -> i32 {
     if sem.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -147,7 +147,7 @@ pub extern "C" fn sem_trywait(sem: *mut SemT) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
     if sem.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -183,7 +183,7 @@ pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Timespec) -> i32 {
     if sem.is_null() || abstime.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -226,7 +226,7 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_getvalue(sem: *mut SemT, sval: *mut i32) -> i32 {
     if sem.is_null() || sval.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -499,12 +499,12 @@ pub extern "C" fn sem_open(
 ///
 /// # Errors
 ///
-/// - `EINVAL` — `sem` is NULL or doesn't refer to a known named
-///   semaphore.
+/// - `EFAULT` — `sem` is NULL.
+/// - `EINVAL` — `sem` doesn't refer to a known named semaphore.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_close(sem: *mut SemT) -> i32 {
     if sem.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     let _guard = acquire_sem_lock();
@@ -1000,10 +1000,10 @@ mod tests {
     }
 
     #[test]
-    fn test_sem_close_null_einval() {
+    fn test_sem_close_null_efault() {
         crate::errno::set_errno(0);
         assert_eq!(sem_close(core::ptr::null_mut()), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -1054,11 +1054,11 @@ mod tests {
     // -- sem_init sets errno for null --
 
     #[test]
-    fn test_sem_init_null_sets_einval() {
+    fn test_sem_init_null_sets_efault() {
         crate::errno::set_errno(0);
         let ret = sem_init(core::ptr::null_mut(), 0, 1);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -1075,11 +1075,11 @@ mod tests {
     // -- sem_wait null sets errno --
 
     #[test]
-    fn test_sem_wait_null_einval() {
+    fn test_sem_wait_null_efault() {
         crate::errno::set_errno(0);
         let ret = sem_wait(core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     // -- sem_trywait sets EAGAIN --
@@ -1097,11 +1097,11 @@ mod tests {
     }
 
     #[test]
-    fn test_sem_trywait_null_sets_einval() {
+    fn test_sem_trywait_null_sets_efault() {
         crate::errno::set_errno(0);
         let ret = sem_trywait(core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     // -- sem_post overflow sets EOVERFLOW --
@@ -1118,11 +1118,11 @@ mod tests {
     }
 
     #[test]
-    fn test_sem_post_null_sets_einval() {
+    fn test_sem_post_null_sets_efault() {
         crate::errno::set_errno(0);
         let ret = sem_post(core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     // (Named-semaphore implementations no longer ENOSYS — see the
@@ -1136,7 +1136,7 @@ mod tests {
         let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
         let ret = sem_timedwait(core::ptr::null_mut(), &raw const ts);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -1148,7 +1148,7 @@ mod tests {
         sem_init(&raw mut sem, 0, 0);
         let ret = sem_timedwait(&raw mut sem, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     // -- sem_init with pshared (ignored but accepted) --

@@ -728,14 +728,14 @@ pub extern "C" fn clone(
 ) -> i32 {
     // (1) glibc rejects NULL fn before issuing the syscall.
     if fn_ptr.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // (2) child_stack is mandatory in the glibc wrapper (it has to
     // arrange for the child to return into the user-provided fn) and
     // in the kernel whenever CLONE_VM is set.
     if child_stack.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -7957,7 +7957,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clone_null_fn_einval() {
+    fn test_clone_null_fn_efault() {
         crate::errno::set_errno(0);
         let ret = clone(
             core::ptr::null(),
@@ -7966,11 +7966,11 @@ mod tests {
             core::ptr::null_mut(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
-    fn test_clone_null_stack_einval() {
+    fn test_clone_null_stack_efault() {
         crate::errno::set_errno(0);
         let ret = clone(
             clone_dummy_fn(),
@@ -7979,7 +7979,7 @@ mod tests {
             core::ptr::null_mut(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -7993,7 +7993,7 @@ mod tests {
             core::ptr::null_mut(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -12412,9 +12412,9 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
 
-        /// EINVAL (NULL fn) takes priority over EPERM.
+        /// EFAULT (NULL fn) takes priority over EPERM.
         #[test]
-        fn test_clone_einval_before_eperm() {
+        fn test_clone_efault_before_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
@@ -12425,7 +12425,7 @@ mod tests {
                 core::ptr::null_mut(),
             );
             assert_eq!(r, -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
         }
 
         /// Parity with unshare: same flags, same cap state → same errno.

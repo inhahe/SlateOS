@@ -1416,7 +1416,7 @@ pub extern "C" fn confstr(name: i32, buf: *mut u8, len: usize) -> usize {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
     if path.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return core::ptr::null_mut();
     }
     if resolved_path.is_null() {
@@ -1481,7 +1481,7 @@ pub extern "C" fn realpath(path: *const u8, resolved_path: *mut u8) -> *mut u8 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn canonicalize_file_name(path: *const u8) -> *mut u8 {
     if path.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return core::ptr::null_mut();
     }
 
@@ -5032,11 +5032,14 @@ mod tests {
         let mut buf = [0u8; PATH_MAX];
         let ret = realpath(core::ptr::null(), buf.as_mut_ptr());
         assert!(ret.is_null());
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
     fn test_realpath_null_resolved() {
+        // resolved_path NULL means "allocate for me" in POSIX; we can't
+        // malloc (no_std), so this stays EINVAL — it's a mode we don't
+        // support, not a bad address.
         let ret = realpath(b"/tmp\0".as_ptr(), core::ptr::null_mut());
         assert!(ret.is_null());
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -5058,7 +5061,7 @@ mod tests {
     fn test_canonicalize_file_name_null() {
         let ret = canonicalize_file_name(core::ptr::null());
         assert!(ret.is_null());
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]

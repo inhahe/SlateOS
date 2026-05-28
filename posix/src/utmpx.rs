@@ -140,7 +140,7 @@ pub extern "C" fn getutxline(_line: *const Utmpx) -> *mut Utmpx {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pututxline(utmpx: *const Utmpx) -> *mut Utmpx {
     if utmpx.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return core::ptr::null_mut();
     }
     // Return a "mutable" pointer to the same entry (pretend we wrote it).
@@ -344,7 +344,7 @@ mod tests {
     fn test_pututxline_null_returns_null() {
         errno::set_errno(0);
         assert!(pututxline(core::ptr::null()).is_null());
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]

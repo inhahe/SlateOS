@@ -678,7 +678,7 @@ pub unsafe extern "C" fn cfgetospeed(termios_p: *const Termios) -> u32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfsetispeed(termios_p: *mut Termios, speed: u32) -> i32 {
     if termios_p.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: Caller guarantees termios_p is valid.
@@ -696,7 +696,7 @@ pub unsafe extern "C" fn cfsetispeed(termios_p: *mut Termios, speed: u32) -> i32
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfsetospeed(termios_p: *mut Termios, speed: u32) -> i32 {
     if termios_p.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: Caller guarantees termios_p is valid.
@@ -759,7 +759,7 @@ pub unsafe extern "C" fn cfmakeraw(termios_p: *mut Termios) {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn cfsetspeed(termios_p: *mut Termios, speed: u32) -> i32 {
     if termios_p.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: Caller guarantees termios_p is valid.
@@ -2219,11 +2219,11 @@ mod tests {
     // --- ptsname_r ---
 
     #[test]
-    fn test_ptsname_r_null_buf_einval() {
+    fn test_ptsname_r_null_buf_efault() {
         let fd = open_test_fd();
         crate::errno::set_errno(0);
         assert_eq!(ptsname_r(fd, core::ptr::null_mut(), 64), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
         let _ = fdtable::close_fd(fd);
     }
 
@@ -2457,7 +2457,7 @@ pub extern "C" fn ptsname(fd: i32) -> *mut u8 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ptsname_r(fd: i32, buf: *mut u8, _buflen: usize) -> i32 {
     if buf.is_null() {
-        crate::errno::set_errno(crate::errno::EINVAL);
+        crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
     }
     if fd < 0 {

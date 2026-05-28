@@ -424,6 +424,20 @@ pub extern "C" fn sched_setaffinity(
         return -1;
     }
 
+    // Phase 207: CAP_SYS_NICE gate for cross-process affinity.
+    // Linux's `sched_setaffinity` calls `check_same_owner(p)` and, if
+    // that fails, requires `ns_capable(CAP_SYS_NICE)`.  pid == 0 means
+    // "self" (always same-owner), so we only gate pid > 0 (targeting
+    // another process we cannot verify ownership of).
+    if pid > 0
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_NICE,
+        )
+    {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+
     0
 }
 
@@ -2234,6 +2248,221 @@ mod tests {
             assert_eq!(sched_get_priority_max(SCHED_FIFO), 99);
             assert_eq!(sched_get_priority_min(SCHED_RR), 1);
             assert_eq!(sched_get_priority_max(SCHED_RR), 99);
+        }
+    }
+
+    // ===================================================================
+    // Phase 207 — CAP_SYS_NICE gate on sched_setaffinity (pid > 0)
+    // ===================================================================
+    //
+    // Linux gates cross-process affinity changes on `check_same_owner`
+    // then `CAP_SYS_NICE`.  pid == 0 means "self" (no cap needed).
+    // Error priority:
+    //   EFAULT > EINVAL (cpusetsize) > ESRCH (pid < 0) > EINVAL (mask)
+    //   > EPERM (no cap, pid > 0)
+    mod phase207_cap_setaffinity {
+        use super::*;
+
+        const CAP_SYS_NICE: u32 = crate::sys_capability::CAP_SYS_NICE;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                crate::sys_capability::test_helpers::restore_caps(
+                    self.lo, self.hi,
+                );
+            }
+        }
+
+        fn drop_cap_sys_nice() {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << CAP_SYS_NICE);
+            let hdr = crate::sys_capability::CapUserHeader {
+                version: crate::sys_capability::VFS_CAP_REVISION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: new_lo,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: hi,
+                    inheritable: 0,
+                },
+            ];
+            let rc = crate::sys_capability::capset(
+                &hdr as *const _,
+                data.as_ptr(),
+            );
+            assert_eq!(rc, 0);
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
+        }
+
+        /// Helper: build a valid CPU mask with bit 0 set.
+        fn valid_mask() -> CpuSetT {
+            let mut m = CpuSetT { bits: [0u64; 16] };
+            m.bits[0] = 1; // CPU 0
+            m
+        }
+
+        /// pid == 0 (self) with cap held succeeds.
+        #[test]
+        fn test_setaffinity_self_cap_held() {
+            assert!(crate::sys_capability::has_capability(CAP_SYS_NICE));
+            let m = valid_mask();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                sched_setaffinity(
+                    0,
+                    core::mem::size_of::<CpuSetT>(),
+                    &m as *const _,
+                ),
+                0,
+            );
+        }
+
+        /// pid == 0 (self) without cap still succeeds — no gate for self.
+        #[test]
+        fn test_setaffinity_self_no_cap_ok() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let m = valid_mask();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                sched_setaffinity(
+                    0,
+                    core::mem::size_of::<CpuSetT>(),
+                    &m as *const _,
+                ),
+                0,
+            );
+        }
+
+        /// pid > 0 with cap held succeeds.
+        #[test]
+        fn test_setaffinity_other_cap_held() {
+            assert!(crate::sys_capability::has_capability(CAP_SYS_NICE));
+            let m = valid_mask();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                sched_setaffinity(
+                    1,
+                    core::mem::size_of::<CpuSetT>(),
+                    &m as *const _,
+                ),
+                0,
+            );
+        }
+
+        /// pid > 0 without CAP_SYS_NICE → EPERM.
+        #[test]
+        fn test_setaffinity_other_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let m = valid_mask();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                sched_setaffinity(
+                    1,
+                    core::mem::size_of::<CpuSetT>(),
+                    &m as *const _,
+                ),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// EFAULT (null mask) takes priority over EPERM.
+        #[test]
+        fn test_setaffinity_efault_before_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                sched_setaffinity(
+                    1,
+                    core::mem::size_of::<CpuSetT>(),
+                    core::ptr::null(),
+                ),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
+
+        /// ESRCH (negative pid) takes priority over EPERM.
+        #[test]
+        fn test_setaffinity_esrch_before_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let m = valid_mask();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                sched_setaffinity(
+                    -1,
+                    core::mem::size_of::<CpuSetT>(),
+                    &m as *const _,
+                ),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+        }
+
+        /// EINVAL (no valid CPU) takes priority over EPERM.
+        #[test]
+        fn test_setaffinity_einval_mask_before_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            // All-zero mask — no valid CPU bit.
+            let m = CpuSetT { bits: [0u64; 16] };
+            crate::errno::set_errno(0);
+            assert_eq!(
+                sched_setaffinity(
+                    1,
+                    core::mem::size_of::<CpuSetT>(),
+                    &m as *const _,
+                ),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        /// `sched_getaffinity` is read-only and unaffected by the cap drop.
+        #[test]
+        fn test_setaffinity_getaffinity_unaffected() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let mut m = CpuSetT { bits: [0u64; 16] };
+            assert_eq!(
+                sched_getaffinity(
+                    0,
+                    core::mem::size_of::<CpuSetT>(),
+                    &raw mut m,
+                ),
+                0,
+            );
+        }
+
+        /// Cap restore after CapGuard drop.
+        #[test]
+        fn test_setaffinity_cap_restore() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_sys_nice();
+                assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
+            }
+            assert!(crate::sys_capability::has_capability(CAP_SYS_NICE));
         }
     }
 }

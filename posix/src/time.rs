@@ -351,6 +351,54 @@ pub const TIMER_ABSTIME: i32 = 1;
 ///
 /// Returns 0 on success, or an error code (not via errno — POSIX
 /// specifies direct return for this function).
+///
+/// # Validation order
+///
+/// Phase 102 added a flag-mask check (any bit other than
+/// `TIMER_ABSTIME` → `EINVAL`) that runs first — see the body
+/// comment below for the rationale.  After the flag mask, the
+/// remaining checks follow Linux precedence:
+///
+/// `kernel/time/posix-timers.c::SYSCALL_DEFINE4(clock_nanosleep, ...)`:
+///
+/// ```c
+/// const struct k_clock *kc = clockid_to_kclock(which_clock);
+/// struct timespec64 t;
+///
+/// if (!kc)                              return -EINVAL;
+/// if (!kc->nsleep)                      return -EINVAL;
+/// if (get_timespec64(&t, rqtp))         return -EFAULT;
+/// if (!timespec64_valid(&t))            return -EINVAL;
+/// ```
+///
+/// Linux dispatches on the clock FIRST.  Only after the clock is
+/// resolved does the kernel attempt `get_timespec64`, which is
+/// where a NULL/bad user pointer surfaces as `-EFAULT`.  The
+/// timespec range check runs LAST.
+///
+/// Precedence (after Phase 102's flag mask):
+///
+///   1. `flags & ~TIMER_ABSTIME` set                → `EINVAL` (Phase 102)
+///   2. `clockid_to_kclock(clk_id)` returns NULL    → `EINVAL`
+///   3. `get_timespec64(request)` user-copy fails   → `EFAULT`
+///   4. `!timespec64_valid(&t)`                     → `EINVAL`
+///   5. Compute sleep, defer to backend syscall.
+///
+/// **Phase 153**: pre-Phase-153 we ran the NULL `request` check
+/// BEFORE the clock check and returned `EINVAL` for NULL.  Two
+/// divergences from Linux:
+///
+/// * `clock_nanosleep(VALID_CLOCK, 0, NULL, NULL)`: Linux returns
+///   `EFAULT` (via `get_timespec64`); we returned `EINVAL`.
+/// * `clock_nanosleep(BAD_CLOCK, 0, NULL, NULL)`: Linux returns
+///   `EINVAL` from the clock check; we returned `EINVAL` from the
+///   NULL check (same errno, wrong reason).
+///
+/// Phase 153 fixes both: the clock check now runs before the NULL
+/// check, and NULL `request` now returns `EFAULT` to match Linux's
+/// `get_timespec64` failure path.  The Phase 102 flag-mask check is
+/// preserved unchanged — it still fires first regardless of any
+/// other shape problem in the call.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_nanosleep(
     clk_id: ClockidT,
@@ -358,23 +406,29 @@ pub extern "C" fn clock_nanosleep(
     request: *const Timespec,
     remain: *mut Timespec,
 ) -> i32 {
-    // Linux semantics (kernel/time/posix-timers.c::common_nsleep,
-    // kernel/time/hrtimer.c::hrtimer_nanosleep): the only valid flag
-    // bit is TIMER_ABSTIME.  Reject any other bit before touching
-    // the request pointer or inspecting the clock id, so a buggy
-    // caller passing garbage flag bits is told about it regardless
-    // of what else is wrong with their call.  clock_nanosleep
-    // returns the error number directly (no errno set), per POSIX.
+    // Phase 102 invariant: any flag bit other than TIMER_ABSTIME is
+    // a programming error.  Reject up-front so a buggy caller is
+    // told about it before any other diagnostic dilutes the signal.
+    // clock_nanosleep returns the error number directly (no errno
+    // set), per POSIX.
     if flags & !TIMER_ABSTIME != 0 {
         return errno::EINVAL;
     }
 
-    if request.is_null() {
+    // Phase 153: clock dispatch precedes the user-pointer check, to
+    // match Linux's `clockid_to_kclock` running before
+    // `get_timespec64`.  Observable effect: `clock_nanosleep(
+    // BAD_CLOCK, 0, NULL, NULL)` returns EINVAL (clock reason) rather
+    // than EFAULT (NULL reason).
+    if !is_valid_clock(clk_id) {
         return errno::EINVAL;
     }
 
-    if !is_valid_clock(clk_id) {
-        return errno::EINVAL;
+    // Phase 153: NULL request → EFAULT, matching Linux's
+    // get_timespec64 / copy_from_user failure path.  Pre-Phase-153
+    // this returned EINVAL.
+    if request.is_null() {
+        return errno::EFAULT;
     }
 
     // POSIX: EINVAL if tv_nsec not in [0, 999_999_999].
@@ -6565,9 +6619,17 @@ mod tests {
 
     // -- clock_nanosleep validation --
 
+    /// Phase 153: `clock_nanosleep(VALID_CLOCK, 0, NULL, ...)` now
+    /// matches Linux's `get_timespec64` failure → EFAULT.
+    /// Pre-Phase-153 this returned EINVAL.  Renamed from
+    /// `test_clock_nanosleep_null_request`.
     #[test]
-    fn test_clock_nanosleep_null_request() {
-        assert_eq!(clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut()), crate::errno::EINVAL);
+    fn test_clock_nanosleep_null_request_efault_phase153() {
+        assert_eq!(
+            clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EFAULT,
+            "valid clock + NULL request must return EFAULT (Linux: get_timespec64)"
+        );
     }
 
     #[test]
@@ -6741,6 +6803,269 @@ mod tests {
         assert_eq!(
             clock_nanosleep(CLOCK_REALTIME, 1 << 6, &req, core::ptr::null_mut()),
             crate::errno::EINVAL
+        );
+    }
+
+    // -- Phase 153: clock_nanosleep clock-vs-NULL ordering + NULL→EFAULT --
+    //
+    // Linux's `kernel/time/posix-timers.c::SYSCALL_DEFINE4(
+    // clock_nanosleep, ...)` calls `clockid_to_kclock(which_clock)`
+    // FIRST.  A bad clock surfaces as EINVAL before any user pointer
+    // is touched.  Only after the clock is resolved does
+    // `get_timespec64(&t, rqtp)` run; a NULL `rqtp` returns -EFAULT
+    // (the `copy_from_user` failure path), not -EINVAL.
+    //
+    // Pre-Phase-153 we checked NULL FIRST and returned EINVAL.  Two
+    // divergences: ordering (NULL beat clock check) and errno
+    // (EINVAL instead of EFAULT).  Phase 153 fixes both while
+    // preserving Phase 102's flag-mask-first invariant.
+
+    // --- Per-error-class: confirm new EFAULT path is observable.
+
+    #[test]
+    fn test_clock_nanosleep_valid_clock_null_request_efault_phase153() {
+        // The headline change: valid clock + zero flags + NULL request
+        // now returns EFAULT (not EINVAL).
+        assert_eq!(
+            clock_nanosleep(CLOCK_MONOTONIC, 0, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EFAULT
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_every_valid_clock_null_request_efault_phase153() {
+        // The EFAULT path must apply uniformly to every valid clock.
+        for &clk in &[
+            CLOCK_REALTIME,
+            CLOCK_MONOTONIC,
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+            CLOCK_BOOTTIME,
+        ] {
+            assert_eq!(
+                clock_nanosleep(clk, 0, core::ptr::null(), core::ptr::null_mut()),
+                crate::errno::EFAULT,
+                "clk={} must return EFAULT for NULL request",
+                clk
+            );
+        }
+    }
+
+    // --- Ordering matrix: clock check beats NULL check.
+
+    #[test]
+    fn test_clock_nanosleep_bad_clock_beats_null_request_phase153() {
+        // BAD clock + NULL request: pre-Phase-153 returned EINVAL via
+        // the NULL check.  Post-Phase-153 the clock check fires first
+        // and we still get EINVAL — same errno but different *path*.
+        // The observable difference would be in errno (had Linux
+        // chosen different errnos for the two), but both are EINVAL.
+        // The cross-check below confirms ordering:
+        assert_eq!(
+            clock_nanosleep(99_999, 0, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EINVAL,
+            "bad clock + NULL must still return EINVAL"
+        );
+
+        // With a VALID clock, the same NULL request now returns
+        // EFAULT — proves the clock check is what's distinguishing the
+        // two cases.
+        assert_eq!(
+            clock_nanosleep(CLOCK_MONOTONIC, 0, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EFAULT,
+            "valid clock + NULL must return EFAULT (Phase 153 path proof)"
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_negative_clock_beats_null_request_phase153() {
+        // Negative clock id (e.g., -1) is a common bug — must yield
+        // EINVAL via the clock check, not EFAULT via NULL.
+        assert_eq!(
+            clock_nanosleep(-1, 0, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_flag_mask_still_beats_null_phase153() {
+        // Phase 102 invariant must survive Phase 153: stray flag bits
+        // are diagnosed BEFORE the clock check and BEFORE the NULL
+        // check.  Bad flag + valid clock + NULL must give EINVAL
+        // (from flag mask), not EFAULT (from NULL).
+        assert_eq!(
+            clock_nanosleep(CLOCK_REALTIME, 1 << 4, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EINVAL,
+            "flag mask must still fire before clock/NULL checks"
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_flag_mask_still_beats_bad_clock_phase153() {
+        // Bad flag + bad clock + NULL: still EINVAL via flag mask.
+        assert_eq!(
+            clock_nanosleep(99_999, i32::MIN, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_null_request_beats_invalid_nsec_phase153() {
+        // NULL request must short-circuit before the timespec is
+        // dereferenced — i.e., we can't observe "bad nsec" because
+        // the pointer is NULL.  Trivially true (can't read invalid
+        // nsec from a NULL pointer) — guards against a future
+        // refactor that dereferences before the null check.
+        assert_eq!(
+            clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EFAULT
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_clock_check_beats_invalid_nsec_phase153() {
+        // BAD clock + valid pointer + invalid nsec: clock check
+        // fires first → EINVAL (clock reason).  Linux ordering.
+        let req = Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 };
+        assert_eq!(
+            clock_nanosleep(99_999, 0, &req, core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
+    }
+
+    // --- Workflow: probe-then-call with NULL request.
+
+    #[test]
+    fn test_clock_nanosleep_probe_then_real_call_phase153() {
+        // A caller probes the call shape with NULL; gets EFAULT.
+        // Then makes a real call with a valid request.
+        assert_eq!(
+            clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EFAULT
+        );
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut());
+        assert_ne!(ret, crate::errno::EFAULT,
+            "real call after probe must not return EFAULT");
+        assert_ne!(ret, crate::errno::EINVAL,
+            "zero timespec is valid — must not return EINVAL");
+    }
+
+    #[test]
+    fn test_clock_nanosleep_efault_then_einval_workflow_phase153() {
+        // Probe with NULL (EFAULT), then with bad clock (EINVAL):
+        // the errno discriminates between the two failure modes,
+        // letting a caller tell which thing was wrong.
+        let r1 = clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut());
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let r2 = clock_nanosleep(99_999, 0, &req, core::ptr::null_mut());
+        assert_eq!(r1, crate::errno::EFAULT);
+        assert_eq!(r2, crate::errno::EINVAL);
+        assert_ne!(r1, r2, "EFAULT and EINVAL must be distinguishable");
+    }
+
+    // --- Buggy caller: NULL pointer accidentally passed.
+
+    #[test]
+    fn test_clock_nanosleep_buggy_caller_phase153() {
+        // A buggy caller forgot to initialise the request pointer.
+        // Linux returns EFAULT — telling them "the pointer was bad"
+        // instead of EINVAL ("some argument was invalid", which is
+        // less informative).
+        let ret = clock_nanosleep(
+            CLOCK_REALTIME, 0,
+            core::ptr::null(), core::ptr::null_mut(),
+        );
+        assert_eq!(
+            ret, crate::errno::EFAULT,
+            "buggy NULL pointer must give the specific EFAULT diagnostic"
+        );
+    }
+
+    // --- Recovery: state isn't corrupted by an EFAULT failure.
+
+    #[test]
+    fn test_clock_nanosleep_recovery_phase153() {
+        // EFAULT failure must not corrupt any internal state.
+        // A subsequent valid call must succeed normally.
+        for _ in 0..5 {
+            assert_eq!(
+                clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut()),
+                crate::errno::EFAULT
+            );
+        }
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut());
+        assert_ne!(ret, crate::errno::EFAULT);
+        assert_ne!(ret, crate::errno::EINVAL);
+    }
+
+    // --- No-side-effect loop: repeated NULL calls all return EFAULT.
+
+    #[test]
+    fn test_clock_nanosleep_efault_loop_phase153() {
+        // Repeated NULL-request calls all yield EFAULT.  Guards
+        // against any future state-machine bug in the early-return
+        // path (e.g., a counter that wraps and changes behaviour).
+        for i in 0..1000 {
+            assert_eq!(
+                clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut()),
+                crate::errno::EFAULT,
+                "iteration {} must return EFAULT", i
+            );
+        }
+    }
+
+    // --- Errno-not-touched: clock_nanosleep returns error directly.
+
+    #[test]
+    fn test_clock_nanosleep_null_request_does_not_set_errno_phase153() {
+        // POSIX: clock_nanosleep returns the error number directly
+        // and does NOT set errno.  Verify the NULL path respects this.
+        crate::errno::set_errno(crate::errno::ENOENT);
+        let ret = clock_nanosleep(
+            CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut(),
+        );
+        assert_eq!(ret, crate::errno::EFAULT);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ENOENT,
+            "clock_nanosleep must not touch errno"
+        );
+    }
+
+    // --- Sentinel: previously-EINVAL NULL path now distinguishable.
+
+    #[test]
+    fn test_clock_nanosleep_null_request_no_longer_einval_phase153() {
+        // Regression guard: explicitly assert NULL + valid clock no
+        // longer collapses to EINVAL.  If a future refactor restores
+        // the old behaviour, this test breaks loudly.
+        let ret = clock_nanosleep(
+            CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut(),
+        );
+        assert_ne!(
+            ret, crate::errno::EINVAL,
+            "Phase 153: valid clock + NULL must NOT collapse to EINVAL"
+        );
+        assert_eq!(ret, crate::errno::EFAULT);
+    }
+
+    // --- ABSTIME + NULL: flag bit zero is fine, NULL still gives EFAULT.
+
+    #[test]
+    fn test_clock_nanosleep_abstime_null_request_efault_phase153() {
+        // TIMER_ABSTIME alone passes the flag mask; with NULL request
+        // the next check is clock (OK) then NULL → EFAULT.
+        assert_eq!(
+            clock_nanosleep(
+                CLOCK_REALTIME, TIMER_ABSTIME,
+                core::ptr::null(), core::ptr::null_mut(),
+            ),
+            crate::errno::EFAULT
         );
     }
 

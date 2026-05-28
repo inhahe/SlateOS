@@ -1951,14 +1951,22 @@ pub extern "C" fn ioprio_get(which: i32, who: i32) -> i32 {
 ///
 /// Linux validates the class/data field *first*, then enters the
 /// `which` switch — so a malformed `ioprio` argument is rejected with
-/// EINVAL before the `who` lookup runs.  Within the class switch:
+/// EINVAL before the `who` lookup runs.  Within the class switch
+/// (`block/ioprio.c::ioprio_check_cap`):
 ///
-/// * `IOPRIO_CLASS_RT`  — `data ∈ [0, IOPRIO_NR_LEVELS)`, else EINVAL.
-///                        (Also requires `CAP_SYS_NICE`/`CAP_SYS_ADMIN`
-///                        → EPERM; we don't model caps yet.)
-/// * `IOPRIO_CLASS_BE`  — same `data` range as RT.
+/// * `IOPRIO_CLASS_RT`  — requires `CAP_SYS_NICE` *or* `CAP_SYS_ADMIN`
+///                        → EPERM if neither held; then `data ∈ [0,
+///                        IOPRIO_NR_LEVELS)`, else EINVAL.  The cap
+///                        check fires **before** the data-range check
+///                        in Linux's source, so a no-cap caller with
+///                        out-of-range RT data observes EPERM, not
+///                        EINVAL.
+/// * `IOPRIO_CLASS_BE`  — same `data` range as RT, no cap required.
 /// * `IOPRIO_CLASS_IDLE` — any `data` value is accepted (priority is
-///                        effectively fixed).
+///                        effectively fixed).  No cap required since
+///                        Linux 5.0 (the pre-5.0 CAP_SYS_ADMIN gate
+///                        on IDLE was removed in
+///                        `block/ioprio.c` commit f5f80df59f5b).
 /// * `IOPRIO_CLASS_NONE` — `data` must be `0`, else EINVAL.  This is
 ///                        a strict check in modern Linux even though
 ///                        the data field is otherwise unused for NONE
@@ -1966,11 +1974,13 @@ pub extern "C" fn ioprio_get(which: i32, who: i32) -> i32 {
 /// * any other class → EINVAL.
 ///
 /// Errors (Linux-matching priority order):
-/// 1. malformed `class` / out-of-range RT or BE `data` / non-zero
+/// 1. `IOPRIO_CLASS_RT` without `CAP_SYS_NICE`/`CAP_SYS_ADMIN`
+///    → `EPERM` (Phase 191; fires before the RT data-range check)
+/// 2. malformed `class` / out-of-range RT or BE `data` / non-zero
 ///    NONE `data` → `EINVAL`
-/// 2. `which` not in `{IOPRIO_WHO_PROCESS, _PGRP, _USER}` → `EINVAL`
+/// 3. `which` not in `{IOPRIO_WHO_PROCESS, _PGRP, _USER}` → `EINVAL`
 ///    (Linux: switch default arm.)
-/// 3. `who < 0` → `ESRCH` (matches Linux's find_task_by_vpid /
+/// 4. `who < 0` → `ESRCH` (matches Linux's find_task_by_vpid /
 ///    find_vpid / make_kuid rejection of negative inputs).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i32 {
@@ -1990,9 +2000,46 @@ pub extern "C" fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i32 {
             // IDLE accepts any data value — priority is always 7 in
             // the scheduler regardless of what was passed.
         }
-        IOPRIO_CLASS_RT | IOPRIO_CLASS_BE => {
+        IOPRIO_CLASS_RT => {
+            // Phase 191: RT requires CAP_SYS_NICE or CAP_SYS_ADMIN.
+            // Linux's `ioprio_check_cap`:
+            //
+            //     case IOPRIO_CLASS_RT:
+            //         if (!capable(CAP_SYS_NICE) &&
+            //             !capable(CAP_SYS_ADMIN))
+            //             return -EPERM;
+            //         fallthrough;
+            //     case IOPRIO_CLASS_BE:
+            //         if (data >= IOPRIO_NR_LEVELS) return -EINVAL;
+            //
+            // The cap check sits BEFORE the data-range check, so a
+            // no-cap caller asking for RT with bad data sees EPERM,
+            // not EINVAL.  Pre-Phase-191 we returned EINVAL for that
+            // case (cap check absent), which misled tools that probe
+            // class availability — `ionice -c1 -n9` first tries to
+            // detect RT support by submitting any RT priority and
+            // checking the errno: EPERM = "no RT for you", EINVAL =
+            // "RT exists but priority is wrong, retry with -n7".
+            if !crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ) && !crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN,
+            ) {
+                errno::set_errno(errno::EPERM);
+                return -1;
+            }
             // 3-bit priority field: 0..7.  Data is masked from a
             // u13 already, so the only way to fail is data >= 8.
+            if !(0..IOPRIO_BE_NR).contains(&data) {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+        }
+        IOPRIO_CLASS_BE => {
+            // BE has no cap requirement — the RT cap check above
+            // falls through to this data-range check in Linux's
+            // source, but we split the arm so the cap gate only
+            // fires for RT.
             if !(0..IOPRIO_BE_NR).contains(&data) {
                 errno::set_errno(errno::EINVAL);
                 return -1;
@@ -9745,6 +9792,357 @@ mod tests {
         // valid class → EINVAL via the catch-all arm.
         assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, -1), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // =====================================================================
+    // Phase 191 — ioprio_set CAP_SYS_NICE/CAP_SYS_ADMIN gate on
+    //             IOPRIO_CLASS_RT
+    //
+    // Linux's `block/ioprio.c::ioprio_check_cap` rejects IOPRIO_CLASS_RT
+    // requests from callers lacking both CAP_SYS_NICE and CAP_SYS_ADMIN
+    // with EPERM, *before* the data-range check fires.  Pre-Phase-191
+    // we ran no cap check at all — every CLASS_RT call that passed the
+    // data-range check succeeded.  This module exercises the new gate:
+    // EPERM under no-cap, success with either cap held, ordering vs.
+    // other error classes (EINVAL on bad class beats EPERM since the
+    // catch-all arm fires first; EPERM on RT beats EINVAL on out-of-
+    // range data per Linux's `ioprio_check_cap` source order), and the
+    // cross-checks that BE, IDLE, NONE classes are unaffected.
+    // =====================================================================
+    mod ioprio_set_cap_phase191 {
+        use super::*;
+
+        /// RAII guard that snapshots the effective cap set on
+        /// construction and restores it on drop, so each test can
+        /// freely mutate caps without leaking changes into the next.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        /// Drop one cap (specified by index < 32) from the effective set
+        /// while leaving every other cap intact.  Asserts the drop took.
+        fn drop_cap(cap: u32) {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if cap < 32 {
+                (lo & !(1u32 << cap), hi)
+            } else {
+                (lo, hi & !(1u32 << (cap - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping cap");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+
+        /// Drop both CAP_SYS_NICE and CAP_SYS_ADMIN simultaneously so
+        /// the RT gate has no escape hatch.
+        fn drop_both_rt_caps() {
+            use crate::sys_capability::{CAP_SYS_ADMIN, CAP_SYS_NICE};
+            drop_cap(CAP_SYS_NICE);
+            drop_cap(CAP_SYS_ADMIN);
+        }
+
+        // -- Per-error-class --------------------------------------------------
+
+        /// CLASS_RT with valid data and neither CAP_SYS_NICE nor
+        /// CAP_SYS_ADMIN held → EPERM (the headline check).
+        #[test]
+        fn test_ioprio_set_phase191_rt_no_caps_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 4;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// CLASS_RT data=0 (highest priority) with no caps → EPERM.
+        /// Confirms data value within the legal range still fails.
+        #[test]
+        fn test_ioprio_set_phase191_rt_no_caps_data_zero_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            let prio = IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// CLASS_RT data=7 (lowest priority) with no caps → EPERM.
+        /// Confirms the boundary high-end RT priority is gated too.
+        #[test]
+        fn test_ioprio_set_phase191_rt_no_caps_data_seven_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 7;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        // -- Ordering matrix --------------------------------------------------
+
+        /// CLASS_RT data=99 (out of range) with no caps: Linux runs
+        /// the cap check BEFORE the data-range check, so EPERM wins.
+        #[test]
+        fn test_ioprio_set_phase191_rt_eperm_beats_einval_data() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 99;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// CLASS_RT with no caps + bad `which` → EPERM still wins
+        /// because the per-class block (including the RT cap gate)
+        /// fires before the which switch.
+        #[test]
+        fn test_ioprio_set_phase191_rt_eperm_beats_einval_which() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 4;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(99, 0, prio), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// CLASS_RT with no caps + negative who → EPERM beats ESRCH:
+        /// the cap gate is checked long before the who lookup.
+        #[test]
+        fn test_ioprio_set_phase191_rt_eperm_beats_esrch_who() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 4;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, -5, prio), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// Bad class + no caps → EINVAL (catch-all arm fires before
+        /// any cap logic; an unrecognised class is still EINVAL).
+        #[test]
+        fn test_ioprio_set_phase191_bad_class_einval_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            // class 5 is not a recognised IOPRIO_CLASS_* value.
+            let prio = 5 << IOPRIO_CLASS_SHIFT;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        // -- Workflow ---------------------------------------------------------
+
+        /// CAP_SYS_NICE alone is enough — the RT call succeeds even
+        /// without CAP_SYS_ADMIN (matches Linux's `||` semantics).
+        #[test]
+        fn test_ioprio_set_phase191_sys_nice_alone_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SYS_ADMIN);
+            // CAP_SYS_NICE still held → RT request must succeed.
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 4;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+        }
+
+        /// CAP_SYS_ADMIN alone is enough — Linux's `||` accepts
+        /// either cap, so dropping CAP_SYS_NICE while holding ADMIN
+        /// must still let RT requests through.
+        #[test]
+        fn test_ioprio_set_phase191_sys_admin_alone_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SYS_NICE);
+            // CAP_SYS_ADMIN still held.
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN,
+            ));
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 2;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+        }
+
+        // -- Buggy caller -----------------------------------------------------
+
+        /// `ionice -c1 -n9` (RT, data=9) without privilege: data is
+        /// out of range AND the caller has no caps.  Linux returns
+        /// EPERM here (cap check first), letting ionice print
+        /// "Operation not permitted" rather than "Invalid argument" —
+        /// the former is what users actually need to see.
+        #[test]
+        fn test_ioprio_set_phase191_ionice_rt_no_cap_data_oor_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            // ionice's -n9 would be encoded as data=9 (out of range).
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 9;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        // -- Recovery ---------------------------------------------------------
+
+        /// After an EPERM-rejected RT call, restoring CAP_SYS_NICE
+        /// (via Drop of CapGuard at end of inner scope) allows the
+        /// next RT call to succeed.
+        #[test]
+        fn test_ioprio_set_phase191_recovery_after_eperm() {
+            let _outer = CapGuard::snapshot();
+            // Inner scope: drop both caps, observe EPERM, then drop
+            // the inner guard which restores the outer snapshot.
+            {
+                let _inner = CapGuard::snapshot();
+                drop_both_rt_caps();
+                let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 4;
+                crate::errno::set_errno(0);
+                assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+                assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            }
+            // Outer snapshot restored — caps held again, RT succeeds.
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 4;
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+        }
+
+        // -- No-side-effect ---------------------------------------------------
+
+        /// An EPERM rejection must not leave errno on a different
+        /// value (e.g. EINVAL from a half-evaluated data check).
+        #[test]
+        fn test_ioprio_set_phase191_eperm_sets_only_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            crate::errno::set_errno(crate::errno::EINVAL);
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 4;
+            // Call overwrites the seeded EINVAL with EPERM.
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        // -- Cross-checks -----------------------------------------------------
+
+        /// CLASS_BE with no RT caps must still succeed — BE has no
+        /// cap requirement in Linux.
+        #[test]
+        fn test_ioprio_set_phase191_be_no_rt_caps_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            let prio = (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | 4;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+        }
+
+        /// CLASS_IDLE with no RT caps must succeed — IDLE has no cap
+        /// requirement since Linux 5.0.
+        #[test]
+        fn test_ioprio_set_phase191_idle_no_rt_caps_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            let prio = IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+        }
+
+        /// CLASS_NONE with no RT caps must succeed (data=0) —
+        /// confirms the gate is RT-only and doesn't bleed into NONE.
+        #[test]
+        fn test_ioprio_set_phase191_none_no_rt_caps_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            let prio = IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+        }
+
+        /// CLASS_NONE+nonzero data with no RT caps → EINVAL, NOT
+        /// EPERM.  The cap gate is in the RT arm only; the NONE arm
+        /// still enforces data==0.
+        #[test]
+        fn test_ioprio_set_phase191_none_data_no_rt_caps_einval() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            let prio = (IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT) | 3;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        /// `ioprio_get` is unaffected by the new gate — it has no cap
+        /// requirement.  Cross-checks the sister syscall.
+        #[test]
+        fn test_ioprio_set_phase191_get_unaffected_by_dropped_caps() {
+            let _g = CapGuard::snapshot();
+            drop_both_rt_caps();
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_get(IOPRIO_WHO_PROCESS, 0), 0);
+            // No errno was set (function succeeded).
+            assert_eq!(crate::errno::get_errno(), 0);
+        }
+
+        /// Dropping an unrelated cap (e.g. CAP_MKNOD) doesn't affect
+        /// the RT path — the gate only consults CAP_SYS_NICE /
+        /// CAP_SYS_ADMIN.
+        #[test]
+        fn test_ioprio_set_phase191_unrelated_cap_drop_no_effect() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_MKNOD);
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 4;
+            crate::errno::set_errno(0);
+            assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+        }
     }
 
     // =====================================================================

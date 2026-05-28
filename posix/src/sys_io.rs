@@ -63,11 +63,18 @@ pub const IOPL_LEVEL_MAX: i32 = 3;
 /// Errors (Linux-matching priority order):
 /// - `EINVAL` — `num == 0`, or `from + num` overflows, or `from + num
 ///   > IO_BITMAP_BITS` (the 64 KiB port space limit).
-/// - `EPERM` — `turn_on != 0` (Linux requires `CAP_SYS_RAWIO`; in our
-///   design no caller has it ambiently).
+/// - `EPERM` — `turn_on != 0` and the caller lacks `CAP_SYS_RAWIO`
+///   (Phase 178).  Pre-Phase-178 this was *unconditional* on
+///   `turn_on != 0` — a divergence: a privileged caller (Linux:
+///   CAP_SYS_RAWIO held) should reach the IO-bitmap install path,
+///   not be refused.
+/// - `ENOSYS` — `turn_on != 0`, caller has `CAP_SYS_RAWIO`, but we
+///   have no IO-bitmap install path (per `design.txt`, drivers
+///   live in userspace and access hardware via the capability
+///   system, not via a kernel-managed IO bitmap).
 ///
 /// `turn_on == 0` on a well-formed range is a successful no-op (we
-/// "clear" access we never granted).
+/// "clear" access we never granted); the cap probe is not run.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ioperm(from: u64, num: u64, turn_on: i32) -> i32 {
     // Range check matches Linux's `(from + num <= from) || (from + num
@@ -90,15 +97,29 @@ pub extern "C" fn ioperm(from: u64, num: u64, turn_on: i32) -> i32 {
         return -1;
     }
 
-    // Granting access requires capability; we always lack it.
-    if turn_on != 0 {
+    // turn_on == 0 on a valid range: clearing access we never granted.
+    // Linux treats this as a successful no-op; we do the same.  The
+    // cap probe runs only on the "grant" path (turn_on != 0), matching
+    // Linux's `ksys_ioperm` which only invokes capable(CAP_SYS_RAWIO)
+    // under `if (turn_on)`.
+    if turn_on == 0 {
+        return 0;
+    }
+
+    // Phase 178: gate the grant path on CAP_SYS_RAWIO.  Linux:
+    //   if (turn_on && !capable(CAP_SYS_RAWIO))
+    //       return -EPERM;
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_RAWIO,
+    ) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
 
-    // turn_on == 0 on a valid range: clearing access we never granted.
-    // Linux treats this as a successful no-op; we do the same.
-    0
+    // Privileged grant request — no IO-bitmap install path exists
+    // in our microkernel (drivers live in userspace per design.txt).
+    errno::set_errno(errno::ENOSYS);
+    -1
 }
 
 /// Set I/O privilege level.
@@ -227,22 +248,24 @@ mod tests {
     #[test]
     fn test_ioperm_exactly_64k_ok() {
         // from + num == 65536 is the boundary case and must be accepted.
-        // turn_on=1 still gives EPERM (capability missing), not EINVAL.
+        // turn_on=1 with CAP_SYS_RAWIO held (Phase 178, host default)
+        // → ENOSYS (no IO-bitmap backend), not EINVAL.
         errno::set_errno(errno::EBADF);
         let r = ioperm(0, IO_BITMAP_BITS, 1);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
-    fn test_ioperm_serial_port_turn_on_eperm() {
+    fn test_ioperm_serial_port_turn_on_enosys() {
         // Classic case: `ioperm(0x3F8, 8, 1)` for COM1. Range is fine,
-        // but the "grant access" half requires CAP_SYS_RAWIO which we
-        // never have.
+        // CAP_SYS_RAWIO held (Phase 178) → ENOSYS (no IO-bitmap
+        // backend).  Dropping the cap restores EPERM (see
+        // ioperm_cap_phase178).
         errno::set_errno(errno::EBADF);
         let r = ioperm(0x3F8, 8, 1);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -256,11 +279,13 @@ mod tests {
 
     #[test]
     fn test_ioperm_turn_off_with_arbitrary_truthy_value() {
-        // Any non-zero turn_on is treated as "grant access" → EPERM.
+        // Any non-zero turn_on is treated as "grant access" → reaches
+        // the cap-gated path.  With CAP_SYS_RAWIO held (Phase 178,
+        // host default) → ENOSYS.
         errno::set_errno(errno::EBADF);
         let r = ioperm(0x3F8, 8, 42);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     // ---- iopl validation ----
@@ -305,12 +330,15 @@ mod tests {
     fn test_xorg_serial_port_init_workflow() {
         // Xorg's old `xf86-input-mouse` driver and various keyboard
         // drivers call `ioperm(0x60, 16, 1)` to claim PS/2 controller
-        // ports at startup, then fall back to /dev/input/event* on
-        // EPERM. We give them EPERM.
+        // ports at startup.  With CAP_SYS_RAWIO held (Phase 178) we
+        // return ENOSYS — Xorg's fallback path treats ENOSYS the same
+        // as EPERM (both surface as "no port-IO available", driving
+        // the /dev/input/event* path).  The EPERM-on-no-cap variant
+        // is covered in ioperm_cap_phase178.
         errno::set_errno(errno::EBADF);
         let r = ioperm(0x60, 16, 1);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -337,13 +365,15 @@ mod tests {
     #[test]
     fn test_legacy_parallel_port_lp0_workflow() {
         // Old `parport` driver in userspace mode calls
-        // `ioperm(0x378, 3, 1)` for LPT1. EPERM → falls back to
-        // /dev/parport0 character device or refuses to drive the
-        // printer.
+        // `ioperm(0x378, 3, 1)` for LPT1.  Phase 178: with
+        // CAP_SYS_RAWIO held (host default) we return ENOSYS;
+        // parport's failure path treats ENOSYS and EPERM the same
+        // (falls back to /dev/parport0 character device or refuses
+        // to drive the printer).
         errno::set_errno(errno::EBADF);
         let r = ioperm(0x378, 3, 1);
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     // ---- errno-preserved-on-success regression ----
@@ -553,5 +583,290 @@ mod tests {
         errno::set_errno(0);
         let r = ioperm(0, IO_BITMAP_BITS, 0);
         assert_eq!(r, 0);
+    }
+
+    // ======================================================================
+    // Phase 178 — ioperm() CAP_SYS_RAWIO gate.
+    //
+    // Linux's `ksys_ioperm` (arch/x86/kernel/ioport.c) gates only the
+    // grant path (turn_on != 0) on CAP_SYS_RAWIO:
+    //
+    //     if (turn_on && !capable(CAP_SYS_RAWIO))
+    //         return -EPERM;
+    //
+    // Pre-Phase-178 we returned EPERM *unconditionally* on the grant
+    // path — wrong, because a privileged caller (Linux: CAP_SYS_RAWIO
+    // held) should reach the IO-bitmap install code.  Phase 178
+    // differentiates: missing cap → EPERM; held cap → ENOSYS (no
+    // IO-bitmap backend exists in our microkernel).
+    //
+    // EINVAL on the range check fires before the cap probe, matching
+    // Linux's prologue ordering.  turn_on == 0 short-circuits to
+    // success without consulting capabilities.
+    //
+    // CapGuard snapshot/restore pattern; --test-threads=1.
+    // ======================================================================
+
+    mod ioperm_cap_phase178 {
+        use super::*;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_rawio() {
+            use crate::sys_capability::CAP_SYS_RAWIO;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_RAWIO < 32 {
+                (lo & !(1u32 << CAP_SYS_RAWIO), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_RAWIO - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(
+                rc, 0,
+                "capset must succeed when dropping CAP_SYS_RAWIO"
+            );
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_RAWIO));
+        }
+
+        // -- grant path EPERM without cap ----------------------------------
+
+        #[test]
+        fn test_ioperm_phase178_grant_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            let r = ioperm(0x3F8, 8, 1);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_ioperm_phase178_grant_arbitrary_truthy_no_cap_eperm() {
+            // Any non-zero turn_on enters the gated path.
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            let r = ioperm(0x60, 16, 42);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_ioperm_phase178_grant_full_range_no_cap_eperm() {
+            // Full IO bitmap (the maximum legal range).
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            let r = ioperm(0, IO_BITMAP_BITS, 1);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- ordering: EINVAL beats EPERM ----------------------------------
+
+        #[test]
+        fn test_ioperm_phase178_range_overflow_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            let r = ioperm(u64::MAX - 4, 16, 1);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        #[test]
+        fn test_ioperm_phase178_zero_num_beats_eperm() {
+            // num == 0 → EINVAL fires before cap probe.
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            let r = ioperm(0x3F8, 0, 1);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        #[test]
+        fn test_ioperm_phase178_beyond_64k_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            let r = ioperm(0xFFF0, 0x20, 1);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- turn_on == 0 bypasses the gate --------------------------------
+
+        /// turn_on == 0 on a valid range succeeds even without
+        /// CAP_SYS_RAWIO — Linux's `if (turn_on)` guard around the
+        /// `capable()` call.
+        #[test]
+        fn test_ioperm_phase178_turn_off_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            let r = ioperm(0x3F8, 8, 0);
+            assert_eq!(r, 0);
+        }
+
+        /// turn_on == 0 with EINVAL-shape range still EINVALs (range
+        /// check runs before turn_on short-circuit).
+        #[test]
+        fn test_ioperm_phase178_turn_off_bad_range_einval() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            let r = ioperm(0, 0, 0);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- cap-held sentinel ---------------------------------------------
+
+        /// With CAP_SYS_RAWIO held, the grant path reaches ENOSYS
+        /// (no IO-bitmap backend).  Proves the gate is the only thing
+        /// blocking the path.
+        #[test]
+        fn test_ioperm_phase178_grant_with_cap_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_RAWIO,
+            ));
+            errno::set_errno(0);
+            let r = ioperm(0x3F8, 8, 1);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- workflow: drop → EPERM, restore → ENOSYS ----------------------
+
+        #[test]
+        fn test_ioperm_phase178_drop_then_restore_workflow() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_sys_rawio();
+                errno::set_errno(0);
+                let r = ioperm(0x3F8, 8, 1);
+                assert_eq!(r, -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_RAWIO,
+            ));
+            errno::set_errno(0);
+            let r = ioperm(0x3F8, 8, 1);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- no-side-effect loop -------------------------------------------
+
+        #[test]
+        fn test_ioperm_phase178_repeated_grant_no_cap_stable() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            for _ in 0..16 {
+                errno::set_errno(0);
+                let r = ioperm(0x3F8, 8, 1);
+                assert_eq!(r, -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+        }
+
+        // -- recovery: turn_off then turn_on with no cap -------------------
+
+        /// turn_off succeeds without cap; subsequent turn_on still
+        /// EPERMs — clearing access doesn't grant any latent privilege.
+        #[test]
+        fn test_ioperm_phase178_turn_off_does_not_unlock_grant_path() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            assert_eq!(ioperm(0x3F8, 8, 0), 0);
+            errno::set_errno(0);
+            let r = ioperm(0x3F8, 8, 1);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- buggy-caller --------------------------------------------------
+
+        /// A caller passes turn_on=1 with an overflow range and no
+        /// cap: must see EINVAL (range bug), not EPERM (cap bug) —
+        /// matches Linux's prologue order.
+        #[test]
+        fn test_ioperm_phase178_buggy_caller_overflow_diagnosed_first() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(0);
+            let r = ioperm(u64::MAX, 1, 1);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL,
+                "range bug must be diagnosed before cap-lack");
+        }
+
+        // -- errno-preserved-on-success ------------------------------------
+
+        /// Successful turn_off with no cap must not clobber errno.
+        #[test]
+        fn test_ioperm_phase178_turn_off_no_cap_preserves_errno() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_rawio();
+            errno::set_errno(errno::EBADF);
+            let r = ioperm(0x3F8, 8, 0);
+            assert_eq!(r, 0);
+            assert_eq!(errno::get_errno(), errno::EBADF);
+        }
     }
 }

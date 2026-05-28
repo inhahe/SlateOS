@@ -724,3 +724,19 @@ OBSOLETE NOTE BELOW (pre-relaxation):
     pidfd_getfd needs the inner targetfd<0 / not-open check
     reintroduced inside the inner pidfd_getfd(pid, fd) once real
     pidfd state exists.
+
+(2026-05-28) Flaky test — aio::tests::test_aio_return_unsubmitted_einval:
+  Observed during Phase 178 (ioperm CAP_SYS_RAWIO) full posix
+  regression run.  The test passes in isolation and on a re-run
+  of the full suite, but failed once under `cargo test -p posix
+  --target x86_64-pc-windows-gnu --lib -- --test-threads=1`.
+  The test asserts that `aio_return` on a zero-initialised Aiocb
+  returns -1 with EINVAL.  Likely a state leak from an earlier
+  aio test polluting the shared aio control-block table, or
+  errno state from a preceding cap-manipulation test (Phase 178
+  added CapGuard tests that mutate effective caps; aio shouldn't
+  depend on caps, but errno might be inspected after an
+  unrelated test set EBADF).  Investigate when next touching aio.
+  Reproduce: run the full suite repeatedly; the failure rate
+  appears to be < 50%.  Symptom: test reports failure but the
+  next run of the same command passes.

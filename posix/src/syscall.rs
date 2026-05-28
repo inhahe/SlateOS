@@ -49,6 +49,7 @@ pub const SYS_PROCESS_IS_READY: u64 = 509;
 pub const SYS_THREAD_CREATE: u64 = 510;
 pub const SYS_THREAD_EXIT: u64 = 511;
 pub const SYS_THREAD_JOIN: u64 = 512;
+pub const SYS_PROCESS_KILL: u64 = 506;
 pub const SYS_PROCESS_SPAWN_EX: u64 = 517;
 pub const SYS_PROCESS_GET_INITIAL_FDS: u64 = 518;
 pub const SYS_PROCESS_GET_ARGS: u64 = 519;

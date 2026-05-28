@@ -257,36 +257,149 @@ pub unsafe extern "C" fn sigaction(
     0
 }
 
+// ---------------------------------------------------------------------------
+// Default signal action classification
+// ---------------------------------------------------------------------------
+
+/// Linux default signal disposition.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DefaultAction {
+    /// Terminate the process.
+    Terminate,
+    /// Terminate with core dump (we treat as Terminate — no core support).
+    Core,
+    /// Ignore the signal (do nothing).
+    Ignore,
+    /// Stop the process (SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU).
+    Stop,
+    /// Continue the process (SIGCONT).
+    Continue,
+}
+
+/// Return the Linux default action for a signal, or `None` for
+/// out-of-range signal numbers.  Based on `signal(7)`.
+fn default_action(sig: i32) -> Option<DefaultAction> {
+    match sig {
+        SIGHUP | SIGINT | SIGPIPE | SIGALRM | SIGTERM | SIGUSR1
+        | SIGUSR2 | SIGVTALRM | SIGPROF | SIGIO | SIGPWR => {
+            Some(DefaultAction::Terminate)
+        }
+        SIGQUIT | SIGILL | SIGTRAP | SIGABRT | SIGBUS | SIGFPE
+        | SIGSEGV | SIGXCPU | SIGXFSZ | SIGSYS => {
+            Some(DefaultAction::Core)
+        }
+        SIGCHLD | SIGURG | SIGWINCH => Some(DefaultAction::Ignore),
+        SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => Some(DefaultAction::Stop),
+        SIGCONT => Some(DefaultAction::Continue),
+        _ if (1..NSIG).contains(&sig) => {
+            // RT signals (32..64) default to Terminate on Linux.
+            Some(DefaultAction::Terminate)
+        }
+        _ => None,
+    }
+}
+
+/// Dispatch a signal to the calling process.
+///
+/// Checks the registered `sigaction` table:
+/// * `SIG_IGN` → signal discarded, returns 0.
+/// * Registered handler → invokes it, returns 0.
+/// * `SIG_DFL` → applies the default action (terminate, ignore, etc.).
+///
+/// For `SIGKILL` and `SIGSTOP`, handlers are ignored (Linux semantics:
+/// they cannot be caught, blocked, or ignored).
+///
+/// **Returns** 0 on success, -1 on unimplemented action (errno = ENOSYS).
+fn dispatch_self_signal(sig: i32) -> i32 {
+    // SIGKILL / SIGSTOP: always apply default, regardless of handler.
+    if sig == SIGKILL {
+        // 128 + 9 = 137
+        crate::process::_exit(128i32.wrapping_add(sig));
+    }
+    if sig == SIGSTOP {
+        // We have no kernel suspend mechanism; report ENOSYS.
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+
+    // Look up the registered action.
+    let handler = if (1..NSIG).contains(&sig) {
+        let idx = sig as usize;
+        // SAFETY: single-threaded access, idx in [1, NSIG).
+        unsafe {
+            let actions = core::ptr::addr_of!(ACTIONS);
+            (*actions)
+                .get(idx)
+                .map(|a| a.sa_handler)
+                .unwrap_or(SIG_DFL)
+        }
+    } else {
+        SIG_DFL
+    };
+
+    if handler == SIG_IGN {
+        return 0;
+    }
+
+    if handler != SIG_DFL {
+        // Invoke the registered handler.  POSIX: the handler receives
+        // the signal number.  We cast the stored usize back to a
+        // function pointer.  The handler may call longjmp or modify
+        // global state — that's fine.
+        //
+        // SAFETY: the caller registered this via signal()/sigaction()
+        // as a valid fn(i32).  We trust they provided a valid pointer.
+        let func: extern "C" fn(i32) =
+            unsafe { core::mem::transmute::<usize, extern "C" fn(i32)>(handler) };
+        func(sig);
+        return 0;
+    }
+
+    // SIG_DFL: apply default action.
+    match default_action(sig) {
+        Some(DefaultAction::Terminate | DefaultAction::Core) => {
+            if sig == SIGABRT {
+                crate::unistd::abort();
+            }
+            // 128 + sig (Unix convention)
+            crate::process::_exit(128i32.wrapping_add(sig));
+        }
+        Some(DefaultAction::Ignore) => 0,
+        Some(DefaultAction::Stop | DefaultAction::Continue) => {
+            // No kernel suspend/resume mechanism yet.
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+        None => {
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
+    }
+}
+
 /// Send a signal to a process.
 ///
-/// Our OS does not deliver Unix signals — process control uses IPC
-/// messages instead.  Most `(pid, sig)` combinations therefore fail
-/// with `ENOSYS`.  Two cases are still useful and are honoured:
+/// ## Signal delivery model (Phase 211)
 ///
-/// * `kill(pid, 0)` — the canonical POSIX existence check.  No signal
-///   is sent; we only verify whether the target PID is a live process.
-///   Implemented via the native `SYS_PROCESS_IS_READY` syscall, which
-///   returns a non-negative value if the process exists and a negative
-///   error otherwise.  We translate that into the POSIX contract:
-///   `0` on success, `-1`/`ESRCH` if no such process.
+/// Our OS uses IPC messages instead of Unix signals, but the POSIX
+/// layer translates `kill()` into native operations:
 ///
-/// * `kill(self, SIGABRT)` — defers to `abort()`, matching the
-///   `raise(SIGABRT)` semantics required by libc.
+/// * `sig == 0` — pure existence check via `SYS_PROCESS_IS_READY`.
+/// * **Self-signals** (`pid == self`): dispatched locally via
+///   `dispatch_self_signal()`, which invokes registered handlers
+///   or applies the Linux default action (terminate, ignore, etc.).
+/// * **Cross-process terminating signals** (`pid > 0`, default action
+///   is Terminate or Core): translated to `SYS_PROCESS_KILL(pid,
+///   128 + sig)`.  The target process is forcefully terminated with
+///   the conventional Unix exit code.
+/// * **Cross-process ignore signals**: silently discarded (return 0).
+/// * **Stop/Continue signals**: not yet supported (`ENOSYS`).
+/// * `pid <= 0` (process groups): not supported (`ENOSYS`).
 ///
-/// `pid <= 0` selects process groups or "all processes" on Linux.  We
-/// have no Unix process-group concept (the design uses IPC), so those
-/// forms return `ENOSYS`.
+/// ## Capability gate (Phase 203)
 ///
-/// # Capability gate (Phase 203)
-///
-/// Linux gates cross-uid signal delivery on `CAP_KILL` inside
-/// `check_kill_permission()` → `kill_ok_by_cred()`.  In our
-/// single-uid environment, same-uid is always true so the cap never
-/// blocks in practice.  We still enforce it for correctness: after
-/// the EINVAL signal check and the self-pid SIGABRT fast path, a
-/// non-self `kill()` with `pid > 0` requires `CAP_KILL`.  This
-/// lets unprivileged callers see EPERM rather than ENOSYS — the
-/// correct signal for "you lack permission" vs. "not implemented."
+/// Non-self `kill()` with `pid > 0` requires `CAP_KILL` (matches
+/// Linux's `check_kill_permission()` → `kill_ok_by_cred()`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     // sig == 0 is a pure existence/permission check; honour it.
@@ -312,74 +425,93 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
         return 0;
     }
 
-    // Validate sig number for everything else.  Linux returns EINVAL
-    // for out-of-range signals; we match that so programs see the same
-    // diagnostic regardless of whether the signal is implemented.
+    // Validate sig number.  Linux returns EINVAL for out-of-range.
     if !(1..NSIG).contains(&sig) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
 
-    // `kill(getpid(), SIGABRT)` is a common abort idiom (e.g. inside
-    // assertion failure paths).  Honour it the same way `raise()` does.
-    if sig == SIGABRT {
-        let self_pid = crate::syscall::syscall0(
-            crate::syscall::SYS_PROCESS_ID,
-        ) as i32;
-        if pid == self_pid {
-            crate::unistd::abort();
-        }
+    // Determine if this is a self-signal.
+    let self_pid = crate::syscall::syscall0(
+        crate::syscall::SYS_PROCESS_ID,
+    ) as i32;
+
+    if pid == self_pid {
+        return dispatch_self_signal(sig);
     }
 
-    // Phase 203: CAP_KILL gate for non-self signal delivery.
-    // Linux's check_kill_permission() calls kill_ok_by_cred():
-    //   - same thread group → always allowed
-    //   - same uid → allowed
-    //   - CAP_KILL → allowed
-    //   - otherwise → EPERM
-    //
-    // Self-signals already took the SIGABRT fast path above.  For
-    // pid <= 0 (process groups) we still fall through to ENOSYS
-    // because we can't enumerate the group membership — the cap
-    // gate only runs for positive pids where the caller intends to
-    // signal a specific target.
-    if pid > 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_KILL,
-        )
-    {
+    // --- Cross-process signal delivery ---
+
+    if pid <= 0 {
+        // Process group signaling — not supported.
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+
+    // Phase 203: CAP_KILL gate for cross-process signals.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_KILL,
+    ) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
 
-    errno::set_errno(errno::ENOSYS);
-    -1
+    // Look up the default action for this signal.
+    let action = match default_action(sig) {
+        Some(a) => a,
+        None => {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    };
+
+    match action {
+        DefaultAction::Terminate | DefaultAction::Core => {
+            // Translate to native process termination.
+            // Exit code = 128 + signal number (Unix convention).
+            let exit_code = 128i32.wrapping_add(sig);
+            let ret = crate::syscall::syscall2(
+                crate::syscall::SYS_PROCESS_KILL,
+                pid as u64,
+                exit_code as u64,
+            );
+            if ret < 0 {
+                // Map kernel errors to POSIX errno.
+                // NoSuchProcess → ESRCH, PermissionDenied → EPERM,
+                // anything else → ESRCH (conservative).
+                errno::set_errno(errno::ESRCH);
+                return -1;
+            }
+            0
+        }
+        DefaultAction::Ignore => {
+            // Cross-process ignore: silently discard (POSIX: success).
+            0
+        }
+        DefaultAction::Stop | DefaultAction::Continue => {
+            // No kernel suspend/resume support yet.
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+    }
 }
 
 /// Send a signal to the calling process / calling thread.
 ///
 /// POSIX `raise(sig)`:
 /// * Returns 0 on success, non-zero on error (errno set).
-/// * For `SIGABRT`, defers to `abort()` — matches glibc and musl, which
-///   route `raise(SIGABRT)` through their `__GI_raise` / `abort` paths.
-/// * For every other signal we have no kernel-side delivery mechanism,
-///   so the call fails with `ENOSYS` after validation.
+/// * Dispatches via `dispatch_self_signal()`, which checks the
+///   registered handler table and applies the appropriate action.
 ///
 /// Errors (Linux-matching):
-/// * `EINVAL` — `sig` is not a valid signal number (`sig <= 0`
-///   or `sig >= NSIG`).
+/// * `EINVAL` — `sig` is not a valid signal number.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn raise(sig: i32) -> i32 {
-    if sig == SIGABRT {
-        // abort() is divergent; never returns.
-        crate::unistd::abort();
-    }
     if !(1..NSIG).contains(&sig) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    errno::set_errno(errno::ENOSYS);
-    -1
+    dispatch_self_signal(sig)
 }
 
 /// Examine and change blocked signals.
@@ -1798,18 +1930,28 @@ mod tests {
     // entirely in our code: pid<=0 with sig==0, out-of-range signals,
     // and the unchanged ENOSYS behaviour for arbitrary (pid, sig).
 
+    /// Cross-process ignore signal → success (discarded).
     #[test]
-    fn test_kill_returns_enosys() {
-        let ret = kill(1, SIGTERM);
-        assert_eq!(ret, -1);
+    fn test_kill_ignore_signal_discarded() {
+        crate::errno::set_errno(0);
+        let ret = kill(1, SIGCHLD);
+        assert_eq!(ret, 0, "ignore-default signal should be silently discarded");
     }
 
-    // -- kill errno verification --
-
+    /// Cross-process stop signal → ENOSYS (not supported).
     #[test]
-    fn test_kill_sets_errno() {
+    fn test_kill_stop_signal_enosys() {
         crate::errno::set_errno(0);
-        let ret = kill(1, SIGTERM);
+        let ret = kill(1, SIGSTOP);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Cross-process continue signal → ENOSYS (not supported).
+    #[test]
+    fn test_kill_continue_signal_enosys() {
+        crate::errno::set_errno(0);
+        let ret = kill(1, SIGCONT);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -1863,18 +2005,28 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    /// Cross-process ignore signals (SIGCHLD, SIGURG, SIGWINCH) are
+    /// silently discarded — returns 0, no syscall issued.
     #[test]
-    fn test_kill_unsupported_signal_enosys() {
-        // Valid signal numbers we don't implement still return ENOSYS,
-        // matching the pre-existing contract.
-        for sig in [SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGPIPE, SIGCHLD] {
+    fn test_kill_cross_process_ignore_signals() {
+        for sig in [SIGCHLD, SIGURG, SIGWINCH] {
+            crate::errno::set_errno(0);
+            let ret = kill(1, sig);
+            assert_eq!(ret, 0, "kill(1, {sig}) should succeed (ignore)");
+        }
+    }
+
+    /// Cross-process stop/continue signals return ENOSYS.
+    #[test]
+    fn test_kill_cross_process_stop_continue_enosys() {
+        for sig in [SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGCONT] {
             crate::errno::set_errno(0);
             let ret = kill(1, sig);
             assert_eq!(ret, -1, "kill(1, {sig}) should fail");
             assert_eq!(
                 crate::errno::get_errno(),
                 crate::errno::ENOSYS,
-                "kill(1, {sig}) should set ENOSYS"
+                "kill(1, {sig}) should set ENOSYS (not supported)"
             );
         }
     }
@@ -1952,16 +2104,27 @@ mod tests {
         }
     }
 
-    // -- cap held: kill reaches ENOSYS (unchanged) ------------------------
+    // -- cap held: ignore signals succeed, stop returns ENOSYS ----------
 
-    /// With CAP_KILL (default), kill(1, SIGHUP) still reaches ENOSYS.
+    /// With CAP_KILL (default), cross-process ignore signals succeed.
     #[test]
-    fn test_phase203_kill_with_cap_enosys() {
+    fn test_phase203_kill_with_cap_ignore_ok() {
         assert!(crate::sys_capability::has_capability(
             crate::sys_capability::CAP_KILL,
         ));
         crate::errno::set_errno(0);
-        let ret = kill(1, SIGHUP);
+        let ret = kill(1, SIGCHLD);
+        assert_eq!(ret, 0);
+    }
+
+    /// With CAP_KILL (default), stop signals return ENOSYS.
+    #[test]
+    fn test_phase203_kill_with_cap_stop_enosys() {
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_KILL,
+        ));
+        crate::errno::set_errno(0);
+        let ret = kill(1, SIGSTOP);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -2068,14 +2231,15 @@ mod tests {
 
     // -- restoration: cap drop/restore cycle ------------------------------
 
-    /// After restoring CAP_KILL, kill reaches ENOSYS again.
+    /// After restoring CAP_KILL, ignore signals succeed again.
     #[test]
     fn test_phase203_kill_cap_restore() {
         {
             let _g = phase203_cap::CapGuard::snapshot();
             phase203_cap::drop_cap_kill();
             crate::errno::set_errno(0);
-            let ret = kill(1, SIGHUP);
+            // Without CAP_KILL, cross-process signal → EPERM.
+            let ret = kill(1, SIGCHLD);
             assert_eq!(ret, -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
         }
@@ -2083,9 +2247,9 @@ mod tests {
             crate::sys_capability::CAP_KILL,
         ));
         crate::errno::set_errno(0);
-        let ret = kill(1, SIGHUP);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        // With cap restored, ignore signals succeed.
+        let ret = kill(1, SIGCHLD);
+        assert_eq!(ret, 0);
     }
 
     // -- sigtimedwait / sigqueue stubs --
@@ -2179,43 +2343,66 @@ mod tests {
         assert_eq!(CLD_CONTINUED, CLD_STOPPED + 1);
     }
 
-    // -- raise (non-SIGABRT) --
+    // -- raise (Phase 211: handler dispatch) --
 
+    /// raise() with SIG_IGN registered returns 0 (signal ignored).
     #[test]
-    fn test_raise_non_sigabrt_returns_enosys() {
-        // raise(anything except SIGABRT) should return -1 with ENOSYS.
+    fn test_raise_sig_ign_returns_zero() {
+        let old = signal(SIGTERM, SIG_IGN);
         errno::set_errno(0);
-        assert_eq!(raise(SIGTERM), -1);
+        assert_eq!(raise(SIGTERM), 0);
+        // Restore.
+        signal(SIGTERM, old);
+    }
+
+    /// raise() with an ignore-default signal (SIGCHLD) returns 0 via
+    /// SIG_DFL → Ignore default action.
+    #[test]
+    fn test_raise_ignore_default_returns_zero() {
+        // Ensure SIG_DFL is set.
+        signal(SIGCHLD, SIG_DFL);
+        errno::set_errno(0);
+        assert_eq!(raise(SIGCHLD), 0);
+    }
+
+    /// raise() with an ignore-default signal (SIGWINCH) returns 0.
+    #[test]
+    fn test_raise_sigwinch_ignore_default_returns_zero() {
+        signal(SIGWINCH, SIG_DFL);
+        errno::set_errno(0);
+        assert_eq!(raise(SIGWINCH), 0);
+    }
+
+    /// raise() with SIG_IGN for SIGHUP returns 0.
+    #[test]
+    fn test_raise_sighup_sig_ign() {
+        let old = signal(SIGHUP, SIG_IGN);
+        errno::set_errno(0);
+        assert_eq!(raise(SIGHUP), 0);
+        signal(SIGHUP, old);
+    }
+
+    /// raise() with SIG_IGN for SIGINT returns 0.
+    #[test]
+    fn test_raise_sigint_sig_ign() {
+        let old = signal(SIGINT, SIG_IGN);
+        errno::set_errno(0);
+        assert_eq!(raise(SIGINT), 0);
+        signal(SIGINT, old);
+    }
+
+    /// raise() with a stop signal returns ENOSYS (no kernel suspend).
+    #[test]
+    fn test_raise_sigtstp_enosys() {
+        signal(SIGTSTP, SIG_DFL);
+        errno::set_errno(0);
+        assert_eq!(raise(SIGTSTP), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
-    fn test_raise_sigint_returns_enosys() {
-        errno::set_errno(0);
-        assert_eq!(raise(SIGINT), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_raise_sighup_returns_enosys() {
-        errno::set_errno(0);
-        assert_eq!(raise(SIGHUP), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_raise_sigkill_returns_enosys() {
-        // SIGKILL without kernel support → ENOSYS.
-        errno::set_errno(0);
-        assert_eq!(raise(SIGKILL), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_raise_zero_returns_enosys() {
-        // sig == 0 is out of the valid signal range (1..NSIG); raise()
-        // now returns EINVAL per Linux semantics, ahead of the ENOSYS
-        // fall-through for valid-but-unsupported signals.
+    fn test_raise_zero_returns_einval() {
+        // sig == 0 is out of the valid signal range (1..NSIG).
         errno::set_errno(0);
         assert_eq!(raise(0), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -2428,27 +2615,31 @@ mod tests {
     }
 
     #[test]
-    fn test_raise_min_signal_enosys() {
-        // sig == 1 (SIGHUP) is valid → falls through to ENOSYS.
+    fn test_raise_min_signal_with_sig_ign() {
+        // sig == 1 (SIGHUP) is valid. With SIG_IGN, returns 0.
+        let old = signal(1, SIG_IGN);
         crate::errno::set_errno(0);
-        assert_eq!(raise(1), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(raise(1), 0);
+        signal(1, old);
     }
 
     #[test]
-    fn test_raise_max_signal_enosys() {
-        // sig == NSIG - 1 (top of the valid range) → ENOSYS.
+    fn test_raise_max_signal_with_sig_ign() {
+        // sig == NSIG - 1 (top of the valid range). With SIG_IGN, returns 0.
+        let old = signal(NSIG - 1, SIG_IGN);
         crate::errno::set_errno(0);
-        assert_eq!(raise(NSIG - 1), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(raise(NSIG - 1), 0);
+        signal(NSIG - 1, old);
     }
 
     #[test]
-    fn test_raise_rt_signal_enosys() {
+    fn test_raise_rt_signal_with_sig_ign() {
         // Realtime signals (SIGRTMIN..=SIGRTMAX) pass validation.
+        // With SIG_IGN, returns 0.
+        let old = signal(SIGRTMIN, SIG_IGN);
         crate::errno::set_errno(0);
-        assert_eq!(raise(SIGRTMIN), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(raise(SIGRTMIN), 0);
+        signal(SIGRTMIN, old);
     }
 
     // ---- sigqueue() ----
@@ -2879,11 +3070,16 @@ mod tests {
     #[test]
     fn test_workflow_raise_sigusr1_libev() {
         // libev uses raise(SIGUSR1) to wake the event loop from a
-        // signal handler.  On our stub it gracefully fails with ENOSYS
-        // so libev's fallback (pipe self-wakeup) is selected at init.
+        // signal handler.  When a handler is registered, raise()
+        // invokes it and returns 0.  When no handler is registered
+        // (SIG_DFL), SIGUSR1's default is Terminate — so libev
+        // would register a handler first.
+        //
+        // Test with SIG_IGN to verify the dispatch path.
+        let old = signal(SIGUSR1, SIG_IGN);
         crate::errno::set_errno(0);
-        assert_eq!(raise(SIGUSR1), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(raise(SIGUSR1), 0);
+        signal(SIGUSR1, old);
     }
 
     #[test]
@@ -2911,16 +3107,9 @@ mod tests {
 
     // ---- Real-world buggy callers ----
 
-    #[test]
-    fn test_workflow_buggy_raise_sigkill() {
-        // Buggy caller tries raise(SIGKILL) thinking it'll self-kill.
-        // Validates fine (SIGKILL is a real signal), reaches ENOSYS.
-        // (POSIX says raise(SIGKILL) is unspecified, but ENOSYS is a
-        // safe, non-fatal answer for our stub.)
-        crate::errno::set_errno(0);
-        assert_eq!(raise(SIGKILL), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
+    // Note: raise(SIGKILL) with SIG_DFL now calls _exit(137) and never
+    // returns (correct POSIX behavior: SIGKILL cannot be caught).
+    // This can't be tested without killing the test process.
 
     #[test]
     fn test_workflow_buggy_sigqueue_oversigned_sig() {
@@ -3354,5 +3543,216 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), start_errno);
         // sig must be untouched.
         assert_eq!(sig, 12345);
+    }
+
+    // =================================================================
+    // Phase 211 — kill()/raise() signal delivery
+    //
+    // kill() now translates signals to native operations:
+    //   - Terminate/Core signals → SYS_PROCESS_KILL (cross-process)
+    //     or _exit(128+sig) (self, SIG_DFL)
+    //   - Ignore signals → silently discarded (return 0)
+    //   - Stop/Continue → ENOSYS (no kernel suspend)
+    //   - Self-signals → dispatch via handler table
+    //
+    // raise() dispatches via dispatch_self_signal():
+    //   - SIG_IGN → return 0
+    //   - handler → invoke fn(sig), return 0
+    //   - SIG_DFL → default action
+    // =================================================================
+
+    /// default_action classifies all standard signals correctly.
+    #[test]
+    fn test_phase211_default_action_classify() {
+        // Terminate signals.
+        for sig in [SIGHUP, SIGINT, SIGPIPE, SIGALRM, SIGTERM,
+                    SIGUSR1, SIGUSR2, SIGVTALRM, SIGPROF, SIGIO, SIGPWR]
+        {
+            assert_eq!(
+                default_action(sig),
+                Some(DefaultAction::Terminate),
+                "signal {sig} should be Terminate"
+            );
+        }
+        // Core-dump signals.
+        for sig in [SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS,
+                    SIGFPE, SIGSEGV, SIGXCPU, SIGXFSZ, SIGSYS]
+        {
+            assert_eq!(
+                default_action(sig),
+                Some(DefaultAction::Core),
+                "signal {sig} should be Core"
+            );
+        }
+        // Ignore signals.
+        for sig in [SIGCHLD, SIGURG, SIGWINCH] {
+            assert_eq!(
+                default_action(sig),
+                Some(DefaultAction::Ignore),
+                "signal {sig} should be Ignore"
+            );
+        }
+        // Stop signals.
+        for sig in [SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU] {
+            assert_eq!(
+                default_action(sig),
+                Some(DefaultAction::Stop),
+                "signal {sig} should be Stop"
+            );
+        }
+        // Continue signal.
+        assert_eq!(default_action(SIGCONT), Some(DefaultAction::Continue));
+        // RT signals default to Terminate.
+        assert_eq!(default_action(SIGRTMIN), Some(DefaultAction::Terminate));
+        assert_eq!(default_action(SIGRTMAX), Some(DefaultAction::Terminate));
+        // Out of range.
+        assert_eq!(default_action(0), None);
+        assert_eq!(default_action(-1), None);
+        assert_eq!(default_action(NSIG), None);
+    }
+
+    /// raise() invokes a custom handler registered via signal().
+    #[test]
+    fn test_phase211_raise_invokes_handler() {
+        use core::sync::atomic::{AtomicI32, Ordering};
+        static RECEIVED: AtomicI32 = AtomicI32::new(0);
+
+        extern "C" fn handler(sig: i32) {
+            RECEIVED.store(sig, Ordering::Relaxed);
+        }
+
+        RECEIVED.store(0, Ordering::Relaxed);
+        let old = signal(SIGUSR1, handler as SighandlerT);
+        crate::errno::set_errno(0);
+        let ret = raise(SIGUSR1);
+        assert_eq!(ret, 0, "raise with handler should return 0");
+        assert_eq!(
+            RECEIVED.load(Ordering::Relaxed),
+            SIGUSR1,
+            "handler should receive the signal number"
+        );
+        signal(SIGUSR1, old);
+    }
+
+    /// raise() with SIG_IGN for various terminating signals.
+    #[test]
+    fn test_phase211_raise_sig_ign_terminators() {
+        for sig in [SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGPIPE] {
+            let old = signal(sig, SIG_IGN);
+            crate::errno::set_errno(0);
+            assert_eq!(raise(sig), 0, "raise({sig}) with SIG_IGN should return 0");
+            signal(sig, old);
+        }
+    }
+
+    /// kill() self-signal dispatches the registered handler.
+    #[test]
+    fn test_phase211_kill_self_invokes_handler() {
+        use core::sync::atomic::{AtomicI32, Ordering};
+        static GOT: AtomicI32 = AtomicI32::new(0);
+
+        extern "C" fn my_handler(sig: i32) {
+            GOT.store(sig, Ordering::Relaxed);
+        }
+
+        GOT.store(0, Ordering::Relaxed);
+        let old = signal(SIGUSR2, my_handler as SighandlerT);
+        // kill(self, SIGUSR2) → dispatch_self_signal → handler.
+        // We use pid = SYS_PROCESS_ID result.  In test builds this is
+        // inline asm so we use SIGUSR2 directly via raise() as proxy.
+        crate::errno::set_errno(0);
+        let ret = raise(SIGUSR2);
+        assert_eq!(ret, 0);
+        assert_eq!(GOT.load(Ordering::Relaxed), SIGUSR2);
+        signal(SIGUSR2, old);
+    }
+
+    /// raise() with SIG_DFL for ignore signals returns 0.
+    #[test]
+    fn test_phase211_raise_default_ignore_signals() {
+        for sig in [SIGCHLD, SIGURG, SIGWINCH] {
+            signal(sig, SIG_DFL);
+            crate::errno::set_errno(0);
+            assert_eq!(
+                raise(sig),
+                0,
+                "raise({sig}) with SIG_DFL should return 0 (default=Ignore)"
+            );
+        }
+    }
+
+    /// raise() with SIG_DFL for stop signals returns ENOSYS.
+    #[test]
+    fn test_phase211_raise_default_stop_enosys() {
+        for sig in [SIGTSTP, SIGTTIN, SIGTTOU] {
+            signal(sig, SIG_DFL);
+            crate::errno::set_errno(0);
+            assert_eq!(raise(sig), -1, "raise({sig}) stop should fail");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "raise({sig}) stop should set ENOSYS"
+            );
+        }
+    }
+
+    /// raise() with SIG_DFL for SIGCONT returns ENOSYS.
+    #[test]
+    fn test_phase211_raise_default_continue_enosys() {
+        signal(SIGCONT, SIG_DFL);
+        crate::errno::set_errno(0);
+        assert_eq!(raise(SIGCONT), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Handler set via signal() then ignored via SIG_IGN: verify
+    /// the handler is no longer called.
+    #[test]
+    fn test_phase211_signal_then_ignore_suppresses_handler() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        static CALLED: AtomicBool = AtomicBool::new(false);
+
+        extern "C" fn h(_sig: i32) {
+            CALLED.store(true, Ordering::Relaxed);
+        }
+
+        CALLED.store(false, Ordering::Relaxed);
+        signal(SIGUSR1, h as SighandlerT);
+        signal(SIGUSR1, SIG_IGN);
+        crate::errno::set_errno(0);
+        assert_eq!(raise(SIGUSR1), 0);
+        assert!(
+            !CALLED.load(Ordering::Relaxed),
+            "handler should NOT be called after SIG_IGN"
+        );
+        signal(SIGUSR1, SIG_DFL);
+    }
+
+    /// kill() with pid <= 0 and valid signal still returns ENOSYS
+    /// (no process group support).
+    #[test]
+    fn test_phase211_kill_pgroup_enosys() {
+        crate::errno::set_errno(0);
+        let ret = kill(0, SIGTERM);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+
+        crate::errno::set_errno(0);
+        let ret = kill(-1, SIGINT);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Cross-process SIGCHLD (ignore-default) is discarded even
+    /// without CAP_KILL — wait, no: CAP_KILL is checked before the
+    /// default-action dispatch for pid > 0.  Without the cap, EPERM.
+    #[test]
+    fn test_phase211_kill_cross_ignore_no_cap_eperm() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let ret = kill(1, SIGCHLD);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
     }
 }

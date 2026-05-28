@@ -781,3 +781,21 @@ OBSOLETE NOTE BELOW (pre-relaxation):
   doing the rename in the same commit would have mixed two
   unrelated changes.  Trigger to fix: next time anyone touches
   perf-event flag handling.
+
+- BUG (observed Phase 192): `aio::tests::test_aio_fsync_recovery_after_einval`
+  fails when run as part of the full `cargo test -p posix
+  --target x86_64-pc-windows-gnu --tests -- --test-threads=1`
+  regression (left=0, right=22 at aio.rs:786 — `aio_error(&cb)`
+  returns 0 instead of EINVAL after the bad aio_fsync call).
+  Passes in isolation.  Diagnosis: the aio completion table is
+  global state keyed by something derived from `&Aiocb` (likely
+  the pointer address).  A prior test in the same run has left a
+  completion record at the address the stack reuses for `cb`, so
+  the EINVAL early-return path appears to "find" a stale success
+  record instead of nothing.  This is a test-isolation bug in the
+  aio module's completion-table design: either the test must
+  scrub the table between calls, or the table must use a stable
+  per-Aiocb identifier rather than its current address.  Not
+  caused by Phase 192 (setuid cap gate is entirely unrelated to
+  aio).  Trigger to fix: next aio touch, or when this test
+  starts failing in CI gating.

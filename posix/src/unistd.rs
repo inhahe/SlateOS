@@ -578,17 +578,90 @@ pub extern "C" fn getegid() -> GidT {
 
 /// Set the user ID of the calling process.
 ///
-/// Stub: succeeds silently (single-user OS, always root).
+/// # Linux semantics (`kernel/sys.c::sys_setuid`)
+///
+/// ```text
+/// if (kuid == cred->uid || kuid == cred->euid || kuid == cred->suid ||
+///     ns_capable_setid(ns, CAP_SETUID))
+///     return commit_creds(new);
+/// return -EPERM;
+/// ```
+///
+/// The kernel allows the syscall when the requested uid matches *any*
+/// of the caller's real/effective/saved uids (in which case no
+/// capability is needed — the call is just toggling between identities
+/// the caller already legitimately holds), or when the caller holds
+/// `CAP_SETUID`.  Anything else fails with `EPERM`.
+///
+/// Our process model is single-user: real, effective, and saved uid
+/// are all `0` ("root").  That collapses the three matching arms into
+/// "uid == 0", so:
+///
+/// * `setuid(0)`  — always succeeds, no cap required (target equals
+///                  current).
+/// * `setuid(N)` with `N != 0` — requires `CAP_SETUID`, else `EPERM`.
+///
+/// **Phase 192:** pre-Phase-192 we returned `0` for *every* uid value,
+/// ignoring caps.  That let an unprivileged sandbox call
+/// `setuid(1000)` and continue to think it had successfully dropped
+/// privilege when in fact nothing changed — exactly the kind of silent
+/// "permission boundary skipped" bug containers care about.  The cap
+/// gate now matches Linux's behaviour for the typical "drop to
+/// nobody / unprivileged user" use case: callers without CAP_SETUID
+/// see EPERM and surface the misconfiguration loudly.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setuid(_uid: UidT) -> i32 {
+pub extern "C" fn setuid(uid: UidT) -> i32 {
+    // Phase 192: target uid != current → needs CAP_SETUID.  Our
+    // current uid is always 0, so any non-zero target requires the
+    // cap.  Linux's `sys_setuid` also accepts the call when uid
+    // matches the effective or saved uid; in our flat model those
+    // are also 0, so the same "uid == 0 always OK" rule covers all
+    // three Linux match arms simultaneously.
+    if uid != 0
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SETUID,
+        )
+    {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
     0
 }
 
 /// Set the effective user ID of the calling process.
 ///
-/// Stub: succeeds silently.
+/// # Linux semantics (`kernel/sys.c::sys_setreuid` / `sys_seteuid`)
+///
+/// `seteuid(uid)` is a thin wrapper around `setreuid(-1, uid)` in
+/// glibc; the kernel implements both via the same permission table.
+/// For the effective-uid field specifically:
+///
+/// ```text
+/// if (euid != (uid_t)-1 &&
+///     euid != cred->uid && euid != cred->euid && euid != cred->suid &&
+///     !ns_capable_setid(ns, CAP_SETUID))
+///     return -EPERM;
+/// ```
+///
+/// Match-against-any-current-uid OR `CAP_SETUID`.  Same collapse to
+/// "uid == 0" in our single-user model.
+///
+/// **Phase 192:** the previous "succeeds silently" stub had the same
+/// hole as [`setuid`] — `seteuid(1000)` looked like it dropped
+/// privilege but did nothing.  The cap gate restores Linux's EPERM on
+/// the privilege-boundary path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn seteuid(_uid: UidT) -> i32 {
+pub extern "C" fn seteuid(uid: UidT) -> i32 {
+    // Phase 192: same rule as setuid — target == 0 always OK; non-zero
+    // requires CAP_SETUID.
+    if uid != 0
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SETUID,
+        )
+    {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
     0
 }
 
@@ -5359,6 +5432,372 @@ mod tests {
             assert_ne!(e, errno::EACCES,
                 "may_setgroups uses EPERM (capable convention), \
                  distinct from seccomp's EACCES");
+        }
+    }
+
+    // ==================================================================
+    // Phase 192: setuid / seteuid gate on CAP_SETUID
+    // ==================================================================
+    //
+    // Linux's `kernel/sys.c::sys_setuid` allows the call when the target
+    // uid matches the real, effective, or saved uid OR the caller holds
+    // CAP_SETUID; otherwise EPERM.  Our flat single-uid (always 0) model
+    // collapses that to "target == 0 always OK; target != 0 needs
+    // CAP_SETUID".  Pre-Phase-192 we returned 0 unconditionally, which
+    // silently masked sandbox-drop bugs in callers.
+    mod setuid_cap_phase192 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase
+        /// 187 (`setgroups_cap_phase187`).
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_setuid() {
+            use crate::sys_capability::CAP_SETUID;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SETUID < 32 {
+                (lo & !(1u32 << CAP_SETUID), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SETUID - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SETUID");
+            assert!(!crate::sys_capability::has_capability(CAP_SETUID));
+        }
+
+        // -- Per-error-class --------------------------------------------------
+
+        /// `setuid(1000)` with no CAP_SETUID — used to silently succeed
+        /// and made callers think they had dropped to an unprivileged
+        /// uid.  Phase 192 turns this into the EPERM Linux reports.
+        #[test]
+        fn test_setuid_phase192_no_cap_normal_uid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            errno::set_errno(0);
+            assert_eq!(setuid(1000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Same gate at u32::MAX (often the "nobody" sentinel for
+        /// invalid mappings in user namespaces).
+        #[test]
+        fn test_setuid_phase192_no_cap_max_uid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            errno::set_errno(0);
+            assert_eq!(setuid(u32::MAX), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Same gate at uid 1 (the historical "daemon" uid — close to
+        /// 0 but not zero, must still trip the cap check).
+        #[test]
+        fn test_setuid_phase192_no_cap_uid_one_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            errno::set_errno(0);
+            assert_eq!(setuid(1), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// `seteuid(1000)` with no CAP_SETUID — same gate, same errno
+        /// as `setuid`.  Linux uses the same permission table for both.
+        #[test]
+        fn test_seteuid_phase192_no_cap_normal_uid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            errno::set_errno(0);
+            assert_eq!(seteuid(1000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// `seteuid(u32::MAX)` with no cap — boundary sentinel.
+        #[test]
+        fn test_seteuid_phase192_no_cap_max_uid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            errno::set_errno(0);
+            assert_eq!(seteuid(u32::MAX), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering / sentinel ---------------------------------------------
+
+        /// `setuid(0)` with no cap — target matches current uid, so the
+        /// gate is bypassed via the "match-current-uid" arm of Linux's
+        /// table.  Must succeed even without CAP_SETUID.
+        #[test]
+        fn test_setuid_phase192_no_cap_target_zero_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            errno::set_errno(0);
+            assert_eq!(setuid(0), 0);
+            // Errno is left untouched (still 0 from our reset).
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        /// `seteuid(0)` with no cap — same bypass.
+        #[test]
+        fn test_seteuid_phase192_no_cap_target_zero_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            errno::set_errno(0);
+            assert_eq!(seteuid(0), 0);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        /// `setuid(0)` with cap held — trivial success.  Pins down that
+        /// the cap presence doesn't accidentally invert the result.
+        #[test]
+        fn test_setuid_phase192_with_cap_target_zero_succeeds() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            assert_eq!(setuid(0), 0);
+        }
+
+        /// `setuid(1000)` with cap held — the cap-allowed path.
+        #[test]
+        fn test_setuid_phase192_with_cap_normal_uid_succeeds() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            assert_eq!(setuid(1000), 0);
+        }
+
+        /// `seteuid(1000)` with cap held — the cap-allowed path.
+        #[test]
+        fn test_seteuid_phase192_with_cap_normal_uid_succeeds() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            assert_eq!(seteuid(1000), 0);
+        }
+
+        // -- Workflow --------------------------------------------------------
+
+        /// Container-style sandbox drop: cap held → drop privilege call
+        /// would succeed; drop cap → subsequent attempt EPERMs.  This
+        /// is the workflow whose bug pre-Phase-192 was silent.
+        #[test]
+        fn test_setuid_phase192_sandbox_drop_workflow() {
+            let _g = CapGuard::snapshot();
+            // 1. Privileged code can change uid.
+            errno::set_errno(0);
+            assert_eq!(setuid(1000), 0);
+            // 2. Sandbox drops CAP_SETUID.
+            drop_cap_setuid();
+            // 3. A confused caller in the sandbox tries to "re-drop" to
+            //    another uid — now correctly reports EPERM instead of
+            //    silently succeeding.
+            errno::set_errno(0);
+            assert_eq!(setuid(2000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // 4. But returning to uid 0 (the "still-current" sentinel)
+            //    remains allowed via the match-current arm.
+            errno::set_errno(0);
+            assert_eq!(setuid(0), 0);
+        }
+
+        // -- Buggy-caller ----------------------------------------------------
+
+        /// Caller forgot to clear errno — fresh EPERM still surfaces.
+        #[test]
+        fn test_setuid_phase192_buggy_caller_stale_errno_replaced() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            errno::set_errno(errno::ENOENT);
+            assert_eq!(setuid(42), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM,
+                "Stale ENOENT must be overwritten with EPERM");
+        }
+
+        /// Caller passes the "max minus one" sentinel — still EPERM.
+        #[test]
+        fn test_setuid_phase192_buggy_caller_max_minus_one_still_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            errno::set_errno(0);
+            assert_eq!(setuid(u32::MAX - 1), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Recovery --------------------------------------------------------
+
+        /// EPERM → restore cap via guard drop → next call succeeds.
+        #[test]
+        fn test_setuid_phase192_capguard_restore_clears_state() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_setuid();
+                errno::set_errno(0);
+                assert_eq!(setuid(1234), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            } // cap restored on guard drop.
+            errno::set_errno(0);
+            assert_eq!(setuid(1234), 0);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        // -- No-side-effect --------------------------------------------------
+
+        /// Repeated failed calls are stable — same -1 / EPERM, no drift.
+        #[test]
+        fn test_setuid_phase192_repeated_failed_calls_stable() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            for _ in 0..8 {
+                errno::set_errno(0);
+                assert_eq!(setuid(7777), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+        }
+
+        /// A failed setuid must not perturb `getuid`/`geteuid` — they
+        /// remain 0 (the single-user model is unchanged).
+        #[test]
+        fn test_setuid_phase192_failed_call_no_observable_uid_change() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            let pre_uid = getuid();
+            let pre_euid = geteuid();
+            errno::set_errno(0);
+            assert_eq!(setuid(1234), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(getuid(), pre_uid);
+            assert_eq!(geteuid(), pre_euid);
+        }
+
+        // -- Cross-check -----------------------------------------------------
+
+        /// Dropping CAP_SETGID alone must NOT affect setuid — Linux
+        /// gates setuid on CAP_SETUID specifically.  Pins the
+        /// cross-cap invariant so a future probe of the wrong cap is
+        /// caught.
+        #[test]
+        fn test_setuid_phase192_setgid_drop_does_not_affect_setuid() {
+            use crate::sys_capability::CAP_SETGID;
+            let _g = CapGuard::snapshot();
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << CAP_SETGID);
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            // setuid still works.
+            errno::set_errno(0);
+            assert_eq!(setuid(1500), 0);
+            assert_eq!(seteuid(1500), 0);
+        }
+
+        /// Dropping CAP_SETUID alone must NOT affect setgid — the
+        /// inverse cross-cap invariant.  setgid is still a permissive
+        /// stub (Phase 193 will gate it), but the test here confirms
+        /// the Phase 192 gate doesn't accidentally also block setgid.
+        #[test]
+        fn test_setuid_phase192_drop_does_not_affect_setgid() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            // setgid is still a permissive stub — Phase 193 territory.
+            // Confirm the Phase 192 cap drop didn't accidentally also
+            // gate setgid.
+            errno::set_errno(0);
+            assert_eq!(setgid(1000), 0);
+            assert_eq!(setegid(1000), 0);
+        }
+
+        /// Phase 192 errno is EPERM (the `capable()` convention),
+        /// matching Linux's `sys_setuid` → `-EPERM` for the cap path.
+        /// Distinct from EACCES.
+        #[test]
+        fn test_setuid_phase192_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            errno::set_errno(0);
+            assert_eq!(setuid(99), -1);
+            let e = errno::get_errno();
+            assert_eq!(e, errno::EPERM);
+            assert_ne!(e, errno::EACCES,
+                "sys_setuid uses EPERM (capable convention), \
+                 distinct from LSM-style EACCES");
+        }
+
+        /// `getuid`/`geteuid` are not gated by CAP_SETUID — they
+        /// always succeed and return 0 regardless of cap state.
+        #[test]
+        fn test_setuid_phase192_getters_unaffected_by_cap_drop() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setuid();
+            assert_eq!(getuid(), 0);
+            assert_eq!(geteuid(), 0);
         }
     }
 

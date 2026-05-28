@@ -1062,6 +1062,23 @@ pub fn timerfd_is_nonblock(idx: u64) -> bool {
 /// but the prologue still enforces the Linux-shaped surface so callers
 /// see the same error for the same wrong input.
 ///
+/// # Capability gate (Phase 199)
+///
+/// `CLOCK_REALTIME_ALARM` and `CLOCK_BOOTTIME_ALARM` wake the system
+/// from suspend; Linux gates them on `CAP_WAKE_ALARM` in
+/// `kernel/time/timerfd.c::SYSCALL_DEFINE2(timerfd_create)`:
+/// ```text
+/// if ((clockid == CLOCK_REALTIME_ALARM ||
+///      clockid == CLOCK_BOOTTIME_ALARM) &&
+///     !capable(CAP_WAKE_ALARM))
+///     return -EPERM;
+/// ```
+/// The gate runs **after** the `flags` mask and clockid validity
+/// checks — so a caller passing bogus flags or an unsupported
+/// clockid sees `EINVAL`, not `EPERM`, regardless of privilege.
+/// Non-alarm clocks (`CLOCK_REALTIME`, `CLOCK_MONOTONIC`,
+/// `CLOCK_BOOTTIME`) bypass the gate entirely.
+///
 /// Valid `flags`: `TFD_CLOEXEC`, `TFD_NONBLOCK`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timerfd_create(clockid: i32, flags: i32) -> i32 {
@@ -1085,6 +1102,23 @@ pub extern "C" fn timerfd_create(clockid: i32, flags: i32) -> i32 {
         || clockid == CLOCK_BOOTTIME_ALARM_I32;
     if !clockid_ok {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Phase 199: the alarm clocks wake the system from suspend, so
+    // Linux gates them on CAP_WAKE_ALARM.  Placed after EINVAL flag /
+    // clockid checks to match the kernel's source order — a caller
+    // passing bogus flags or an unknown clockid sees EINVAL regardless
+    // of privilege, but a caller holding a valid alarm clockid without
+    // the cap is told it lacks privilege (EPERM), not asked to retry
+    // with a different flag value.
+    let is_alarm_clock = clockid == CLOCK_REALTIME_ALARM_I32
+        || clockid == CLOCK_BOOTTIME_ALARM_I32;
+    if is_alarm_clock
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_WAKE_ALARM,
+        )
+    {
+        errno::set_errno(errno::EPERM);
         return -1;
     }
     let Some(idx) = allocate_timerfd_instance() else {
@@ -5617,5 +5651,181 @@ mod tests {
         assert_eq!(r, 0);
 
         crate::file::close(tfd);
+    }
+
+    // -- Phase 199: CAP_WAKE_ALARM gate on timerfd alarm clocks -----------
+
+    /// RAII guard that snapshots and restores effective capabilities.
+    struct CapGuard {
+        lo: u32,
+        hi: u32,
+    }
+    impl CapGuard {
+        fn snapshot() -> Self {
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            Self { lo, hi }
+        }
+    }
+    impl Drop for CapGuard {
+        fn drop(&mut self) {
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: self.lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: self.hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let _ =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+        }
+    }
+
+    fn drop_cap(cap: u32) {
+        let (lo, hi) = crate::sys_capability::current_caps_effective();
+        let (new_lo, new_hi) = if cap < 32 {
+            (lo & !(1u32 << cap), hi)
+        } else {
+            (lo, hi & !(1u32 << (cap - 32)))
+        };
+        let mut hdr = crate::sys_capability::CapUserHeader {
+            version:
+                crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let data = [
+            crate::sys_capability::CapUserData {
+                effective: new_lo,
+                permitted: u32::MAX,
+                inheritable: 0,
+            },
+            crate::sys_capability::CapUserData {
+                effective: new_hi,
+                permitted: u32::MAX,
+                inheritable: 0,
+            },
+        ];
+        let rc =
+            crate::sys_capability::capset(&mut hdr, data.as_ptr());
+        assert_eq!(rc, 0, "capset must succeed dropping cap");
+        assert!(!crate::sys_capability::has_capability(cap));
+    }
+
+    /// With CAP_WAKE_ALARM held (default), CLOCK_REALTIME_ALARM
+    /// succeeds — same as Phase 93, but documents the cap-held path.
+    #[test]
+    fn test_phase199_timerfd_alarm_with_cap_succeeds() {
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_WAKE_ALARM,
+        ));
+        errno::set_errno(0);
+        let fd = timerfd_create(8, 0); // CLOCK_REALTIME_ALARM
+        assert!(fd >= 0, "alarm clock with cap should succeed");
+        crate::file::close(fd);
+        let fd = timerfd_create(9, 0); // CLOCK_BOOTTIME_ALARM
+        assert!(fd >= 0, "alarm clock with cap should succeed");
+        crate::file::close(fd);
+    }
+
+    /// Without CAP_WAKE_ALARM, CLOCK_REALTIME_ALARM → EPERM.
+    #[test]
+    fn test_phase199_timerfd_realtime_alarm_no_cap_eperm() {
+        let _g = CapGuard::snapshot();
+        drop_cap(crate::sys_capability::CAP_WAKE_ALARM);
+        errno::set_errno(0);
+        let fd = timerfd_create(8, 0); // CLOCK_REALTIME_ALARM
+        assert_eq!(fd, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    /// Without CAP_WAKE_ALARM, CLOCK_BOOTTIME_ALARM → EPERM.
+    #[test]
+    fn test_phase199_timerfd_boottime_alarm_no_cap_eperm() {
+        let _g = CapGuard::snapshot();
+        drop_cap(crate::sys_capability::CAP_WAKE_ALARM);
+        errno::set_errno(0);
+        let fd = timerfd_create(9, 0); // CLOCK_BOOTTIME_ALARM
+        assert_eq!(fd, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    /// Non-alarm clocks bypass the gate entirely — no EPERM even
+    /// without CAP_WAKE_ALARM.
+    #[test]
+    fn test_phase199_timerfd_non_alarm_clocks_no_cap_still_ok() {
+        let _g = CapGuard::snapshot();
+        drop_cap(crate::sys_capability::CAP_WAKE_ALARM);
+        for &clk in &[
+            crate::time::CLOCK_REALTIME,
+            crate::time::CLOCK_MONOTONIC,
+            crate::time::CLOCK_BOOTTIME,
+        ] {
+            errno::set_errno(0);
+            let fd = timerfd_create(clk, 0);
+            assert!(fd >= 0, "non-alarm clock {clk} must still succeed");
+            crate::file::close(fd);
+        }
+    }
+
+    /// EINVAL takes priority over EPERM: bad flags + alarm clock →
+    /// EINVAL, not EPERM (flags check runs before cap check).
+    #[test]
+    fn test_phase199_timerfd_bad_flags_einval_before_eperm() {
+        let _g = CapGuard::snapshot();
+        drop_cap(crate::sys_capability::CAP_WAKE_ALARM);
+        errno::set_errno(0);
+        let fd = timerfd_create(8, 0x8000); // bogus flags
+        assert_eq!(fd, -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "bad flags must yield EINVAL even without CAP_WAKE_ALARM"
+        );
+    }
+
+    /// EINVAL takes priority: bad clockid + no cap → EINVAL, not EPERM.
+    #[test]
+    fn test_phase199_timerfd_bad_clockid_einval_before_eperm() {
+        let _g = CapGuard::snapshot();
+        drop_cap(crate::sys_capability::CAP_WAKE_ALARM);
+        errno::set_errno(0);
+        let fd = timerfd_create(999, 0); // invalid clockid
+        assert_eq!(fd, -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "bad clockid must yield EINVAL regardless of cap"
+        );
+    }
+
+    /// After restoring CAP_WAKE_ALARM (CapGuard drop), alarm clocks
+    /// work again.
+    #[test]
+    fn test_phase199_timerfd_cap_restore_re_enables_alarm() {
+        {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_WAKE_ALARM);
+            errno::set_errno(0);
+            let fd = timerfd_create(8, 0);
+            assert_eq!(fd, -1, "must fail without cap");
+        }
+        // CapGuard restored the cap.
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_WAKE_ALARM,
+        ));
+        errno::set_errno(0);
+        let fd = timerfd_create(8, 0);
+        assert!(fd >= 0, "must succeed after cap restored");
+        crate::file::close(fd);
     }
 }

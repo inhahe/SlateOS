@@ -1556,20 +1556,91 @@ pub const IOPRIO_WHO_PGRP: i32 = 2;
 /// Who: user.
 pub const IOPRIO_WHO_USER: i32 = 3;
 
+/// Bit position of the class within the encoded ioprio value.
+/// Layout: `(class << 13) | data` — see `<linux/ioprio.h>`.
+pub const IOPRIO_CLASS_SHIFT: i32 = 13;
+/// Mask for the data portion of an encoded ioprio value (low 13 bits).
+pub const IOPRIO_PRIO_MASK: i32 = (1 << IOPRIO_CLASS_SHIFT) - 1;
+/// Number of best-effort / real-time priority levels (0..7).
+pub const IOPRIO_BE_NR: i32 = 8;
+
+/// Validate the `which` parameter of `ioprio_get`/`ioprio_set`.
+/// Returns `true` for `IOPRIO_WHO_PROCESS`, `_PGRP`, `_USER`.
+#[inline]
+fn ioprio_which_valid(which: i32) -> bool {
+    matches!(
+        which,
+        IOPRIO_WHO_PROCESS | IOPRIO_WHO_PGRP | IOPRIO_WHO_USER,
+    )
+}
+
 /// Get the I/O scheduling class and priority of a process.
 ///
-/// Stub: returns 0 (default priority = `IOPRIO_CLASS_NONE`).
+/// Stub: validates arguments per Linux `block/ioprio.c`, then returns
+/// the encoded default priority `(IOPRIO_CLASS_NONE << 13) | 0 = 0`.
+///
+/// Errors (Linux-matching priority order):
+/// * `EINVAL` — `which` not in `{IOPRIO_WHO_PROCESS, _PGRP, _USER}`.
+/// * `ESRCH` — `who` is negative (no such process / pgrp / user).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ioprio_get(_which: i32, _who: i32) -> i32 {
+pub extern "C" fn ioprio_get(which: i32, who: i32) -> i32 {
+    if !ioprio_which_valid(which) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if who < 0 {
+        // Negative pid/pgid/uid cannot name any real entity. Linux's
+        // find_task_by_vpid / find_user reject negatives with ESRCH.
+        errno::set_errno(errno::ESRCH);
+        return -1;
+    }
     // Return class=NONE, data=0 → value = (NONE << 13) | 0 = 0.
     0
 }
 
 /// Set the I/O scheduling class and priority of a process.
 ///
-/// Stub: returns 0 (succeed silently).
+/// Stub: validates arguments per Linux `block/ioprio.c`, then succeeds
+/// silently without actually adjusting any scheduler state (we have no
+/// per-process ioprio storage yet — see todo.txt).
+///
+/// Errors (Linux-matching priority order):
+/// * `EINVAL` — `which` not in valid set, or decoded class > `IOPRIO_CLASS_IDLE`,
+///   or `RT`/`BE` data >= `IOPRIO_BE_NR` (8).
+/// * `ESRCH` — `who` is negative.
+///
+/// Linux additionally requires `CAP_SYS_ADMIN` to set `IOPRIO_CLASS_RT`,
+/// returning `EPERM`. We don't model capabilities in this stub; that
+/// gate belongs in the kernel-side syscall implementation.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ioprio_set(_which: i32, _who: i32, _ioprio: i32) -> i32 {
+pub extern "C" fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i32 {
+    if !ioprio_which_valid(which) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let class = ioprio >> IOPRIO_CLASS_SHIFT;
+    let data = ioprio & IOPRIO_PRIO_MASK;
+    match class {
+        IOPRIO_CLASS_NONE | IOPRIO_CLASS_IDLE => {
+            // Data is ignored for NONE (fall back to nice-derived) and
+            // IDLE (always priority 7). Linux accepts any data here.
+        }
+        IOPRIO_CLASS_RT | IOPRIO_CLASS_BE => {
+            // 3-bit priority field: 0..7.
+            if !(0..IOPRIO_BE_NR).contains(&data) {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+        }
+        _ => {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    }
+    if who < 0 {
+        errno::set_errno(errno::ESRCH);
+        return -1;
+    }
     0
 }
 
@@ -7356,6 +7427,265 @@ mod tests {
         let ret = kcmp(1234, 5678, KCMP_EPOLL_TFD, 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -----------------------------------------------------------------
+    // ioprio_get / ioprio_set — argument-domain validation (Phase 58)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_ioprio_layout_constants() {
+        assert_eq!(IOPRIO_CLASS_SHIFT, 13);
+        assert_eq!(IOPRIO_PRIO_MASK, 0x1FFF);
+        assert_eq!(IOPRIO_BE_NR, 8);
+    }
+
+    // ---- ioprio_get error paths ----
+
+    #[test]
+    fn test_ioprio_get_invalid_which_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_get(0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioprio_get_invalid_which_high_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_get(99, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioprio_get_invalid_which_negative_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_get(-1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioprio_get_negative_who_esrch() {
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_get(IOPRIO_WHO_PROCESS, -1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_ioprio_get_negative_who_pgrp_esrch() {
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_get(IOPRIO_WHO_PGRP, -100), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_ioprio_get_negative_who_user_esrch() {
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_get(IOPRIO_WHO_USER, i32::MIN), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_ioprio_get_which_checked_before_who() {
+        // Bad which + bad who → EINVAL wins (which check first).
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_get(42, -1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // ---- ioprio_get success paths ----
+
+    #[test]
+    fn test_ioprio_get_self_returns_default() {
+        // who = 0 means "current task/pgrp/user"; default = NONE/0.
+        assert_eq!(ioprio_get(IOPRIO_WHO_PROCESS, 0), 0);
+        assert_eq!(ioprio_get(IOPRIO_WHO_PGRP, 0), 0);
+        assert_eq!(ioprio_get(IOPRIO_WHO_USER, 0), 0);
+    }
+
+    #[test]
+    fn test_ioprio_get_specific_pid_returns_default() {
+        // Stub does not track per-pid state — every existing pid maps
+        // to the default-priority value.
+        assert_eq!(ioprio_get(IOPRIO_WHO_PROCESS, 1234), 0);
+    }
+
+    // ---- ioprio_set error paths ----
+
+    #[test]
+    fn test_ioprio_set_invalid_which_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioprio_set_invalid_class_too_large_einval() {
+        // class = 4 is one past IOPRIO_CLASS_IDLE.
+        let prio = 4 << IOPRIO_CLASS_SHIFT;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioprio_set_invalid_class_way_too_large_einval() {
+        let prio = 7 << IOPRIO_CLASS_SHIFT;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioprio_set_rt_data_eight_einval() {
+        // data must be 0..7 for RT and BE.
+        let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | 8;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioprio_set_be_data_at_limit_einval() {
+        let prio = (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | IOPRIO_PRIO_MASK;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioprio_set_negative_who_esrch() {
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, -5, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_ioprio_set_which_checked_before_class() {
+        // Bad which + bad class → EINVAL from which check (it's first;
+        // both happen to return EINVAL, but verify ordering by using a
+        // class that would otherwise pass).
+        let prio = (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | 4;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(99, 0, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioprio_set_class_checked_before_who() {
+        // Bad class + bad who → EINVAL (class check is before who).
+        let prio = 5 << IOPRIO_CLASS_SHIFT;
+        crate::errno::set_errno(0);
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, -1, prio), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // ---- ioprio_set success paths ----
+
+    #[test]
+    fn test_ioprio_set_class_none_succeeds() {
+        // CLASS_NONE ignores the data field.
+        let prio = IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT;
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+    }
+
+    #[test]
+    fn test_ioprio_set_class_idle_succeeds_with_any_data() {
+        // CLASS_IDLE: data is effectively always 7; any value is accepted.
+        let prio = (IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT) | 100;
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+    }
+
+    #[test]
+    fn test_ioprio_set_class_rt_data_range_succeeds() {
+        // RT class with data 0..=7 must succeed.
+        for data in 0..IOPRIO_BE_NR {
+            let prio = (IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT) | data;
+            assert_eq!(
+                ioprio_set(IOPRIO_WHO_PROCESS, 0, prio),
+                0,
+                "RT data={data} should succeed",
+            );
+        }
+    }
+
+    #[test]
+    fn test_ioprio_set_class_be_data_range_succeeds() {
+        for data in 0..IOPRIO_BE_NR {
+            let prio = (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | data;
+            assert_eq!(
+                ioprio_set(IOPRIO_WHO_PROCESS, 0, prio),
+                0,
+                "BE data={data} should succeed",
+            );
+        }
+    }
+
+    // ---- Real-world workflows ----
+
+    #[test]
+    fn test_ioprio_workflow_ionice_lowest_be() {
+        // `ionice -c2 -n7 <pid>` — best-effort, lowest priority.
+        let prio = (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | 7;
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 1234, prio), 0);
+    }
+
+    #[test]
+    fn test_ioprio_workflow_ionice_idle() {
+        // `ionice -c3 <pid>` — idle (data ignored).
+        let prio = IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT;
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 1234, prio), 0);
+    }
+
+    #[test]
+    fn test_ioprio_workflow_ionice_pgrp() {
+        // `ionice -P <pgid>` — apply to entire process group.
+        let prio = (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | 4;
+        assert_eq!(ioprio_set(IOPRIO_WHO_PGRP, 4321, prio), 0);
+    }
+
+    #[test]
+    fn test_ioprio_workflow_backup_user_throttle() {
+        // A backup daemon throttles its own user's I/O class to idle.
+        let prio = IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT;
+        assert_eq!(ioprio_set(IOPRIO_WHO_USER, 1000, prio), 0);
+    }
+
+    #[test]
+    fn test_ioprio_workflow_round_trip_get_after_set() {
+        // After set, get returns whatever the stub reports (default).
+        let prio = (IOPRIO_CLASS_BE << IOPRIO_CLASS_SHIFT) | 4;
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
+        // Stub doesn't persist; default-priority is returned.
+        assert_eq!(ioprio_get(IOPRIO_WHO_PROCESS, 0), 0);
+    }
+
+    // ---- Real-world buggy callers ----
+
+    #[test]
+    fn test_ioprio_workflow_buggy_raw_priority_no_encoding() {
+        // A caller forgets the (class << 13) encoding and passes the
+        // priority data directly as the ioprio value.  With data <
+        // 0x2000 the class field is 0 (NONE), so this *succeeds*
+        // silently on Linux too — match that behavior.
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, 4), 0);
+    }
+
+    #[test]
+    fn test_ioprio_workflow_buggy_class_only_no_shift() {
+        // A caller passes the class number directly (e.g. ioprio=2
+        // intending CLASS_BE).  Same as above: class=0 NONE, success.
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, IOPRIO_CLASS_BE), 0);
+    }
+
+    #[test]
+    fn test_ioprio_workflow_buggy_negative_ioprio() {
+        // A signed-extension bug produces a negative ioprio.  Top bit
+        // set → class field extracted as a large value → EINVAL.
+        crate::errno::set_errno(0);
+        // i32::MIN >> 13 is a large negative number — class != any
+        // valid class → EINVAL via the catch-all arm.
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, -1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 }
 

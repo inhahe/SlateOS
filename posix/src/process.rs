@@ -1907,6 +1907,12 @@ pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: i32 = 1 << 4;
 pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE: i32 = 1 << 5;
 /// Register for sync-core private expedited.
 pub const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE: i32 = 1 << 6;
+/// Private expedited RSEQ — restart restartable sequences across the
+/// process.  Added in Linux 5.10.  Not supported by our membarrier
+/// (we have no rseq infrastructure), but the constant is recognised
+/// by the flag-validation step so a caller asking for RSEQ + FLAG_CPU
+/// gets EINVAL from the dispatch arm rather than the flag arm.
+pub const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: i32 = 1 << 7;
 
 /// Bitmask of operations supported by [`membarrier`] / reported by
 /// `MEMBARRIER_CMD_QUERY`.
@@ -1926,6 +1932,17 @@ const MEMBARRIER_SUPPORTED: i32 = MEMBARRIER_CMD_GLOBAL
     | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
     | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
     | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE;
+
+/// Target a specific CPU for `MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ`.
+///
+/// Linux 5.10+ extended the rseq variant to accept this flag plus a
+/// `cpu_id` argument so userspace can restart only the rseq on one
+/// CPU rather than every CPU in the process.  Every other command
+/// rejects non-zero `flags` with EINVAL.  Mirrors the constant in
+/// [`linux_membarrier_types`](crate::linux_membarrier_types) but lives
+/// here as `u32` so it can be compared directly against the syscall
+/// `flags` argument.
+pub const MEMBARRIER_CMD_FLAG_CPU: u32 = 1 << 0;
 
 /// Issue an x86_64 `mfence` on the calling CPU.  This drains the local
 /// store buffer and provides a full memory barrier with respect to
@@ -1955,30 +1972,81 @@ fn local_mfence() {
 /// fence; our kernel does not yet expose a userspace-triggered IPI, so
 /// peer-CPU fencing is implicit (each thread re-fences on its next
 /// syscall).  `MEMBARRIER_CMD_QUERY` returns the bitmask of supported
-/// commands.  `flags` must be zero on every command except the rseq
-/// variants (which we don't support).
+/// commands.
+///
+/// Validation order matches Linux's `sys_membarrier`
+/// (`kernel/sched/membarrier.c`):
+///
+/// 1. **First switch — flag validation by command.**
+///    `MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ` accepts `flags == 0`
+///    or `flags == MEMBARRIER_CMD_FLAG_CPU`; every other command
+///    (including `MEMBARRIER_CMD_QUERY` and unknown commands) requires
+///    `flags == 0`.  This is why a `QUERY` call with non-zero flags
+///    is `EINVAL` even though `QUERY` doesn't otherwise look at flags.
+/// 2. **Implicit cpu_id normalisation.**  When `flags & FLAG_CPU` is
+///    not set, `cpu_id` is treated as -1 (i.e. ignored).
+/// 3. **Second switch — exact-match command dispatch.**  Each command
+///    is a discrete *value*, not a bitmask: a caller that ORs two
+///    command bits together (e.g. `GLOBAL | PRIVATE_EXPEDITED`) is
+///    not asking for "both at once" — it's asking for an invalid
+///    command, and gets `EINVAL`.  Unknown commands also land in the
+///    default `EINVAL` arm.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn membarrier(cmd: i32, flags: u32, _cpu_id: i32) -> i32 {
-    if cmd == MEMBARRIER_CMD_QUERY {
-        return MEMBARRIER_SUPPORTED;
-    }
-
-    // Reject unknown / unsupported commands.
-    if cmd <= 0 || (cmd & !MEMBARRIER_SUPPORTED) != 0 {
+pub extern "C" fn membarrier(cmd: i32, flags: u32, cpu_id: i32) -> i32 {
+    // -- First switch: per-command flag validation ----------------------
+    //
+    // Linux's first switch has two arms: PRIVATE_EXPEDITED_RSEQ accepts
+    // a single optional flag (FLAG_CPU), everything else demands
+    // flags == 0.  We don't have rseq, so the RSEQ arm's "accepted"
+    // case still falls through to a dispatch EINVAL — but matching the
+    // *flag-validation step* is important: a caller asking for RSEQ
+    // with FLAG_CPU should not see EINVAL from the flag check (that
+    // would steer them toward removing the flag, which is correct on
+    // pre-5.10 kernels but wrong on modern ones).
+    if cmd == MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ {
+        if flags != 0 && flags != MEMBARRIER_CMD_FLAG_CPU {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    } else if flags != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
 
-    // No flag bits are defined for our supported commands.
-    if flags != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
+    // -- cpu_id normalisation -------------------------------------------
+    //
+    // Linux: `if (!(flags & MEMBARRIER_CMD_FLAG_CPU)) cpu_id = -1;`.
+    // We don't actually IPI a specific CPU (no userspace IPI path) so
+    // `cpu_id` is informational only — but we mirror the normalisation
+    // so any future hook that reads it sees the same value Linux would.
+    let _cpu_id = if flags & MEMBARRIER_CMD_FLAG_CPU == 0 {
+        -1
+    } else {
+        cpu_id
+    };
 
-    // For every supported command the visible effect is: drain the
-    // local store buffer.  Issue an mfence.
-    local_mfence();
-    0
+    // -- Second switch: exact-match command dispatch --------------------
+    match cmd {
+        MEMBARRIER_CMD_QUERY => MEMBARRIER_SUPPORTED,
+        MEMBARRIER_CMD_GLOBAL
+        | MEMBARRIER_CMD_GLOBAL_EXPEDITED
+        | MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
+        | MEMBARRIER_CMD_PRIVATE_EXPEDITED
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED
+        | MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE
+        | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE => {
+            // For every supported command the visible effect is: drain
+            // the local store buffer.  Issue an mfence.
+            local_mfence();
+            0
+        }
+        _ => {
+            // Unknown commands (including OR-combined command bits and
+            // unsupported variants like PRIVATE_EXPEDITED_RSEQ) → EINVAL.
+            errno::set_errno(errno::EINVAL);
+            -1
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5478,6 +5546,219 @@ mod tests {
         assert_eq!(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 16);
         assert_eq!(MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE, 32);
         assert_eq!(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE, 64);
+    }
+
+    // ===================================================================
+    // Phase 134 — membarrier() validation order matches Linux's
+    // sys_membarrier (kernel/sched/membarrier.c).  Adds FLAG_CPU
+    // recognition, per-command flag validation (incl. for QUERY),
+    // exact-match command dispatch, and PRIVATE_EXPEDITED_RSEQ as a
+    // recognised-but-unsupported command.
+    // ===================================================================
+
+    // -- Constants ----------------------------------------------------------
+
+    #[test]
+    fn test_phase134_flag_cpu_constant() {
+        // Matches `MEMBARRIER_CMD_FLAG_CPU` in <linux/membarrier.h>.
+        assert_eq!(MEMBARRIER_CMD_FLAG_CPU, 1);
+    }
+
+    #[test]
+    fn test_phase134_private_expedited_rseq_constant() {
+        // Matches <linux/membarrier.h>: CMD bit 7.
+        assert_eq!(MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ, 1 << 7);
+    }
+
+    // -- CMD_QUERY now validates flags -------------------------------------
+
+    #[test]
+    fn test_phase134_query_with_nonzero_flags_einval() {
+        // BEFORE Phase 134: cmd=QUERY returned MEMBARRIER_SUPPORTED
+        // unconditionally, ignoring `flags`.
+        // AFTER: Linux's first switch demands flags==0 for QUERY too.
+        crate::errno::set_errno(0);
+        let ret = membarrier(MEMBARRIER_CMD_QUERY, 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase134_query_with_flag_cpu_einval() {
+        // FLAG_CPU is only valid with PRIVATE_EXPEDITED_RSEQ.
+        crate::errno::set_errno(0);
+        let ret = membarrier(MEMBARRIER_CMD_QUERY, MEMBARRIER_CMD_FLAG_CPU, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase134_query_zero_flags_returns_supported() {
+        // Sanity: the basic QUERY contract still works.
+        assert_eq!(membarrier(MEMBARRIER_CMD_QUERY, 0, 0), MEMBARRIER_SUPPORTED);
+    }
+
+    // -- Exact-match cmd dispatch (no more bitmask subset) -----------------
+
+    #[test]
+    fn test_phase134_combined_cmd_bits_einval() {
+        // BEFORE Phase 134: cmd = GLOBAL | PRIVATE_EXPEDITED = 9 was
+        // silently accepted (9 & !MEMBARRIER_SUPPORTED == 0), and ran
+        // local_mfence then returned 0.  But that's not a valid command;
+        // each command must be passed as its discrete value.
+        crate::errno::set_errno(0);
+        let combined = MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_PRIVATE_EXPEDITED;
+        let ret = membarrier(combined, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase134_two_register_bits_combined_einval() {
+        // Another OR-combined case: REGISTER_GLOBAL_EXPEDITED |
+        // REGISTER_PRIVATE_EXPEDITED.  Each is supported individually
+        // but the OR-combination is not a command.
+        crate::errno::set_errno(0);
+        let combined = MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
+            | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
+        let ret = membarrier(combined, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- FLAG_CPU recognition ----------------------------------------------
+
+    #[test]
+    fn test_phase134_global_with_flag_cpu_einval() {
+        // Linux first switch: non-RSEQ command with non-zero flags →
+        // EINVAL, regardless of *which* flag bit is set.
+        crate::errno::set_errno(0);
+        let ret = membarrier(
+            MEMBARRIER_CMD_GLOBAL,
+            MEMBARRIER_CMD_FLAG_CPU,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase134_private_expedited_with_flag_cpu_einval() {
+        // PRIVATE_EXPEDITED (not RSEQ) also rejects FLAG_CPU.
+        crate::errno::set_errno(0);
+        let ret = membarrier(
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED,
+            MEMBARRIER_CMD_FLAG_CPU,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- PRIVATE_EXPEDITED_RSEQ flag arm vs dispatch arm -------------------
+
+    #[test]
+    fn test_phase134_rseq_with_flag_cpu_passes_flag_check_then_einval() {
+        // RSEQ + FLAG_CPU passes the first switch (the flag arm
+        // recognises the combination as legal), but we don't support
+        // RSEQ so the dispatch arm returns EINVAL.  This is *the same*
+        // EINVAL Linux returns when CONFIG_RSEQ=n, so behaviour is
+        // semantically right — and the caller didn't get steered away
+        // from FLAG_CPU.
+        crate::errno::set_errno(0);
+        let ret = membarrier(
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
+            MEMBARRIER_CMD_FLAG_CPU,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase134_rseq_with_other_flag_einval_at_flag_arm() {
+        // RSEQ with a flag that's NOT FLAG_CPU → EINVAL at the flag arm.
+        crate::errno::set_errno(0);
+        let ret = membarrier(
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
+            1 << 3, // not FLAG_CPU
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase134_rseq_with_zero_flags_einval_at_dispatch() {
+        // RSEQ with flags=0 passes flag arm but EINVALs at dispatch
+        // (we don't support RSEQ).
+        crate::errno::set_errno(0);
+        let ret = membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- cpu_id normalisation ----------------------------------------------
+
+    #[test]
+    fn test_phase134_cpu_id_ignored_when_flag_cpu_absent() {
+        // Without FLAG_CPU, cpu_id is informational; passing a wild
+        // value should not affect a valid command.
+        crate::errno::set_errno(0);
+        assert_eq!(membarrier(MEMBARRIER_CMD_GLOBAL, 0, 9999), 0);
+        assert_eq!(membarrier(MEMBARRIER_CMD_GLOBAL, 0, -42), 0);
+    }
+
+    // -- Buggy-caller / recovery -------------------------------------------
+
+    #[test]
+    fn test_phase134_query_flag_error_does_not_poison_supported_value() {
+        // First a bad QUERY (flags!=0) → EINVAL.  Then a good QUERY →
+        // returns the bitmask.  No internal state should leak.
+        crate::errno::set_errno(0);
+        assert_eq!(membarrier(MEMBARRIER_CMD_QUERY, 1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        let supported = membarrier(MEMBARRIER_CMD_QUERY, 0, 0);
+        assert!(supported > 0);
+        assert_ne!(supported & MEMBARRIER_CMD_GLOBAL, 0);
+    }
+
+    #[test]
+    fn test_phase134_dispatch_after_bad_combined_cmd() {
+        // A bad combined cmd is rejected, and a subsequent good cmd
+        // still succeeds.
+        crate::errno::set_errno(0);
+        let combined =
+            MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_PRIVATE_EXPEDITED;
+        assert_eq!(membarrier(combined, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0),
+            0,
+        );
+    }
+
+    // -- Workflow ----------------------------------------------------------
+
+    #[test]
+    fn test_phase134_typical_query_register_use_workflow() {
+        // 1. Probe what's supported.
+        let supported = membarrier(MEMBARRIER_CMD_QUERY, 0, 0);
+        assert!(supported & MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED != 0);
+
+        // 2. Register intent (so other threads can be expedited).
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED, 0, 0),
+            0,
+        );
+
+        // 3. Issue the barrier.
+        assert_eq!(
+            membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0),
+            0,
+        );
     }
 
     // -----------------------------------------------------------------------

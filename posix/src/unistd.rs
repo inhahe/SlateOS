@@ -2740,12 +2740,16 @@ pub fn ptrace_request_known(request: i32) -> bool {
 /// 3. All other requests: `pid <= 0` → `ESRCH` (no such process).
 ///    Linux performs this via `find_get_task_by_vpid(pid)` which
 ///    returns `-ESRCH` for non-positive pids.
-/// 4. All validated → `ENOSYS`.
+/// 4. `!capable(CAP_SYS_PTRACE)` → `EPERM`  (Phase 200).
+///    In Linux this is checked inside `ptrace_may_access()` after
+///    finding the target task and checking thread-group membership.
+///    We place it after the `ESRCH` guard because a non-positive pid
+///    is always invalid regardless of privilege — the kernel never
+///    reaches the capability check for such pids.
+/// 5. All validated → `ENOSYS`.
 ///
 /// Things we cannot validate yet (will become real checks once the
 /// process subsystem exposes traced-state):
-/// - `EPERM`: caller lacks `CAP_SYS_PTRACE` or target is not a
-///   descendant.
 /// - `ESRCH`: target pid is not in this user's session.
 /// - `EFAULT`: `addr`/`data` does not refer to a readable/writable
 ///   address in the tracee.
@@ -2768,9 +2772,22 @@ pub extern "C" fn ptrace(request: i32, pid: i32, _addr: u64, _data: u64) -> i64 
         errno::set_errno(errno::ESRCH);
         return -1;
     }
-    // TODO(ptrace): ESRCH for non-existent pid, EPERM for unauthorized
-    // attach, EFAULT for bad addr/data — all require process-model
-    // hooks we don't have yet.
+    // Phase 200: CAP_SYS_PTRACE gate.  In Linux, ptrace_may_access()
+    // runs after finding the target task (ESRCH already screened) and
+    // checking thread-group membership.  A same-thread-group attach
+    // can bypass the cap check, but we don't track thread groups yet,
+    // so we gate all non-TRACEME requests uniformly.  An unprivileged
+    // caller with a valid pid sees EPERM rather than ENOSYS, which is
+    // the correct signal for "you don't have permission" vs. "this
+    // syscall isn't implemented."
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_PTRACE,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    // TODO(ptrace): ESRCH for non-existent pid, EFAULT for bad
+    // addr/data — require process-model hooks we don't have yet.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -9635,6 +9652,208 @@ mod tests {
         let ret = ptrace(PTRACE_KILL, 0, 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    // =====================================================================
+    // Phase 200 — CAP_SYS_PTRACE gate on ptrace (non-TRACEME requests)
+    //
+    // Linux's ptrace_may_access() checks CAP_SYS_PTRACE after finding the
+    // target task.  In our stub, the cap gate runs after the pid <= 0 →
+    // ESRCH check.  PTRACE_TRACEME bypasses the gate (tracing yourself
+    // doesn't need ptrace capability).
+    // =====================================================================
+
+    // -- cap helpers (scoped to this phase) --------------------------------
+
+    mod phase200_cap_helpers {
+        pub(super) struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            pub(super) fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        pub(super) fn drop_cap_sys_ptrace() {
+            let cap = crate::sys_capability::CAP_SYS_PTRACE;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if cap < 32 {
+                (lo & !(1u32 << cap), hi)
+            } else {
+                (lo, hi & !(1u32 << (cap - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed dropping cap");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+    }
+
+    // -- per-error class: cap held ----------------------------------------
+
+    /// With CAP_SYS_PTRACE held (default), valid ptrace requests reach
+    /// ENOSYS (unchanged from pre-Phase 200 behavior).
+    #[test]
+    fn test_phase200_ptrace_attach_with_cap_reaches_enosys() {
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_PTRACE,
+        ));
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_ATTACH, 1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- per-error class: cap dropped → EPERM -----------------------------
+
+    /// Without CAP_SYS_PTRACE, PTRACE_ATTACH → EPERM.
+    #[test]
+    fn test_phase200_ptrace_attach_no_cap_eperm() {
+        let _g = phase200_cap_helpers::CapGuard::snapshot();
+        phase200_cap_helpers::drop_cap_sys_ptrace();
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_ATTACH, 1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    /// Without CAP_SYS_PTRACE, PTRACE_SEIZE → EPERM.
+    #[test]
+    fn test_phase200_ptrace_seize_no_cap_eperm() {
+        let _g = phase200_cap_helpers::CapGuard::snapshot();
+        phase200_cap_helpers::drop_cap_sys_ptrace();
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_SEIZE, 42, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    /// Without CAP_SYS_PTRACE, PTRACE_PEEKTEXT → EPERM.
+    #[test]
+    fn test_phase200_ptrace_peektext_no_cap_eperm() {
+        let _g = phase200_cap_helpers::CapGuard::snapshot();
+        phase200_cap_helpers::drop_cap_sys_ptrace();
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_PEEKTEXT, 100, 0x1000, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    // -- PTRACE_TRACEME bypasses the cap gate -----------------------------
+
+    /// PTRACE_TRACEME does not require CAP_SYS_PTRACE — tracing
+    /// yourself is always allowed (subject to "already traced" check,
+    /// which we stub as ENOSYS).
+    #[test]
+    fn test_phase200_ptrace_traceme_no_cap_still_enosys() {
+        let _g = phase200_cap_helpers::CapGuard::snapshot();
+        phase200_cap_helpers::drop_cap_sys_ptrace();
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_TRACEME, 0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::ENOSYS,
+            "TRACEME must bypass CAP_SYS_PTRACE gate"
+        );
+    }
+
+    // -- ordering: EIO before EPERM, ESRCH before EPERM -------------------
+
+    /// Unknown request + no cap → EIO (request check runs first).
+    #[test]
+    fn test_phase200_ptrace_unknown_request_eio_before_eperm() {
+        let _g = phase200_cap_helpers::CapGuard::snapshot();
+        phase200_cap_helpers::drop_cap_sys_ptrace();
+        errno::set_errno(0);
+        let ret = ptrace(9999, 1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::EIO,
+            "EIO for unknown request must precede EPERM"
+        );
+    }
+
+    /// pid <= 0 + no cap → ESRCH (pid check runs before cap check).
+    #[test]
+    fn test_phase200_ptrace_bad_pid_esrch_before_eperm() {
+        let _g = phase200_cap_helpers::CapGuard::snapshot();
+        phase200_cap_helpers::drop_cap_sys_ptrace();
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_ATTACH, 0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::ESRCH,
+            "ESRCH for bad pid must precede EPERM"
+        );
+    }
+
+    // -- restoration: CapGuard drop re-enables ptrace ---------------------
+
+    /// After restoring CAP_SYS_PTRACE, valid ptrace reaches ENOSYS again.
+    #[test]
+    fn test_phase200_ptrace_cap_restore_re_enables() {
+        {
+            let _g = phase200_cap_helpers::CapGuard::snapshot();
+            phase200_cap_helpers::drop_cap_sys_ptrace();
+            errno::set_errno(0);
+            let ret = ptrace(PTRACE_ATTACH, 1, 0, 0);
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM, "must fail without cap");
+        }
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_PTRACE,
+        ));
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_ATTACH, 1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS, "must pass after restore");
     }
 
     // =====================================================================

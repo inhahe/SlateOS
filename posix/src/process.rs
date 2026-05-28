@@ -2683,6 +2683,14 @@ unsafe fn process_vm_validate(
 /// transfer pages explicitly rather than peeking at another task's
 /// address space).
 ///
+/// # Capability gate (Phase 200)
+///
+/// Linux gates cross-process memory access on `CAP_SYS_PTRACE` via
+/// `mm_access()` → `__ptrace_may_access()`, checked **after** all
+/// argument validation.  A caller passing bad flags or a bad pid
+/// sees the argument error (EINVAL / ESRCH), not EPERM; only a
+/// caller with fully valid arguments and no capability sees EPERM.
+///
 /// # Safety
 ///
 /// When `liovcnt > 0`, `local_iov` must point to at least `liovcnt`
@@ -2706,6 +2714,14 @@ pub extern "C" fn process_vm_readv(
             -1
         }
         Ok(()) => {
+            // Phase 200: CAP_SYS_PTRACE gate — same check Linux
+            // performs inside mm_access() after finding the target.
+            if !crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_PTRACE,
+            ) {
+                errno::set_errno(errno::EPERM);
+                return -1;
+            }
             errno::set_errno(errno::ENOSYS);
             -1
         }
@@ -2717,6 +2733,11 @@ pub extern "C" fn process_vm_readv(
 /// Linux 3.2+.  Mirrors [`process_vm_readv`] but transfers in the
 /// opposite direction — same argument-domain checks apply via
 /// [`process_vm_validate`].
+///
+/// # Capability gate (Phase 200)
+///
+/// Same `CAP_SYS_PTRACE` gate as [`process_vm_readv`] — placed
+/// after validation so argument errors take priority.
 ///
 /// # Safety
 ///
@@ -2741,6 +2762,13 @@ pub extern "C" fn process_vm_writev(
             -1
         }
         Ok(()) => {
+            // Phase 200: CAP_SYS_PTRACE gate — see process_vm_readv.
+            if !crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_PTRACE,
+            ) {
+                errno::set_errno(errno::EPERM);
+                return -1;
+            }
             errno::set_errno(errno::ENOSYS);
             -1
         }
@@ -9218,6 +9246,243 @@ mod tests {
         );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // =================================================================
+    // Phase 200 — CAP_SYS_PTRACE gate on process_vm_readv / writev
+    //
+    // Linux gates cross-process memory access on CAP_SYS_PTRACE via
+    // mm_access() → __ptrace_may_access().  The gate runs after all
+    // argument-domain checks, so bad flags/pid/iovecs still see their
+    // original EINVAL/ESRCH/EFAULT errors regardless of cap state.
+    // =================================================================
+
+    mod phase200_pvm_cap {
+        pub(super) struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            pub(super) fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        pub(super) fn drop_cap_sys_ptrace() {
+            let cap = crate::sys_capability::CAP_SYS_PTRACE;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << cap);
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed dropping cap");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+    }
+
+    // -- per-error class: cap held → ENOSYS (unchanged) -------------------
+
+    /// With CAP_SYS_PTRACE (default), valid process_vm_readv still
+    /// reaches ENOSYS.
+    #[test]
+    fn test_phase200_process_vm_readv_with_cap_enosys() {
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_PTRACE,
+        ));
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- per-error class: cap dropped → EPERM -----------------------------
+
+    /// Without CAP_SYS_PTRACE, valid process_vm_readv → EPERM.
+    #[test]
+    fn test_phase200_process_vm_readv_no_cap_eperm() {
+        let _g = phase200_pvm_cap::CapGuard::snapshot();
+        phase200_pvm_cap::drop_cap_sys_ptrace();
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    /// Without CAP_SYS_PTRACE, valid process_vm_writev → EPERM.
+    #[test]
+    fn test_phase200_process_vm_writev_no_cap_eperm() {
+        let _g = phase200_pvm_cap::CapGuard::snapshot();
+        phase200_pvm_cap::drop_cap_sys_ptrace();
+        crate::errno::set_errno(0);
+        let ret = process_vm_writev(
+            1,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    // -- ordering: argument errors beat EPERM -----------------------------
+
+    /// Bad flags + no cap → EINVAL (argument check runs before cap).
+    #[test]
+    fn test_phase200_process_vm_readv_bad_flags_einval_before_eperm() {
+        let _g = phase200_pvm_cap::CapGuard::snapshot();
+        phase200_pvm_cap::drop_cap_sys_ptrace();
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            1, // non-zero flags
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "EINVAL for bad flags must precede EPERM"
+        );
+    }
+
+    /// Bad pid + no cap → ESRCH (pid check before cap).
+    #[test]
+    fn test_phase200_process_vm_readv_bad_pid_esrch_before_eperm() {
+        let _g = phase200_pvm_cap::CapGuard::snapshot();
+        phase200_pvm_cap::drop_cap_sys_ptrace();
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            0, // bad pid
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ESRCH,
+            "ESRCH for bad pid must precede EPERM"
+        );
+    }
+
+    /// Excessive iovec count + no cap → EINVAL.
+    #[test]
+    fn test_phase200_process_vm_readv_big_liovcnt_einval_before_eperm() {
+        let _g = phase200_pvm_cap::CapGuard::snapshot();
+        phase200_pvm_cap::drop_cap_sys_ptrace();
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            core::ptr::null(),
+            PROCESS_VM_UIO_MAXIOV + 1, // overflow
+            core::ptr::null(),
+            0,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "iovec overflow must yield EINVAL even without cap"
+        );
+    }
+
+    // -- restoration: CapGuard drop re-enables ----------------------------
+
+    /// After restoring CAP_SYS_PTRACE, valid calls reach ENOSYS again.
+    #[test]
+    fn test_phase200_process_vm_readv_cap_restore() {
+        {
+            let _g = phase200_pvm_cap::CapGuard::snapshot();
+            phase200_pvm_cap::drop_cap_sys_ptrace();
+            crate::errno::set_errno(0);
+            let ret = process_vm_readv(
+                1,
+                core::ptr::null(),
+                0,
+                core::ptr::null(),
+                0,
+                0,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_PTRACE,
+        ));
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     // -----------------------------------------------------------------

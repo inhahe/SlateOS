@@ -497,12 +497,39 @@ fn is_known_madvise(advice: i32) -> bool {
     )
 }
 
+/// MADV_HWPOISON — Linux kernel's "inject memory error" advice.  Routed
+/// through `madvise_inject_error` and gated on `CAP_SYS_ADMIN`.
+const MADV_HWPOISON: i32 = 100;
+/// MADV_SOFT_OFFLINE — softer variant of `MADV_HWPOISON`.  Same
+/// `madvise_inject_error` path, same `CAP_SYS_ADMIN` requirement.
+const MADV_SOFT_OFFLINE: i32 = 101;
+
 /// Give advice about use of memory.
 ///
 /// Validates inputs (addr page-aligned, addr+length doesn't overflow,
 /// advice is a known `MADV_*` value).  Otherwise advisory no-op: our
 /// kernel doesn't act on access-pattern hints, but garbage from the
 /// caller now produces a real EINVAL instead of silent success.
+///
+/// Validation order matches Linux's `mm/madvise.c::do_madvise` and
+/// `madvise_inject_error`:
+/// 1. `addr` not page-aligned, or `addr + length` overflows → `EINVAL`.
+/// 2. `advice` not a recognised `MADV_*` value → `EINVAL`.
+/// 3. (Phase 189) `advice` is `MADV_HWPOISON` (100) or
+///    `MADV_SOFT_OFFLINE` (101) and the caller lacks `CAP_SYS_ADMIN` →
+///    `EPERM`.  Matches `madvise_inject_error`:
+///    ```text
+///    if (!capable(CAP_SYS_ADMIN))
+///        return -EPERM;
+///    ```
+///    The cap check fires only for the error-injection family — every
+///    other `MADV_*` value remains an advisory no-op success.
+/// 4. (Phase 189) `MADV_HWPOISON` / `MADV_SOFT_OFFLINE` with
+///    `CAP_SYS_ADMIN` held → `ENOSYS`.  We do not implement the
+///    memory-error injection backend; surfacing ENOSYS lets privileged
+///    test tools (RAS validation suites, mce-test) distinguish "denied"
+///    from "no backend".
+/// 5. All other recognised `MADV_*` values → `0` (advisory no-op).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn madvise(addr: *mut core::ffi::c_void, length: SizeT, advice: i32) -> i32 {
     if !is_page_aligned(addr) || range_overflows(addr, length) {
@@ -511,6 +538,22 @@ pub extern "C" fn madvise(addr: *mut core::ffi::c_void, length: SizeT, advice: i
     }
     if !is_known_madvise(advice) {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Phase 189: HWPOISON / SOFT_OFFLINE are the error-injection
+    // family — Linux routes them through `madvise_inject_error`,
+    // which opens with `if (!capable(CAP_SYS_ADMIN)) return -EPERM`.
+    // The cap check fires only for these two; every other recognised
+    // advice value falls through to the advisory no-op below.
+    if advice == MADV_HWPOISON || advice == MADV_SOFT_OFFLINE {
+        if !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_ADMIN,
+        ) {
+            errno::set_errno(errno::EPERM);
+            return -1;
+        }
+        // Cap held but we have no memory-error injection backend.
+        errno::set_errno(errno::ENOSYS);
         return -1;
     }
     0
@@ -1450,9 +1493,12 @@ mod tests {
     #[test]
     fn test_madvise_linux_extensions_accepted() {
         // MADV_FREE (8), MADV_DONTFORK (10), MADV_HUGEPAGE (14), MADV_COLD (20),
-        // MADV_COLLAPSE (25), MADV_HWPOISON (100), MADV_SOFT_OFFLINE (101) — all
-        // valid Linux advisory values; we accept (no-op) without EINVAL.
-        for advice in [8i32, 10, 14, 20, 25, 100, 101] {
+        // MADV_COLLAPSE (25) — pure advisory values; we accept (no-op) without
+        // EINVAL.  HWPOISON (100) and SOFT_OFFLINE (101) are excluded here:
+        // Phase 189 gates them on CAP_SYS_ADMIN and surfaces ENOSYS once the
+        // cap check passes (no backend).  See the `madvise_cap_phase189`
+        // module for their dedicated coverage.
+        for advice in [8i32, 10, 14, 20, 25] {
             assert_eq!(
                 madvise(core::ptr::null_mut(), 16384, advice),
                 0,
@@ -2981,6 +3027,438 @@ mod tests {
             assert_eq!(mlock(core::ptr::null(), 64 * PAGE), 0);
             assert_eq!(mlockall(MCL_CURRENT | MCL_FUTURE), 0);
             assert_eq!(mlock2(core::ptr::null(), 16 * PAGE, MLOCK_ONFAULT), 0);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 189: madvise — CAP_SYS_ADMIN gate for HWPOISON / SOFT_OFFLINE
+    // ------------------------------------------------------------------
+    //
+    // Linux's `mm/madvise.c::madvise_inject_error` opens with:
+    //
+    //     if (!capable(CAP_SYS_ADMIN))
+    //         return -EPERM;
+    //
+    // and is the per-page worker for MADV_HWPOISON (100) and
+    // MADV_SOFT_OFFLINE (101).  Every other MADV_* value is advisory
+    // and never enters this path.
+    //
+    // Pre-Phase-189 our madvise() returned `0` for HWPOISON /
+    // SOFT_OFFLINE — silently succeeding even without CAP_SYS_ADMIN,
+    // which let unprivileged programs probe for memory-error
+    // injection without seeing the Linux EPERM signal.  Phase 189
+    // gates the two values on CAP_SYS_ADMIN: missing cap → EPERM, cap
+    // held but no backend → ENOSYS.
+    //
+    // EINVAL paths (bad addr alignment, unknown advice) still beat
+    // the cap check — they fire before `do_madvise` would call into
+    // `madvise_inject_error`, matching Linux's `madvise_behavior_valid`
+    // / address-validation prologue.
+    //
+    // Host test build holds CAP_SYS_ADMIN by default (bit 21 ∈
+    // DEFAULT_CAPS_LOW = u32::MAX).  Must run with `--test-threads=1`
+    // because the tests manipulate process-wide capability state.
+    // ------------------------------------------------------------------
+
+    mod madvise_cap_phase189 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase 188
+        /// (`stat::tests::mknod_cap_phase188`).
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_admin() {
+            use crate::sys_capability::CAP_SYS_ADMIN;
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_ADMIN < 32 {
+                (lo & !(1u32 << CAP_SYS_ADMIN), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_ADMIN");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
+        }
+
+        // Re-declare the local constants (the `madvise` const items
+        // are private to the function module).
+        const MADV_HWPOISON: i32 = 100;
+        const MADV_SOFT_OFFLINE: i32 = 101;
+
+        // -- Per-error-class --------------------------------------------------
+
+        /// HWPOISON without CAP_SYS_ADMIN → EPERM.  Matches Linux's
+        /// `madvise_inject_error` opening cap check.
+        #[test]
+        fn test_madvise_phase189_hwpoison_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// SOFT_OFFLINE without CAP_SYS_ADMIN → EPERM.
+        #[test]
+        fn test_madvise_phase189_soft_offline_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_SOFT_OFFLINE),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// MADV_NORMAL (0) is unaffected by cap drop — purely
+        /// advisory.  Confirms the gate is type-conditional.
+        #[test]
+        fn test_madvise_phase189_normal_no_cap_still_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_NORMAL),
+                0,
+            );
+        }
+
+        /// MADV_DONTNEED / FREE / HUGEPAGE / COLLAPSE — all advisory,
+        /// all unaffected.
+        #[test]
+        fn test_madvise_phase189_other_advisories_no_cap_still_succeed() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            for advice in [MADV_DONTNEED, 8i32, 14, 25] {
+                errno::set_errno(0);
+                assert_eq!(
+                    madvise(core::ptr::null_mut(), 16384, advice),
+                    0,
+                    "advice {advice} must be unaffected by CAP_SYS_ADMIN drop"
+                );
+            }
+        }
+
+        // -- Ordering matrix --------------------------------------------------
+
+        /// EINVAL (unaligned addr) beats EPERM — the address check
+        /// runs before `do_madvise` would dispatch to
+        /// `madvise_inject_error`.
+        #[test]
+        fn test_madvise_phase189_einval_unaligned_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(0x1 as *mut core::ffi::c_void, 16384, MADV_HWPOISON),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL,
+                "Unaligned-addr EINVAL must beat CAP_SYS_ADMIN EPERM");
+        }
+
+        /// EINVAL (unknown advice) beats EPERM.  Linux's
+        /// `madvise_behavior_valid` rejects garbage before the cap
+        /// check; HWPOISON-as-garbage cannot occur, but a caller
+        /// passing both a missing cap and an unrelated bad advice
+        /// must see EINVAL (the syscall-domain failure).
+        #[test]
+        fn test_madvise_phase189_einval_bad_advice_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, 9999),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// EPERM beats ENOSYS — the cap gate fires before the
+        /// "no backend" return.  Without the gate this would be
+        /// observable as ENOSYS, which is what `mce-test` would
+        /// misinterpret as "kernel lacks RAS support".
+        #[test]
+        fn test_madvise_phase189_eperm_beats_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM,
+                "Missing CAP_SYS_ADMIN must surface as EPERM, not ENOSYS");
+        }
+
+        // -- ENOSYS-with-cap --------------------------------------------------
+
+        /// HWPOISON with CAP_SYS_ADMIN held → ENOSYS (we have no
+        /// memory-error injection backend).  Lets privileged RAS
+        /// tools distinguish "denied" from "no backend".
+        #[test]
+        fn test_madvise_phase189_hwpoison_with_cap_returns_enosys() {
+            let _g = CapGuard::snapshot();
+            // Cap held by default.
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// SOFT_OFFLINE with CAP_SYS_ADMIN held → ENOSYS.
+        #[test]
+        fn test_madvise_phase189_soft_offline_with_cap_returns_enosys() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_SOFT_OFFLINE),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Workflow --------------------------------------------------------
+
+        /// Drop cap → HWPOISON fails EPERM; restore cap → HWPOISON
+        /// reaches ENOSYS.  Mirrors the privilege-drop / re-elevate
+        /// pattern of a setuid memory-tester.
+        #[test]
+        fn test_madvise_phase189_drop_then_restore_workflow() {
+            let _g = CapGuard::snapshot();
+            // 1. Cap held — ENOSYS (proper request, no backend).
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+            // 2. Drop cap — EPERM.
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // 3. Restore cap via capset to u32::MAX — ENOSYS again.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Buggy-caller ----------------------------------------------------
+
+        /// A caller that didn't clear errno sees a fresh EPERM, not
+        /// the stale value.
+        #[test]
+        fn test_madvise_phase189_buggy_caller_stale_errno_replaced() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(errno::ENOENT);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM,
+                "Stale ENOENT must be overwritten with EPERM");
+        }
+
+        // -- Recovery --------------------------------------------------------
+
+        /// CapGuard drop restores cap so a subsequent HWPOISON call
+        /// reaches ENOSYS again.
+        #[test]
+        fn test_madvise_phase189_capguard_restore_clears_state() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_sys_admin();
+                errno::set_errno(0);
+                assert_eq!(
+                    madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
+                    -1,
+                );
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            } // _g dropped here; cap restored.
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS,
+                "CapGuard drop must restore cap; HWPOISON reaches ENOSYS");
+        }
+
+        // -- Sentinel --------------------------------------------------------
+
+        /// With CAP_SYS_ADMIN held, all existing EINVAL paths still
+        /// fire.  Confirms the gate is gated, not unconditional.
+        #[test]
+        fn test_madvise_phase189_with_cap_existing_terminals_unchanged() {
+            let _g = CapGuard::snapshot();
+            // EINVAL on unaligned.
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(0x1 as *mut core::ffi::c_void, 16384, MADV_NORMAL),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+            // EINVAL on unknown advice.
+            errno::set_errno(0);
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, 9999), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+            // 0 on advisory.
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_NORMAL),
+                0,
+            );
+        }
+
+        // -- Cross-check -----------------------------------------------------
+
+        /// Dropping CAP_MKNOD alone must NOT affect madvise — Linux
+        /// gates the inject path on CAP_SYS_ADMIN specifically.  Pins
+        /// down the cross-cap invariant so a future refactor that
+        /// probes the wrong cap is caught.
+        #[test]
+        fn test_madvise_phase189_mknod_drop_does_not_affect_madvise() {
+            use crate::sys_capability::CAP_MKNOD;
+            let _g = CapGuard::snapshot();
+            // Drop only CAP_MKNOD (bit 27).
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << CAP_MKNOD);
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            // HWPOISON still reaches ENOSYS.
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS,
+                "CAP_MKNOD drop must not affect madvise");
+        }
+
+        /// Phase 189 errno is EPERM (capable convention), matching
+        /// `madvise_inject_error` → `-EPERM`.  Distinct from the
+        /// EACCES used by Phase 186 (seccomp).  Cross-phase invariant.
+        #[test]
+        fn test_madvise_phase189_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(
+                madvise(core::ptr::null_mut(), 16384, MADV_SOFT_OFFLINE),
+                -1,
+            );
+            let e = errno::get_errno();
+            assert_eq!(e, errno::EPERM);
+            assert_ne!(e, errno::EACCES,
+                "madvise_inject_error uses EPERM (capable convention)");
         }
     }
 }

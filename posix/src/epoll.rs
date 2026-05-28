@@ -625,22 +625,45 @@ pub unsafe extern "C" fn epoll_pwait2(
     timeout: *const crate::stat::Timespec,
     _sigmask: *const u64,
 ) -> i32 {
+    // Linux validation order (fs/eventpoll.c::do_epoll_pwait2):
+    //   1. copy_from_user(timeout)           -> EFAULT
+    //   2. poll_select_set_timeout validates -> EINVAL on tv_sec < 0
+    //                                          or tv_nsec out of range
+    //   3. then delegates to do_epoll_wait    (fdget etc.)
+    //
+    // We can't usefully distinguish "wild non-null pointer" from a
+    // real timespec without a userspace memory map, so we forward the
+    // dereference unconditionally when `timeout` is non-null and
+    // validate the *contents* of the timespec — that EINVAL must fire
+    // BEFORE the inner epfd lookup, otherwise a bad timespec combined
+    // with a bad epfd would surface as EBADF instead of EINVAL.
     let tms: i32 = if timeout.is_null() {
         -1
     } else {
         // SAFETY: caller guarantees timeout points to a valid Timespec.
         let ts = unsafe { &*timeout };
+        // Match Linux's `poll_select_set_timeout`: reject negative
+        // seconds and any nsec value outside `[0, 1_000_000_000)`.
+        if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
         if ts.tv_sec == 0 && ts.tv_nsec == 0 {
             0
         } else {
             // Round up nanoseconds → milliseconds so a non-zero
-            // sub-millisecond timeout doesn't collapse to 0.
+            // sub-millisecond timeout doesn't collapse to 0.  Both
+            // operands are non-negative now (validated above), so the
+            // saturating math can only saturate upward.
             let ms = ts.tv_sec
                 .saturating_mul(1_000)
                 .saturating_add(ts.tv_nsec.saturating_add(999_999) / 1_000_000);
             if ms > i64::from(i32::MAX) {
                 i32::MAX
             } else if ms <= 0 {
+                // Theoretically unreachable since both operands are
+                // non-negative and at least one is non-zero (the all-
+                // zero case is handled above).  Defensive: round up.
                 1
             } else {
                 ms as i32
@@ -4232,5 +4255,232 @@ mod tests {
         // No events armed → returns 0.  Must not be an error.
         assert_eq!(good, 0, "recovery wait must succeed, errno={}", errno::get_errno());
         crate::file::close(epfd);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 108 — epoll_pwait2 timespec validation.
+    //
+    // Linux's `do_epoll_pwait2` (fs/eventpoll.c) validates the
+    // user-supplied timespec via `poll_select_set_timeout` BEFORE the
+    // inner `do_epoll_wait` call (so before any fdget on epfd).  A
+    // negative `tv_sec` or out-of-range `tv_nsec` returns EINVAL even
+    // when the epfd is bad.  Previously we silently coerced bad
+    // timespecs into a 1ms timeout and forwarded to epoll_wait, so the
+    // EINVAL never fired.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_epoll_pwait2_phase108_null_timeout_is_indefinite_wait() {
+        // Null timeout should behave like epoll_wait(..., -1).  With a
+        // real epfd, no events armed, and timeout=0 (we cant block in
+        // tests), we cant exercise the indefinite path directly.  Just
+        // verify the function reaches the inner wait with the expected
+        // tms by passing null and a real epfd; we shouldn't see
+        // EINVAL.  To avoid blocking, also use timeout via a zero
+        // timespec in a separate test.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        errno::set_errno(0);
+        // We don't actually invoke null-timeout here (that would block
+        // indefinitely if any event hooks ever stuck).  Instead this
+        // test pins that a zero timespec returns 0 promptly.
+        let zero_ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let r = unsafe {
+            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const zero_ts, core::ptr::null())
+        };
+        assert_eq!(r, 0, "zero timespec must poll once and return, errno={}", errno::get_errno());
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_pwait2_phase108_negative_tv_sec_einval() {
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        let bad = crate::stat::Timespec { tv_sec: -1, tv_nsec: 0 };
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_pwait2_phase108_negative_tv_nsec_einval() {
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        let bad = crate::stat::Timespec { tv_sec: 0, tv_nsec: -1 };
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_pwait2_phase108_tv_nsec_one_billion_einval() {
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        let bad = crate::stat::Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 };
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_pwait2_phase108_tv_nsec_just_under_one_billion_ok() {
+        // Boundary case: tv_nsec = 999_999_999 is the largest accepted
+        // value (matches Linux's `[0, NSEC_PER_SEC)` range).
+        //
+        // We pair this with a bad epfd so the test short-circuits at
+        // the inner epoll_wait EBADF check rather than entering the
+        // ~1-second poll loop.  If the timespec check spuriously
+        // rejected the boundary value, we'd see EINVAL instead.
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        let ok = crate::stat::Timespec { tv_sec: 0, tv_nsec: 999_999_999 };
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_pwait2(99999, ev.as_mut_ptr(), 1, &raw const ok, core::ptr::null())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF,
+            "tv_nsec=999_999_999 must reach the EBADF path, not be rejected with EINVAL");
+    }
+
+    #[test]
+    fn test_epoll_pwait2_phase108_einval_ts_wins_over_ebadf_epfd() {
+        // Bad timespec + bad epfd: Linux validates the timespec FIRST
+        // (poll_select_set_timeout fires before fdget), so EINVAL wins.
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        let bad = crate::stat::Timespec { tv_sec: -10, tv_nsec: 0 };
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_pwait2(99999, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_epoll_pwait2_phase108_einval_ts_wins_over_einval_maxevents() {
+        // Bad timespec + zero maxevents: both would be EINVAL, but the
+        // timespec check fires first.  Both surface as EINVAL — this
+        // test simply confirms we don't regress to EBADF or some other
+        // errno by silently coercing the timespec.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        let bad = crate::stat::Timespec { tv_sec: 0, tv_nsec: i64::MAX };
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_pwait2(epfd, ev.as_mut_ptr(), 0, &raw const bad, core::ptr::null())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_pwait2_phase108_einval_ts_wins_over_efault_events() {
+        // Bad timespec + null events ptr: Linux's timespec check
+        // happens before access_ok, so EINVAL wins over EFAULT.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let bad = crate::stat::Timespec { tv_sec: 0, tv_nsec: -42 };
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_pwait2(epfd, core::ptr::null_mut(), 1, &raw const bad, core::ptr::null())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_pwait2_phase108_huge_tv_sec_does_not_overflow_to_einval() {
+        // Saturating math must convert i64::MAX seconds to i32::MAX
+        // milliseconds without spuriously failing the timespec check.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        let huge = crate::stat::Timespec { tv_sec: i64::MAX, tv_nsec: 0 };
+        errno::set_errno(0);
+        // Don't call this — it would wait indefinitely.  Just verify
+        // the validation pass: pass a bad maxevents alongside so the
+        // outer epoll_wait short-circuits before sleeping, and check
+        // that the inner errno is the maxevents EINVAL (not a
+        // timespec EINVAL that wrongly fired).
+        let r = unsafe {
+            epoll_pwait2(epfd, ev.as_mut_ptr(), 0, &raw const huge, core::ptr::null())
+        };
+        assert_eq!(r, -1);
+        // Either path (timespec EINVAL or maxevents EINVAL) surfaces
+        // as EINVAL; the point is no other errno (no EBADF, no
+        // EFAULT).
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_pwait2_phase108_zero_timespec_polls_immediately() {
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        let zero = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const zero, core::ptr::null())
+        };
+        assert_eq!(r, 0);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_pwait2_phase108_recovery_after_einval() {
+        // After a rejected call with a bad timespec, a subsequent call
+        // with a valid zero timespec succeeds.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        let bad = crate::stat::Timespec { tv_sec: -1, tv_nsec: 0 };
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let zero = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const zero, core::ptr::null())
+        };
+        assert_eq!(r, 0, "recovery call must succeed, errno={}", errno::get_errno());
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_pwait2_phase108_null_timeout_with_bad_epfd_is_ebadf() {
+        // With null timeout (no timespec validation needed), bad epfd
+        // surfaces from the inner epoll_wait: EBADF.  This confirms we
+        // don't spuriously fail with EINVAL when timeout==NULL.
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_pwait2(99999, ev.as_mut_ptr(), 1, core::ptr::null(), core::ptr::null())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
     }
 }

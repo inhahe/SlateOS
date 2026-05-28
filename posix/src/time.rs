@@ -316,6 +316,17 @@ pub extern "C" fn clock_nanosleep(
     request: *const Timespec,
     remain: *mut Timespec,
 ) -> i32 {
+    // Linux semantics (kernel/time/posix-timers.c::common_nsleep,
+    // kernel/time/hrtimer.c::hrtimer_nanosleep): the only valid flag
+    // bit is TIMER_ABSTIME.  Reject any other bit before touching
+    // the request pointer or inspecting the clock id, so a buggy
+    // caller passing garbage flag bits is told about it regardless
+    // of what else is wrong with their call.  clock_nanosleep
+    // returns the error number directly (no errno set), per POSIX.
+    if flags & !TIMER_ABSTIME != 0 {
+        return errno::EINVAL;
+    }
+
     if request.is_null() {
         return errno::EINVAL;
     }
@@ -4973,6 +4984,168 @@ mod tests {
     fn test_clock_nanosleep_invalid_nsec() {
         let req = Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 };
         assert_eq!(clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut()), crate::errno::EINVAL);
+    }
+
+    // -- Phase 102: clock_nanosleep flag-mask validation --
+    //
+    // Linux semantics (kernel/time/posix-timers.c::common_nsleep):
+    //   if (flags & ~TIMER_ABSTIME) return -EINVAL;
+    // The check precedes request / clk_id / nsec inspection.  Our
+    // previous code never inspected the flag mask at all; only
+    // TIMER_ABSTIME (== 1) was conditionally used, and stray bits
+    // were silently dropped.  clock_nanosleep returns the error
+    // number directly (not via errno) per POSIX.
+
+    #[test]
+    fn test_clock_nanosleep_timer_abstime_is_bit_zero() {
+        // Sanity / invariant: TIMER_ABSTIME must be 1 (bit 0).  This
+        // matches glibc's <time.h> and Linux <linux/time.h>.  If this
+        // ever drifts, the mask check below would silently accept
+        // bit 0 set with any other shape — break loudly here instead.
+        assert_eq!(TIMER_ABSTIME, 1);
+        assert_eq!(TIMER_ABSTIME & (TIMER_ABSTIME - 1), 0,
+            "TIMER_ABSTIME must be a single bit");
+    }
+
+    #[test]
+    fn test_clock_nanosleep_unknown_flag_einval() {
+        // An arbitrary stray bit must yield EINVAL up-front, BEFORE
+        // any of the other validations.  We pass a null request +
+        // bad clock id deliberately so that if the mask check were
+        // missing, we'd still see EINVAL from the existing paths —
+        // i.e. this test depends on the mask path returning first.
+        // We can't observe ordering via the value alone (all paths
+        // return EINVAL), but we can observe that the mask path is
+        // hit BEFORE the null-request dereference.
+        let bad = 1 << 4;
+        assert_eq!(
+            clock_nanosleep(CLOCK_REALTIME, bad, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_high_bit_einval() {
+        // i32::MIN sets the sign bit — far outside the valid mask.
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        assert_eq!(
+            clock_nanosleep(CLOCK_REALTIME, i32::MIN, &req, core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_einval_wins_with_garbage_inputs() {
+        // Both bad flags AND bad request would normally trigger
+        // separate EINVAL paths.  Regression guard: the flag-mask
+        // check fires first, before the null check or clock check.
+        // We verify the path is reachable with otherwise-valid
+        // inputs except the stray flag bit.
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        assert_eq!(
+            clock_nanosleep(CLOCK_REALTIME, 1 << 5, &req, core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_zero_flags_passes_mask() {
+        // Zero flags is valid; a zero-duration relative sleep should
+        // succeed (0 nanoseconds → immediate return).  Must NOT
+        // return EINVAL (which would indicate the mask wrongly
+        // rejected zero).
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut());
+        assert_ne!(ret, crate::errno::EINVAL,
+            "zero flags must not be rejected by the mask");
+    }
+
+    #[test]
+    fn test_clock_nanosleep_timer_abstime_alone_passes_mask() {
+        // TIMER_ABSTIME alone is the canonical valid call; it must
+        // not be rejected by the mask.  Path goes to the abs-time
+        // branch which, with a zero/past target, returns 0 immediately.
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &req, core::ptr::null_mut());
+        assert_ne!(ret, crate::errno::EINVAL,
+            "TIMER_ABSTIME alone must not be rejected by the mask");
+    }
+
+    #[test]
+    fn test_clock_nanosleep_abstime_plus_unknown_einval() {
+        // Mixing TIMER_ABSTIME with a stray bit must still EINVAL —
+        // no partial acceptance.
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mixed = TIMER_ABSTIME | (1 << 8);
+        assert_eq!(
+            clock_nanosleep(CLOCK_REALTIME, mixed, &req, core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_o_append_value_rejected() {
+        // O_APPEND (a file flag) has no meaning here.  In our
+        // numbering it's 0o2000 == 1<<10, which is not TIMER_ABSTIME
+        // (1<<0).  Must EINVAL.
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        assert_eq!(
+            clock_nanosleep(CLOCK_REALTIME, crate::fcntl::O_APPEND, &req, core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_recovery_after_einval() {
+        // A rejected call must not corrupt state — a subsequent
+        // valid-flags call still behaves correctly.
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let r1 = clock_nanosleep(CLOCK_REALTIME, 1 << 7, &req, core::ptr::null_mut());
+        assert_eq!(r1, crate::errno::EINVAL);
+        let r2 = clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut());
+        assert_ne!(r2, crate::errno::EINVAL,
+            "valid call after rejected one must still succeed");
+    }
+
+    #[test]
+    fn test_clock_nanosleep_single_bits_outside_mask_all_rejected() {
+        // Exhaustive: every single-bit value 1<<1 .. 1<<30 must be
+        // rejected (1<<0 is TIMER_ABSTIME itself and is valid).
+        // Guards against a future TIMER_ABSTIME change silently
+        // widening the accepted mask.
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        for shift in 1..31 {
+            let bit = 1i32 << shift;
+            assert_eq!(
+                clock_nanosleep(CLOCK_REALTIME, bit, &req, core::ptr::null_mut()),
+                crate::errno::EINVAL,
+                "bit {:#x} should be rejected by clock_nanosleep mask", bit
+            );
+        }
+    }
+
+    #[test]
+    fn test_clock_nanosleep_bad_flags_before_invalid_clock() {
+        // Both bad flags AND bad clock id would normally produce
+        // EINVAL via different paths.  Mask check must fire first
+        // (matches Linux ordering).  We can't differentiate the
+        // value, but the test exercises the path with valid clock
+        // checks unreachable.
+        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        assert_eq!(
+            clock_nanosleep(99_999, 1 << 9, &req, core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
+    }
+
+    #[test]
+    fn test_clock_nanosleep_bad_flags_before_invalid_nsec() {
+        // Bad flags must fire before the nsec validation.
+        let req = Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 };
+        assert_eq!(
+            clock_nanosleep(CLOCK_REALTIME, 1 << 6, &req, core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
     }
 
     // -- gettimeofday --

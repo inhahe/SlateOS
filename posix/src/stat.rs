@@ -165,40 +165,164 @@ pub extern "C" fn S_ISSOCK(mode: u32) -> i32 {
 // mknod / mkfifo — create special files
 // ---------------------------------------------------------------------------
 
+/// Return `true` if the `S_IFMT` field of `mode` names a file type that
+/// `mknod(2)` accepts.  Linux's `fs/namei.c::do_mknodat` rejects any
+/// other value with `-EINVAL`, including `mode & S_IFMT == 0`.
+///
+/// Accepted types: regular (`S_IFREG`), character device (`S_IFCHR`),
+/// block device (`S_IFBLK`), FIFO (`S_IFIFO`), socket (`S_IFSOCK`).
+/// Directory and symlink are excluded because `mkdir`/`symlink` create
+/// them.
+#[must_use]
+pub fn mknod_type_valid(mode: u32) -> bool {
+    let t = mode & crate::fcntl::S_IFMT;
+    t == crate::fcntl::S_IFREG
+        || t == crate::fcntl::S_IFCHR
+        || t == crate::fcntl::S_IFBLK
+        || t == crate::fcntl::S_IFIFO
+        || t == crate::fcntl::S_IFSOCK
+}
+
 /// Create a special or ordinary file.
 ///
-/// Stub: returns -1 with ENOSYS.  Our filesystem doesn't support
-/// device nodes or special files yet.
+/// Returns -1 with `ENOSYS` after argument-domain validation.  Our
+/// filesystem doesn't support device nodes or special files yet, but
+/// invalid callers must still see Linux-matching errno values so
+/// portable code (udev, mdev, tmpfiles.d processors) reports failures
+/// correctly.
+///
+/// Validation order matches `fs/namei.c::do_mknodat` in Linux:
+/// 1. `pathname == NULL` → `EFAULT`.
+/// 2. `pathname` is the empty string → `ENOENT`.
+/// 3. `mode & S_IFMT` is not a valid file type → `EINVAL`.
+///    Plain `0` (no type bits) is rejected — Linux treats that as
+///    "create a regular file" in the BSD legacy interface but
+///    `do_mknodat` is strict.  Our stub follows the strict path.
+/// 4. All validated → `ENOSYS`.
+///
+/// Things we cannot validate yet:
+/// - `EPERM`: CHR/BLK device creation requires `CAP_MKNOD`.
+/// - `EEXIST`: pathname already exists.
+/// - `ENOTDIR`/`ENOENT`: a path component is wrong.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mknod(_pathname: *const u8, _mode: u32, _dev: u64) -> i32 {
+pub extern "C" fn mknod(pathname: *const u8, mode: u32, _dev: u64) -> i32 {
+    if pathname.is_null() {
+        crate::errno::set_errno(crate::errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: pathname non-NULL; read one byte to detect empty string.
+    if unsafe { *pathname } == 0 {
+        crate::errno::set_errno(crate::errno::ENOENT);
+        return -1;
+    }
+    if !mknod_type_valid(mode) {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
 
 /// Create a special file relative to a directory fd.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Returns -1 with `ENOSYS` after argument-domain validation, matching
+/// `mknod` for path/mode and adding directory-fd checks.
+///
+/// Validation order:
+/// 1. `pathname == NULL` → `EFAULT`.
+/// 2. `pathname` empty → `ENOENT`.
+/// 3. `mode & S_IFMT` invalid → `EINVAL`.
+/// 4. `dirfd != AT_FDCWD` and `dirfd < 0` → `EBADF`.
+/// 5. `dirfd != AT_FDCWD` and not an open fd → `EBADF`.
+/// 6. All validated → `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mknodat(_dirfd: i32, _pathname: *const u8, _mode: u32, _dev: u64) -> i32 {
+pub extern "C" fn mknodat(dirfd: i32, pathname: *const u8, mode: u32, _dev: u64) -> i32 {
+    if pathname.is_null() {
+        crate::errno::set_errno(crate::errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: pathname non-NULL.
+    if unsafe { *pathname } == 0 {
+        crate::errno::set_errno(crate::errno::ENOENT);
+        return -1;
+    }
+    if !mknod_type_valid(mode) {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    if dirfd != crate::file::AT_FDCWD {
+        if dirfd < 0 {
+            crate::errno::set_errno(crate::errno::EBADF);
+            return -1;
+        }
+        if crate::fdtable::get_fd(dirfd).is_none() {
+            crate::errno::set_errno(crate::errno::EBADF);
+            return -1;
+        }
+    }
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
 
 /// Create a FIFO (named pipe).
 ///
-/// Stub: returns -1 with ENOSYS.  Named pipes require kernel support
-/// for special file types in the filesystem.
+/// Returns -1 with `ENOSYS` after argument-domain validation.  Named
+/// pipes require kernel support for special file types in the
+/// filesystem, which we don't have yet.
+///
+/// Validation order (matches `fs/namei.c::do_mkfifoat` in Linux):
+/// 1. `pathname == NULL` → `EFAULT`.
+/// 2. `pathname` empty → `ENOENT`.
+/// 3. All validated → `ENOSYS`.  Linux does not validate `mode` bits
+///    here — the type field is implicit (S_IFIFO) and the permission
+///    bits are silently masked against the umask.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mkfifo(_pathname: *const u8, _mode: u32) -> i32 {
+pub extern "C" fn mkfifo(pathname: *const u8, _mode: u32) -> i32 {
+    if pathname.is_null() {
+        crate::errno::set_errno(crate::errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: pathname non-NULL.
+    if unsafe { *pathname } == 0 {
+        crate::errno::set_errno(crate::errno::ENOENT);
+        return -1;
+    }
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
 
 /// Create a FIFO relative to a directory fd.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Returns -1 with `ENOSYS` after argument-domain validation, matching
+/// `mkfifo` plus directory-fd checks.
+///
+/// Validation order:
+/// 1. `pathname == NULL` → `EFAULT`.
+/// 2. `pathname` empty → `ENOENT`.
+/// 3. `dirfd != AT_FDCWD` and `dirfd < 0` → `EBADF`.
+/// 4. `dirfd != AT_FDCWD` and not an open fd → `EBADF`.
+/// 5. All validated → `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mkfifoat(_dirfd: i32, _pathname: *const u8, _mode: u32) -> i32 {
+pub extern "C" fn mkfifoat(dirfd: i32, pathname: *const u8, _mode: u32) -> i32 {
+    if pathname.is_null() {
+        crate::errno::set_errno(crate::errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: pathname non-NULL.
+    if unsafe { *pathname } == 0 {
+        crate::errno::set_errno(crate::errno::ENOENT);
+        return -1;
+    }
+    if dirfd != crate::file::AT_FDCWD {
+        if dirfd < 0 {
+            crate::errno::set_errno(crate::errno::EBADF);
+            return -1;
+        }
+        if crate::fdtable::get_fd(dirfd).is_none() {
+            crate::errno::set_errno(crate::errno::EBADF);
+            return -1;
+        }
+    }
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
@@ -402,7 +526,13 @@ mod tests {
 
     #[test]
     fn test_mknodat_returns_enosys() {
-        assert_eq!(mknodat(-1, b"node\0".as_ptr(), S_IFCHR | 0o666, 0), -1);
+        // Phase 66: mknodat now rejects dirfd<0 (other than AT_FDCWD) with
+        // EBADF before reaching ENOSYS.  Use AT_FDCWD so the call resolves
+        // to the cwd path and reaches the ENOSYS sentinel.
+        assert_eq!(
+            mknodat(crate::file::AT_FDCWD, b"node\0".as_ptr(), S_IFCHR | 0o666, 0),
+            -1,
+        );
     }
 
     #[test]
@@ -412,7 +542,9 @@ mod tests {
 
     #[test]
     fn test_mkfifoat_returns_enosys() {
-        assert_eq!(mkfifoat(-1, b"fifo\0".as_ptr(), 0o644), -1);
+        // Phase 66: mkfifoat now rejects dirfd<0 (other than AT_FDCWD) with
+        // EBADF.  Use AT_FDCWD so the call reaches ENOSYS.
+        assert_eq!(mkfifoat(crate::file::AT_FDCWD, b"fifo\0".as_ptr(), 0o644), -1);
     }
 
     // -- S_IS* functions edge cases --
@@ -594,8 +726,10 @@ mod tests {
 
     #[test]
     fn test_mknod_sets_enosys() {
+        // Phase 66: mode=0 (no type bits) is now rejected with EINVAL
+        // before reaching ENOSYS.  Use a valid type to reach the sentinel.
         crate::errno::set_errno(0);
-        mknod(b"/tmp/n\0".as_ptr(), 0, 0);
+        mknod(b"/tmp/n\0".as_ptr(), S_IFREG | 0o644, 0);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -608,15 +742,18 @@ mod tests {
 
     #[test]
     fn test_mknodat_sets_enosys() {
+        // Phase 66: mode=0 → EINVAL, dirfd=0 (not AT_FDCWD, not open) → EBADF.
+        // Use S_IFREG type and AT_FDCWD to reach ENOSYS.
         crate::errno::set_errno(0);
-        mknodat(0, b"n\0".as_ptr(), 0, 0);
+        mknodat(crate::file::AT_FDCWD, b"n\0".as_ptr(), S_IFREG | 0o644, 0);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_mkfifoat_sets_enosys() {
+        // Phase 66: dirfd=0 (not AT_FDCWD, not open) → EBADF.  Use AT_FDCWD.
         crate::errno::set_errno(0);
-        mkfifoat(0, b"f\0".as_ptr(), 0o644);
+        mkfifoat(crate::file::AT_FDCWD, b"f\0".as_ptr(), 0o644);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -630,5 +767,407 @@ mod tests {
     #[test]
     fn test_mkfifo_null_path() {
         assert_eq!(mkfifo(core::ptr::null(), 0), -1);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 66 — mknod / mknodat / mkfifo / mkfifoat full validators
+    // -----------------------------------------------------------------
+
+    // --- mknod_type_valid helper ---
+
+    #[test]
+    fn test_mknod_type_valid_accepts_reg() {
+        assert!(mknod_type_valid(S_IFREG));
+        assert!(mknod_type_valid(S_IFREG | 0o644));
+    }
+
+    #[test]
+    fn test_mknod_type_valid_accepts_chr() {
+        assert!(mknod_type_valid(S_IFCHR));
+        assert!(mknod_type_valid(S_IFCHR | 0o666));
+    }
+
+    #[test]
+    fn test_mknod_type_valid_accepts_blk() {
+        assert!(mknod_type_valid(S_IFBLK));
+        assert!(mknod_type_valid(S_IFBLK | 0o660));
+    }
+
+    #[test]
+    fn test_mknod_type_valid_accepts_fifo() {
+        assert!(mknod_type_valid(S_IFIFO));
+        assert!(mknod_type_valid(S_IFIFO | 0o644));
+    }
+
+    #[test]
+    fn test_mknod_type_valid_accepts_sock() {
+        assert!(mknod_type_valid(S_IFSOCK));
+        assert!(mknod_type_valid(S_IFSOCK | 0o755));
+    }
+
+    #[test]
+    fn test_mknod_type_valid_rejects_dir() {
+        // Directories are created via mkdir(2), not mknod.
+        assert!(!mknod_type_valid(S_IFDIR | 0o755));
+    }
+
+    #[test]
+    fn test_mknod_type_valid_rejects_symlink() {
+        // Symlinks are created via symlink(2), not mknod.
+        assert!(!mknod_type_valid(S_IFLNK | 0o777));
+    }
+
+    #[test]
+    fn test_mknod_type_valid_rejects_zero() {
+        // mode=0 has no type bits — Linux's do_mknodat rejects this.
+        assert!(!mknod_type_valid(0));
+        assert!(!mknod_type_valid(0o644));
+    }
+
+    // --- mknod: per-error-class ---
+
+    #[test]
+    fn test_mknod_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(core::ptr::null(), S_IFREG | 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mknod_empty_enoent() {
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(b"\0".as_ptr(), S_IFREG | 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_mknod_bad_type_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(b"/tmp/x\0".as_ptr(), S_IFDIR | 0o755, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mknod_no_type_bits_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(b"/tmp/x\0".as_ptr(), 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mknod_symlink_type_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(b"/tmp/x\0".as_ptr(), S_IFLNK | 0o777, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mknod_valid_reaches_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(b"/tmp/x\0".as_ptr(), S_IFCHR | 0o666, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- mknod: ordering ---
+
+    #[test]
+    fn test_mknod_null_beats_bad_type() {
+        // NULL path checked before mode validation.
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(core::ptr::null(), S_IFDIR | 0o755, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mknod_empty_beats_bad_type() {
+        // Empty path checked before mode validation.
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(b"\0".as_ptr(), S_IFDIR | 0o755, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    // --- mknodat: per-error-class ---
+
+    #[test]
+    fn test_mknodat_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            mknodat(crate::file::AT_FDCWD, core::ptr::null(), S_IFREG | 0o644, 0),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mknodat_empty_enoent() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            mknodat(crate::file::AT_FDCWD, b"\0".as_ptr(), S_IFREG | 0o644, 0),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_mknodat_bad_type_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            mknodat(crate::file::AT_FDCWD, b"n\0".as_ptr(), S_IFDIR | 0o755, 0),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mknodat_negative_dirfd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(mknodat(-1, b"n\0".as_ptr(), S_IFREG | 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_mknodat_nonexistent_fd_ebadf() {
+        crate::errno::set_errno(0);
+        // fd 9999 is overwhelmingly unlikely to be open.
+        assert_eq!(mknodat(9999, b"n\0".as_ptr(), S_IFREG | 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_mknodat_at_fdcwd_reaches_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            mknodat(crate::file::AT_FDCWD, b"n\0".as_ptr(), S_IFCHR | 0o666, 0),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- mknodat: ordering ---
+
+    #[test]
+    fn test_mknodat_null_beats_bad_type() {
+        // NULL path is checked first, before mode and dirfd.
+        crate::errno::set_errno(0);
+        assert_eq!(mknodat(-1, core::ptr::null(), S_IFDIR | 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mknodat_empty_beats_bad_type() {
+        crate::errno::set_errno(0);
+        assert_eq!(mknodat(-1, b"\0".as_ptr(), S_IFDIR | 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_mknodat_bad_type_beats_bad_dirfd() {
+        // Mode validation comes before dirfd validation.
+        crate::errno::set_errno(0);
+        assert_eq!(mknodat(-1, b"n\0".as_ptr(), S_IFDIR | 0o755, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- mkfifo: per-error-class ---
+
+    #[test]
+    fn test_mkfifo_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifo(core::ptr::null(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mkfifo_empty_enoent() {
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifo(b"\0".as_ptr(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_mkfifo_valid_reaches_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifo(b"/tmp/fifo\0".as_ptr(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mkfifo_any_mode_ok() {
+        // Linux does not validate mode bits — only the type field matters
+        // (implicit S_IFIFO) and even garbage mode bits are accepted at
+        // this layer (perms are masked by umask later).
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifo(b"/tmp/fifo\0".as_ptr(), 0xFFFF_FFFF), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- mkfifo: ordering ---
+
+    #[test]
+    fn test_mkfifo_null_beats_empty() {
+        // Trivially: NULL path is checked before the empty-string check
+        // because dereferencing a NULL would crash.
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifo(core::ptr::null(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // --- mkfifoat: per-error-class ---
+
+    #[test]
+    fn test_mkfifoat_null_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            mkfifoat(crate::file::AT_FDCWD, core::ptr::null(), 0o644),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mkfifoat_empty_enoent() {
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifoat(crate::file::AT_FDCWD, b"\0".as_ptr(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    #[test]
+    fn test_mkfifoat_negative_dirfd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifoat(-1, b"f\0".as_ptr(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_mkfifoat_nonexistent_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifoat(9999, b"f\0".as_ptr(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_mkfifoat_at_fdcwd_reaches_enosys() {
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifoat(crate::file::AT_FDCWD, b"f\0".as_ptr(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- mkfifoat: ordering ---
+
+    #[test]
+    fn test_mkfifoat_null_beats_bad_dirfd() {
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifoat(-1, core::ptr::null(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mkfifoat_empty_beats_bad_dirfd() {
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifoat(-1, b"\0".as_ptr(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    // --- Real-world workflows ---
+
+    #[test]
+    fn test_workflow_udev_creates_dev_null() {
+        // udev creating /dev/null: major=1, minor=3, mode=S_IFCHR | 0o666.
+        // Linux makes this dev with makedev(1,3) → ((1u64) << 8) | 3.
+        crate::errno::set_errno(0);
+        let dev = (1u64 << 8) | 3;
+        assert_eq!(
+            mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, dev),
+            -1,
+        );
+        // Properly-formed call reaches ENOSYS (we don't implement nodes).
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_systemd_tmpfiles_creates_pipe() {
+        // tmpfiles.d entry like:  p /run/initctl 0644 root root - -
+        // would be implemented as mkfifo("/run/initctl", 0644).
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifo(b"/run/initctl\0".as_ptr(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_mdev_block_device() {
+        // mdev creates block device for /dev/sda: S_IFBLK | 0o660.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            mknod(b"/dev/sda\0".as_ptr(), S_IFBLK | 0o660, (8u64 << 8) | 0),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_mkfifoat_relative_to_dir() {
+        // A daemon mkfifo()s relative to its working dir.  We use
+        // AT_FDCWD since we can't open arbitrary directories in tests.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            mkfifoat(crate::file::AT_FDCWD, b"control\0".as_ptr(), 0o600),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- Real-world buggy callers ---
+
+    #[test]
+    fn test_buggy_mknod_perms_only() {
+        // Common bug: passing 0o644 to mknod expecting it to create a
+        // regular file.  POSIX permits this (mode==0 → regular file in
+        // some implementations) but Linux's do_mknodat is strict and
+        // returns EINVAL.  We match Linux.
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(b"/tmp/x\0".as_ptr(), 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_buggy_mknod_directory_type() {
+        // Buggy caller tries to create a directory via mknod.  Must use
+        // mkdir(2).  Linux rejects with EINVAL.
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(b"/tmp/d\0".as_ptr(), S_IFDIR | 0o755, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_buggy_mknod_symlink_type() {
+        // Buggy caller tries to create a symlink via mknod.  Must use
+        // symlink(2).  Linux rejects with EINVAL.
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(b"/tmp/l\0".as_ptr(), S_IFLNK | 0o777, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_buggy_mknodat_unopened_dirfd() {
+        // Caller uses an fd that was never opened (or was closed).
+        // Should get EBADF, not silently succeed.
+        crate::errno::set_errno(0);
+        assert_eq!(mknodat(12345, b"n\0".as_ptr(), S_IFREG | 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_buggy_mkfifoat_unopened_dirfd() {
+        crate::errno::set_errno(0);
+        assert_eq!(mkfifoat(12345, b"f\0".as_ptr(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_buggy_mknod_no_pathname() {
+        // Caller passes NULL pathname after a failed string construction.
+        crate::errno::set_errno(0);
+        assert_eq!(mknod(core::ptr::null(), S_IFREG | 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 }

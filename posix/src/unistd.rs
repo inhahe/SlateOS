@@ -648,15 +648,31 @@ pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
 
 /// Set the supplementary group IDs.
 ///
-/// Linux-matching argument-domain validation:
-///   - `size > NGROUPS_MAX` (65536) → `-1` with `EINVAL`.
-///   - `size > 0 && list == NULL` → `-1` with `EFAULT`.
-///   - `size == 0` succeeds regardless of `list` (drops all
-///     supplementary groups; Linux explicitly permits a NULL `list`
-///     when `size == 0`).
-///   - Otherwise: accepted as a no-op success.  We are a single-user
-///     system with no group enforcement, so once the call is
-///     well-formed there is no `EPERM` path.
+/// Linux validation order (`kernel/groups.c::SYSCALL_DEFINE2(setgroups,
+/// int, gidsetsize, gid_t __user *, grouplist)`):
+///
+///   1. **Phase 187:** `!may_setgroups()` → `-1` with `EPERM`.
+///      `may_setgroups()` is `ns_capable_setid(user_ns, CAP_SETGID) &&
+///      userns_may_setgroups(user_ns)`.  In our single-user-namespace
+///      model the userns check collapses to true, so the gate reduces
+///      to a pure `CAP_SETGID` probe.  The cap check runs *first* —
+///      before any argument validation — so an unprivileged caller
+///      passing garbage arguments still sees `EPERM`, never `EINVAL`
+///      or `EFAULT`.  Pre-Phase-187 we silently accepted every
+///      well-formed call regardless of privilege, which let
+///      unprivileged code freely reshape its supplementary group list
+///      and broke `setgroups`-based privilege separation (the classic
+///      `setgroups(0, NULL)` drop idiom that container runtimes,
+///      `su`/`sudo`, and the OpenSSH daemon all rely on).
+///   2. `size > NGROUPS_MAX` (65536) → `-1` with `EINVAL`.
+///   3. `size > 0 && list == NULL` → `-1` with `EFAULT` (Linux:
+///      `groups_from_user`'s `copy_from_user` on a NULL grouplist).
+///   4. `size == 0` succeeds regardless of `list` (drops all
+///      supplementary groups; Linux explicitly permits a NULL `list`
+///      when `size == 0`).
+///   5. Otherwise: accepted as a no-op success.  No per-gid validation
+///      (Linux accepts any gid_t value here; range/policy enforcement
+///      happens at the LSM layer which we don't model).
 ///
 /// Note: our `_SC_NGROUPS_MAX` advertises 32 (the POSIX minimum
 /// guarantee), but Linux's kernel ceiling is 65536 and we accept up
@@ -667,6 +683,17 @@ pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setgroups(size: usize, list: *const GidT) -> i32 {
     const NGROUPS_KERNEL_MAX: usize = 65536;
+    // Phase 187: CAP_SETGID gate runs first, matching Linux's
+    // `may_setgroups()` placement at the top of the syscall handler.
+    // The previous "we're single-user, no EPERM path" doctring was
+    // stale — capabilities have existed since the cred-model phases,
+    // and Linux's order is cap-check-then-validate.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SETGID,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
     if size > NGROUPS_KERNEL_MAX {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -4947,6 +4974,391 @@ mod tests {
             let ret = setgroups(size, groups.as_ptr());
             assert_eq!(ret, -1, "size={} should fail", size);
             assert_eq!(errno::get_errno(), errno::EINVAL, "size={}", size);
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 187: setgroups — CAP_SETGID gate
+    // ----------------------------------------------------------------------
+    //
+    // Linux's `kernel/groups.c::SYSCALL_DEFINE2(setgroups, ...)` opens
+    // with:
+    //
+    //     if (!may_setgroups())
+    //         return -EPERM;
+    //     if ((unsigned)gidsetsize > NGROUPS_MAX)
+    //         return -EINVAL;
+    //     ... groups_alloc / groups_from_user ...
+    //
+    // `may_setgroups()` returns `ns_capable_setid(user_ns, CAP_SETGID)
+    // && userns_may_setgroups(user_ns)`.  We have a single user
+    // namespace so the second factor is always true; the gate
+    // collapses to a pure `CAP_SETGID` probe.
+    //
+    // Cap check beats EINVAL beats EFAULT.  Host test build holds
+    // CAP_SETGID by default (DEFAULT_CAPS_LOW = u32::MAX includes bit
+    // 6), so all 14 pre-existing Phase 85 setgroups tests reach the
+    // EINVAL / EFAULT / success paths unchanged.
+    //
+    // These tests must run with `--test-threads=1` because they
+    // manipulate process-wide capability state.
+    // ----------------------------------------------------------------------
+
+    mod setgroups_cap_phase187 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase
+        /// 167 (`uts_cap_phase167`).
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_setgid() {
+            use crate::sys_capability::CAP_SETGID;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SETGID < 32 {
+                (lo & !(1u32 << CAP_SETGID), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SETGID - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SETGID");
+            assert!(!crate::sys_capability::has_capability(CAP_SETGID));
+        }
+
+        // -- Per-error-class --------------------------------------------------
+
+        /// `setgroups(0, NULL)` — the canonical drop-all-groups idiom
+        /// — used to silently succeed even without CAP_SETGID.  Phase
+        /// 187 makes it report EPERM, matching Linux's `may_setgroups`
+        /// gate at the very top of the syscall handler.
+        #[test]
+        fn test_setgroups_phase187_no_cap_drop_all_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgroups(0, core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Same gate fires for a small non-empty list.
+        #[test]
+        fn test_setgroups_phase187_no_cap_small_list_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            let groups: [GidT; 3] = [1, 2, 3];
+            assert_eq!(setgroups(3, groups.as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// And for the boundary-sized maximum.
+        #[test]
+        fn test_setgroups_phase187_no_cap_at_max_size_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            let groups: [GidT; 1] = [0];
+            assert_eq!(setgroups(65536, groups.as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering matrix --------------------------------------------------
+
+        /// Cap missing AND size > NGROUPS_MAX → cap wins (EPERM, not
+        /// EINVAL).  Matches Linux's `may_setgroups` placement at the
+        /// top of the syscall, before the size guard.
+        #[test]
+        fn test_setgroups_phase187_eperm_beats_einval_oversize() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            let groups: [GidT; 1] = [0];
+            assert_eq!(setgroups(65537, groups.as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM,
+                "EPERM must beat EINVAL when cap is missing");
+        }
+
+        /// Cap missing AND size > 0 with NULL list → cap wins (EPERM,
+        /// not EFAULT).
+        #[test]
+        fn test_setgroups_phase187_eperm_beats_efault_null_list() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgroups(5, core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM,
+                "EPERM must beat EFAULT when cap is missing");
+        }
+
+        /// Cap missing AND size = usize::MAX AND list = NULL → cap
+        /// wins over both EINVAL and EFAULT.
+        #[test]
+        fn test_setgroups_phase187_eperm_beats_einval_and_efault() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgroups(usize::MAX, core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Workflow --------------------------------------------------------
+
+        /// Drop cap → setgroups fails; restore cap → setgroups
+        /// succeeds.  Mirrors the privilege-drop / privilege-regain
+        /// pattern container runtimes use during user-namespace setup.
+        #[test]
+        fn test_setgroups_phase187_drop_then_restore_workflow() {
+            let _g = CapGuard::snapshot();
+            // 1. Cap held → succeed.
+            errno::set_errno(0);
+            assert_eq!(setgroups(0, core::ptr::null()), 0);
+            // 2. Drop cap → fail with EPERM.
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgroups(0, core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // 3. Restore via guard drop happens after the test — we
+            //    verify the in-test restore path by manually replaying
+            //    a capset to u32::MAX and re-checking.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            errno::set_errno(0);
+            assert_eq!(setgroups(0, core::ptr::null()), 0);
+        }
+
+        // -- Buggy-caller ----------------------------------------------------
+
+        /// A caller that forgot to clear errno before calling sees a
+        /// fresh EPERM, not whatever stale value was sitting there.
+        #[test]
+        fn test_setgroups_phase187_buggy_caller_stale_errno_replaced() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(errno::ENOENT);
+            assert_eq!(setgroups(2, [1, 2].as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM,
+                "Stale ENOENT must be overwritten with EPERM");
+        }
+
+        /// A caller that passes obviously broken arguments still sees
+        /// EPERM, not the argument errno — matches Linux ordering.
+        #[test]
+        fn test_setgroups_phase187_buggy_caller_garbage_args_still_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            // Wildly oversized + null pointer + ignore-the-rules
+            // values: would normally trip EINVAL then EFAULT, but the
+            // cap check beats both.
+            assert_eq!(
+                setgroups(usize::MAX - 1, core::ptr::null()),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Recovery --------------------------------------------------------
+
+        /// CapGuard drop restores the cap so a subsequent valid call
+        /// in the same test process succeeds with errno cleared.
+        #[test]
+        fn test_setgroups_phase187_capguard_restore_clears_state() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_setgid();
+                errno::set_errno(0);
+                assert_eq!(setgroups(0, core::ptr::null()), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            } // _g dropped here; cap restored.
+            // Errno is still EPERM (the function does not clear it on
+            // success) but a fresh call succeeds again.
+            errno::set_errno(0);
+            assert_eq!(setgroups(0, core::ptr::null()), 0);
+            // Success path leaves errno untouched (0 from our reset).
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        // -- No-side-effect --------------------------------------------------
+
+        /// A failed (EPERM) call must not change any observable state.
+        /// `setgroups` is a no-op-on-success in our stub, so the only
+        /// observable is errno — which the test above confirms.  Here
+        /// we additionally verify that *repeated* failed calls all
+        /// return the same EPERM and don't drift.
+        #[test]
+        fn test_setgroups_phase187_repeated_failed_calls_stable() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            for _ in 0..8 {
+                errno::set_errno(0);
+                assert_eq!(setgroups(2, [10, 20].as_ptr()), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+        }
+
+        // -- Sentinel --------------------------------------------------------
+
+        /// With CAP_SETGID held, the existing EINVAL path still fires
+        /// for oversized size.  Confirms the gate is *gated* on the
+        /// cap, not an unconditional EPERM addition.
+        #[test]
+        fn test_setgroups_phase187_with_cap_einval_still_fires() {
+            let _g = CapGuard::snapshot();
+            // Cap is held by default — don't drop it.
+            errno::set_errno(0);
+            let groups: [GidT; 1] = [0];
+            assert_eq!(setgroups(65537, groups.as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL,
+                "With cap held, EINVAL must still surface for bad size");
+        }
+
+        /// With CAP_SETGID held, the existing EFAULT path still fires
+        /// for size>0 with NULL list.
+        #[test]
+        fn test_setgroups_phase187_with_cap_efault_still_fires() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            assert_eq!(setgroups(3, core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT,
+                "With cap held, EFAULT must still surface for null list");
+        }
+
+        /// With CAP_SETGID held, valid call still succeeds.
+        #[test]
+        fn test_setgroups_phase187_with_cap_valid_call_succeeds() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            let groups: [GidT; 4] = [100, 200, 300, 400];
+            assert_eq!(setgroups(4, groups.as_ptr()), 0);
+        }
+
+        // -- Cross-check -----------------------------------------------------
+
+        /// Dropping CAP_SETUID *alone* must NOT cause setgroups to
+        /// fail — Linux gates setgroups on CAP_SETGID specifically.
+        /// This test pins down the cross-cap invariant so a future
+        /// refactor that accidentally probes the wrong cap is caught.
+        #[test]
+        fn test_setgroups_phase187_setuid_drop_does_not_affect_setgroups() {
+            use crate::sys_capability::CAP_SETUID;
+            let _g = CapGuard::snapshot();
+            // Drop only CAP_SETUID (bit 7), leave CAP_SETGID (bit 6).
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << CAP_SETUID);
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            // setgroups still works.
+            errno::set_errno(0);
+            let groups: [GidT; 2] = [50, 60];
+            assert_eq!(setgroups(2, groups.as_ptr()), 0);
+        }
+
+        /// Phase 187 errno is EPERM (the `capable()` convention),
+        /// matching Linux's `may_setgroups` → `-EPERM`.  Distinct from
+        /// the EACCES errno used by Phase 186 (`seccomp` filter
+        /// install) — a cross-phase invariant pinning down which gate
+        /// uses which errno convention.
+        #[test]
+        fn test_setgroups_phase187_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgroups(1, [99].as_ptr()), -1);
+            let e = errno::get_errno();
+            assert_eq!(e, errno::EPERM);
+            assert_ne!(e, errno::EACCES,
+                "may_setgroups uses EPERM (capable convention), \
+                 distinct from seccomp's EACCES");
         }
     }
 

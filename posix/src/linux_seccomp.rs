@@ -180,9 +180,11 @@ fn is_known_action(action: u32) -> bool {
 /// **Phase 186** — privilege gate for `SECCOMP_SET_MODE_FILTER`:
 /// `kernel/seccomp.c::seccomp_prepare_filter` runs
 ///
-///     if (!task_no_new_privs(current) &&
-///         !ns_capable_noaudit(current_user_ns(), CAP_SYS_ADMIN))
-///         return ERR_PTR(-EACCES);
+/// ```text
+/// if (!task_no_new_privs(current) &&
+///     !ns_capable_noaudit(current_user_ns(), CAP_SYS_ADMIN))
+///     return ERR_PTR(-EACCES);
+/// ```
 ///
 /// after `copy_from_user` of the `sock_fprog` header and the
 /// `fprog->len` sanity check.  Errno is **EACCES**, *not* EPERM —

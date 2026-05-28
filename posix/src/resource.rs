@@ -315,11 +315,13 @@ pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
 ///
 /// Validation order matches Linux's `kernel/sys.c::sys_getrusage`:
 ///
-///     if (who != RUSAGE_SELF && who != RUSAGE_CHILDREN &&
-///         who != RUSAGE_THREAD)
-///         return -EINVAL;
-///     getrusage(current, who, &r);
-///     return copy_to_user(ru, &r, sizeof(r)) ? -EFAULT : 0;
+/// ```text
+/// if (who != RUSAGE_SELF && who != RUSAGE_CHILDREN &&
+///     who != RUSAGE_THREAD)
+///     return -EINVAL;
+/// getrusage(current, who, &r);
+/// return copy_to_user(ru, &r, sizeof(r)) ? -EFAULT : 0;
+/// ```
 ///
 /// `who` is validated BEFORE the user pointer is ever touched, so a
 /// caller passing both an invalid `who` and a NULL `usage` pointer

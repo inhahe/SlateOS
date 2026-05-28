@@ -296,18 +296,43 @@ fn validate_attr(attr: &PerfEventAttr) -> Result<(), i32> {
 
 /// Open a performance monitoring event.
 ///
-/// Returns `-1` on failure with errno set. Error precedence:
+/// Returns `-1` on failure with errno set.
 ///
-/// * `EFAULT` — `attr` is NULL.
-/// * `EINVAL` — bad attr.size (too small), bad attr.type_, bad config
-///   for the type, unknown flag bit, bad pid/cpu combination, bad
-///   pid value (< -1), bad cpu value (out of range), or PID_CGROUP
-///   flag with pid < 0.
-/// * `E2BIG` — attr.size larger than what the kernel knows (the
+/// # Linux semantics
+///
+/// `SYSCALL_DEFINE5(perf_event_open, ...)` in `kernel/events/core.c`
+/// has this prologue:
+///
+/// 1. `if (flags & ~PERF_FLAG_ALL) return -EINVAL;` — runs first, even
+///    before `perf_copy_attr()` touches the userspace pointer.
+/// 2. `security_perf_event_open(...)` — the `CAP_PERFMON` /
+///    `perf_event_paranoid` gate (we skip; no privilege model yet).
+/// 3. `perf_copy_attr(attr_uptr, &attr)` — runs `get_user(size,
+///    &uattr->size)` which yields `-EFAULT` if `attr_uptr` is NULL,
+///    then validates `size` (`-EINVAL` if too small, `-E2BIG` if
+///    larger than `PAGE_SIZE`), then copies the body.
+/// 4. type/config validation, pid/cpu range checks, group_fd lookup.
+///
+/// Phase 129 reorders our checks to match steps 1→3→4 exactly. The
+/// previous arrangement (`attr` NULL check first, then `validate_attr`,
+/// then flags) was wrong: a caller passing both `attr = NULL` and
+/// `flags = 0xdeadbeef` saw `EFAULT` here but `EINVAL` on real Linux.
+/// Probing tools (libpfm, libperf, perf-tool's `perf list`) inspect
+/// errno to decide whether to retry with a smaller flag set or to
+/// give up entirely, so the wrong errno would mislead them.
+///
+/// # Errors
+///
+/// * `EINVAL` — unknown flag bit (checked first, matching Linux);
+///   then bad `attr.size` (too small), bad `attr.type_`, bad config
+///   for the type, bad pid/cpu combination, bad pid value (< -1),
+///   bad cpu value (out of range), or `PID_CGROUP` flag with pid < 0.
+/// * `EFAULT` — `attr` is NULL (checked after flags).
+/// * `E2BIG` — `attr.size` larger than what the kernel knows (the
 ///   caller is from the future).
 /// * `EBADF` — `group_fd` is non-negative but isn't a known perf fd
 ///   (since we don't allocate perf fds, this catches every positive
-///   group_fd).
+///   `group_fd`).
 /// * `ENOSYS` — everything valid, but the kernel has no PMU driver
 ///   yet. Real callers treat this identically to a Linux kernel
 ///   built without `CONFIG_PERF_EVENTS=y`.
@@ -319,6 +344,15 @@ pub extern "C" fn perf_event_open(
     group_fd: i32,
     flags: u64,
 ) -> i32 {
+    // Linux's perf_event_open checks the flag mask *first*, before
+    // calling perf_copy_attr (which is where NULL-attr EFAULT would
+    // be observed). Mirror that ordering exactly: a caller passing
+    // both bad flags and a NULL attr sees EINVAL, just like Linux.
+    if (flags & !PERF_FLAG_VALID) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     if attr.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -332,12 +366,6 @@ pub extern "C" fn perf_event_open(
 
     if let Err(e) = validate_attr(&attr_val) {
         errno::set_errno(e);
-        return -1;
-    }
-
-    // Flag bits: only the well-known PERF_FLAG_* values are accepted.
-    if (flags & !PERF_FLAG_VALID) != 0 {
-        errno::set_errno(errno::EINVAL);
         return -1;
     }
 
@@ -852,5 +880,206 @@ mod tests {
         let ret = perf_event_open(misaligned, 0, 0, -1, 0);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 129 — perf_event_open flag-mask precedence parity with Linux
+    //
+    // Linux's `SYSCALL_DEFINE5(perf_event_open, ...)` in
+    // `kernel/events/core.c` runs the flag-mask check before anything
+    // else, even before `perf_copy_attr` touches the userspace
+    // pointer:
+    //
+    //     if (flags & ~PERF_FLAG_ALL)
+    //         return -EINVAL;
+    //     ...
+    //     err = perf_copy_attr(attr_uptr, &attr);  // EFAULT here for NULL
+    //
+    // Phase 129 reorders our impl so the same precedence holds. Tools
+    // like libperf, libpfm4 and the standalone `perf` binary feed
+    // bad-shaped attrs / flags during feature probing; they branch
+    // on errno to decide what to retry, so the wrong code (EFAULT vs
+    // EINVAL) sends them down the wrong path.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_perf_event_open_phase129_einval_wins_over_efault() {
+        // Both bad flags AND NULL attr: Linux checks flags first,
+        // returns -EINVAL. We now match.
+        errno::set_errno(0);
+        let ret = perf_event_open(core::ptr::null_mut(), 0, 0, -1, 1 << 16);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_einval_wins_over_size_einval() {
+        // Bad flags AND attr.size below PERF_ATTR_SIZE_MIN: flag check
+        // wins (the kernel never reaches perf_copy_attr).
+        let mut attr = make_valid_hw_attr();
+        attr.size = 0;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 1 << 17);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_einval_wins_over_size_e2big() {
+        // Bad flags AND attr.size above PERF_ATTR_SIZE_MAX: flag check
+        // wins. Without the reorder the caller saw E2BIG.
+        let mut attr = make_valid_hw_attr();
+        attr.size = PERF_ATTR_SIZE_MAX + 1;
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 1 << 18);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_einval_wins_over_pid_einval() {
+        // Bad flags AND pid < -1: flag check wins. The pid-range
+        // check should never be reached.
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, -2, 0, -1, 1 << 19);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_einval_wins_over_cpu_einval() {
+        // Bad flags AND cpu out of range: flag check wins.
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, PERF_CPU_MAX, -1, 1 << 20);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_einval_wins_over_ebadf() {
+        // Bad flags AND group_fd >= 0: flag check wins. Without the
+        // reorder this would have reached the group_fd >= 0 EBADF
+        // branch (after attr validation succeeded).
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, 5, 1 << 21);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_high_bit_unknown_flag_einval() {
+        // Sign bit (1 << 63) is an unknown flag bit -> EINVAL.
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 1u64 << 63);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_all_ones_flags_einval() {
+        // u64::MAX -> EINVAL (unknown bits dominate). Confirms we
+        // don't accidentally accept all-ones as a wildcard.
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, u64::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_compatible_known_flags_reach_enosys() {
+        // PERF_FLAG_FD_CLOEXEC | PERF_FLAG_PID_CGROUP is the subset
+        // of valid flags that doesn't require `group_fd >= 0`
+        // (FD_OUTPUT and FD_NO_GROUP both demand a group fd, so
+        // combining them with group_fd=-1 is its own EINVAL — that
+        // case is exercised separately).  With pid=0 (valid cgroup
+        // fd shape), cpu=0, group_fd=-1, this should pass every
+        // validation step and reach the ENOSYS stub.
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(
+            &mut attr,
+            0,
+            0,
+            -1,
+            PERF_FLAG_FD_CLOEXEC | PERF_FLAG_PID_CGROUP,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_null_attr_with_clean_flags_still_efault() {
+        // Sanity: after the reorder, the NULL-attr case with clean
+        // flags still reports EFAULT (we didn't drop that branch).
+        errno::set_errno(0);
+        let ret = perf_event_open(
+            core::ptr::null_mut(),
+            0,
+            0,
+            -1,
+            PERF_FLAG_FD_CLOEXEC,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_libperf_feature_probe_workflow() {
+        // libperf's feature-detection sequence:
+        //   1. Try perf_event_open with FD_CLOEXEC. Linux 3.14+
+        //      accepts; older returns EINVAL.
+        //   2. On EINVAL, retry without FD_CLOEXEC.
+        // Our shim: FD_CLOEXEC is in the valid mask, so step 1
+        // proceeds to ENOSYS — libperf sees "kernel supports the
+        // flag but not the syscall," which is the truthful answer.
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, PERF_FLAG_FD_CLOEXEC);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_recovery_after_flag_einval() {
+        // After a flag-mask EINVAL, a clean call still produces
+        // ENOSYS (errno is rewritten, not sticky).
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let r1 = perf_event_open(&mut attr, 0, 0, -1, 1 << 30);
+        assert_eq!(r1, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let r2 = perf_event_open(&mut attr, 0, 0, -1, 0);
+        assert_eq!(r2, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_buggy_caller_passes_negative_one_flags() {
+        // C caller doing `perf_event_open(&attr, 0, 0, -1, -1ULL)`
+        // (which casts to u64::MAX) hits the unknown-bit check first
+        // and gets EINVAL — same as Linux. Confirms negative
+        // sign-extended flag arg is handled correctly.
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, !0u64);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_perf_event_open_phase129_first_invalid_bit_above_mask_einval() {
+        // 1 << 4 is the first bit just past PERF_FLAG_FD_CLOEXEC
+        // (=1 << 3) and is unused by Linux as of 6.x -> EINVAL.
+        let mut attr = make_valid_hw_attr();
+        errno::set_errno(0);
+        let ret = perf_event_open(&mut attr, 0, 0, -1, 1 << 4);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 }

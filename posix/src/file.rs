@@ -3620,6 +3620,11 @@ pub extern "C" fn readahead(fd: Fd, offset: i64, count: usize) -> i32 {
 pub const SYNC_FILE_RANGE_WAIT_BEFORE: u32 = 1;
 pub const SYNC_FILE_RANGE_WRITE: u32 = 2;
 pub const SYNC_FILE_RANGE_WAIT_AFTER: u32 = 4;
+/// Mask of all defined `sync_file_range` flag bits.  Any bit outside
+/// this mask is rejected with EINVAL — matches Linux's
+/// `VALID_FLAGS` check in `fs/sync.c::ksys_sync_file_range`.
+pub const SYNC_FILE_RANGE_VALID: u32 =
+    SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER;
 
 /// Sync a file range to disk.
 ///
@@ -3627,10 +3632,40 @@ pub const SYNC_FILE_RANGE_WAIT_AFTER: u32 = 4;
 /// syncing file data to disk.  Since we don't have a writeback cache,
 /// this delegates to fsync for the full file.
 ///
+/// Validates inputs per Linux semantics (fs/sync.c::ksys_sync_file_range)
+/// in the same order as the upstream prologue:
+/// 1. `flags & ~SYNC_FILE_RANGE_VALID` → EINVAL.
+/// 2. `offset < 0` → EINVAL.
+/// 3. `nbytes < 0` → EINVAL.
+/// 4. `offset + nbytes` overflowing i64 → EINVAL (Linux computes
+///    `endbyte = offset + nbytes` as s64 and rejects negative).
+/// 5. `fd < 0` or fd not open → EBADF.
+///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sync_file_range(fd: Fd, _offset: i64, _nbytes: i64, _flags: u32) -> i32 {
+pub extern "C" fn sync_file_range(fd: Fd, offset: i64, nbytes: i64, flags: u32) -> i32 {
+    if flags & !SYNC_FILE_RANGE_VALID != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if offset < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if nbytes < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // endbyte = offset + nbytes must not overflow i64.
+    if offset.checked_add(nbytes).is_none() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
     }
@@ -6363,8 +6398,14 @@ mod tests {
 
     #[test]
     fn test_sync_file_range_valid_fd_no_crash() {
-        // On test host, fd 0 (stdin) may or may not support fsync.
-        let _ret = sync_file_range(0, 0, 4096, SYNC_FILE_RANGE_WRITE);
+        // Use a pipe to get a guaranteed-open fd.  fsync on a pipe
+        // is allowed to return EINVAL; we only care that the prologue
+        // doesn't crash and that the call returns.
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+        let _ret = sync_file_range(pipefd[0], 0, 4096, SYNC_FILE_RANGE_WRITE);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
     }
 
     #[test]
@@ -6383,6 +6424,213 @@ mod tests {
             0,
             "flags must be distinct bits"
         );
+    }
+
+    // -- Phase 90: sync_file_range argument-domain validation --
+
+    #[test]
+    fn test_sync_file_range_phase90_valid_mask_constant() {
+        // SYNC_FILE_RANGE_VALID covers exactly the three defined bits.
+        assert_eq!(
+            SYNC_FILE_RANGE_VALID,
+            SYNC_FILE_RANGE_WAIT_BEFORE
+                | SYNC_FILE_RANGE_WRITE
+                | SYNC_FILE_RANGE_WAIT_AFTER,
+        );
+        assert_eq!(SYNC_FILE_RANGE_VALID, 7);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_unknown_flag_einval() {
+        // Bit 3 (0b1000) is not a defined sync_file_range flag.
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(pipefd[0], 0, 0, 8);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_high_bit_flag_einval() {
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(pipefd[0], 0, 0, 0x8000_0000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_known_flag_combo_passes_prologue() {
+        // All three valid bits together — must clear the flag check.
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+        crate::errno::set_errno(0);
+        let _ret = sync_file_range(
+            pipefd[0], 0, 0,
+            SYNC_FILE_RANGE_WAIT_BEFORE
+                | SYNC_FILE_RANGE_WRITE
+                | SYNC_FILE_RANGE_WAIT_AFTER,
+        );
+        // The flag prologue must not produce EINVAL.
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_negative_offset_einval() {
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(pipefd[0], -1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_negative_nbytes_einval() {
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(pipefd[0], 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_endbyte_overflow_einval() {
+        // offset + nbytes overflows i64.
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(pipefd[0], i64::MAX, 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_max_offset_zero_nbytes_ok_prologue() {
+        // offset = i64::MAX, nbytes = 0 → endbyte does not overflow.
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+        crate::errno::set_errno(0);
+        let _ret = sync_file_range(pipefd[0], i64::MAX, 0, 0);
+        // Must not produce EINVAL from the prologue.
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_nonexistent_fd_ebadf() {
+        // Positive but never-allocated fd → EBADF.
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(9999, 0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_flag_check_beats_offset() {
+        // flags=bogus + offset=-1 → EINVAL from flag check, not offset
+        // check (both produce EINVAL, but the flag check must fire
+        // first per Linux's prologue order).  We can't directly observe
+        // which branch fired, but the test documents the intent.
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(-1, -1, 0, 0x40);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_flag_check_beats_ebadf() {
+        // flags=bogus + fd=-1 → EINVAL (flag check beats fd check).
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(-1, 0, 0, 0x100);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_offset_check_beats_ebadf() {
+        // valid flags + negative offset + fd=-1 → EINVAL (offset check
+        // beats fd check).
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(-1, -1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_nbytes_check_beats_ebadf() {
+        // valid flags + offset=0 + negative nbytes + fd=-1 → EINVAL.
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(-1, 0, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_overflow_check_beats_ebadf() {
+        // overflow check fires before fd check.
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(-1, i64::MAX, 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_einval_then_valid_progression() {
+        // After an EINVAL, a valid call still works.
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(pipefd[0], 0, 0, 0x80);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        crate::errno::set_errno(0);
+        let _ret = sync_file_range(pipefd[0], 0, 0, 0);
+        // The prologue must not produce EINVAL/EBADF on a valid call.
+        let e = crate::errno::get_errno();
+        assert_ne!(e, crate::errno::EINVAL);
+        assert_ne!(e, crate::errno::EBADF);
+
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
+    }
+
+    #[test]
+    fn test_sync_file_range_phase90_ebadf_then_valid_progression() {
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+
+        crate::errno::set_errno(0);
+        let ret = sync_file_range(8888, 0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+
+        crate::errno::set_errno(0);
+        let _ret = sync_file_range(pipefd[0], 0, 0, 0);
+        let e = crate::errno::get_errno();
+        assert_ne!(e, crate::errno::EINVAL);
+        assert_ne!(e, crate::errno::EBADF);
+
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
     }
 
     // -----------------------------------------------------------------------

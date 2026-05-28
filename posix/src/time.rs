@@ -283,8 +283,12 @@ pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
 ///   3. `get_timespec64(tp)` user-copy fails          → `EFAULT`
 ///   4. `kc->clock_set(...)` validates timespec       → `EINVAL`
 ///      on `tv_sec < 0` / `tv_nsec ∉ [0, 999_999_999]`
-///   5. Otherwise: kernel writes the clock; with insufficient caps
-///      the kernel may return `EPERM`.
+///   5. `security_settime64()` → `capable(CAP_SYS_TIME)`  → `EPERM`
+///      on missing cap
+///   6. Otherwise: kernel writes the clock.  We don't have a
+///      backend yet — Phase 177 returns `ENOSYS` here for the
+///      privileged path so callers can distinguish "denied" from
+///      "not implemented".
 ///
 /// **Phase 151**: pre-Phase-151 we ran the NULL `tp` check FIRST
 /// (returning EFAULT) and the clock check SECOND.  Linux dispatches
@@ -333,10 +337,23 @@ pub extern "C" fn clock_settime(clk_id: ClockidT, tp: *const Timespec) -> i32 {
         return -1;
     }
 
-    // 5. All argument checks passed; we still can't actually set the
-    //    clock.  Report EPERM, which is also what an unprivileged
-    //    caller would see on Linux.
-    errno::set_errno(errno::EPERM);
+    // 5. Phase 177: gate on CAP_SYS_TIME.  Linux's settable clocks
+    //    (CLOCK_REALTIME via posix_clock_realtime_set, CLOCK_TAI via
+    //    tai_clock_set) all defer to do_settimeofday64() /
+    //    timekeeping_inject_offset(), which call
+    //    capable(CAP_SYS_TIME) (or, for slewing variants, may also
+    //    accept CAP_SYS_NICE — but the abrupt set path is strictly
+    //    CAP_SYS_TIME).  An unprivileged caller sees EPERM; a
+    //    privileged caller would proceed.  We don't have a clock-
+    //    setting backend yet, so the privileged path returns ENOSYS
+    //    to distinguish "permission denied" from "syscall not wired".
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_TIME,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    errno::set_errno(errno::ENOSYS);
     -1
 }
 
@@ -551,8 +568,9 @@ pub extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut core::ffi::c_void) ->
 ///   - If `tv` is non-NULL: validate `tv_sec >= 0`, `tv_usec` in
 ///     `[0, 999_999]`; on failure return `-1` with `EINVAL`.
 ///   - On a structurally valid call that would actually set the clock:
-///     return `-1` with `EPERM` because the kernel clock cannot be
-///     adjusted from userspace yet (no `CAP_SYS_TIME` infrastructure).
+///     Phase 177 gates on `CAP_SYS_TIME` — unprivileged callers get
+///     `EPERM`; privileged callers reach the (unimplemented) backend
+///     and get `ENOSYS`.
 ///   - The `tz` argument is accepted but otherwise ignored (Linux has
 ///     deprecated `settimeofday` timezone setting since 2.6.x; passing a
 ///     non-NULL `tz` along with a NULL `tv` is treated as a no-op success
@@ -585,9 +603,22 @@ pub extern "C" fn settimeofday(
         return 0;
     }
 
-    // Structurally valid request to actually adjust the clock — we lack
-    // CAP_SYS_TIME plumbing, so refuse with EPERM.
-    errno::set_errno(errno::EPERM);
+    // Structurally valid request to actually adjust the clock.
+    //
+    // Phase 177: Linux's settimeofday gates writes on CAP_SYS_TIME
+    // via security_settime64() → capable(CAP_SYS_TIME) before
+    // delegating to do_sys_settimeofday64() / do_settimeofday64().
+    // An unprivileged caller sees EPERM; a privileged caller would
+    // proceed.  We don't have a clock-setting backend, so the
+    // privileged path returns ENOSYS to distinguish "permission
+    // denied" from "syscall not wired".
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_TIME,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    errno::set_errno(errno::ENOSYS);
     -1
 }
 
@@ -4272,24 +4303,29 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_settime_returns_eperm() {
+    fn test_clock_settime_returns_enosys() {
         // CLOCK_REALTIME with a valid timespec passes every argument
-        // check, so we fall through to the EPERM path (no CAP_SYS_TIME
-        // hook + no kernel support for setting the wall clock).
+        // check and the CAP_SYS_TIME gate (host build holds the cap by
+        // default), so we fall through to the ENOSYS path (no kernel
+        // clock-setting backend).  Phase 177 differentiates: dropping
+        // CAP_SYS_TIME would yield EPERM — see
+        // tests::clock_time_cap_phase177.
         let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
-    fn test_settimeofday_returns_eperm() {
+    fn test_settimeofday_returns_enosys() {
+        // Phase 177: with CAP_SYS_TIME held (host default) the valid-
+        // args path now reaches ENOSYS; dropping the cap restores EPERM.
         let tv = Timeval { tv_sec: 0, tv_usec: 0 };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -7584,14 +7620,15 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_settime_tv_nsec_max_valid_passes_to_eperm() {
+    fn test_clock_settime_tv_nsec_max_valid_passes_to_enosys() {
         // 999_999_999 is the max legal nanosecond value.  It should
-        // pass the timespec check and fall through to EPERM.
+        // pass the timespec check and (with CAP_SYS_TIME held in the
+        // host build, Phase 177) fall through to ENOSYS.
         let ts = Timespec { tv_sec: 0, tv_nsec: 999_999_999 };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -7620,26 +7657,27 @@ mod tests {
     }
 
     #[test]
-    fn test_clock_settime_zero_timespec_realtime_eperm() {
+    fn test_clock_settime_zero_timespec_realtime_enosys() {
         // The epoch is a legal timespec value.  Linux accepts it
-        // and would set the clock to 1970-01-01; we return EPERM
-        // because we can't actually set the wall clock.
+        // and would set the clock to 1970-01-01; with CAP_SYS_TIME
+        // held (host default, Phase 177) we now return ENOSYS
+        // (no clock-setting backend).
         let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
-    fn test_clock_settime_large_tv_sec_realtime_eperm() {
+    fn test_clock_settime_large_tv_sec_realtime_enosys() {
         // A far-future timestamp (year ~2262) — must still pass the
-        // argument check and reach EPERM.
+        // argument check and reach ENOSYS (Phase 177, cap held).
         let ts = Timespec { tv_sec: 9_223_372_036, tv_nsec: 500 };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     // ------------------------------------------------------------------
@@ -7758,7 +7796,7 @@ mod tests {
     }
 
     /// Workflow: a libc probe-then-set sequence sees EINVAL for
-    /// MONOTONIC then EFAULT/EPERM for REALTIME — confirming the
+    /// MONOTONIC then EFAULT/ENOSYS for REALTIME — confirming the
     /// "is it settable" diagnostic isn't masked by a NULL pointer.
     #[test]
     fn test_clock_settime_probe_then_set_workflow_phase151() {
@@ -7767,11 +7805,12 @@ mod tests {
         assert_eq!(clock_settime(CLOCK_MONOTONIC, core::ptr::null()), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
-        // Now set REALTIME with a valid value — EPERM (capability lack).
+        // Now set REALTIME with a valid value — ENOSYS (Phase 177,
+        // CAP_SYS_TIME held → past gate → no backend).
         let ts = valid_ts();
         errno::set_errno(0);
         assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     // -- buggy caller --
@@ -7803,11 +7842,12 @@ mod tests {
         assert_eq!(clock_settime(CLOCK_REALTIME, core::ptr::null()), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
 
-        // Fix the tp; now the EPERM (cap-lack) path lands.
+        // Fix the tp; with CAP_SYS_TIME held (Phase 177, host
+        // default), the path now lands on ENOSYS (no backend).
         let ts = valid_ts();
         errno::set_errno(0);
         assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     // -- no-side-effect loop --
@@ -7853,7 +7893,9 @@ mod tests {
 
         errno::set_errno(0);
         assert_eq!(clock_settime(CLOCK_REALTIME, &raw const valid), -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        // Phase 177: with CAP_SYS_TIME held in the host build, the
+        // valid-arg path now reaches ENOSYS (was EPERM pre-Phase-177).
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -7870,7 +7912,10 @@ mod tests {
     // Linux semantics being validated:
     //   - tv NULL && tz NULL → 0
     //   - tv non-NULL with out-of-range tv_sec/tv_usec → -1, EINVAL
-    //   - structurally valid tv → -1, EPERM (no CAP_SYS_TIME)
+    //   - structurally valid tv with CAP_SYS_TIME held → -1, ENOSYS
+    //     (Phase 177: cap-gate above an unimplemented backend)
+    //   - structurally valid tv without CAP_SYS_TIME → -1, EPERM
+    //     (asserted separately in settimeofday_cap_phase177)
     //   - tv NULL && tz non-NULL → 0 (deprecated tz-only no-op)
     // ---------------------------------------------------------------------
 
@@ -7931,52 +7976,52 @@ mod tests {
     }
 
     #[test]
-    fn test_settimeofday_phase84_max_valid_tv_usec_is_eperm() {
-        // 999_999 is the maximum valid microsecond value — must reach EPERM,
-        // not EINVAL.
+    fn test_settimeofday_phase84_max_valid_tv_usec_is_enosys() {
+        // 999_999 is the maximum valid microsecond value — must reach
+        // ENOSYS (Phase 177, CAP_SYS_TIME held), not EINVAL.
         let tv = Timeval { tv_sec: 0, tv_usec: 999_999 };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
-    fn test_settimeofday_phase84_zero_tv_is_eperm() {
+    fn test_settimeofday_phase84_zero_tv_is_enosys() {
         let tv = Timeval { tv_sec: 0, tv_usec: 0 };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
-    fn test_settimeofday_phase84_large_valid_tv_is_eperm() {
+    fn test_settimeofday_phase84_large_valid_tv_is_enosys() {
         // Reasonably distant future timestamp — still valid argument-wise.
         let tv = Timeval { tv_sec: 2_000_000_000, tv_usec: 500_000 };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
-    fn test_settimeofday_phase84_valid_tv_with_nonnull_tz_is_eperm() {
-        // tv valid + tz non-NULL: EPERM (we still can't set the clock).
+    fn test_settimeofday_phase84_valid_tv_with_nonnull_tz_is_enosys() {
+        // tv valid + tz non-NULL: ENOSYS (cap held, no backend).
         let tv = Timeval { tv_sec: 1, tv_usec: 1 };
         let sentinel: u8 = 0;
         let tz = &raw const sentinel as *const core::ffi::c_void;
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, tz);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
-    fn test_settimeofday_phase84_einval_ordering_precedes_eperm() {
+    fn test_settimeofday_phase84_einval_ordering_precedes_enosys() {
         // A bad tv_usec must be detected as EINVAL even when tz is
         // also non-NULL — validation order is "tv-field-shape" first,
-        // EPERM last.
+        // cap-gate / ENOSYS last.
         let tv = Timeval { tv_sec: 0, tv_usec: -42 };
         let sentinel: u8 = 0;
         let tz = &raw const sentinel as *const core::ffi::c_void;
@@ -7999,12 +8044,12 @@ mod tests {
     #[test]
     fn test_settimeofday_phase84_does_not_overflow_on_intmax_sec() {
         // Pathological but well-formed input: i64::MAX seconds, 0 us.
-        // Must not panic; must return EPERM.
+        // Must not panic; must return ENOSYS (Phase 177, cap held).
         let tv = Timeval { tv_sec: i64::MAX, tv_usec: 0 };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -8016,7 +8061,7 @@ mod tests {
             errno::set_errno(0);
             let ret = settimeofday(&raw const tv, core::ptr::null());
             assert_eq!(ret, -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
     }
 
@@ -8032,19 +8077,21 @@ mod tests {
         let good = Timeval { tv_sec: 0, tv_usec: 0 };
         errno::set_errno(0);
         assert_eq!(settimeofday(&raw const good, core::ptr::null()), -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        // Phase 177: ENOSYS with CAP_SYS_TIME held.
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
     fn test_settimeofday_phase84_null_tv_then_valid_tv_progression() {
-        // Both-NULL success path followed by valid-tv EPERM path.
+        // Both-NULL success path followed by valid-tv ENOSYS path
+        // (Phase 177, cap held).
         errno::set_errno(0);
         assert_eq!(settimeofday(core::ptr::null(), core::ptr::null()), 0);
 
         let tv = Timeval { tv_sec: 1, tv_usec: 1 };
         errno::set_errno(0);
         assert_eq!(settimeofday(&raw const tv, core::ptr::null()), -1);
-        assert_eq!(errno::get_errno(), errno::EPERM);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     #[test]
@@ -8116,5 +8163,369 @@ mod tests {
     fn test_usleep_small_value() {
         // usleep(1) — 1 microsecond — should return quickly.
         let _ret = usleep(1);
+    }
+
+    // ======================================================================
+    // Phase 177 — clock_settime() / settimeofday() CAP_SYS_TIME gate.
+    //
+    // Linux gates both syscalls on CAP_SYS_TIME via
+    // security_settime64() → capable(CAP_SYS_TIME) before delegating
+    // to do_settimeofday64().  Pre-Phase-177 we returned EPERM
+    // unconditionally regardless of capability state, which broke
+    // privileged callers (they should reach the backend, not be
+    // refused with EPERM).
+    //
+    // After Phase 177:
+    //   * with CAP_SYS_TIME held → ENOSYS (no clock-setting backend)
+    //   * without CAP_SYS_TIME   → EPERM
+    //   * EINVAL / EFAULT argument errors still take precedence
+    //     because Linux validates those before the security_settime
+    //     hook fires.
+    //
+    // Uses the CapGuard snapshot/restore pattern; --test-threads=1.
+    // ======================================================================
+
+    mod clock_time_cap_phase177 {
+        use super::*;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_time() {
+            use crate::sys_capability::CAP_SYS_TIME;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_TIME < 32 {
+                (lo & !(1u32 << CAP_SYS_TIME), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_TIME - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(
+                rc, 0,
+                "capset must succeed when dropping CAP_SYS_TIME"
+            );
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_TIME));
+        }
+
+        // -- clock_settime: per-error EPERM --------------------------------
+
+        #[test]
+        fn test_clock_settime_phase177_realtime_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            errno::set_errno(0);
+            assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_clock_settime_phase177_max_valid_nsec_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let ts = Timespec { tv_sec: 1, tv_nsec: 999_999_999 };
+            errno::set_errno(0);
+            assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- clock_settime: ordering — EINVAL/EFAULT beat EPERM ------------
+
+        #[test]
+        fn test_clock_settime_phase177_unknown_clock_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            errno::set_errno(0);
+            assert_eq!(clock_settime(0xDEAD, &raw const ts), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        #[test]
+        fn test_clock_settime_phase177_unsettable_clock_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            errno::set_errno(0);
+            assert_eq!(clock_settime(CLOCK_MONOTONIC, &raw const ts), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        #[test]
+        fn test_clock_settime_phase177_null_tp_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            errno::set_errno(0);
+            assert_eq!(
+                clock_settime(CLOCK_REALTIME, core::ptr::null()),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        #[test]
+        fn test_clock_settime_phase177_bad_nsec_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let ts = Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 };
+            errno::set_errno(0);
+            assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- clock_settime: cap-held sentinel ------------------------------
+
+        #[test]
+        fn test_clock_settime_phase177_with_cap_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_TIME,
+            ));
+            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            errno::set_errno(0);
+            assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- clock_settime: workflow drop/restore --------------------------
+
+        #[test]
+        fn test_clock_settime_phase177_drop_then_restore_workflow() {
+            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_sys_time();
+                errno::set_errno(0);
+                assert_eq!(
+                    clock_settime(CLOCK_REALTIME, &raw const ts),
+                    -1
+                );
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_TIME,
+            ));
+            errno::set_errno(0);
+            assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- settimeofday: per-error EPERM ---------------------------------
+
+        #[test]
+        fn test_settimeofday_phase177_valid_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+            errno::set_errno(0);
+            assert_eq!(
+                settimeofday(&raw const tv, core::ptr::null()),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_settimeofday_phase177_max_valid_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let tv = Timeval { tv_sec: 2_000_000_000, tv_usec: 999_999 };
+            errno::set_errno(0);
+            assert_eq!(
+                settimeofday(&raw const tv, core::ptr::null()),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- settimeofday: ordering — EINVAL beats EPERM -------------------
+
+        #[test]
+        fn test_settimeofday_phase177_negative_sec_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let tv = Timeval { tv_sec: -1, tv_usec: 0 };
+            errno::set_errno(0);
+            assert_eq!(
+                settimeofday(&raw const tv, core::ptr::null()),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        #[test]
+        fn test_settimeofday_phase177_bad_usec_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let tv = Timeval { tv_sec: 0, tv_usec: 1_000_000 };
+            errno::set_errno(0);
+            assert_eq!(
+                settimeofday(&raw const tv, core::ptr::null()),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- settimeofday: NULL-NULL bypasses the gate ---------------------
+
+        /// Both-NULL no-op succeeds even without CAP_SYS_TIME — it
+        /// short-circuits before reaching the cap probe.
+        #[test]
+        fn test_settimeofday_phase177_null_null_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            errno::set_errno(0);
+            assert_eq!(
+                settimeofday(core::ptr::null(), core::ptr::null()),
+                0
+            );
+        }
+
+        /// tz-only update (tv NULL, tz non-NULL) also short-circuits
+        /// before the cap probe.
+        #[test]
+        fn test_settimeofday_phase177_tz_only_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let sentinel: u8 = 0;
+            let tz = &raw const sentinel as *const core::ffi::c_void;
+            errno::set_errno(0);
+            assert_eq!(settimeofday(core::ptr::null(), tz), 0);
+        }
+
+        // -- settimeofday: cap-held sentinel -------------------------------
+
+        #[test]
+        fn test_settimeofday_phase177_with_cap_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_TIME,
+            ));
+            let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+            errno::set_errno(0);
+            assert_eq!(
+                settimeofday(&raw const tv, core::ptr::null()),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- settimeofday: workflow drop/restore ---------------------------
+
+        #[test]
+        fn test_settimeofday_phase177_drop_then_restore_workflow() {
+            let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_sys_time();
+                errno::set_errno(0);
+                assert_eq!(
+                    settimeofday(&raw const tv, core::ptr::null()),
+                    -1
+                );
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_TIME,
+            ));
+            errno::set_errno(0);
+            assert_eq!(
+                settimeofday(&raw const tv, core::ptr::null()),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- cross-checks --------------------------------------------------
+
+        /// settimeofday and clock_settime agree on cap semantics:
+        /// dropping CAP_SYS_TIME yields EPERM on both; holding it
+        /// yields ENOSYS on both.
+        #[test]
+        fn test_phase177_clock_settime_and_settimeofday_agree_on_cap_gate() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+            errno::set_errno(0);
+            assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            errno::set_errno(0);
+            assert_eq!(
+                settimeofday(&raw const tv, core::ptr::null()),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Errno isolation: an EPERM call doesn't bleed into a
+        /// subsequent fresh-errno EINVAL call.
+        #[test]
+        fn test_phase177_eperm_then_einval_isolation() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            errno::set_errno(0);
+            assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+
+            errno::set_errno(0);
+            let bad = Timeval { tv_sec: -1, tv_usec: 0 };
+            assert_eq!(
+                settimeofday(&raw const bad, core::ptr::null()),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
     }
 }

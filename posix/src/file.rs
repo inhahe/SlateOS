@@ -2240,11 +2240,18 @@ pub extern "C" fn linkat(
 
 /// Change file mode bits relative to a directory fd.
 ///
-/// Stub: accepts silently.
+/// Validates `flags` per Linux's `do_fchmodat` prologue:
+/// `flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)` → EINVAL.
+/// AT_EACCESS is **not** a valid fchmodat flag (it's a faccessat
+/// flag) — passing it here yields EINVAL.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, _flags: i32) -> i32 {
+pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i32) -> i32 {
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return chmod(path, mode);
     }
@@ -2256,7 +2263,8 @@ pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, _flags: i32
 
 /// Change file owner/group relative to a directory fd.
 ///
-/// Stub: accepts silently.
+/// Validates `flags` per Linux's `do_fchownat` prologue:
+/// `flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)` → EINVAL.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -2265,8 +2273,12 @@ pub extern "C" fn fchownat(
     path: *const u8,
     owner: UidT,
     group: GidT,
-    _flags: i32,
+    flags: i32,
 ) -> i32 {
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return chown(path, owner, group);
     }
@@ -7776,6 +7788,182 @@ mod tests {
         // see a spurious failure.
         assert_eq!(chmod(b"/usr/bin/foo\0".as_ptr(), 0o755), 0);
         assert_eq!(chown(b"/usr/bin/foo\0".as_ptr(), 0, 0), 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 92 — fchmodat / fchownat flags validation
+    //
+    // Linux validates `flags & ~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH)`
+    // in the prologue (do_fchmodat / do_fchownat) before path resolution.
+    // Our previous stubs discarded the argument entirely.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_fchmodat_phase92_unknown_flag_bit_einval() {
+        // 0x4000 is not a defined AT_* flag.
+        crate::errno::set_errno(0);
+        let ret = fchmodat(AT_FDCWD, b"/tmp\0".as_ptr(), 0o644, 0x4000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchmodat_phase92_high_bit_flag_einval() {
+        crate::errno::set_errno(0);
+        let ret = fchmodat(AT_FDCWD, b"/tmp\0".as_ptr(), 0o644, i32::MIN);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchmodat_phase92_at_eaccess_rejected() {
+        // AT_EACCESS (0x200) is a faccessat flag, NOT an fchmodat flag.
+        crate::errno::set_errno(0);
+        let ret = fchmodat(AT_FDCWD, b"/tmp\0".as_ptr(), 0o644, AT_EACCESS);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchmodat_phase92_symlink_nofollow_accepted() {
+        // AT_SYMLINK_NOFOLLOW is a valid fchmodat flag.  Must clear
+        // the flag check (other errors are unrelated).
+        crate::errno::set_errno(0);
+        let _ret = fchmodat(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            0o644,
+            AT_SYMLINK_NOFOLLOW,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchmodat_phase92_empty_path_accepted() {
+        crate::errno::set_errno(0);
+        let _ret = fchmodat(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            0o644,
+            AT_EMPTY_PATH,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchmodat_phase92_both_valid_flags_accepted() {
+        crate::errno::set_errno(0);
+        let _ret = fchmodat(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            0o644,
+            AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchmodat_phase92_flag_check_beats_null_path() {
+        // Bad flag + null path → EINVAL (flag check fires first).
+        crate::errno::set_errno(0);
+        let ret = fchmodat(AT_FDCWD, core::ptr::null(), 0o644, 0x4000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchownat_phase92_unknown_flag_bit_einval() {
+        crate::errno::set_errno(0);
+        let ret = fchownat(AT_FDCWD, b"/tmp\0".as_ptr(), 0, 0, 0x4000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchownat_phase92_high_bit_flag_einval() {
+        crate::errno::set_errno(0);
+        let ret = fchownat(AT_FDCWD, b"/tmp\0".as_ptr(), 0, 0, i32::MIN);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchownat_phase92_at_eaccess_rejected() {
+        crate::errno::set_errno(0);
+        let ret = fchownat(AT_FDCWD, b"/tmp\0".as_ptr(), 0, 0, AT_EACCESS);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchownat_phase92_symlink_nofollow_accepted() {
+        crate::errno::set_errno(0);
+        let _ret = fchownat(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            0, 0,
+            AT_SYMLINK_NOFOLLOW,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchownat_phase92_empty_path_accepted() {
+        crate::errno::set_errno(0);
+        let _ret = fchownat(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            0, 0,
+            AT_EMPTY_PATH,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchownat_phase92_both_valid_flags_accepted() {
+        crate::errno::set_errno(0);
+        let _ret = fchownat(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            0, 0,
+            AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH,
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchownat_phase92_flag_check_beats_null_path() {
+        crate::errno::set_errno(0);
+        let ret = fchownat(AT_FDCWD, core::ptr::null(), 0, 0, 0x4000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_fchmodat_phase92_einval_then_valid_progression() {
+        crate::errno::set_errno(0);
+        let ret = fchmodat(AT_FDCWD, b"/tmp\0".as_ptr(), 0o644, 0x4000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Valid call after the EINVAL still works.
+        assert_eq!(
+            fchmodat(AT_FDCWD, b"/tmp\0".as_ptr(), 0o644, AT_SYMLINK_NOFOLLOW),
+            0,
+        );
+    }
+
+    #[test]
+    fn test_fchownat_phase92_einval_then_valid_progression() {
+        crate::errno::set_errno(0);
+        let ret = fchownat(AT_FDCWD, b"/tmp\0".as_ptr(), 0, 0, 0x4000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        assert_eq!(
+            fchownat(AT_FDCWD, b"/tmp\0".as_ptr(), 0, 0, AT_SYMLINK_NOFOLLOW),
+            0,
+        );
     }
 
     // -----------------------------------------------------------------

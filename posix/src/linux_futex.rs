@@ -111,6 +111,25 @@ fn timespec_to_ns(ts: &Timespec) -> Option<u64> {
 ///   Return 0 on success.
 /// - All other operations: -1 with `ENOSYS` (not yet wired through to
 ///   the kernel).
+///
+/// # Linux semantics
+///
+/// `SYSCALL_DEFINE6(futex, ...)` in `kernel/futex/syscalls.c` calls
+/// `do_futex`, which switches on `cmd = op & FUTEX_CMD_MASK` and
+/// returns `-ENOSYS` from the default arm for any unrecognised command
+/// — *without* ever inspecting `uaddr`.  Each per-handler then does
+/// its own `get_futex_key(uaddr, ...)` which calls `access_ok` and
+/// yields `-EFAULT` on a NULL pointer.
+///
+/// Phase 130 moves our NULL-uaddr check from the top of the function
+/// into the implemented-op arms, so a caller passing
+/// `futex(NULL, BOGUS_CMD, ...)` now sees `ENOSYS` (matching Linux),
+/// rather than `EFAULT` from the dropped early check.  This matters
+/// because glibc-internal probing for newer futex ops (e.g.
+/// `FUTEX_LOCK_PI2`, added in Linux 5.14) passes the candidate op
+/// with whatever placeholder pointers the call site has — including
+/// NULL during dry-run feature detection.  Returning `EFAULT` there
+/// hid the "op not supported" signal under "your pointer is bad".
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn futex(
     uaddr: *mut u32,
@@ -120,11 +139,6 @@ pub extern "C" fn futex(
     _uaddr2: *mut u32,
     _val3: u32,
 ) -> i64 {
-    if uaddr.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
     // Strip PRIVATE / CLOCK_REALTIME flag bits.  Both are no-ops on our
     // kernel: futexes are already process-local, and we have a single
     // monotonic clock.
@@ -132,6 +146,14 @@ pub extern "C" fn futex(
 
     match op {
         FUTEX_WAIT => {
+            // Linux's futex_wait_setup -> get_futex_key -> access_ok
+            // returns -EFAULT for NULL uaddr.  Match that errno but
+            // only after we've confirmed FUTEX_WAIT is the requested
+            // op (so unknown ops never reach this branch).
+            if uaddr.is_null() {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
             if timeout.is_null() {
                 let ret = syscall2(SYS_FUTEX_WAIT, uaddr as u64, u64::from(val));
                 match ret {
@@ -167,6 +189,10 @@ pub extern "C" fn futex(
             }
         }
         FUTEX_WAKE => {
+            if uaddr.is_null() {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
             let ret = syscall2(SYS_FUTEX_WAKE, uaddr as u64, u64::from(val));
             if ret < 0 {
                 errno::translate(ret)
@@ -175,17 +201,30 @@ pub extern "C" fn futex(
             }
         }
         FUTEX_LOCK_PI => {
+            if uaddr.is_null() {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
             let ret = syscall1(SYS_FUTEX_LOCK_PI, uaddr as u64);
             if ret < 0 { errno::translate(ret) } else { 0 }
         }
         FUTEX_UNLOCK_PI => {
+            if uaddr.is_null() {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
             let ret = syscall1(SYS_FUTEX_UNLOCK_PI, uaddr as u64);
             if ret < 0 { errno::translate(ret) } else { 0 }
         }
         _ => {
-            // Operations not wired to the kernel yet: REQUEUE,
-            // CMP_REQUEUE, WAKE_OP, WAIT_BITSET, WAKE_BITSET,
-            // TRYLOCK_PI, WAIT_REQUEUE_PI, CMP_REQUEUE_PI.
+            // Operations Linux supports but we haven't wired yet:
+            // REQUEUE, CMP_REQUEUE, WAKE_OP, WAIT_BITSET, WAKE_BITSET,
+            // TRYLOCK_PI, WAIT_REQUEUE_PI, CMP_REQUEUE_PI.  Also the
+            // genuinely-unknown command space (op >= 14 in Linux 6.x).
+            // For both classes Linux's `do_futex` default arm returns
+            // -ENOSYS without dereferencing uaddr, so we return ENOSYS
+            // regardless of uaddr — `EFAULT` from a NULL pointer would
+            // mask the "op not supported" signal during feature probes.
             errno::set_errno(errno::ENOSYS);
             -1
         }
@@ -484,5 +523,274 @@ mod tests {
             tv_nsec: 0,
         };
         assert_eq!(timespec_to_ns(&ts), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 130 — futex() ENOSYS precedence over EFAULT for unknown ops
+    //
+    // Linux's `do_futex` switches on `cmd = op & FUTEX_CMD_MASK` and
+    // its default arm returns `-ENOSYS` without ever inspecting
+    // `uaddr`.  Each per-handler then does its own `access_ok(uaddr)`
+    // which yields `-EFAULT` for a NULL pointer.  Previously our impl
+    // checked NULL `uaddr` BEFORE the dispatch, so callers passing a
+    // NULL uaddr with an unknown (or unimplemented) cmd saw EFAULT
+    // instead of Linux's ENOSYS.  This phase moves the NULL check
+    // into the implemented-op arms so unknown ops return ENOSYS
+    // regardless of `uaddr` — matching Linux and unmasking the
+    // "op not supported" signal that glibc / libc-internal probing
+    // relies on.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_futex_phase130_unknown_op_null_uaddr_enosys_not_efault() {
+        // Genuinely unknown cmd (well above Linux's last assigned
+        // FUTEX_LOCK_PI2=13) AND NULL uaddr: Linux returns ENOSYS,
+        // not EFAULT.  Pre-Phase-130 we returned EFAULT.
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            99, // far outside the assigned cmd space
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_futex_phase130_requeue_null_uaddr_enosys_not_efault() {
+        // FUTEX_REQUEUE is a real Linux op but unimplemented in our
+        // shim — falls through to the default arm.  With NULL uaddr
+        // we now return ENOSYS (was EFAULT pre-Phase-130).
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            FUTEX_REQUEUE,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_futex_phase130_wake_op_null_uaddr_enosys_not_efault() {
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            FUTEX_WAKE_OP,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_futex_phase130_wait_bitset_null_uaddr_enosys_not_efault() {
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            FUTEX_WAIT_BITSET,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            FUTEX_BITSET_MATCH_ANY,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_futex_phase130_trylock_pi_null_uaddr_enosys() {
+        // FUTEX_TRYLOCK_PI with NULL uaddr.  Pre-Phase-130: EFAULT.
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            FUTEX_TRYLOCK_PI,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_futex_phase130_unknown_op_with_private_flag_enosys() {
+        // Unknown op OR'd with FUTEX_PRIVATE_FLAG: the flag is
+        // stripped, so the masked cmd is still unknown.  Result:
+        // ENOSYS, not EFAULT, even with NULL uaddr.
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            99 | FUTEX_PRIVATE_FLAG,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_futex_phase130_unknown_op_with_clock_realtime_enosys() {
+        // Same as above for FUTEX_CLOCK_REALTIME stripping.
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            99 | FUTEX_CLOCK_REALTIME,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_futex_phase130_wait_null_uaddr_still_efault() {
+        // Sanity: the NULL-uaddr -> EFAULT path is preserved for
+        // implemented ops; we only changed precedence for unknown
+        // ones.
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            FUTEX_WAIT,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_futex_phase130_wake_null_uaddr_still_efault() {
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            FUTEX_WAKE,
+            1,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_futex_phase130_lock_pi_null_uaddr_still_efault() {
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            FUTEX_LOCK_PI,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_futex_phase130_unlock_pi_null_uaddr_still_efault() {
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            FUTEX_UNLOCK_PI,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_futex_phase130_glibc_lock_pi2_probe_workflow() {
+        // glibc 2.34+ probes for FUTEX_LOCK_PI2 (Linux 5.14+ feature)
+        // by calling futex(?,FUTEX_LOCK_PI2,...) once during init. If
+        // the kernel returns ENOSYS, glibc falls back to LOCK_PI; any
+        // other errno aborts the probe.  Phase 130 ensures the
+        // fallback path works even if the probe uses a placeholder
+        // NULL uaddr.
+        //
+        // FUTEX_LOCK_PI2 = 13 on Linux; we don't define a constant
+        // for it, but the test inlines the value to mirror exactly
+        // what glibc's probe does.
+        const FUTEX_LOCK_PI2: i32 = 13;
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            FUTEX_LOCK_PI2,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_futex_phase130_recovery_after_enosys() {
+        // After an unknown-op ENOSYS, a subsequent FUTEX_WAIT call
+        // with NULL uaddr produces a clean EFAULT (errno is rewritten,
+        // not sticky).
+        errno::set_errno(0);
+        let r1 = futex(
+            core::ptr::null_mut(),
+            99,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(r1, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+
+        let r2 = futex(
+            core::ptr::null_mut(),
+            FUTEX_WAIT,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(r2, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_futex_phase130_buggy_caller_passes_negative_op_enosys() {
+        // Negative i32 op: after stripping high bits, the masked op
+        // is still unknown.  Confirms we don't crash or sign-extend
+        // into a valid range, and that NULL uaddr remains masked by
+        // the ENOSYS dispatch.
+        errno::set_errno(0);
+        let ret = futex(
+            core::ptr::null_mut(),
+            -1,
+            0,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 }

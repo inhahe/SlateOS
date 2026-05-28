@@ -602,6 +602,20 @@ pub extern "C" fn io_uring_setup(entries: u32, params: *mut IoUringParams) -> i3
         errno::set_errno(e);
         return -1;
     }
+    // Phase 208: CAP_SYS_NICE gate for IORING_SETUP_SQPOLL.
+    // Linux's `io_sq_offload_create` (called by `io_uring_create`)
+    // creates a kernel-poll thread that needs scheduling privileges.
+    // The cap check runs AFTER all parameter validation but BEFORE
+    // ring allocation, so an unprivileged caller with valid params
+    // sees EPERM, not ENOSYS.
+    if (p.flags & IORING_SETUP_SQPOLL) != 0
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_NICE,
+        )
+    {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -1518,5 +1532,162 @@ mod tests {
         let r = io_uring_setup(64, &mut p);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // ===================================================================
+    // Phase 208 — CAP_SYS_NICE gate on io_uring_setup(IORING_SETUP_SQPOLL)
+    // ===================================================================
+    //
+    // Linux's `io_sq_offload_create` checks `capable(CAP_SYS_NICE)` (or
+    // `CAP_SYS_ADMIN` in older kernels) before creating the kernel poll
+    // thread.  Error priority:
+    //   EFAULT > EINVAL/EBADF (param validation) > EPERM (no cap) > ENOSYS
+    mod phase208_cap_sqpoll {
+        use super::*;
+
+        const CAP_SYS_NICE: u32 = crate::sys_capability::CAP_SYS_NICE;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                crate::sys_capability::test_helpers::restore_caps(
+                    self.lo, self.hi,
+                );
+            }
+        }
+
+        fn drop_cap_sys_nice() {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << CAP_SYS_NICE);
+            let hdr = crate::sys_capability::CapUserHeader {
+                version: crate::sys_capability::VFS_CAP_REVISION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: new_lo,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: hi,
+                    inheritable: 0,
+                },
+            ];
+            let rc = crate::sys_capability::capset(
+                &hdr as *const _,
+                data.as_ptr(),
+            );
+            assert_eq!(rc, 0);
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
+        }
+
+        /// SQPOLL with cap held reaches ENOSYS (not blocked by cap gate).
+        #[test]
+        fn test_sqpoll_cap_held_enosys() {
+            assert!(crate::sys_capability::has_capability(CAP_SYS_NICE));
+            let mut p = good_params();
+            p.flags = IORING_SETUP_SQPOLL;
+            errno::set_errno(0);
+            assert_eq!(io_uring_setup(32, &mut p), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// SQPOLL without CAP_SYS_NICE → EPERM.
+        #[test]
+        fn test_sqpoll_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let mut p = good_params();
+            p.flags = IORING_SETUP_SQPOLL;
+            errno::set_errno(0);
+            assert_eq!(io_uring_setup(32, &mut p), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// SQPOLL + SQ_AFF (valid combo) without cap → EPERM.
+        #[test]
+        fn test_sqpoll_sq_aff_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let mut p = good_params();
+            p.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SQ_AFF;
+            p.sq_thread_cpu = 0;
+            errno::set_errno(0);
+            assert_eq!(io_uring_setup(32, &mut p), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Non-SQPOLL setup without cap still reaches ENOSYS — gate is
+        /// SQPOLL-specific.
+        #[test]
+        fn test_non_sqpoll_no_cap_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let mut p = good_params();
+            // No SQPOLL flag.
+            errno::set_errno(0);
+            assert_eq!(io_uring_setup(32, &mut p), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// EINVAL (bad param) takes priority over EPERM.
+        #[test]
+        fn test_einval_before_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let mut p = good_params();
+            p.flags = IORING_SETUP_SQPOLL;
+            // entries == 0 → EINVAL from validate_setup_params.
+            errno::set_errno(0);
+            assert_eq!(io_uring_setup(0, &mut p), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// EFAULT (null params) takes priority over EPERM.
+        #[test]
+        fn test_efault_before_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(io_uring_setup(32, core::ptr::null_mut()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        /// SQPOLL + IOPOLL (incompatible combo) → EINVAL from param
+        /// validation, even without cap. Param errors beat cap errors.
+        #[test]
+        fn test_sqpoll_iopoll_einval_before_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            let mut p = good_params();
+            p.flags = IORING_SETUP_SQPOLL | IORING_SETUP_IOPOLL;
+            errno::set_errno(0);
+            assert_eq!(io_uring_setup(32, &mut p), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// Cap restore after CapGuard drop.
+        #[test]
+        fn test_sqpoll_cap_restore() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_sys_nice();
+                assert!(
+                    !crate::sys_capability::has_capability(CAP_SYS_NICE),
+                );
+            }
+            assert!(crate::sys_capability::has_capability(CAP_SYS_NICE));
+        }
     }
 }

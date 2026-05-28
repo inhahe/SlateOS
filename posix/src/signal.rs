@@ -852,6 +852,14 @@ pub extern "C" fn sigtimedwait(
 /// process-group, "self", or "all-processes" forms; the target must
 /// be a real positive PID.
 ///
+/// # Capability gate (Phase 204)
+///
+/// Like `kill()`, Linux gates cross-uid signal delivery via
+/// `check_kill_permission()` → `kill_ok_by_cred()`.  Since
+/// `sigqueue` always targets a specific positive pid, the gate
+/// runs after argument validation (EINVAL) for every well-formed
+/// call.
+///
 /// Errors (Linux-matching priority order):
 ///
 /// 1. `pid <= 0`                                       → `EINVAL`
@@ -861,8 +869,8 @@ pub extern "C" fn sigtimedwait(
 ///    validates sig deep in `__send_signal_locked::valid_signal`,
 ///    after process lookup; here the stub mirrors that EINVAL value
 ///    without modelling process existence.
-/// 3. (EPERM for impersonation, ESRCH for find_vpid failure —
-///    skipped; the stub has no process model.)
+/// 3. `!CAP_KILL`                                      → `EPERM`
+///    (Phase 204)
 /// 4. `ENOSYS` for any otherwise-valid call.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigqueue(pid: crate::types::PidT, sig: i32, _value: usize) -> i32 {
@@ -876,6 +884,15 @@ pub extern "C" fn sigqueue(pid: crate::types::PidT, sig: i32, _value: usize) -> 
     //    path and surfaces as EINVAL once the process is found.
     if !(0..NSIG).contains(&sig) {
         crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    // 3. Phase 204: CAP_KILL gate — same contract as kill() Phase 203.
+    //    sigqueue always targets a specific pid (no process-group
+    //    forms), so the gate fires for every well-formed call.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_KILL,
+    ) {
+        crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
     crate::errno::set_errno(crate::errno::ENOSYS);
@@ -2649,6 +2666,108 @@ mod tests {
         crate::errno::set_errno(0);
         assert_eq!(sigqueue(-1, 0, usize::MAX), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // =================================================================
+    // Phase 204 — CAP_KILL gate on sigqueue()
+    //
+    // sigqueue always targets a specific positive pid; the gate runs
+    // after argument validation (EINVAL for pid/sig).  Reuses the
+    // Phase 203 cap helpers.
+    // =================================================================
+
+    // -- cap held: sigqueue reaches ENOSYS (unchanged) --------------------
+
+    /// With CAP_KILL (default), sigqueue(1, SIGHUP, 0) reaches ENOSYS.
+    #[test]
+    fn test_phase204_sigqueue_with_cap_enosys() {
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_KILL,
+        ));
+        crate::errno::set_errno(0);
+        let ret = sigqueue(1, SIGHUP, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- cap dropped: sigqueue → EPERM ------------------------------------
+
+    /// Without CAP_KILL, sigqueue(1, SIGHUP, 0) → EPERM.
+    #[test]
+    fn test_phase204_sigqueue_no_cap_eperm() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let ret = sigqueue(1, SIGHUP, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    /// Without CAP_KILL, sig==0 (existence probe) → EPERM too.
+    /// Unlike kill(pid, 0), sigqueue has no special sig-0 fast path
+    /// — it goes through the same cap gate.
+    #[test]
+    fn test_phase204_sigqueue_sig0_no_cap_eperm() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let ret = sigqueue(1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    // -- ordering: EINVAL beats EPERM -------------------------------------
+
+    /// pid <= 0 + no cap → EINVAL (pid check before cap).
+    #[test]
+    fn test_phase204_sigqueue_bad_pid_einval_before_eperm() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let ret = sigqueue(0, SIGHUP, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "EINVAL for bad pid must precede EPERM"
+        );
+    }
+
+    /// Invalid sig + no cap → EINVAL (sig check before cap).
+    #[test]
+    fn test_phase204_sigqueue_bad_sig_einval_before_eperm() {
+        let _g = phase203_cap::CapGuard::snapshot();
+        phase203_cap::drop_cap_kill();
+        crate::errno::set_errno(0);
+        let ret = sigqueue(1, NSIG, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "EINVAL for bad sig must precede EPERM"
+        );
+    }
+
+    // -- restoration: cap restore cycle -----------------------------------
+
+    /// After restoring CAP_KILL, sigqueue reaches ENOSYS again.
+    #[test]
+    fn test_phase204_sigqueue_cap_restore() {
+        {
+            let _g = phase203_cap::CapGuard::snapshot();
+            phase203_cap::drop_cap_kill();
+            crate::errno::set_errno(0);
+            let ret = sigqueue(1, SIGHUP, 0);
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_KILL,
+        ));
+        crate::errno::set_errno(0);
+        let ret = sigqueue(1, SIGHUP, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     // ---- sigtimedwait() ----

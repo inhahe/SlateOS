@@ -43,20 +43,29 @@ mod tests {
         assert_eq!(EFD_SEMAPHORE, 1);
     }
 
-    /// `eventfd_read` on an invalid fd returns -1 with EFAULT (null buf).
+    /// Phase 144: `eventfd_read(-1, NULL)` resolves the fd before
+    /// the pointer, so a bad fd returns EBADF rather than the
+    /// pre-Phase-144 EFAULT.  Renamed from
+    /// `test_eventfd_read_null_returns_efault` to reflect the new
+    /// precedence — see `epoll::tests` for the full Phase 144
+    /// coverage including the valid-fd-NULL-pointer EFAULT case.
     #[test]
-    fn test_eventfd_read_null_returns_efault() {
+    fn test_eventfd_read_bad_fd_beats_null_pointer_efault() {
         crate::errno::set_errno(0);
         assert_eq!(eventfd_read(-1, core::ptr::null_mut()), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
-    /// `eventfd_write` with `u64::MAX` is rejected (Linux EINVAL).
+    /// Phase 144: `eventfd_write(-1, u64::MAX)` resolves the fd
+    /// before the value, so a bad fd returns EBADF rather than the
+    /// pre-Phase-144 value-EINVAL.  The U64_MAX rejection path is
+    /// still tested via a valid eventfd in
+    /// `epoll::tests::test_eventfd_write_phase144_valid_fd_u64_max_is_einval`.
     #[test]
-    fn test_eventfd_write_max_rejected() {
+    fn test_eventfd_write_bad_fd_beats_value_max_einval() {
         crate::errno::set_errno(0);
         assert_eq!(eventfd_write(-1, u64::MAX), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]

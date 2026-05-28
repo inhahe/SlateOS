@@ -751,19 +751,30 @@ pub extern "C" fn eventfd(initval: u32, flags: i32) -> i32 {
 /// non-blocking with zero counter).
 ///
 /// Equivalent to `read(fd, value, 8) == 8 ? 0 : -1`.
+///
+/// Validation order (Phase 144) matches the glibc wrapper composed
+/// with Linux's `sys_read`:
+///   1. `fdget(fd)`                    → EBADF
+///   2. `f.file->f_op->read`           → EINVAL on non-eventfd
+///   3. `copy_to_user(value, ...)`     → EFAULT
+///
+/// Pre-Phase-144 we checked the NULL pointer first, so
+/// `eventfd_read(-1, NULL)` returned EFAULT instead of Linux's
+/// EBADF, hiding the fd bug behind a misdirected pointer error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn eventfd_read(fd: i32, value: *mut u64) -> i32 {
-    if value.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
+    // Phase 144: fd resolution precedes NULL-pointer check.  A bad
+    // fd is the higher-information error and Linux reports it first.
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
     if entry.kind != HandleKind::Eventfd {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if value.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -790,18 +801,32 @@ pub extern "C" fn eventfd_read(fd: i32, value: *mut u64) -> i32 {
 /// `errno` set on error (EBADF, EINVAL if `value` is `u64::MAX`).
 ///
 /// Equivalent to `write(fd, &value, 8) == 8 ? 0 : -1`.
+///
+/// Validation order (Phase 144) matches the glibc wrapper composed
+/// with Linux's `sys_write`:
+///   1. `fdget(fd)`                       → EBADF
+///   2. `f.file->f_op->write`             → EINVAL on non-eventfd
+///   3. `if (val == U64_MAX) return EINVAL` (inside
+///      `eventfd_write` kernel handler, after fd resolution).
+///
+/// Pre-Phase-144 we checked `value == u64::MAX` before the fd
+/// lookup, so `eventfd_write(-1, u64::MAX)` returned EINVAL
+/// instead of Linux's EBADF.  Both errors are -1, but the
+/// diagnostic was misdirected at the value when the real bug
+/// was the fd.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn eventfd_write(fd: i32, value: u64) -> i32 {
-    if value == u64::MAX {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
+    // Phase 144: fd resolution precedes value validation, matching
+    // the kernel's `sys_write` → `eventfd_write` flow.
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
     if entry.kind != HandleKind::Eventfd {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if value == u64::MAX {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -2436,12 +2461,24 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
-    /// `eventfd_read` with a null pointer must fail with EFAULT.
+    /// Phase 144: `eventfd_read(3, NULL)` — fd 3 in the host test
+    /// environment is not an eventfd, so the fd-resolution check
+    /// runs first and produces EBADF (no fd table entry) or EINVAL
+    /// (entry exists but wrong kind).  The NULL-pointer EFAULT path
+    /// is unreachable here because the fd never validates.  Renamed
+    /// from `test_eventfd_read_null_returns_efault` (which asserted
+    /// the pre-Phase-144 buggy ordering) and re-tasked to pin the
+    /// new precedence. The matched-EFAULT case lives in
+    /// `test_eventfd_read_phase144_valid_fd_null_pointer_is_efault`.
     #[test]
-    fn test_eventfd_read_null_returns_efault() {
+    fn test_eventfd_read_bad_fd_beats_null_pointer_efault() {
         errno::set_errno(0);
         assert_eq!(eventfd_read(3, core::ptr::null_mut()), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        let e = errno::get_errno();
+        assert!(
+            e == errno::EBADF || e == errno::EINVAL,
+            "got {e}, expected EBADF or EINVAL (never the old EFAULT)",
+        );
     }
 
     /// `eventfd_read` on a non-eventfd fd must fail with EBADF.
@@ -2463,13 +2500,22 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
-    /// `eventfd_write` with `u64::MAX` is invalid per Linux semantics
-    /// and must be rejected before issuing the kernel call.
+    /// Phase 144: `eventfd_write(3, u64::MAX)` — fd 3 is not an
+    /// eventfd in the host test environment, so the fd-resolution
+    /// check runs first.  We get EBADF (no entry) or EINVAL (wrong
+    /// kind); the U64_MAX rejection path is unreachable.  Renamed
+    /// from `test_eventfd_write_max_rejected` and re-tasked.  A
+    /// real eventfd + U64_MAX test that exercises the value-EINVAL
+    /// path lives in `test_eventfd_write_phase144_valid_fd_u64_max_is_einval`.
     #[test]
-    fn test_eventfd_write_max_rejected() {
+    fn test_eventfd_write_bad_fd_beats_value_max_einval() {
         errno::set_errno(0);
         assert_eq!(eventfd_write(3, u64::MAX), -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        let e = errno::get_errno();
+        assert!(
+            e == errno::EBADF || e == errno::EINVAL,
+            "got {e}, expected EBADF or EINVAL (never reached the value check)",
+        );
     }
 
     /// `eventfd_write` on a non-eventfd fd must fail with EBADF.
@@ -5234,6 +5280,304 @@ mod tests {
         assert_eq!(buf.it_value.tv_sec, 9012);
         assert_eq!(buf.it_value.tv_nsec, 3456);
 
+        crate::file::close(efd);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 144 — eventfd_read / eventfd_write resolve fd first
+    //
+    // Both are glibc convenience wrappers that decompose into Linux's
+    // `sys_read` / `sys_write`, which run `fdget(fd)` before any
+    // pointer copy or value check.  Observable Linux errno priority
+    // is EBADF > EINVAL(kind) > EFAULT(pointer) > EINVAL(value).
+    //
+    // Pre-Phase-144 we checked the NULL pointer (for read) and the
+    // U64_MAX value (for write) before the fd lookup, so a buggy
+    // caller passing both got the wrong, lower-information error.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_eventfd_read_phase144_bad_fd_null_ptr_is_ebadf() {
+        // Core regression: -1 + NULL → EBADF, not EFAULT.
+        errno::set_errno(0);
+        let ret = eventfd_read(-1, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_eventfd_read_phase144_unknown_fd_null_ptr_is_ebadf() {
+        errno::set_errno(0);
+        let ret = eventfd_read(99999, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_eventfd_read_phase144_intmin_fd_null_ptr_is_ebadf() {
+        errno::set_errno(0);
+        let ret = eventfd_read(i32::MIN, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_eventfd_read_phase144_wrong_kind_fd_null_ptr_is_einval() {
+        // Wrong-kind real fd: get a timerfd, pass to eventfd_read
+        // with NULL.  Linux returns EINVAL (kind mismatch) BEFORE
+        // EFAULT (pointer); we match.
+        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        assert!(tfd >= 0);
+        errno::set_errno(0);
+        let ret = eventfd_read(tfd, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(tfd);
+    }
+
+    #[test]
+    fn test_eventfd_read_phase144_valid_fd_null_pointer_is_efault() {
+        // Post-Phase-144 third stage reachable: real eventfd + NULL
+        // → EFAULT.
+        let efd = eventfd(0, 0);
+        assert!(efd >= 0);
+        errno::set_errno(0);
+        let ret = eventfd_read(efd, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        crate::file::close(efd);
+    }
+
+    #[test]
+    fn test_eventfd_read_phase144_buggy_caller_does_not_write_value() {
+        // Buffer-untouched invariant: when the fd check fails, the
+        // value buffer must not be written.
+        let sentinel: u64 = 0xDEAD_BEEF_CAFE_F00D;
+        let mut val: u64 = sentinel;
+        errno::set_errno(0);
+        let ret = eventfd_read(-1, &raw mut val);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(val, sentinel, "buffer must not be written on EBADF");
+    }
+
+    #[test]
+    fn test_eventfd_write_phase144_bad_fd_u64_max_is_ebadf() {
+        // Core regression: -1 + u64::MAX → EBADF, not EINVAL.  Both
+        // errors return -1 but the diagnostic differs.
+        errno::set_errno(0);
+        let ret = eventfd_write(-1, u64::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_eventfd_write_phase144_unknown_fd_u64_max_is_ebadf() {
+        errno::set_errno(0);
+        let ret = eventfd_write(99999, u64::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_eventfd_write_phase144_intmin_fd_u64_max_is_ebadf() {
+        errno::set_errno(0);
+        let ret = eventfd_write(i32::MIN, u64::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_eventfd_write_phase144_wrong_kind_fd_u64_max_is_einval() {
+        // Wrong-kind real fd + U64_MAX → EINVAL from the kind check,
+        // not the value check (both EINVAL — assert -1 + EINVAL shape).
+        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        assert!(tfd >= 0);
+        errno::set_errno(0);
+        let ret = eventfd_write(tfd, u64::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(tfd);
+    }
+
+    #[test]
+    fn test_eventfd_write_phase144_valid_fd_u64_max_is_einval() {
+        // Post-Phase-144 third stage reachable: real eventfd +
+        // U64_MAX → EINVAL from the value check.
+        let efd = eventfd(0, 0);
+        assert!(efd >= 0);
+        errno::set_errno(0);
+        let ret = eventfd_write(efd, u64::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(efd);
+    }
+
+    #[test]
+    fn test_eventfd_write_phase144_valid_fd_u64_max_minus_one_succeeds() {
+        // Boundary check: u64::MAX - 1 is the largest legal value
+        // on Linux and must succeed.  Confirms our value check
+        // boundary matches Linux's `if (val == U64_MAX)`, not
+        // `if (val >= U64_MAX - some_slack)`.
+        let efd = eventfd(0, 0);
+        assert!(efd >= 0);
+        errno::set_errno(0);
+        let ret = eventfd_write(efd, u64::MAX - 1);
+        assert_eq!(ret, 0, "u64::MAX-1 must succeed; errno={}", errno::get_errno());
+        crate::file::close(efd);
+    }
+
+    #[test]
+    fn test_eventfd_read_phase144_no_side_effect_loop() {
+        // Hammer the bad-fd path 32×; errno deterministically EBADF.
+        for _ in 0..32 {
+            errno::set_errno(0);
+            let r = eventfd_read(-1, core::ptr::null_mut());
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EBADF);
+        }
+    }
+
+    #[test]
+    fn test_eventfd_write_phase144_no_side_effect_loop() {
+        for _ in 0..32 {
+            errno::set_errno(0);
+            let r = eventfd_write(-1, u64::MAX);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EBADF);
+        }
+    }
+
+    #[test]
+    fn test_eventfd_read_phase144_recovery_after_bad_fd() {
+        // Workflow: EBADF, fix fd, succeed.
+        errno::set_errno(0);
+        let r = eventfd_read(-1, core::ptr::null_mut());
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+
+        let efd = eventfd(5, 0); // initial counter = 5
+        assert!(efd >= 0);
+        let mut val: u64 = 0;
+        errno::set_errno(0);
+        let r = eventfd_read(efd, &raw mut val);
+        assert_eq!(r, 0);
+        // Counter readable as 5 on the kernel target; host stub may
+        // differ.  Only assert success here; the value semantics
+        // are exercised by pre-existing eventfd tests.
+        crate::file::close(efd);
+    }
+
+    #[test]
+    fn test_eventfd_write_phase144_recovery_after_bad_fd() {
+        // Workflow: EBADF, fix fd, write succeeds (with a non-max value).
+        errno::set_errno(0);
+        let r = eventfd_write(-1, 42);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+
+        let efd = eventfd(0, 0);
+        assert!(efd >= 0);
+        errno::set_errno(0);
+        let r = eventfd_write(efd, 42);
+        assert_eq!(r, 0, "write of 42 must succeed; errno={}", errno::get_errno());
+        crate::file::close(efd);
+    }
+
+    #[test]
+    fn test_eventfd_read_phase144_ordering_matrix() {
+        // Full 2x3 matrix: {bad fd, wrong-kind fd, eventfd} ×
+        // {NULL ptr, valid ptr}.  Pins every outcome.
+        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        assert!(tfd >= 0);
+        let efd = eventfd(0, 0);
+        assert!(efd >= 0);
+        let mut val: u64 = 0;
+
+        // bad fd × NULL  → EBADF
+        errno::set_errno(0);
+        let r = eventfd_read(-1, core::ptr::null_mut());
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+
+        // bad fd × valid → EBADF
+        errno::set_errno(0);
+        let r = eventfd_read(-1, &raw mut val);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+
+        // wrong-kind × NULL → EINVAL (kind beats EFAULT)
+        errno::set_errno(0);
+        let r = eventfd_read(tfd, core::ptr::null_mut());
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // wrong-kind × valid → EINVAL
+        errno::set_errno(0);
+        let r = eventfd_read(tfd, &raw mut val);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // eventfd × NULL → EFAULT
+        errno::set_errno(0);
+        let r = eventfd_read(efd, core::ptr::null_mut());
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+
+        // eventfd × valid → 0 (we just made a fresh eventfd with
+        // counter 0; in nonblocking modes this would EAGAIN, but
+        // the default is blocking and the kernel returns the
+        // counter — which the host stub also satisfies).  Skip
+        // asserting the value; only assert success or EAGAIN.
+        errno::set_errno(0);
+        let r = eventfd_read(efd, &raw mut val);
+        let e = errno::get_errno();
+        assert!(
+            r == 0 || (r == -1 && e == errno::EAGAIN),
+            "got r={r} errno={e}, expected 0 or EAGAIN",
+        );
+
+        crate::file::close(tfd);
+        crate::file::close(efd);
+    }
+
+    #[test]
+    fn test_eventfd_write_phase144_ordering_matrix() {
+        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        assert!(tfd >= 0);
+        let efd = eventfd(0, 0);
+        assert!(efd >= 0);
+
+        // bad fd × U64_MAX → EBADF
+        errno::set_errno(0);
+        assert_eq!(eventfd_write(-1, u64::MAX), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+
+        // bad fd × valid value → EBADF
+        errno::set_errno(0);
+        assert_eq!(eventfd_write(-1, 1), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+
+        // wrong-kind × U64_MAX → EINVAL (kind beats value)
+        errno::set_errno(0);
+        assert_eq!(eventfd_write(tfd, u64::MAX), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // wrong-kind × valid value → EINVAL
+        errno::set_errno(0);
+        assert_eq!(eventfd_write(tfd, 1), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // eventfd × U64_MAX → EINVAL (value check)
+        errno::set_errno(0);
+        assert_eq!(eventfd_write(efd, u64::MAX), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // eventfd × valid value → 0
+        errno::set_errno(0);
+        assert_eq!(eventfd_write(efd, 1), 0);
+
+        crate::file::close(tfd);
         crate::file::close(efd);
     }
 

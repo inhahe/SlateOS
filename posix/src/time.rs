@@ -198,6 +198,17 @@ fn is_valid_clock(clk_id: ClockidT) -> bool {
     )
 }
 
+/// Check whether a clock ID is one that may be modified by
+/// `clock_settime`.
+///
+/// Linux only permits setting `CLOCK_REALTIME` and `CLOCK_TAI`;
+/// every monotonic / cputime / coarse clock is read-only because
+/// the kernel derives them from independent sources.  We don't have
+/// CLOCK_TAI, so only `CLOCK_REALTIME` qualifies.
+fn is_settable_clock(clk_id: ClockidT) -> bool {
+    clk_id == CLOCK_REALTIME
+}
+
 /// Get the resolution of a clock.
 ///
 /// Returns 0 on success, -1 on error.
@@ -220,10 +231,69 @@ pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
 
 /// Set the clock.
 ///
-/// Stub: returns -1 with `EPERM`.  The kernel clock cannot be
-/// adjusted from userspace yet.
+/// Validates arguments per the Linux `sys_clock_settime` prologue,
+/// then returns `-1` with `EPERM` because our kernel does not yet
+/// expose a settable wall clock.
+///
+/// Linux validation order (matches
+/// `kernel/time/posix-timers.c::SYSCALL_DEFINE2(clock_settime, ...)`):
+///
+/// 1. `tp` is null → `EFAULT` (via `copy_from_user`).
+/// 2. `clk_id` is not a recognised clock → `EINVAL`.
+/// 3. `clk_id` is recognised but not settable (e.g. monotonic,
+///    cputime, coarse clocks) → `EINVAL`.
+/// 4. `tv_sec < 0` or `tv_nsec` outside `[0, 999_999_999]`
+///    → `EINVAL` (the `timespec64_valid_strict` check).
+/// 5. Otherwise → `EPERM` (caller lacks `CAP_SYS_TIME` or, in our
+///    case, the operation is simply not implemented yet).
+///
+/// The validation order matters: callers using `clock_settime` to
+/// probe whether a clock is supported (a common libc test idiom)
+/// must see `EINVAL` for read-only clocks like `CLOCK_MONOTONIC`,
+/// regardless of capability state, so that probes don't false-
+/// positive on the "permission denied" path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn clock_settime(_clk_id: ClockidT, _tp: *const Timespec) -> i32 {
+pub extern "C" fn clock_settime(clk_id: ClockidT, tp: *const Timespec) -> i32 {
+    // 1. EFAULT before any clock-id inspection.  Linux reaches this
+    //    via copy_from_user, which runs before the clock dispatch.
+    if tp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // 2. Unknown clock → EINVAL.
+    if !is_valid_clock(clk_id) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // 3. Known but read-only clock → EINVAL.  Same errno as (2) but
+    //    a different *reason*; the test suite distinguishes by
+    //    checking that the unsettable list (MONOTONIC, BOOTTIME,
+    //    CPUTIME, COARSE variants, RAW) all report EINVAL.
+    if !is_settable_clock(clk_id) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // 4. Validate the timespec.  POSIX (and Linux's
+    //    timespec64_valid_strict) require:
+    //      tv_sec  >= 0
+    //      0 <= tv_nsec <= 999_999_999
+    //    Note: we intentionally allow `tv_sec == 0` even though
+    //    that points to the epoch, because Linux accepts it.
+    //
+    // SAFETY: tp was just confirmed non-null.  We do an unaligned
+    // read so that callers passing a misaligned C struct don't UB.
+    let ts = unsafe { core::ptr::read_unaligned(tp) };
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec > 999_999_999 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // 5. All argument checks passed; we still can't actually set the
+    //    clock.  Report EPERM, which is also what an unprivileged
+    //    caller would see on Linux.
     errno::set_errno(errno::EPERM);
     -1
 }
@@ -3783,9 +3853,14 @@ mod tests {
 
     #[test]
     fn test_clock_settime_returns_eperm() {
+        // CLOCK_REALTIME with a valid timespec passes every argument
+        // check, so we fall through to the EPERM path (no CAP_SYS_TIME
+        // hook + no kernel support for setting the wall clock).
         let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
     }
 
     #[test]
@@ -4354,17 +4429,220 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_clock_settime_monotonic_eperm() {
-        // Cannot set CLOCK_MONOTONIC.
+    fn test_clock_settime_monotonic_einval() {
+        // CLOCK_MONOTONIC is recognised but not settable: Phase 83
+        // moved this from EPERM to EINVAL so that callers can
+        // distinguish "no permission" from "wrong clock kind".
         let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        errno::set_errno(0);
         let ret = clock_settime(CLOCK_MONOTONIC, &raw const ts);
         assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
-    fn test_clock_settime_null_ts() {
-        // Null timespec → should not crash.
-        let _ret = clock_settime(CLOCK_REALTIME, core::ptr::null());
+    fn test_clock_settime_null_ts_efault() {
+        // Null timespec → EFAULT.  Phase 83 makes this explicit.
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_REALTIME, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 83 — clock_settime argument-domain validation
+    //
+    // Validation order matches Linux:
+    //   tp == NULL                       -> EFAULT
+    //   unknown clock_id                 -> EINVAL
+    //   recognised but unsettable clock  -> EINVAL
+    //   tv_sec < 0 or bad tv_nsec        -> EINVAL
+    //   otherwise                        -> EPERM
+    // ------------------------------------------------------------------
+
+    /// Convenience: a valid Timespec for the EPERM path tests.
+    fn valid_ts() -> Timespec { Timespec { tv_sec: 1, tv_nsec: 0 } }
+
+    #[test]
+    fn test_is_settable_clock_only_realtime() {
+        // The set of settable clocks is exactly {CLOCK_REALTIME}.
+        assert!(is_settable_clock(CLOCK_REALTIME));
+        for &c in &[
+            CLOCK_MONOTONIC,
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+            CLOCK_BOOTTIME,
+        ] {
+            assert!(!is_settable_clock(c), "clock {c} must not be settable");
+        }
+    }
+
+    #[test]
+    fn test_clock_settime_efault_precedes_clock_check() {
+        // Even with an obviously bogus clock id, a null tp must
+        // surface EFAULT first.  This matches the Linux ordering:
+        // copy_from_user runs before the clock-id dispatch.
+        errno::set_errno(0);
+        let ret = clock_settime(0x7FFF_FFFF, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_clock_settime_unknown_clock_einval() {
+        let ts = valid_ts();
+        errno::set_errno(0);
+        let ret = clock_settime(0x7FFF_FFFF, &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clock_settime_negative_clock_einval() {
+        let ts = valid_ts();
+        errno::set_errno(0);
+        let ret = clock_settime(-1, &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clock_settime_every_unsettable_clock_einval() {
+        let ts = valid_ts();
+        for &c in &[
+            CLOCK_MONOTONIC,
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+            CLOCK_BOOTTIME,
+        ] {
+            errno::set_errno(0);
+            let ret = clock_settime(c, &raw const ts);
+            assert_eq!(ret, -1, "clock {c} should be -1");
+            assert_eq!(errno::get_errno(), errno::EINVAL,
+                "clock {c} should report EINVAL");
+        }
+    }
+
+    #[test]
+    fn test_clock_settime_negative_tv_sec_einval() {
+        let ts = Timespec { tv_sec: -1, tv_nsec: 0 };
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clock_settime_negative_tv_nsec_einval() {
+        let ts = Timespec { tv_sec: 0, tv_nsec: -1 };
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clock_settime_tv_nsec_billion_einval() {
+        // exactly 1e9 is out of range (valid range is 0..=999_999_999)
+        let ts = Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 };
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clock_settime_tv_nsec_max_valid_passes_to_eperm() {
+        // 999_999_999 is the max legal nanosecond value.  It should
+        // pass the timespec check and fall through to EPERM.
+        let ts = Timespec { tv_sec: 0, tv_nsec: 999_999_999 };
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    #[test]
+    fn test_clock_settime_realtime_coarse_einval_not_eperm() {
+        // CLOCK_REALTIME_COARSE shares the "realtime" name but is a
+        // distinct, unsettable clock id.  This test catches the bug
+        // where a naive implementation accepts any clock containing
+        // "REALTIME" in its name.
+        let ts = valid_ts();
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_REALTIME_COARSE, &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clock_settime_unsettable_clock_precedes_timespec_check() {
+        // Bad timespec on an unsettable clock must still surface the
+        // EINVAL-for-clock-kind path (it's the same errno, so we
+        // really just verify no crash and a sensible code).
+        let ts = Timespec { tv_sec: -1, tv_nsec: -1 };
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_MONOTONIC, &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_clock_settime_zero_timespec_realtime_eperm() {
+        // The epoch is a legal timespec value.  Linux accepts it
+        // and would set the clock to 1970-01-01; we return EPERM
+        // because we can't actually set the wall clock.
+        let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    #[test]
+    fn test_clock_settime_large_tv_sec_realtime_eperm() {
+        // A far-future timestamp (year ~2262) — must still pass the
+        // argument check and reach EPERM.
+        let ts = Timespec { tv_sec: 9_223_372_036, tv_nsec: 500 };
+        errno::set_errno(0);
+        let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    #[test]
+    fn test_clock_settime_errno_progression() {
+        // Sanity check that every distinct branch produces the
+        // distinct errno we claim.  This guards against future
+        // refactors that accidentally collapse branches.
+        let valid = valid_ts();
+        let bad_ns = Timespec { tv_sec: 0, tv_nsec: -1 };
+
+        errno::set_errno(0);
+        assert_eq!(clock_settime(CLOCK_REALTIME, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+
+        errno::set_errno(0);
+        assert_eq!(clock_settime(999, &raw const valid), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        errno::set_errno(0);
+        assert_eq!(clock_settime(CLOCK_BOOTTIME, &raw const valid), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        errno::set_errno(0);
+        assert_eq!(clock_settime(CLOCK_REALTIME, &raw const bad_ns), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        errno::set_errno(0);
+        assert_eq!(clock_settime(CLOCK_REALTIME, &raw const valid), -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
     }
 
     #[test]

@@ -416,6 +416,18 @@ pub extern "C" fn getpriority(which: i32, _who: u32) -> i32 {
 ///
 /// Stores the value locally but does not affect kernel scheduling.
 /// Returns 0 on success, -1 on error.
+///
+/// Phase 169: Linux's `sys_setpriority` calls `set_one_prio` on each
+/// task in scope.  After clamping `niceval` to `[MIN_NICE, MAX_NICE]`,
+/// `set_one_prio` does:
+///   - cross-uid permission check → `EPERM` (collapses in our
+///     single-user model);
+///   - `if (niceval < task_nice(p) && !can_nice(p, niceval)) error =
+///     -EACCES;` — i.e. lowering the nice value (raising priority)
+///     requires `CAP_SYS_NICE` under the default `RLIMIT_NICE = 0`.
+/// Note the errno is `EACCES`, not `EPERM` — that distinction is
+/// observable by callers that switch on errno.  Equivalent or higher
+/// nice values (lowering priority) are always allowed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
     if which != PRIO_PROCESS && which != PRIO_PGRP && which != PRIO_USER {
@@ -423,6 +435,17 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
         return -1;
     }
     let val = prio.clamp(-20, 19);
+    // SAFETY: Single-threaded access.
+    let current = unsafe { core::ptr::addr_of!(NICE_VALUE).read() };
+    // Phase 169: priority-raise (new nice < current nice) requires
+    // CAP_SYS_NICE.  Linux returns EACCES from set_one_prio in this
+    // case (distinct from the cross-uid EPERM path).
+    if val < current && !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_NICE,
+    ) {
+        errno::set_errno(errno::EACCES);
+        return -1;
+    }
     // SAFETY: Single-threaded access.
     unsafe { core::ptr::addr_of_mut!(NICE_VALUE).write(val); }
     0
@@ -1977,6 +2000,346 @@ mod tests {
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_BOOT,
             ));
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 169: setpriority() — CAP_SYS_NICE gate on priority-raise.
+    //
+    // Pre-Phase-169 behaviour: setpriority clamped to [-20, 19] and
+    // wrote the value with no capability check.  An unprivileged
+    // caller could lower its nice value (raise priority) by any
+    // amount.
+    //
+    // Linux semantics (kernel/sys.c::set_one_prio):
+    //   if (niceval < task_nice(p) && !can_nice(p, niceval))
+    //       error = -EACCES;
+    // Note: EACCES, not EPERM.  The check is per-task; in our
+    // single-process single-user model it collapses to a comparison
+    // of the new clamped niceval against the stored NICE_VALUE.
+    //
+    // Implementation: read current NICE_VALUE, clamp prio, and if the
+    // clamped value is strictly less than current (a raise) without
+    // CAP_SYS_NICE return -1 / EACCES.  Equal or higher values
+    // (lowering priority or no change) always succeed.
+    // ----------------------------------------------------------------------
+
+    mod setpriority_cap_phase169 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase
+        /// 77 / 164 / 165 / 166 / 167 / 168.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_nice() {
+            use crate::sys_capability::CAP_SYS_NICE;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_NICE < 32 {
+                (lo & !(1u32 << CAP_SYS_NICE), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_NICE - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_NICE");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
+        }
+
+        // -- Per-error-class ----------------------------------------------
+
+        /// From the default nice=0, asking for -1 without CAP_SYS_NICE
+        /// returns -1 with EACCES (not EPERM).
+        #[test]
+        fn test_setpriority_phase169_no_cap_raise_returns_eaccess() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -1), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        /// Errno must be EACCES specifically, not EPERM.  Distinguishes
+        /// Linux's set_one_prio EACCES branch from the cross-uid
+        /// EPERM branch (which collapses in our single-user model).
+        #[test]
+        fn test_setpriority_phase169_errno_is_eacces_not_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -5), -1);
+            assert_ne!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        // -- Ordering matrix ----------------------------------------------
+
+        /// EINVAL on `which` must beat EACCES — Linux validates
+        /// `which` in sys_setpriority before entering the per-task
+        /// loop that runs set_one_prio.
+        #[test]
+        fn test_setpriority_phase169_einval_which_beats_eacces() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            // Bogus which + raise attempt — must see EINVAL, not EACCES.
+            assert_eq!(setpriority(999, 0, -10), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// Lowering priority (higher nice) without cap always works.
+        #[test]
+        fn test_setpriority_phase169_lower_priority_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, 10), 0);
+            assert_eq!(errno::get_errno(), 0);
+            errno::set_errno(0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), 10);
+        }
+
+        /// Setting the same value (no change) without cap succeeds —
+        /// Linux uses `<` (strict less-than), not `<=`.
+        #[test]
+        fn test_setpriority_phase169_same_value_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            // Default NICE_VALUE = 0; setting prio=0 is a no-op.
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, 0), 0);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        /// EACCES must beat the clamp: an unprivileged caller asking
+        /// for -100 (would clamp to -20) gets EACCES because clamped
+        /// -20 < current 0.  Confirms we don't silently clamp-then-
+        /// store before the cap check.
+        #[test]
+        fn test_setpriority_phase169_eacces_beats_clamp() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -100), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+            // And the stored value must NOT have been updated.
+            errno::set_errno(0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), 0);
+        }
+
+        // -- Workflow -----------------------------------------------------
+
+        /// Daemon workflow: setpriority to -10 under default caps
+        /// (succeeds), drop CAP_SYS_NICE, then ask for -15 (raise →
+        /// EACCES), then ask for -5 (lower → succeeds).
+        #[test]
+        fn test_setpriority_phase169_workflow_raise_drop_cap_raise_lower()
+        {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -10), 0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), -10);
+            drop_cap_sys_nice();
+            // Further raise: EACCES.
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -15), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+            // Lower (nice value increases): still allowed without cap.
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -5), 0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), -5);
+        }
+
+        // -- Buggy caller -------------------------------------------------
+
+        /// Passing i32::MIN with no cap must yield EACCES (the
+        /// clamped target -20 is below the default 0), not crash or
+        /// store.
+        #[test]
+        fn test_setpriority_phase169_buggy_caller_i32_min_no_cap_eacces()
+        {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, i32::MIN), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+            errno::set_errno(0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), 0);
+        }
+
+        /// i32::MAX clamps to 19 and is a lower-priority request —
+        /// must succeed without cap.
+        #[test]
+        fn test_setpriority_phase169_i32_max_no_cap_clamps_and_succeeds()
+        {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, i32::MAX), 0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), 19);
+        }
+
+        // -- Recovery -----------------------------------------------------
+
+        /// After EACCES, restoring CAP_SYS_NICE lets the same call
+        /// succeed.  Confirms dynamic cap evaluation.
+        #[test]
+        fn test_setpriority_phase169_recovery_restore_cap_lets_raise() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -8), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+            // Restore caps to default-all.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -8), 0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), -8);
+        }
+
+        // -- No-side-effect ----------------------------------------------
+
+        /// EACCES rejection must leave NICE_VALUE untouched, observable
+        /// via getpriority.
+        #[test]
+        fn test_setpriority_phase169_eacces_does_not_modify_value() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            // Seed value to 4 under default caps.
+            assert_eq!(setpriority(PRIO_PROCESS, 0, 4), 0);
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -2), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+            errno::set_errno(0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), 4);
+        }
+
+        // -- Sentinel -----------------------------------------------------
+
+        /// With CAP_SYS_NICE held, raising priority works — confirms
+        /// privileged path is unbroken.
+        #[test]
+        fn test_setpriority_phase169_sentinel_with_cap_raise_succeeds() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+            errno::set_errno(0);
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -10), 0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), -10);
+        }
+
+        // -- Cross-checks -------------------------------------------------
+
+        /// Default-cap setpriority(-100) still clamps to -20 — the
+        /// privileged clamp behaviour is preserved.
+        #[test]
+        fn test_setpriority_phase169_default_cap_minus_100_clamps() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -100), 0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), -20);
+        }
+
+        /// `setpriority` rejection should not perturb `nice()`'s
+        /// negative-inc gate (both consult the same cap but via
+        /// different errnos — EACCES vs EPERM).  Confirms the two
+        /// gates remain independent.
+        #[test]
+        fn test_setpriority_phase169_distinct_from_nice_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            // setpriority raise → EACCES.
+            assert_eq!(setpriority(PRIO_PROCESS, 0, -3), -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+            // nice raise → EPERM.
+            errno::set_errno(0);
+            assert_eq!(nice(-3), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
         }
     }
 }

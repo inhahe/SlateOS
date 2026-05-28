@@ -287,18 +287,34 @@ fn online_cpu_count() -> usize {
 /// Populates `mask` with bits 0..N set, where N is the number of online CPUs
 /// (capped at `CPU_SETSIZE`).  Our scheduler doesn't yet support per-thread
 /// affinity restriction, so every thread can be dispatched to any online CPU.
+///
+/// Validation order matches Linux's `SYSCALL_DEFINE3(sched_getaffinity)`
+/// in `kernel/sched/syscalls.c`:
+///   1. `cpusetsize` too small → `EINVAL` (Linux: `len*8 < nr_cpu_ids`)
+///   2. `pid` not found → `ESRCH` (Linux: `find_process_by_pid` returns NULL,
+///      which `sched_getaffinity` maps to `-ESRCH`; negative pids fall into
+///      this case because `find_task_by_vpid` cannot resolve them).
+///   3. `mask` unwritable → `EFAULT` (Linux: late `copy_to_user` failure).
+///      Our stub checks for NULL up front; a real implementation would
+///      catch this on the write.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_getaffinity(
     pid: i32,
     cpusetsize: usize,
     mask: *mut CpuSetT,
 ) -> i32 {
-    if pid < 0 {
+    if cpusetsize < core::mem::size_of::<CpuSetT>() {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if mask.is_null() || cpusetsize < core::mem::size_of::<CpuSetT>() {
-        errno::set_errno(errno::EINVAL);
+    if pid < 0 {
+        // Linux: find_process_by_pid(negative) → NULL → -ESRCH.
+        errno::set_errno(errno::ESRCH);
+        return -1;
+    }
+    if mask.is_null() {
+        // Linux: copy_to_user with bad user pointer → -EFAULT.
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -331,18 +347,36 @@ pub extern "C" fn sched_getaffinity(
 /// Validates the mask (non-NULL, sufficient size, at least one valid CPU bit
 /// set) but does not actually constrain scheduling — our scheduler treats all
 /// online CPUs as eligible.  Returns 0 on success, -1 with errno on failure.
+///
+/// Validation order matches Linux's `SYSCALL_DEFINE3(sched_setaffinity)`
+/// in `kernel/sched/syscalls.c`:
+///   1. `mask` unreadable → `EFAULT` (Linux: `get_user_cpu_mask` calls
+///      `copy_from_user`, which is the first thing the syscall does).
+///   2. `cpusetsize` too small → `EINVAL` (Linux is more forgiving here,
+///      zero-extending undersized masks; we are stricter because our
+///      stub does not zero-pad).
+///   3. `pid` not found → `ESRCH` (Linux: `find_process_by_pid` → NULL →
+///      `-ESRCH`; negative pids fall into this case).
+///   4. Mask has no valid CPU bit → `EINVAL` (Linux: `cpumask_subset`
+///      against `cpus_allowed` returns false).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_setaffinity(
     pid: i32,
     cpusetsize: usize,
     mask: *const CpuSetT,
 ) -> i32 {
-    if pid < 0 {
+    if mask.is_null() {
+        // Linux: copy_from_user with bad user pointer → -EFAULT.
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if cpusetsize < core::mem::size_of::<CpuSetT>() {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if mask.is_null() || cpusetsize < core::mem::size_of::<CpuSetT>() {
-        errno::set_errno(errno::EINVAL);
+    if pid < 0 {
+        // Linux: find_process_by_pid(negative) → NULL → -ESRCH.
+        errno::set_errno(errno::ESRCH);
         return -1;
     }
 
@@ -687,16 +721,22 @@ mod tests {
     }
 
     #[test]
-    fn test_sched_getaffinity_null() {
+    fn test_sched_getaffinity_null_efault() {
+        // Phase 118: NULL mask now returns EFAULT (matches Linux's
+        // copy_to_user failure on a bad user pointer), not EINVAL.
+        errno::set_errno(0);
         let ret = sched_getaffinity(0, 128, core::ptr::null_mut());
         assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
-    fn test_sched_getaffinity_too_small() {
+    fn test_sched_getaffinity_too_small_einval() {
         let mut cpuset = CpuSetT { bits: [0; 16] };
+        errno::set_errno(0);
         let ret = sched_getaffinity(0, 1, &raw mut cpuset); // Too small
         assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
@@ -707,10 +747,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sched_setaffinity_null_einval() {
+    fn test_sched_setaffinity_null_efault() {
+        // Phase 118: NULL mask now returns EFAULT (matches Linux's
+        // copy_from_user failure on a bad user pointer), not EINVAL.
+        errno::set_errno(0);
         let ret = sched_setaffinity(0, 128, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -1434,20 +1477,24 @@ mod tests {
     }
 
     #[test]
-    fn test_sched_getaffinity_negative_pid_einval() {
+    fn test_sched_getaffinity_negative_pid_esrch() {
+        // Phase 118: negative pid now returns ESRCH (matches Linux's
+        // find_process_by_pid(negative) → NULL → -ESRCH path), not EINVAL.
         let mut cpuset = CpuSetT { bits: [0xAA; 16] };
         errno::set_errno(0);
         assert_eq!(
             sched_getaffinity(-1, core::mem::size_of::<CpuSetT>(), &raw mut cpuset),
             -1
         );
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
         // Buffer untouched on validation failure.
         assert_eq!(cpuset.bits[0], 0xAA);
     }
 
     #[test]
-    fn test_sched_setaffinity_negative_pid_einval() {
+    fn test_sched_setaffinity_negative_pid_esrch() {
+        // Phase 118: negative pid now returns ESRCH (matches Linux's
+        // find_process_by_pid(negative) → NULL → -ESRCH path), not EINVAL.
         let mut cpuset = CpuSetT { bits: [0; 16] };
         cpu_set(0, &raw mut cpuset);
         errno::set_errno(0);
@@ -1455,7 +1502,7 @@ mod tests {
             sched_setaffinity(-1, core::mem::size_of::<CpuSetT>(), &raw const cpuset),
             -1
         );
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
     }
 
     // ---- Validation ordering ----
@@ -1578,5 +1625,216 @@ mod tests {
         let mut param = SchedParam { sched_priority: 99 };
         assert_eq!(sched_getparam(0, &raw mut param), 0);
         assert_eq!(param.sched_priority, 0);
+    }
+
+    // -- Phase 118: sched_*affinity validation parity with Linux ---------------
+    //
+    // Linux semantics (kernel/sched/syscalls.c):
+    //   sched_getaffinity: cpusetsize (EINVAL) → pid lookup (ESRCH) →
+    //                      copy_to_user (EFAULT).
+    //   sched_setaffinity: copy_from_user (EFAULT) → pid lookup (ESRCH) →
+    //                      mask validity (EINVAL).
+    //
+    // Buggy callers passing multiple bad arguments at once must see the
+    // Linux-side error, not whichever the original implementation happened
+    // to check first.
+
+    #[test]
+    fn test_getaffinity_phase118_cpusetsize_wins_over_negative_pid() {
+        // (cpusetsize=1, pid=-1): Linux checks len first → EINVAL.
+        let mut cpuset = CpuSetT { bits: [0; 16] };
+        errno::set_errno(0);
+        let ret = sched_getaffinity(-1, 1, &raw mut cpuset);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getaffinity_phase118_cpusetsize_wins_over_null_mask() {
+        // (cpusetsize=0, mask=NULL): Linux checks len first → EINVAL.
+        errno::set_errno(0);
+        let ret = sched_getaffinity(0, 0, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getaffinity_phase118_negative_pid_wins_over_null_mask() {
+        // (pid=-1, mask=NULL, cpusetsize ok): Linux looks up pid before
+        // copy_to_user runs → ESRCH (not EFAULT).
+        errno::set_errno(0);
+        let ret = sched_getaffinity(
+            -1,
+            core::mem::size_of::<CpuSetT>(),
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_getaffinity_phase118_clean_args_succeed() {
+        // After reorder, valid args still succeed and fill the mask.
+        let mut cpuset = CpuSetT { bits: [0xFFu64; 16] };
+        errno::set_errno(0);
+        let ret = sched_getaffinity(
+            0,
+            core::mem::size_of::<CpuSetT>(),
+            &raw mut cpuset,
+        );
+        assert_eq!(ret, 0);
+        // In the host test build only CPU 0 is online.
+        assert_eq!(cpuset.bits[0] & 1, 1);
+    }
+
+    #[test]
+    fn test_getaffinity_phase118_huge_negative_pid_esrch() {
+        // i32::MIN must still resolve to ESRCH, not EINVAL or panic on
+        // arithmetic.
+        let mut cpuset = CpuSetT { bits: [0; 16] };
+        errno::set_errno(0);
+        let ret = sched_getaffinity(
+            i32::MIN,
+            core::mem::size_of::<CpuSetT>(),
+            &raw mut cpuset,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_getaffinity_phase118_no_side_effect_on_efault() {
+        // EFAULT path must not have written to the buffer (mask is NULL
+        // here, so there's no buffer; the assertion is that we returned
+        // -1/EFAULT cleanly without UB or panic).
+        errno::set_errno(0);
+        let ret = sched_getaffinity(
+            0,
+            core::mem::size_of::<CpuSetT>(),
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_setaffinity_phase118_null_mask_wins_over_negative_pid() {
+        // (mask=NULL, pid=-1): Linux copy_from_user fails first → EFAULT.
+        errno::set_errno(0);
+        let ret = sched_setaffinity(
+            -1,
+            core::mem::size_of::<CpuSetT>(),
+            core::ptr::null(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_setaffinity_phase118_null_mask_wins_over_small_size() {
+        // (mask=NULL, cpusetsize=1): Linux copy_from_user fails before
+        // any len-related logic kicks in → EFAULT.
+        errno::set_errno(0);
+        let ret = sched_setaffinity(0, 1, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_setaffinity_phase118_size_wins_over_negative_pid() {
+        // (mask valid, cpusetsize=1, pid=-1): in our strict stub the
+        // size check fires before the pid lookup → EINVAL.
+        let cpuset = CpuSetT { bits: [1; 16] };
+        errno::set_errno(0);
+        let ret = sched_setaffinity(-1, 1, &raw const cpuset);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_setaffinity_phase118_pid_wins_over_empty_mask() {
+        // (pid=-1, all-zero mask, ok size): Linux pid lookup runs before
+        // cpumask validity → ESRCH (not EINVAL).
+        let cpuset = CpuSetT { bits: [0; 16] };
+        errno::set_errno(0);
+        let ret = sched_setaffinity(
+            -1,
+            core::mem::size_of::<CpuSetT>(),
+            &raw const cpuset,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_setaffinity_phase118_clean_args_still_succeed() {
+        // After reorder, valid args still succeed.
+        let mut cpuset = CpuSetT { bits: [0; 16] };
+        cpu_set(0, &raw mut cpuset);
+        errno::set_errno(0);
+        let ret = sched_setaffinity(
+            0,
+            core::mem::size_of::<CpuSetT>(),
+            &raw const cpuset,
+        );
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_setaffinity_phase118_huge_negative_pid_esrch() {
+        let cpuset = CpuSetT { bits: [1; 16] };
+        errno::set_errno(0);
+        let ret = sched_setaffinity(
+            i32::MIN,
+            core::mem::size_of::<CpuSetT>(),
+            &raw const cpuset,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_getaffinity_phase118_glibc_probe_workflow() {
+        // glibc's CPU_COUNT helper does:
+        //   sched_getaffinity(0, sizeof(cpu_set_t), &set)
+        // and reads back the bits. After Phase 118 the happy path is
+        // unchanged.
+        let mut cpuset = CpuSetT { bits: [0; 16] };
+        errno::set_errno(0);
+        let ret = sched_getaffinity(
+            0,
+            core::mem::size_of::<CpuSetT>(),
+            &raw mut cpuset,
+        );
+        assert_eq!(ret, 0);
+        // At least CPU 0 must be set.
+        assert!(cpuset.bits[0] & 1 != 0);
+    }
+
+    #[test]
+    fn test_setaffinity_phase118_recovery_after_esrch() {
+        // After a buggy-caller ESRCH on (pid=-1), the same mask used with
+        // pid=0 must succeed — i.e. the failed call left no sticky state.
+        let cpuset = CpuSetT { bits: [1; 16] };
+        errno::set_errno(0);
+        assert_eq!(
+            sched_setaffinity(
+                -1,
+                core::mem::size_of::<CpuSetT>(),
+                &raw const cpuset,
+            ),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+
+        errno::set_errno(0);
+        assert_eq!(
+            sched_setaffinity(
+                0,
+                core::mem::size_of::<CpuSetT>(),
+                &raw const cpuset,
+            ),
+            0
+        );
     }
 }

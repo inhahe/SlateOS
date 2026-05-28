@@ -152,15 +152,33 @@ static mut RLIMITS: [Rlimit; RLIMIT_NLIMITS] = {
 ///
 /// Stores the soft and hard limits for `resource` in `*rlp`.
 /// Returns 0 on success, -1 on error.
+///
+/// Validation order matches Linux's `SYSCALL_DEFINE2(getrlimit)`
+/// (`kernel/sys.c`): the kernel calls `do_prlimit(current, resource,
+/// NULL, &value)` *first* — which validates `resource >= RLIM_NLIMITS`
+/// → `-EINVAL` — and only then does `copy_to_user(rlim, &value, ...)`,
+/// which can fail with `-EFAULT`. A buggy caller passing both a bad
+/// resource ordinal and a NULL pointer therefore observes `EINVAL`
+/// on Linux, not `EFAULT`. We pin that same order so userspace
+/// (libc's `getrlimit(3)` wrapper, Python's `resource.getrlimit`)
+/// sees identical errno on either malformed-input combination.
+///
+/// `setrlimit` uses the opposite order (EFAULT before EINVAL)
+/// because Linux's `SYSCALL_DEFINE2(setrlimit)` does
+/// `copy_from_user(&new_rlim, ...)` before `do_prlimit` — so the
+/// asymmetry in this file mirrors Linux's asymmetric kernel code.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
-    if rlp.is_null() {
-        errno::set_errno(errno::EFAULT);
+    // Linux validates the resource ordinal inside do_prlimit BEFORE
+    // ever touching the userspace pointer (copy_to_user is the last
+    // step, on the success path). Match that ordering.
+    if resource < 0 || (resource as usize) >= RLIMIT_NLIMITS {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
 
-    if resource < 0 || (resource as usize) >= RLIMIT_NLIMITS {
-        errno::set_errno(errno::EINVAL);
+    if rlp.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -1235,5 +1253,188 @@ mod tests {
             crate::fdtable::MAX_FDS as u64,
             "RLIMIT_NOFILE hard must match fdtable::MAX_FDS"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 112 — getrlimit validation order parity with Linux
+    //
+    // Linux's `SYSCALL_DEFINE2(getrlimit)` calls `do_prlimit` (which
+    // returns -EINVAL on a bad resource ordinal) BEFORE `copy_to_user`
+    // (which is the only path to -EFAULT). A buggy caller passing both
+    // a bad resource and a NULL pointer therefore observes EINVAL on
+    // Linux, not EFAULT.
+    //
+    // setrlimit is intentionally NOT reordered: Linux's
+    // `SYSCALL_DEFINE2(setrlimit)` does `copy_from_user` first, so
+    // EFAULT-before-EINVAL is the correct asymmetry for that syscall.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_getrlimit_phase112_einval_wins_over_efault_neg_resource() {
+        // Negative resource + NULL pointer: Linux's do_prlimit returns
+        // EINVAL before any copy_to_user. We now do too.
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = getrlimit(-1, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_einval_wins_over_efault_high_resource() {
+        // Resource above RLIMIT_NLIMITS + NULL pointer -> EINVAL.
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = getrlimit(9999, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_einval_wins_at_nlimits_with_null() {
+        // The first invalid index is exactly RLIMIT_NLIMITS (16).
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = getrlimit(RLIMIT_NLIMITS as i32, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_efault_only_when_resource_valid() {
+        // Valid resource + NULL pointer: resource check passes -> EFAULT.
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = getrlimit(RLIMIT_STACK, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_intmin_resource_with_null_is_einval() {
+        // Catastrophic resource value: must report EINVAL, not EFAULT
+        // and not panic on the `as usize` cast (we check `< 0` first).
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = getrlimit(i32::MIN, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_intmax_resource_with_null_is_einval() {
+        // i32::MAX is > RLIMIT_NLIMITS, so resource check fails first.
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = getrlimit(i32::MAX, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_does_not_dereference_null_on_einval() {
+        // Sanity check: passing NULL with a bad resource must NOT
+        // attempt to write through the NULL pointer. The reorder pins
+        // this: the resource check returns before the write.
+        reset_global_state();
+        errno::set_errno(0);
+        // If the implementation regressed to "check pointer last" or
+        // forgot to early-return, this would dereference NULL and
+        // segfault on a hosted target — which the test runner would
+        // catch as an abort.
+        let ret = getrlimit(-42, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_setrlimit_keeps_efault_before_einval() {
+        // setrlimit MUST keep the inverted order (EFAULT before EINVAL)
+        // because Linux's setrlimit does copy_from_user before
+        // do_prlimit. Pin that: bad resource + NULL pointer -> EFAULT.
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = setrlimit(-1, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_setrlimit_efault_at_nlimits_too() {
+        // Same asymmetry confirmation: invalid resource at the boundary
+        // + NULL pointer -> EFAULT (not EINVAL) for setrlimit.
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = setrlimit(RLIMIT_NLIMITS as i32, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_recovery_after_einval() {
+        // After a bad-resource EINVAL, a valid call still returns 0
+        // and rewrites errno (errno is not sticky on success).
+        reset_global_state();
+        errno::set_errno(0);
+        let r1 = getrlimit(9999, core::ptr::null_mut());
+        assert_eq!(r1, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let r2 = getrlimit(RLIMIT_CPU, &mut rl);
+        assert_eq!(r2, 0);
+        // Don't assert errno here — POSIX permits successful calls to
+        // leave errno alone; only the negative-return path must set
+        // errno to a meaningful value.
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_does_not_mutate_state_on_einval() {
+        // Bad resource must not perturb the global RLIMITS array, even
+        // when the pointer is also NULL.
+        reset_global_state();
+        let mut before = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_STACK, &mut before), 0);
+
+        errno::set_errno(0);
+        let ret = getrlimit(-1, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let mut after = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(getrlimit(RLIMIT_STACK, &mut after), 0);
+        assert_eq!(after.rlim_cur, before.rlim_cur);
+        assert_eq!(after.rlim_max, before.rlim_max);
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_python_resource_module_workflow() {
+        // CPython's `resource.getrlimit(resource)` calls
+        // `getrlimit(resource, &rl)` and raises ValueError on EINVAL,
+        // OSError on other errnos. A buggy script passing
+        // `resource.getrlimit(-1)` against a freshly-zeroed pointer
+        // would, pre-reorder, surface as OSError(EFAULT) — opaque.
+        // Post-reorder it surfaces as ValueError(EINVAL), matching
+        // CPython's behaviour against the real Linux kernel.
+        reset_global_state();
+        errno::set_errno(0);
+        let ret = getrlimit(-1, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getrlimit_phase112_buggy_caller_passes_huge_unsigned() {
+        // A C caller that does `getrlimit((int)0xFFFFFFFFu, NULL)`
+        // (which sign-extends to -1) hits the resource check first and
+        // sees EINVAL, the same as on Linux. Confirms we don't trip
+        // the EFAULT branch on this common typo.
+        reset_global_state();
+        errno::set_errno(0);
+        #[allow(clippy::cast_possible_wrap)]
+        let bogus_resource = 0xFFFF_FFFF_u32 as i32; // = -1
+        let ret = getrlimit(bogus_resource, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 }

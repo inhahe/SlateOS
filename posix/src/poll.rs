@@ -201,6 +201,19 @@ pub extern "C" fn fd_set_isset(fd: i32, set: *const FdSet) -> i32 {
 ///
 /// Returns the number of fds with non-zero `revents`, or -1 on error.
 ///
+/// # Linux semantics
+///
+/// Errno precedence (matches `fs/select.c::do_sys_poll`):
+///
+/// 1. `nfds > RLIMIT_NOFILE` → EINVAL.  Linux rejects oversized nfds
+///    **before** touching the `fds` pointer, so this check fires even
+///    when `fds == NULL`.  Our equivalent of `RLIMIT_NOFILE` is
+///    `fdtable::MAX_FDS` (256) — the hard cap on the fd table.
+/// 2. `fds == NULL` with `nfds > 0` → EFAULT (Linux's `copy_from_user`
+///    fault during the first slot copy).
+/// 3. Per-entry: `pfd.fd < 0` is silently skipped (revents=0); an fd
+///    not in the table sets `POLLNVAL` on that slot only.
+///
 /// # Safety
 ///
 /// `fds` must point to an array of at least `nfds` `Pollfd` entries.
@@ -208,6 +221,16 @@ pub extern "C" fn fd_set_isset(fd: i32, set: *const FdSet) -> i32 {
 pub unsafe extern "C" fn poll(fds: *mut Pollfd, nfds: NfdsT, timeout: i32) -> i32 {
     // Sleep interval: 10ms (balance between responsiveness and CPU).
     const POLL_INTERVAL_NS: u64 = 10_000_000;
+
+    // Phase 156: oversized nfds is EINVAL and is checked first — Linux's
+    // `do_sys_poll` (fs/select.c) rejects `nfds > rlimit(RLIMIT_NOFILE)`
+    // before any `copy_from_user`, so the EINVAL fires regardless of
+    // whether `fds` is NULL.  Skipping this guard would let an attacker
+    // drive the iteration loop into a multi-billion-step or OOB read.
+    if nfds > fdtable::MAX_FDS as NfdsT {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
 
     if fds.is_null() && nfds > 0 {
         errno::set_errno(errno::EFAULT);
@@ -1481,5 +1504,271 @@ mod tests {
             fdtable::MAX_FDS,
             "Phase 155 clamp assumes FD_SETSIZE == fdtable::MAX_FDS"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 156 — `poll(fds, nfds > MAX_FDS, ...)` is EINVAL.
+    //
+    // Linux's `do_sys_poll` (fs/select.c) rejects oversized nfds
+    // **before** touching the `fds` pointer:
+    //
+    //     if (nfds > rlimit(RLIMIT_NOFILE))
+    //         return -EINVAL;
+    //
+    // Our equivalent of `RLIMIT_NOFILE` is `fdtable::MAX_FDS` (256) —
+    // the hard cap on our static fd table.  We previously had no upper
+    // bound on nfds, which would let an attacker drive the iteration
+    // loop to billions of steps and read past the `fds` array.
+    //
+    // All tests below use a `{0,0}` non-blocking timeout (`timeout==0`)
+    // and either NULL fds (when nfds==0) or a small valid array, so the
+    // success path never crosses syscall0 / fdtable lookups on the host
+    // build.
+    // -----------------------------------------------------------------
+
+    // -- Per-error-class --------------------------------------------------
+
+    /// `nfds == MAX_FDS + 1` → EINVAL.
+    #[test]
+    fn test_poll_nfds_one_past_max_fds_einval_phase156() {
+        crate::errno::set_errno(0);
+        // Use a non-null but unused buffer — the EINVAL fires before any
+        // entry is dereferenced.
+        let mut pfd = Pollfd { fd: -1, events: 0, revents: 0 };
+        let ret = unsafe {
+            poll(
+                &raw mut pfd,
+                (fdtable::MAX_FDS as NfdsT) + 1,
+                0,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// `nfds == NfdsT::MAX` → EINVAL (never iterates).
+    #[test]
+    fn test_poll_nfds_max_value_einval_phase156() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { poll(core::ptr::null_mut(), NfdsT::MAX, 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// `nfds == MAX_FDS` is the largest accepted value — must not EINVAL.
+    /// Uses `fd: -1` in every slot so the inner loop silently skips them,
+    /// no fdtable lookup occurs.
+    #[test]
+    fn test_poll_nfds_equal_to_max_fds_accepted_phase156() {
+        crate::errno::set_errno(0);
+        // Heap is unavailable in our test config; use a stack array of
+        // MAX_FDS = 256 entries, each marked `fd: -1` so they are
+        // silently skipped by the poll loop.
+        let mut arr = [Pollfd { fd: -1, events: 0, revents: 0 };
+            fdtable::MAX_FDS];
+        let ret = unsafe {
+            poll(arr.as_mut_ptr(), fdtable::MAX_FDS as NfdsT, 0)
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    // -- Ordering matrix --------------------------------------------------
+
+    /// Phase 156: EINVAL precedes the NULL-pointer EFAULT — the nfds
+    /// check fires even when `fds == NULL`.  This is the inversion of
+    /// the pre-Phase-156 behaviour, which would have hit EFAULT first
+    /// (since no EINVAL guard existed).
+    #[test]
+    fn test_poll_einval_beats_efault_phase156() {
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            poll(
+                core::ptr::null_mut(),
+                (fdtable::MAX_FDS as NfdsT) + 1,
+                0,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "EINVAL must beat EFAULT in the Linux precedence"
+        );
+    }
+
+    /// EFAULT still fires when nfds is in-range but fds is NULL.
+    #[test]
+    fn test_poll_in_range_nfds_null_fds_efault_phase156() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { poll(core::ptr::null_mut(), 1, 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// `nfds == 0` + NULL fds is fine (matches Linux: nothing to copy).
+    #[test]
+    fn test_poll_zero_nfds_null_fds_ok_phase156() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { poll(core::ptr::null_mut(), 0, 0) };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    // -- Workflow ---------------------------------------------------------
+
+    /// Typical caller polling a single fd with `fd: -1` (the standard
+    /// "ignore me" sentinel) — the slot is silently skipped, return 0.
+    #[test]
+    fn test_poll_single_negative_fd_skipped_phase156() {
+        crate::errno::set_errno(0);
+        let mut pfd = Pollfd { fd: -1, events: POLLIN, revents: 0xBEEF_u16 as i16 };
+        let ret = unsafe { poll(&raw mut pfd, 1, 0) };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+        // Sentinel value was overwritten to 0 — confirms the loop ran.
+        assert_eq!(pfd.revents, 0);
+    }
+
+    // -- Buggy-caller -----------------------------------------------------
+
+    /// Caller passes a wildly oversized nfds (e.g. 1 GiB), which would
+    /// previously have iterated unboundedly.  Must return EINVAL
+    /// promptly without OOB reads.
+    #[test]
+    fn test_poll_gigabyte_nfds_einval_phase156() {
+        crate::errno::set_errno(0);
+        // Non-null but never read because EINVAL fires first.
+        let mut pfd = Pollfd { fd: 0, events: 0, revents: 0 };
+        let ret = unsafe {
+            poll(
+                &raw mut pfd,
+                1_073_741_824, // 1 GiB
+                0,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Sign-extended -1 reinterpreted as `NfdsT::MAX` from a C caller
+    /// that passes `(unsigned long)-1` — still EINVAL.
+    #[test]
+    fn test_poll_negative_one_unsigned_einval_phase156() {
+        crate::errno::set_errno(0);
+        let n: NfdsT = (-1i64) as NfdsT; // 0xFFFF_FFFF_FFFF_FFFF
+        let ret = unsafe { poll(core::ptr::null_mut(), n, 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- Recovery / no-side-effect loop -----------------------------------
+
+    /// Re-issuing poll after the EINVAL path with a sane request must
+    /// succeed (errno isn't latched).
+    #[test]
+    fn test_poll_recover_after_einval_phase156() {
+        crate::errno::set_errno(0);
+        let _ = unsafe { poll(core::ptr::null_mut(), NfdsT::MAX, 0) };
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        crate::errno::set_errno(0);
+        let mut pfd = Pollfd { fd: -1, events: 0, revents: 0 };
+        let ret = unsafe { poll(&raw mut pfd, 1, 0) };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    /// The EINVAL path must not touch the `fds` buffer — verify a
+    /// sentinel value in the caller's Pollfd survives the rejected
+    /// call.
+    #[test]
+    fn test_poll_einval_does_not_touch_fds_buffer_phase156() {
+        crate::errno::set_errno(0);
+        let mut pfd = Pollfd { fd: 99, events: 0xAAAA_u16 as i16, revents: 0x5555_u16 as i16 };
+        let ret = unsafe {
+            poll(
+                &raw mut pfd,
+                (fdtable::MAX_FDS as NfdsT) + 1,
+                0,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // Caller's buffer was not touched (no loop iterations ran).
+        assert_eq!(pfd.fd, 99);
+        assert_eq!(pfd.events, 0xAAAA_u16 as i16);
+        assert_eq!(pfd.revents, 0x5555_u16 as i16);
+    }
+
+    // -- Sentinel ---------------------------------------------------------
+
+    /// Explicit sentinel: the pre-Phase-156 behaviour was to accept
+    /// arbitrary nfds (no upper-bound guard).  If a future regression
+    /// removes the EINVAL guard, this fails loudly.
+    #[test]
+    fn test_poll_oversize_nfds_no_longer_unchecked_phase156() {
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            poll(
+                core::ptr::null_mut(),
+                (fdtable::MAX_FDS as NfdsT) + 1,
+                0,
+            )
+        };
+        assert_eq!(ret, -1, "oversize nfds must be rejected");
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "oversize nfds must set EINVAL (not EFAULT and not 0)"
+        );
+    }
+
+    // -- Cross-checks -----------------------------------------------------
+
+    /// `ppoll` delegates to `poll` so the EINVAL guard fires there too.
+    #[test]
+    fn test_ppoll_inherits_poll_nfds_einval_phase156() {
+        crate::errno::set_errno(0);
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = unsafe {
+            ppoll(
+                core::ptr::null_mut(),
+                (fdtable::MAX_FDS as NfdsT) + 1,
+                &raw const ts,
+                core::ptr::null(),
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// `ppoll(NULL fds, nfds=0)` still succeeds with a {0,0} timeout.
+    #[test]
+    fn test_ppoll_zero_nfds_ok_phase156() {
+        crate::errno::set_errno(0);
+        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ret = unsafe {
+            ppoll(
+                core::ptr::null_mut(),
+                0,
+                &raw const ts,
+                core::ptr::null(),
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    /// Phase 156 cap equals `fdtable::MAX_FDS` (which is also the same
+    /// constant Phase 155 uses for `FD_SETSIZE`).  If MAX_FDS ever
+    /// changes, this surfaces the assumption.
+    #[test]
+    fn test_poll_nfds_cap_is_fdtable_max_fds_phase156() {
+        // Sanity-check: MAX_FDS is the same constant used by the
+        // Phase 156 guard above.
+        assert_eq!(fdtable::MAX_FDS, 256);
+        // And it equals FD_SETSIZE (Phase 155 invariant).
+        assert_eq!(fdtable::MAX_FDS, FD_SETSIZE);
     }
 }

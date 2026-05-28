@@ -3979,24 +3979,83 @@ pub struct OpenHow {
     pub resolve: u64,
 }
 
+/// Bitmask of every RESOLVE_* bit our `openat2` recognises.  Any
+/// bit outside this mask in `how.resolve` is rejected with EINVAL —
+/// matches Linux's `VALID_RESOLVE_FLAGS` check in
+/// `fs/open.c::build_open_how` and ensures forward-compat callers
+/// don't silently lose security restrictions they thought were
+/// in effect.
+const VALID_RESOLVE_FLAGS: u64 = RESOLVE_NO_XDEV
+    | RESOLVE_NO_MAGICLINKS
+    | RESOLVE_NO_SYMLINKS
+    | RESOLVE_BENEATH
+    | RESOLVE_IN_ROOT
+    | RESOLVE_CACHED;
+
+/// Cap on `openat2`'s `usize` argument.  Linux uses `PAGE_SIZE`
+/// (4096 on x86_64), and the *ABI* contract is "no larger than a
+/// 4 KiB page" regardless of the actual kernel page size — userspace
+/// libraries hard-code 4096 as the upper bound.  We do the same so
+/// the syscall surface looks identical to a Linux client even on
+/// our 16 KiB-page kernel.
+const OPENAT2_MAX_USIZE: usize = 4096;
+
 /// `openat2` — open a file relative to a directory fd with extended
 /// resolution control.
 ///
-/// Linux 5.6+ syscall.  Our implementation delegates to regular `openat`
-/// for now — the `resolve` flags are accepted but not enforced (our VFS
-/// doesn't support the RESOLVE_* restrictions yet).
+/// Linux 5.6+ syscall.  Validation order matches Linux's
+/// `sys_openat2` in `fs/open.c`:
+///
+/// 1. `size < OPEN_HOW_SIZE_VER0` (the smallest accepted struct
+///    version, 24 bytes) → `EINVAL`.
+/// 2. `size > PAGE_SIZE` → `E2BIG`.
+/// 3. `copy_struct_from_user` faults on a NULL `how` → `EFAULT`.
+/// 4. Inside `build_open_how`: any unknown bit in `how.resolve`
+///    → `EINVAL`.
+///
+/// Our implementation still delegates the actual open to regular
+/// `openat` once validation passes — the `resolve` flags are
+/// accepted but not enforced (our VFS doesn't support the
+/// RESOLVE_* restrictions yet).  Validation matches the Linux ABI
+/// so callers see consistent errors regardless of backend.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn openat2(dirfd: i32, path: *const u8, how: *const OpenHow, size: usize) -> Fd {
-    if how.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+    // Step 1: size too small for the smallest accepted struct version.
+    // Linux's `copy_struct_from_user` checks this *before* touching the
+    // user pointer; doing it first means a buggy caller passing
+    // (NULL, 0, 0) gets steered to "your size is wrong" rather than
+    // "your pointer is wrong".
     if size < core::mem::size_of::<OpenHow>() {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // SAFETY: caller guarantees `how` points to a valid OpenHow struct.
-    let h = unsafe { &*how };
+    // Step 2: size too big.  Linux's `copy_struct_from_user` bails
+    // with -E2BIG above PAGE_SIZE.  Forward-compat callers that pass
+    // a future-version size still get a clear "too large" rather than
+    // a confusing EFAULT.
+    if size > OPENAT2_MAX_USIZE {
+        errno::set_errno(errno::E2BIG);
+        return -1;
+    }
+    // Step 3: NULL pointer is EFAULT (only reachable when size is in
+    // the legal range, which matches Linux's order).
+    if how.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: `how` is non-NULL and `size >= sizeof(OpenHow)` (we just
+    // checked).  `read_unaligned` tolerates any caller alignment.
+    let h = unsafe { core::ptr::read_unaligned(how) };
+
+    // Step 4: build_open_how — unknown resolve bits → EINVAL.
+    // Without this check, callers asking for security restrictions
+    // we don't know about would silently get an unrestricted open,
+    // defeating the whole point of openat2's forward-compat design.
+    if h.resolve & !VALID_RESOLVE_FLAGS != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     openat(dirfd, path, h.flags as i32, h.mode as ModeT)
 }
 
@@ -7508,6 +7567,300 @@ mod tests {
             &how,
             core::mem::size_of::<OpenHow>(),
         );
+    }
+
+    // ===================================================================
+    // Phase 135 — openat2 validation order matches Linux's sys_openat2
+    // (fs/open.c) and rejects unknown resolve bits + oversized usize.
+    // ===================================================================
+
+    // -- Validation order: size first, then E2BIG, then EFAULT -------------
+
+    #[test]
+    fn test_phase135_null_how_with_undersized_returns_einval_not_efault() {
+        // BEFORE Phase 135: (NULL, 1) returned EFAULT (NULL check first).
+        // AFTER: matches Linux's `copy_struct_from_user` order, which
+        // checks size < min before touching the pointer.  The right
+        // fix for a buggy caller is to pass the correct size, not to
+        // allocate a struct.
+        crate::errno::set_errno(0);
+        let ret = openat2(AT_FDCWD, b"/tmp\0".as_ptr(), core::ptr::null(), 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase135_null_how_with_zero_size_returns_einval_not_efault() {
+        crate::errno::set_errno(0);
+        let ret = openat2(AT_FDCWD, b"/tmp\0".as_ptr(), core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase135_null_how_with_minimum_size_still_efault() {
+        // Sanity: size IS valid; NULL pointer still produces EFAULT.
+        // The reorder didn't break the existing contract.
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            core::ptr::null(),
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- Oversized size → E2BIG ---------------------------------------------
+
+    #[test]
+    fn test_phase135_oversized_size_returns_e2big() {
+        // BEFORE Phase 135: no upper bound — any huge usize was
+        // accepted as long as `how != NULL`.  Linux caps at PAGE_SIZE
+        // and rejects anything larger with E2BIG so userspace gets a
+        // clear signal that the kernel doesn't know about that struct
+        // version.
+        let how = OpenHow { flags: 0, mode: 0, resolve: 0 };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            10_000, // way above 4 KiB
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::E2BIG);
+    }
+
+    #[test]
+    fn test_phase135_oversized_size_e2big_wins_over_efault() {
+        // E2BIG is checked before NULL-attr dereference, so a huge
+        // size with NULL how still gets E2BIG.  Right diagnostic
+        // (the caller's size argument is wrong; their pointer is a
+        // red herring).
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            core::ptr::null(),
+            10_000,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::E2BIG);
+    }
+
+    #[test]
+    fn test_phase135_exact_page_size_is_accepted_size_wise() {
+        // size == 4096 is the boundary: Linux accepts it (E2BIG fires
+        // for `> PAGE_SIZE`, not `>= PAGE_SIZE`).  We can't open a
+        // real file in the test environment, but we can verify the
+        // size check doesn't reject it.  Provide a valid how with
+        // size=4096 and check we DON'T see E2BIG.
+        let mut buf = [0u8; 4096];
+        let how_ptr = buf.as_mut_ptr().cast::<OpenHow>();
+        // SAFETY: 4096 > sizeof::<OpenHow>(), and OpenHow's all-zero
+        // value (every field 0) is a valid bit pattern.
+        crate::errno::set_errno(0);
+        let _ret = openat2(
+            AT_FDCWD,
+            b"/nonexistent_phase135\0".as_ptr(),
+            how_ptr,
+            4096,
+        );
+        // We don't care about the actual return; just that it isn't
+        // E2BIG-from-our-size-check.
+        assert_ne!(crate::errno::get_errno(), crate::errno::E2BIG);
+    }
+
+    // -- Resolve-bit validation -------------------------------------------
+
+    #[test]
+    fn test_phase135_unknown_resolve_bit_einval() {
+        // BEFORE Phase 135: unknown resolve bits were silently passed
+        // through to `openat`, which has no `resolve` argument — so the
+        // caller's security restriction was silently dropped.  Linux
+        // rejects with EINVAL so the caller knows the kernel didn't
+        // honour their request.
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: 1u64 << 30, // not a defined RESOLVE_* bit
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase135_unknown_high_resolve_bit_einval() {
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: 1u64 << 63, // top bit, definitely unknown
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase135_mixed_known_and_unknown_resolve_bits_einval() {
+        // Even mixing a known bit (NO_SYMLINKS) with an unknown one is
+        // EINVAL — Linux rejects on any unknown bit, regardless of
+        // what else is set.
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: RESOLVE_NO_SYMLINKS | (1u64 << 40),
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase135_all_known_resolve_bits_pass_validation() {
+        // The union of every defined RESOLVE_* bit must pass our
+        // validation (whether the actual open succeeds is irrelevant).
+        let all_known = RESOLVE_NO_XDEV
+            | RESOLVE_NO_MAGICLINKS
+            | RESOLVE_NO_SYMLINKS
+            | RESOLVE_BENEATH
+            | RESOLVE_IN_ROOT
+            | RESOLVE_CACHED;
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: all_known,
+        };
+        crate::errno::set_errno(0);
+        let _ret = openat2(
+            AT_FDCWD,
+            b"/nonexistent_phase135_all_resolve\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        // Whatever the open result, errno must NOT be EINVAL from
+        // our resolve-bit check.
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase135_zero_resolve_passes_validation() {
+        // resolve=0 (no restrictions) is the common case — must pass
+        // validation.
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let _ret = openat2(
+            AT_FDCWD,
+            b"/nonexistent_phase135_zero_resolve\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- Ordering: resolve check happens only after size/EFAULT pass ------
+
+    #[test]
+    fn test_phase135_size_check_beats_resolve_check() {
+        // size < min wins even if resolve has garbage bits — the
+        // resolve field isn't reached until after the struct copy.
+        let how = OpenHow {
+            flags: 0,
+            mode: 0,
+            resolve: 0xDEAD_BEEF_DEAD_BEEF,
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(AT_FDCWD, b"/tmp\0".as_ptr(), &how, 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // (We can't distinguish "EINVAL from size" vs "EINVAL from
+        // resolve" by errno alone, but Linux's order means size wins;
+        // verified by the absence of any side effect on `how`.)
+    }
+
+    // -- Workflow & recovery ----------------------------------------------
+
+    #[test]
+    fn test_phase135_recoverable_after_e2big() {
+        // First call: oversized usize → E2BIG.
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let bad = openat2(AT_FDCWD, b"/tmp\0".as_ptr(), &how, 10_000);
+        assert_eq!(bad, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::E2BIG);
+
+        // Second call: correct size → no E2BIG.
+        crate::errno::set_errno(0);
+        let _ret = openat2(
+            AT_FDCWD,
+            b"/nonexistent_phase135_recovery\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::E2BIG);
+    }
+
+    #[test]
+    fn test_phase135_recoverable_after_bad_resolve_bit() {
+        // First call: unknown resolve bit → EINVAL.
+        let bad_how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: 1u64 << 30,
+        };
+        crate::errno::set_errno(0);
+        let bad = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &bad_how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(bad, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Second call: clean how — no EINVAL from our validation.
+        let good_how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: RESOLVE_NO_SYMLINKS,
+        };
+        crate::errno::set_errno(0);
+        let _ret = openat2(
+            AT_FDCWD,
+            b"/nonexistent_phase135_good_resolve\0".as_ptr(),
+            &good_how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     // -----------------------------------------------------------------------

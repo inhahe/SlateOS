@@ -1902,21 +1902,45 @@ static mut TIMER_TABLE: [Option<Itimerspec>; MAX_TIMERS] = [None; MAX_TIMERS];
 ///
 /// Allocates a timer ID and stores it in `*timerid`.  The timer
 /// never actually fires (no signal delivery), but the API succeeds.
+///
+/// # Linux validation order
+///
+/// `kernel/time/posix-timers.c::sys_timer_create` →
+/// `do_timer_create`:
+///
+/// 1. `copy_from_user(&event, timer_event_spec, sizeof(event))` if
+///    `timer_event_spec` non-null → `EFAULT` (user copy fail)
+/// 2. `posix_clocks[which_clock]` unavailable → `EINVAL`
+/// 3. `event->sigev_notify` unrecognised → `EINVAL`
+/// 4. `posix_timer_add(new_timer)` allocates the timer slot.
+/// 5. `copy_to_user(created_timer_id, ...)` → `EFAULT` (which
+///    destroys the just-allocated timer before returning).
+///
+/// **Phase 147**: pre-Phase-147 we returned `EINVAL` when `timerid`
+/// was NULL.  Linux's NULL-`timerid` path goes through
+/// `copy_to_user`, which returns `EFAULT`.  Fix: change the errno on
+/// the NULL-`timerid` path to `EFAULT`, keeping its position after
+/// the clock and `sevp` checks (Linux only reaches the `copy_to_user`
+/// after step 3).
+///
+/// We do NOT simulate the "allocate-then-destroy" cycle that Linux
+/// performs between steps 4 and 5 — the slot allocation is not
+/// observable on the failure path, so eliding it is behaviourally
+/// equivalent.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_create(
     clockid: ClockidT,
     sevp: *const Sigevent,
     timerid: *mut TimerT,
 ) -> i32 {
-    // Linux validates the clock ID first.  Unknown clocks yield EINVAL
-    // before the kernel touches sevp or timerid.  Match that ordering.
+    // Step 2: clock validation → EINVAL.  (Linux's step 1 — sevp
+    // copy_from_user EFAULT — isn't simulated; we deref sevp directly.)
     if !is_valid_clock(clockid) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // If sevp is non-null, sigev_notify must be one of the recognised
-    // notification methods.  A null sevp is treated as SIGEV_SIGNAL with
-    // SIGALRM, per POSIX.
+    // Step 3: sigev_notify validation → EINVAL.  A null sevp is
+    // treated as SIGEV_SIGNAL with SIGALRM, per POSIX.
     if !sevp.is_null() {
         // SAFETY: caller asserts sevp points to a valid Sigevent.  We
         // only read the sigev_notify field; we do not dereference any
@@ -1927,12 +1951,15 @@ pub extern "C" fn timer_create(
             return -1;
         }
     }
+    // Step 5: NULL `timerid` → EFAULT.  Linux's `copy_to_user` would
+    // segfault on a NULL destination and return EFAULT.  Phase 147
+    // fix: pre-Phase-147 we returned EINVAL here.
     if timerid.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
-    // Find a free slot.
+    // Step 4: allocate a slot.  Find a free entry.
     // SAFETY: single-threaded access by convention.
     let table = unsafe { core::ptr::addr_of_mut!(TIMER_TABLE).as_mut() };
     let Some(table) = table else {
@@ -4152,13 +4179,17 @@ mod tests {
         timer_delete(id2);
     }
 
+    /// Phase 147: NULL `timerid` returns EFAULT, not EINVAL.  Linux's
+    /// `sys_timer_create` reaches `copy_to_user` only after clock and
+    /// sevp validation; a NULL destination there yields EFAULT.
+    /// Renamed from `test_timer_create_null_timerid`.
     #[test]
-    fn test_timer_create_null_timerid() {
+    fn test_timer_create_null_timerid_efault_phase147() {
         reset_timers();
         crate::errno::set_errno(0);
         let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -4449,6 +4480,295 @@ mod tests {
         let ret2 = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret2, 0);
         assert_eq!(id, 0, "no allocation should have happened on the rejected call");
+        timer_delete(id);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 147: timer_create returns EFAULT (not EINVAL) on NULL
+    // `timerid`, matching Linux's `copy_to_user` failure path.
+    // Validation order:
+    //
+    //   1. clock validation        → EINVAL
+    //   2. sigev_notify validation → EINVAL  (only if sevp non-null)
+    //   3. timerid NULL            → EFAULT  (Phase 147 fix:
+    //      pre-Phase-147 returned EINVAL)
+    //
+    // Linux additionally allocates a timer slot between steps 2 and
+    // 3 (`posix_timer_add`) and destroys it on the EFAULT path; we
+    // skip that round-trip since it's not externally observable.
+    // ---------------------------------------------------------------
+
+    // -- per-error-class --
+
+    /// Per-error-class: clock-id failure with NULL `timerid` and
+    /// NULL `sevp` still returns EINVAL (clock check fires first).
+    #[test]
+    fn test_timer_create_bad_clock_einval_phase147() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        let ret = timer_create(0x4243, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Per-error-class: bad sigev_notify with NULL `timerid` still
+    /// returns EINVAL (sigev_notify check fires before timerid).
+    #[test]
+    fn test_timer_create_bad_sigev_notify_einval_phase147() {
+        reset_timers();
+        let sev = Sigevent {
+            sigev_value: 0,
+            sigev_signo: 0,
+            sigev_notify: 99,
+            _pad: [0u8; 48],
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_create(CLOCK_REALTIME, &raw const sev, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Per-error-class: NULL `timerid` with valid clock and NULL
+    /// `sevp` returns EFAULT — the Phase 147 fix.
+    #[test]
+    fn test_timer_create_null_timerid_valid_clock_efault_phase147() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// Per-error-class: NULL `timerid` with valid clock AND valid
+    /// (non-NULL) sevp still returns EFAULT.
+    #[test]
+    fn test_timer_create_null_timerid_with_valid_sevp_efault_phase147() {
+        reset_timers();
+        let sev = Sigevent {
+            sigev_value: 0,
+            sigev_signo: 0,
+            sigev_notify: 0, // SIGEV_SIGNAL (valid)
+            _pad: [0u8; 48],
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_create(CLOCK_REALTIME, &raw const sev, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- ordering matrix --
+
+    /// Ordering: bad clock beats NULL timerid (EINVAL, not EFAULT).
+    #[test]
+    fn test_timer_create_bad_clock_beats_null_timerid_phase147() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        let ret = timer_create(0xDEAD, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
+            "clock check must fire before timerid check");
+    }
+
+    /// Ordering: bad sigev_notify beats NULL timerid (EINVAL, not
+    /// EFAULT).
+    #[test]
+    fn test_timer_create_bad_sigev_notify_beats_null_timerid_phase147() {
+        reset_timers();
+        let sev = Sigevent {
+            sigev_value: 0,
+            sigev_signo: 0,
+            sigev_notify: 77,
+            _pad: [0u8; 48],
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_create(CLOCK_REALTIME, &raw const sev, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
+            "sigev_notify check must fire before timerid check");
+    }
+
+    /// Ordering: bad clock beats bad sigev_notify beats NULL
+    /// timerid (all three set; EINVAL via clock path).
+    #[test]
+    fn test_timer_create_bad_clock_beats_all_phase147() {
+        reset_timers();
+        let sev = Sigevent {
+            sigev_value: 0,
+            sigev_signo: 0,
+            sigev_notify: 88,
+            _pad: [0u8; 48],
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_create(-7, &raw const sev, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- workflow --
+
+    /// Workflow: a caller that probes the API with NULL timerid sees
+    /// EFAULT, then retries with a valid pointer and succeeds.
+    #[test]
+    fn test_timer_create_efault_then_valid_succeeds_phase147() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, core::ptr::null(), core::ptr::null_mut()),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+
+        let mut id: TimerT = -1;
+        crate::errno::set_errno(0);
+        let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        assert_eq!(ret, 0);
+        assert_eq!(id, 0, "first allocation should land in slot 0");
+        timer_delete(id);
+    }
+
+    // -- buggy caller --
+
+    /// Buggy caller: a program that swaps the sevp and timerid
+    /// argument positions (passes timerid as sevp, NULL as timerid)
+    /// gets EFAULT for the NULL timerid.  The "sevp" pointer they
+    /// passed (a valid timer-id pointer) does not panic our deref
+    /// because we only read `sigev_notify`.  Wait — actually, the
+    /// argument they passed for sevp would be the address of an
+    /// uninitialised TimerT, which is `-1` written as i32.  The
+    /// sigev_notify field read would access whatever follows.  To
+    /// avoid testing UB, construct a deliberate but harmless valid
+    /// Sigevent here and assert the EFAULT comes from NULL timerid.
+    #[test]
+    fn test_timer_create_buggy_caller_null_timerid_phase147() {
+        reset_timers();
+        // Caller forgot to take the address of their TimerT.
+        let sev = Sigevent {
+            sigev_value: 0,
+            sigev_signo: 0,
+            sigev_notify: 0,
+            _pad: [0u8; 48],
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_create(CLOCK_REALTIME, &raw const sev, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- recovery --
+
+    /// Recovery: after EFAULT from NULL timerid, the timer table
+    /// state is unchanged — no slot was consumed.  Subsequent valid
+    /// calls fill slots from index 0.
+    #[test]
+    fn test_timer_create_efault_no_slot_consumed_phase147() {
+        reset_timers();
+
+        // Burn one slot first to establish baseline.
+        let mut id0: TimerT = -1;
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id0),
+            0
+        );
+        assert_eq!(id0, 0);
+
+        // EFAULT call.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, core::ptr::null(), core::ptr::null_mut()),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+
+        // Next valid call must land in slot 1 (slot 0 still held).
+        let mut id1: TimerT = -1;
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id1),
+            0
+        );
+        assert_eq!(id1, 1, "EFAULT call must not have consumed a slot");
+
+        timer_delete(id0);
+        timer_delete(id1);
+    }
+
+    /// Recovery: after a chain of EFAULT/EINVAL calls, the timer
+    /// table is still pristine — a fresh allocation starts at slot 0.
+    #[test]
+    fn test_timer_create_efault_einval_chain_no_state_change_phase147() {
+        reset_timers();
+
+        // EINVAL: bad clock.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            timer_create(0xBAD, core::ptr::null(), core::ptr::null_mut()),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // EINVAL: bad sigev_notify.
+        let bad_sev = Sigevent {
+            sigev_value: 0,
+            sigev_signo: 0,
+            sigev_notify: 55,
+            _pad: [0u8; 48],
+        };
+        let mut id_tmp: TimerT = -1;
+        crate::errno::set_errno(0);
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, &raw const bad_sev, &raw mut id_tmp),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // EFAULT: NULL timerid.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, core::ptr::null(), core::ptr::null_mut()),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+
+        // Now valid: must land in slot 0.
+        let mut id: TimerT = -1;
+        let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        assert_eq!(ret, 0);
+        assert_eq!(id, 0, "no slot should have been consumed by the bad calls");
+        timer_delete(id);
+    }
+
+    // -- no-side-effect loop --
+
+    /// No-side-effect loop: repeated EFAULT calls must not leak
+    /// state — the timer table stays empty and errno stays EFAULT.
+    #[test]
+    fn test_timer_create_efault_loop_no_state_change_phase147() {
+        reset_timers();
+        for _ in 0..64 {
+            crate::errno::set_errno(0);
+            let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), core::ptr::null_mut());
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
+        // Table still empty: first allocation goes to slot 0.
+        let mut id: TimerT = -1;
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id),
+            0
+        );
+        assert_eq!(id, 0);
+        timer_delete(id);
+    }
+
+    /// No-side-effect loop: success path doesn't touch errno.
+    #[test]
+    fn test_timer_create_success_doesnt_touch_errno_phase147() {
+        reset_timers();
+        crate::errno::set_errno(54321);
+        let mut id: TimerT = -1;
+        let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 54321,
+            "success path must not touch errno");
         timer_delete(id);
     }
 

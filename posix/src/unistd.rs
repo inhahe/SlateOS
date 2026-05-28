@@ -2378,23 +2378,33 @@ pub const SWAP_FLAGS_VALID: i32 = SWAP_FLAG_PREFER
 /// swap subsystem (design.txt: lazy allocation is opt-in, never silent
 /// overcommit).
 ///
-/// Errors (Linux-matching priority order):
-/// * `EFAULT` — `path` is NULL.
-/// * `ENOENT` — `path` is the empty string.
-/// * `EINVAL` — `swapflags` contains bits outside `SWAP_FLAGS_VALID`.
+/// Errors (Linux-matching priority order — `sys_swapon` performs the
+/// flag-mask check *before* `getname`):
+///
+/// 1. `swapflags & ~SWAP_FLAGS_VALID`  → `EINVAL`
+/// 2. (`CAP_SYS_ADMIN` check → `EPERM` — skipped; no cred model yet.)
+/// 3. `path == NULL`                   → `EFAULT`  (Linux: `getname` →
+///                                        `strncpy_from_user`)
+/// 4. `*path == 0`                     → `ENOENT`  (Linux: getname's
+///                                        empty-name path → -ENOENT)
+///
+/// That means `swapon(NULL, BAD_FLAG)` returns `EINVAL`, not `EFAULT`
+/// — the flag check happens before the user pointer is dereferenced.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn swapon(path: *const u8, swapflags: i32) -> i32 {
+    // 1. Flag-mask check first — Linux's sys_swapon prologue.
+    if swapflags & !SWAP_FLAGS_VALID != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // 2. NULL path → EFAULT (getname / strncpy_from_user).
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // SAFETY: path is non-NULL; we read one byte.
+    // 3. Empty path → ENOENT.  SAFETY: path is non-NULL; we read one byte.
     if unsafe { *path } == 0 {
         errno::set_errno(errno::ENOENT);
-        return -1;
-    }
-    if swapflags & !SWAP_FLAGS_VALID != 0 {
-        errno::set_errno(errno::EINVAL);
         return -1;
     }
     errno::set_errno(errno::ENOSYS);
@@ -4735,11 +4745,159 @@ mod tests {
     }
 
     #[test]
-    fn test_swapon_path_checked_before_flags() {
-        // NULL path + bad flags → EFAULT (path checked first).
+    fn test_swapon_flags_checked_before_path() {
+        // Phase 122: Linux's sys_swapon checks `swap_flags &
+        // ~SWAP_FLAGS_VALID` before calling getname, so a bad flag bit
+        // beats EFAULT/ENOENT.  NULL path + bad flags → EINVAL.
         errno::set_errno(0);
         assert_eq!(swapon(core::ptr::null(), 0x80_0000), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // --- Phase 122: validation order matches Linux sys_swapon ---
+
+    /// Phase 122: empty path + bad flag bit — flag check fires first
+    /// → EINVAL (not ENOENT).
+    #[test]
+    fn test_swapon_phase122_empty_bad_flag_einval() {
+        errno::set_errno(0);
+        assert_eq!(swapon(b"\0".as_ptr(), 0x80_0000), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Phase 122: NULL pointer + sign-bit flag (i32::MIN) — EINVAL
+    /// from the mask check, never reaches the NULL deref check.
+    #[test]
+    fn test_swapon_phase122_null_i32_min_einval() {
+        errno::set_errno(0);
+        assert_eq!(swapon(core::ptr::null(), i32::MIN), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Phase 122: NULL pointer with *clean* flags (PREFER + priority)
+    /// — flag check passes, NULL caught next → EFAULT.
+    #[test]
+    fn test_swapon_phase122_null_clean_flags_efault() {
+        errno::set_errno(0);
+        let flags = SWAP_FLAG_PREFER | 3;
+        assert_eq!(swapon(core::ptr::null(), flags), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// Phase 122: empty path with every valid flag bit set — flag
+    /// check passes → empty path caught → ENOENT.
+    #[test]
+    fn test_swapon_phase122_empty_all_valid_flags_enoent() {
+        errno::set_errno(0);
+        assert_eq!(swapon(b"\0".as_ptr(), SWAP_FLAGS_VALID), -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    /// Phase 122: NULL + every valid flag → EFAULT (flag pool clean,
+    /// NULL fires).
+    #[test]
+    fn test_swapon_phase122_null_all_valid_flags_efault() {
+        errno::set_errno(0);
+        assert_eq!(swapon(core::ptr::null(), SWAP_FLAGS_VALID), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// Phase 122: flags == 0 + NULL — historical no-flag swapon
+    /// invocation (pre-DISCARD kernels).  Flag check trivially
+    /// passes; NULL → EFAULT.
+    #[test]
+    fn test_swapon_phase122_zero_flags_null_efault() {
+        errno::set_errno(0);
+        assert_eq!(swapon(core::ptr::null(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// Phase 122: bit 16 just above the priority mask range — picks
+    /// an *unknown* bit close to the legal flag region, confirming
+    /// the mask test is exact, not "fuzzy".
+    #[test]
+    fn test_swapon_phase122_bit16_unknown_einval() {
+        errno::set_errno(0);
+        // SWAP_FLAG_PRIO_MASK is 0x7FFF; SWAP_FLAG_PREFER is 0x8000;
+        // SWAP_FLAG_DISCARD = 0x10000.  Bit 17 (0x20000) is unknown
+        // unless DISCARD_ONCE/DISCARD_PAGES cover it — check below.
+        let unknown = 0x10_0000_i32;
+        assert!(unknown & SWAP_FLAGS_VALID == 0,
+            "test premise wrong: 0x100000 must be outside SWAP_FLAGS_VALID");
+        assert_eq!(swapon(b"/swap\0".as_ptr(), unknown), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Phase 122: every unknown high bit ORed with every legal bit
+    /// → EINVAL (mask rejects, regardless of legal bits set).
+    #[test]
+    fn test_swapon_phase122_legal_plus_unknown_einval() {
+        errno::set_errno(0);
+        let flags = SWAP_FLAGS_VALID | 0x4000_0000;
+        assert_eq!(swapon(b"/swap\0".as_ptr(), flags), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Phase 122: errno recovery — a successful (modulo ENOSYS) call
+    /// after an EINVAL cleanly overwrites errno.
+    #[test]
+    fn test_swapon_phase122_recovery_after_einval() {
+        errno::set_errno(0);
+        assert_eq!(swapon(core::ptr::null(), 0x80_0000), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(swapon(b"/swap\0".as_ptr(), SWAP_FLAG_DISCARD), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    /// Phase 122: errno recovery in reverse — EFAULT followed by
+    /// EINVAL.  Confirms each call overwrites cleanly.
+    #[test]
+    fn test_swapon_phase122_recovery_efault_then_einval() {
+        errno::set_errno(0);
+        assert_eq!(swapon(core::ptr::null(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(swapon(b"/swap\0".as_ptr(), 0x80_0000), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Phase 122 workflow: util-linux `swapon -v --priority 7
+    /// /dev/sda2` resolves to `swapon("/dev/sda2", PREFER | 7)`.
+    /// Must reach ENOSYS so the user sees "Function not implemented"
+    /// rather than a wrong-args misdirection.
+    #[test]
+    fn test_swapon_phase122_workflow_util_linux_prio_7() {
+        errno::set_errno(0);
+        let path = b"/dev/sda2\0";
+        let flags = SWAP_FLAG_PREFER | 7;
+        assert_eq!(swapon(path.as_ptr(), flags), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    /// Phase 122 workflow: systemd-swap-on probe.  systemd may call
+    /// `swapon(NULL, 0)` (with errno checking) as a syscall-presence
+    /// probe.  Flag check passes (0 is legal) → NULL → EFAULT,
+    /// confirming the syscall is wired up.  An EINVAL here would
+    /// falsely suggest a missing syscall.
+    #[test]
+    fn test_swapon_phase122_workflow_systemd_probe() {
+        errno::set_errno(0);
+        assert_eq!(swapon(core::ptr::null(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// Phase 122 buggy-caller: a shell script computes
+    /// `swap_flags=$((SWAP_FLAG_PREFER | priority))` but `priority`
+    /// was read as a signed int and overflowed to `-1`.  Bitwise OR
+    /// of -1 with anything is all-bits-set → unknown bits → EINVAL.
+    #[test]
+    fn test_swapon_phase122_buggy_caller_neg1_prio_einval() {
+        errno::set_errno(0);
+        let path = b"/dev/sda2\0";
+        let flags = SWAP_FLAG_PREFER | (-1_i32);
+        // -1 | anything == -1 == all bits set
+        assert_eq!(flags, -1);
+        assert_eq!(swapon(path.as_ptr(), flags), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]

@@ -13,13 +13,20 @@
 //! inputs (matching Linux's error contract) and report "no real
 //! ruleset machinery" after validation:
 //!
-//! * [`landlock_create_ruleset`] supports the **ABI probe** form
-//!   (`attr == NULL && size == 0 && flags == LANDLOCK_CREATE_RULESET_VERSION`)
-//!   exactly the way Linux does — returns the advertised ABI
-//!   version ([`LANDLOCK_ABI_VERSION`]).  This is the very first
-//!   call every Landlock-aware program makes; without it, the
-//!   program assumes Landlock is unavailable and the rest never
-//!   runs.
+//! * [`landlock_create_ruleset`] supports two **probe** forms
+//!   (`attr == NULL && size == 0` plus one probe flag) exactly the
+//!   way Linux does:
+//!     * `flags == LANDLOCK_CREATE_RULESET_VERSION` — returns the
+//!       advertised ABI version ([`LANDLOCK_ABI_VERSION`]).  This is
+//!       the very first call every Landlock-aware program makes;
+//!       without it, the program assumes Landlock is unavailable and
+//!       the rest never runs.
+//!     * `flags == LANDLOCK_CREATE_RULESET_ERRATA` — returns the
+//!       advertised errata bitfield ([`LANDLOCK_ERRATA`]).  Added in
+//!       Linux 6.10 so userspace can detect specific kernel quirks
+//!       (we have none, so the bitfield is zero — but the probe must
+//!       still succeed, otherwise libcap-landlock 0.6+ thinks the
+//!       kernel is older than 6.10 and falls back to slower paths).
 //! * The non-probe (real-create) form validates `attr`, `size`,
 //!   `flags`, and the access-rights bitmask, then returns -1 with
 //!   `ENOSYS` — programs that gracefully fall back when create
@@ -120,12 +127,32 @@ pub const LANDLOCK_ACCESS_NET_ALL: u64 =
 /// probe form of [`landlock_create_ruleset`]).
 pub const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1 << 0;
 
+/// Request the errata bitfield (used only in the probe form of
+/// [`landlock_create_ruleset`]).  Added in Linux 6.10.
+///
+/// Each set bit identifies a known kernel quirk userspace needs to
+/// work around.  Linux's first three errata cover ABI versions 1–3;
+/// every fresh release of `linux/landlock.h` documents the meaning
+/// of each bit.  Our [`LANDLOCK_ERRATA`] is zero — fresh
+/// implementation, no quirks to advertise.
+pub const LANDLOCK_CREATE_RULESET_ERRATA: u32 = 1 << 1;
+
 /// The Landlock ABI version we advertise.
 ///
 /// Version 1 is the minimum specification (Linux 5.13).  We can
 /// bump this as the kernel learns to honour the rule types and
 /// access bits introduced by later versions.
 pub const LANDLOCK_ABI_VERSION: i32 = 1;
+
+/// The Landlock errata bitfield we advertise.
+///
+/// Each bit corresponds to a known kernel quirk userspace must work
+/// around — but we have none of those quirks (our implementation
+/// isn't old enough to have collected workarounds yet), so the
+/// bitfield is zero.  Probing this still has to succeed, otherwise
+/// callers assume the running kernel is too old to expose errata at
+/// all and apply *Linux's* historical workarounds.
+pub const LANDLOCK_ERRATA: i32 = 0;
 
 // ---------------------------------------------------------------------------
 // Structures
@@ -215,56 +242,68 @@ const fn is_valid_net_access(mask: u64) -> bool {
 
 /// Create a Landlock ruleset.
 ///
-/// Two forms:
+/// Three forms (matching Linux 6.10+):
 ///
-/// 1. **Probe**: `attr == NULL && size == 0 && flags == LANDLOCK_CREATE_RULESET_VERSION`
-///    — returns the advertised ABI version (positive int).  Every
-///    Landlock-aware program does this first.
-/// 2. **Create**: `flags == 0`, `attr` and `size` describe a valid
+/// 1. **Version probe**: `attr == NULL && size == 0 && flags ==
+///    LANDLOCK_CREATE_RULESET_VERSION` — returns the advertised ABI
+///    version ([`LANDLOCK_ABI_VERSION`]).  Every Landlock-aware
+///    program does this first.
+/// 2. **Errata probe**: `attr == NULL && size == 0 && flags ==
+///    LANDLOCK_CREATE_RULESET_ERRATA` — returns the errata bitfield
+///    ([`LANDLOCK_ERRATA`]).  Programs that need to work around
+///    specific kernel quirks do this after the version probe.
+/// 3. **Create**: `flags == 0`, `attr` and `size` describe a valid
 ///    [`LandlockRulesetAttr`] — would return an fd; in our world
 ///    validates and reports `ENOSYS` because the kernel-side
 ///    enforcement isn't wired up.
+///
+/// Linux's `flags != 0` path requires `attr == NULL && size == 0`
+/// (probe mode is *only* about reading metadata) and rejects every
+/// other flag combination — including `VERSION | ERRATA` together —
+/// with `EINVAL`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn landlock_create_ruleset(
     attr: *const LandlockRulesetAttr,
     size: usize,
     flags: u32,
 ) -> i32 {
-    // -- Probe form ---------------------------------------------------------
+    // -- Probe forms --------------------------------------------------------
     //
-    // The kernel: `attr == NULL && size == 0` makes any other `flags`
-    // (including extra bits) EINVAL; only `LANDLOCK_CREATE_RULESET_VERSION`
-    // alone is the probe.
-    if attr.is_null() && size == 0 {
-        if flags == LANDLOCK_CREATE_RULESET_VERSION {
-            return LANDLOCK_ABI_VERSION;
+    // Linux's order: any non-zero `flags` means we're in probe mode.
+    // The only legal probes are exact-match VERSION or exact-match
+    // ERRATA, both with attr=NULL and size=0; everything else is
+    // EINVAL.  (Mixing probe bits, mixing a probe with attr/size, or
+    // setting an unknown bit all fall through to EINVAL.)
+    if flags != 0 {
+        if attr.is_null() && size == 0 {
+            if flags == LANDLOCK_CREATE_RULESET_VERSION {
+                return LANDLOCK_ABI_VERSION;
+            }
+            if flags == LANDLOCK_CREATE_RULESET_ERRATA {
+                return LANDLOCK_ERRATA;
+            }
         }
         errno::set_errno(errno::EINVAL);
         return -1;
     }
 
-    // -- Real-create form ---------------------------------------------------
-    //
-    // Linux rejects any flags here (only the probe-mode flag is defined,
-    // and it's not valid in create mode).
-    if flags != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    // NULL attr with non-zero size, or non-NULL attr with zero size, are
-    // both nonsensical.  Linux reports EFAULT for the first and EINVAL
-    // for the second (size doesn't cover the minimum attr struct).
-    if attr.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+    // Linux's order (matching `copy_min_struct_from_user` then the
+    // explicit page-size check): `size < min` is EINVAL, oversized is
+    // E2BIG, then dereferencing a bad pointer is EFAULT.  Critically
+    // `size == 0` is EINVAL *before* the NULL-attr EFAULT — a buggy
+    // caller that passes `(NULL, 0, 0)` should be steered toward
+    // "your size is wrong" rather than "your pointer is wrong",
+    // because the right fix is to fill in the size.
     if size < MIN_RULESET_ATTR_SIZE {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
     if size > MAX_RULESET_ATTR_SIZE {
         errno::set_errno(errno::E2BIG);
+        return -1;
+    }
+    if attr.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -847,5 +886,281 @@ mod tests {
         // The caller will see ENOSYS and gracefully fall back to
         // "Landlock unavailable" without any further calls.
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // ===================================================================
+    // Phase 133 — ERRATA probe support (Linux 6.10+) and tightened
+    // probe-vs-create validation ordering.
+    // ===================================================================
+
+    // -- Constants ----------------------------------------------------------
+
+    #[test]
+    fn test_phase133_errata_probe_flag_value() {
+        // Matches `LANDLOCK_CREATE_RULESET_ERRATA` in
+        // <uapi/linux/landlock.h> as of 6.10.
+        assert_eq!(LANDLOCK_CREATE_RULESET_ERRATA, 1 << 1);
+    }
+
+    #[test]
+    fn test_phase133_errata_distinct_from_version() {
+        // The two probe flags share no bits — Linux uses an exact-match
+        // dispatch and requires `flags == VERSION` xor `flags == ERRATA`.
+        assert_ne!(
+            LANDLOCK_CREATE_RULESET_VERSION,
+            LANDLOCK_CREATE_RULESET_ERRATA,
+        );
+        assert_eq!(
+            LANDLOCK_CREATE_RULESET_VERSION & LANDLOCK_CREATE_RULESET_ERRATA,
+            0,
+        );
+    }
+
+    #[test]
+    fn test_phase133_errata_value_is_zero() {
+        // We advertise no errata.  Probing must still succeed and return
+        // a *value* (0), not an error; otherwise libcap-landlock thinks
+        // the kernel is too old to support the probe and applies its
+        // own historical workarounds.
+        assert_eq!(LANDLOCK_ERRATA, 0);
+    }
+
+    // -- ERRATA probe form --------------------------------------------------
+
+    #[test]
+    fn test_phase133_errata_probe_returns_errata_bitfield() {
+        clear_errno();
+        let v = landlock_create_ruleset(
+            core::ptr::null(),
+            0,
+            LANDLOCK_CREATE_RULESET_ERRATA,
+        );
+        assert_eq!(v, LANDLOCK_ERRATA);
+        // Probe success must NOT touch errno (even though we return 0,
+        // 0 means "no errata", not an error).
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_phase133_errata_probe_zero_is_success_not_failure() {
+        // Critical: a return of 0 from the ERRATA probe is the
+        // bitfield value, not a "ruleset fd 0".  We don't promise
+        // anything about errno on success — clear it first and verify
+        // the call doesn't disturb it.
+        errno::set_errno(123);
+        let v = landlock_create_ruleset(
+            core::ptr::null(),
+            0,
+            LANDLOCK_CREATE_RULESET_ERRATA,
+        );
+        assert_eq!(v, 0);
+        // Caller can still rely on errno being whatever they last set.
+        assert_eq!(errno::get_errno(), 123);
+    }
+
+    #[test]
+    fn test_phase133_errata_probe_with_non_null_attr_einval() {
+        // Probe flags require attr=NULL.  A non-NULL attr with the
+        // ERRATA flag is a buggy caller and gets EINVAL (matches
+        // Linux's `if (attr != NULL || size != 0) return -EINVAL` in
+        // the probe path).
+        let attr = LandlockRulesetAttr::zeroed();
+        clear_errno();
+        let v = landlock_create_ruleset(
+            &raw const attr,
+            0,
+            LANDLOCK_CREATE_RULESET_ERRATA,
+        );
+        assert_eq!(v, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase133_errata_probe_with_non_zero_size_einval() {
+        clear_errno();
+        let v = landlock_create_ruleset(
+            core::ptr::null(),
+            16,
+            LANDLOCK_CREATE_RULESET_ERRATA,
+        );
+        assert_eq!(v, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -- Probe flag mixing --------------------------------------------------
+
+    #[test]
+    fn test_phase133_version_and_errata_together_einval() {
+        // Linux uses exact-match (`flags == X`), so combining the two
+        // probe bits doesn't trigger either — EINVAL.
+        clear_errno();
+        let v = landlock_create_ruleset(
+            core::ptr::null(),
+            0,
+            LANDLOCK_CREATE_RULESET_VERSION | LANDLOCK_CREATE_RULESET_ERRATA,
+        );
+        assert_eq!(v, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase133_errata_with_extra_high_bit_einval() {
+        // Unknown probe-flag bit set alongside ERRATA → EINVAL.
+        clear_errno();
+        let v = landlock_create_ruleset(
+            core::ptr::null(),
+            0,
+            LANDLOCK_CREATE_RULESET_ERRATA | (1u32 << 20),
+        );
+        assert_eq!(v, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase133_unknown_probe_bit_alone_einval() {
+        // A flag value that's neither VERSION nor ERRATA → EINVAL even
+        // if attr=NULL && size=0.
+        clear_errno();
+        let v = landlock_create_ruleset(core::ptr::null(), 0, 1u32 << 5);
+        assert_eq!(v, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -- Create-form ordering fix (size before EFAULT) ----------------------
+
+    #[test]
+    fn test_phase133_zero_size_with_null_attr_returns_einval_not_efault() {
+        // BEFORE Phase 133: `attr=NULL, size=0, flags=0` returned
+        // EFAULT (NULL attr was checked first).
+        //
+        // AFTER Phase 133: matches Linux's
+        // `copy_min_struct_from_user` order — `size < min` is checked
+        // first, so this is EINVAL.  The right caller fix is to set
+        // size, not to allocate a struct.
+        clear_errno();
+        let v = landlock_create_ruleset(core::ptr::null(), 0, 0);
+        assert_eq!(v, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase133_undersized_with_null_attr_returns_einval_not_efault() {
+        // Same ordering rule: size=4 (< min=16) wins over NULL-attr.
+        clear_errno();
+        let v = landlock_create_ruleset(core::ptr::null(), 4, 0);
+        assert_eq!(v, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase133_oversized_with_null_attr_returns_e2big_not_efault() {
+        // E2BIG wins over EFAULT too — `size > MAX` is a check on a
+        // value the caller controls, so the diagnostic should point
+        // at it before the pointer dereference would fault.
+        clear_errno();
+        let v = landlock_create_ruleset(core::ptr::null(), 1_000_000, 0);
+        assert_eq!(v, -1);
+        assert_eq!(errno::get_errno(), errno::E2BIG);
+    }
+
+    #[test]
+    fn test_phase133_null_attr_with_valid_size_still_efault() {
+        // Sanity: when size IS valid, NULL attr still produces EFAULT.
+        // The reorder didn't break the existing contract for the
+        // typical buggy-caller case.
+        clear_errno();
+        let v = landlock_create_ruleset(
+            core::ptr::null(),
+            core::mem::size_of::<LandlockRulesetAttr>(),
+            0,
+        );
+        assert_eq!(v, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // -- Probe vs create dispatch -------------------------------------------
+
+    #[test]
+    fn test_phase133_errata_probe_with_flags_set_but_in_create_size() {
+        // `flags=ERRATA, attr=non-null, size=16` — non-zero flags
+        // means probe path, but attr != NULL means probe rejects with
+        // EINVAL.  Should NOT fall through to create-form validation
+        // and return ENOSYS.
+        let attr = LandlockRulesetAttr {
+            handled_access_fs: LANDLOCK_ACCESS_FS_READ_FILE,
+            handled_access_net: 0,
+        };
+        clear_errno();
+        let v = landlock_create_ruleset(
+            &raw const attr,
+            core::mem::size_of::<LandlockRulesetAttr>(),
+            LANDLOCK_CREATE_RULESET_ERRATA,
+        );
+        assert_eq!(v, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -- Workflow -----------------------------------------------------------
+
+    #[test]
+    fn test_phase133_libcap_landlock_probe_sequence() {
+        // Mimics the libcap-landlock 0.6+ startup probe:
+        // 1. Probe ABI version → uses the result to gate which
+        //    access bits to request.
+        // 2. Probe errata → uses the result to apply quirk workarounds.
+        // 3. Try to create with the chosen access set.
+        clear_errno();
+        let ver = landlock_create_ruleset(
+            core::ptr::null(),
+            0,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        );
+        assert!(ver >= 1);
+        assert_eq!(errno::get_errno(), 0);
+
+        // After step 1, errno is still clean; step 2 must not disturb it.
+        let errata = landlock_create_ruleset(
+            core::ptr::null(),
+            0,
+            LANDLOCK_CREATE_RULESET_ERRATA,
+        );
+        // We advertise no errata, but the call succeeded with value 0.
+        assert_eq!(errata, LANDLOCK_ERRATA);
+        assert_eq!(errno::get_errno(), 0);
+
+        // Step 3: real create.  Fails with ENOSYS until the backend lands.
+        let attr = LandlockRulesetAttr {
+            handled_access_fs: LANDLOCK_ACCESS_FS_READ_FILE,
+            handled_access_net: 0,
+        };
+        let ret = landlock_create_ruleset(
+            &raw const attr,
+            core::mem::size_of::<LandlockRulesetAttr>(),
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_phase133_errata_probe_recoverable_after_einval() {
+        // A buggy first call shouldn't poison subsequent good calls.
+        clear_errno();
+        // Bad: probe with non-zero size.
+        let bad = landlock_create_ruleset(
+            core::ptr::null(),
+            16,
+            LANDLOCK_CREATE_RULESET_ERRATA,
+        );
+        assert_eq!(bad, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // Good: same flag, valid arguments.
+        let good = landlock_create_ruleset(
+            core::ptr::null(),
+            0,
+            LANDLOCK_CREATE_RULESET_ERRATA,
+        );
+        assert_eq!(good, LANDLOCK_ERRATA);
     }
 }

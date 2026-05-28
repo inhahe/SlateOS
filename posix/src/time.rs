@@ -1862,6 +1862,21 @@ pub const SIGEV_NONE: i32 = 1;
 pub const SIGEV_SIGNAL: i32 = 0;
 /// Start a thread on timer expiration.
 pub const SIGEV_THREAD: i32 = 2;
+/// Deliver a signal to a specific thread (Linux extension).
+pub const SIGEV_THREAD_ID: i32 = 4;
+
+/// Check whether `notify` is a `sigev_notify` value Linux accepts in
+/// `timer_create` / `sigqueue` / `mq_notify`.
+///
+/// Linux's `good_sigevent()` (kernel/time/posix-timers.c) accepts
+/// `SIGEV_NONE`, `SIGEV_SIGNAL`, `SIGEV_THREAD`, and `SIGEV_THREAD_ID`.
+/// Any other value yields `EINVAL`.
+fn is_valid_sigev_notify(notify: i32) -> bool {
+    matches!(
+        notify,
+        SIGEV_NONE | SIGEV_SIGNAL | SIGEV_THREAD | SIGEV_THREAD_ID
+    )
+}
 
 /// Maximum number of timers per process.
 const MAX_TIMERS: usize = 32;
@@ -1878,10 +1893,29 @@ static mut TIMER_TABLE: [Option<Itimerspec>; MAX_TIMERS] = [None; MAX_TIMERS];
 /// never actually fires (no signal delivery), but the API succeeds.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_create(
-    _clockid: ClockidT,
-    _sevp: *const Sigevent,
+    clockid: ClockidT,
+    sevp: *const Sigevent,
     timerid: *mut TimerT,
 ) -> i32 {
+    // Linux validates the clock ID first.  Unknown clocks yield EINVAL
+    // before the kernel touches sevp or timerid.  Match that ordering.
+    if !is_valid_clock(clockid) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // If sevp is non-null, sigev_notify must be one of the recognised
+    // notification methods.  A null sevp is treated as SIGEV_SIGNAL with
+    // SIGALRM, per POSIX.
+    if !sevp.is_null() {
+        // SAFETY: caller asserts sevp points to a valid Sigevent.  We
+        // only read the sigev_notify field; we do not dereference any
+        // pointer inside the struct.
+        let notify = unsafe { (*sevp).sigev_notify };
+        if !is_valid_sigev_notify(notify) {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    }
     if timerid.is_null() {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -1918,11 +1952,33 @@ pub extern "C" fn timer_create(
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_settime(
     timerid: TimerT,
-    _flags: i32,
+    flags: i32,
     new_value: *const Itimerspec,
     old_value: *mut Itimerspec,
 ) -> i32 {
+    // Linux's posix-timers code rejects any flag bit other than
+    // TIMER_ABSTIME with EINVAL before touching the timer table.
+    if flags & !TIMER_ABSTIME != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if new_value.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // SAFETY: new_value verified non-null above; caller asserts it
+    // points to a valid Itimerspec.  Copy it now so subsequent
+    // validation reads from local storage.
+    let nv = unsafe { *new_value };
+    // POSIX/Linux require tv_nsec in [0, 999_999_999] and tv_sec >= 0
+    // for both fields of the new value; otherwise EINVAL.
+    if nv.it_interval.tv_sec < 0
+        || nv.it_interval.tv_nsec < 0
+        || nv.it_interval.tv_nsec > 999_999_999
+        || nv.it_value.tv_sec < 0
+        || nv.it_value.tv_nsec < 0
+        || nv.it_value.tv_nsec > 999_999_999
+    {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -1949,9 +2005,8 @@ pub extern "C" fn timer_settime(
         unsafe { *old_value = *current; }
     }
 
-    // Store new value.
-    // SAFETY: new_value verified non-null.
-    *slot = Some(unsafe { *new_value });
+    // Store new value (copy validated above).
+    *slot = Some(nv);
     0
 }
 
@@ -4216,6 +4271,311 @@ mod tests {
     fn test_timer_getoverrun_returns_zero() {
         assert_eq!(timer_getoverrun(0), 0);
         assert_eq!(timer_getoverrun(99), 0);
+    }
+
+    // -- Phase 97: timer_create / timer_settime argument-domain validation --
+
+    /// `is_valid_sigev_notify` accepts every Linux-recognised value.
+    #[test]
+    fn test_is_valid_sigev_notify_recognised() {
+        assert!(is_valid_sigev_notify(SIGEV_NONE));
+        assert!(is_valid_sigev_notify(SIGEV_SIGNAL));
+        assert!(is_valid_sigev_notify(SIGEV_THREAD));
+        assert!(is_valid_sigev_notify(SIGEV_THREAD_ID));
+    }
+
+    /// Any other `sigev_notify` value is rejected.
+    #[test]
+    fn test_is_valid_sigev_notify_unknown_rejected() {
+        // Linux uses 0/1/2/4; 3 and 5+ are unallocated.
+        assert!(!is_valid_sigev_notify(3));
+        assert!(!is_valid_sigev_notify(5));
+        assert!(!is_valid_sigev_notify(99));
+        assert!(!is_valid_sigev_notify(-1));
+        assert!(!is_valid_sigev_notify(i32::MAX));
+    }
+
+    /// `SIGEV_THREAD_ID` matches glibc's value (4).
+    #[test]
+    fn test_sigev_thread_id_value() {
+        assert_eq!(SIGEV_THREAD_ID, 4);
+    }
+
+    /// `timer_create` with an unknown clock ID returns -1 / EINVAL
+    /// before allocating any slot.
+    #[test]
+    fn test_timer_create_unknown_clockid() {
+        reset_timers();
+        let mut id: TimerT = 999;
+        crate::errno::set_errno(0);
+        let ret = timer_create(99, core::ptr::null(), &raw mut id);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // id must be untouched (no allocation happened).
+        assert_eq!(id, 999, "no slot should be allocated on EINVAL");
+    }
+
+    /// Every clock the rest of the API recognises is also accepted by
+    /// `timer_create`.
+    #[test]
+    fn test_timer_create_accepts_all_valid_clocks() {
+        for clk in [
+            CLOCK_REALTIME,
+            CLOCK_MONOTONIC,
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+            CLOCK_BOOTTIME,
+        ] {
+            reset_timers();
+            let mut id: TimerT = -1;
+            let ret = timer_create(clk, core::ptr::null(), &raw mut id);
+            assert_eq!(ret, 0, "clock {clk} should be accepted");
+            assert!(id >= 0, "clock {clk}: a valid slot must be returned");
+            timer_delete(id);
+        }
+    }
+
+    /// `timer_create` with a non-null sevp whose `sigev_notify` is bogus
+    /// returns -1 / EINVAL.
+    #[test]
+    fn test_timer_create_bad_sigev_notify() {
+        reset_timers();
+        let sev = Sigevent {
+            sigev_value: 0,
+            sigev_signo: 0,
+            sigev_notify: 99, // not one of the recognised constants
+            _pad: [0u8; 48],
+        };
+        let mut id: TimerT = 999;
+        crate::errno::set_errno(0);
+        let ret = timer_create(CLOCK_REALTIME, &raw const sev, &raw mut id);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(id, 999, "no slot should be allocated on EINVAL");
+    }
+
+    /// `timer_create` accepts every recognised `sigev_notify` value.
+    #[test]
+    fn test_timer_create_accepts_each_sigev_notify() {
+        for notify in [SIGEV_NONE, SIGEV_SIGNAL, SIGEV_THREAD, SIGEV_THREAD_ID] {
+            reset_timers();
+            let sev = Sigevent {
+                sigev_value: 0,
+                sigev_signo: 0,
+                sigev_notify: notify,
+                _pad: [0u8; 48],
+            };
+            let mut id: TimerT = -1;
+            let ret = timer_create(CLOCK_REALTIME, &raw const sev, &raw mut id);
+            assert_eq!(ret, 0, "sigev_notify {notify} should be accepted");
+            timer_delete(id);
+        }
+    }
+
+    /// Ordering: clockid check fires before the sevp check.  An invalid
+    /// clock with a deliberately-bogus sevp still reports EINVAL, but
+    /// for the clock — observable via the fact that no slot is touched.
+    #[test]
+    fn test_timer_create_validation_order_clockid_first() {
+        reset_timers();
+        let sev = Sigevent {
+            sigev_value: 0,
+            sigev_signo: 0,
+            sigev_notify: 99, // also invalid
+            _pad: [0u8; 48],
+        };
+        let mut id: TimerT = 999;
+        crate::errno::set_errno(0);
+        let ret = timer_create(42, &raw const sev, &raw mut id);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // Now retry with a valid clock; first slot must still be free.
+        crate::errno::set_errno(0);
+        let ret2 = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        assert_eq!(ret2, 0);
+        assert_eq!(id, 0, "no allocation should have happened on the rejected call");
+        timer_delete(id);
+    }
+
+    /// `timer_settime` rejects any flag bit other than `TIMER_ABSTIME`.
+    #[test]
+    fn test_timer_settime_unknown_flags() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        // Bit 1 is not TIMER_ABSTIME (which is bit 0).
+        let ret = timer_settime(id, 0x2, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // High bits are also rejected.
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, i32::MIN, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        timer_delete(id);
+    }
+
+    /// `TIMER_ABSTIME` alone is accepted.
+    #[test]
+    fn test_timer_settime_accepts_timer_abstime() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        let ret = timer_settime(id, TIMER_ABSTIME, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        timer_delete(id);
+    }
+
+    /// `timer_settime` rejects `tv_nsec` outside `[0, 999_999_999]`.
+    #[test]
+    fn test_timer_settime_bad_tv_nsec() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        // tv_nsec too large in it_value.
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // tv_nsec negative in it_interval.
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: -1 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // tv_sec negative.
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: -1, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        timer_delete(id);
+    }
+
+    /// Validation order in `timer_settime`: flags first, then null
+    /// check, then tv_nsec, then timer lookup.  Bogus flags must fire
+    /// even when new_value is null.
+    #[test]
+    fn test_timer_settime_validation_order_flags_first() {
+        reset_timers();
+        crate::errno::set_errno(0);
+        let ret = timer_settime(0, 0x2, core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Validation order: tv_nsec checked before the timer lookup.
+    /// Passing an obviously-invalid timer ID with a bad timespec still
+    /// reports EINVAL — proves both paths reach EINVAL, but a freshly
+    /// created (valid) timer with a bad tv_nsec still leaves the slot's
+    /// stored value unchanged from its initial all-zeros state.
+    #[test]
+    fn test_timer_settime_bad_tv_nsec_does_not_overwrite_slot() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+
+        // Install a known-good baseline.
+        let good = Itimerspec {
+            it_interval: Timespec { tv_sec: 7, tv_nsec: 7 },
+            it_value: Timespec { tv_sec: 8, tv_nsec: 8 },
+        };
+        assert_eq!(timer_settime(id, 0, &raw const good, core::ptr::null_mut()), 0);
+
+        // A subsequent bad call must not clobber the stored value.
+        let bad = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        assert_eq!(timer_settime(id, 0, &raw const bad, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Read back via timer_gettime — should still be the good value.
+        let mut out = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        assert_eq!(timer_gettime(id, &raw mut out), 0);
+        assert_eq!(out.it_interval.tv_sec, 7);
+        assert_eq!(out.it_interval.tv_nsec, 7);
+        assert_eq!(out.it_value.tv_sec, 8);
+        assert_eq!(out.it_value.tv_nsec, 8);
+        timer_delete(id);
+    }
+
+    /// Buggy caller: tv_nsec exactly at the limit (999_999_999) is
+    /// accepted — boundary value.
+    #[test]
+    fn test_timer_settime_boundary_tv_nsec_accepted() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 999_999_999 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 999_999_999 },
+        };
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        timer_delete(id);
+    }
+
+    /// Buggy-caller workflow: a real program that recovers from an
+    /// EINVAL by passing a valid value should still see a working
+    /// timer afterwards.
+    #[test]
+    fn test_timer_settime_recovery_after_einval() {
+        reset_timers();
+        let mut id: TimerT = 0;
+        timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
+
+        // First attempt: bogus flags → EINVAL.
+        let val = Itimerspec {
+            it_interval: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 2, tv_nsec: 0 },
+        };
+        crate::errno::set_errno(0);
+        assert_eq!(timer_settime(id, 0xF, &raw const val, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Retry with valid flags.
+        let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+
+        // timer_gettime confirms the second call landed.
+        let mut out = Itimerspec {
+            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        assert_eq!(timer_gettime(id, &raw mut out), 0);
+        assert_eq!(out.it_interval.tv_sec, 1);
+        assert_eq!(out.it_value.tv_sec, 2);
+        timer_delete(id);
     }
 
     // -- setitimer / getitimer --

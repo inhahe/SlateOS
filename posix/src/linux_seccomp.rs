@@ -177,6 +177,27 @@ fn is_known_action(action: u32) -> bool {
 ///   here so callers skip notification-mode entirely (see comment
 ///   on the arm below).
 ///
+/// **Phase 186** — privilege gate for `SECCOMP_SET_MODE_FILTER`:
+/// `kernel/seccomp.c::seccomp_prepare_filter` runs
+///
+///     if (!task_no_new_privs(current) &&
+///         !ns_capable_noaudit(current_user_ns(), CAP_SYS_ADMIN))
+///         return ERR_PTR(-EACCES);
+///
+/// after `copy_from_user` of the `sock_fprog` header and the
+/// `fprog->len` sanity check.  Errno is **EACCES**, *not* EPERM —
+/// Linux deliberately distinguishes "you copied a fine filter but
+/// you're not allowed to install it" (EACCES) from the
+/// `capable()`-failure convention (EPERM) used by landlock /
+/// fanotify / userfaultfd / ...  We mirror EACCES exactly.
+///
+/// Placement: the gate runs *after* every flag-shape EINVAL check
+/// and *after* the NULL-args EFAULT — flag mistakes and bad
+/// pointers therefore beat the privilege denial, just like Linux.
+/// `SECCOMP_SET_MODE_STRICT`, `SECCOMP_GET_ACTION_AVAIL`, and
+/// `SECCOMP_GET_NOTIF_SIZES` are **not** gated (strict mode is
+/// self-restrictive; the GET ops are pure probes).
+///
 /// # Returns
 ///
 /// * `SECCOMP_GET_ACTION_AVAIL`: `0` if the kernel recognizes the
@@ -188,6 +209,8 @@ fn is_known_action(action: u32) -> bool {
 ///   * `EINVAL` — unknown operation, unknown flag bit, contradictory
 ///     flag combination, or `flags` non-zero for an op that requires
 ///     `flags == 0`.
+///   * `EACCES` — Phase 186: `SECCOMP_SET_MODE_FILTER` with neither
+///     `no_new_privs` set nor `CAP_SYS_ADMIN` held.
 ///   * `ENOSYS` — every input was valid but the underlying mechanism
 ///     (BPF interpreter / notification table / strict-mode enforcement)
 ///     isn't implemented yet.
@@ -259,6 +282,28 @@ pub extern "C" fn seccomp(operation: u32, flags: u32, args: *mut u8) -> i32 {
             // seccomp_prepare_user_filter.
             if args.is_null() {
                 errno::set_errno(errno::EFAULT);
+                return -1;
+            }
+            // Phase 186: NNP || CAP_SYS_ADMIN gate per
+            // `kernel/seccomp.c::seccomp_prepare_filter`.  Same
+            // motivation as the landlock_restrict_self gate (Phase
+            // 185) — a seccomp filter can affect a privileged child
+            // via execve, so an unprivileged caller must first set
+            // no_new_privs.  But seccomp uses **EACCES**, not EPERM,
+            // so the two gates are not interchangeable.
+            //
+            // Placement note: this gate runs *after* every flag-shape
+            // EINVAL check above and *after* the EFAULT for NULL
+            // args, matching Linux's seccomp_prepare_user_filter →
+            // seccomp_prepare_filter call sequence (the cap test
+            // lives inside the prepare step, which copy_from_user
+            // runs first).
+            if !crate::unistd::no_new_privs_set()
+                && !crate::sys_capability::has_capability(
+                    crate::sys_capability::CAP_SYS_ADMIN,
+                )
+            {
+                errno::set_errno(errno::EACCES);
                 return -1;
             }
             errno::set_errno(errno::ENOSYS);
@@ -942,5 +987,424 @@ mod tests {
         let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 186 — seccomp(SET_MODE_FILTER) privilege gate
+    //                                       (NNP || CAP_SYS_ADMIN -> EACCES)
+    //
+    // Linux source (kernel/seccomp.c::seccomp_prepare_filter):
+    //
+    //   /* Installing a seccomp filter requires that the task has
+    //    * CAP_SYS_ADMIN in its namespace or be running with
+    //    * no_new_privs.  This avoids scenarios where unprivileged
+    //    * tasks can affect the behavior of privileged children. */
+    //   if (!task_no_new_privs(current) &&
+    //       !ns_capable_noaudit(current_user_ns(), CAP_SYS_ADMIN))
+    //       return ERR_PTR(-EACCES);
+    //
+    // Same motivation as the landlock gate (Phase 185) but with a
+    // **different errno** — EACCES, not EPERM.  Linux deliberately
+    // splits "you copied a fine filter but you're not allowed to
+    // install it" from the capable() convention.  Mirroring that
+    // distinction is the whole point of the gate.
+    //
+    // Placement also differs from Phase 185: the seccomp gate lives
+    // inside `seccomp_prepare_filter`, which copy_from_user gets to
+    // first.  So flag-shape EINVAL and NULL-args EFAULT both beat
+    // EACCES here.  In Phase 185 (landlock) the cap gate ran
+    // *before* flag-shape EINVAL.
+    //
+    // SECCOMP_SET_MODE_STRICT (self-restrictive), GET_ACTION_AVAIL
+    // (pure probe), and GET_NOTIF_SIZES (pure probe) are **not**
+    // gated — only SET_MODE_FILTER is.
+    // ----------------------------------------------------------------------
+
+    mod seccomp_filter_cap_phase186 {
+        use super::*;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        /// RAII guard that resets `no_new_privs` to false on Drop.
+        struct NnpGuard;
+        impl NnpGuard {
+            fn snapshot_and_clear() -> Self {
+                crate::unistd::_test_reset_no_new_privs(false);
+                Self
+            }
+        }
+        impl Drop for NnpGuard {
+            fn drop(&mut self) {
+                crate::unistd::_test_reset_no_new_privs(false);
+            }
+        }
+
+        fn drop_cap(cap: u32) {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if cap < 32 {
+                (lo & !(1u32 << cap), hi)
+            } else {
+                (lo, hi & !(1u32 << (cap - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+
+        fn drop_sys_admin() {
+            drop_cap(crate::sys_capability::CAP_SYS_ADMIN);
+        }
+
+        /// One-byte buffer good enough to satisfy the NULL-args
+        /// EFAULT check.  The filter is never inspected by our stub.
+        fn nonnull_args() -> *mut u8 {
+            static mut DUMMY: u8 = 0;
+            // SAFETY: single-threaded test, just need a non-null ptr
+            // for the EFAULT check to pass.
+            (&raw mut DUMMY).cast::<u8>()
+        }
+
+        // -- Per-error-class ----------------------------------------------
+
+        /// No CAP_SYS_ADMIN, NNP cleared, well-formed flags + non-NULL
+        /// args → reaches the EACCES gate.
+        #[test]
+        fn test_seccomp_phase186_filter_no_cap_no_nnp_returns_eacces() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        /// CAP_SYS_ADMIN held → bypasses gate → reaches ENOSYS.
+        #[test]
+        fn test_seccomp_phase186_filter_with_cap_no_nnp_reaches_enosys() {
+            let _n = NnpGuard::snapshot_and_clear();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// NNP set, no CAP_SYS_ADMIN → bypasses gate → reaches ENOSYS.
+        #[test]
+        fn test_seccomp_phase186_filter_with_nnp_no_cap_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            crate::unistd::_test_reset_no_new_privs(true);
+            errno::set_errno(0);
+            let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// **Key Phase 186 distinction from Phase 185**: the gate
+        /// errno is EACCES, not EPERM.  Linux uses EACCES specifically
+        /// for the seccomp prepare-filter denial.
+        #[test]
+        fn test_seccomp_phase186_errno_is_eacces_not_eperm() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            assert_eq!(ret, -1);
+            assert_ne!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        // -- Other operations are NOT gated -------------------------------
+
+        /// SECCOMP_SET_MODE_STRICT is self-restrictive — Linux does
+        /// NOT apply the NNP/cap gate.  Even an unprivileged caller
+        /// reaches ENOSYS (our backend stub).
+        #[test]
+        fn test_seccomp_phase186_strict_no_cap_no_nnp_still_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = seccomp(
+                SECCOMP_SET_MODE_STRICT,
+                0,
+                core::ptr::null_mut(),
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// SECCOMP_GET_ACTION_AVAIL is a pure probe — not gated.
+        /// Returns 0 for a known action regardless of cap state.
+        #[test]
+        fn test_seccomp_phase186_get_action_avail_no_cap_works_normally() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let mut action: u32 = SECCOMP_RET_ALLOW;
+            let ret = seccomp(
+                SECCOMP_GET_ACTION_AVAIL,
+                0,
+                (&raw mut action).cast::<u8>(),
+            );
+            assert_eq!(ret, 0);
+        }
+
+        /// SECCOMP_GET_NOTIF_SIZES is a pure probe — not gated.
+        /// Reaches ENOSYS (our chosen stub return) regardless of cap
+        /// state, never EACCES.
+        #[test]
+        fn test_seccomp_phase186_get_notif_sizes_no_cap_returns_enosys_not_eacces() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let mut sizes = [0u8; 32];
+            let ret = seccomp(
+                SECCOMP_GET_NOTIF_SIZES,
+                0,
+                sizes.as_mut_ptr(),
+            );
+            assert_eq!(ret, -1);
+            assert_ne!(errno::get_errno(), errno::EACCES);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Ordering matrix ---------------------------------------------
+
+        /// Unprivileged + unknown flag bit → EINVAL beats EACCES
+        /// (flag-shape check runs before the gate).  This is the
+        /// **opposite precedence** of Phase 185 landlock, where the
+        /// cap gate ran *before* the flag check.
+        #[test]
+        fn test_seccomp_phase186_einval_beats_eacces_unknown_flag() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = seccomp(
+                SECCOMP_SET_MODE_FILTER,
+                0x8000_0000,
+                nonnull_args(),
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// Unprivileged + TSYNC|NEW_LISTENER (contradictory) →
+        /// EINVAL beats EACCES.
+        #[test]
+        fn test_seccomp_phase186_einval_beats_eacces_tsync_new_listener_combo() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = seccomp(
+                SECCOMP_SET_MODE_FILTER,
+                SECCOMP_FILTER_FLAG_TSYNC
+                    | SECCOMP_FILTER_FLAG_NEW_LISTENER,
+                nonnull_args(),
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// Unprivileged + NULL args → EFAULT beats EACCES (NULL
+        /// pointer check runs before the gate).
+        #[test]
+        fn test_seccomp_phase186_efault_beats_eacces_null_args() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = seccomp(
+                SECCOMP_SET_MODE_FILTER,
+                0,
+                core::ptr::null_mut(),
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        // -- No-side-effect ----------------------------------------------
+
+        /// Denial must not mutate cap set or NNP bit.
+        #[test]
+        fn test_seccomp_phase186_eacces_preserves_caps_and_nnp() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            let (lo_before, hi_before) =
+                crate::sys_capability::current_caps_effective();
+            let nnp_before = crate::unistd::no_new_privs_set();
+            errno::set_errno(0);
+            let _ = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            let (lo_after, hi_after) =
+                crate::sys_capability::current_caps_effective();
+            let nnp_after = crate::unistd::no_new_privs_set();
+            assert_eq!(lo_before, lo_after);
+            assert_eq!(hi_before, hi_after);
+            assert_eq!(nnp_before, nnp_after);
+        }
+
+        // -- Recovery ----------------------------------------------------
+
+        /// Drop cap + clear NNP → EACCES.  Set NNP → reaches ENOSYS
+        /// on next call.
+        #[test]
+        fn test_seccomp_phase186_recovery_set_nnp_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let denied =
+                seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            assert_eq!(denied, -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+            crate::unistd::_test_reset_no_new_privs(true);
+            errno::set_errno(0);
+            let reached =
+                seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            assert_eq!(reached, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Workflow ----------------------------------------------------
+
+        /// Container init drops admin and forgets NNP; tries to
+        /// install a filter — denied with EACCES.  Catches the same
+        /// misconfiguration Linux catches.
+        #[test]
+        fn test_seccomp_phase186_workflow_sandbox_drops_then_filter_denied() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            // (forgot NNP)
+            errno::set_errno(0);
+            let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        /// Correct sandbox sequence: drop admin, set NNP, install
+        /// filter.  Reaches ENOSYS (no real BPF backend) — the same
+        /// path libseccomp would take on a CONFIG_SECCOMP=n kernel.
+        #[test]
+        fn test_seccomp_phase186_workflow_unprivileged_filter_with_nnp() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            crate::unistd::_test_reset_no_new_privs(true);
+            errno::set_errno(0);
+            let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Sentinel ----------------------------------------------------
+
+        /// CAP_SYS_PTRACE alone (without CAP_SYS_ADMIN) does NOT
+        /// satisfy — only CAP_SYS_ADMIN counts here.
+        #[test]
+        fn test_seccomp_phase186_sentinel_ptrace_cap_does_not_satisfy() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_PTRACE
+            ));
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EACCES);
+        }
+
+        // -- Cross-checks ------------------------------------------------
+
+        /// **Cross-phase invariant**: Phase 185 (landlock) and
+        /// Phase 186 (seccomp) implement the same NNP||CAP_SYS_ADMIN
+        /// gate but with *different* errnos.  Landlock returns EPERM;
+        /// seccomp returns EACCES.  Verify they don't accidentally
+        /// converge on the same errno (which would mean the seccomp
+        /// gate is wrong).
+        #[test]
+        fn test_seccomp_phase186_errno_differs_from_landlock_phase185() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+
+            errno::set_errno(0);
+            let _ = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            let seccomp_errno = errno::get_errno();
+
+            errno::set_errno(0);
+            let _ = crate::linux_landlock::landlock_restrict_self(0, 0);
+            let landlock_errno = errno::get_errno();
+
+            assert_eq!(seccomp_errno, errno::EACCES);
+            assert_eq!(landlock_errno, errno::EPERM);
+            assert_ne!(seccomp_errno, landlock_errno);
+        }
     }
 }

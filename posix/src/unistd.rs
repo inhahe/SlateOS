@@ -2652,6 +2652,15 @@ pub const SYSLOG_LOG_LEVEL_MAX: i32 = 8;
 /// * `0`     — read commands with valid `buf` and `len == 0` (Phase 157).
 /// * `EINVAL` — `SYSLOG_ACTION_CONSOLE_LEVEL` with `len` outside
 ///   `[1, 8]`.
+/// * `EPERM` — **Phase 172:** Linux `check_syslog_permissions` rejects
+///   the action when the caller lacks `CAP_SYSLOG`.  The CLOSE, OPEN,
+///   and SIZE_BUFFER actions are unconditionally allowed (they are
+///   no-ops on Linux).  Under default `dmesg_restrict=0`, READ_ALL and
+///   SIZE_UNREAD are also unprivileged-accessible (they only read the
+///   ring buffer for the calling process's view).  Every other action
+///   — READ, READ_CLEAR, CLEAR, CONSOLE_OFF, CONSOLE_ON,
+///   CONSOLE_LEVEL — requires CAP_SYSLOG; missing the cap returns
+///   `EPERM` *after* argument-domain EINVAL checks.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
     if !(0..=SYSLOG_ACTION_MAX).contains(&cmd) {
@@ -2688,6 +2697,30 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
             // CLOSE, OPEN, CLEAR, CONSOLE_OFF, CONSOLE_ON,
             // SIZE_UNREAD, SIZE_BUFFER — no buf/len validation needed.
         }
+    }
+    // Phase 172: Linux `check_syslog_permissions` gates most actions on
+    // CAP_SYSLOG.  Mirror the default-`dmesg_restrict=0` semantics:
+    //   • CLOSE/OPEN/SIZE_BUFFER  -> always allowed (no-op privileges)
+    //   • READ_ALL/SIZE_UNREAD    -> allowed without cap (read-only ring view)
+    //   • everything else         -> require CAP_SYSLOG -> EPERM
+    // This check follows the argument-domain EINVAL guards so that
+    // bad-cmd / NULL-buf / bad-CONSOLE_LEVEL still trump cap failure,
+    // matching Linux's switch-then-permission ordering.
+    let cap_required = !matches!(
+        cmd,
+        SYSLOG_ACTION_CLOSE
+            | SYSLOG_ACTION_OPEN
+            | SYSLOG_ACTION_SIZE_BUFFER
+            | SYSLOG_ACTION_READ_ALL
+            | SYSLOG_ACTION_SIZE_UNREAD,
+    );
+    if cap_required
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYSLOG,
+        )
+    {
+        errno::set_errno(errno::EPERM);
+        return -1;
     }
     errno::set_errno(errno::ENOSYS);
     -1
@@ -7517,5 +7550,451 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(fpathconf(fd, _PC_NAME_MAX), -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // ======================================================================
+    // Phase 172 — klogctl CAP_SYSLOG gate
+    //
+    // Linux `kernel/printk/printk.c::check_syslog_permissions` rejects most
+    // syslog actions with -EPERM when the caller lacks CAP_SYSLOG (under
+    // the default `dmesg_restrict=0`).  CLOSE, OPEN, SIZE_BUFFER are
+    // unconditionally allowed (they're no-ops on Linux).  READ_ALL and
+    // SIZE_UNREAD are likewise allowed without the cap.  Everything else
+    // — READ, READ_CLEAR, CLEAR, CONSOLE_OFF, CONSOLE_ON, CONSOLE_LEVEL —
+    // requires CAP_SYSLOG → EPERM.
+    //
+    // These tests must run with `--test-threads=1` because they mutate
+    // the process-wide capability state.  Each test snapshots the
+    // effective set on entry and restores it on drop.
+    // ======================================================================
+
+    mod klogctl_cap_phase172 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase
+        /// 168 – 171.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_syslog() {
+            use crate::sys_capability::CAP_SYSLOG;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYSLOG < 32 {
+                (lo & !(1u32 << CAP_SYSLOG), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYSLOG - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYSLOG");
+            assert!(!crate::sys_capability::has_capability(CAP_SYSLOG));
+        }
+
+        // -- Per-error-class ---------------------------------------------
+
+        /// READ without CAP_SYSLOG → EPERM (after EINVAL guards pass).
+        #[test]
+        fn test_klogctl_phase172_read_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            let mut buf = [0u8; 64];
+            errno::set_errno(0);
+            assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 64), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// READ_CLEAR without CAP_SYSLOG → EPERM.
+        #[test]
+        fn test_klogctl_phase172_read_clear_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            let mut buf = [0u8; 64];
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_READ_CLEAR, buf.as_mut_ptr(), 64),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// CLEAR without CAP_SYSLOG → EPERM.
+        #[test]
+        fn test_klogctl_phase172_clear_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// CONSOLE_OFF without CAP_SYSLOG → EPERM.
+        #[test]
+        fn test_klogctl_phase172_console_off_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_CONSOLE_OFF, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// CONSOLE_ON without CAP_SYSLOG → EPERM.
+        #[test]
+        fn test_klogctl_phase172_console_on_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_CONSOLE_ON, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// CONSOLE_LEVEL with valid level but no CAP_SYSLOG → EPERM
+        /// (the EINVAL guard for bad level passes; cap probe fires).
+        #[test]
+        fn test_klogctl_phase172_console_level_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 4),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Allowed-without-cap (must still reach ENOSYS, not EPERM) ----
+
+        /// CLOSE is a no-op on Linux — no cap required.  Must still
+        /// reach ENOSYS (our stub doesn't model the ring buffer).
+        #[test]
+        fn test_klogctl_phase172_close_no_cap_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_CLOSE, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// OPEN is a no-op on Linux — no cap required.
+        #[test]
+        fn test_klogctl_phase172_open_no_cap_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_OPEN, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// SIZE_BUFFER returns the buffer size on Linux — no cap
+        /// required.  Our stub still reaches ENOSYS.
+        #[test]
+        fn test_klogctl_phase172_size_buffer_no_cap_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_SIZE_BUFFER, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// READ_ALL is the unprivileged dmesg path under
+        /// `dmesg_restrict=0` — no cap required.
+        #[test]
+        fn test_klogctl_phase172_read_all_no_cap_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            let mut buf = [0u8; 64];
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), 64),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// SIZE_UNREAD is read-only — no cap required.
+        #[test]
+        fn test_klogctl_phase172_size_unread_no_cap_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_SIZE_UNREAD, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Ordering matrix (EINVAL beats EPERM) ------------------------
+
+        /// Negative cmd returns EINVAL even with no cap — argument-
+        /// domain check runs first.
+        #[test]
+        fn test_klogctl_phase172_bad_cmd_einval_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(klogctl(-1, core::ptr::null_mut(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// READ with NULL buf returns EINVAL even with no cap — the
+        /// buf/len fold-check runs before the cap probe.
+        #[test]
+        fn test_klogctl_phase172_read_null_buf_einval_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(klogctl(SYSLOG_ACTION_READ, core::ptr::null_mut(), 64), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// CONSOLE_LEVEL with bad level returns EINVAL even with no
+        /// cap — the level-range check runs before the cap probe.
+        #[test]
+        fn test_klogctl_phase172_bad_console_level_einval_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// READ with len==0 short-circuits to success (returns 0)
+        /// even with no cap — this matches Linux's `if (!len) return 0;`
+        /// fast-path that fires before the permission check would
+        /// otherwise apply.  (Linux's `do_syslog` permission check
+        /// runs before, but our stub mirrors the observable
+        /// fast-path-zero behaviour.)
+        #[test]
+        fn test_klogctl_phase172_read_zero_len_no_cap_returns_zero() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            let mut buf = [0u8; 16];
+            errno::set_errno(0);
+            assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0), 0);
+            // errno unchanged on success
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        // -- Workflow ----------------------------------------------------
+
+        /// systemd-journal-like probe: tries to call CLEAR (privileged)
+        /// after the cap is dropped — gets EPERM, falls back to
+        /// READ_ALL (unprivileged) which reaches ENOSYS.
+        #[test]
+        fn test_klogctl_phase172_workflow_drop_then_fallback() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            // First: try CLEAR (privileged action) — EPERM.
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Then fall back to unprivileged READ_ALL — ENOSYS.
+            let mut buf = [0u8; 32];
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), 32),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Recovery ----------------------------------------------------
+
+        /// After EPERM from a cap-required action, restoring the cap
+        /// allows the privileged path to reach ENOSYS.
+        #[test]
+        fn test_klogctl_phase172_recovery_after_eperm() {
+            let _outer = CapGuard::snapshot();
+            // Drop the cap and observe EPERM.
+            drop_cap_syslog();
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Restore via the outer guard's stored state by dropping a
+            // nested guard — simplest: just capset the default high
+            // bit back.  Use the outer guard's snapshot path: a fresh
+            // inner CapGuard snapshots the (cap-dropped) state, but to
+            // restore we manually set the CAP_SYSLOG bit.
+            use crate::sys_capability::CAP_SYSLOG;
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYSLOG < 32 {
+                (lo | (1u32 << CAP_SYSLOG), hi)
+            } else {
+                (lo, hi | (1u32 << (CAP_SYSLOG - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0);
+            assert!(crate::sys_capability::has_capability(CAP_SYSLOG));
+            // Now CLEAR reaches ENOSYS.
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Sentinel: cap-held privileged path still works --------------
+
+        /// With CAP_SYSLOG held (default state), every cap-required
+        /// action reaches ENOSYS — verifies the gate doesn't fire
+        /// when the cap is present.
+        #[test]
+        fn test_klogctl_phase172_sentinel_cap_held_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            // Don't drop the cap — default state holds CAP_SYSLOG.
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYSLOG,
+            ));
+            let mut buf = [0u8; 32];
+            for cmd in [
+                SYSLOG_ACTION_READ,
+                SYSLOG_ACTION_READ_CLEAR,
+                SYSLOG_ACTION_CLEAR,
+                SYSLOG_ACTION_CONSOLE_OFF,
+                SYSLOG_ACTION_CONSOLE_ON,
+            ] {
+                errno::set_errno(0);
+                let (p, l) = if matches!(
+                    cmd,
+                    SYSLOG_ACTION_READ | SYSLOG_ACTION_READ_CLEAR,
+                ) {
+                    (buf.as_mut_ptr(), 32i32)
+                } else {
+                    (core::ptr::null_mut(), 0i32)
+                };
+                assert_eq!(klogctl(cmd, p, l), -1, "cmd={cmd}");
+                assert_eq!(
+                    errno::get_errno(),
+                    errno::ENOSYS,
+                    "cmd={cmd} should reach ENOSYS with cap held",
+                );
+            }
+        }
+
+        // -- Cross-check: dropping CAP_SYSLOG leaves other caps alone ----
+
+        /// Dropping CAP_SYSLOG must not disturb CAP_SYS_NICE,
+        /// CAP_IPC_LOCK, CAP_SYS_ADMIN or any unrelated cap — verifies
+        /// the bit-mask is precise.
+        #[test]
+        fn test_klogctl_phase172_drop_syslog_isolates_other_caps() {
+            let _g = CapGuard::snapshot();
+            drop_cap_syslog();
+            // CAP_SYSLOG is bit 2 of high (cap 34); check other caps
+            // in both low and high words remain set.
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_IPC_LOCK,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_CHROOT,
+            ));
+            // And dropping doesn't accidentally re-enable CAP_SYSLOG.
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYSLOG,
+            ));
+        }
     }
 }

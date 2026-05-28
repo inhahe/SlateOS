@@ -392,6 +392,15 @@ unsafe fn free_queue(qidx: usize) {
 /// `attr` is the requested attributes when `O_CREAT` is set; if null,
 /// defaults are used.
 ///
+/// Access-mode validation matches Linux's `do_open` in `ipc/mqueue.c`:
+/// the access bits `oflag & O_ACCMODE` must be exactly one of
+/// `O_RDONLY` (0), `O_WRONLY` (1), or `O_RDWR` (2). The fourth
+/// encoding (3 = both O_WRONLY and O_RDWR set simultaneously) is
+/// rejected with `EINVAL`. Without this check, a buggy caller doing
+/// `mq_open(name, O_WRONLY | O_RDWR, ...)` would get a descriptor
+/// here but `EINVAL` on real Linux — masking the bug until the code
+/// is ported.
+///
 /// Returns a positive descriptor on success, -1 with errno on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mq_open(
@@ -401,10 +410,23 @@ pub extern "C" fn mq_open(
     attr: *const MqAttr,
 ) -> MqdT {
     // Validate name outside the lock — it's read-only and bounded.
+    // Linux's `getname(u_name)` runs before `do_open`, so name errors
+    // (EFAULT/ENOENT/ENAMETOOLONG) surface before access-mode EINVAL.
     let (name_buf, name_len) = match unsafe { validate_name(name) } {
         Some(v) => v,
         None => return -1,
     };
+
+    // Access-mode validation: the two-bit field `oflag & O_ACCMODE`
+    // has four encodings, but only three are legal (RDONLY=0,
+    // WRONLY=1, RDWR=2). Encoding 3 is the impossible
+    // "O_WRONLY | O_RDWR" combination that Linux rejects with EINVAL
+    // in `do_open`'s `oflag2acc` lookup-table guard.
+    if (oflag & crate::fcntl::O_ACCMODE) == crate::fcntl::O_ACCMODE {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     let nonblock = (oflag & crate::fcntl::O_NONBLOCK) != 0;
     let create = (oflag & crate::fcntl::O_CREAT) != 0;
     let excl = (oflag & crate::fcntl::O_EXCL) != 0;
@@ -1802,5 +1824,311 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
         let _ = mq_unlink(b"/qnotify_bug\0".as_ptr());
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 113 — mq_open access-mode validation
+    //
+    // Linux's `do_open` (ipc/mqueue.c) rejects the impossible
+    // O_WRONLY|O_RDWR encoding via:
+    //   static const int oflag2acc[O_ACCMODE] = { MAY_READ, MAY_WRITE,
+    //                                MAY_READ|MAY_WRITE,
+    //                                MAY_READ|MAY_WRITE };
+    //   if ((oflag & O_ACCMODE) == (O_RDWR | O_WRONLY))
+    //       return ERR_PTR(-EINVAL);
+    //
+    // Before Phase 113 our mq_open silently accepted that bit pattern
+    // and returned a working descriptor — a real divergence that
+    // would mask bugs in code being ported from Linux. Phase 113
+    // pins the EINVAL response.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_mq_open_phase113_o_wronly_or_rdwr_is_einval() {
+        // The single combination Linux rejects: oflag & O_ACCMODE == 3.
+        let _g = lock_tests();
+        errno::set_errno(0);
+        let r = mq_open(
+            b"/q113_a\0".as_ptr(),
+            crate::fcntl::O_WRONLY | crate::fcntl::O_RDWR,
+            0o600,
+            core::ptr::null(),
+        );
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // And the queue must not have been created as a side effect.
+        let again = mq_open(
+            b"/q113_a\0".as_ptr(),
+            crate::fcntl::O_RDONLY,
+            0o600,
+            core::ptr::null(),
+        );
+        assert_eq!(again, -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    #[test]
+    fn test_mq_open_phase113_bad_accmode_with_create_still_einval() {
+        // O_CREAT must not paper over the bad access mode — Linux's
+        // do_open check fires inside do_mq_open AFTER the create path
+        // decision, but our check fires early. Either way, EINVAL.
+        let _g = lock_tests();
+        errno::set_errno(0);
+        let r = mq_open(
+            b"/q113_b\0".as_ptr(),
+            crate::fcntl::O_WRONLY | crate::fcntl::O_RDWR | O_CREAT,
+            0o600,
+            core::ptr::null(),
+        );
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Side-effect check: no queue created.
+        let again = mq_open(
+            b"/q113_b\0".as_ptr(),
+            crate::fcntl::O_RDONLY,
+            0o600,
+            core::ptr::null(),
+        );
+        assert_eq!(again, -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    #[test]
+    fn test_mq_open_phase113_bad_accmode_with_nonblock_still_einval() {
+        // O_NONBLOCK does not whitelist the bad access mode.
+        let _g = lock_tests();
+        errno::set_errno(0);
+        let r = mq_open(
+            b"/q113_c\0".as_ptr(),
+            crate::fcntl::O_WRONLY | crate::fcntl::O_RDWR | O_NONBLOCK | O_CREAT,
+            0o600,
+            core::ptr::null(),
+        );
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mq_open_phase113_o_rdonly_accepted() {
+        // Boundary: O_RDONLY (0) is a valid access mode.
+        let _g = lock_tests();
+        // Create first (open-only-RDONLY would ENOENT a missing queue).
+        let creator = mq_open(
+            b"/q113_rdonly\0".as_ptr(),
+            crate::fcntl::O_RDWR | O_CREAT,
+            0o600,
+            core::ptr::null(),
+        );
+        assert!(creator > 0);
+        let _ = mq_close(creator);
+
+        let r = mq_open(
+            b"/q113_rdonly\0".as_ptr(),
+            crate::fcntl::O_RDONLY,
+            0o600,
+            core::ptr::null(),
+        );
+        assert!(r > 0, "O_RDONLY must be accepted (errno={})", errno::get_errno());
+        let _ = mq_close(r);
+        let _ = mq_unlink(b"/q113_rdonly\0".as_ptr());
+    }
+
+    #[test]
+    fn test_mq_open_phase113_o_wronly_accepted() {
+        // Boundary: O_WRONLY (1) is a valid access mode.
+        let _g = lock_tests();
+        let creator = mq_open(
+            b"/q113_wronly\0".as_ptr(),
+            crate::fcntl::O_RDWR | O_CREAT,
+            0o600,
+            core::ptr::null(),
+        );
+        assert!(creator > 0);
+        let _ = mq_close(creator);
+
+        let r = mq_open(
+            b"/q113_wronly\0".as_ptr(),
+            crate::fcntl::O_WRONLY,
+            0o600,
+            core::ptr::null(),
+        );
+        assert!(r > 0, "O_WRONLY must be accepted (errno={})", errno::get_errno());
+        let _ = mq_close(r);
+        let _ = mq_unlink(b"/q113_wronly\0".as_ptr());
+    }
+
+    #[test]
+    fn test_mq_open_phase113_o_rdwr_accepted() {
+        // Boundary: O_RDWR (2) is a valid access mode.
+        let _g = lock_tests();
+        let r = mq_open(
+            b"/q113_rdwr\0".as_ptr(),
+            crate::fcntl::O_RDWR | O_CREAT,
+            0o600,
+            core::ptr::null(),
+        );
+        assert!(r > 0, "O_RDWR must be accepted (errno={})", errno::get_errno());
+        let _ = mq_close(r);
+        let _ = mq_unlink(b"/q113_rdwr\0".as_ptr());
+    }
+
+    #[test]
+    fn test_mq_open_phase113_efault_wins_over_einval() {
+        // Order check: NULL name must surface EFAULT BEFORE the bad
+        // access mode surfaces EINVAL, matching Linux where getname()
+        // runs before do_open().
+        let _g = lock_tests();
+        errno::set_errno(0);
+        let r = mq_open(
+            core::ptr::null(),
+            crate::fcntl::O_WRONLY | crate::fcntl::O_RDWR,
+            0o600,
+            core::ptr::null(),
+        );
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mq_open_phase113_unknown_high_bits_still_accepted() {
+        // Linux's mq_open does NOT reject unknown high bits — it
+        // simply ignores them. Confirm our check fires ONLY on the
+        // O_ACCMODE == 3 pattern and does not over-reject. (If we ever
+        // tighten this to reject unknown bits we'd break Linux apps
+        // that pass O_CLOEXEC, which we already silently accept.)
+        let _g = lock_tests();
+        // 0x4000_0000 is well above any defined O_* flag — silently
+        // accepted by Linux mq_open. Use a positive sign-safe value.
+        let weird_flag: i32 = 0x4000_0000;
+        let r = mq_open(
+            b"/q113_weird\0".as_ptr(),
+            crate::fcntl::O_RDWR | O_CREAT | weird_flag,
+            0o600,
+            core::ptr::null(),
+        );
+        assert!(r > 0, "unknown high bits must not block creation (errno={})", errno::get_errno());
+        let _ = mq_close(r);
+        let _ = mq_unlink(b"/q113_weird\0".as_ptr());
+    }
+
+    #[test]
+    fn test_mq_open_phase113_recovery_after_einval() {
+        // After a bad-accmode EINVAL, a subsequent valid call still
+        // succeeds — errno is not left in a sticky bad state.
+        let _g = lock_tests();
+        errno::set_errno(0);
+        let r1 = mq_open(
+            b"/q113_rec\0".as_ptr(),
+            crate::fcntl::O_WRONLY | crate::fcntl::O_RDWR,
+            0o600,
+            core::ptr::null(),
+        );
+        assert_eq!(r1, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let r2 = mq_open(
+            b"/q113_rec\0".as_ptr(),
+            crate::fcntl::O_RDWR | O_CREAT,
+            0o600,
+            core::ptr::null(),
+        );
+        assert!(r2 > 0, "recovery call must succeed (errno={})", errno::get_errno());
+        let _ = mq_close(r2);
+        let _ = mq_unlink(b"/q113_rec\0".as_ptr());
+    }
+
+    #[test]
+    fn test_mq_open_phase113_bad_accmode_does_not_create_queue() {
+        // State-integrity check: a rejected open must NOT leak a
+        // half-created queue. Specifically, the slot allocator must
+        // not have been touched.
+        let _g = lock_tests();
+        errno::set_errno(0);
+        let r = mq_open(
+            b"/q113_nocreate\0".as_ptr(),
+            crate::fcntl::O_WRONLY | crate::fcntl::O_RDWR | O_CREAT | O_EXCL,
+            0o600,
+            core::ptr::null(),
+        );
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // Re-opening RDONLY (without CREAT) must surface ENOENT,
+        // proving no queue was registered.
+        errno::set_errno(0);
+        let r2 = mq_open(
+            b"/q113_nocreate\0".as_ptr(),
+            crate::fcntl::O_RDONLY,
+            0o600,
+            core::ptr::null(),
+        );
+        assert_eq!(r2, -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    #[test]
+    fn test_mq_open_phase113_buggy_caller_passes_negative_one_oflag() {
+        // A C caller doing `mq_open(name, -1, ...)` (all bits set,
+        // including O_ACCMODE == 3 within the low two bits) hits the
+        // access-mode check and gets EINVAL, same as on Linux.
+        let _g = lock_tests();
+        errno::set_errno(0);
+        let r = mq_open(
+            b"/q113_negone\0".as_ptr(),
+            -1,
+            0o600,
+            core::ptr::null(),
+        );
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mq_open_phase113_posix_real_time_test_suite_workflow() {
+        // Linux's open_posix_testsuite has an mq_open conformance case
+        // that explicitly tests O_RDWR | O_WRONLY -> EINVAL. Before
+        // Phase 113 our shim silently returned a valid descriptor,
+        // which would have broken that test if run against our libc.
+        // Pin the conformance behaviour.
+        let _g = lock_tests();
+        errno::set_errno(0);
+        let r = mq_open(
+            b"/q113_conform\0".as_ptr(),
+            crate::fcntl::O_RDWR | crate::fcntl::O_WRONLY | O_CREAT,
+            0o644,
+            core::ptr::null(),
+        );
+        assert_eq!(r, -1, "expected mq_open to reject O_RDWR|O_WRONLY (conformance test)");
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mq_open_phase113_einval_does_not_consume_descriptor_slot() {
+        // Allocating a descriptor is expensive; the bad-accmode reject
+        // must happen BEFORE any allocation. Verify by counting: 100
+        // rejected mq_opens must still allow a fresh valid mq_open
+        // afterward without descriptor-table exhaustion.
+        let _g = lock_tests();
+        for _ in 0..100 {
+            errno::set_errno(0);
+            let r = mq_open(
+                b"/q113_noleak\0".as_ptr(),
+                crate::fcntl::O_WRONLY | crate::fcntl::O_RDWR,
+                0o600,
+                core::ptr::null(),
+            );
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+        // 101st call must succeed.
+        let r = mq_open(
+            b"/q113_noleak\0".as_ptr(),
+            crate::fcntl::O_RDWR | O_CREAT,
+            0o600,
+            core::ptr::null(),
+        );
+        assert!(r > 0, "descriptor table exhausted by leaked allocations");
+        let _ = mq_close(r);
+        let _ = mq_unlink(b"/q113_noleak\0".as_ptr());
     }
 }

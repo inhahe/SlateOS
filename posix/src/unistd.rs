@@ -626,9 +626,23 @@ pub extern "C" fn setregid(_rgid: GidT, _egid: GidT) -> i32 {
 
 /// Get the supplementary group IDs.
 ///
-/// Returns 0 (no supplementary groups — only group 0).
+/// Linux semantics (kernel/groups.c::SYSCALL_DEFINE2(getgroups)):
+/// * `size < 0` → `-EINVAL`.
+/// * `size == 0` → return the number of supplementary groups
+///   without touching `list` (the query form).
+/// * `size > 0` and our supplementary group count fits → copy the
+///   list and return the count.
+///
+/// We have no supplementary groups, so once the prologue passes we
+/// always return 0.  `list` is never dereferenced because there is
+/// nothing to copy — matching Linux's behaviour, which only invokes
+/// `copy_to_user` when `ngroups > 0`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getgroups(_size: i32, _list: *mut GidT) -> i32 {
+pub extern "C" fn getgroups(size: i32, _list: *mut GidT) -> i32 {
+    if size < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
 }
 
@@ -4144,6 +4158,77 @@ mod tests {
         let mut groups: [GidT; 5] = [99; 5];
         let ret = getgroups(5, groups.as_mut_ptr());
         assert_eq!(ret, 0, "getgroups should return 0 (no supplementary groups)");
+    }
+
+    // -- Phase 94: getgroups size validation --
+
+    #[test]
+    fn test_getgroups_phase94_negative_size_einval() {
+        crate::errno::set_errno(0);
+        let ret = getgroups(-1, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getgroups_phase94_int_min_size_einval() {
+        crate::errno::set_errno(0);
+        let ret = getgroups(i32::MIN, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getgroups_phase94_zero_size_with_null_list_ok() {
+        // POSIX query form: size==0 + NULL list → return count (0).
+        crate::errno::set_errno(0);
+        let ret = getgroups(0, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getgroups_phase94_positive_size_with_null_list_ok() {
+        // We have 0 supplementary groups → nothing to copy →
+        // list pointer is never dereferenced, matching Linux's
+        // copy_to_user-only-when-ngroups>0 behaviour.
+        crate::errno::set_errno(0);
+        let ret = getgroups(8, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_getgroups_phase94_positive_size_with_valid_list_ok() {
+        let mut groups: [GidT; 16] = [0xDEAD; 16];
+        crate::errno::set_errno(0);
+        let ret = getgroups(16, groups.as_mut_ptr());
+        assert_eq!(ret, 0);
+        // The buffer must not have been written (we have 0 groups).
+        assert_eq!(groups[0], 0xDEAD);
+    }
+
+    #[test]
+    fn test_getgroups_phase94_einval_then_valid_progression() {
+        crate::errno::set_errno(0);
+        let bad = getgroups(-5, core::ptr::null_mut());
+        assert_eq!(bad, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Subsequent valid call still works.
+        crate::errno::set_errno(0);
+        let good = getgroups(0, core::ptr::null_mut());
+        assert_eq!(good, 0);
+    }
+
+    #[test]
+    fn test_getgroups_phase94_buggy_caller_signed_overflow() {
+        // Caller computed `nbytes / sizeof(gid_t)` with signed math and
+        // it wrapped negative.  Linux reports EINVAL — so do we.
+        crate::errno::set_errno(0);
+        let buggy_size: i32 = -42;
+        let ret = getgroups(buggy_size, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     // ------------------------------------------------------------------

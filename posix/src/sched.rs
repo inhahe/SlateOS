@@ -94,9 +94,8 @@ pub extern "C" fn sched_getscheduler(pid: i32) -> i32 {
 /// Linux validation order (`kernel/sched/syscalls.c::__sched_setscheduler`):
 ///   1. `pid < 0` → `EINVAL`.
 ///   2. Unknown policy → `EINVAL`.
-///   3. `param == NULL` → `EINVAL` (we keep `EINVAL` for ABI
-///      stability with the rest of this module; Linux uses `EFAULT`
-///      via `copy_from_user`).
+///   3. `param == NULL` → `EFAULT` (Linux: `copy_from_user` returns
+///      `-EFAULT` for an invalid user pointer).
 ///   4. `sched_priority` outside `[min(policy), max(policy)]` → `EINVAL`.
 ///   5. **Phase 170**: switching to a real-time policy (`SCHED_FIFO`,
 ///      `SCHED_RR`) or `SCHED_DEADLINE` without `CAP_SYS_NICE` → `EPERM`.
@@ -123,7 +122,7 @@ pub extern "C" fn sched_setscheduler(
         return -1;
     }
     if param.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: param non-null per the check above; SchedParam is repr(C)
@@ -170,7 +169,7 @@ pub extern "C" fn sched_getparam(pid: i32, param: *mut SchedParam) -> i32 {
         return -1;
     }
     if param.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: param verified non-null.
@@ -194,7 +193,7 @@ pub extern "C" fn sched_setparam(
         return -1;
     }
     if param.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: param non-null per the check above.
@@ -258,7 +257,7 @@ pub extern "C" fn sched_rr_get_interval(
         return -1;
     }
     if tp.is_null() {
-        errno::set_errno(errno::EINVAL);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: tp verified non-null.
@@ -2045,10 +2044,10 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
-        /// EINVAL on NULL param beats EPERM (we deliberately keep
-        /// EINVAL here for ABI; see sched_setscheduler doc).
+        /// EFAULT on NULL param beats EPERM (Linux: copy_from_user
+        /// fails before the cap check runs).
         #[test]
-        fn test_sched_setscheduler_phase170_einval_null_beats_eperm() {
+        fn test_sched_setscheduler_phase170_efault_null_beats_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
             errno::set_errno(0);
@@ -2056,7 +2055,7 @@ mod tests {
                 sched_setscheduler(0, SCHED_FIFO, core::ptr::null()),
                 -1,
             );
-            assert_eq!(errno::get_errno(), errno::EINVAL);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
         }
 
         /// EINVAL on out-of-range priority beats EPERM (Linux
@@ -2464,5 +2463,124 @@ mod tests {
             }
             assert!(crate::sys_capability::has_capability(CAP_SYS_NICE));
         }
+    }
+
+    // =================================================================
+    // Phase 210 — NULL-pointer errno: EINVAL → EFAULT cleanup
+    //
+    // Linux returns EFAULT for NULL user-space pointers via
+    // `copy_from_user` / `copy_to_user`.  Our stubs originally used
+    // EINVAL because the rest of the sched module did so.  Phase 210
+    // corrects these four functions to match Linux:
+    //   sched_setscheduler, sched_getparam, sched_setparam,
+    //   sched_rr_get_interval.
+    //
+    // sched_getaffinity / sched_setaffinity already used EFAULT since
+    // Phase 118.
+    // =================================================================
+
+    /// sched_setscheduler: NULL param → EFAULT (not EINVAL).
+    #[test]
+    fn test_phase210_setscheduler_null_param_efault() {
+        errno::set_errno(0);
+        assert_eq!(sched_setscheduler(0, SCHED_RR, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// sched_getparam: NULL param → EFAULT.
+    #[test]
+    fn test_phase210_getparam_null_param_efault() {
+        errno::set_errno(0);
+        assert_eq!(sched_getparam(0, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// sched_setparam: NULL param → EFAULT.
+    #[test]
+    fn test_phase210_setparam_null_param_efault() {
+        errno::set_errno(0);
+        assert_eq!(sched_setparam(0, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// sched_rr_get_interval: NULL tp → EFAULT.
+    #[test]
+    fn test_phase210_rr_get_interval_null_tp_efault() {
+        errno::set_errno(0);
+        assert_eq!(sched_rr_get_interval(0, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// sched_setscheduler: EINVAL (bad pid) still beats EFAULT (NULL
+    /// param) — pid check comes first in the validation chain.
+    #[test]
+    fn test_phase210_setscheduler_einval_pid_beats_efault_null() {
+        errno::set_errno(0);
+        assert_eq!(sched_setscheduler(-1, SCHED_OTHER, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// sched_setscheduler: EINVAL (unknown policy) still beats EFAULT
+    /// (NULL param) — policy check comes before the NULL check.
+    #[test]
+    fn test_phase210_setscheduler_einval_policy_beats_efault_null() {
+        errno::set_errno(0);
+        assert_eq!(sched_setscheduler(0, 99, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// sched_getparam: EINVAL (bad pid) beats EFAULT (NULL param).
+    #[test]
+    fn test_phase210_getparam_einval_pid_beats_efault_null() {
+        errno::set_errno(0);
+        assert_eq!(sched_getparam(-1, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// sched_setparam: EINVAL (bad pid) beats EFAULT (NULL param).
+    #[test]
+    fn test_phase210_setparam_einval_pid_beats_efault_null() {
+        errno::set_errno(0);
+        assert_eq!(sched_setparam(-1, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// sched_rr_get_interval: EINVAL (bad pid) beats EFAULT (NULL tp).
+    #[test]
+    fn test_phase210_rr_get_interval_einval_pid_beats_efault_null() {
+        errno::set_errno(0);
+        assert_eq!(sched_rr_get_interval(-1, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// After each EFAULT, a valid follow-up call succeeds — no sticky
+    /// state from the failed NULL-pointer path.
+    #[test]
+    fn test_phase210_recovery_after_efault() {
+        // sched_getparam: EFAULT then success.
+        errno::set_errno(0);
+        assert_eq!(sched_getparam(0, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        let mut param = SchedParam { sched_priority: 99 };
+        errno::set_errno(0);
+        assert_eq!(sched_getparam(0, &raw mut param), 0);
+        assert_eq!(param.sched_priority, 0);
+
+        // sched_setparam: EFAULT then success.
+        errno::set_errno(0);
+        assert_eq!(sched_setparam(0, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        let p = SchedParam { sched_priority: 0 };
+        errno::set_errno(0);
+        assert_eq!(sched_setparam(0, &raw const p), 0);
+
+        // sched_rr_get_interval: EFAULT then success.
+        errno::set_errno(0);
+        assert_eq!(sched_rr_get_interval(0, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        let mut tp = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        errno::set_errno(0);
+        assert_eq!(sched_rr_get_interval(0, &raw mut tp), 0);
+        assert_eq!(tp.tv_nsec, 100_000_000);
     }
 }

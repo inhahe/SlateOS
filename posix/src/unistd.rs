@@ -852,18 +852,34 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
 /// Stores `name[..len]` as the new domain name.  Subsequent calls to
 /// `getdomainname()` will return the new value.
 ///
-/// Returns 0 on success, -1 on error (EINVAL if too long, EFAULT if null).
+/// Errors (Linux-matching priority order — `kernel/sys.c::sys_setdomainname`
+/// performs the cap check at the top, before argument validation):
 ///
-/// Note: On a real multi-user system this would require `CAP_SYS_ADMIN`.
-/// We're single-user so any process can set the domain name.
+/// 1. `!CAP_SYS_ADMIN`              → `EPERM`   (Phase 167)
+/// 2. `len > HOST_NAME_MAX`          → `EINVAL`
+/// 3. `name == NULL` when `len > 0`  → `EFAULT`
+///
+/// `len == 0` is accepted even with a NULL pointer (matches Linux's
+/// `copy_from_user(_, NULL, 0)` short-circuit).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setdomainname(name: *const u8, len: usize) -> i32 {
-    if name.is_null() {
-        errno::set_errno(errno::EFAULT);
+    // 1. CAP_SYS_ADMIN check first (Phase 167).  The comment that
+    //    previously said "we're single-user so any process can set
+    //    the domain name" predates the cred model — now that
+    //    capabilities exist, Linux's sys_setdomainname ordering
+    //    applies.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_ADMIN,
+    ) {
+        errno::set_errno(errno::EPERM);
         return -1;
     }
     if len > HOST_NAME_MAX {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if len > 0 && name.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -1310,15 +1326,39 @@ pub extern "C" fn sync() {
 /// Stores the hostname in a process-local static buffer.  Retrieved
 /// via `gethostname()`.  Maximum length is 255 bytes (HOST_NAME_MAX).
 ///
-/// Returns 0 on success, -1 on error (EINVAL if too long, EFAULT if null).
+/// Errors (Linux-matching priority order — `kernel/sys.c::sys_sethostname`
+/// checks the cap first, then the length, then the user pointer):
+///
+/// 1. `!CAP_SYS_ADMIN`              → `EPERM`   (Phase 167)
+/// 2. `len > HOST_NAME_MAX`          → `EINVAL`
+/// 3. `name == NULL` when `len > 0`  → `EFAULT`
+///
+/// `len == 0` is accepted even with a NULL pointer (matches Linux's
+/// `copy_from_user(_, NULL, 0)` short-circuit).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
-    if name.is_null() {
-        errno::set_errno(errno::EFAULT);
+    // 1. CAP_SYS_ADMIN check first (Phase 167) — Linux's
+    //    sys_sethostname checks ns_capable(uts_ns->user_ns,
+    //    CAP_SYS_ADMIN) at the top of the syscall prologue,
+    //    before any argument validation.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_ADMIN,
+    ) {
+        errno::set_errno(errno::EPERM);
         return -1;
     }
+    // 2. Length sanity (matches Linux's `len < 0 || len >
+    //    __NEW_UTS_LEN` check; our `usize` parameter already
+    //    excludes negative values).
     if len > HOST_NAME_MAX {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // 3. Empty copy never dereferences the pointer — Linux's
+    //    copy_from_user(_, NULL, 0) returns 0 so sethostname(NULL, 0)
+    //    succeeds.  We mirror that and only EFAULT on len > 0.
+    if len > 0 && name.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -4211,6 +4251,381 @@ mod tests {
 
         let mut buf = [0u8; 5];
         assert_eq!(getdomainname(buf.as_mut_ptr(), buf.len()), -1);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 167: sethostname / setdomainname — CAP_SYS_ADMIN gate
+    //
+    // Linux's `kernel/sys.c::sys_sethostname` and `sys_setdomainname`
+    // check `ns_capable(uts_ns->user_ns, CAP_SYS_ADMIN)` at the very
+    // top of the syscall prologue — before length validation and
+    // before the user-pointer is touched.  Pre-Phase-167 our stubs
+    // accepted writes from any caller; the setdomainname doc even
+    // said "we're single-user so any process can set the domain
+    // name."  Now that the cred model exists (Phase 77 reboot, 164
+    // swap, 165 mount, 166 chroot), we restore Linux's gate.
+    //
+    // Ordering: EPERM > EINVAL (len > HOST_NAME_MAX) > EFAULT
+    // (NULL pointer with len > 0).  `len == 0` short-circuits the
+    // copy and is accepted with any pointer (matches
+    // copy_from_user(_, NULL, 0) returning 0).
+    // ------------------------------------------------------------------
+
+    mod uts_cap_phase167 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase
+        /// 77 / 164 / 165 / 166.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_admin() {
+            use crate::sys_capability::CAP_SYS_ADMIN;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_ADMIN < 32 {
+                (lo & !(1u32 << CAP_SYS_ADMIN), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_ADMIN");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
+        }
+
+        // -- Per-error-class --------------------------------------------------
+
+        /// `sethostname` under no cap returns EPERM, not the silent
+        /// success the stub used to grant.
+        #[test]
+        fn test_sethostname_phase167_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            let name = b"newhost";
+            assert_eq!(sethostname(name.as_ptr(), name.len()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Same for `setdomainname`.
+        #[test]
+        fn test_setdomainname_phase167_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            let name = b"example.com";
+            assert_eq!(setdomainname(name.as_ptr(), name.len()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering matrix --------------------------------------------------
+
+        /// EPERM must beat the EINVAL-too-long check (cap goes
+        /// first in Linux's prologue).
+        #[test]
+        fn test_sethostname_phase167_eperm_beats_einval_too_long() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            let long = [b'a'; 1024];
+            assert_eq!(sethostname(long.as_ptr(), 1024), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// EPERM must beat EFAULT (NULL pointer + len > 0).
+        #[test]
+        fn test_sethostname_phase167_eperm_beats_efault_null_with_len() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(sethostname(core::ptr::null(), 5), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// setdomainname: EPERM beats EINVAL.
+        #[test]
+        fn test_setdomainname_phase167_eperm_beats_einval_too_long() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            let long = [b'b'; 1024];
+            assert_eq!(setdomainname(long.as_ptr(), 1024), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// setdomainname: EPERM beats EFAULT.
+        #[test]
+        fn test_setdomainname_phase167_eperm_beats_efault_null_with_len() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(setdomainname(core::ptr::null(), 5), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Regression: under default caps, EINVAL still beats EFAULT
+        /// — the new ordering only inserts EPERM at the top.
+        #[test]
+        fn test_sethostname_phase167_default_einval_beats_efault() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            assert_eq!(
+                sethostname(core::ptr::null(), 100_000),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- Linux len=0 short-circuit (new in Phase 167) ---------------------
+
+        /// `sethostname(NULL, 0)` succeeds on Linux because
+        /// `copy_from_user(_, NULL, 0)` is a no-op.  Phase 167
+        /// restores that semantics — pre-Phase-167 we returned
+        /// EFAULT here, diverging from Linux.
+        #[test]
+        fn test_sethostname_phase167_null_len_zero_succeeds_with_cap() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            assert_eq!(sethostname(core::ptr::null(), 0), 0);
+            // Re-set to localhost to avoid bleeding into later tests.
+            let localhost = b"localhost";
+            let _ = sethostname(localhost.as_ptr(), localhost.len());
+        }
+
+        /// Same for `setdomainname(NULL, 0)`.
+        #[test]
+        fn test_setdomainname_phase167_null_len_zero_succeeds_with_cap() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            assert_eq!(setdomainname(core::ptr::null(), 0), 0);
+            // Restore "(none)" to avoid bleeding into later tests.
+            let none = b"(none)";
+            let _ = setdomainname(none.as_ptr(), none.len());
+        }
+
+        /// `sethostname(NULL, 0)` under no cap still returns EPERM
+        /// — the cap check beats even the len=0 short-circuit.
+        #[test]
+        fn test_sethostname_phase167_null_len_zero_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(sethostname(core::ptr::null(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Workflow ---------------------------------------------------------
+
+        /// Workflow: a dropbear sshd that already dropped
+        /// CAP_SYS_ADMIN tries to "normalise" its hostname for
+        /// logging — Linux returns EPERM; we now do too.
+        #[test]
+        fn test_sethostname_phase167_workflow_dropbear_post_drop() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            let name = b"sshd-worker-7";
+            assert_eq!(sethostname(name.as_ptr(), name.len()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Workflow: a Kubernetes pod (no CAP_SYS_ADMIN) calls
+        /// `domainname svc.cluster.local` from an entrypoint script
+        /// — must see EPERM.
+        #[test]
+        fn test_setdomainname_phase167_workflow_k8s_pod_entrypoint() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            let domain = b"svc.cluster.local";
+            assert_eq!(setdomainname(domain.as_ptr(), domain.len()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Buggy-caller -----------------------------------------------------
+
+        /// Buggy caller: a build script computes a hostname length
+        /// from `strlen` on a stack-garbage pointer, ending up with
+        /// `len = 0xFFFF` and an arbitrary `name`.  Under no cap we
+        /// still get EPERM, not the EINVAL the unprivileged-callable
+        /// path would have returned.
+        #[test]
+        fn test_sethostname_phase167_buggy_huge_len_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            let stale = b"stale\0";
+            assert_eq!(sethostname(stale.as_ptr(), 0xFFFF), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Recovery ---------------------------------------------------------
+
+        /// After EPERM, restoring CAP_SYS_ADMIN lets the next
+        /// sethostname succeed.  Verifies the cap-restoration path
+        /// is intact even after repeated cap-stripped calls.
+        #[test]
+        fn test_sethostname_phase167_recovery_after_eperm() {
+            // Save the original hostname for restoration.
+            let mut orig = [0u8; 256];
+            gethostname(orig.as_mut_ptr(), orig.len());
+            let orig_len = unsafe { crate::string::strlen(orig.as_ptr()) };
+
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_sys_admin();
+                errno::set_errno(0);
+                assert_eq!(sethostname(b"test\0".as_ptr(), 4), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            } // guard drops here -> cap restored
+
+            // With caps back, sethostname succeeds.
+            let new_name = b"phase167-recover";
+            assert_eq!(
+                sethostname(new_name.as_ptr(), new_name.len()),
+                0
+            );
+
+            // Restore the original hostname so later tests see the
+            // baseline.
+            sethostname(orig.as_ptr(), orig_len);
+        }
+
+        // -- Sentinels --------------------------------------------------------
+
+        /// Pre-Phase-167 sethostname silently succeeded for any
+        /// caller — this sentinel locks the new EPERM contract.
+        #[test]
+        fn test_sethostname_phase167_no_longer_silently_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            let rc = sethostname(b"x\0".as_ptr(), 1);
+            assert_ne!(rc, 0,
+                "Pre-Phase-167: unprivileged sethostname returned 0 \
+                 — CAP_SYS_ADMIN gate missing.");
+            assert_eq!(rc, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Sentinel for setdomainname.
+        #[test]
+        fn test_setdomainname_phase167_no_longer_silently_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            let rc = setdomainname(b"x\0".as_ptr(), 1);
+            assert_ne!(rc, 0,
+                "Pre-Phase-167: unprivileged setdomainname returned 0 \
+                 — CAP_SYS_ADMIN gate missing.");
+            assert_eq!(rc, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Cross-checks -----------------------------------------------------
+
+        /// Both functions share the same EPERM precedence under a
+        /// stripped cap.
+        #[test]
+        fn test_sethostname_and_setdomainname_phase167_share_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+
+            errno::set_errno(0);
+            assert_eq!(sethostname(b"h\0".as_ptr(), 1), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+
+            errno::set_errno(0);
+            assert_eq!(setdomainname(b"d\0".as_ptr(), 1), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Regression: default-cap sethostname still round-trips
+        /// (the existing test_sethostname_roundtrip exercises this
+        /// without explicit cap check; we add an explicit assertion
+        /// to lock it down).
+        #[test]
+        fn test_sethostname_phase167_default_cap_still_writes() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+
+            // Save and restore.
+            let mut orig = [0u8; 256];
+            gethostname(orig.as_mut_ptr(), orig.len());
+            let orig_len = unsafe { crate::string::strlen(orig.as_ptr()) };
+
+            let new_name = b"phase167-default";
+            assert_eq!(
+                sethostname(new_name.as_ptr(), new_name.len()),
+                0
+            );
+            let mut buf = [0u8; 256];
+            assert_eq!(gethostname(buf.as_mut_ptr(), buf.len()), 0);
+            assert_eq!(&buf[..new_name.len()], new_name);
+
+            sethostname(orig.as_ptr(), orig_len);
+        }
     }
 
     // ------------------------------------------------------------------

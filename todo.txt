@@ -703,3 +703,24 @@ OBSOLETE NOTE BELOW (pre-relaxation):
   - `unwrap_used`, `expect_used`, `panic` — per CLAUDE.md rules
   Fix in a separate cleanup pass; do not gate other work on it.
   Build is currently clean (0 warnings on `cargo build -p kernel`).
+
+(2026-05-28) Phase 145 deferrals — pidfd validation:
+  - Modern Linux (6.9+) defined PIDFD_SIGNAL_THREAD (1<<0),
+    PIDFD_SIGNAL_THREAD_GROUP (1<<1), PIDFD_SIGNAL_PROCESS_GROUP
+    (1<<2) scope flags for pidfd_send_signal, plus a hweight32 mutex
+    check (at most one set).  Our stub still treats any non-zero flag
+    as EINVAL (pre-6.9 behaviour).  Add the constants and the mutex
+    check in a future phase.  Defined position: between the flag mask
+    check and the fdget step.
+  - Phase 145 removed the sig-range and si_signo cross-check from
+    pidfd_send_signal because they live deeper in the kernel than
+    fdget, and with no HandleKind::Pidfd in the fdtable every input
+    short-circuits at the kind check.  When a HandleKind::Pidfd is
+    added (alongside a working pidfd_open that actually allocates one),
+    re-introduce the sig-range check inside what corresponds to
+    valid_signal (deepest), and re-introduce the si_signo cross-check
+    in the position corresponding to copy_siginfo_from_user_any
+    (between access_pidfd_pidns and kill_pid_info_type).  Similarly,
+    pidfd_getfd needs the inner targetfd<0 / not-open check
+    reintroduced inside the inner pidfd_getfd(pid, fd) once real
+    pidfd state exists.

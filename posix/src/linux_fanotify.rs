@@ -88,6 +88,23 @@ const FAN_INIT_VALID_FLAGS: u32 = FAN_CLOEXEC
     | FAN_REPORT_NAME
     | FAN_REPORT_TARGET_FID;
 
+/// File-ID-report bits, collectively `fid_mode` in Linux's source.
+///
+/// `FAN_REPORT_FID`, `FAN_REPORT_DIR_FID`, `FAN_REPORT_NAME`, and
+/// `FAN_REPORT_TARGET_FID` together form `FANOTIFY_FID_BITS` in
+/// `fs/notify/fanotify/fanotify_user.c`.  The kernel uses the union
+/// to test whether *any* FID-style report was requested, then
+/// rejects FID reporting under permission-event classes
+/// (CONTENT / PRE_CONTENT) — those classes deliver blocking
+/// permission events that need a real file descriptor, not a FID
+/// handle, so the combination is meaningless.  `FAN_REPORT_PIDFD`
+/// and `FAN_REPORT_TID` are *not* part of `fid_mode`: they describe
+/// the pid reporting form, not the file reporting form.
+const FAN_FID_MODE_BITS: u32 = FAN_REPORT_FID
+    | FAN_REPORT_DIR_FID
+    | FAN_REPORT_NAME
+    | FAN_REPORT_TARGET_FID;
+
 // ---------------------------------------------------------------------------
 // fanotify event mask bits
 // ---------------------------------------------------------------------------
@@ -294,7 +311,9 @@ fn validate_event_f_flags(event_f_flags: u32) -> Result<(), i32> {
 /// `fanotify_init(2)` contract. Returns `-1` with errno set to:
 ///
 /// * `EINVAL` — invalid class encoding (`0xC`), unknown flag bits,
-///   `FAN_REPORT_NAME` without `FAN_REPORT_DIR_FID`,
+///   any FID-report bit requested alongside `FAN_CLASS_CONTENT` or
+///   `FAN_CLASS_PRE_CONTENT` (FID reporting only works under
+///   `FAN_CLASS_NOTIF`), `FAN_REPORT_NAME` without `FAN_REPORT_DIR_FID`,
 ///   `FAN_REPORT_TARGET_FID` without the full FID+DIR_FID+NAME triple,
 ///   `FAN_REPORT_PIDFD` together with `FAN_REPORT_TID` (the two are
 ///   mutually exclusive — per-thread ids can't be wrapped in a pidfd),
@@ -321,6 +340,20 @@ pub extern "C" fn fanotify_init(flags: u32, event_f_flags: u32) -> i32 {
     // Remaining flag bits must all be ones we recognize.
     let non_class = flags & !FAN_ALL_CLASS_BITS;
     if (non_class & !FAN_INIT_VALID_FLAGS) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Phase 142: FID-style reports are only valid under
+    // FAN_CLASS_NOTIF.  Linux's `do_fanotify_init` computes
+    // `fid_mode = flags & FANOTIFY_FID_BITS` and rejects with EINVAL
+    // whenever `fid_mode != 0 && class != FAN_CLASS_NOTIF` — the
+    // CONTENT / PRE_CONTENT classes deliver blocking permission
+    // events that *must* carry a real file descriptor for the
+    // userspace handler to allow / deny the operation; a FID handle
+    // can't be acted upon synchronously.
+    let fid_mode = flags & FAN_FID_MODE_BITS;
+    if fid_mode != 0 && class != FAN_CLASS_NOTIF {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -959,6 +992,289 @@ mod tests {
         );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 142 — FID-mode bits require FAN_CLASS_NOTIF
+    //
+    // Linux's `do_fanotify_init` computes
+    //     fid_mode = flags & FANOTIFY_FID_BITS
+    // and rejects `fid_mode != 0 && class != FAN_CLASS_NOTIF` with
+    // EINVAL.  The FID-reporting forms can only be paired with the
+    // notification class because CONTENT / PRE_CONTENT classes ship
+    // blocking permission events that require a real fd in the event
+    // header (the handler allows / denies the in-flight syscall).
+    // Pre-Phase-142 we accepted any FID combo with any class and
+    // returned ENOSYS — a real observable divergence from Linux.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_phase142_fid_mode_bits_constant_shape() {
+        // Membership: FANOTIFY_FID_BITS is the union of the four
+        // FID-report bits, no more, no less.
+        assert_eq!(
+            FAN_FID_MODE_BITS,
+            FAN_REPORT_FID
+                | FAN_REPORT_DIR_FID
+                | FAN_REPORT_NAME
+                | FAN_REPORT_TARGET_FID,
+        );
+        // PIDFD and TID describe pid-form reporting, not FID-form
+        // reporting, and must be excluded.
+        assert_eq!(FAN_FID_MODE_BITS & FAN_REPORT_PIDFD, 0);
+        assert_eq!(FAN_FID_MODE_BITS & FAN_REPORT_TID, 0);
+        // No overlap with class bits or aux flags.
+        assert_eq!(FAN_FID_MODE_BITS & FAN_ALL_CLASS_BITS, 0);
+        let aux = FAN_CLOEXEC
+            | FAN_NONBLOCK
+            | FAN_UNLIMITED_QUEUE
+            | FAN_UNLIMITED_MARKS
+            | FAN_ENABLE_AUDIT;
+        assert_eq!(FAN_FID_MODE_BITS & aux, 0);
+    }
+
+    #[test]
+    fn test_phase142_fid_alone_with_notif_ok() {
+        // Baseline: FID-only report under NOTIF must still reach
+        // ENOSYS, not EINVAL — confirms we didn't accidentally trip
+        // the new guard for the legitimate case.
+        errno::set_errno(0);
+        let ret = fanotify_init(
+            FAN_CLASS_NOTIF | FAN_REPORT_FID,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_phase142_report_fid_with_class_content_einval() {
+        // Core regression: FID + CONTENT → EINVAL.
+        errno::set_errno(0);
+        let ret = fanotify_init(
+            FAN_CLASS_CONTENT | FAN_REPORT_FID,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase142_report_fid_with_class_pre_content_einval() {
+        // Core regression: FID + PRE_CONTENT → EINVAL.
+        errno::set_errno(0);
+        let ret = fanotify_init(
+            FAN_CLASS_PRE_CONTENT | FAN_REPORT_FID,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase142_each_fid_bit_individually_rejects_under_content() {
+        // Every FID bit, on its own, must trip the new guard when
+        // paired with CONTENT.  This is a per-bit smoke test against
+        // a missed-bit regression in FAN_FID_MODE_BITS.
+        for bit in [
+            FAN_REPORT_FID,
+            FAN_REPORT_DIR_FID,
+            // FAN_REPORT_NAME alone would also fail the
+            // "NAME requires DIR_FID" guard, but the fid_mode check
+            // runs first under Linux — testing NAME+DIR_FID with
+            // CONTENT keeps the assertion focused on the new check.
+            FAN_REPORT_DIR_FID | FAN_REPORT_NAME,
+            // TARGET_FID alone would fail the "needs full triple"
+            // guard; pair it with the triple to isolate the new
+            // check.
+            FAN_REPORT_FID | FAN_REPORT_DIR_FID
+                | FAN_REPORT_NAME | FAN_REPORT_TARGET_FID,
+        ] {
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_CONTENT | bit,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1, "bits={bit:#x}");
+            assert_eq!(errno::get_errno(), errno::EINVAL, "bits={bit:#x}");
+        }
+    }
+
+    #[test]
+    fn test_phase142_report_dir_fid_name_with_pre_content_einval() {
+        // The DFID+NAME combo (common with the convenience macro
+        // FAN_REPORT_DFID_NAME) under PRE_CONTENT must EINVAL.
+        errno::set_errno(0);
+        let ret = fanotify_init(
+            FAN_CLASS_PRE_CONTENT | FAN_REPORT_DFID_NAME,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase142_full_fid_triple_with_content_einval() {
+        // Even the full FID+DIR_FID+NAME+TARGET_FID triple — perfectly
+        // valid under NOTIF — must EINVAL under CONTENT.
+        errno::set_errno(0);
+        let ret = fanotify_init(
+            FAN_CLASS_CONTENT | FAN_REPORT_DFID_NAME_TARGET,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase142_pidfd_with_content_ok() {
+        // PIDFD is NOT a FID-mode bit — must NOT trip the new guard,
+        // even under CONTENT.  Linux accepts pidfd reporting under
+        // any class; the fid_mode check filters only the file-handle
+        // forms.  Reaches ENOSYS.
+        errno::set_errno(0);
+        let ret = fanotify_init(
+            FAN_CLASS_CONTENT | FAN_REPORT_PIDFD,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_phase142_tid_with_pre_content_ok() {
+        // TID is NOT a FID-mode bit — must reach ENOSYS even under
+        // PRE_CONTENT.  Confirms PIDFD and TID are correctly excluded
+        // from FAN_FID_MODE_BITS.
+        errno::set_errno(0);
+        let ret = fanotify_init(
+            FAN_CLASS_PRE_CONTENT | FAN_REPORT_TID,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_phase142_aux_flags_with_content_ok() {
+        // CLOEXEC + NONBLOCK + ENABLE_AUDIT under CONTENT must reach
+        // ENOSYS — the new guard only fires on FID-mode bits.
+        errno::set_errno(0);
+        let ret = fanotify_init(
+            FAN_CLASS_CONTENT
+                | FAN_CLOEXEC
+                | FAN_NONBLOCK
+                | FAN_ENABLE_AUDIT,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_phase142_unknown_bit_check_beats_fid_mode_check() {
+        // Ordering matrix: unknown bit AND FID+CONTENT.  The
+        // unknown-bit check runs first per Linux's order; both
+        // return EINVAL.  Asserts -1 + EINVAL shape (which check
+        // fires is unobservable since both produce the same errno).
+        errno::set_errno(0);
+        let ret = fanotify_init(
+            FAN_CLASS_CONTENT | 0x8000_0000 | FAN_REPORT_FID,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase142_class_check_beats_fid_mode_check() {
+        // 0xC (both CONTENT and PRE_CONTENT) AND FID set.  The class
+        // check runs first.  Both EINVAL; assert shape only.
+        errno::set_errno(0);
+        let ret = fanotify_init(
+            FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT | FAN_REPORT_FID,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase142_fid_mode_check_beats_name_without_dir_fid() {
+        // FID+NAME (no DIR_FID) under CONTENT.  Pre-Phase-142 the
+        // NAME-without-DIR_FID check would fire first; with the new
+        // guard inserted *above* that check, the fid_mode rejection
+        // takes precedence.  Linux's order is the same: fid_mode
+        // first, then NAME-needs-DIR_FID.  Both EINVAL; assert shape.
+        errno::set_errno(0);
+        let ret = fanotify_init(
+            FAN_CLASS_CONTENT | FAN_REPORT_FID | FAN_REPORT_NAME,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase142_recovery_drop_fid_then_succeeds() {
+        // Workflow: buggy caller hits EINVAL with FID+CONTENT,
+        // drops the FID bit, retries, reaches ENOSYS.
+        errno::set_errno(0);
+        let bad = fanotify_init(
+            FAN_CLASS_CONTENT | FAN_REPORT_FID,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(bad, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        errno::set_errno(0);
+        let ok = fanotify_init(FAN_CLASS_CONTENT, fcntl::O_RDONLY as u32);
+        assert_eq!(ok, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_phase142_recovery_switch_class_then_succeeds() {
+        // Alternate recovery: keep the FID-mode bit, swap CONTENT
+        // for NOTIF.  Real-world libfanotify pattern.
+        errno::set_errno(0);
+        let bad = fanotify_init(
+            FAN_CLASS_CONTENT | FAN_REPORT_FID,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(bad, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        errno::set_errno(0);
+        let ok = fanotify_init(
+            FAN_CLASS_NOTIF | FAN_REPORT_FID,
+            fcntl::O_RDONLY as u32,
+        );
+        assert_eq!(ok, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_phase142_no_side_effect_loop() {
+        // Hammer the new guard 32× under both rejected classes;
+        // errno must always be EINVAL afterwards, return value -1.
+        for _ in 0..16 {
+            errno::set_errno(0);
+            let r = fanotify_init(
+                FAN_CLASS_CONTENT | FAN_REPORT_FID,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+
+            errno::set_errno(0);
+            let r = fanotify_init(
+                FAN_CLASS_PRE_CONTENT | FAN_REPORT_DFID_NAME,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
     }
 
     // -----------------------------------------------------------------

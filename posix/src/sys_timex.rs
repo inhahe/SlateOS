@@ -117,6 +117,29 @@ pub const MIN_TICK: i64 = 900_000 / USER_HZ;
 pub const MAX_TICK: i64 = 1_100_000 / USER_HZ;
 
 // ---------------------------------------------------------------------------
+// ADJ_SETOFFSET sub-second bounds
+// ---------------------------------------------------------------------------
+//
+// Linux's `kernel/time/ntp.c::ntp_validate_timex` (via
+// `timeval_inject_offset_valid` / `timespec_inject_offset_valid`)
+// rejects an `ADJ_SETOFFSET` whose sub-second field is negative or
+// `>= one second`:
+//
+//     if (tv->tv_usec >= USEC_PER_SEC || tv->tv_usec < 0)
+//         return false;     // (nsec version uses NSEC_PER_SEC)
+//
+// The sub-second field is interpreted as nanoseconds when `ADJ_NANO`
+// is also requested, otherwise as microseconds.  Pre-fix we silently
+// accepted any value here; chrony's `clock_step()` would happily pass
+// 1_999_999 usec and we would mis-apply the offset.
+
+/// Linux's `USEC_PER_SEC`.
+pub const USEC_PER_SEC: i64 = 1_000_000;
+
+/// Linux's `NSEC_PER_SEC`.
+pub const NSEC_PER_SEC: i64 = 1_000_000_000;
+
+// ---------------------------------------------------------------------------
 // Timex struct
 // ---------------------------------------------------------------------------
 
@@ -313,6 +336,29 @@ pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
         // SAFETY: caller contract — `tx` points to a readable Timex.
         let tick = unsafe { (*tx).tick };
         if tick < MIN_TICK || tick > MAX_TICK {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    }
+
+    // Phase 162: Linux's `ntp_validate_timex` rejects an
+    // `ADJ_SETOFFSET` whose sub-second field is out of range.  The
+    // field is interpreted as nanoseconds if `ADJ_NANO` is set in the
+    // same call, otherwise as microseconds.  Pre-fix we silently
+    // accepted any value (negative, ≥ 1s) and dropped it on the floor
+    // because we don't yet have an RTC to apply the step to —
+    // surfacing the EINVAL still matters because chrony's
+    // `clock_step()` falls back to settimeofday on a SETOFFSET
+    // failure, and silently "succeeding" hides the bug.
+    if (modes & ADJ_SETOFFSET) != 0 {
+        // SAFETY: caller contract — `tx` points to a readable Timex.
+        let sub_sec = unsafe { (*tx).time_tv_usec };
+        let limit = if (modes & ADJ_NANO) != 0 {
+            NSEC_PER_SEC
+        } else {
+            USEC_PER_SEC
+        };
+        if !(0..limit).contains(&sub_sec) {
             errno::set_errno(errno::EINVAL);
             return -1;
         }
@@ -1000,5 +1046,335 @@ mod tests {
         assert_eq!(USER_HZ, 100);
         assert_eq!(MIN_TICK, 9_000);
         assert_eq!(MAX_TICK, 11_000);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 162 — ADJ_SETOFFSET sub-second range (Linux ABI parity)
+    // ------------------------------------------------------------------
+    //
+    // Linux's `ntp_validate_timex` rejects an `ADJ_SETOFFSET` whose
+    // sub-second field (`time.tv_usec`, reinterpreted as nanoseconds
+    // when `ADJ_NANO` is co-set) is negative or `>=` one second:
+    //
+    //     if (tv->tv_usec >= USEC_PER_SEC || tv->tv_usec < 0)
+    //         return false;
+    //
+    // For the ADJ_NANO variant the bound is NSEC_PER_SEC = 1e9.
+    // Pre-fix we silently accepted out-of-range values; even though
+    // we don't actually apply the offset (no RTC yet), the EINVAL is
+    // still observable behaviour that NTP clients depend on.
+
+    // ---- Per-error-class: usec mode ----
+
+    #[test]
+    fn test_adjtimex_phase162_setoffset_usec_negative_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET;
+        tx.time_tv_usec = -1;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase162_setoffset_usec_equal_one_second_einval() {
+        // The check is `>=`, so exactly USEC_PER_SEC must fail.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET;
+        tx.time_tv_usec = USEC_PER_SEC;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase162_setoffset_usec_way_above_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET;
+        tx.time_tv_usec = i64::MAX;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase162_setoffset_usec_i64_min_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET;
+        tx.time_tv_usec = i64::MIN;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // ---- Per-error-class: nsec mode (ADJ_SETOFFSET | ADJ_NANO) ----
+
+    #[test]
+    fn test_adjtimex_phase162_setoffset_nano_at_usec_limit_accepted() {
+        // 999_999 is a perfectly valid nsec value (well below 1e9) —
+        // confirms the nano variant uses NSEC_PER_SEC, not
+        // USEC_PER_SEC.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET | ADJ_NANO;
+        tx.time_tv_usec = 999_999; // nsec — valid
+        let ret = adjtimex(&mut tx);
+        assert_ne!(ret, -1, "999_999 nsec must be accepted under ADJ_NANO");
+    }
+
+    #[test]
+    fn test_adjtimex_phase162_setoffset_nano_equal_one_second_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET | ADJ_NANO;
+        tx.time_tv_usec = NSEC_PER_SEC; // exactly 1e9 ns → EINVAL
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase162_setoffset_nano_negative_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET | ADJ_NANO;
+        tx.time_tv_usec = -1;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // ---- Boundary acceptance ----
+
+    #[test]
+    fn test_adjtimex_phase162_setoffset_usec_zero_accepted() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET;
+        tx.time_tv_usec = 0;
+        let ret = adjtimex(&mut tx);
+        assert_ne!(ret, -1);
+    }
+
+    #[test]
+    fn test_adjtimex_phase162_setoffset_usec_max_accepted() {
+        // USEC_PER_SEC - 1 = 999_999 — the largest valid microsecond.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET;
+        tx.time_tv_usec = USEC_PER_SEC - 1;
+        let ret = adjtimex(&mut tx);
+        assert_ne!(ret, -1);
+    }
+
+    #[test]
+    fn test_adjtimex_phase162_setoffset_nano_max_accepted() {
+        // NSEC_PER_SEC - 1 = 999_999_999 — the largest valid nanosecond.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET | ADJ_NANO;
+        tx.time_tv_usec = NSEC_PER_SEC - 1;
+        let ret = adjtimex(&mut tx);
+        assert_ne!(ret, -1);
+    }
+
+    // ---- Ordering matrix ----
+
+    #[test]
+    fn test_adjtimex_phase162_null_ptr_beats_setoffset_einval() {
+        // EFAULT (null ptr) fires before SETOFFSET validation.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let ret = adjtimex(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_adjtimex_phase162_unknown_mode_beats_setoffset_einval() {
+        // Unknown mode bit short-circuits before SETOFFSET check.
+        // Both yield EINVAL but the precedence matters because the
+        // unknown-mode branch doesn't read `time_tv_usec` at all.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET | 0x8000_0000;
+        tx.time_tv_usec = i64::MAX;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase162_bad_tick_beats_bad_setoffset_einval() {
+        // ADJ_TICK check fires before ADJ_SETOFFSET check (our code
+        // order matches Linux's: tick first, then setoffset).  Both
+        // are EINVAL; this pins the ordering for future readers.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK | ADJ_SETOFFSET;
+        tx.tick = 0;
+        tx.time_tv_usec = -1;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // State untouched on rejection.
+        let mut tx2 = Timex::zeroed();
+        let _ = adjtimex(&mut tx2);
+        assert_eq!(tx2.tick, 10_000);
+    }
+
+    // ---- No-side-effect ----
+
+    #[test]
+    fn test_adjtimex_phase162_bad_setoffset_leaves_state_untouched() {
+        // Combined ADJ_OFFSET | ADJ_SETOFFSET with a bad sub-second
+        // must abort before the ADJ_OFFSET part is applied.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_OFFSET | ADJ_SETOFFSET;
+        tx.offset = 777_777;
+        tx.time_tv_usec = USEC_PER_SEC; // invalid
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        let mut tx2 = Timex::zeroed();
+        let _ = adjtimex(&mut tx2);
+        assert_eq!(tx2.offset, 0, "offset must NOT be applied on SETOFFSET failure");
+    }
+
+    // ---- Workflow ----
+
+    #[test]
+    fn test_adjtimex_phase162_chrony_clock_step_workflow() {
+        // chrony's clock_step() injects a small offset, typically a
+        // few milliseconds.  500_000 usec = 0.5s — well within the
+        // valid range.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET;
+        tx.time_tv_sec = 0;
+        tx.time_tv_usec = 500_000;
+        let ret = adjtimex(&mut tx);
+        assert_ne!(ret, -1, "valid chrony clock_step must succeed");
+    }
+
+    #[test]
+    fn test_adjtimex_phase162_buggy_caller_unnormalised_usec() {
+        // C code: `tx.time_tv_sec = 0; tx.time_tv_usec = 1_500_000;`
+        // — a caller that "forgot" to normalise 1.5s into 1s + 0.5s.
+        // Pre-fix: silently accepted (and we'd have dropped it on
+        // the floor).  Post-fix: EINVAL exposes the bug.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET;
+        tx.time_tv_usec = 1_500_000;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // ---- Recovery ----
+
+    #[test]
+    fn test_adjtimex_phase162_recovery_after_bad_setoffset() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET;
+        tx.time_tv_usec = USEC_PER_SEC;
+        assert_eq!(adjtimex(&mut tx), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        errno::set_errno(0);
+        let mut tx2 = Timex::zeroed();
+        tx2.modes = ADJ_SETOFFSET;
+        tx2.time_tv_usec = 100_000;
+        let ret = adjtimex(&mut tx2);
+        assert_ne!(ret, -1);
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    // ---- Sentinel ----
+
+    #[test]
+    fn test_adjtimex_setoffset_out_of_range_no_longer_silently_accepted_phase162() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET;
+        tx.time_tv_usec = USEC_PER_SEC;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1, "post-Phase-162: out-of-range sub-second must fail");
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "post-Phase-162: yields EINVAL"
+        );
+    }
+
+    // ---- Cross-checks ----
+
+    #[test]
+    fn test_clock_adjtime_phase162_bad_setoffset_forwards_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET;
+        tx.time_tv_usec = -42;
+        let ret = clock_adjtime(0, &mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ntp_adjtime_phase162_bad_setoffset_nano_forwards_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_SETOFFSET | ADJ_NANO;
+        tx.time_tv_usec = NSEC_PER_SEC + 1;
+        let ret = ntp_adjtime(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase162_sub_second_constants_match_linux() {
+        assert_eq!(USEC_PER_SEC, 1_000_000);
+        assert_eq!(NSEC_PER_SEC, 1_000_000_000);
     }
 }

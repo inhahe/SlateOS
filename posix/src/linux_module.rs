@@ -174,28 +174,38 @@ pub extern "C" fn init_module(module_image: *const u8, len: usize, params: *cons
 
 /// Load a kernel module from a file descriptor (Linux `finit_module(2)`).
 ///
-/// Validates `fd`, `params`, and `flags` before returning `-1` /
-/// `errno = ENOSYS`. Real module loading is not supported on this
-/// microkernel by design.
+/// Validates `flags`, `fd`, and `params` (in that order, matching
+/// Linux's `SYSCALL_DEFINE3(finit_module)` prologue in
+/// `kernel/module/main.c`: the kernel rejects unknown flag bits with
+/// `EINVAL` *before* calling `fdget(fd)`, and `params` is only read
+/// via `copy_from_user` after the fd is resolved) before returning
+/// `-1` / `errno = ENOSYS`. Real module loading is not supported on
+/// this microkernel by design.
 ///
 /// # Errors
 ///
-/// - `EBADF`: `fd < 0`.
-/// - `EFAULT`: NULL `params` (Linux requires "" not NULL).
-/// - `EINVAL`: unknown flag bit.
+/// - `EINVAL`: unknown flag bit (checked first).
+/// - `EBADF`: `fd < 0` (checked second).
+/// - `EFAULT`: NULL `params` (checked last; Linux requires "" not NULL).
 /// - `ENOSYS`: all checks pass — no module subsystem to dispatch to.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn finit_module(fd: i32, params: *const u8, flags: u32) -> i32 {
+    // Linux's `SYSCALL_DEFINE3(finit_module)` rejects unknown flag
+    // bits before calling `fdget(fd)`, so a buggy caller that passes
+    // both a bad fd and a bad flag observes EINVAL, not EBADF. Match
+    // that ordering exactly so userspace probing of module-support
+    // behaviour (libkmod, systemd-modules-load) sees the same errno
+    // sequence as on real Linux.
+    if (flags & !MODULE_INIT_FLAGS_VALID) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if fd < 0 {
         errno::set_errno(errno::EBADF);
         return -1;
     }
     if params.is_null() {
         errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-    if (flags & !MODULE_INIT_FLAGS_VALID) != 0 {
-        errno::set_errno(errno::EINVAL);
         return -1;
     }
     errno::set_errno(errno::ENOSYS);
@@ -504,5 +514,154 @@ mod tests {
         let r = init_module(buf.as_ptr(), 4, params.as_ptr());
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 111 — finit_module validation-order parity with Linux
+    //
+    // Linux's `SYSCALL_DEFINE3(finit_module)` (kernel/module/main.c):
+    //   1. flags & ~(KNOWN) -> -EINVAL
+    //   2. fdget(fd)         -> -EBADF if fd < 0 or not open
+    //   3. copy_from_user(uargs) inside load_module path -> -EFAULT
+    //
+    // These tests pin that exact order so a userspace caller probing
+    // module support (libkmod, systemd-modules-load, modprobe --dry-run)
+    // sees the same errno on every malformed-input combination as it
+    // would on real Linux. Phase 110 reordered io_uring_enter/register
+    // the same way; Phase 111 is the kernel-module analogue.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_finit_module_phase111_einval_wins_over_ebadf() {
+        // Bad flag AND negative fd: Linux checks flags first -> EINVAL.
+        let params = b"\0";
+        let r = finit_module(-1, params.as_ptr(), 0x8000);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_einval_wins_over_efault() {
+        // Bad flag AND NULL params: Linux checks flags first -> EINVAL.
+        let r = finit_module(3, ptr::null(), 0x8000);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_einval_wins_over_ebadf_and_efault() {
+        // All three malformed: Linux still returns EINVAL first.
+        let r = finit_module(-1, ptr::null(), 0x8000);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_ebadf_wins_over_efault() {
+        // Good flags, bad fd, NULL params: flags pass, fdget fails -> EBADF.
+        let r = finit_module(-1, ptr::null(), 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_high_bit_unknown_flag_einval() {
+        // Sign bit (0x8000_0000) is an unknown flag bit -> EINVAL,
+        // not an arithmetic-shift bug or sign-extension surprise.
+        let params = b"\0";
+        let r = finit_module(3, params.as_ptr(), 0x8000_0000);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_first_invalid_bit_above_mask_einval() {
+        // 0x08 is the first bit just past MODULE_INIT_COMPRESSED_FILE
+        // (=0x04) and is unused by Linux as of 6.x -> EINVAL.
+        let params = b"\0";
+        let r = finit_module(3, params.as_ptr(), 0x08);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_all_known_flag_bits_reach_enosys() {
+        // 0x07 = IGNORE_MODVERSIONS | IGNORE_VERMAGIC | COMPRESSED_FILE.
+        // No unknown bits -> pass the mask check -> reach ENOSYS.
+        let params = b"\0";
+        let r = finit_module(3, params.as_ptr(), MODULE_INIT_FLAGS_VALID);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_i32_min_fd_ebadf() {
+        // Catastrophic fd value: must still report EBADF, not panic or
+        // accidentally pass via sign-extension into a valid range.
+        let params = b"\0";
+        let r = finit_module(i32::MIN, params.as_ptr(), 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_i32_max_fd_reaches_enosys() {
+        // i32::MAX is >= 0, so it passes the fd bound check and the
+        // call proceeds to the ENOSYS stub (we don't open the fd).
+        let params = b"\0";
+        let r = finit_module(i32::MAX, params.as_ptr(), 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_recovery_after_einval() {
+        // After a flag-mask EINVAL, a subsequent valid call still
+        // produces a clean ENOSYS (errno is rewritten, not sticky).
+        let params = b"\0";
+        let r1 = finit_module(3, params.as_ptr(), 0x8000);
+        assert_eq!(r1, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let r2 = finit_module(3, params.as_ptr(), 0);
+        assert_eq!(r2, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_modprobe_force_vermagic_workflow() {
+        // `modprobe --force-vermagic e1000` opens the .ko, then calls
+        //   finit_module(fd, "", MODULE_INIT_IGNORE_VERMAGIC)
+        // libkmod combines IGNORE_VERMAGIC + COMPRESSED_FILE when the
+        // .ko on disk is xz-compressed (which is the Debian default).
+        let params = b"\0";
+        let flags = MODULE_INIT_IGNORE_VERMAGIC | MODULE_INIT_COMPRESSED_FILE;
+        let r = finit_module(3, params.as_ptr(), flags);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_systemd_modules_load_workflow() {
+        // systemd-modules-load reads /etc/modules-load.d/*.conf and
+        // calls finit_module(fd, "", 0) for each entry. It expects
+        // ENOSYS to silently disable module loading rather than
+        // logging EINVAL/EBADF noise into the journal.
+        let params = b"\0";
+        let r = finit_module(7, params.as_ptr(), 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_finit_module_phase111_buggy_caller_passes_negative_one_flags() {
+        // A C caller doing `finit_module(fd, "", -1)` (which casts to
+        // 0xFFFF_FFFF unsigned) hits the unknown-bit check first and
+        // gets EINVAL — exactly the same as on Linux. Confirms we
+        // don't accidentally accept all-ones as a wildcard.
+        let params = b"\0";
+        let r = finit_module(3, params.as_ptr(), u32::MAX);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 }

@@ -2828,6 +2828,14 @@ pub const KCMP_TYPES: i32 = 8;
 ///    `struct kcmp_epoll_slot`; a NULL pointer fails the
 ///    copy_from_user in the kernel.  `idx2 == 0`              → `EFAULT`
 ///
+/// # Capability gate (Phase 202)
+///
+/// Linux gates kcmp on `CAP_SYS_PTRACE` via two
+/// `ptrace_may_access(task, PTRACE_MODE_READ_REALCREDS)` calls —
+/// one for each target pid — after finding the tasks.  The gate
+/// runs after all argument-domain checks (ESRCH, EINVAL, EBADF,
+/// EFAULT) so callers with bad arguments see the argument error.
+///
 /// After validation we return `ENOSYS`: the microkernel doesn't
 /// expose kernel-object identity to userspace through this debugging
 /// interface — process introspection happens via capability handles
@@ -2868,6 +2876,17 @@ pub extern "C" fn kcmp(
     // (5) KCMP_EPOLL_TFD: idx2 must point to a kcmp_epoll_slot.
     if type_ == KCMP_EPOLL_TFD && idx2 == 0 {
         errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // Phase 202: CAP_SYS_PTRACE gate.  Linux's kcmp calls
+    // ptrace_may_access() twice — once for each target pid.  We
+    // check the cap once after all argument validation so callers
+    // with bad arguments see the argument error, not EPERM.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_PTRACE,
+    ) {
+        errno::set_errno(errno::EPERM);
         return -1;
     }
 
@@ -9677,6 +9696,145 @@ mod tests {
         let ret = kcmp(1234, 5678, KCMP_EPOLL_TFD, 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // =================================================================
+    // Phase 202 — CAP_SYS_PTRACE gate on kcmp()
+    //
+    // Linux gates kcmp on CAP_SYS_PTRACE (two ptrace_may_access calls).
+    // Our gate runs after all argument validation (ESRCH, EINVAL,
+    // EBADF, EFAULT).  Reuses the phase200_pvm_cap helpers which
+    // already handle CAP_SYS_PTRACE.
+    // =================================================================
+
+    // -- cap held: kcmp reaches ENOSYS (unchanged) ------------------------
+
+    /// With CAP_SYS_PTRACE (default), valid kcmp reaches ENOSYS.
+    #[test]
+    fn test_phase202_kcmp_with_cap_enosys() {
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_PTRACE,
+        ));
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_FILE, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -- cap dropped: kcmp → EPERM ----------------------------------------
+
+    /// Without CAP_SYS_PTRACE, valid kcmp → EPERM.
+    #[test]
+    fn test_phase202_kcmp_no_cap_eperm() {
+        let _g = phase200_pvm_cap::CapGuard::snapshot();
+        phase200_pvm_cap::drop_cap_sys_ptrace();
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_VM, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    /// Without cap, all valid kcmp types → EPERM.
+    #[test]
+    fn test_phase202_kcmp_all_types_no_cap_eperm() {
+        let _g = phase200_pvm_cap::CapGuard::snapshot();
+        phase200_pvm_cap::drop_cap_sys_ptrace();
+        for type_ in 0..KCMP_TYPES {
+            // KCMP_EPOLL_TFD needs a non-null idx2 to pass EFAULT.
+            let idx2 = if type_ == KCMP_EPOLL_TFD { 0x1000 } else { 0 };
+            crate::errno::set_errno(0);
+            let ret = kcmp(1, 2, type_, 0, idx2);
+            assert_eq!(ret, -1, "type {type_} must fail");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EPERM,
+                "type {type_} must return EPERM without cap"
+            );
+        }
+    }
+
+    // -- ordering: argument errors beat EPERM -----------------------------
+
+    /// Bad pid1 + no cap → ESRCH (pid check before cap).
+    #[test]
+    fn test_phase202_kcmp_bad_pid_esrch_before_eperm() {
+        let _g = phase200_pvm_cap::CapGuard::snapshot();
+        phase200_pvm_cap::drop_cap_sys_ptrace();
+        crate::errno::set_errno(0);
+        let ret = kcmp(0, 2, KCMP_FILE, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::ESRCH,
+            "ESRCH for bad pid must precede EPERM"
+        );
+    }
+
+    /// Bad type + no cap → EINVAL (type check before cap).
+    #[test]
+    fn test_phase202_kcmp_bad_type_einval_before_eperm() {
+        let _g = phase200_pvm_cap::CapGuard::snapshot();
+        phase200_pvm_cap::drop_cap_sys_ptrace();
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_TYPES, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "EINVAL for bad type must precede EPERM"
+        );
+    }
+
+    /// KCMP_FILE with overflowing idx + no cap → EBADF.
+    #[test]
+    fn test_phase202_kcmp_file_overflow_ebadf_before_eperm() {
+        let _g = phase200_pvm_cap::CapGuard::snapshot();
+        phase200_pvm_cap::drop_cap_sys_ptrace();
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_FILE, u64::MAX, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EBADF,
+            "EBADF for fd overflow must precede EPERM"
+        );
+    }
+
+    /// KCMP_EPOLL_TFD with null idx2 + no cap → EFAULT.
+    #[test]
+    fn test_phase202_kcmp_epoll_tfd_efault_before_eperm() {
+        let _g = phase200_pvm_cap::CapGuard::snapshot();
+        phase200_pvm_cap::drop_cap_sys_ptrace();
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_EPOLL_TFD, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EFAULT,
+            "EFAULT for null epoll slot must precede EPERM"
+        );
+    }
+
+    // -- restoration: cap drop/restore cycle ------------------------------
+
+    /// After restoring CAP_SYS_PTRACE, kcmp reaches ENOSYS again.
+    #[test]
+    fn test_phase202_kcmp_cap_restore() {
+        {
+            let _g = phase200_pvm_cap::CapGuard::snapshot();
+            phase200_pvm_cap::drop_cap_sys_ptrace();
+            crate::errno::set_errno(0);
+            let ret = kcmp(1, 2, KCMP_FILE, 0, 0);
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_PTRACE,
+        ));
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_FILE, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     // -----------------------------------------------------------------

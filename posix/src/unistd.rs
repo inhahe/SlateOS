@@ -1456,10 +1456,19 @@ pub extern "C" fn sethostid(hostid: i64) -> i32 {
 /// up yet — `design.txt` puts root selection in the capability layer
 /// rather than via legacy chroot semantics).
 ///
-/// Errors (Linux-matching priority order):
-/// * `EFAULT` — `path` is NULL.
-/// * `ENOENT` — `path` is the empty string (`""`).  POSIX requires
-///   non-empty pathnames; Linux's `getname_kernel` rejects this.
+/// Errors (Linux-matching priority order — `fs/open.c::sys_chroot`
+/// resolves the user pointer with `user_path_at` *before* checking
+/// `CAP_SYS_CHROOT`, so path-domain errors beat EPERM):
+///
+/// 1. `path == NULL`           → `EFAULT`
+/// 2. `*path == 0`             → `ENOENT`  (Linux's `getname_kernel`
+///                                rejects the empty-name path)
+/// 3. `!CAP_SYS_CHROOT`        → `EPERM`   (Phase 166)
+///
+/// After argument and capability validation we return `ENOSYS`:
+/// filesystem-root remapping isn't wired up yet — `design.txt`
+/// puts root selection in the capability layer rather than via
+/// legacy chroot semantics.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn chroot(path: *const u8) -> i32 {
     if path.is_null() {
@@ -1472,6 +1481,16 @@ pub extern "C" fn chroot(path: *const u8) -> i32 {
     let first = unsafe { *path };
     if first == 0 {
         errno::set_errno(errno::ENOENT);
+        return -1;
+    }
+    // Phase 166: CAP_SYS_CHROOT check.  Linux performs this after
+    // user_path_at + inode_permission, so path-domain errors still
+    // beat EPERM.  We don't yet do inode_permission, so EPERM
+    // immediately follows the path-syntax checks.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_CHROOT,
+    ) {
+        errno::set_errno(errno::EPERM);
         return -1;
     }
     errno::set_errno(errno::ENOSYS);
@@ -5280,6 +5299,297 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(chroot(b"/var/empty\0".as_ptr()), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 166: chroot — CAP_SYS_CHROOT gate
+    //
+    // Linux `fs/open.c::sys_chroot` resolves the user pointer via
+    // `user_path_at` first, then runs `inode_permission`, then
+    // checks `ns_capable(current_user_ns(), CAP_SYS_CHROOT)`.  So
+    // path-domain errors (EFAULT / ENOENT / ENAMETOOLONG) beat
+    // EPERM, but EPERM beats any later error including the
+    // ENOSYS our stub surfaces.  Pre-Phase-166 the cap check was
+    // missing entirely — an unprivileged caller saw ENOSYS for a
+    // clean path instead of the EPERM Linux returns.
+    // ------------------------------------------------------------------
+
+    mod chroot_cap_phase166 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase
+        /// 77 / 164 / 165.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_chroot() {
+            use crate::sys_capability::CAP_SYS_CHROOT;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_CHROOT < 32 {
+                (lo & !(1u32 << CAP_SYS_CHROOT), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_CHROOT - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_CHROOT");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_CHROOT));
+        }
+
+        // -- Per-error-class --------------------------------------------------
+
+        /// A clean call from an unprivileged process must surface
+        /// EPERM, not the ENOSYS the stub used to return.
+        #[test]
+        fn test_chroot_phase166_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_chroot();
+            errno::set_errno(0);
+            assert_eq!(chroot(b"/var/empty\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// A single-character path also reaches EPERM under no cap.
+        #[test]
+        fn test_chroot_phase166_one_char_path_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_chroot();
+            errno::set_errno(0);
+            assert_eq!(chroot(b"a\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering matrix --------------------------------------------------
+
+        /// Linux: `user_path_at` runs before the cap check, so a
+        /// NULL pointer yields EFAULT even without CAP_SYS_CHROOT.
+        #[test]
+        fn test_chroot_phase166_efault_beats_eperm_null_path() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_chroot();
+            errno::set_errno(0);
+            assert_eq!(chroot(core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        /// Same for an empty path — ENOENT wins because path
+        /// resolution runs first.
+        #[test]
+        fn test_chroot_phase166_enoent_beats_eperm_empty_path() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_chroot();
+            errno::set_errno(0);
+            assert_eq!(chroot(b"\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::ENOENT);
+        }
+
+        // -- Workflow ---------------------------------------------------------
+
+        /// Workflow: an OpenSSH `sshd` worker (no CAP_SYS_CHROOT
+        /// after sandbox setup) attempts a defensive chroot into
+        /// `/var/empty` — Linux returns EPERM; we now do too.
+        #[test]
+        fn test_chroot_phase166_workflow_sshd_sandbox_attempt() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_chroot();
+            errno::set_errno(0);
+            assert_eq!(chroot(b"/var/empty\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Workflow: a container runtime (think runc) that already
+        /// pivoted root and dropped CAP_SYS_CHROOT calls chroot to
+        /// double-isolate — must still see EPERM.
+        #[test]
+        fn test_chroot_phase166_workflow_runc_post_pivot_chroot() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_chroot();
+            errno::set_errno(0);
+            assert_eq!(
+                chroot(b"/run/containerd/rootfs\0".as_ptr()),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Buggy-caller -----------------------------------------------------
+
+        /// Buggy caller: a program that dropped caps then accidentally
+        /// passed a NULL path — the EFAULT they get back doesn't leak
+        /// the cap state (NULL beats EPERM regardless of caps).
+        #[test]
+        fn test_chroot_phase166_buggy_caller_null_under_no_cap() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_chroot();
+            errno::set_errno(0);
+            assert_eq!(chroot(core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        // -- Recovery ---------------------------------------------------------
+
+        /// After EPERM, restoring CAP_SYS_CHROOT lets the next call
+        /// reach ENOSYS for a clean path.
+        #[test]
+        fn test_chroot_phase166_recovery_after_eperm_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_chroot();
+            errno::set_errno(0);
+            assert_eq!(chroot(b"/var/empty\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            drop(_g);
+            errno::set_errno(0);
+            assert_eq!(chroot(b"/var/empty\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- No-side-effect ---------------------------------------------------
+
+        /// Calling chroot under no cap repeatedly never poisons the
+        /// cap-restoration path — three back-to-back EPERMs then a
+        /// guard-drop and a clean ENOSYS.
+        #[test]
+        fn test_chroot_phase166_repeated_eperm_does_not_poison_caps() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_chroot();
+            for _ in 0..3 {
+                errno::set_errno(0);
+                assert_eq!(chroot(b"/sandbox\0".as_ptr()), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+            drop(_g);
+            errno::set_errno(0);
+            assert_eq!(chroot(b"/sandbox\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Sentinel ---------------------------------------------------------
+
+        /// Pre-Phase-166 chroot silently skipped the cap check; an
+        /// unprivileged caller saw ENOSYS for a clean path.  This
+        /// sentinel locks the new contract — explicit `assert_ne!`
+        /// on ENOSYS so the failure message names the missing cap
+        /// gate if the regression returns.
+        #[test]
+        fn test_chroot_phase166_no_longer_silently_skips_cap_check() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_chroot();
+            errno::set_errno(0);
+            assert_eq!(chroot(b"/srv\0".as_ptr()), -1);
+            assert_ne!(errno::get_errno(), errno::ENOSYS,
+                "Pre-Phase-166: unprivileged caller saw ENOSYS — \
+                 CAP_SYS_CHROOT check missing.");
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Cross-checks -----------------------------------------------------
+
+        /// Regression: default-cap caller still reaches ENOSYS for a
+        /// clean call.  Phase 166 must not over-gate.
+        #[test]
+        fn test_chroot_phase166_capable_default_still_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_CHROOT
+            ));
+            errno::set_errno(0);
+            assert_eq!(chroot(b"/var/empty\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// Regression: default-cap caller still reaches EFAULT for
+        /// a NULL pointer.
+        #[test]
+        fn test_chroot_phase166_capable_default_still_reaches_efault() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_CHROOT
+            ));
+            errno::set_errno(0);
+            assert_eq!(chroot(core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        /// Regression: default-cap caller still reaches ENOENT for
+        /// an empty string.
+        #[test]
+        fn test_chroot_phase166_capable_default_still_reaches_enoent() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_CHROOT
+            ));
+            errno::set_errno(0);
+            assert_eq!(chroot(b"\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::ENOENT);
+        }
+
+        /// Dropping CAP_SYS_CHROOT must not affect other caps —
+        /// only the chroot path is gated.  Verifies via swapon (which
+        /// gates on CAP_SYS_ADMIN under Phase 164) that the broader
+        /// cap state is intact.
+        #[test]
+        fn test_chroot_phase166_drop_chroot_does_not_affect_sys_admin() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_chroot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            // swapon under CAP_SYS_ADMIN reaches ENOSYS (its own
+            // Phase 164 EPERM gate doesn't trip).
+            errno::set_errno(0);
+            assert_eq!(swapon(b"/swap\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
     }
 
     // ---- swapon ----

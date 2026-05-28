@@ -421,11 +421,54 @@ pub extern "C" fn clock_nanosleep(
 ///
 /// Uses `CLOCK_MONOTONIC` since we don't have a wall clock yet.
 /// The `tz` parameter is ignored (deprecated in POSIX).
+///
+/// # Linux validation order
+///
+/// `kernel/time/time.c::SYSCALL_DEFINE2(gettimeofday, ...)`:
+///
+/// ```c
+/// if (likely(tv != NULL)) {
+///     struct timespec64 ts;
+///     ktime_get_real_ts64(&ts);
+///     if (put_user(ts.tv_sec, &tv->tv_sec) ||
+///         put_user(ts.tv_nsec/1000, &tv->tv_usec))
+///         return -EFAULT;
+/// }
+/// if (unlikely(tz != NULL)) {
+///     if (copy_to_user(tz, &sys_tz, sizeof(sys_tz)))
+///         return -EFAULT;
+/// }
+/// return 0;
+/// ```
+///
+/// The kernel treats both pointers as **optional**.  A `NULL tv` is
+/// not an error — it just means "don't populate the time".  A NULL
+/// `tz` likewise just skips the timezone copy.  Both NULL is a
+/// well-formed (if pointless) call that returns 0.  EFAULT only
+/// arises if a *non-NULL* pointer is invalid (which we can't
+/// distinguish in userspace tests).
+///
+/// Precedence:
+///
+///   1. `tv != NULL` → read the clock; on user-copy failure return
+///      `-1`/`EFAULT`.  Reaching this point with a NULL `tv` is **not**
+///      an error.
+///   2. `tz != NULL` → copy the timezone; on user-copy failure return
+///      `-1`/`EFAULT`.  NULL `tz` is always fine.
+///   3. Return 0.
+///
+/// **Phase 152**: pre-Phase-152 we returned `-1`/`EFAULT` on a NULL
+/// `tv`.  Linux returns 0.  This made callers that pass NULL to
+/// "ping" the syscall (a common shimming/probing idiom) see a
+/// spurious failure.  Phase 152 reorders to match Linux: NULL `tv`
+/// silently skips population and returns 0 without setting errno.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut core::ffi::c_void) -> i32 {
+    // Linux: tv == NULL is NOT an error — skip population and fall
+    // through to the (also-optional) tz path, returning 0.  Errno is
+    // not touched.
     if tv.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
+        return 0;
     }
 
     let ns = syscall0(SYS_CLOCK_MONOTONIC);
@@ -6703,11 +6746,23 @@ mod tests {
 
     // -- gettimeofday --
 
+    /// Phase 152: NULL `tv` now matches Linux — it is silently
+    /// accepted and `gettimeofday` returns 0 without setting errno.
+    /// Renamed from `test_gettimeofday_null_tv` (which pinned the
+    /// pre-Phase-152 EFAULT behaviour).
     #[test]
-    fn test_gettimeofday_null_tv() {
+    fn test_gettimeofday_null_tv_returns_zero_phase152() {
         crate::errno::set_errno(0);
-        assert_eq!(gettimeofday(core::ptr::null_mut(), core::ptr::null_mut()), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(
+            gettimeofday(core::ptr::null_mut(), core::ptr::null_mut()),
+            0,
+            "NULL tv must return 0, not -1 — Linux semantics"
+        );
+        assert_eq!(
+            crate::errno::get_errno(),
+            0,
+            "NULL tv must not set errno"
+        );
     }
 
     #[test]
@@ -6717,6 +6772,291 @@ mod tests {
         let mut tv = Timeval { tv_sec: -1, tv_usec: -1 };
         let _ = gettimeofday(&raw mut tv, core::ptr::null_mut());
         // Don't assert exact values — syscall may return error on host.
+    }
+
+    // -- Phase 152: gettimeofday NULL tv tolerance --
+    //
+    // Linux's `kernel/time/time.c::SYSCALL_DEFINE2(gettimeofday, ...)`
+    // wraps the tv population in `if (likely(tv != NULL))`.  A NULL
+    // `tv` is not an error — the kernel just skips writing the
+    // timeval and falls through to the (also-optional) tz copy,
+    // returning 0.  Pre-Phase-152 we returned `-1`/`EFAULT` instead.
+    //
+    // All tests below cover the new NULL-tolerance contract.
+
+    // --- Per-error-class: confirm NULL tv leaves errno unchanged.
+
+    #[test]
+    fn test_gettimeofday_null_tv_does_not_set_errno_phase152() {
+        // Seed errno with a non-zero sentinel.  A NULL-tv call must
+        // not touch it — Linux's `sys_gettimeofday` never writes
+        // errno on the NULL branch.
+        crate::errno::set_errno(crate::errno::EINVAL);
+        let ret = gettimeofday(core::ptr::null_mut(), core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "errno must remain at the seeded sentinel — NULL tv is silent"
+        );
+    }
+
+    // --- Ordering matrix: tz state is independent of tv-NULL handling.
+
+    #[test]
+    fn test_gettimeofday_null_tv_non_null_tz_returns_zero_phase152() {
+        // Even with a non-NULL `tz` pointer, NULL `tv` returns 0.
+        // Linux's tz branch is independent of the tv branch — both
+        // are short-circuited by their respective NULL checks.
+        crate::errno::set_errno(0);
+        let mut dummy_tz: u8 = 0;
+        let ret = gettimeofday(
+            core::ptr::null_mut(),
+            (&raw mut dummy_tz).cast::<core::ffi::c_void>(),
+        );
+        assert_eq!(ret, 0);
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_gettimeofday_both_null_returns_zero_phase152() {
+        // Canonical "ping the syscall" idiom: callers that don't
+        // care about the time but want to confirm the syscall is
+        // wired up.  Linux returns 0; we now do the same.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            gettimeofday(core::ptr::null_mut(), core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_gettimeofday_non_null_tv_unaffected_phase152() {
+        // The non-NULL tv path must still populate the timeval as
+        // before — Phase 152 only touches the NULL branch.
+        let mut tv = Timeval { tv_sec: -1, tv_usec: -1 };
+        let ret = gettimeofday(&raw mut tv, core::ptr::null_mut());
+        // On the host the underlying syscall may fail; just verify
+        // we didn't take the NULL-shortcut and that ret is sane.
+        if ret == 0 {
+            // If the syscall succeeded, tv must have been written
+            // (no longer the -1/-1 sentinel).
+            assert!(
+                tv.tv_sec != -1 || tv.tv_usec != -1,
+                "non-NULL tv path must populate the timeval on success"
+            );
+        }
+    }
+
+    // --- Workflow: probe-then-use pattern.
+
+    #[test]
+    fn test_gettimeofday_probe_then_real_call_workflow_phase152() {
+        // A program probes with NULL first to confirm the syscall is
+        // wired up, then makes a real call with a valid buffer.
+        crate::errno::set_errno(0);
+        let probe = gettimeofday(core::ptr::null_mut(), core::ptr::null_mut());
+        assert_eq!(probe, 0, "probe with NULL must succeed");
+        assert_eq!(crate::errno::get_errno(), 0);
+
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let _ = gettimeofday(&raw mut tv, core::ptr::null_mut());
+        // We don't assert the value — host syscall may fail — but
+        // the probe must not have poisoned the subsequent call.
+    }
+
+    #[test]
+    fn test_gettimeofday_null_tv_then_settimeofday_workflow_phase152() {
+        // gettimeofday(NULL,NULL) returns 0; settimeofday(NULL,NULL)
+        // also returns 0.  Confirm both halves of the no-op shape
+        // agree — a common shim pattern when programs want to verify
+        // both syscalls are present.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            gettimeofday(core::ptr::null_mut(), core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            settimeofday(core::ptr::null(), core::ptr::null()),
+            0
+        );
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    // --- Buggy caller: NULL tv must not cascade into a fake error.
+
+    #[test]
+    fn test_gettimeofday_buggy_caller_phase152() {
+        // A buggy caller passes NULL by accident.  Linux returns 0
+        // (silent).  Our pre-Phase-152 code returned -1/EFAULT,
+        // which would mislead the caller into believing the clock
+        // was unavailable.  Verify the silent success path.
+        crate::errno::set_errno(crate::errno::EBADF); // pre-existing errno
+        let ret = gettimeofday(core::ptr::null_mut(), core::ptr::null_mut());
+        assert_eq!(ret, 0, "NULL tv must succeed silently");
+        // Errno preserved from the caller's previous state.
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EBADF,
+            "buggy NULL call must not stamp over the caller's errno"
+        );
+    }
+
+    // --- Recovery: a NULL call followed by a real call works.
+
+    #[test]
+    fn test_gettimeofday_recovery_phase152() {
+        // NULL call (no-op), then real call must work normally.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            gettimeofday(core::ptr::null_mut(), core::ptr::null_mut()),
+            0
+        );
+        let mut tv = Timeval { tv_sec: -42, tv_usec: -42 };
+        let ret = gettimeofday(&raw mut tv, core::ptr::null_mut());
+        if ret == 0 {
+            assert!(
+                tv.tv_sec != -42 || tv.tv_usec != -42,
+                "real call after NULL probe must populate tv"
+            );
+        }
+    }
+
+    // --- No-side-effect loop: repeated NULL calls don't accumulate state.
+
+    #[test]
+    fn test_gettimeofday_null_tv_loop_phase152() {
+        // 1000 NULL-tv calls in a row must all succeed identically
+        // and leave errno alone.  Guards against any future hidden
+        // side effect (e.g. a static counter that wraps) in the
+        // NULL-shortcut path.
+        crate::errno::set_errno(0);
+        for i in 0..1000 {
+            let ret = gettimeofday(core::ptr::null_mut(), core::ptr::null_mut());
+            assert_eq!(ret, 0, "iteration {} must succeed", i);
+            assert_eq!(
+                crate::errno::get_errno(),
+                0,
+                "iteration {} must not set errno",
+                i
+            );
+        }
+    }
+
+    // --- Cross-check: settimeofday no-op shape is unaffected.
+
+    #[test]
+    fn test_gettimeofday_does_not_affect_settimeofday_phase152() {
+        // The Phase 152 change is purely on gettimeofday — confirm
+        // settimeofday's existing NULL-NULL → 0 behaviour is not
+        // perturbed.
+        crate::errno::set_errno(0);
+        let _ = gettimeofday(core::ptr::null_mut(), core::ptr::null_mut());
+        assert_eq!(
+            settimeofday(core::ptr::null(), core::ptr::null()),
+            0
+        );
+        assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    // --- Tz-only: NULL tv with non-NULL tz must still be a no-op success.
+
+    #[test]
+    fn test_gettimeofday_null_tv_arbitrary_tz_phase152() {
+        // Stress: vary the tz pointer (NULL, a stack address, an
+        // "unaligned" address).  Pre-Phase-152 short-circuited on
+        // NULL tv before tz was inspected, so tz value never mattered.
+        // Post-Phase-152 the NULL-tv branch still short-circuits to 0
+        // — confirm the contract.
+        let mut a: u8 = 0;
+        let mut b: u32 = 0;
+        let tz_variants: [*mut core::ffi::c_void; 3] = [
+            core::ptr::null_mut(),
+            (&raw mut a).cast::<core::ffi::c_void>(),
+            (&raw mut b).cast::<core::ffi::c_void>(),
+        ];
+        for tz in tz_variants {
+            crate::errno::set_errno(0);
+            assert_eq!(
+                gettimeofday(core::ptr::null_mut(), tz),
+                0,
+                "tz variant must not affect NULL-tv result"
+            );
+            assert_eq!(crate::errno::get_errno(), 0);
+        }
+    }
+
+    // --- Interleaved: NULL/non-NULL tv calls in alternation.
+
+    #[test]
+    fn test_gettimeofday_alternating_null_and_valid_phase152() {
+        // Alternate NULL and non-NULL tv calls.  The NULL calls
+        // must not affect the non-NULL ones and vice versa.
+        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        for i in 0..20 {
+            crate::errno::set_errno(0);
+            if i % 2 == 0 {
+                assert_eq!(
+                    gettimeofday(core::ptr::null_mut(), core::ptr::null_mut()),
+                    0
+                );
+                assert_eq!(crate::errno::get_errno(), 0);
+            } else {
+                let _ = gettimeofday(&raw mut tv, core::ptr::null_mut());
+                // value not asserted — host syscall may fail
+            }
+        }
+    }
+
+    // --- Independence: errno set by an unrelated call survives NULL-tv.
+
+    #[test]
+    fn test_gettimeofday_null_tv_preserves_prior_errno_phase152() {
+        // Mirror of buggy-caller: confirm NULL-tv path does not
+        // clear errno from any value, not just the canonical zero.
+        // Exhaustive across a representative spread of errno values.
+        for &e in &[
+            crate::errno::EBADF,
+            crate::errno::EINVAL,
+            crate::errno::ENOENT,
+            crate::errno::EAGAIN,
+            crate::errno::EFAULT,
+        ] {
+            crate::errno::set_errno(e);
+            assert_eq!(
+                gettimeofday(core::ptr::null_mut(), core::ptr::null_mut()),
+                0,
+                "ret=0 expected with pre-set errno {}",
+                e
+            );
+            assert_eq!(
+                crate::errno::get_errno(),
+                e,
+                "errno must remain {} after NULL-tv call",
+                e
+            );
+        }
+    }
+
+    // --- Phase 152 sentinel: previously-divergent input now matches Linux.
+
+    #[test]
+    fn test_gettimeofday_null_tv_no_longer_efault_phase152() {
+        // Sentinel guard: explicitly assert the previous divergent
+        // EFAULT path is gone.  If a future refactor reintroduces
+        // the EFAULT-on-NULL behaviour, this test breaks loudly.
+        crate::errno::set_errno(0);
+        let ret = gettimeofday(core::ptr::null_mut(), core::ptr::null_mut());
+        assert_ne!(
+            ret, -1,
+            "Phase 152: NULL tv must NOT return -1"
+        );
+        assert_ne!(
+            crate::errno::get_errno(),
+            crate::errno::EFAULT,
+            "Phase 152: NULL tv must NOT set EFAULT"
+        );
     }
 
     // -- localtime --

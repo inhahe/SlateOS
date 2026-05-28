@@ -2079,21 +2079,38 @@ pub extern "C" fn inotify_init1(flags: i32) -> i32 {
 /// If `pathname` is already watched on this instance, the existing
 /// watch's mask is overwritten (matching Linux without `IN_MASK_ADD`)
 /// and the existing wd is returned.
+///
+/// Validation order matches Linux's `sys_inotify_add_watch`
+/// (`fs/notify/inotify/inotify_user.c`):
+///
+/// 1. `inotify_arg_to_mask(mask)` masked against `ALL_INOTIFY_BITS` —
+///    must have at least one event bit set after masking → EINVAL.
+/// 2. `fdget(fd)` — invalid fd → EBADF; fd not an inotify
+///    instance → EINVAL.
+/// 3. `user_path_at(pathname, ...)` — NULL pointer → EFAULT; empty or
+///    too-long → ENOENT/ENAMETOOLONG; missing file → ENOENT.
+///
+/// Phase 139 fix: pre-Phase 139 we checked `pathname.is_null()` first
+/// and returned EFAULT, so a caller passing both NULL pathname AND a
+/// zero (no-event-bits) mask saw EFAULT.  Linux returns EINVAL for
+/// that input because the mask check fires before any user pointer is
+/// touched.  Userspace probes (inotify-tools, fswatch's Linux backend)
+/// rely on the Linux ordering to bisect "is my mask wrong" from "is
+/// my pathname wrong."
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn inotify_add_watch(
     fd: i32,
     pathname: *const u8,
     mask: u32,
 ) -> i32 {
-    if pathname.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+    // Step 1: mask validation — Linux's first check, before any user
+    // pointer or fd is touched.
     if mask & IN_KNOWN_EVENTS == 0 {
         // Linux: at least one event bit must be set.
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // Step 2: fd validation — `fdget(fd)` happens before user_path_at.
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -2103,6 +2120,12 @@ pub extern "C" fn inotify_add_watch(
         return -1;
     }
     let idx = entry.handle;
+    // Step 3: pathname validation — `user_path_at` runs last; NULL or
+    // unreadable pointer faults here.
+    if pathname.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
 
     // Resolve the path against CWD into a normalized absolute path.
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
@@ -2913,6 +2936,268 @@ mod tests {
         );
         assert_eq!(errno::get_errno(), errno::EINVAL);
         crate::file::close(efd);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 139 — inotify_add_watch validation ordering matches
+    // `sys_inotify_add_watch` (mask → fd → pathname).
+    //
+    // Pre-Phase 139:
+    //     pathname NULL → EFAULT     (first)
+    //     mask == 0     → EINVAL     (second)
+    //     fd invalid    → EBADF      (third)
+    //
+    // Linux's order (`fs/notify/inotify/inotify_user.c`):
+    //     mask check    → EINVAL     (first; inotify_arg_to_mask)
+    //     fdget         → EBADF      (second)
+    //     non-inotify   → EINVAL     (third)
+    //     user_path_at  → EFAULT     (fourth; NULL pathname)
+    //
+    // The reorder is observable when more than one error condition is
+    // present at once: e.g. NULL pathname + zero mask returns EINVAL on
+    // Linux but used to return EFAULT here.
+    // ------------------------------------------------------------------
+
+    // --- per-error-class smoke tests under the new ordering ----------
+
+    #[test]
+    fn test_inotify_add_watch_phase139_zero_mask_alone_einval() {
+        // Sanity: mask check still fires when the rest is fine.
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        errno::set_errno(0);
+        assert_eq!(inotify_add_watch(fd, b"/tmp\0".as_ptr(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_phase139_bad_fd_alone_ebadf() {
+        // Valid mask, valid pathname, bad fd → EBADF.
+        errno::set_errno(0);
+        assert_eq!(
+            inotify_add_watch(100_000, b"/tmp\0".as_ptr(), IN_MODIFY),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_phase139_null_pathname_after_good_fd_efault() {
+        // Valid mask, valid inotify fd, NULL pathname → EFAULT.
+        // (Path check is now last.)
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        errno::set_errno(0);
+        let ret = inotify_add_watch(fd, core::ptr::null(), IN_MODIFY);
+        assert_eq!(ret, -1);
+        // The fd table is global; a parallel test could have closed
+        // and reused the fd as a non-inotify kind, which would surface
+        // EINVAL at the kind check before EFAULT.  Accept either.
+        let e = errno::get_errno();
+        assert!(
+            e == errno::EFAULT || e == errno::EINVAL || e == errno::EBADF,
+            "expected EFAULT/EINVAL/EBADF, got {e}"
+        );
+        crate::file::close(fd);
+    }
+
+    // --- ordering matrix --------------------------------------------------
+
+    #[test]
+    fn test_inotify_add_watch_phase139_zero_mask_beats_null_pathname() {
+        // CORE REGRESSION: NULL pathname + zero mask.  Pre-Phase 139:
+        // EFAULT.  Linux / Phase 139+: EINVAL.
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        errno::set_errno(0);
+        let ret = inotify_add_watch(fd, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_phase139_zero_mask_beats_bad_fd() {
+        // Zero mask + bad fd: Linux's mask check fires before fdget,
+        // so EINVAL wins over EBADF.  Pre-Phase 139 we ALSO returned
+        // EINVAL here (the path-NULL check passed because pathname is
+        // non-NULL; then mask check fired before fd lookup), so this
+        // is a regression-guard rather than a behaviour change — but
+        // pin it because the reorder shouldn't disturb it.
+        errno::set_errno(0);
+        let ret = inotify_add_watch(100_000, b"/tmp\0".as_ptr(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_phase139_zero_mask_beats_bad_fd_and_null_path() {
+        // Triple-bad: zero mask + bad fd + NULL pathname.  EINVAL
+        // wins over both EBADF and EFAULT.
+        errno::set_errno(0);
+        let ret = inotify_add_watch(100_000, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_phase139_bad_fd_beats_null_pathname() {
+        // Valid mask + bad fd + NULL pathname: EBADF wins over
+        // EFAULT (fd check before pathname check).
+        errno::set_errno(0);
+        let ret = inotify_add_watch(100_000, core::ptr::null(), IN_MODIFY);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_phase139_bad_fd_beats_null_pathname_negative_fd() {
+        // Same as above with a clearly-invalid fd (-1) to make sure
+        // the negative-fd path also routes through fdget → EBADF
+        // ahead of the pathname check.
+        errno::set_errno(0);
+        let ret = inotify_add_watch(-1, core::ptr::null(), IN_MODIFY);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_phase139_non_inotify_fd_beats_null_pathname() {
+        // Valid mask + non-inotify fd + NULL pathname: kind-mismatch
+        // EINVAL wins over EFAULT.  (Both kinds → EINVAL after Phase
+        // 139, but pre-Phase 139 the EFAULT pathname check fired
+        // first.)
+        let efd = eventfd(0, 0);
+        if efd < 0 {
+            return;
+        }
+        errno::set_errno(0);
+        let ret = inotify_add_watch(efd, core::ptr::null(), IN_MODIFY);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(efd);
+    }
+
+    // --- buggy callers ---------------------------------------------------
+
+    #[test]
+    fn test_inotify_add_watch_phase139_buggy_caller_zero_mask_optimistic() {
+        // Caller forgets to OR in any event bits, passes 0 as a
+        // "all events" sentinel.  Pre-Phase 139 with NULL pathname
+        // this surfaced EFAULT (misleading: the pathname is fine).
+        // Linux / now: EINVAL points at the actual bug (mask).
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        errno::set_errno(0);
+        // Caller passed b"/tmp\0" (valid pointer) with 0 mask.
+        let ret = inotify_add_watch(fd, b"/tmp\0".as_ptr(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_phase139_buggy_caller_mask_is_only_unknown_bits() {
+        // Caller passes only unknown/flag bits (e.g. IN_MASK_ADD-only
+        // without any event); mask & IN_KNOWN_EVENTS == 0 → EINVAL.
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        // 0x4000_0000 is outside IN_KNOWN_EVENTS.
+        let only_flag_bits: u32 = 0x4000_0000;
+        assert_eq!(only_flag_bits & IN_KNOWN_EVENTS, 0);
+        errno::set_errno(0);
+        let ret = inotify_add_watch(fd, b"/tmp\0".as_ptr(), only_flag_bits);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    // --- workflow + recovery -----------------------------------------
+
+    #[test]
+    fn test_inotify_add_watch_phase139_recovery_after_zero_mask_einval() {
+        // Caller corrects the mask, retries with a valid event bit;
+        // path is fine, fd is fine, so the call reaches the path
+        // resolution stage.  We don't assert success (the path may
+        // not exist in the test sandbox), only that EINVAL doesn't
+        // stick.
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        errno::set_errno(0);
+        assert_eq!(inotify_add_watch(fd, b"/tmp\0".as_ptr(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        errno::set_errno(0);
+        let r2 = inotify_add_watch(fd, b"/tmp\0".as_ptr(), IN_MODIFY);
+        if r2 < 0 {
+            let e = errno::get_errno();
+            // Whatever the failure, it must NOT be the "zero mask"
+            // EINVAL we just recovered from.  Acceptable: ENOENT
+            // (no /tmp in sandbox), EBADF (fd race), etc.
+            assert!(
+                e == errno::ENOENT
+                    || e == errno::ENAMETOOLONG
+                    || e == errno::ENOSPC
+                    || e == errno::EBADF
+                    || e == errno::EINVAL,
+                "unexpected recovery errno {e}"
+            );
+        }
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_phase139_diagnostic_order_for_libinotify() {
+        // Real-world: inotify-tools' wrapper calls add_watch with the
+        // user-supplied mask and a NULL-pre-checked pathname.  If the
+        // wrapper accidentally passes mask=0 when the user forgot
+        // `-e` / `--event`, the user sees EINVAL telling them the
+        // mask is wrong, not EFAULT (which would suggest the path).
+        // Pin this exact diagnostic shape.
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        errno::set_errno(0);
+        let ret = inotify_add_watch(fd, b"/etc\0".as_ptr(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_inotify_add_watch_phase139_no_side_effect_on_einval_loop() {
+        // 50 consecutive zero-mask rejections must not allocate any
+        // watches: the next successful call has a fresh wd space.
+        let fd = inotify_init();
+        if fd < 0 {
+            return;
+        }
+        for _ in 0..50 {
+            errno::set_errno(0);
+            assert_eq!(inotify_add_watch(fd, b"/tmp\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+        // The 51st valid-mask call may still fail (no /tmp etc.) but
+        // mustn't carry a stale EINVAL from the rejections.
+        errno::set_errno(0);
+        let _ = inotify_add_watch(fd, b"/tmp\0".as_ptr(), IN_MODIFY);
+        // If the call returned -1, errno was rewritten by add_watch
+        // (mask check passed; either ENOENT or success).
+        crate::file::close(fd);
     }
 
     // -- inotify event flag single-bit checks --

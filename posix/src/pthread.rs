@@ -1293,30 +1293,102 @@ pub const PTHREAD_CANCEL_ENABLE: i32 = 0;
 /// Cancel state: disabled.
 pub const PTHREAD_CANCEL_DISABLE: i32 = 1;
 
+// Cancellation state and type are per-thread under POSIX, but our
+// libc runs in a context where threading is effectively
+// single-tasked (or pthread is a thin wrapper).  We track the values
+// in process-global atomics so that:
+//
+//   * the previous value is correctly reported via the `old*` out
+//     pointer, even across non-default settings;
+//   * a successful set() reliably persists until the next set();
+//   * tests can observe and reset the state deterministically.
+//
+// This is a stub-quality model, but it gives callers the documented
+// pthread contract instead of a pair of constants.
+static CANCEL_STATE: AtomicI32 = AtomicI32::new(PTHREAD_CANCEL_ENABLE);
+static CANCEL_TYPE: AtomicI32 = AtomicI32::new(PTHREAD_CANCEL_DEFERRED);
+
+/// Inspect the current cancellation state (test/debug helper).
+#[must_use]
+pub fn current_cancel_state() -> i32 {
+    CANCEL_STATE.load(Ordering::Relaxed)
+}
+
+/// Inspect the current cancellation type (test/debug helper).
+#[must_use]
+pub fn current_cancel_type() -> i32 {
+    CANCEL_TYPE.load(Ordering::Relaxed)
+}
+
+/// Reset the cancellation state/type back to POSIX defaults.  Used by
+/// tests to avoid cross-test contamination of the static atomics.
+#[cfg(test)]
+pub(crate) fn reset_cancel_state_and_type() {
+    CANCEL_STATE.store(PTHREAD_CANCEL_ENABLE, Ordering::Relaxed);
+    CANCEL_TYPE.store(PTHREAD_CANCEL_DEFERRED, Ordering::Relaxed);
+}
+
 /// Set the calling thread's cancellation state.
 ///
-/// Stub: succeeds silently, stores the old state.
+/// POSIX:
+///
+/// > Legal values for state are PTHREAD_CANCEL_ENABLE and
+/// > PTHREAD_CANCEL_DISABLE.  ...  If pthread_setcancelstate() is
+/// > given an invalid third [sic — `state`] argument, it shall
+/// > return [EINVAL] without changing the state of the cancelability
+/// > state.
+///
+/// On success we atomically swap the new value into `CANCEL_STATE`
+/// and write the previous value to `*oldstate` (if non-null), so
+/// that a save-restore idiom like
+///
+/// ```c
+/// int old;
+/// pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &old);
+/// /* critical region */
+/// pthread_setcancelstate(old, NULL);
+/// ```
+///
+/// works correctly across nested calls.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_setcancelstate(state: i32, oldstate: *mut i32) -> i32 {
-    if !oldstate.is_null() {
-        // Report that cancellation was enabled (harmless default).
-        // SAFETY: caller guarantees oldstate is valid if non-null.
-        unsafe { *oldstate = PTHREAD_CANCEL_ENABLE; }
+    // Validate first — POSIX requires that an invalid value leaves
+    // the cancellation state unchanged.
+    if state != PTHREAD_CANCEL_ENABLE && state != PTHREAD_CANCEL_DISABLE {
+        return errno::EINVAL;
     }
-    let _ = state;
+    // Swap atomically so concurrent callers can never observe an
+    // intermediate state.
+    let prev = CANCEL_STATE.swap(state, Ordering::Relaxed);
+    if !oldstate.is_null() {
+        // SAFETY: caller guarantees oldstate is valid if non-null.
+        unsafe { *oldstate = prev; }
+    }
     0
 }
 
 /// Set the calling thread's cancellation type.
 ///
-/// Stub: succeeds silently.
+/// POSIX:
+///
+/// > Legal values for type are PTHREAD_CANCEL_DEFERRED and
+/// > PTHREAD_CANCEL_ASYNCHRONOUS.  ...  If pthread_setcanceltype()
+/// > is given an invalid first argument, it shall return [EINVAL]
+/// > without changing the state of the cancelability type.
+///
+/// Same swap-and-report semantics as `pthread_setcancelstate`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_setcanceltype(cancel_type: i32, oldtype: *mut i32) -> i32 {
+    if cancel_type != PTHREAD_CANCEL_DEFERRED
+        && cancel_type != PTHREAD_CANCEL_ASYNCHRONOUS
+    {
+        return errno::EINVAL;
+    }
+    let prev = CANCEL_TYPE.swap(cancel_type, Ordering::Relaxed);
     if !oldtype.is_null() {
         // SAFETY: caller guarantees oldtype is valid if non-null.
-        unsafe { *oldtype = PTHREAD_CANCEL_DEFERRED; }
+        unsafe { *oldtype = prev; }
     }
-    let _ = cancel_type;
     0
 }
 
@@ -3351,5 +3423,243 @@ mod tests {
         for word in &set.__bits {
             assert_eq!(*word, u64::MAX);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 82 — pthread_setcancelstate / pthread_setcanceltype validation
+    //
+    // POSIX requires that invalid `state`/`type` arguments return EINVAL
+    // without mutating the current cancellation state/type, and that
+    // valid calls report the previous value via the out-pointer.
+    //
+    // These tests use an RAII guard that snapshots and restores the
+    // global atomics around each case, so they remain deterministic
+    // under `--test-threads=1` even when tests run in arbitrary order.
+    // -----------------------------------------------------------------------
+
+    struct CancelGuard {
+        saved_state: i32,
+        saved_type: i32,
+    }
+    impl CancelGuard {
+        fn new() -> Self {
+            Self {
+                saved_state: current_cancel_state(),
+                saved_type: current_cancel_type(),
+            }
+        }
+    }
+    impl Drop for CancelGuard {
+        fn drop(&mut self) {
+            CANCEL_STATE.store(self.saved_state, Ordering::Relaxed);
+            CANCEL_TYPE.store(self.saved_type, Ordering::Relaxed);
+        }
+    }
+
+    // ---- (a) Helper / constant invariants -------------------------------
+
+    #[test]
+    fn test_cancel_state_constants_distinct() {
+        assert_ne!(PTHREAD_CANCEL_ENABLE, PTHREAD_CANCEL_DISABLE);
+        assert_ne!(PTHREAD_CANCEL_DEFERRED, PTHREAD_CANCEL_ASYNCHRONOUS);
+    }
+
+    #[test]
+    fn test_cancel_state_default_after_reset() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        assert_eq!(current_cancel_state(), PTHREAD_CANCEL_ENABLE);
+        assert_eq!(current_cancel_type(), PTHREAD_CANCEL_DEFERRED);
+    }
+
+    // ---- (b) pthread_setcancelstate: EINVAL on bad input ----------------
+
+    #[test]
+    fn test_setcancelstate_rejects_negative() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let ret = pthread_setcancelstate(-1, core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL);
+        // State must be unchanged.
+        assert_eq!(current_cancel_state(), PTHREAD_CANCEL_ENABLE);
+    }
+
+    #[test]
+    fn test_setcancelstate_rejects_value_two() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let ret = pthread_setcancelstate(2, core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(current_cancel_state(), PTHREAD_CANCEL_ENABLE);
+    }
+
+    #[test]
+    fn test_setcancelstate_rejects_large_value() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let ret = pthread_setcancelstate(i32::MAX, core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(current_cancel_state(), PTHREAD_CANCEL_ENABLE);
+    }
+
+    #[test]
+    fn test_setcancelstate_invalid_does_not_write_oldstate() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let mut old: i32 = 0x5A5A_5A5A;
+        let ret = pthread_setcancelstate(42, &raw mut old);
+        assert_eq!(ret, errno::EINVAL);
+        // Sentinel must be untouched.
+        assert_eq!(old, 0x5A5A_5A5A);
+    }
+
+    // ---- (c) pthread_setcancelstate: success cases ----------------------
+
+    #[test]
+    fn test_setcancelstate_enable_to_disable_reports_previous() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let mut old: i32 = -123;
+        let ret = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &raw mut old);
+        assert_eq!(ret, 0);
+        assert_eq!(old, PTHREAD_CANCEL_ENABLE);
+        assert_eq!(current_cancel_state(), PTHREAD_CANCEL_DISABLE);
+    }
+
+    #[test]
+    fn test_setcancelstate_save_restore_roundtrip() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let mut saved: i32 = 0;
+        assert_eq!(
+            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &raw mut saved),
+            0,
+        );
+        assert_eq!(saved, PTHREAD_CANCEL_ENABLE);
+        // Now restore.
+        assert_eq!(pthread_setcancelstate(saved, core::ptr::null_mut()), 0);
+        assert_eq!(current_cancel_state(), PTHREAD_CANCEL_ENABLE);
+    }
+
+    #[test]
+    fn test_setcancelstate_null_oldstate_succeeds() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let ret = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        assert_eq!(current_cancel_state(), PTHREAD_CANCEL_DISABLE);
+    }
+
+    #[test]
+    fn test_setcancelstate_idempotent() {
+        // Setting the same value twice should be a no-op (and report
+        // that value back).
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let mut old: i32 = 99;
+        assert_eq!(pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &raw mut old), 0);
+        assert_eq!(pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &raw mut old), 0);
+        assert_eq!(old, PTHREAD_CANCEL_DISABLE);
+    }
+
+    // ---- (d) pthread_setcanceltype: EINVAL on bad input -----------------
+
+    #[test]
+    fn test_setcanceltype_rejects_negative() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let ret = pthread_setcanceltype(-1, core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(current_cancel_type(), PTHREAD_CANCEL_DEFERRED);
+    }
+
+    #[test]
+    fn test_setcanceltype_rejects_value_two() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let ret = pthread_setcanceltype(2, core::ptr::null_mut());
+        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(current_cancel_type(), PTHREAD_CANCEL_DEFERRED);
+    }
+
+    #[test]
+    fn test_setcanceltype_invalid_does_not_write_oldtype() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let mut old: i32 = 0x1234_5678;
+        let ret = pthread_setcanceltype(99, &raw mut old);
+        assert_eq!(ret, errno::EINVAL);
+        assert_eq!(old, 0x1234_5678);
+    }
+
+    // ---- (e) pthread_setcanceltype: success cases -----------------------
+
+    #[test]
+    fn test_setcanceltype_deferred_to_async_reports_previous() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let mut old: i32 = 0xABCD;
+        let ret = pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, &raw mut old);
+        assert_eq!(ret, 0);
+        assert_eq!(old, PTHREAD_CANCEL_DEFERRED);
+        assert_eq!(current_cancel_type(), PTHREAD_CANCEL_ASYNCHRONOUS);
+    }
+
+    #[test]
+    fn test_setcanceltype_save_restore_roundtrip() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let mut saved: i32 = 0;
+        assert_eq!(
+            pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, &raw mut saved),
+            0,
+        );
+        assert_eq!(saved, PTHREAD_CANCEL_DEFERRED);
+        assert_eq!(pthread_setcanceltype(saved, core::ptr::null_mut()), 0);
+        assert_eq!(current_cancel_type(), PTHREAD_CANCEL_DEFERRED);
+    }
+
+    #[test]
+    fn test_setcanceltype_null_oldtype_succeeds() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        let ret = pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        assert_eq!(current_cancel_type(), PTHREAD_CANCEL_ASYNCHRONOUS);
+    }
+
+    // ---- (f) Non-interference between state and type --------------------
+
+    #[test]
+    fn test_setcancelstate_does_not_affect_type() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        assert_eq!(
+            pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, core::ptr::null_mut()),
+            0,
+        );
+        assert_eq!(
+            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, core::ptr::null_mut()),
+            0,
+        );
+        // Type must still be ASYNCHRONOUS.
+        assert_eq!(current_cancel_type(), PTHREAD_CANCEL_ASYNCHRONOUS);
+        assert_eq!(current_cancel_state(), PTHREAD_CANCEL_DISABLE);
+    }
+
+    #[test]
+    fn test_setcanceltype_does_not_affect_state() {
+        let _g = CancelGuard::new();
+        reset_cancel_state_and_type();
+        assert_eq!(
+            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, core::ptr::null_mut()),
+            0,
+        );
+        assert_eq!(
+            pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, core::ptr::null_mut()),
+            0,
+        );
+        assert_eq!(current_cancel_state(), PTHREAD_CANCEL_DISABLE);
+        assert_eq!(current_cancel_type(), PTHREAD_CANCEL_ASYNCHRONOUS);
     }
 }

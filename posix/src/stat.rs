@@ -191,17 +191,22 @@ pub fn mknod_type_valid(mode: u32) -> bool {
 /// portable code (udev, mdev, tmpfiles.d processors) reports failures
 /// correctly.
 ///
-/// Validation order matches `fs/namei.c::do_mknodat` in Linux:
+/// Validation order matches `fs/namei.c::do_mknodat` and
+/// `fs/namei.c::vfs_mknod` in Linux:
 /// 1. `pathname == NULL` → `EFAULT`.
 /// 2. `pathname` is the empty string → `ENOENT`.
 /// 3. `mode & S_IFMT` is not a valid file type → `EINVAL`.
 ///    Plain `0` (no type bits) is rejected — Linux treats that as
 ///    "create a regular file" in the BSD legacy interface but
 ///    `do_mknodat` is strict.  Our stub follows the strict path.
-/// 4. All validated → `ENOSYS`.
+/// 4. (Phase 188) `mode & S_IFMT` is `S_IFCHR` or `S_IFBLK` and the
+///    caller lacks `CAP_MKNOD` → `EPERM`.  Matches Linux's
+///    `vfs_mknod`: `if (S_ISCHR(mode) || S_ISBLK(mode)) { if
+///    (!capable(CAP_MKNOD)) return -EPERM; }`.  FIFO, socket, and
+///    regular-file types do not require the cap.
+/// 5. All validated → `ENOSYS`.
 ///
 /// Things we cannot validate yet:
-/// - `EPERM`: CHR/BLK device creation requires `CAP_MKNOD`.
 /// - `EEXIST`: pathname already exists.
 /// - `ENOTDIR`/`ENOENT`: a path component is wrong.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -219,6 +224,18 @@ pub extern "C" fn mknod(pathname: *const u8, mode: u32, _dev: u64) -> i32 {
         crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
+    // Phase 188: CAP_MKNOD gate fires only for character and block
+    // device types — matches Linux's `vfs_mknod` placement.  FIFO,
+    // socket, and regular-file creations bypass this check.
+    let t = mode & crate::fcntl::S_IFMT;
+    if (t == crate::fcntl::S_IFCHR || t == crate::fcntl::S_IFBLK)
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_MKNOD,
+        )
+    {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
@@ -234,7 +251,10 @@ pub extern "C" fn mknod(pathname: *const u8, mode: u32, _dev: u64) -> i32 {
 /// 3. `mode & S_IFMT` invalid → `EINVAL`.
 /// 4. `dirfd != AT_FDCWD` and `dirfd < 0` → `EBADF`.
 /// 5. `dirfd != AT_FDCWD` and not an open fd → `EBADF`.
-/// 6. All validated → `ENOSYS`.
+/// 6. (Phase 188) `mode & S_IFMT` is `S_IFCHR` or `S_IFBLK` and the
+///    caller lacks `CAP_MKNOD` → `EPERM`.  Linux's `vfs_mknod` runs
+///    after path resolution, so the dirfd checks beat the cap check.
+/// 7. All validated → `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mknodat(dirfd: i32, pathname: *const u8, mode: u32, _dev: u64) -> i32 {
     if pathname.is_null() {
@@ -259,6 +279,18 @@ pub extern "C" fn mknodat(dirfd: i32, pathname: *const u8, mode: u32, _dev: u64)
             crate::errno::set_errno(crate::errno::EBADF);
             return -1;
         }
+    }
+    // Phase 188: CAP_MKNOD gate fires only for CHR/BLK device types,
+    // and only after path resolution / dirfd validation — matching
+    // Linux's `vfs_mknod` placement deep inside `do_mknodat`.
+    let t = mode & crate::fcntl::S_IFMT;
+    if (t == crate::fcntl::S_IFCHR || t == crate::fcntl::S_IFBLK)
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_MKNOD,
+        )
+    {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
     }
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
@@ -1169,5 +1201,494 @@ mod tests {
         crate::errno::set_errno(0);
         assert_eq!(mknod(core::ptr::null(), S_IFREG | 0o644, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 188: mknod / mknodat — CAP_MKNOD gate for CHR / BLK
+    // ----------------------------------------------------------------------
+    //
+    // Linux's `fs/namei.c::vfs_mknod` opens with:
+    //
+    //     if (S_ISCHR(mode) || S_ISBLK(mode)) {
+    //         if (!capable(CAP_MKNOD))
+    //             return -EPERM;
+    //     }
+    //
+    // The check runs *after* `do_mknodat` has resolved the path and
+    // validated the file-type bits — so EFAULT (NULL path), ENOENT
+    // (empty), EINVAL (bad type), and EBADF (bad dirfd) all beat the
+    // EPERM.
+    //
+    // FIFO, socket, and regular-file creations bypass the cap check
+    // entirely.  Mode bits outside the type field (e.g. perms) are
+    // irrelevant — only `mode & S_IFMT` is examined.
+    //
+    // Host test build holds CAP_MKNOD by default (bit 27 ∈
+    // DEFAULT_CAPS_LOW = u32::MAX), so all pre-existing mknod /
+    // mknodat / mkfifo / mkfifoat tests continue to hit the same
+    // ENOSYS / EINVAL / EBADF terminals.
+    //
+    // Must run with `--test-threads=1` because the tests manipulate
+    // process-wide capability state.
+    // ----------------------------------------------------------------------
+
+    mod mknod_cap_phase188 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase
+        /// 187 (`setgroups_cap_phase187`).
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_mknod() {
+            use crate::sys_capability::CAP_MKNOD;
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_MKNOD < 32 {
+                (lo & !(1u32 << CAP_MKNOD), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_MKNOD - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_MKNOD");
+            assert!(!crate::sys_capability::has_capability(CAP_MKNOD));
+        }
+
+        // -- Per-error-class --------------------------------------------------
+
+        /// CHR device without CAP_MKNOD → EPERM.  Matches `vfs_mknod`
+        /// when `S_ISCHR(mode) && !capable(CAP_MKNOD)`.
+        #[test]
+        fn test_mknod_phase188_chr_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/dev/zero\0".as_ptr(), S_IFCHR | 0o666, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// BLK device without CAP_MKNOD → EPERM.
+        #[test]
+        fn test_mknod_phase188_blk_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/dev/loop0\0".as_ptr(), S_IFBLK | 0o660, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// FIFO without CAP_MKNOD → still reaches ENOSYS.  Linux does
+        /// not require CAP_MKNOD for named pipes — the cap gate is
+        /// type-conditional.
+        #[test]
+        fn test_mknod_phase188_fifo_no_cap_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/run/fifo\0".as_ptr(), S_IFIFO | 0o600, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
+                "FIFO must not require CAP_MKNOD");
+        }
+
+        /// Socket without CAP_MKNOD → still reaches ENOSYS.
+        #[test]
+        fn test_mknod_phase188_sock_no_cap_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/run/s\0".as_ptr(), S_IFSOCK | 0o600, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
+                "Socket must not require CAP_MKNOD");
+        }
+
+        /// Regular file without CAP_MKNOD → still reaches ENOSYS.
+        #[test]
+        fn test_mknod_phase188_reg_no_cap_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/tmp/r\0".as_ptr(), S_IFREG | 0o644, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
+                "Regular file must not require CAP_MKNOD");
+        }
+
+        // -- Ordering matrix --------------------------------------------------
+
+        /// EFAULT (NULL path) beats EPERM — the path-validation step
+        /// runs before any cap check in Linux's `do_mknodat`.
+        #[test]
+        fn test_mknod_phase188_efault_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(mknod(core::ptr::null(), S_IFCHR | 0o666, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
+
+        /// ENOENT (empty path) beats EPERM.
+        #[test]
+        fn test_mknod_phase188_enoent_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(mknod(b"\0".as_ptr(), S_IFBLK | 0o660, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+        }
+
+        /// EINVAL (bad type, e.g. S_IFDIR) beats EPERM.  Type
+        /// validation runs before `vfs_mknod` is even called.
+        #[test]
+        fn test_mknod_phase188_einval_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/tmp/d\0".as_ptr(), S_IFDIR | 0o755, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
+                "Bad-type EINVAL must beat CAP_MKNOD EPERM");
+        }
+
+        /// EPERM beats ENOSYS — the cap gate is the last validation
+        /// before the stub returns ENOSYS, so missing-cap callers
+        /// never see ENOSYS for CHR/BLK.
+        #[test]
+        fn test_mknod_phase188_eperm_beats_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/dev/tty\0".as_ptr(), S_IFCHR | 0o620, 0),
+                -1,
+            );
+            // Without the gate this would return ENOSYS.
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM,
+                "Missing CAP_MKNOD must surface as EPERM, not ENOSYS");
+        }
+
+        // -- mknodat ordering --------------------------------------------------
+
+        /// mknodat: EBADF (bad dirfd) beats EPERM.  Linux runs the
+        /// fdget before path resolution; vfs_mknod is deeper still.
+        #[test]
+        fn test_mknodat_phase188_ebadf_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknodat(-1, b"d\0".as_ptr(), S_IFCHR | 0o666, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF,
+                "Bad dirfd EBADF must beat CAP_MKNOD EPERM");
+        }
+
+        /// mknodat with AT_FDCWD: CHR without cap → EPERM.
+        #[test]
+        fn test_mknodat_phase188_at_fdcwd_chr_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknodat(
+                    crate::file::AT_FDCWD,
+                    b"dev\0".as_ptr(),
+                    S_IFCHR | 0o666,
+                    0,
+                ),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// mknodat with AT_FDCWD: FIFO bypasses cap → ENOSYS.
+        #[test]
+        fn test_mknodat_phase188_at_fdcwd_fifo_bypasses_cap() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknodat(
+                    crate::file::AT_FDCWD,
+                    b"f\0".as_ptr(),
+                    S_IFIFO | 0o600,
+                    0,
+                ),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        // -- Workflow --------------------------------------------------------
+
+        /// Privileged → unprivileged → privileged round-trip.
+        /// Mirrors a setuid helper that drops CAP_MKNOD after device
+        /// setup and a re-execed root daemon that gets it back.
+        #[test]
+        fn test_mknod_phase188_drop_then_restore_workflow() {
+            let _g = CapGuard::snapshot();
+            // 1. Cap held — CHR reaches ENOSYS (proper request, stub
+            //    can't materialize it).
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+            // 2. Drop cap — CHR fails with EPERM.
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            // 3. Restore cap (via capset to u32::MAX) — CHR reaches
+            //    ENOSYS again.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        // -- Buggy-caller ----------------------------------------------------
+
+        /// A caller that didn't clear errno before mknod sees a fresh
+        /// EPERM, not the stale value.
+        #[test]
+        fn test_mknod_phase188_buggy_caller_stale_errno_replaced() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(crate::errno::ENOENT);
+            assert_eq!(
+                mknod(b"/dev/sda\0".as_ptr(), S_IFBLK | 0o660, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM,
+                "Stale ENOENT must be overwritten with EPERM");
+        }
+
+        // -- Recovery --------------------------------------------------------
+
+        /// CapGuard drop restores the cap so a subsequent CHR call in
+        /// the same test process reaches ENOSYS again.
+        #[test]
+        fn test_mknod_phase188_capguard_restore_clears_state() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_mknod();
+                crate::errno::set_errno(0);
+                assert_eq!(
+                    mknod(b"/dev/x\0".as_ptr(), S_IFCHR | 0o666, 0),
+                    -1,
+                );
+                assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            } // _g dropped here; cap restored.
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/dev/x\0".as_ptr(), S_IFCHR | 0o666, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
+                "CapGuard drop must restore cap; CHR reaches ENOSYS");
+        }
+
+        // -- Sentinel --------------------------------------------------------
+
+        /// With CAP_MKNOD held, all existing terminals still fire:
+        /// EFAULT, ENOENT, EINVAL, ENOSYS.  Confirms the gate is
+        /// gated, not unconditional.
+        #[test]
+        fn test_mknod_phase188_with_cap_existing_terminals_unchanged() {
+            let _g = CapGuard::snapshot();
+            // Cap held by default — do not drop.
+            // EFAULT.
+            crate::errno::set_errno(0);
+            assert_eq!(mknod(core::ptr::null(), S_IFCHR | 0o666, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+            // ENOENT.
+            crate::errno::set_errno(0);
+            assert_eq!(mknod(b"\0".as_ptr(), S_IFCHR | 0o666, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+            // EINVAL.
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/tmp/d\0".as_ptr(), S_IFDIR | 0o755, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+            // ENOSYS for CHR with cap.
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/dev/n\0".as_ptr(), S_IFCHR | 0o666, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        // -- Cross-check -----------------------------------------------------
+
+        /// Dropping CAP_SETPCAP alone must NOT affect mknod — Linux
+        /// gates vfs_mknod on CAP_MKNOD specifically.  Pins down the
+        /// cross-cap invariant so a future refactor that probes the
+        /// wrong cap is caught.
+        #[test]
+        fn test_mknod_phase188_setpcap_drop_does_not_affect_mknod() {
+            use crate::sys_capability::CAP_SETPCAP;
+            let _g = CapGuard::snapshot();
+            // Drop only CAP_SETPCAP (bit 8), leave CAP_MKNOD (bit 27).
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << CAP_SETPCAP);
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            // mknod CHR still reaches ENOSYS.
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/dev/y\0".as_ptr(), S_IFCHR | 0o666, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
+                "CAP_SETPCAP drop must not affect mknod");
+        }
+
+        /// Phase 188 errno is EPERM (capable convention), matching
+        /// Linux's `vfs_mknod` → `-EPERM`.  Distinct from the EACCES
+        /// errno used by Phase 186 (seccomp) — a cross-phase invariant.
+        #[test]
+        fn test_mknod_phase188_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                mknod(b"/dev/q\0".as_ptr(), S_IFBLK | 0o660, 0),
+                -1,
+            );
+            let e = crate::errno::get_errno();
+            assert_eq!(e, crate::errno::EPERM);
+            assert_ne!(e, crate::errno::EACCES,
+                "vfs_mknod uses EPERM (capable convention)");
+        }
+
+        /// mkfifo (always implicit S_IFIFO) is unaffected by cap drop
+        /// — it does not pass through vfs_mknod's S_ISCHR/S_ISBLK gate.
+        #[test]
+        fn test_mknod_phase188_mkfifo_unaffected_by_cap_drop() {
+            let _g = CapGuard::snapshot();
+            drop_cap_mknod();
+            crate::errno::set_errno(0);
+            assert_eq!(mkfifo(b"/run/p\0".as_ptr(), 0o644), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
+                "mkfifo does not pass through CAP_MKNOD gate");
+        }
     }
 }

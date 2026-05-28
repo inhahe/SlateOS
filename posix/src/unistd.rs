@@ -1403,10 +1403,29 @@ pub extern "C" fn sethostid(hostid: i64) -> i32 {
 
 /// Change the root directory.
 ///
-/// Stub: returns -1 with `ENOSYS`.  Filesystem namespaces are not
-/// yet implemented.
+/// Stub: validates arguments per Linux `fs/open.c::sys_chroot`, then
+/// returns `-1` with `ENOSYS` (filesystem-root remapping isn't wired
+/// up yet — `design.txt` puts root selection in the capability layer
+/// rather than via legacy chroot semantics).
+///
+/// Errors (Linux-matching priority order):
+/// * `EFAULT` — `path` is NULL.
+/// * `ENOENT` — `path` is the empty string (`""`).  POSIX requires
+///   non-empty pathnames; Linux's `getname_kernel` rejects this.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn chroot(_path: *const u8) -> i32 {
+pub extern "C" fn chroot(path: *const u8) -> i32 {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: path was just confirmed non-NULL; we read one byte to
+    // distinguish the empty-string case from a real path.  Caller's
+    // contract guarantees the buffer is at least NUL-terminated.
+    let first = unsafe { *path };
+    if first == 0 {
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -2017,20 +2036,79 @@ pub const PTRACE_DETACH: i32 = 17;
 // swapon / swapoff
 // ---------------------------------------------------------------------------
 
+/// Mark high-priority swap area (bit 15 of `swapflags`).
+///
+/// When set, the lower bits of `swapflags` form a priority for the new
+/// swap area; without this bit Linux ignores those bits and assigns a
+/// default priority.
+pub const SWAP_FLAG_PREFER: i32 = 0x8000;
+/// Discard data on swap-in for this area (TRIM support).
+pub const SWAP_FLAG_DISCARD: i32 = 0x1_0000;
+/// Discard swap pages eagerly when they go free.
+pub const SWAP_FLAG_DISCARD_ONCE: i32 = 0x2_0000;
+/// Discard swap pages on swap-in and on free.
+pub const SWAP_FLAG_DISCARD_PAGES: i32 = 0x4_0000;
+/// Mask of the priority field (low 15 bits).  Valid when
+/// `SWAP_FLAG_PREFER` is set.
+pub const SWAP_FLAG_PRIO_MASK: i32 = 0x7FFF;
+
+/// Bitmask of every defined `swapon` flag.  Bits outside this mask are
+/// rejected with `EINVAL`.
+pub const SWAP_FLAGS_VALID: i32 = SWAP_FLAG_PREFER
+    | SWAP_FLAG_DISCARD
+    | SWAP_FLAG_DISCARD_ONCE
+    | SWAP_FLAG_DISCARD_PAGES
+    | SWAP_FLAG_PRIO_MASK;
+
 /// Enable swapping on a device.
 ///
-/// Stub: returns -1 with ENOSYS (our OS uses committed memory, no swap).
+/// Stub: validates arguments per Linux `mm/swapfile.c::sys_swapon`, then
+/// returns `-1` with `ENOSYS`.  Our OS uses committed memory and has no
+/// swap subsystem (design.txt: lazy allocation is opt-in, never silent
+/// overcommit).
+///
+/// Errors (Linux-matching priority order):
+/// * `EFAULT` — `path` is NULL.
+/// * `ENOENT` — `path` is the empty string.
+/// * `EINVAL` — `swapflags` contains bits outside `SWAP_FLAGS_VALID`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn swapon(_path: *const u8, _swapflags: i32) -> i32 {
+pub extern "C" fn swapon(path: *const u8, swapflags: i32) -> i32 {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: path is non-NULL; we read one byte.
+    if unsafe { *path } == 0 {
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    }
+    if swapflags & !SWAP_FLAGS_VALID != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
 
 /// Disable swapping on a device.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Stub: validates arguments per Linux `mm/swapfile.c::sys_swapoff`,
+/// then returns `-1` with `ENOSYS`.
+///
+/// Errors (Linux-matching priority order):
+/// * `EFAULT` — `path` is NULL.
+/// * `ENOENT` — `path` is the empty string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn swapoff(_path: *const u8) -> i32 {
+pub extern "C" fn swapoff(path: *const u8) -> i32 {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // SAFETY: path is non-NULL.
+    if unsafe { *path } == 0 {
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -2039,12 +2117,80 @@ pub extern "C" fn swapoff(_path: *const u8) -> i32 {
 // klogctl — kernel log control
 // ---------------------------------------------------------------------------
 
+/// Close the kernel log (currently a no-op on Linux).
+pub const SYSLOG_ACTION_CLOSE: i32 = 0;
+/// Open the kernel log (no-op).
+pub const SYSLOG_ACTION_OPEN: i32 = 1;
+/// Read up to `len` bytes from the log.
+pub const SYSLOG_ACTION_READ: i32 = 2;
+/// Read all remaining log messages.
+pub const SYSLOG_ACTION_READ_ALL: i32 = 3;
+/// Read all messages, then clear the ring buffer.
+pub const SYSLOG_ACTION_READ_CLEAR: i32 = 4;
+/// Clear the ring buffer (no buf/len needed).
+pub const SYSLOG_ACTION_CLEAR: i32 = 5;
+/// Disable console printing of new messages.
+pub const SYSLOG_ACTION_CONSOLE_OFF: i32 = 6;
+/// Re-enable console printing.
+pub const SYSLOG_ACTION_CONSOLE_ON: i32 = 7;
+/// Set the console log level (passed in `len`, 1..=8).
+pub const SYSLOG_ACTION_CONSOLE_LEVEL: i32 = 8;
+/// Return the number of unread bytes in the log.
+pub const SYSLOG_ACTION_SIZE_UNREAD: i32 = 9;
+/// Return the size of the log buffer.
+pub const SYSLOG_ACTION_SIZE_BUFFER: i32 = 10;
+
+/// Highest defined klogctl command.  Anything above this is `EINVAL`
+/// per Linux `kernel/printk/printk.c::do_syslog`.
+pub const SYSLOG_ACTION_MAX: i32 = SYSLOG_ACTION_SIZE_BUFFER;
+
+/// Lowest console log level accepted by `SYSLOG_ACTION_CONSOLE_LEVEL`
+/// (matches Linux `MINIMUM_CONSOLE_LOGLEVEL`).
+pub const SYSLOG_LOG_LEVEL_MIN: i32 = 1;
+/// Highest console log level accepted (matches Linux `LOGLEVEL_DEBUG + 1`).
+pub const SYSLOG_LOG_LEVEL_MAX: i32 = 8;
+
 /// Control the kernel log.
 ///
-/// Stub: returns -1 with ENOSYS.  Our OS uses structured text
-/// logging (JSON-lines), not the Linux klog interface.
+/// Stub: validates arguments per Linux `kernel/printk/printk.c::do_syslog`,
+/// then returns `-1` with `ENOSYS`.  Our OS uses structured text logging
+/// (JSON-lines per `design.txt`), not the legacy klog ring buffer.
+///
+/// Errors (Linux-matching priority order):
+/// * `EINVAL` — `cmd` is negative or above `SYSLOG_ACTION_MAX` (10).
+/// * `EFAULT` — read commands (READ, READ_ALL, READ_CLEAR) with NULL
+///   `buf`.
+/// * `EINVAL` — read commands with `len < 0`.
+/// * `EINVAL` — `SYSLOG_ACTION_CONSOLE_LEVEL` with `len` outside
+///   `[1, 8]`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn klogctl(_cmd: i32, _buf: *mut u8, _len: i32) -> i32 {
+pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
+    if !(0..=SYSLOG_ACTION_MAX).contains(&cmd) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    match cmd {
+        SYSLOG_ACTION_READ | SYSLOG_ACTION_READ_ALL | SYSLOG_ACTION_READ_CLEAR => {
+            if buf.is_null() {
+                errno::set_errno(errno::EFAULT);
+                return -1;
+            }
+            if len < 0 {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+        }
+        SYSLOG_ACTION_CONSOLE_LEVEL => {
+            if !(SYSLOG_LOG_LEVEL_MIN..=SYSLOG_LOG_LEVEL_MAX).contains(&len) {
+                errno::set_errno(errno::EINVAL);
+                return -1;
+            }
+        }
+        _ => {
+            // CLOSE, OPEN, CLEAR, CONSOLE_OFF, CONSOLE_ON,
+            // SIZE_UNREAD, SIZE_BUFFER — no buf/len validation needed.
+        }
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -3731,5 +3877,353 @@ mod tests {
             // Free the allocation.
             unsafe { crate::malloc::free(ptr); }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // chroot / swapon / swapoff / klogctl — argument validation (Phase 61)
+    // -----------------------------------------------------------------
+
+    // ---- chroot ----
+
+    #[test]
+    fn test_chroot_null_efault() {
+        errno::set_errno(0);
+        assert_eq!(chroot(core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_chroot_empty_enoent() {
+        errno::set_errno(0);
+        assert_eq!(chroot(b"\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    #[test]
+    fn test_chroot_one_char_path_enosys() {
+        errno::set_errno(0);
+        assert_eq!(chroot(b"a\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_chroot_workflow_sandbox_pivot() {
+        // A daemon chroots into /var/empty before dropping privileges.
+        // Validation passes → ENOSYS, so the daemon's "namespace
+        // already isolated" fallback kicks in.
+        errno::set_errno(0);
+        assert_eq!(chroot(b"/var/empty\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // ---- swapon ----
+
+    #[test]
+    fn test_swap_flag_constants() {
+        assert_eq!(SWAP_FLAG_PREFER, 0x8000);
+        assert_eq!(SWAP_FLAG_DISCARD, 0x1_0000);
+        assert_eq!(SWAP_FLAG_PRIO_MASK, 0x7FFF);
+        // Priority mask must not overlap any flag bit.
+        assert_eq!(SWAP_FLAG_PRIO_MASK & SWAP_FLAG_PREFER, 0);
+        assert_eq!(SWAP_FLAG_PRIO_MASK & SWAP_FLAG_DISCARD, 0);
+    }
+
+    #[test]
+    fn test_swapon_null_efault() {
+        errno::set_errno(0);
+        assert_eq!(swapon(core::ptr::null(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_swapon_empty_enoent() {
+        errno::set_errno(0);
+        assert_eq!(swapon(b"\0".as_ptr(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    #[test]
+    fn test_swapon_unknown_flag_einval() {
+        // Bit 19 is outside every defined swap flag.
+        errno::set_errno(0);
+        assert_eq!(swapon(b"/swap\0".as_ptr(), 0x80_0000), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_swapon_negative_flag_einval() {
+        errno::set_errno(0);
+        assert_eq!(swapon(b"/swap\0".as_ptr(), i32::MIN), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_swapon_path_checked_before_flags() {
+        // NULL path + bad flags → EFAULT (path checked first).
+        errno::set_errno(0);
+        assert_eq!(swapon(core::ptr::null(), 0x80_0000), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_swapon_priority_only_reaches_enosys() {
+        // PREFER + priority bits are a valid combination.
+        let flags = SWAP_FLAG_PREFER | 5;
+        errno::set_errno(0);
+        assert_eq!(swapon(b"/swap\0".as_ptr(), flags), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_swapon_discard_reaches_enosys() {
+        errno::set_errno(0);
+        assert_eq!(swapon(b"/swap\0".as_ptr(), SWAP_FLAG_DISCARD), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_swapon_all_valid_flags_reaches_enosys() {
+        errno::set_errno(0);
+        assert_eq!(swapon(b"/swap\0".as_ptr(), SWAP_FLAGS_VALID), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // ---- swapoff ----
+
+    #[test]
+    fn test_swapoff_null_efault() {
+        errno::set_errno(0);
+        assert_eq!(swapoff(core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_swapoff_empty_enoent() {
+        errno::set_errno(0);
+        assert_eq!(swapoff(b"\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    // ---- klogctl ----
+
+    #[test]
+    fn test_syslog_action_constants() {
+        assert_eq!(SYSLOG_ACTION_CLOSE, 0);
+        assert_eq!(SYSLOG_ACTION_OPEN, 1);
+        assert_eq!(SYSLOG_ACTION_READ, 2);
+        assert_eq!(SYSLOG_ACTION_READ_ALL, 3);
+        assert_eq!(SYSLOG_ACTION_READ_CLEAR, 4);
+        assert_eq!(SYSLOG_ACTION_CLEAR, 5);
+        assert_eq!(SYSLOG_ACTION_CONSOLE_OFF, 6);
+        assert_eq!(SYSLOG_ACTION_CONSOLE_ON, 7);
+        assert_eq!(SYSLOG_ACTION_CONSOLE_LEVEL, 8);
+        assert_eq!(SYSLOG_ACTION_SIZE_UNREAD, 9);
+        assert_eq!(SYSLOG_ACTION_SIZE_BUFFER, 10);
+        assert_eq!(SYSLOG_ACTION_MAX, 10);
+    }
+
+    #[test]
+    fn test_klogctl_negative_cmd_einval() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(-1, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_cmd_above_max_einval() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_MAX + 1, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_cmd_way_above_max_einval() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(100, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_read_null_buf_efault() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, core::ptr::null_mut(), 16), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_klogctl_read_all_null_buf_efault() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ_ALL, core::ptr::null_mut(), 16), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_klogctl_read_clear_null_buf_efault() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ_CLEAR, core::ptr::null_mut(), 16), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_klogctl_read_negative_len_einval() {
+        let mut buf = [0u8; 16];
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), -1), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_console_level_zero_einval() {
+        // Below SYSLOG_LOG_LEVEL_MIN.
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_console_level_nine_einval() {
+        // Above SYSLOG_LOG_LEVEL_MAX.
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 9), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_console_level_negative_einval() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), -3), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_close_reaches_enosys() {
+        // CLOSE takes no buf/len; passes through.
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_CLOSE, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_klogctl_clear_reaches_enosys() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_klogctl_size_unread_reaches_enosys() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_UNREAD, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_klogctl_size_buffer_reaches_enosys() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_BUFFER, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_klogctl_read_valid_args_reaches_enosys() {
+        let mut buf = [0u8; 64];
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 64), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_klogctl_console_level_valid_reaches_enosys() {
+        for level in SYSLOG_LOG_LEVEL_MIN..=SYSLOG_LOG_LEVEL_MAX {
+            errno::set_errno(0);
+            assert_eq!(
+                klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), level),
+                -1,
+                "level={level} should reach -1",
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS, "level={level}");
+        }
+    }
+
+    #[test]
+    fn test_klogctl_cmd_checked_before_buf() {
+        // Bad cmd + NULL buf → EINVAL from cmd check.
+        errno::set_errno(0);
+        assert_eq!(klogctl(-5, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_read_buf_checked_before_len() {
+        // READ + NULL buf + negative len → EFAULT (buf check first).
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, core::ptr::null_mut(), -1), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // ---- Real-world workflows ----
+
+    #[test]
+    fn test_workflow_dmesg_read_all() {
+        // `dmesg` calls klogctl(SYSLOG_ACTION_READ_ALL, buf, sizeof(buf))
+        // to dump the kernel log. Validates → ENOSYS, dmesg prints
+        // "klogctl: Function not implemented" and exits cleanly.
+        let mut buf = [0u8; 8192];
+        errno::set_errno(0);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), buf.len() as i32),
+            -1,
+        );
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_systemd_set_console_level() {
+        // systemd lowers the console log level during early boot via
+        // klogctl(8, NULL, 4). Validates → ENOSYS; systemd logs the
+        // failure and proceeds with default verbosity.
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 4), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_mkswap_then_swapon() {
+        // mkswap formats /dev/sda3 as swap; the installer then calls
+        // swapon("/dev/sda3", 0). On our committed-memory OS this
+        // returns ENOSYS and the installer continues without swap.
+        errno::set_errno(0);
+        assert_eq!(swapon(b"/dev/sda3\0".as_ptr(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // ---- Real-world buggy callers ----
+
+    #[test]
+    fn test_workflow_buggy_swapon_garbage_flags() {
+        // Caller forgot to zero `swapflags` before swapon(); stack
+        // garbage shows up as unknown bits → EINVAL.  Without our
+        // validation the kernel would have happily accepted them.
+        errno::set_errno(0);
+        assert_eq!(swapon(b"/dev/sda3\0".as_ptr(), 0x0AC0_0000), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_workflow_buggy_klogctl_typo_cmd() {
+        // Caller meant SYSLOG_ACTION_READ (2) but typed 20.  EINVAL is
+        // the correct diagnostic.
+        errno::set_errno(0);
+        assert_eq!(klogctl(20, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_workflow_buggy_chroot_empty_argv() {
+        // A script passes "" from an unchecked argv[1] to chroot();
+        // ENOENT is the correct (and informative) diagnostic.
+        errno::set_errno(0);
+        assert_eq!(chroot(b"\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOENT);
     }
 }

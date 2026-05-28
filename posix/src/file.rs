@@ -3113,7 +3113,16 @@ pub extern "C" fn sendfile64(
 /// is updated to reflect the bytes transferred.  When null, reads/writes
 /// from the current fd position and advances it.
 ///
-/// Stub: performs userspace pread/read + pwrite/write copy.
+/// Argument-domain validation (Linux-matching):
+///   - `flags != 0` → `-1` with `EINVAL`.  Linux's `do_copy_file_range`
+///     reserves `flags` for future extension and rejects any non-zero
+///     value.
+///   - `fd_in < 0 || fd_out < 0` → `-1` with `EBADF`.
+///   - Either fd not open → `-1` with `EBADF`.
+///   - `len == 0` → `0` (well-formed no-op).
+///
+/// Stub: after validation, performs a userspace pread/read +
+/// pwrite/write copy.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn copy_file_range(
     fd_in: Fd,
@@ -3121,8 +3130,36 @@ pub extern "C" fn copy_file_range(
     fd_out: Fd,
     off_out: *mut i64,
     len: usize,
-    _flags: u32,
+    flags: u32,
 ) -> isize {
+    // flags is reserved — Linux currently defines no valid bit.
+    if flags != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Both fds must be non-negative.  Linux's fdget path returns EBADF
+    // for negative fds before any I/O-shape validation.
+    if fd_in < 0 || fd_out < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    // Both fds must be open.  lookup_fd sets EBADF on miss.
+    if lookup_fd(fd_in).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if lookup_fd(fd_out).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    // Zero-length copy is a well-formed no-op.  Linux returns 0 here.
+    if len == 0 {
+        return 0;
+    }
+
     let mut buf = [0u8; 4096];
     let mut total: usize = 0;
 
@@ -5479,13 +5516,220 @@ mod tests {
 
     #[test]
     fn test_copy_file_range_zero_len() {
-        // Copying zero bytes should return 0 immediately.
+        // Copying zero bytes should return 0 immediately.  Use a pipe
+        // to get guaranteed-open fds — relying on stdin/stdout is
+        // fragile because other tests in the suite may close them.
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
         let result = copy_file_range(
-            0, core::ptr::null_mut(),
-            1, core::ptr::null_mut(),
+            pipefd[0], core::ptr::null_mut(),
+            pipefd[1], core::ptr::null_mut(),
             0, 0,
         );
         assert_eq!(result, 0);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
+    }
+
+    // ----------------------------------------------------------------
+    // Phase 89 — copy_file_range argument-domain validation
+    //
+    // Linux semantics being validated:
+    //   - flags != 0 → -1, EINVAL (no valid flag bits defined yet)
+    //   - fd_in < 0 || fd_out < 0 → -1, EBADF
+    //   - fd_in or fd_out not open → -1, EBADF
+    //   - len == 0 with otherwise valid inputs → 0
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_copy_file_range_phase89_nonzero_flag_einval() {
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            0, core::ptr::null_mut(),
+            1, core::ptr::null_mut(),
+            8, 1,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_high_bit_flag_einval() {
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            0, core::ptr::null_mut(),
+            1, core::ptr::null_mut(),
+            8, 0x8000_0000,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_flag_check_beats_zero_len() {
+        // The bug being fixed: bad flags + len==0 used to return 0
+        // silently (skipping validation entirely).
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            0, core::ptr::null_mut(),
+            1, core::ptr::null_mut(),
+            0, 4,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_neg_fd_in_ebadf() {
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            -1, core::ptr::null_mut(),
+            1, core::ptr::null_mut(),
+            8, 0,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_neg_fd_out_ebadf() {
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            0, core::ptr::null_mut(),
+            -1, core::ptr::null_mut(),
+            8, 0,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_both_neg_fds_ebadf() {
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            -5, core::ptr::null_mut(),
+            -6, core::ptr::null_mut(),
+            8, 0,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_nonexistent_fd_in_ebadf() {
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            9999, core::ptr::null_mut(),
+            1, core::ptr::null_mut(),
+            8, 0,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_nonexistent_fd_out_ebadf() {
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            0, core::ptr::null_mut(),
+            9999, core::ptr::null_mut(),
+            8, 0,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_flag_check_beats_ebadf() {
+        // Bad flags + bogus fds → EINVAL, not EBADF (flag check first).
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            -1, core::ptr::null_mut(),
+            -1, core::ptr::null_mut(),
+            8, 1,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_neg_fd_check_beats_lookup() {
+        // -1 fd + non-existent positive fd → EBADF from negative check.
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            -1, core::ptr::null_mut(),
+            9999, core::ptr::null_mut(),
+            8, 0,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_zero_len_with_valid_fds_ok() {
+        // len==0 + flags==0 + valid open fds → 0 (no-op).  Use a pipe
+        // for guaranteed-open fds — other tests in the suite may close
+        // stdin/stdout, so we can't rely on fds 0/1 being open.
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            pipefd[0], core::ptr::null_mut(),
+            pipefd[1], core::ptr::null_mut(),
+            0, 0,
+        );
+        assert_eq!(r, 0);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_einval_then_valid_progression() {
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            pipefd[0], core::ptr::null_mut(),
+            pipefd[1], core::ptr::null_mut(),
+            8, 1,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Subsequent valid call succeeds (len==0 no-op).
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            pipefd[0], core::ptr::null_mut(),
+            pipefd[1], core::ptr::null_mut(),
+            0, 0,
+        );
+        assert_eq!(r, 0);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
+    }
+
+    #[test]
+    fn test_copy_file_range_phase89_ebadf_then_valid_progression() {
+        let mut pipefd = [0i32; 2];
+        assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            9999, core::ptr::null_mut(),
+            pipefd[1], core::ptr::null_mut(),
+            8, 0,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+
+        crate::errno::set_errno(0);
+        let r = copy_file_range(
+            pipefd[0], core::ptr::null_mut(),
+            pipefd[1], core::ptr::null_mut(),
+            0, 0,
+        );
+        assert_eq!(r, 0);
+        let _ = close(pipefd[0]);
+        let _ = close(pipefd[1]);
     }
 
     // -- sendfile with offset pointer --

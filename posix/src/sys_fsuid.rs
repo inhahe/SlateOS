@@ -51,14 +51,50 @@ pub fn current_fsgid() -> GidT {
 // Functions
 // ---------------------------------------------------------------------------
 
+/// The "invalid UID" sentinel.
+///
+/// Linux's `<linux/uidgid.h>` defines `INVALID_UID` as `(uid_t)-1`
+/// (i.e. `u32::MAX`).  The kernel's `uid_valid(kuid)` helper rejects
+/// this value, and every credential-changing syscall (`setuid`,
+/// `setfsuid`, `setresuid`, …) silently *skips* the assignment when
+/// the requested UID is invalid — the caller still gets the previous
+/// value back, but the stored credential is unchanged.
+pub const INVALID_UID: UidT = UidT::MAX;
+
+/// The "invalid GID" sentinel — see [`INVALID_UID`].
+pub const INVALID_GID: GidT = GidT::MAX;
+
 /// Set filesystem UID.
 ///
-/// Atomically replaces the current filesystem UID with `fsuid` and
-/// returns the previous value.  On Linux, calls from non-privileged
-/// processes that try to set a UID other than the real/effective/saved
-/// UID silently leave the value unchanged but still return the previous
-/// value.  We currently allow any value because privilege checks are
-/// not enforced yet.
+/// # Linux semantics (`kernel/sys.c::sys_setfsuid`)
+///
+/// ```text
+/// SYSCALL_DEFINE1(setfsuid, uid_t, uid) {
+///     old_fsuid = current->fsuid;
+///     kuid = make_kuid(ns, uid);
+///     if (uid_valid(kuid) && (caller is privileged or kuid matches
+///                              current ruid/euid/suid/fsuid)) {
+///         current->fsuid = kuid;
+///     }
+///     return old_fsuid;          // always, even when the assignment was skipped
+/// }
+/// ```
+///
+/// Three observable behaviours follow:
+///
+/// 1. `setfsuid((uid_t)-1)` (i.e. `u32::MAX`) is the conventional
+///    "invalid UID" sentinel — `uid_valid(kuid)` is false, so the
+///    assignment is silently skipped.  The previous fsuid is still
+///    returned; the stored value does *not* become `u32::MAX`.
+/// 2. The function *never* sets errno on a well-formed call.  Even
+///    "not permitted" cases return the previous value rather than
+///    `-1` — `setfsuid` predates POSIX `setuid` and chose this
+///    quirky interface because NFS daemons need to discover the
+///    previous value to put it back.
+/// 3. The return value is the *previous* fsuid, not the new one.
+///
+/// We currently skip the privilege check (no real credential model
+/// yet) but enforce (1) and (3) for ABI parity.
 ///
 /// # Safety
 ///
@@ -66,20 +102,26 @@ pub fn current_fsgid() -> GidT {
 /// permission checks will use the new value.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setfsuid(fsuid: UidT) -> i32 {
-    let prev = FSUID.swap(fsuid, Ordering::Relaxed);
-    // Linux returns the previous fsuid as an int.  i32 is wide enough
-    // for any UidT we use (u32) under our typical range.
+    let prev = FSUID.load(Ordering::Relaxed);
+    if fsuid != INVALID_UID {
+        FSUID.store(fsuid, Ordering::Relaxed);
+    }
+    // Linux returns the previous fsuid as an int.  Personality / UID
+    // values fit in the low 31 bits; `as i32` is safe.
     prev as i32
 }
 
 /// Set filesystem GID.
 ///
 /// Atomically replaces the current filesystem GID with `fsgid` and
-/// returns the previous value.  Same privilege-check caveat as
-/// `setfsuid`.
+/// returns the previous value.  Same `(gid_t)-1` sentinel and
+/// errno-untouched contract as [`setfsuid`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setfsgid(fsgid: GidT) -> i32 {
-    let prev = FSGID.swap(fsgid, Ordering::Relaxed);
+    let prev = FSGID.load(Ordering::Relaxed);
+    if fsgid != INVALID_GID {
+        FSGID.store(fsgid, Ordering::Relaxed);
+    }
     prev as i32
 }
 
@@ -167,6 +209,192 @@ mod tests {
         assert_eq!(current_fsgid(), 11);
         // Changing one must not disturb the other.
         setfsuid(0);
+        assert_eq!(current_fsgid(), 11);
+        reset();
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 79 — INVALID_UID/INVALID_GID sentinel handling
+    //
+    // Linux's `setfsuid` / `setfsgid` silently skip the assignment when
+    // the caller passes `(uid_t)-1` (`u32::MAX`).  They still return
+    // the previous value.  Our previous stub stored the sentinel
+    // verbatim, leaving the process with a corrupt filesystem UID of
+    // `u32::MAX` — a subtle bug since file permission checks would then
+    // run as the "nobody" sentinel rather than the intended UID.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_phase79_invalid_uid_constant_value() {
+        assert_eq!(INVALID_UID, u32::MAX);
+        assert_eq!(INVALID_GID, u32::MAX);
+    }
+
+    #[test]
+    fn test_phase79_setfsuid_invalid_uid_does_not_change_state() {
+        reset();
+        // Establish a known non-default state.
+        let _ = setfsuid(1234);
+        assert_eq!(current_fsuid(), 1234);
+        // (uid_t)-1 must NOT clobber the state.
+        let prev = setfsuid(INVALID_UID);
+        // Still returns the previous fsuid (1234), regardless of skip.
+        assert_eq!(prev, 1234);
+        // And the stored value is still 1234, not u32::MAX.
+        assert_eq!(current_fsuid(), 1234);
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_setfsgid_invalid_gid_does_not_change_state() {
+        reset();
+        let _ = setfsgid(5678);
+        assert_eq!(current_fsgid(), 5678);
+        let prev = setfsgid(INVALID_GID);
+        assert_eq!(prev, 5678);
+        assert_eq!(current_fsgid(), 5678);
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_setfsuid_invalid_from_default_zero() {
+        reset();
+        // From default state, an INVALID_UID call returns 0 and leaves
+        // state at 0 (not u32::MAX).
+        let prev = setfsuid(INVALID_UID);
+        assert_eq!(prev, 0);
+        assert_eq!(current_fsuid(), 0);
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_setfsgid_invalid_from_default_zero() {
+        reset();
+        let prev = setfsgid(INVALID_GID);
+        assert_eq!(prev, 0);
+        assert_eq!(current_fsgid(), 0);
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_setfsuid_invalid_then_real_works() {
+        reset();
+        // INVALID_UID is a no-op, so a subsequent real call still
+        // observes 0 as the "previous" value.
+        let _ = setfsuid(INVALID_UID);
+        let prev = setfsuid(42);
+        assert_eq!(prev, 0);
+        assert_eq!(current_fsuid(), 42);
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_max_minus_one_is_set_not_sentinel() {
+        // u32::MAX is the sentinel; u32::MAX - 1 (0xFFFFFFFE) is a
+        // perfectly valid UID and must be stored.
+        reset();
+        let _ = setfsuid(u32::MAX - 1);
+        assert_eq!(current_fsuid(), u32::MAX - 1);
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_invalid_uid_does_not_clobber_errno() {
+        // setfsuid never sets errno — even on the "would have been
+        // denied" path it returns the previous value cleanly.
+        reset();
+        crate::errno::set_errno(crate::errno::EBADF);
+        let _ = setfsuid(INVALID_UID);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        crate::errno::set_errno(0);
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_invalid_gid_does_not_clobber_errno() {
+        reset();
+        crate::errno::set_errno(crate::errno::EBADF);
+        let _ = setfsgid(INVALID_GID);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        crate::errno::set_errno(0);
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_setfsuid_does_not_clobber_errno_on_normal_set() {
+        // A normal setfsuid also leaves errno untouched.
+        reset();
+        crate::errno::set_errno(crate::errno::EAGAIN);
+        let _ = setfsuid(100);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EAGAIN);
+        crate::errno::set_errno(0);
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_buggy_caller_passes_signed_minus_one() {
+        // C code that does `setfsuid((uid_t)(-1))` on a u32 typedef:
+        // the cast value is u32::MAX, which is our sentinel.  Must be
+        // treated as the "no change" probe, not a corrupt set.
+        reset();
+        let _ = setfsuid(50);
+        let cast: u32 = -1i32 as u32;
+        assert_eq!(cast, u32::MAX);
+        let prev = setfsuid(cast);
+        assert_eq!(prev, 50);
+        assert_eq!(current_fsuid(), 50);
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_workflow_probe_then_set_then_restore() {
+        // Real-world idiom: probe current fsuid, do work as a different
+        // UID, restore.  The probe is `setfsuid(INVALID_UID)` per Linux
+        // convention — it returns the current value without changing it.
+        reset();
+        let _ = setfsuid(1000);
+
+        // Probe: returns current (1000), state unchanged.
+        let original = setfsuid(INVALID_UID);
+        assert_eq!(original, 1000);
+        assert_eq!(current_fsuid(), 1000);
+
+        // Switch to UID 65534 ("nobody") for an NFS operation.
+        let was = setfsuid(65534);
+        assert_eq!(was, 1000);
+        assert_eq!(current_fsuid(), 65534);
+
+        // Restore.
+        let after = setfsuid(original as u32);
+        assert_eq!(after, 65534);
+        assert_eq!(current_fsuid(), 1000);
+
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_workflow_probe_then_set_then_restore_gid() {
+        reset();
+        let _ = setfsgid(2000);
+        let original = setfsgid(INVALID_GID);
+        assert_eq!(original, 2000);
+        assert_eq!(current_fsgid(), 2000);
+        let _ = setfsgid(65534);
+        let after = setfsgid(original as u32);
+        assert_eq!(after, 65534);
+        assert_eq!(current_fsgid(), 2000);
+        reset();
+    }
+
+    #[test]
+    fn test_phase79_invalid_uid_does_not_affect_gid() {
+        // Cross-cred non-interference: a setfsuid sentinel must not
+        // touch the fsgid at all.
+        reset();
+        let _ = setfsuid(7);
+        let _ = setfsgid(11);
+        let _ = setfsuid(INVALID_UID);
+        assert_eq!(current_fsuid(), 7);
         assert_eq!(current_fsgid(), 11);
         reset();
     }

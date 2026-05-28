@@ -667,9 +667,18 @@ pub unsafe extern "C" fn sigfillset(set: *mut SigsetT) -> i32 {
 }
 
 /// Add a signal to a signal set.
+///
+/// Errors (Linux-matching):
+/// * `EFAULT` — `set` is NULL (glibc would segfault; kernel uses
+///   `copy_to_user` → `-EFAULT`).
+/// * `EINVAL` — `signum` is out of the valid range `[1, NSIG)`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigaddset(set: *mut SigsetT, signum: i32) -> i32 {
-    if set.is_null() || !(1..NSIG).contains(&signum) {
+    if set.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if !(1..NSIG).contains(&signum) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -682,9 +691,17 @@ pub unsafe extern "C" fn sigaddset(set: *mut SigsetT, signum: i32) -> i32 {
 }
 
 /// Remove a signal from a signal set.
+///
+/// Errors (Linux-matching):
+/// * `EFAULT` — `set` is NULL.
+/// * `EINVAL` — `signum` is out of range.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigdelset(set: *mut SigsetT, signum: i32) -> i32 {
-    if set.is_null() || !(1..NSIG).contains(&signum) {
+    if set.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if !(1..NSIG).contains(&signum) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -697,9 +714,17 @@ pub unsafe extern "C" fn sigdelset(set: *mut SigsetT, signum: i32) -> i32 {
 }
 
 /// Test whether a signal is in a signal set.
+///
+/// Errors (Linux-matching):
+/// * `EFAULT` — `set` is NULL.
+/// * `EINVAL` — `signum` is out of range.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigismember(set: *const SigsetT, signum: i32) -> i32 {
-    if set.is_null() || !(1..NSIG).contains(&signum) {
+    if set.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if !(1..NSIG).contains(&signum) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -3761,5 +3786,89 @@ mod tests {
         let ret = kill(1, SIGCHLD);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+    }
+
+    // =================================================================
+    // Phase 212 — sigaddset/sigdelset/sigismember: EFAULT for NULL set
+    //
+    // Linux returns EFAULT for NULL user-space pointers (via
+    // copy_from_user/copy_to_user).  Our stubs used EINVAL for both
+    // NULL set and bad signum.  Phase 212 splits the check:
+    //   NULL set → EFAULT, bad signum → EINVAL.
+    // =================================================================
+
+    /// sigaddset: NULL set → EFAULT.
+    #[test]
+    fn test_phase212_sigaddset_null_efault() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { sigaddset(core::ptr::null_mut(), SIGINT) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// sigaddset: bad signum → EINVAL.
+    #[test]
+    fn test_phase212_sigaddset_bad_signum_einval() {
+        let mut set = SigsetT::EMPTY;
+        crate::errno::set_errno(0);
+        let ret = unsafe { sigaddset(&raw mut set, 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// sigaddset: NULL + bad signum → EFAULT (NULL wins).
+    #[test]
+    fn test_phase212_sigaddset_null_beats_bad_signum() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { sigaddset(core::ptr::null_mut(), 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// sigdelset: NULL set → EFAULT.
+    #[test]
+    fn test_phase212_sigdelset_null_efault() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { sigdelset(core::ptr::null_mut(), SIGINT) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// sigdelset: bad signum → EINVAL.
+    #[test]
+    fn test_phase212_sigdelset_bad_signum_einval() {
+        let mut set = SigsetT { bits: [u64::MAX; 16] };
+        crate::errno::set_errno(0);
+        let ret = unsafe { sigdelset(&raw mut set, -1) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// sigismember: NULL set → EFAULT.
+    #[test]
+    fn test_phase212_sigismember_null_efault() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { sigismember(core::ptr::null(), SIGINT) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// sigismember: bad signum → EINVAL.
+    #[test]
+    fn test_phase212_sigismember_bad_signum_einval() {
+        let set = SigsetT { bits: [u64::MAX; 16] };
+        crate::errno::set_errno(0);
+        let ret = unsafe { sigismember(&raw const set, 0) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// sigismember: NULL + bad signum → EFAULT (NULL wins).
+    #[test]
+    fn test_phase212_sigismember_null_beats_bad_signum() {
+        crate::errno::set_errno(0);
+        let ret = unsafe { sigismember(core::ptr::null(), -1) };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 }

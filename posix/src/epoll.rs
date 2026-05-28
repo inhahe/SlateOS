@@ -1211,6 +1211,25 @@ pub unsafe extern "C" fn timerfd_settime(
 /// Writes the remaining time until next expiration to `curr_value.it_value`
 /// and the interval to `curr_value.it_interval`.
 ///
+/// Validation order matches Linux's `sys_timerfd_gettime`
+/// (fs/timerfd.c):
+///
+/// ```text
+/// SYSCALL_DEFINE2(timerfd_gettime, int, ufd, ... __user *, otmr) {
+///     struct itimerspec64 kotmr;
+///     int ret = do_timerfd_gettime(ufd, &kotmr);   // calls timerfd_fget
+///     if (ret)
+///         return ret;                              // EBADF / EINVAL
+///     return put_itimerspec64(&kotmr, otmr) ? -EFAULT : 0;
+/// }
+/// ```
+///
+/// The fd is resolved BEFORE the user pointer is touched.  Pre-Phase
+/// 143 we checked the NULL pointer first, so `timerfd_gettime(-1, NULL)`
+/// returned `EFAULT` (incorrectly diagnosing the pointer when the real
+/// bug was the fd).  Linux returns `EBADF` for that combination; we
+/// now match.
+///
 /// # Safety
 /// `curr_value` must be a valid writable pointer to an `Itimerspec`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -1218,16 +1237,20 @@ pub unsafe extern "C" fn timerfd_gettime(
     fd: i32,
     curr_value: *mut Itimerspec,
 ) -> i32 {
-    if curr_value.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+    // Phase 143: fd resolution precedes the user-pointer check to
+    // match Linux's `do_timerfd_gettime` flow.  A buggy caller
+    // passing both a bad fd and a NULL pointer learns about the fd
+    // first — the higher-information error.
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
     if entry.kind != HandleKind::Timerfd {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if curr_value.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     let idx = entry.handle;
@@ -4994,5 +5017,261 @@ mod tests {
         };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 143 — timerfd_gettime fd resolves before user-pointer check
+    //
+    // Linux's `sys_timerfd_gettime` calls `do_timerfd_gettime`, which
+    // runs `timerfd_fget(ufd, &f)` (returns EBADF for unknown fd,
+    // EINVAL for wrong fd type) before any `put_itimerspec64` /
+    // `copy_to_user` can fail with EFAULT.  Pre-Phase-143 we checked
+    // the NULL pointer first, so `timerfd_gettime(-1, NULL)` returned
+    // EFAULT — misdirecting the caller at the pointer when the real
+    // bug was the fd.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_timerfd_gettime_phase143_bad_fd_with_null_is_ebadf() {
+        // Core regression: bad fd (-1) + NULL pointer → EBADF, not
+        // EFAULT.  This is the case the Phase 143 reorder fixes.
+        errno::set_errno(0);
+        let ret = unsafe { timerfd_gettime(-1, core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_unknown_fd_with_null_is_ebadf() {
+        // A wildly-out-of-range fd: same outcome.  `fdtable::get_fd`
+        // returns None, surfaces as EBADF before the pointer is
+        // touched.
+        errno::set_errno(0);
+        let ret = unsafe { timerfd_gettime(99999, core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_intmin_fd_with_null_is_ebadf() {
+        // i32::MIN as fd: still EBADF.  Confirms no integer-underflow
+        // surprise in the fd lookup path.
+        errno::set_errno(0);
+        let ret = unsafe { timerfd_gettime(i32::MIN, core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_intmax_fd_with_null_is_ebadf() {
+        errno::set_errno(0);
+        let ret = unsafe { timerfd_gettime(i32::MAX, core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_bad_fd_with_valid_buffer_is_ebadf() {
+        // Ordering not the focus here, just confirming the fd check
+        // works on its own (valid pointer, bad fd → EBADF).  Pins the
+        // baseline so we notice if EBADF ever regresses to EINVAL.
+        let mut buf = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value:    crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        let ret = unsafe { timerfd_gettime(-1, &mut buf) };
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_wrong_kind_fd_takes_einval_path() {
+        // A real fd of a non-timerfd kind: we expect EINVAL (wrong
+        // type) BEFORE the NULL-pointer EFAULT.  Use eventfd(2) which
+        // creates a real Eventfd-kind fd we own.
+        let efd = eventfd(0, 0);
+        assert!(efd >= 0, "eventfd setup failed; errno={}", errno::get_errno());
+
+        errno::set_errno(0);
+        let ret = unsafe { timerfd_gettime(efd, core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "wrong-kind fd must beat NULL-pointer EFAULT",
+        );
+
+        crate::file::close(efd);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_valid_timerfd_null_out_is_efault() {
+        // Recovery / contrast: when the fd IS a real timerfd, the
+        // NULL-pointer path is reached and yields EFAULT.  This pins
+        // the post-Phase-143 ordering's third stage.
+        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        assert!(tfd >= 0, "timerfd_create setup failed; errno={}", errno::get_errno());
+
+        errno::set_errno(0);
+        let ret = unsafe { timerfd_gettime(tfd, core::ptr::null_mut()) };
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+
+        crate::file::close(tfd);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_valid_timerfd_valid_buffer_succeeds() {
+        // End-to-end happy path under the new ordering: real timerfd
+        // + real buffer → 0 with no errno surprise.
+        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        assert!(tfd >= 0);
+
+        let mut buf = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value:    crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        let ret = unsafe { timerfd_gettime(tfd, &mut buf) };
+        assert_eq!(ret, 0);
+
+        crate::file::close(tfd);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_recovery_after_bad_fd() {
+        // Workflow: caller hits EBADF with bad fd + NULL, fixes the
+        // fd (creates a real timerfd) and passes a real buffer,
+        // succeeds.  This is the standard "probe, fix, retry"
+        // pattern; assert that the first call doesn't leak any state
+        // that would affect the second.
+        errno::set_errno(0);
+        let r = unsafe { timerfd_gettime(-1, core::ptr::null_mut()) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+
+        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        assert!(tfd >= 0);
+        let mut buf = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value:    crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        let r = unsafe { timerfd_gettime(tfd, &mut buf) };
+        assert_eq!(r, 0);
+        crate::file::close(tfd);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_buggy_caller_uninit_fd_values() {
+        // Buggy caller pattern: an uninitialised stack int treated as
+        // an fd.  All these representative garbage values must EBADF,
+        // not EFAULT, even with NULL pointer.
+        for fd in [-7, -42, 0x4242, 0x7FFF_FFFF, 0x0BAD_F00Du32 as i32] {
+            errno::set_errno(0);
+            let r = unsafe { timerfd_gettime(fd, core::ptr::null_mut()) };
+            assert_eq!(r, -1, "fd={fd}");
+            // Either EBADF (no entry) or EINVAL (entry exists but
+            // wrong kind — possible if a host test happens to have
+            // such an fd open).  EFAULT must NEVER appear before the
+            // fd is resolved.
+            let e = errno::get_errno();
+            assert!(
+                e == errno::EBADF || e == errno::EINVAL,
+                "fd={fd} got errno {e}, expected EBADF or EINVAL",
+            );
+        }
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_no_side_effect_loop() {
+        // Hammer the bad-fd path 32×; errno deterministically EBADF.
+        for _ in 0..32 {
+            errno::set_errno(0);
+            let r = unsafe { timerfd_gettime(-1, core::ptr::null_mut()) };
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EBADF);
+        }
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_does_not_write_buffer_on_ebadf() {
+        // The buffer must not be touched when fd resolution fails.
+        // A naive ordering that wrote to the buffer before the fd
+        // check would corrupt caller memory.
+        let mut buf = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0xDEAD, tv_nsec: 0xBEEF },
+            it_value:    crate::stat::Timespec { tv_sec: 0xCAFE, tv_nsec: 0xF00D },
+        };
+        errno::set_errno(0);
+        let r = unsafe { timerfd_gettime(-1, &mut buf) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(buf.it_interval.tv_sec, 0xDEAD, "buffer must be untouched");
+        assert_eq!(buf.it_interval.tv_nsec, 0xBEEF);
+        assert_eq!(buf.it_value.tv_sec, 0xCAFE);
+        assert_eq!(buf.it_value.tv_nsec, 0xF00D);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_does_not_write_buffer_on_einval() {
+        // Same invariant for the wrong-kind-fd path: buffer must be
+        // untouched on EINVAL.  Use an eventfd as the wrong-kind fd.
+        let efd = eventfd(0, 0);
+        assert!(efd >= 0);
+
+        let mut buf = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 1234, tv_nsec: 5678 },
+            it_value:    crate::stat::Timespec { tv_sec: 9012, tv_nsec: 3456 },
+        };
+        errno::set_errno(0);
+        let r = unsafe { timerfd_gettime(efd, &mut buf) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(buf.it_interval.tv_sec, 1234);
+        assert_eq!(buf.it_interval.tv_nsec, 5678);
+        assert_eq!(buf.it_value.tv_sec, 9012);
+        assert_eq!(buf.it_value.tv_nsec, 3456);
+
+        crate::file::close(efd);
+    }
+
+    #[test]
+    fn test_timerfd_gettime_phase143_ordering_matrix_all_combos() {
+        // Build the 2x2 matrix of {bad fd, good fd} × {NULL ptr,
+        // valid ptr} and assert the expected errno (or success) for
+        // each.  Pins the full ordering contract in one place.
+        let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
+        assert!(tfd >= 0);
+        let mut buf = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value:    crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+
+        // bad fd + NULL → EBADF
+        errno::set_errno(0);
+        let r = unsafe { timerfd_gettime(-1, core::ptr::null_mut()) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+
+        // bad fd + valid → EBADF
+        errno::set_errno(0);
+        let r = unsafe { timerfd_gettime(-1, &mut buf) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+
+        // good fd + NULL → EFAULT
+        errno::set_errno(0);
+        let r = unsafe { timerfd_gettime(tfd, core::ptr::null_mut()) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+
+        // good fd + valid → 0
+        errno::set_errno(0);
+        let r = unsafe { timerfd_gettime(tfd, &mut buf) };
+        assert_eq!(r, 0);
+
+        crate::file::close(tfd);
     }
 }

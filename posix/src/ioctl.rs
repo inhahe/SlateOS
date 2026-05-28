@@ -1222,23 +1222,46 @@ mod tests {
 
     #[test]
     fn test_grantpt_succeeds() {
-        assert_eq!(grantpt(0), 0);
+        // Phase 68: grantpt no longer silently returns 0 — it now
+        // validates the fd.  fd=0 is registered in the test fdtable
+        // (by ensure_std_fds), so the validator passes the EBADF
+        // checks and reports EINVAL (the fd is not a PTY master,
+        // and on this OS no fd ever is).  The original "succeeds"
+        // name is retained for git-blame friendliness; the assertion
+        // is updated to match Linux semantics.
+        crate::errno::set_errno(0);
+        assert_eq!(grantpt(0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_unlockpt_succeeds() {
-        assert_eq!(unlockpt(0), 0);
+        // Phase 68: unlockpt no longer silently returns 0.  See
+        // test_grantpt_succeeds for the EINVAL reasoning.
+        crate::errno::set_errno(0);
+        assert_eq!(unlockpt(0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_ptsname_returns_null() {
+        // ptsname still returns NULL; the validator now also sets
+        // errno so callers can tell EBADF (closed fd) from ENOTTY
+        // (open but not a PTY).
         assert!(ptsname(0).is_null());
     }
 
     #[test]
     fn test_ptsname_r_returns_enosys() {
+        // Phase 68: ptsname_r(0, valid_buf, 64) now reports ENOTTY
+        // because fd=0 is open (ensure_std_fds in test env) but is
+        // not a PTY master.  The original test was checking the
+        // unconditional ENOSYS sentinel; updated to match the
+        // post-validator Linux-correct errno.
         let mut buf = [0u8; 64];
+        crate::errno::set_errno(0);
         assert_eq!(ptsname_r(0, buf.as_mut_ptr(), buf.len()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
     }
 
     // -- validate_terminal_fd --
@@ -1984,9 +2007,15 @@ mod tests {
 
     #[test]
     fn test_ptsname_r_small_buffer() {
+        // Phase 68: the small-buffer (ERANGE) path is currently
+        // unreachable because fd=0 is open but is not a PTY master,
+        // so ENOTTY fires before any path-length check.  When PTY
+        // support lands, the buflen check should happen after the
+        // fd validates as a real PTY master.
         let mut buf = [0u8; 1];
+        crate::errno::set_errno(0);
         assert_eq!(ptsname_r(0, buf.as_mut_ptr(), buf.len()), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
     }
 
     // -- ctermid with buffer verifies null terminator --
@@ -2061,6 +2090,248 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
         let _ = fdtable::close_fd(fd);
     }
+
+    // -----------------------------------------------------------------
+    // Phase 68 — PTY-helper validators
+    // posix_openpt / grantpt / unlockpt / ptsname / ptsname_r
+    // -----------------------------------------------------------------
+
+    // Helper: allocate an open fd we own for tests (so we can
+    // exercise the "valid open fd" branch of grantpt/unlockpt/
+    // ptsname/ptsname_r).
+    fn open_test_fd() -> i32 {
+        fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd must succeed")
+    }
+
+    // --- posix_openpt ---
+
+    #[test]
+    fn test_posix_openpt_enosys_for_zero() {
+        crate::errno::set_errno(0);
+        assert_eq!(posix_openpt(0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_posix_openpt_enosys_for_o_rdwr() {
+        // O_RDWR is what POSIX requires callers to pass.
+        crate::errno::set_errno(0);
+        assert_eq!(posix_openpt(0x02), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_posix_openpt_enosys_for_o_rdwr_noctty() {
+        // The canonical posix_openpt(O_RDWR | O_NOCTTY) form.
+        crate::errno::set_errno(0);
+        assert_eq!(posix_openpt(0x02 | 0x100), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_posix_openpt_does_not_validate_flags() {
+        // Garbage flags are accepted (and would be by Linux too,
+        // since posix_openpt is open("/dev/ptmx", flags) — we don't
+        // invent EINVAL paths Linux doesn't have).
+        crate::errno::set_errno(0);
+        assert_eq!(posix_openpt(-1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // --- grantpt ---
+
+    #[test]
+    fn test_grantpt_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(grantpt(-1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_grantpt_closed_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(grantpt(9999), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_grantpt_open_non_pty_fd_einval() {
+        // Any open fd is necessarily not a PTY master (because
+        // posix_openpt always fails), so grantpt must report
+        // EINVAL — never silently succeed.
+        let fd = open_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(grantpt(fd), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // --- unlockpt ---
+
+    #[test]
+    fn test_unlockpt_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(unlockpt(-1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_unlockpt_closed_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(unlockpt(9999), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_unlockpt_open_non_pty_fd_einval() {
+        let fd = open_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(unlockpt(fd), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // --- ptsname ---
+
+    #[test]
+    fn test_ptsname_negative_fd_returns_null_ebadf() {
+        crate::errno::set_errno(0);
+        assert!(ptsname(-1).is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_ptsname_closed_fd_returns_null_ebadf() {
+        crate::errno::set_errno(0);
+        assert!(ptsname(9999).is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_ptsname_open_non_pty_fd_returns_null_enotty() {
+        let fd = open_test_fd();
+        crate::errno::set_errno(0);
+        assert!(ptsname(fd).is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // --- ptsname_r ---
+
+    #[test]
+    fn test_ptsname_r_null_buf_einval() {
+        let fd = open_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(ptsname_r(fd, core::ptr::null_mut(), 64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_ptsname_r_negative_fd_ebadf() {
+        let mut buf = [0u8; 64];
+        crate::errno::set_errno(0);
+        assert_eq!(ptsname_r(-1, buf.as_mut_ptr(), buf.len()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_ptsname_r_closed_fd_ebadf() {
+        let mut buf = [0u8; 64];
+        crate::errno::set_errno(0);
+        assert_eq!(ptsname_r(9999, buf.as_mut_ptr(), buf.len()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_ptsname_r_open_non_pty_fd_enotty() {
+        let fd = open_test_fd();
+        let mut buf = [0u8; 64];
+        crate::errno::set_errno(0);
+        assert_eq!(ptsname_r(fd, buf.as_mut_ptr(), buf.len()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // --- ordering ---
+
+    #[test]
+    fn test_ptsname_r_null_buf_beats_bad_fd() {
+        // Per glibc semantics: NULL buf is rejected with EINVAL even
+        // when fd would also fail.  This documents the order.
+        crate::errno::set_errno(0);
+        assert_eq!(ptsname_r(-1, core::ptr::null_mut(), 64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_grantpt_negative_fd_beats_not_pty() {
+        // fd<0 check fires before the "is it a PTY master" decision.
+        crate::errno::set_errno(0);
+        assert_eq!(grantpt(-1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // --- real-world workflows ---
+
+    #[test]
+    fn test_workflow_openpty_emulation_fails_at_openpt() {
+        // libc's openpty() typically does:
+        //   m = posix_openpt(O_RDWR | O_NOCTTY)
+        //   grantpt(m); unlockpt(m); name = ptsname(m); ...
+        // The first step fails with ENOSYS on our system, so the
+        // caller should never reach grantpt/unlockpt/ptsname.
+        crate::errno::set_errno(0);
+        let m = posix_openpt(0x02 | 0x100);
+        assert_eq!(m, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_terminal_emulator_full_chain() {
+        // A terminal emulator that ignores the posix_openpt failure
+        // (or hand-rolls its own equivalent) and tries grantpt on
+        // an arbitrary open fd must see EINVAL — not silent success
+        // followed by a confusing later failure.
+        let fd = open_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(grantpt(fd), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert_eq!(unlockpt(fd), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert!(ptsname(fd).is_null());
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // --- buggy callers ---
+
+    #[test]
+    fn test_buggy_grantpt_uses_unchecked_openpt_result() {
+        // Caller forgets to check posix_openpt's return value and
+        // passes -1 to grantpt.  Must produce EBADF, not silent
+        // success that pretends a PTY was provisioned.
+        crate::errno::set_errno(0);
+        assert_eq!(grantpt(-1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_buggy_unlockpt_uses_unchecked_openpt_result() {
+        crate::errno::set_errno(0);
+        assert_eq!(unlockpt(-1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_buggy_ptsname_r_with_null_buf() {
+        // Common bug: caller forgets to allocate the buffer.
+        crate::errno::set_errno(0);
+        assert_eq!(ptsname_r(0, core::ptr::null_mut(), 64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2069,7 +2340,17 @@ mod tests {
 
 /// Open a pseudo-terminal master device.
 ///
-/// Stub: returns -1 with ENOSYS.  PTY support requires kernel /dev/ptmx.
+/// Returns -1 with ENOSYS — PTY support requires kernel `/dev/ptmx`,
+/// which we have not implemented.  Since no fd can ever come back
+/// from `posix_openpt`, every subsequent `grantpt`/`unlockpt`/
+/// `ptsname`/`ptsname_r` call necessarily operates on a non-PTY fd,
+/// which the validators below report with ENOTTY (or EBADF if the
+/// fd was never opened in the first place).
+///
+/// `oflag` is not validated — Linux's posix_openpt is implemented as
+/// `open("/dev/ptmx", oflag)` and forwards whatever the open path
+/// would accept.  Since we never reach the open path, flag validation
+/// here would only invent failures Linux doesn't have.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_openpt(_oflag: i32) -> i32 {
     crate::errno::set_errno(crate::errno::ENOSYS);
@@ -2078,33 +2359,115 @@ pub extern "C" fn posix_openpt(_oflag: i32) -> i32 {
 
 /// Grant access to the slave pseudo-terminal device.
 ///
-/// Stub: returns 0 (success) since we don't enforce PTY permissions.
+/// Phase 68: previously returned 0 unconditionally, which lied to
+/// buggy callers (passing -1 or a closed fd looked like success).
+/// Now validates `fd` and reports the same errno Linux would:
+///
+/// 1. `fd < 0`              -> `EBADF`
+/// 2. `fd` not in fdtable   -> `EBADF`
+/// 3. otherwise             -> `EINVAL` (fd is not a PTY master —
+///    none exist on this system because `posix_openpt` always
+///    returns ENOSYS).
+///
+/// Linux's `grantpt(3)` returns EINVAL when the fd is not associated
+/// with a master pseudo-terminal device, which is always our case.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn grantpt(_fd: i32) -> i32 {
-    0
+pub extern "C" fn grantpt(fd: i32) -> i32 {
+    if fd < 0 {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return -1;
+    }
+    if crate::fdtable::get_fd(fd).is_none() {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return -1;
+    }
+    crate::errno::set_errno(crate::errno::EINVAL);
+    -1
 }
 
 /// Unlock a pseudo-terminal master/slave pair.
 ///
-/// Stub: returns 0 (success).
+/// Phase 68: previously returned 0 unconditionally.  Now validates
+/// `fd` and reports Linux-matching errnos, identical to `grantpt`.
+///
+/// 1. `fd < 0`              -> `EBADF`
+/// 2. `fd` not in fdtable   -> `EBADF`
+/// 3. otherwise             -> `EINVAL` (not a PTY master).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn unlockpt(_fd: i32) -> i32 {
-    0
+pub extern "C" fn unlockpt(fd: i32) -> i32 {
+    if fd < 0 {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return -1;
+    }
+    if crate::fdtable::get_fd(fd).is_none() {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return -1;
+    }
+    crate::errno::set_errno(crate::errno::EINVAL);
+    -1
 }
 
 /// Get the name of the slave pseudo-terminal device.
 ///
-/// Stub: returns null (no PTY support).
+/// Phase 68: still returns NULL (no PTYs exist), but now sets errno
+/// on every failure path so the caller can distinguish "bad fd" from
+/// "fd is not a PTY".  Validation order:
+///
+/// 1. `fd < 0`              -> set `EBADF`, return NULL.
+/// 2. `fd` not in fdtable   -> set `EBADF`, return NULL.
+/// 3. otherwise             -> set `ENOTTY`, return NULL
+///    (matching Linux's behaviour for non-PTY-master fds).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ptsname(_fd: i32) -> *mut u8 {
+pub extern "C" fn ptsname(fd: i32) -> *mut u8 {
+    if fd < 0 {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return core::ptr::null_mut();
+    }
+    if crate::fdtable::get_fd(fd).is_none() {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return core::ptr::null_mut();
+    }
+    crate::errno::set_errno(crate::errno::ENOTTY);
     core::ptr::null_mut()
 }
 
 /// Thread-safe version of `ptsname`.
 ///
-/// Stub: returns ENOSYS.
+/// Phase 68: returns -1 with errno set (consistent with the local
+/// project convention; note that strict POSIX `ptsname_r` returns
+/// the errno value directly rather than -1, but every other stub in
+/// this file uses the -1+errno convention).  TODO(ptsname_r): if we
+/// ever ship PTY support, decide whether to switch to the strict
+/// return-the-errno convention — see todo.txt.
+///
+/// Validation order matches glibc's ptsname_r (which calls
+/// `ioctl(fd, TIOCGPTN)` and then formats a path):
+///
+/// 1. `buf == NULL`         -> `EINVAL`
+/// 2. `fd < 0`              -> `EBADF`
+/// 3. `fd` not in fdtable   -> `EBADF`
+/// 4. otherwise             -> `ENOTTY` (not a PTY master).
+///
+/// `buflen` is not separately validated: a non-PTY fd produces
+/// ENOTTY before we'd reach a buffer-size check, and we never have
+/// a real PTY path to compare against, so `ERANGE` (buflen too
+/// small) is currently unreachable.  If PTY support lands, the
+/// path-length check should happen after the fd validation and
+/// before writing the path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ptsname_r(_fd: i32, _buf: *mut u8, _buflen: usize) -> i32 {
-    crate::errno::set_errno(crate::errno::ENOSYS);
+pub extern "C" fn ptsname_r(fd: i32, buf: *mut u8, _buflen: usize) -> i32 {
+    if buf.is_null() {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    if fd < 0 {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return -1;
+    }
+    if crate::fdtable::get_fd(fd).is_none() {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return -1;
+    }
+    crate::errno::set_errno(crate::errno::ENOTTY);
     -1
 }

@@ -552,6 +552,17 @@ Remaining net improvements (diminishing returns):
   `serial_test` dev-dep) or restructure getopt to take a context
   pointer so the tests don't share global state.
 
+- (Phase 74, sched.rs) NULL-pointer errno is EINVAL, not EFAULT, in
+  sched_setscheduler / sched_setparam / sched_getparam /
+  sched_rr_get_interval / sched_getaffinity / sched_setaffinity.
+  Linux uses EFAULT (the kernel detects NULL via copy_from_user /
+  copy_to_user); we use EINVAL because the rest of this module did so
+  before validators were added.  Not strictly Linux-compatible.  Fix:
+  switch every NULL-pointer arm to EFAULT in a future cleanup phase
+  and update the existing null-pointer tests at the same time.  Low
+  priority: most callers check return value, not errno specifically,
+  and EINVAL is still a "you did something wrong" signal.
+
 - (2026-05-27) Flaky test: `posix::stdio::tests::test_alloc_file_pool_exhaustion`
   intermittently fails during full `cargo test -p posix --lib` with
   "pool should be exhausted" but passes cleanly in isolation.  Cause:

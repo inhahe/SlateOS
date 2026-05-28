@@ -295,9 +295,21 @@ fn status_to_return(status: i32) -> i32 {
 /// returns the appropriate `TIME_*` code.  Setting `modes = 0` is a
 /// read-only query.
 ///
-/// Returns -1 with `EFAULT` on null pointer.  We do not enforce
-/// privilege on writes (no user/permission model yet); on a real
-/// multi-user system this would require CAP_SYS_TIME.
+/// # Errors (Linux-matching priority order)
+///
+/// 1. `EFAULT` — `tx` is NULL.
+/// 2. `EINVAL` — `modes` contains an unrecognised bit, or
+///    `ADJ_TICK`/`ADJ_SETOFFSET` carries an out-of-range value
+///    (matches Linux's `ntp_validate_timex`).
+/// 3. **Phase 173:** `EPERM` — `modes != 0` (i.e. the caller is
+///    requesting a write) and the caller lacks `CAP_SYS_TIME`.
+///    Read-only queries (`modes == 0`) require no capability.
+///
+/// The cap check sits after argument-domain `EINVAL` because Linux's
+/// `do_adjtimex` calls `ntp_validate_timex` *before* the
+/// `capable(CAP_SYS_TIME)` probe — so a bad mode bit or a wild tick
+/// value still returns `EINVAL` to an unprivileged caller, never
+/// `EPERM`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
     if tx.is_null() {
@@ -362,6 +374,20 @@ pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
             errno::set_errno(errno::EINVAL);
             return -1;
         }
+    }
+
+    // Phase 173: Linux's `do_adjtimex` gates any modify-mode call on
+    // CAP_SYS_TIME.  A pure read-only query (modes == 0) is allowed for
+    // unprivileged callers — only writes need the cap.  The probe runs
+    // after `ntp_validate_timex` (our EINVAL guards above), matching the
+    // kernel's `validate then capable` ordering.
+    if modes != 0
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_TIME,
+        )
+    {
+        errno::set_errno(errno::EPERM);
+        return -1;
     }
 
     let _guard = lock_timex();
@@ -1795,5 +1821,459 @@ mod tests {
         // Linux uses ENOTSUP and EOPNOTSUPP interchangeably (both =
         // 95).  Our errno table mirrors this.
         assert_eq!(errno::EOPNOTSUPP, errno::ENOTSUP);
+    }
+
+    // ======================================================================
+    // Phase 173 — adjtimex CAP_SYS_TIME gate
+    //
+    // Linux `kernel/time/timekeeping.c::do_adjtimex` returns -EPERM when
+    // the caller requests *any* modification (`txc->modes != 0`) without
+    // CAP_SYS_TIME.  A read-only query (`modes == 0`) is unprivileged.
+    // The check sits after `ntp_validate_timex` so EINVAL beats EPERM
+    // for bad mode bits / out-of-range tick / out-of-range setoffset.
+    //
+    // ntp_adjtime forwards to adjtimex and inherits the gate.
+    // clock_adjtime forwards to adjtimex only for CLOCK_REALTIME and
+    // CLOCK_TAI; other clock ids return EOPNOTSUPP/EINVAL before any
+    // cap check (matches Linux's `do_clock_adjtime`).
+    // ======================================================================
+
+    mod adjtimex_cap_phase173 {
+        use super::*;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_time() {
+            use crate::sys_capability::CAP_SYS_TIME;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_TIME < 32 {
+                (lo & !(1u32 << CAP_SYS_TIME), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_TIME - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_TIME");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_TIME));
+        }
+
+        // -- Per-error-class --------------------------------------------
+
+        /// ADJ_OFFSET write without CAP_SYS_TIME → EPERM.
+        #[test]
+        fn test_adjtimex_phase173_offset_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_OFFSET;
+            tx.offset = 1234;
+            errno::set_errno(0);
+            assert_eq!(adjtimex(&mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// ADJ_FREQUENCY write without CAP_SYS_TIME → EPERM.
+        #[test]
+        fn test_adjtimex_phase173_frequency_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_FREQUENCY;
+            tx.freq = 100;
+            errno::set_errno(0);
+            assert_eq!(adjtimex(&mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// ADJ_STATUS write without CAP_SYS_TIME → EPERM.
+        #[test]
+        fn test_adjtimex_phase173_status_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_STATUS;
+            tx.status = STA_PLL;
+            errno::set_errno(0);
+            assert_eq!(adjtimex(&mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// ADJ_TICK write (with valid tick) without CAP_SYS_TIME → EPERM.
+        #[test]
+        fn test_adjtimex_phase173_tick_valid_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_TICK;
+            // Valid mid-range tick — passes the EINVAL guard so the
+            // cap probe is the next thing.
+            tx.tick = (MIN_TICK + MAX_TICK) / 2;
+            errno::set_errno(0);
+            assert_eq!(adjtimex(&mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Combined-modes write without CAP_SYS_TIME → EPERM.
+        #[test]
+        fn test_adjtimex_phase173_combined_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_OFFSET | ADJ_FREQUENCY | ADJ_STATUS;
+            errno::set_errno(0);
+            assert_eq!(adjtimex(&mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Read-only query is unprivileged ----------------------------
+
+        /// modes == 0 is a read-only query — no cap required, returns
+        /// a TIME_* status code.
+        #[test]
+        fn test_adjtimex_phase173_readonly_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = 0;
+            errno::set_errno(0);
+            let rc = adjtimex(&mut tx);
+            // Read-only queries return a TIME_* code (non-negative);
+            // errno must not be touched (success path).
+            assert!(rc >= 0,
+                "modes==0 should succeed without CAP_SYS_TIME, got rc={rc}");
+        }
+
+        // -- Ordering matrix (EFAULT/EINVAL beat EPERM) ------------------
+
+        /// NULL tx → EFAULT even without cap (pointer check first).
+        #[test]
+        fn test_adjtimex_phase173_null_tx_efault_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            errno::set_errno(0);
+            assert_eq!(adjtimex(core::ptr::null_mut()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        /// Unknown mode bits → EINVAL even without cap (ntp_validate_timex
+        /// runs before the cap probe).
+        #[test]
+        fn test_adjtimex_phase173_bad_modes_einval_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            // 0x8000_0000 is not a known mode bit.
+            tx.modes = 0x8000_0000;
+            errno::set_errno(0);
+            assert_eq!(adjtimex(&mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// ADJ_TICK with out-of-range tick → EINVAL even without cap.
+        #[test]
+        fn test_adjtimex_phase173_bad_tick_einval_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_TICK;
+            tx.tick = MAX_TICK + 1;
+            errno::set_errno(0);
+            assert_eq!(adjtimex(&mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// ADJ_SETOFFSET with out-of-range sub-second → EINVAL even
+        /// without cap.
+        #[test]
+        fn test_adjtimex_phase173_bad_setoffset_einval_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_SETOFFSET;
+            // Default unit is microseconds; USEC_PER_SEC is out-of-range.
+            tx.time_tv_usec = USEC_PER_SEC;
+            errno::set_errno(0);
+            assert_eq!(adjtimex(&mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- Workflow / recovery ----------------------------------------
+
+        /// chrony-like probe: drop cap, attempt write → EPERM; flip to
+        /// read-only → succeeds; restore cap → write succeeds.
+        #[test]
+        fn test_adjtimex_phase173_workflow_drop_probe_restore() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            // 1. Write attempt fails.
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_OFFSET;
+            tx.offset = 1;
+            errno::set_errno(0);
+            assert_eq!(adjtimex(&mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // 2. Read-only succeeds.
+            let mut probe = Timex::zeroed();
+            probe.modes = 0;
+            errno::set_errno(0);
+            assert!(adjtimex(&mut probe) >= 0);
+            // 3. Restore CAP_SYS_TIME and write succeeds.
+            use crate::sys_capability::CAP_SYS_TIME;
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_TIME < 32 {
+                (lo | (1u32 << CAP_SYS_TIME), hi)
+            } else {
+                (lo, hi | (1u32 << (CAP_SYS_TIME - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0);
+            assert!(crate::sys_capability::has_capability(CAP_SYS_TIME));
+            tx.modes = ADJ_OFFSET;
+            tx.offset = 42;
+            errno::set_errno(0);
+            assert!(adjtimex(&mut tx) >= 0);
+        }
+
+        // -- No-side-effect on EPERM ------------------------------------
+
+        /// EPERM must leave the NTP discipline state untouched — a
+        /// subsequent read-only query under restored caps must not
+        /// observe the rejected write.
+        #[test]
+        fn test_adjtimex_phase173_eperm_no_side_effect_on_state() {
+            let _g = CapGuard::snapshot();
+            // First read the current offset under default caps.
+            let mut probe = Timex::zeroed();
+            probe.modes = 0;
+            assert!(adjtimex(&mut probe) >= 0);
+            let baseline_offset = probe.offset;
+
+            // Drop cap and try to write a known-distinctive offset.
+            drop_cap_sys_time();
+            let mut bad = Timex::zeroed();
+            bad.modes = ADJ_OFFSET;
+            bad.offset = baseline_offset.wrapping_add(0x5BAD_C0DE);
+            errno::set_errno(0);
+            assert_eq!(adjtimex(&mut bad), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+
+            // Read back under restored caps via the outer guard's drop
+            // path — but we want to assert *before* the guard drops, so
+            // manually restore CAP_SYS_TIME and read again.
+            use crate::sys_capability::CAP_SYS_TIME;
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_TIME < 32 {
+                (lo | (1u32 << CAP_SYS_TIME), hi)
+            } else {
+                (lo, hi | (1u32 << (CAP_SYS_TIME - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            let mut after = Timex::zeroed();
+            after.modes = 0;
+            assert!(adjtimex(&mut after) >= 0);
+            assert_eq!(after.offset, baseline_offset,
+                "EPERM must not change state.offset");
+        }
+
+        // -- ntp_adjtime forwards the gate ------------------------------
+
+        /// ntp_adjtime is an alias for adjtimex — inherits the gate.
+        #[test]
+        fn test_ntp_adjtime_phase173_write_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_OFFSET;
+            errno::set_errno(0);
+            assert_eq!(ntp_adjtime(&mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- clock_adjtime forwarding (REALTIME/TAI inherit the gate) ----
+
+        /// clock_adjtime(CLOCK_REALTIME, write) without cap → EPERM via
+        /// the adjtimex forward.
+        #[test]
+        fn test_clock_adjtime_phase173_realtime_write_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_OFFSET;
+            errno::set_errno(0);
+            assert_eq!(clock_adjtime(0 /* CLOCK_REALTIME */, &mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// clock_adjtime(CLOCK_TAI, write) without cap → EPERM.
+        #[test]
+        fn test_clock_adjtime_phase173_tai_write_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_OFFSET;
+            errno::set_errno(0);
+            assert_eq!(clock_adjtime(11 /* CLOCK_TAI */, &mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// clock_adjtime on a non-adjustable clock returns EOPNOTSUPP
+        /// without needing any cap — the dispatch table rejects before
+        /// the cap probe.
+        #[test]
+        fn test_clock_adjtime_phase173_monotonic_no_cap_eopnotsupp() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_OFFSET;
+            errno::set_errno(0);
+            assert_eq!(clock_adjtime(1 /* CLOCK_MONOTONIC */, &mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
+        }
+
+        /// clock_adjtime with unknown clock id → EINVAL even without cap.
+        #[test]
+        fn test_clock_adjtime_phase173_bad_clock_no_cap_einval() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_OFFSET;
+            errno::set_errno(0);
+            assert_eq!(clock_adjtime(99, &mut tx), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- Sentinel: cap-held privileged path still works -------------
+
+        /// With CAP_SYS_TIME held (default), every write reaches the
+        /// state-application path and returns a TIME_* code.
+        #[test]
+        fn test_adjtimex_phase173_sentinel_cap_held_write_succeeds() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_TIME,
+            ));
+            let mut tx = Timex::zeroed();
+            tx.modes = ADJ_OFFSET | ADJ_FREQUENCY;
+            tx.offset = 100;
+            tx.freq = 200;
+            errno::set_errno(0);
+            assert!(adjtimex(&mut tx) >= 0,
+                "cap-held write should succeed");
+        }
+
+        // -- Cross-check: dropping CAP_SYS_TIME isolates other caps ----
+
+        /// Dropping CAP_SYS_TIME must not disturb other caps.
+        #[test]
+        fn test_adjtimex_phase173_drop_isolates_other_caps() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_time();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_IPC_LOCK,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYSLOG,
+            ));
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_TIME,
+            ));
+        }
     }
 }

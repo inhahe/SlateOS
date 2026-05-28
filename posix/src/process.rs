@@ -1972,37 +1972,177 @@ pub extern "C" fn clone3(args: *const CloneArgs, size: usize) -> i64 {
 // process_vm_readv / process_vm_writev — cross-process I/O
 // ---------------------------------------------------------------------------
 
+/// Maximum iovec-array length accepted by `process_vm_readv` and
+/// `process_vm_writev`.
+///
+/// Linux's `UIO_MAXIOV` is 1024 — the same cap used for `readv`,
+/// `writev`, `preadv`, and `pwritev`.  Counts above this are rejected
+/// with `EINVAL` regardless of actual array contents.
+pub const PROCESS_VM_UIO_MAXIOV: u64 = 1024;
+
+/// Maximum total byte count summable across an iovec array.
+///
+/// Linux uses `SSIZE_MAX` (`i64::MAX` on x86_64) as the per-direction
+/// transfer limit; total `iov_len` summed across the array must not
+/// exceed this, otherwise the syscall reports `EINVAL`.
+pub const PROCESS_VM_SSIZE_MAX: u64 = i64::MAX as u64;
+
+/// Shared validator for both `process_vm_readv` and `process_vm_writev`.
+///
+/// Returns `Ok(())` if every argument-domain check passes (in which
+/// case the caller should set `ENOSYS`), `Err(errno)` otherwise.
+/// Both syscalls share identical argument semantics — only the
+/// direction of data transfer differs.
+///
+/// # Linux behaviour
+///
+/// In the order the kernel performs them in `fs/read_write.c`'s
+/// `process_vm_rw`:
+///
+/// 1. `flags != 0`                                  → `EINVAL`
+///    (reserved arg; Linux requires zero)
+/// 2. `pid <= 0`                                    → `ESRCH`
+///    (no such task — Linux's `find_get_task_by_vpid` returns NULL
+///    for non-positive pids, surfaced as ESRCH)
+/// 3. `liovcnt > UIO_MAXIOV`                        → `EINVAL`
+/// 4. `riovcnt > UIO_MAXIOV`                        → `EINVAL`
+/// 5. `liovcnt > 0` and `local_iov == NULL`         → `EFAULT`
+/// 6. `riovcnt > 0` and `remote_iov == NULL`        → `EFAULT`
+/// 7. Σ `local_iov[i].iov_len > SSIZE_MAX`          → `EINVAL`
+/// 8. Σ `remote_iov[i].iov_len > SSIZE_MAX`         → `EINVAL`
+///
+/// The local/remote sums are *not* required to match — Linux
+/// transfers `min(local_sum, remote_sum)` bytes and reports the count.
+///
+/// # Safety
+///
+/// When `liovcnt > 0`, `local_iov` must point to at least `liovcnt`
+/// readable `Iovec` structures; same for `remote_iov`/`riovcnt`.
+unsafe fn process_vm_validate(
+    pid: i32,
+    local_iov: *const crate::file::Iovec,
+    liovcnt: u64,
+    remote_iov: *const crate::file::Iovec,
+    riovcnt: u64,
+    flags: u64,
+) -> Result<(), i32> {
+    // (1) flags is a reserved field — must be zero.
+    if flags != 0 {
+        return Err(errno::EINVAL);
+    }
+    // (2) Non-positive pid never names a real task.
+    if pid <= 0 {
+        return Err(errno::ESRCH);
+    }
+    // (3)/(4) iovec-count caps.
+    if liovcnt > PROCESS_VM_UIO_MAXIOV {
+        return Err(errno::EINVAL);
+    }
+    if riovcnt > PROCESS_VM_UIO_MAXIOV {
+        return Err(errno::EINVAL);
+    }
+    // (5)/(6) non-empty array requires a non-NULL pointer.
+    if liovcnt > 0 && local_iov.is_null() {
+        return Err(errno::EFAULT);
+    }
+    if riovcnt > 0 && remote_iov.is_null() {
+        return Err(errno::EFAULT);
+    }
+    // (7)/(8) per-direction byte-count cap.  Sum with saturating_add
+    // so a malicious per-vec u64 length doesn't wrap into the valid
+    // range — once we cross SSIZE_MAX we fail-fast.
+    let mut lsum: u64 = 0;
+    for i in 0..liovcnt {
+        // SAFETY: caller contract — local_iov covers liovcnt entries.
+        let iov = unsafe { *local_iov.add(i as usize) };
+        lsum = lsum.saturating_add(iov.iov_len as u64);
+        if lsum > PROCESS_VM_SSIZE_MAX {
+            return Err(errno::EINVAL);
+        }
+    }
+    let mut rsum: u64 = 0;
+    for i in 0..riovcnt {
+        // SAFETY: caller contract — remote_iov covers riovcnt entries.
+        let iov = unsafe { *remote_iov.add(i as usize) };
+        rsum = rsum.saturating_add(iov.iov_len as u64);
+        if rsum > PROCESS_VM_SSIZE_MAX {
+            return Err(errno::EINVAL);
+        }
+    }
+    Ok(())
+}
+
 /// `process_vm_readv` — read from another process's address space.
 ///
-/// Linux 3.2+.  Stub: returns -1 with ENOSYS (cross-process memory
-/// access not supported).
+/// Linux 3.2+.  See [`process_vm_validate`] for the full
+/// argument-domain check matrix.  After validation, returns `-1`
+/// with `errno = ENOSYS`: cross-process memory access isn't part of
+/// the microkernel's IPC model (programs use channel handles to
+/// transfer pages explicitly rather than peeking at another task's
+/// address space).
+///
+/// # Safety
+///
+/// When `liovcnt > 0`, `local_iov` must point to at least `liovcnt`
+/// readable `Iovec` structures; same for `remote_iov`/`riovcnt`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn process_vm_readv(
-    _pid: i32,
-    _local_iov: *const crate::file::Iovec,
-    _liovcnt: u64,
-    _remote_iov: *const crate::file::Iovec,
-    _riovcnt: u64,
-    _flags: u64,
+    pid: i32,
+    local_iov: *const crate::file::Iovec,
+    liovcnt: u64,
+    remote_iov: *const crate::file::Iovec,
+    riovcnt: u64,
+    flags: u64,
 ) -> i64 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    // SAFETY: caller contract — iov pointers cover their respective
+    // counts of Iovec entries, or are unread when their count is 0.
+    match unsafe {
+        process_vm_validate(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)
+    } {
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+        Ok(()) => {
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+    }
 }
 
 /// `process_vm_writev` — write to another process's address space.
 ///
-/// Linux 3.2+.  Stub: returns -1 with ENOSYS.
+/// Linux 3.2+.  Mirrors [`process_vm_readv`] but transfers in the
+/// opposite direction — same argument-domain checks apply via
+/// [`process_vm_validate`].
+///
+/// # Safety
+///
+/// When `liovcnt > 0`, `local_iov` must point to at least `liovcnt`
+/// readable `Iovec` structures; same for `remote_iov`/`riovcnt`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn process_vm_writev(
-    _pid: i32,
-    _local_iov: *const crate::file::Iovec,
-    _liovcnt: u64,
-    _remote_iov: *const crate::file::Iovec,
-    _riovcnt: u64,
-    _flags: u64,
+    pid: i32,
+    local_iov: *const crate::file::Iovec,
+    liovcnt: u64,
+    remote_iov: *const crate::file::Iovec,
+    riovcnt: u64,
+    flags: u64,
 ) -> i64 {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    // SAFETY: caller contract — iov pointers cover their respective
+    // counts of Iovec entries, or are unread when their count is 0.
+    match unsafe {
+        process_vm_validate(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)
+    } {
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+        Ok(()) => {
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6597,6 +6737,358 @@ mod tests {
         let args = clone3_v2_empty();
         crate::errno::set_errno(0);
         let ret = clone3(&args as *const _, 8);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------
+    // process_vm_readv / process_vm_writev — argument-domain validation
+    // (Phase 56)
+    // -----------------------------------------------------------------
+
+    fn pvm_iov(base: usize, len: usize) -> crate::file::Iovec {
+        crate::file::Iovec {
+            iov_base: base as *mut u8,
+            iov_len: len,
+        }
+    }
+
+    #[test]
+    fn test_process_vm_uio_maxiov_constant() {
+        // Must match Linux's UIO_MAXIOV.
+        assert_eq!(PROCESS_VM_UIO_MAXIOV, 1024);
+    }
+
+    #[test]
+    fn test_process_vm_ssize_max_constant() {
+        assert_eq!(PROCESS_VM_SSIZE_MAX, i64::MAX as u64);
+    }
+
+    #[test]
+    fn test_process_vm_readv_nonzero_flags_einval() {
+        crate::errno::set_errno(0);
+        let ret =
+            process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_process_vm_writev_nonzero_flags_einval() {
+        crate::errno::set_errno(0);
+        let ret =
+            process_vm_writev(1, core::ptr::null(), 0, core::ptr::null(), 0, 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_process_vm_readv_pid_zero_esrch() {
+        crate::errno::set_errno(0);
+        let ret =
+            process_vm_readv(0, core::ptr::null(), 0, core::ptr::null(), 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_process_vm_readv_negative_pid_esrch() {
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            -42,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_process_vm_readv_flags_before_pid() {
+        // Validation order: flags checked before pid.  Confirms that
+        // a buggy caller with both errors reports the flags error.
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            -1,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            42, // nonzero flags
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_process_vm_readv_liovcnt_overflow_einval() {
+        let iov = [pvm_iov(0x1000, 4096)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            iov.as_ptr(),
+            PROCESS_VM_UIO_MAXIOV + 1,
+            iov.as_ptr(),
+            1,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_process_vm_readv_riovcnt_overflow_einval() {
+        let iov = [pvm_iov(0x1000, 4096)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            iov.as_ptr(),
+            1,
+            iov.as_ptr(),
+            PROCESS_VM_UIO_MAXIOV + 1,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_process_vm_readv_uio_maxiov_exact_passes() {
+        // Exactly UIO_MAXIOV is accepted (Linux's check is `>`, not `>=`).
+        // Use a fixed-size stack array to avoid an alloc dependency
+        // in this no_std-friendly test module.
+        const N: usize = PROCESS_VM_UIO_MAXIOV as usize;
+        let mut iov = [crate::file::Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        }; N];
+        for (i, slot) in iov.iter_mut().enumerate() {
+            *slot = pvm_iov(0x1000 + i * 4096, 8);
+        }
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            iov.as_ptr(),
+            PROCESS_VM_UIO_MAXIOV,
+            iov.as_ptr(),
+            PROCESS_VM_UIO_MAXIOV,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_process_vm_readv_null_local_with_count_efault() {
+        let iov = [pvm_iov(0x1000, 4096)];
+        crate::errno::set_errno(0);
+        let ret =
+            process_vm_readv(1, core::ptr::null(), 3, iov.as_ptr(), 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_process_vm_readv_null_remote_with_count_efault() {
+        let iov = [pvm_iov(0x1000, 4096)];
+        crate::errno::set_errno(0);
+        let ret =
+            process_vm_readv(1, iov.as_ptr(), 1, core::ptr::null(), 3, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_process_vm_readv_null_with_zero_count_passes() {
+        // NULL pointer is OK when its count is 0.
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            0,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_process_vm_readv_local_sum_overflow_einval() {
+        // Two iovs each claiming SSIZE_MAX bytes — sum overflows.
+        let iov = [
+            pvm_iov(0x1000, i64::MAX as usize),
+            pvm_iov(0x2000, i64::MAX as usize),
+        ];
+        let remote = [pvm_iov(0x3000, 4096)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            iov.as_ptr(),
+            2,
+            remote.as_ptr(),
+            1,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_process_vm_readv_remote_sum_overflow_einval() {
+        let local = [pvm_iov(0x1000, 4096)];
+        let iov = [
+            pvm_iov(0x1000, i64::MAX as usize),
+            pvm_iov(0x2000, i64::MAX as usize),
+        ];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            local.as_ptr(),
+            1,
+            iov.as_ptr(),
+            2,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_process_vm_readv_local_sum_at_ssize_max_passes() {
+        // Sum exactly SSIZE_MAX (boundary).
+        let iov = [pvm_iov(0x1000, i64::MAX as usize)];
+        let remote = [pvm_iov(0x3000, 1)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            1,
+            iov.as_ptr(),
+            1,
+            remote.as_ptr(),
+            1,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_process_vm_writev_same_validation_as_readv() {
+        // writev share validator — verify they behave identically.
+        crate::errno::set_errno(0);
+        let ret =
+            process_vm_writev(0, core::ptr::null(), 0, core::ptr::null(), 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_process_vm_readv_workflow_gdb_inspect_target() {
+        // gdb's `read_inferior_memory()` reads a target stack via
+        // process_vm_readv with one local iov pointing into gdb's
+        // buffer and one remote iov pointing into the target's stack.
+        let local_buf = [0u8; 4096];
+        let local = [pvm_iov(local_buf.as_ptr() as usize, 4096)];
+        let remote = [pvm_iov(0x7fff_a000_0000, 4096)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            12345, // target pid
+            local.as_ptr(),
+            1,
+            remote.as_ptr(),
+            1,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_process_vm_writev_workflow_criu_inject_dump_state() {
+        // CRIU's restore path writes the dumped register/memory state
+        // back into the recreated process via process_vm_writev.
+        let payload = [0u8; 8192];
+        let local = [
+            pvm_iov(payload.as_ptr() as usize, 4096),
+            pvm_iov(payload.as_ptr() as usize + 4096, 4096),
+        ];
+        let remote = [
+            pvm_iov(0x7fff_8000_0000, 4096),
+            pvm_iov(0x7fff_8000_1000, 4096),
+        ];
+        crate::errno::set_errno(0);
+        let ret = process_vm_writev(
+            54321,
+            local.as_ptr(),
+            2,
+            remote.as_ptr(),
+            2,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_process_vm_readv_workflow_sanitizer_shadow_read() {
+        // AddressSanitizer's interceptor in tsan attaches to a target
+        // and reads its shadow memory via process_vm_readv.
+        let shadow_buf = [0u8; 16384];
+        let local = [pvm_iov(shadow_buf.as_ptr() as usize, 16384)];
+        let remote = [pvm_iov(0x7fff_1000_0000, 16384)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            99999,
+            local.as_ptr(),
+            1,
+            remote.as_ptr(),
+            1,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_process_vm_readv_workflow_buggy_negative_pid() {
+        // Real bug from a Go ptrace wrapper: passed a Go int (signed)
+        // that wrapped to negative when the target pid exceeded
+        // int32 range.  Linux reports ESRCH.
+        let local = [pvm_iov(0x1000, 4096)];
+        let remote = [pvm_iov(0x2000, 4096)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_readv(
+            -2_147_483_647,
+            local.as_ptr(),
+            1,
+            remote.as_ptr(),
+            1,
+            0,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_process_vm_writev_workflow_buggy_reserved_flags() {
+        // Caller migrating from preadv2/pwritev2 forgot that
+        // process_vm_writev's `flags` is reserved (must be 0) and
+        // passed RWF_HIPRI (0x1).  EINVAL.
+        let local = [pvm_iov(0x1000, 4096)];
+        let remote = [pvm_iov(0x2000, 4096)];
+        crate::errno::set_errno(0);
+        let ret = process_vm_writev(
+            1234,
+            local.as_ptr(),
+            1,
+            remote.as_ptr(),
+            1,
+            0x1, // RWF_HIPRI
+        );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }

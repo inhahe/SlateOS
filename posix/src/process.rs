@@ -1221,15 +1221,26 @@ pub extern "C" fn umount(target: *const u8) -> i32 {
 /// # Linux behaviour
 ///
 /// `umount2(const char *target, int flags)` (the syscall `umount(8)`
-/// actually invokes).  Argument checks:
+/// actually invokes).  Argument checks, in the order Linux performs
+/// them in `fs/namespace.c::ksys_umount` / `path_umount`:
 ///
-/// * `target == NULL`                                   → `EFAULT`
-/// * `*target == 0`                                     → `ENOENT`
-/// * not NUL-terminated within `PATH_MAX`               → `ENAMETOOLONG`
-/// * `flags & ~UMOUNT2_FLAGS_VALID`                     → `EINVAL`
-/// * `MNT_EXPIRE` combined with `MNT_FORCE | MNT_DETACH`→ `EINVAL`
-///   (Linux's `fs/namespace.c` explicitly rejects this combo since an
-///    expiry mark can't coexist with a force/detach action).
+/// 1. `flags & ~UMOUNT2_FLAGS_VALID`                   → `EINVAL`
+///    Linux performs this check *before* `user_path_at`, so an
+///    unknown flag bit beats every path-related errno (including
+///    NULL-pointer EFAULT and empty-path ENOENT).
+/// 2. (Capability check `may_mount` → `EPERM` — skipped here, we
+///    have no cred model yet.)
+/// 3. `target == NULL`                                 → `EFAULT`
+///    Linux: `user_path_at → getname → strncpy_from_user` on a NULL
+///    user pointer returns `-EFAULT`.
+/// 4. `*target == 0`                                   → `ENOENT`
+///    Linux: empty path string fails name resolution with `-ENOENT`.
+/// 5. not NUL-terminated within `PATH_MAX`             → `ENAMETOOLONG`
+///    Linux: `getname` enforces the `PATH_MAX` bound.
+/// 6. `MNT_EXPIRE` combined with `MNT_FORCE | MNT_DETACH`→ `EINVAL`
+///    Linux: `do_umount` rejects this combo *after* path resolution,
+///    because an expiry mark can't coexist with a force/detach action.
+///    We surface it as an extra validation step before `ENOSYS`.
 ///
 /// After arguments are validated we return `ENOSYS`.
 ///
@@ -1239,11 +1250,18 @@ pub extern "C" fn umount(target: *const u8) -> i32 {
 /// or to at least `UMOUNT_PATH_MAX + 1` readable bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn umount2(target: *const u8, flags: i32) -> i32 {
+    // 1. Reject unknown flag bits.  Linux performs this check at the
+    //    very top of `ksys_umount`, before any path resolution.
+    if (flags & !UMOUNT2_FLAGS_VALID) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // 2. NULL target → EFAULT (Linux: getname/strncpy_from_user).
     if target.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // SAFETY: same contract as umount above.
+    // 3. Path string validation.  SAFETY: same contract as umount above.
     let len = unsafe { umount_cstr_len(target, UMOUNT_PATH_MAX) };
     match len {
         None => {
@@ -1256,12 +1274,8 @@ pub extern "C" fn umount2(target: *const u8, flags: i32) -> i32 {
         }
         Some(_) => {}
     }
-    // Reject unknown flag bits.
-    if (flags & !UMOUNT2_FLAGS_VALID) != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // MNT_EXPIRE is mutually exclusive with MNT_FORCE and MNT_DETACH.
+    // 4. MNT_EXPIRE is mutually exclusive with MNT_FORCE and MNT_DETACH
+    //    (Linux's `do_umount`, after path resolution).
     if (flags & crate::sys_mount::MNT_EXPIRE) != 0
         && (flags
             & (crate::sys_mount::MNT_FORCE
@@ -4552,22 +4566,26 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    // --- umount2: validation order ---
+    // --- umount2: validation order (Phase 121: matches Linux ksys_umount) ---
 
     #[test]
-    fn test_umount2_null_path_before_flag_check() {
-        // NULL path + bad flags → EFAULT wins (path checked first).
+    fn test_umount2_flag_check_before_null_path() {
+        // Phase 121: NULL path + bad flags → EINVAL wins.  Linux's
+        // ksys_umount checks the flag mask before user_path_at, so the
+        // unknown-bit EINVAL fires before getname would observe EFAULT.
         crate::errno::set_errno(0);
         assert_eq!(umount2(core::ptr::null(), 0x10), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
-    fn test_umount2_empty_path_before_flag_check() {
+    fn test_umount2_flag_check_before_empty_path() {
+        // Phase 121: empty path + bad flags → EINVAL wins for the same
+        // reason as the NULL case.
         crate::errno::set_errno(0);
         let empty = b"\0";
         assert_eq!(umount2(empty.as_ptr(), 0x10), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
@@ -4581,6 +4599,176 @@ mod tests {
         assert_eq!(umount2(path.as_ptr(), flags), -1);
         // Both checks return EINVAL — this test documents that the
         // unknown-bit check runs first (covers more cases).
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- Phase 121: validation order matches Linux ksys_umount ---
+    //
+    // Linux's `fs/namespace.c::ksys_umount` performs the flag-mask
+    // check at the very top of the syscall, before `may_mount` and
+    // before `user_path_at`.  That means an unknown flag bit beats
+    // every path-related errno, even NULL-pointer EFAULT.  The
+    // following tests exercise every interesting combination of
+    // (flag valid?, path valid?, mutex valid?) to lock that order in.
+
+    /// Phase 121: NULL pointer with a *clean* flag set (MNT_EXPIRE
+    /// alone) — flag check passes, NULL caught by getname → EFAULT.
+    #[test]
+    fn test_umount2_phase121_null_clean_flags_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            umount2(core::ptr::null(), crate::sys_mount::MNT_EXPIRE),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// Phase 121: NULL pointer + an unknown high bit → EINVAL.  The
+    /// flag mask catches bit 31 before the NULL check would fire.
+    #[test]
+    fn test_umount2_phase121_null_bad_high_bit_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            umount2(core::ptr::null(), 0x8000_0000_u32 as i32),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 121: NULL pointer + i32::MIN — confirms the mask uses
+    /// the full 32-bit width (sign-bit + many high bits all unknown).
+    #[test]
+    fn test_umount2_phase121_null_i32_min_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(umount2(core::ptr::null(), i32::MIN), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 121: NULL pointer + every recognised flag bit ORed
+    /// together (MNT_EXPIRE | UMOUNT_NOFOLLOW — picked so we don't
+    /// also trip the MNT_EXPIRE/FORCE mutex check).  Flag mask is
+    /// clean → NULL fires EFAULT.
+    #[test]
+    fn test_umount2_phase121_null_all_valid_flags_efault() {
+        crate::errno::set_errno(0);
+        let flags = crate::sys_mount::MNT_EXPIRE
+            | crate::sys_mount::UMOUNT_NOFOLLOW;
+        assert_eq!(umount2(core::ptr::null(), flags), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// Phase 121: empty-string path + unknown flag → EINVAL.  The
+    /// flag check fires before the path scan returns Some(0).
+    #[test]
+    fn test_umount2_phase121_empty_bad_flag_einval() {
+        crate::errno::set_errno(0);
+        let empty = b"\0";
+        assert_eq!(umount2(empty.as_ptr(), 0x4000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 121: oversized (unterminated) path + unknown flag →
+    /// EINVAL.  Important DoS-avoidance property: a malformed flag
+    /// word short-circuits the linear path scan, so a buggy caller
+    /// passing a huge buffer with garbage flags doesn't pay the
+    /// O(PATH_MAX) walk cost.
+    #[test]
+    fn test_umount2_phase121_huge_path_bad_flag_einval() {
+        let huge = vec![b'a'; UMOUNT_PATH_MAX + 1];
+        crate::errno::set_errno(0);
+        assert_eq!(umount2(huge.as_ptr(), 0x10), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 121: empty path + EXPIRE+FORCE (mutex-conflict combo).
+    /// Flag mask passes (both bits known) → path scan returns
+    /// Some(0) → ENOENT fires before the mutex check runs.
+    #[test]
+    fn test_umount2_phase121_empty_expire_force_enoent() {
+        crate::errno::set_errno(0);
+        let empty = b"\0";
+        let flags = crate::sys_mount::MNT_EXPIRE
+            | crate::sys_mount::MNT_FORCE;
+        assert_eq!(umount2(empty.as_ptr(), flags), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+    }
+
+    /// Phase 121: NULL + EXPIRE+DETACH (mutex-conflict combo).
+    /// Flag mask passes → NULL pointer fires EFAULT before mutex.
+    #[test]
+    fn test_umount2_phase121_null_expire_detach_efault() {
+        crate::errno::set_errno(0);
+        let flags = crate::sys_mount::MNT_EXPIRE
+            | crate::sys_mount::MNT_DETACH;
+        assert_eq!(umount2(core::ptr::null(), flags), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// Phase 121: ENAMETOOLONG path + EXPIRE+DETACH combo.  Flag
+    /// mask clean → cstr_len = None → ENAMETOOLONG before mutex.
+    #[test]
+    fn test_umount2_phase121_huge_path_expire_detach_enametoolong() {
+        let huge = vec![b'a'; UMOUNT_PATH_MAX + 1];
+        crate::errno::set_errno(0);
+        let flags = crate::sys_mount::MNT_EXPIRE
+            | crate::sys_mount::MNT_DETACH;
+        assert_eq!(umount2(huge.as_ptr(), flags), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
+    }
+
+    /// Phase 121: full precedence chain — bad flag beats both the
+    /// path errno (ENAMETOOLONG on a huge unterminated buffer) and
+    /// the mutex EINVAL.  All four checks would fire; flag wins.
+    #[test]
+    fn test_umount2_phase121_full_chain_flag_wins() {
+        let huge = vec![b'a'; UMOUNT_PATH_MAX + 1];
+        crate::errno::set_errno(0);
+        let flags = 0x20
+            | crate::sys_mount::MNT_EXPIRE
+            | crate::sys_mount::MNT_FORCE;
+        assert_eq!(umount2(huge.as_ptr(), flags), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 121: errno recovery — a subsequent well-formed call
+    /// after an EINVAL reaches ENOSYS and cleanly overwrites errno.
+    #[test]
+    fn test_umount2_phase121_recovery_after_einval() {
+        crate::errno::set_errno(0);
+        assert_eq!(umount2(core::ptr::null(), 0x100), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let path = b"/srv\0";
+        assert_eq!(umount2(path.as_ptr(), 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    /// Phase 121 workflow: libmount probes whether the syscall is
+    /// available with `umount2(NULL, UMOUNT_NOFOLLOW)`.  NOFOLLOW is
+    /// a valid flag, so the call reaches getname and surfaces EFAULT
+    /// — confirming the syscall exists.  An EINVAL here would
+    /// falsely suggest the kernel doesn't recognise NOFOLLOW.
+    #[test]
+    fn test_umount2_phase121_workflow_libmount_probe() {
+        crate::errno::set_errno(0);
+        assert_eq!(
+            umount2(core::ptr::null(), crate::sys_mount::UMOUNT_NOFOLLOW),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// Phase 121 buggy-caller: an init script computes flags by
+    /// ORing `getenv("UMOUNT_FLAGS")` parsed as decimal with
+    /// MNT_DETACH.  A typo of "2147483648" overflows to the sign
+    /// bit, producing a negative flag word.  Linux returns EINVAL
+    /// regardless of how valid the path is; we must too.
+    #[test]
+    fn test_umount2_phase121_buggy_caller_overflowed_flags_einval() {
+        crate::errno::set_errno(0);
+        let path = b"/mnt/usb\0";
+        let flags = (0x8000_0000_u32 as i32)
+            | crate::sys_mount::MNT_DETACH;
+        assert_eq!(umount2(path.as_ptr(), flags), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 

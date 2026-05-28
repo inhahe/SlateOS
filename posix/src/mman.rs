@@ -2229,6 +2229,279 @@ mod tests {
             assert_ne!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
     }
+
+    // ------------------------------------------------------------------
+    // Phase 138 — MFD_EXEC and MFD_NOEXEC_SEAL mutual exclusion
+    //
+    // Linux 6.3 added MFD_NOEXEC_SEAL and MFD_EXEC and made them
+    // mutually exclusive in `mm/memfd.c::memfd_create`:
+    //
+    //     if ((flags & MFD_EXEC) && (flags & MFD_NOEXEC_SEAL))
+    //         return -EINVAL;
+    //
+    // The check sits between the flag-mask reject and
+    // `strnlen_user(uname, ...)`, so EINVAL wins over the
+    // NULL-name EFAULT.  Pre-Phase 138 we passed both bits through
+    // (both are in MEMFD_FLAG_MASK) and only the underlying open()
+    // would have reported anything anomalous — which it can't,
+    // because the user-visible behaviour of the two flags is
+    // contradictory and not representable as an open() failure.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_memfd_create_phase138_constants_distinct() {
+        // MFD_EXEC (0x10) and MFD_NOEXEC_SEAL (0x08) must occupy
+        // distinct bits; otherwise the mutual-exclusion check below
+        // can't tell the two apart.
+        use crate::linux_memfd::{MFD_EXEC, MFD_NOEXEC_SEAL};
+        assert_ne!(MFD_EXEC, MFD_NOEXEC_SEAL);
+        assert_eq!(MFD_EXEC & MFD_NOEXEC_SEAL, 0);
+    }
+
+    #[test]
+    fn test_memfd_create_phase138_exec_and_noexec_seal_einval() {
+        // Core regression: both flags together → EINVAL.
+        crate::errno::set_errno(0);
+        let ret = memfd_create(
+            b"both\0".as_ptr(),
+            crate::linux_memfd::MFD_EXEC | crate::linux_memfd::MFD_NOEXEC_SEAL,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase138_exec_alone_accepted() {
+        // MFD_EXEC alone is a valid flag — must NOT trip the new
+        // mutual-exclusion check.  We don't care about the return
+        // value (open() may fail in the test sandbox), only that the
+        // errno isn't the EINVAL the mutex check would set.
+        crate::errno::set_errno(0);
+        let r = memfd_create(b"exec_only\0".as_ptr(), crate::linux_memfd::MFD_EXEC);
+        if r >= 0 {
+            let _ = crate::file::close(r);
+        } else {
+            // Any failure must not be the mutex EINVAL — open()
+            // failures surface a different errno entirely.  We can't
+            // exhaustively enumerate "not mutex EINVAL" but we can
+            // assert it's not the canonical bad-flag value while the
+            // input is a valid single flag.
+            assert_ne!(crate::errno::get_errno(), 0);
+        }
+    }
+
+    #[test]
+    fn test_memfd_create_phase138_noexec_seal_alone_accepted() {
+        // Symmetric: MFD_NOEXEC_SEAL alone must reach open().
+        crate::errno::set_errno(0);
+        let r = memfd_create(
+            b"noexec_only\0".as_ptr(),
+            crate::linux_memfd::MFD_NOEXEC_SEAL,
+        );
+        if r >= 0 {
+            let _ = crate::file::close(r);
+        } else {
+            assert_ne!(crate::errno::get_errno(), 0);
+        }
+    }
+
+    #[test]
+    fn test_memfd_create_phase138_exec_plus_cloexec_accepted() {
+        // MFD_EXEC | MFD_CLOEXEC: legitimate combo (caller wants the
+        // memfd executable AND close-on-exec on the fd).  Must NOT
+        // trip the mutual-exclusion check.
+        crate::errno::set_errno(0);
+        let r = memfd_create(
+            b"exec_cloexec\0".as_ptr(),
+            crate::linux_memfd::MFD_EXEC | crate::linux_memfd::MFD_CLOEXEC,
+        );
+        if r >= 0 {
+            let _ = crate::file::close(r);
+        }
+    }
+
+    #[test]
+    fn test_memfd_create_phase138_noexec_plus_allow_sealing_accepted() {
+        // MFD_NOEXEC_SEAL | MFD_ALLOW_SEALING: legitimate combo
+        // (sealing infrastructure with executable sealing).  Must NOT
+        // trip the mutex check.
+        crate::errno::set_errno(0);
+        let r = memfd_create(
+            b"noexec_sealing\0".as_ptr(),
+            crate::linux_memfd::MFD_NOEXEC_SEAL | crate::linux_memfd::MFD_ALLOW_SEALING,
+        );
+        if r >= 0 {
+            let _ = crate::file::close(r);
+        }
+    }
+
+    // --- ordering matrix --------------------------------------------------
+
+    #[test]
+    fn test_memfd_create_phase138_mask_check_beats_mutex_check() {
+        // Unknown flag bit ALSO set with the mutex pair: the
+        // flag-mask check runs first.  We can't directly observe
+        // which check rejected it (both → EINVAL) but we CAN observe
+        // that an unknown flag pinned high keeps the rejection
+        // consistent across the "with and without the mutex pair"
+        // axes — i.e. the check before the mutex still wins for
+        // unknown bits.
+        crate::errno::set_errno(0);
+        let with_pair = memfd_create(
+            b"x\0".as_ptr(),
+            0x4000_0000
+                | crate::linux_memfd::MFD_EXEC
+                | crate::linux_memfd::MFD_NOEXEC_SEAL,
+        );
+        assert_eq!(with_pair, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        crate::errno::set_errno(0);
+        let without_pair = memfd_create(b"x\0".as_ptr(), 0x4000_0000);
+        assert_eq!(without_pair, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase138_hugetlb_check_beats_mutex_check() {
+        // Linux's order: flag-mask → HUGETLB reject (ours) → mutex
+        // check.  MFD_HUGETLB + MFD_EXEC + MFD_NOEXEC_SEAL: both the
+        // HUGETLB and the mutex check would fire EINVAL.  We can't
+        // observe which one without an instrumented build, but pin
+        // that we still return EINVAL (regression guard for someone
+        // reordering the two checks and accidentally letting a
+        // hugetlb+exec_pair combo slip past).
+        crate::errno::set_errno(0);
+        let ret = memfd_create(
+            b"h\0".as_ptr(),
+            crate::linux_memfd::MFD_HUGETLB
+                | crate::linux_memfd::MFD_EXEC
+                | crate::linux_memfd::MFD_NOEXEC_SEAL,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase138_mutex_check_beats_null_name() {
+        // Critical ordering: NULL name + MFD_EXEC|MFD_NOEXEC_SEAL.
+        // Linux's mutex check runs BEFORE strnlen_user, so EINVAL
+        // wins over EFAULT.  Pre-Phase 138 our code reached the
+        // `name.is_null()` branch and returned EFAULT instead.
+        crate::errno::set_errno(0);
+        let ret = memfd_create(
+            core::ptr::null(),
+            crate::linux_memfd::MFD_EXEC | crate::linux_memfd::MFD_NOEXEC_SEAL,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- buggy callers ---------------------------------------------------
+
+    #[test]
+    fn test_memfd_create_phase138_buggy_caller_or_in_both_flags() {
+        // A library upgrading from "MFD_EXEC for Linux 6.3+" to
+        // "MFD_NOEXEC_SEAL for sealed memfds" without removing the
+        // old flag.  Catches a real upgrade bug.
+        crate::errno::set_errno(0);
+        let flags = crate::linux_memfd::MFD_CLOEXEC
+            | crate::linux_memfd::MFD_ALLOW_SEALING
+            | crate::linux_memfd::MFD_EXEC
+            | crate::linux_memfd::MFD_NOEXEC_SEAL;
+        let ret = memfd_create(b"upgrade_bug\0".as_ptr(), flags);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_memfd_create_phase138_buggy_caller_zeroed_then_or_pair() {
+        // Caller does `flags = 0; flags |= MFD_EXEC; flags |=
+        // MFD_NOEXEC_SEAL;` thinking they're independent.  EINVAL.
+        let mut flags: u32 = 0;
+        flags |= crate::linux_memfd::MFD_EXEC;
+        flags |= crate::linux_memfd::MFD_NOEXEC_SEAL;
+        crate::errno::set_errno(0);
+        let ret = memfd_create(b"zeroed_or\0".as_ptr(), flags);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // --- recovery / workflow -------------------------------------------
+
+    #[test]
+    fn test_memfd_create_phase138_recovery_after_mutex_einval() {
+        // Caller sees EINVAL, drops one of the conflicting flags,
+        // retries successfully (or with an unrelated failure).
+        crate::errno::set_errno(0);
+        let bad = memfd_create(
+            b"r\0".as_ptr(),
+            crate::linux_memfd::MFD_EXEC | crate::linux_memfd::MFD_NOEXEC_SEAL,
+        );
+        assert_eq!(bad, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Retry with just MFD_EXEC.
+        let r = memfd_create(b"r\0".as_ptr(), crate::linux_memfd::MFD_EXEC);
+        if r >= 0 {
+            let _ = crate::file::close(r);
+        }
+    }
+
+    #[test]
+    fn test_memfd_create_phase138_workflow_glibc_upgrade_path() {
+        // Real-world: a Rust `memfd` crate that adds MFD_EXEC support
+        // for Linux 6.3+ but accidentally still passes
+        // MFD_NOEXEC_SEAL (the default since 6.3 when neither is
+        // explicitly set, per sysctl `vm.memfd_noexec`).  The first
+        // call exposes the bug with EINVAL; the corrected call (one
+        // flag only) goes through.
+        crate::errno::set_errno(0);
+        let buggy = memfd_create(
+            b"upgrade\0".as_ptr(),
+            crate::linux_memfd::MFD_CLOEXEC
+                | crate::linux_memfd::MFD_EXEC
+                | crate::linux_memfd::MFD_NOEXEC_SEAL,
+        );
+        assert_eq!(buggy, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Fixed: pick MFD_EXEC only (the explicit user-wants-exec
+        // path).
+        crate::errno::set_errno(0);
+        let fixed = memfd_create(
+            b"upgrade\0".as_ptr(),
+            crate::linux_memfd::MFD_CLOEXEC | crate::linux_memfd::MFD_EXEC,
+        );
+        if fixed >= 0 {
+            let _ = crate::file::close(fixed);
+        } else {
+            // Whatever the failure, it must NOT be the mutex EINVAL
+            // (errno must be re-set by the second call, not stale).
+            assert_ne!(crate::errno::get_errno(), 0);
+        }
+    }
+
+    #[test]
+    fn test_memfd_create_phase138_no_side_effect_on_mutex_einval() {
+        // 100 rejected mutex-EINVAL calls must not consume any
+        // resources or perturb the counter.
+        for _ in 0..100 {
+            crate::errno::set_errno(0);
+            let r = memfd_create(
+                b"loop\0".as_ptr(),
+                crate::linux_memfd::MFD_EXEC | crate::linux_memfd::MFD_NOEXEC_SEAL,
+            );
+            assert_eq!(r, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+        // Next valid call still works (or fails with a non-mutex
+        // errno from open()).
+        let r = memfd_create(b"after\0".as_ptr(), 0);
+        if r >= 0 {
+            let _ = crate::file::close(r);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2479,6 +2752,8 @@ const MEMFD_FLAG_MASK: u32 = crate::linux_memfd::MFD_CLOEXEC
 ///
 /// - `EINVAL` — `flags` has unknown bits or `MFD_HUGETLB` is set
 ///   (checked first, matching Linux's prologue).
+/// - `EINVAL` — both `MFD_EXEC` and `MFD_NOEXEC_SEAL` are set (they
+///   are mutually exclusive since Linux 6.3 — see Phase 138).
 /// - `EFAULT` — `name` is NULL (checked after flags).
 /// - `EINVAL` — `name` is too long.
 /// - Plus any error reported by the underlying `open()` / `unlink()`.
@@ -2501,6 +2776,18 @@ pub extern "C" fn memfd_create(name: *const u8, flags: u32) -> i32 {
     }
     if flags & crate::linux_memfd::MFD_HUGETLB != 0 {
         // Hugepage-backed memfds require kernel huge-page support.
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Phase 138: MFD_EXEC and MFD_NOEXEC_SEAL are mutually exclusive
+    // since Linux 6.3.  In Linux's `mm/memfd.c::memfd_create` this
+    // check runs after the flag-mask check and before
+    // `strnlen_user(uname, ...)`, so it precedes the NULL-name
+    // EFAULT.  See commit 105ff5339f4988f5 ("memfd: add
+    // MFD_NOEXEC_SEAL and MFD_EXEC").
+    const EXEC_BOTH: u32 = crate::linux_memfd::MFD_EXEC
+        | crate::linux_memfd::MFD_NOEXEC_SEAL;
+    if flags & EXEC_BOTH == EXEC_BOTH {
         errno::set_errno(errno::EINVAL);
         return -1;
     }

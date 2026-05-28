@@ -8,6 +8,48 @@ use crate::errno;
 // ---------------------------------------------------------------------------
 // Capability version
 // ---------------------------------------------------------------------------
+//
+// Linux's `<linux/capability.h>` defines three versions:
+//
+//   * V1 (`0x19980330`) — the original 32-bit ABI.  Each capability set
+//     fits in a single u32 (`_LINUX_CAPABILITY_U32S_1 = 1`); only
+//     capabilities 0..=31 are addressable.
+//   * V2 (`0x20071026`) — added a second u32 for the high bits.  This
+//     version had a bug with 64-bit file capabilities and was deprecated
+//     in favour of V3.  Wire format is identical to V3
+//     (`_LINUX_CAPABILITY_U32S_2 = 2`), so V2 and V3 are interchangeable
+//     for read/write purposes.
+//   * V3 (`0x20080522`) — current preferred version; supports the full
+//     64-bit capability set.
+//
+// `kernel/capability.c::cap_validate_magic` accepts all three.  When it
+// sees an unknown version, it writes the kernel's preferred version
+// (`_LINUX_CAPABILITY_VERSION_3`) into the caller's header and returns
+// `-EINVAL`.  The libcap idiom for version discovery is to call
+// `capget(&hdr, NULL)` with `hdr.version = 0`:
+//
+//   * NULL dataptr + EFAULT (NULL header)         → propagate EFAULT
+//   * NULL dataptr + unknown version              → return 0 (probe
+//     succeeded; preferred version was written to the header)
+//   * NULL dataptr + valid version                → return 0
+//   * non-NULL dataptr + any error                → propagate error
+//
+// We mirror that here so libcap, glibc's `cap_get_proc`, and shell
+// utilities like `setpriv(1)` and `capsh(1)` can negotiate the version
+// before issuing the real call.
+
+/// Version 1 capability header (original 32-bit ABI; Linux 2.2+).
+pub const _LINUX_CAPABILITY_VERSION_1: u32 = 0x19980330;
+
+/// Number of u32 words for capability sets in v1 (low 32 bits only).
+pub const _LINUX_CAPABILITY_U32S_1: usize = 1;
+
+/// Version 2 capability header (deprecated; superseded by v3 but wire-
+/// compatible with it).
+pub const _LINUX_CAPABILITY_VERSION_2: u32 = 0x20071026;
+
+/// Number of u32 words for capability sets in v2 (low + high 32 bits).
+pub const _LINUX_CAPABILITY_U32S_2: usize = 2;
 
 /// Version 3 capability header (Linux 2.6.26+, supports 64-bit sets).
 pub const _LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
@@ -221,89 +263,198 @@ pub fn has_capability(cap: u32) -> bool {
 
 /// Validate the header passed to `capget` / `capset`.
 ///
-/// Linux behaviour: if `version` is unsupported, the kernel writes the
-/// preferred version back into `*hdrp` and returns -1 with EINVAL.
-/// `pid` must be 0 or the caller's own PID.
-fn validate_cap_header(hdrp: *mut CapUserHeader) -> Result<(), i32> {
+/// Mirrors Linux's `kernel/capability.c::cap_validate_magic`: returns
+/// the per-set u32-word count (`tocopy`) — 1 for V1, 2 for V2/V3.  If
+/// `version` is unsupported, writes the preferred version
+/// (`_LINUX_CAPABILITY_VERSION_3`) into `*hdrp` and returns
+/// `Err(EINVAL)`.  A NULL header pointer yields `Err(EFAULT)`.
+///
+/// PID-handling is **not** done here — Linux performs it after the
+/// short-circuit that supports the probe pattern, so the caller does
+/// the pid check itself once we know it is on the non-probe path.
+fn validate_cap_header(hdrp: *mut CapUserHeader) -> Result<usize, i32> {
     if hdrp.is_null() {
         return Err(errno::EFAULT);
     }
     // SAFETY: hdrp is non-null by check above; caller contract for layout.
-    let (version, pid) = unsafe { ((*hdrp).version, (*hdrp).pid) };
-    if version != _LINUX_CAPABILITY_VERSION_3 {
-        // Tell the caller which version we support.
-        // SAFETY: hdrp non-null.
-        unsafe { (*hdrp).version = _LINUX_CAPABILITY_VERSION_3; }
-        return Err(errno::EINVAL);
+    let version = unsafe { (*hdrp).version };
+    match version {
+        _LINUX_CAPABILITY_VERSION_1 => Ok(_LINUX_CAPABILITY_U32S_1),
+        _LINUX_CAPABILITY_VERSION_2 | _LINUX_CAPABILITY_VERSION_3 => {
+            Ok(_LINUX_CAPABILITY_U32S_3)
+        }
+        _ => {
+            // Tell the caller which version we prefer.
+            // SAFETY: hdrp non-null.
+            unsafe { (*hdrp).version = _LINUX_CAPABILITY_VERSION_3; }
+            Err(errno::EINVAL)
+        }
     }
-    // We treat pid 0 as "self".  Non-zero pids would require looking up
-    // the target task's credential, which we don't expose; reject with
-    // EPERM to match Linux behaviour for "other process" requests
-    // without the needed capability.
-    if pid != 0 {
-        return Err(errno::EPERM);
-    }
-    Ok(())
 }
 
 /// Get process capabilities.
 ///
 /// Writes the calling process's effective, permitted, and inheritable
-/// sets into `datap[0..2]` (low and high u32 words).  Returns 0 on
-/// success, -1 with errno on validation failure.
+/// sets into `datap[0..tocopy)` (1 entry for V1, 2 for V2/V3).  Returns
+/// 0 on success, -1 with errno on validation failure.
+///
+/// # Linux semantics
+///
+/// `kernel/capability.c::SYSCALL_DEFINE2(capget)`:
+///
+/// ```c
+/// ret = cap_validate_magic(header, &tocopy);
+/// if ((dataptr == NULL) || (ret != 0))
+///     return ((dataptr == NULL) && (ret == -EINVAL)) ? 0 : ret;
+/// ```
+///
+/// The "probe" idiom — `capget(&hdr, NULL)` with `hdr.version = 0` —
+/// must return 0 even when the header's version is unknown, because
+/// `cap_validate_magic` has already written the preferred version into
+/// the header and the caller's probe has succeeded.  Without this,
+/// libcap and glibc's `cap_get_proc` cannot negotiate the version
+/// before issuing the real call.
+///
+/// Errors (Linux-matching priority order):
+/// * `EFAULT` — `hdrp` is NULL (header unreadable).  This wins over
+///   the probe shortcut: a NULL header has no version field to write
+///   the preferred value into, so the probe cannot have succeeded.
+/// * `EINVAL` — non-NULL `datap` with an unknown header version.  The
+///   header is rewritten with the preferred version regardless.
+/// * `EPERM`  — `pid != 0` (real Linux looks up the target task's
+///   credentials; our stub has no process model so we reject any
+///   non-self request).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn capget(
     hdrp: *mut CapUserHeader,
     datap: *mut CapUserData,
 ) -> i32 {
-    if let Err(e) = validate_cap_header(hdrp) {
-        errno::set_errno(e);
+    let validation = validate_cap_header(hdrp);
+
+    // Linux's short-circuit:
+    //     if ((dataptr == NULL) || (ret != 0))
+    //         return ((dataptr == NULL) && (ret == -EINVAL)) ? 0 : ret;
+    //
+    // Probe path: when datap is NULL, callers want to discover the
+    // preferred version.  We return 0 unless the header itself was
+    // unreadable (EFAULT), in which case the probe cannot have written
+    // the preferred version and we propagate the error.
+    if datap.is_null() {
+        return match validation {
+            Ok(_) => 0,                              // probe with known version
+            Err(e) if e == errno::EINVAL => 0,       // probe wrote preferred version
+            Err(e) => {
+                errno::set_errno(e);
+                -1
+            }
+        };
+    }
+
+    // Non-NULL datap with a validation error: propagate the error.
+    let tocopy = match validation {
+        Ok(t) => t,
+        Err(e) => {
+            errno::set_errno(e);
+            return -1;
+        }
+    };
+
+    // SAFETY: hdrp non-null (validate_cap_header would have returned
+    // EFAULT otherwise).
+    let pid = unsafe { (*hdrp).pid };
+    if pid != 0 {
+        errno::set_errno(errno::EPERM);
         return -1;
     }
-    if datap.is_null() {
-        // A null `datap` is permitted: Linux uses it as a "probe" to
-        // discover the supported version.  Header was already
-        // validated/written by validate_cap_header.
-        return 0;
-    }
+
     let eff_lo = CAP_EFF_LO.load(Ordering::Relaxed);
     let eff_hi = CAP_EFF_HI.load(Ordering::Relaxed);
     let prm_lo = CAP_PRM_LO.load(Ordering::Relaxed);
     let prm_hi = CAP_PRM_HI.load(Ordering::Relaxed);
     let inh_lo = CAP_INH_LO.load(Ordering::Relaxed);
     let inh_hi = CAP_INH_HI.load(Ordering::Relaxed);
-    // SAFETY: caller guarantees datap points to two writable
-    // CapUserData entries (low + high words) per the v3 ABI.
+    // SAFETY: caller guarantees datap points to `tocopy` writable
+    // CapUserData entries — 1 for V1 (low word only), 2 for V2/V3.
     unsafe {
         *datap = CapUserData { effective: eff_lo, permitted: prm_lo, inheritable: inh_lo };
-        *datap.add(1) = CapUserData { effective: eff_hi, permitted: prm_hi, inheritable: inh_hi };
+        if tocopy == _LINUX_CAPABILITY_U32S_3 {
+            *datap.add(1) = CapUserData {
+                effective: eff_hi,
+                permitted: prm_hi,
+                inheritable: inh_hi,
+            };
+        }
     }
     0
 }
 
 /// Set process capabilities.
 ///
-/// Reads `datap[0..2]` and atomically updates the effective, permitted,
-/// and inheritable sets.  Linux enforces several invariants
-/// (effective ⊆ permitted; inheritable ⊆ permitted ∪ inheritable-old;
-/// only `CAP_SETPCAP` allows raising permitted) — we currently apply
-/// only the basic effective-⊆-permitted check, since the full rules
-/// require a real security model.  Returns 0 on success.
+/// Reads `datap[0..tocopy)` (1 entry for V1, 2 for V2/V3) and atomically
+/// updates the effective, permitted, and inheritable sets.  Linux
+/// enforces several invariants (effective ⊆ permitted;
+/// inheritable ⊆ permitted ∪ inheritable-old; only `CAP_SETPCAP` allows
+/// raising permitted) — we currently apply only the basic
+/// effective-⊆-permitted check, since the full rules require a real
+/// security model.  Returns 0 on success.
+///
+/// # Linux semantics
+///
+/// `kernel/capability.c::SYSCALL_DEFINE2(capset)`:
+///
+/// ```c
+/// ret = cap_validate_magic(header, &tocopy);
+/// if (ret != 0) return ret;
+/// if (get_user(pid, &header->pid)) return -EFAULT;
+/// if (pid != 0 && pid != task_pid_vnr(current)) return -EPERM;
+/// if (copybytes > sizeof(kdata)) return -EINVAL;
+/// if (copy_from_user(&kdata, data, copybytes)) return -EFAULT;
+/// ```
+///
+/// Unlike `capget`, `capset` does **not** have a probe shortcut — the
+/// data pointer must be valid.
+///
+/// Errors (Linux-matching priority order):
+/// * `EFAULT` — `hdrp` is NULL.
+/// * `EINVAL` — unknown header version (preferred version written back).
+/// * `EFAULT` — `datap` is NULL.
+/// * `EPERM`  — `pid != 0` (Linux: pid must be 0 or self).
+/// * `EPERM`  — effective ⊄ permitted (POSIX/Linux invariant).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn capset(
     hdrp: *mut CapUserHeader,
     datap: *const CapUserData,
 ) -> i32 {
-    if let Err(e) = validate_cap_header(hdrp) {
-        errno::set_errno(e);
-        return -1;
-    }
+    let tocopy = match validate_cap_header(hdrp) {
+        Ok(t) => t,
+        Err(e) => {
+            errno::set_errno(e);
+            return -1;
+        }
+    };
     if datap.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // SAFETY: caller contract — datap points to two CapUserData entries.
-    let (lo, hi) = unsafe { (*datap, *datap.add(1)) };
+    // SAFETY: hdrp non-null (validate_cap_header succeeded).
+    let pid = unsafe { (*hdrp).pid };
+    if pid != 0 {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    // SAFETY: caller contract — datap points to `tocopy` readable
+    // CapUserData entries (1 for V1, 2 for V2/V3).
+    let (lo, hi) = unsafe {
+        let lo = *datap;
+        let hi = if tocopy == _LINUX_CAPABILITY_U32S_3 {
+            *datap.add(1)
+        } else {
+            // V1 only carries the low 32 bits; high words default to 0
+            // so any previously-set high bits are cleared on capset.
+            CapUserData { effective: 0, permitted: 0, inheritable: 0 }
+        };
+        (lo, hi)
+    };
     // Effective must be a subset of permitted (POSIX/Linux invariant).
     if (lo.effective & !lo.permitted) != 0 || (hi.effective & !hi.permitted) != 0 {
         errno::set_errno(errno::EPERM);
@@ -609,5 +760,293 @@ mod tests {
         assert_eq!(CAP_KILL, 5);
         assert_eq!(CAP_SYS_ADMIN, 21);
         assert_eq!(CAP_NET_BIND_SERVICE, 10);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 132 — capget/capset accept V1 / V2 / V3, and the NULL-dataptr
+    // probe pattern returns 0 even for unknown versions
+    //
+    // Linux's `cap_validate_magic` accepts V1 (one u32 per set), V2
+    // (two u32, deprecated), and V3 (two u32, current).  The probe
+    // idiom — `capget(&hdr, NULL)` with any version — must return 0 so
+    // libcap/glibc can negotiate the version field before issuing the
+    // real call.  Phases prior to 132 rejected V1/V2 with EINVAL and
+    // returned EINVAL on the probe path with an unknown version,
+    // breaking libcap's `cap_get_proc`.
+    // ------------------------------------------------------------------
+
+    // -- Helper / constant tests -------------------------------------------
+
+    #[test]
+    fn test_phase132_capability_v1_constant() {
+        assert_eq!(_LINUX_CAPABILITY_VERSION_1, 0x19980330);
+        assert_eq!(_LINUX_CAPABILITY_U32S_1, 1);
+    }
+
+    #[test]
+    fn test_phase132_capability_v2_constant() {
+        assert_eq!(_LINUX_CAPABILITY_VERSION_2, 0x20071026);
+        assert_eq!(_LINUX_CAPABILITY_U32S_2, 2);
+    }
+
+    #[test]
+    fn test_phase132_all_versions_distinct() {
+        let versions = [
+            _LINUX_CAPABILITY_VERSION_1,
+            _LINUX_CAPABILITY_VERSION_2,
+            _LINUX_CAPABILITY_VERSION_3,
+        ];
+        for i in 0..versions.len() {
+            for j in (i + 1)..versions.len() {
+                assert_ne!(versions[i], versions[j],
+                    "capability versions must be distinct");
+            }
+        }
+    }
+
+    // -- V1 accepted by capget --------------------------------------------
+
+    #[test]
+    fn test_phase132_capget_v1_writes_only_low_slot() {
+        reset_caps();
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_1, pid: 0 };
+        // Sentinel high slot — must remain untouched after V1 capget.
+        let mut data = [
+            CapUserData { effective: 0, permitted: 0, inheritable: 0 },
+            CapUserData {
+                effective: 0xDEAD_BEEF,
+                permitted: 0xCAFE_BABE,
+                inheritable: 0xFEED_FACE,
+            },
+        ];
+        let ret = capget(&mut hdr, data.as_mut_ptr());
+        assert_eq!(ret, 0);
+        // Low slot populated with the default caps.
+        assert_eq!(data[0].effective, DEFAULT_CAPS_LOW);
+        assert_eq!(data[0].permitted, DEFAULT_CAPS_LOW);
+        assert_eq!(data[0].inheritable, 0);
+        // High slot untouched — V1 only writes one entry.
+        assert_eq!(data[1].effective, 0xDEAD_BEEF);
+        assert_eq!(data[1].permitted, 0xCAFE_BABE);
+        assert_eq!(data[1].inheritable, 0xFEED_FACE);
+        // Header version is *not* rewritten — V1 is valid.
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_1);
+        reset_caps();
+    }
+
+    // -- V2 accepted by capget --------------------------------------------
+
+    #[test]
+    fn test_phase132_capget_v2_writes_both_slots() {
+        reset_caps();
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_2, pid: 0 };
+        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let ret = capget(&mut hdr, data.as_mut_ptr());
+        assert_eq!(ret, 0);
+        // Both slots populated — V2 is wire-compatible with V3.
+        assert_eq!(data[0].effective, DEFAULT_CAPS_LOW);
+        assert_eq!(data[1].effective, DEFAULT_CAPS_HIGH);
+        // Header version is *not* rewritten.
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_2);
+        reset_caps();
+    }
+
+    // -- Probe pattern: NULL dataptr with unknown version -----------------
+
+    #[test]
+    fn test_phase132_capget_probe_unknown_version_returns_zero() {
+        // Probe pattern: caller passes garbage version with NULL datap.
+        // Linux: returns 0 after writing the preferred version.  This is
+        // libcap's `_cap_get_proc` initial probe.
+        let mut hdr = CapUserHeader { version: 0, pid: 0 };
+        errno::set_errno(errno::EBADF);
+        let ret = capget(&mut hdr, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        // Header was rewritten with the preferred version.
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_3);
+        // POSIX: successful syscall must not touch errno.
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_phase132_capget_probe_v1_returns_zero() {
+        // Probe with a known version still returns 0 (no rewrite needed).
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_1, pid: 0 };
+        let ret = capget(&mut hdr, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_1);
+    }
+
+    #[test]
+    fn test_phase132_capget_probe_v2_returns_zero() {
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_2, pid: 0 };
+        let ret = capget(&mut hdr, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_2);
+    }
+
+    // -- EFAULT wins over probe shortcut ----------------------------------
+
+    #[test]
+    fn test_phase132_capget_null_header_efault_even_with_null_datap() {
+        // EFAULT from a NULL header pointer is *not* short-circuited by
+        // the probe path — without a writable header there's no way to
+        // signal the preferred version, so Linux propagates -EFAULT.
+        errno::set_errno(0);
+        let ret = capget(core::ptr::null_mut(), core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // -- Non-NULL datap with unknown version still EINVAL -----------------
+
+    #[test]
+    fn test_phase132_capget_unknown_version_nonnull_datap_einval() {
+        // Real call (non-NULL datap) with unknown version: EINVAL with
+        // preferred version written.  This is the post-probe regression
+        // path — must continue to work.
+        let mut hdr = CapUserHeader { version: 0x12345678, pid: 0 };
+        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let ret = capget(&mut hdr, data.as_mut_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_3);
+    }
+
+    // -- capset accepts V1 and V2 -----------------------------------------
+
+    #[test]
+    fn test_phase132_capset_v2_accepted() {
+        reset_caps();
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_2, pid: 0 };
+        // V2 is wire-compatible with V3 — set caps and verify they took.
+        let want_eff: u32 = 1u32 << CAP_KILL;
+        let data = [
+            CapUserData {
+                effective: want_eff,
+                permitted: DEFAULT_CAPS_LOW,
+                inheritable: 0,
+            },
+            CapUserData { effective: 0, permitted: DEFAULT_CAPS_HIGH, inheritable: 0 },
+        ];
+        let ret = capset(&mut hdr, data.as_ptr());
+        assert_eq!(ret, 0);
+        let (lo, hi) = current_caps_effective();
+        assert_eq!(lo, want_eff);
+        assert_eq!(hi, 0);
+        // Header is *not* rewritten when version is accepted.
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_2);
+        reset_caps();
+    }
+
+    #[test]
+    fn test_phase132_capset_v1_clears_high_word() {
+        // V1 only carries the low 32 bits; the high word defaults to 0,
+        // so any previously-set high-bit caps must be cleared.
+        reset_caps();
+        // Pre-condition: defaults have high bits set (CAP_BPF etc.).
+        let (_, hi_before) = current_caps_effective();
+        assert_ne!(hi_before, 0, "DEFAULT_CAPS_HIGH should be non-zero");
+
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_1, pid: 0 };
+        let data = [
+            CapUserData {
+                effective: 1u32 << CAP_KILL,
+                permitted: DEFAULT_CAPS_LOW,
+                inheritable: 0,
+            },
+        ];
+        let ret = capset(&mut hdr, data.as_ptr());
+        assert_eq!(ret, 0);
+        let (lo, hi) = current_caps_effective();
+        assert_eq!(lo, 1u32 << CAP_KILL);
+        // High word cleared because V1 carries no high-set data.
+        assert_eq!(hi, 0);
+        reset_caps();
+    }
+
+    // -- Validation-order parity (Linux's flow) ---------------------------
+
+    #[test]
+    fn test_phase132_capset_efault_beats_einval_when_header_null() {
+        // NULL header → EFAULT before any version check.
+        errno::set_errno(0);
+        let data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let ret = capset(core::ptr::null_mut(), data.as_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase132_capset_einval_beats_eperm_for_pid() {
+        // Unknown version with pid != 0: EINVAL (version) wins over EPERM
+        // (pid) — version is checked first in cap_validate_magic.
+        let mut hdr = CapUserHeader { version: 0xBADCAFE, pid: 42 };
+        let data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let ret = capset(&mut hdr, data.as_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Preferred version was still written.
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_3);
+    }
+
+    // -- Workflow: libcap probe-then-call ---------------------------------
+
+    #[test]
+    fn test_phase132_workflow_libcap_probe_then_real_call() {
+        reset_caps();
+        // 1. Probe with version=0, NULL datap.  Expect ret 0 and the
+        //    preferred version written to hdr.version.
+        let mut hdr = CapUserHeader { version: 0, pid: 0 };
+        let r1 = capget(&mut hdr, core::ptr::null_mut());
+        assert_eq!(r1, 0);
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_3);
+
+        // 2. Real call with the discovered version.  Expect populated
+        //    data and ret 0.
+        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let r2 = capget(&mut hdr, data.as_mut_ptr());
+        assert_eq!(r2, 0);
+        assert_eq!(data[0].effective, DEFAULT_CAPS_LOW);
+        assert_eq!(data[1].effective, DEFAULT_CAPS_HIGH);
+        reset_caps();
+    }
+
+    // -- Buggy-caller cases -----------------------------------------------
+
+    #[test]
+    fn test_phase132_buggy_caller_uninitialised_version_probe_works() {
+        // C: `struct __user_cap_header_struct hdr; hdr.pid = 0;` —
+        // hdr.version is uninitialised stack memory.  If the caller
+        // immediately probes (NULL datap), Linux returns 0 and writes
+        // the preferred version even if the garbage happened to be a
+        // valid version.  Test with a deliberately weird value.
+        let mut hdr = CapUserHeader { version: 0x5A5A_5A5A, pid: 0 };
+        let ret = capget(&mut hdr, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_3);
+    }
+
+    // -- Recovery: probe doesn't poison subsequent calls ------------------
+
+    #[test]
+    fn test_phase132_recovery_after_unknown_version_probe() {
+        reset_caps();
+        // 1. Probe with garbage version succeeds.
+        let mut hdr = CapUserHeader { version: 0xBAD, pid: 0 };
+        errno::set_errno(0);
+        let r1 = capget(&mut hdr, core::ptr::null_mut());
+        assert_eq!(r1, 0);
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_3);
+        // Probe success: errno was NOT clobbered.
+        assert_eq!(errno::get_errno(), 0);
+
+        // 2. The very next real capget with the now-correct version must
+        //    reach the data-write path, not stale EINVAL.
+        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let r2 = capget(&mut hdr, data.as_mut_ptr());
+        assert_eq!(r2, 0);
+        assert_eq!(data[0].effective, DEFAULT_CAPS_LOW);
+        reset_caps();
     }
 }

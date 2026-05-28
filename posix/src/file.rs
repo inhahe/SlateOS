@@ -3897,9 +3897,19 @@ pub extern "C" fn name_to_handle_at(
 /// Validation order matches `fs/fhandle.c::sys_open_by_handle_at`:
 /// 1. `handle` NULL → `EFAULT`.
 /// 2. If `mount_fd != AT_FDCWD`, it must be a valid open fd → `EBADF`.
-///    Linux additionally requires `CAP_DAC_READ_SEARCH`, which we do
-///    not model (single-user OS).
-/// 3. All validated → `ENOSYS`.
+/// 3. (Phase 190) Caller lacks `CAP_DAC_READ_SEARCH` → `EPERM`.
+///    Matches Linux's `handle_to_path` → `may_decode_fh`:
+///    ```text
+///    if (!may_decode_fh(&ctx, o_flags))
+///        return -EPERM;
+///    ```
+///    where `may_decode_fh` returns `true` for callers holding
+///    `CAP_DAC_READ_SEARCH` (the export-fd path also exists but
+///    requires backend support we don't have).  Pre-Phase-190 the
+///    docstring claimed this was "not modeled (single-user OS)" —
+///    that was wrong: our capability layer does model caps and an
+///    unprivileged caller should see EPERM, not ENOSYS.
+/// 4. All validated → `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn open_by_handle_at(
     mount_fd: Fd,
@@ -3918,6 +3928,18 @@ pub extern "C" fn open_by_handle_at(
         if lookup_fd(mount_fd).is_none() {
             return -1;
         }
+    }
+    // Phase 190: CAP_DAC_READ_SEARCH gate matching Linux's
+    // `may_decode_fh`.  Without the cap, callers cannot decode an
+    // arbitrary file handle (which would otherwise bypass DAC) — they
+    // would need a privileged export-fd path we don't expose.  Surface
+    // EPERM here so unprivileged file-handle probes (CRIU's quick
+    // capability probe, libnfs handle helpers) read us correctly.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_DAC_READ_SEARCH,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
     }
     errno::set_errno(errno::ENOSYS);
     -1
@@ -9901,5 +9923,381 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = close_range(800, 810, 0);
         assert_eq!(ret, 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 190: open_by_handle_at — CAP_DAC_READ_SEARCH gate
+    // ------------------------------------------------------------------
+    //
+    // Linux's `fs/fhandle.c::open_by_handle_at` -> `handle_to_path`
+    // checks `may_decode_fh`, which approves callers holding
+    // `CAP_DAC_READ_SEARCH`:
+    //
+    //     static bool may_decode_fh(struct handle_to_path_ctx *ctx,
+    //                               unsigned int o_flags) {
+    //         if (capable(CAP_DAC_READ_SEARCH))
+    //             return true;
+    //         /* export-fd path with EXPORT_OP_PRIVILEGED_FILEHANDLE */
+    //     }
+    //
+    // and the caller path returns `-EPERM` when `may_decode_fh` is
+    // false.  Our stub now gates on `CAP_DAC_READ_SEARCH` after the
+    // EFAULT/EBADF guards but before the ENOSYS terminal.
+    //
+    // EFAULT (NULL handle) and EBADF (bad mount_fd) still beat EPERM,
+    // matching Linux's `do_handle_open` prologue order
+    // (`get_path_anchor` runs before `may_decode_fh`).
+    //
+    // Pre-Phase-190 the docstring said "Linux additionally requires
+    // CAP_DAC_READ_SEARCH, which we do not model" — that was wrong:
+    // our cap layer does model it, and an unprivileged file-handle
+    // probe should see EPERM, not ENOSYS.
+    //
+    // Host build holds CAP_DAC_READ_SEARCH by default (bit 2 ∈
+    // DEFAULT_CAPS_LOW = u32::MAX).  Must run with `--test-threads=1`.
+    // ------------------------------------------------------------------
+
+    mod open_by_handle_at_cap_phase190 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase 189.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_dac_read_search() {
+            use crate::sys_capability::CAP_DAC_READ_SEARCH;
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_DAC_READ_SEARCH < 32 {
+                (lo & !(1u32 << CAP_DAC_READ_SEARCH), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_DAC_READ_SEARCH - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_DAC_READ_SEARCH");
+            assert!(!crate::sys_capability::has_capability(
+                CAP_DAC_READ_SEARCH,
+            ));
+        }
+
+        fn fresh_handle() -> FileHandle {
+            FileHandle { handle_bytes: 0, handle_type: 0 }
+        }
+
+        // -- Per-error-class --------------------------------------------------
+
+        /// No cap → EPERM.  Canonical missing-privilege path.
+        #[test]
+        fn test_obha_phase190_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_dac_read_search();
+            let mut fh = fresh_handle();
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// With cap held → ENOSYS (no backend).  Confirms the gate is
+        /// gated, not unconditional.
+        #[test]
+        fn test_obha_phase190_with_cap_returns_enosys() {
+            let _g = CapGuard::snapshot();
+            // Cap held by default.
+            let mut fh = fresh_handle();
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        // -- Ordering matrix --------------------------------------------------
+
+        /// EFAULT (NULL handle) beats EPERM — pointer check runs in
+        /// `do_handle_open` before `get_path_anchor` even runs.
+        #[test]
+        fn test_obha_phase190_efault_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_dac_read_search();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                open_by_handle_at(AT_FDCWD, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
+
+        /// EBADF (negative mount_fd) beats EPERM — fdget runs in
+        /// `get_path_anchor`, which is before `may_decode_fh`.
+        #[test]
+        fn test_obha_phase190_ebadf_negative_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_dac_read_search();
+            let mut fh = fresh_handle();
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(-5, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        }
+
+        /// EBADF (nonexistent fd) beats EPERM.
+        #[test]
+        fn test_obha_phase190_ebadf_nonexistent_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_dac_read_search();
+            let mut fh = fresh_handle();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                open_by_handle_at(100_000, &raw mut fh, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        }
+
+        /// EPERM beats ENOSYS — without the gate, missing-cap callers
+        /// would see ENOSYS, which CRIU's capability probe reads as
+        /// "kernel doesn't support file handles" (wrong diagnostic).
+        #[test]
+        fn test_obha_phase190_eperm_beats_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_dac_read_search();
+            let mut fh = fresh_handle();
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM,
+                "Missing CAP_DAC_READ_SEARCH must surface as EPERM");
+        }
+
+        // -- Workflow --------------------------------------------------------
+
+        /// Drop cap → EPERM; restore cap → ENOSYS.  Mirrors the
+        /// privilege-drop-then-restore pattern of a setuid file
+        /// handle resolver (NFS userspace daemons).
+        #[test]
+        fn test_obha_phase190_drop_then_restore_workflow() {
+            let _g = CapGuard::snapshot();
+            let mut fh = fresh_handle();
+            // 1. Cap held → ENOSYS.
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+            // 2. Drop cap → EPERM.
+            drop_cap_dac_read_search();
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            // 3. Restore via capset to u32::MAX → ENOSYS again.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        // -- Buggy-caller ----------------------------------------------------
+
+        /// Caller didn't clear errno → sees fresh EPERM, not stale.
+        #[test]
+        fn test_obha_phase190_buggy_caller_stale_errno_replaced() {
+            let _g = CapGuard::snapshot();
+            drop_cap_dac_read_search();
+            let mut fh = fresh_handle();
+            crate::errno::set_errno(crate::errno::ENOENT);
+            assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        // -- Recovery --------------------------------------------------------
+
+        /// CapGuard drop restores cap; subsequent call reaches ENOSYS.
+        #[test]
+        fn test_obha_phase190_capguard_restore_clears_state() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_dac_read_search();
+                let mut fh = fresh_handle();
+                crate::errno::set_errno(0);
+                assert_eq!(
+                    open_by_handle_at(AT_FDCWD, &raw mut fh, 0),
+                    -1,
+                );
+                assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            } // _g dropped here; cap restored.
+            let mut fh = fresh_handle();
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        // -- Sentinel --------------------------------------------------------
+
+        /// With cap held, all existing EFAULT/EBADF terminals still
+        /// fire.  Confirms the gate is conditional.
+        #[test]
+        fn test_obha_phase190_with_cap_existing_terminals_unchanged() {
+            let _g = CapGuard::snapshot();
+            // EFAULT.
+            crate::errno::set_errno(0);
+            assert_eq!(
+                open_by_handle_at(AT_FDCWD, core::ptr::null_mut(), 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+            // EBADF negative.
+            let mut fh = fresh_handle();
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(-5, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+            // ENOSYS happy path.
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        // -- Cross-check -----------------------------------------------------
+
+        /// Dropping CAP_SYS_ADMIN alone must NOT affect
+        /// open_by_handle_at — Linux gates this specifically on
+        /// CAP_DAC_READ_SEARCH.  Pins down the cross-cap invariant.
+        #[test]
+        fn test_obha_phase190_sys_admin_drop_does_not_affect_obha() {
+            use crate::sys_capability::CAP_SYS_ADMIN;
+            let _g = CapGuard::snapshot();
+            // Drop only CAP_SYS_ADMIN (bit 21).
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << CAP_SYS_ADMIN);
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            // Still reaches ENOSYS.
+            let mut fh = fresh_handle();
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
+                "CAP_SYS_ADMIN drop must not affect open_by_handle_at");
+        }
+
+        /// Phase 190 errno is EPERM (capable convention), matching
+        /// `may_decode_fh` failure.  Distinct from EACCES (Phase 186).
+        #[test]
+        fn test_obha_phase190_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_dac_read_search();
+            let mut fh = fresh_handle();
+            crate::errno::set_errno(0);
+            assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
+            let e = crate::errno::get_errno();
+            assert_eq!(e, crate::errno::EPERM);
+            assert_ne!(e, crate::errno::EACCES);
+        }
+
+        /// `name_to_handle_at` is unaffected by the cap drop — that
+        /// syscall has a different validation path (no `may_decode_fh`).
+        /// Pinning this prevents a future copy-paste from applying the
+        /// gate to the wrong sibling.
+        #[test]
+        fn test_obha_phase190_name_to_handle_at_unaffected() {
+            let _g = CapGuard::snapshot();
+            drop_cap_dac_read_search();
+            let mut fh = fresh_handle();
+            let mut mount_id: i32 = 0;
+            crate::errno::set_errno(0);
+            let ret = name_to_handle_at(
+                AT_FDCWD,
+                b"x\0".as_ptr(),
+                &raw mut fh,
+                &raw mut mount_id,
+                0,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
+                "name_to_handle_at must not pass through the obha cap gate");
+        }
     }
 }

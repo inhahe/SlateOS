@@ -2260,50 +2260,106 @@ pub extern "C" fn fchownat(
 }
 
 // ---------------------------------------------------------------------------
-// chmod / fchmod / chown / fchown (stubs)
+// chmod / fchmod / chown / fchown / lchown
 // ---------------------------------------------------------------------------
+//
+// Argument-domain validators for the permission-changing family.  Our OS
+// has no permission system yet, so the *body* of each call is still a no-op
+// returning 0 — a well-formed caller should not see ENOSYS, because the
+// semantic "the requested mode/owner is now in effect" is trivially true
+// in a single-permission-class environment.
+//
+// What the validators *do* catch is the buggy-caller case: a NULL path
+// pointer, a negative fd, or an fd that isn't open.  On Linux these are
+// EFAULT and EBADF respectively, regardless of whether the underlying
+// filesystem supports the operation, so reporting them gives our tests
+// and our future implementation a stable, Linux-shaped surface.
 
 /// Change file mode bits.
 ///
-/// Stub: our OS doesn't have file permissions yet.  Accepts silently.
+/// Validates `path != NULL` (Linux: EFAULT on a bad pointer).  Once our
+/// filesystem supports permissions, the body will do the lookup and
+/// permission check; until then it remains a no-op success after the
+/// pointer validation.
 ///
-/// Returns 0 (always succeeds).
+/// Errors:
+///   * `EFAULT` — `path` is NULL.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn chmod(_path: *const u8, _mode: ModeT) -> i32 {
-    // No permission system yet — accept silently.
+pub extern "C" fn chmod(path: *const u8, _mode: ModeT) -> i32 {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // No permission system yet — accept silently for well-formed calls.
     0
 }
 
 /// Change file mode bits (by fd).
 ///
-/// Stub: accepts silently.
+/// Validates `fd >= 0` and that `fd` refers to an open file description.
+///
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fchmod(_fd: Fd, _mode: ModeT) -> i32 {
+pub extern "C" fn fchmod(fd: Fd, _mode: ModeT) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
     0
 }
 
 /// Change file owner and group.
 ///
-/// Stub: our OS doesn't have multi-user support.  Accepts silently.
+/// Validates `path != NULL`.
+///
+/// Errors:
+///   * `EFAULT` — `path` is NULL.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn chown(_path: *const u8, _owner: UidT, _group: GidT) -> i32 {
+pub extern "C" fn chown(path: *const u8, _owner: UidT, _group: GidT) -> i32 {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
     0
 }
 
 /// Change file owner and group (by fd).
 ///
-/// Stub: accepts silently.
+/// Validates `fd >= 0` and that `fd` refers to an open file description.
+///
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fchown(_fd: Fd, _owner: UidT, _group: GidT) -> i32 {
+pub extern "C" fn fchown(fd: Fd, _owner: UidT, _group: GidT) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
     0
 }
 
 /// Change file owner and group (don't follow symlinks).
 ///
-/// Like `chown`, but does not follow symbolic links — changes ownership
-/// of the link itself rather than its target.  Stub: accepts silently.
+/// Like `chown`, but does not follow symbolic links — changes ownership of
+/// the link itself rather than its target.  Validates `path != NULL`.
+///
+/// Errors:
+///   * `EFAULT` — `path` is NULL.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lchown(_path: *const u8, _owner: UidT, _group: GidT) -> i32 {
+pub extern "C" fn lchown(path: *const u8, _owner: UidT, _group: GidT) -> i32 {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
     0
 }
 
@@ -3836,7 +3892,12 @@ mod tests {
 
     #[test]
     fn test_fchmod_succeeds() {
-        assert_eq!(fchmod(0, 0o644), 0);
+        // Use a freshly-allocated fd rather than relying on fd 0 being open
+        // (other tests may have closed it).
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(fchmod(fd, 0o644), 0);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
@@ -3846,7 +3907,10 @@ mod tests {
 
     #[test]
     fn test_fchown_succeeds() {
-        assert_eq!(fchown(0, 0, 0), 0);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(fchown(fd, 0, 0), 0);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
@@ -6438,5 +6502,219 @@ mod tests {
         let ret = open_by_handle_at(AT_FDCWD, &raw mut fh, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 70 — chmod / fchmod / chown / fchown / lchown validators
+    //
+    // The body is a no-op success (no permission system yet), but the
+    // entry-prologue validates the bug-shaped inputs Linux rejects with
+    // EFAULT (NULL path pointer) or EBADF (negative or closed fd).
+    // -----------------------------------------------------------------
+
+    // ---- chmod ----
+
+    #[test]
+    fn test_chmod_null_path_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(chmod(core::ptr::null(), 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_chmod_valid_path_returns_zero() {
+        // Mode bits outside 0o7777 must not be rejected — Linux silently
+        // masks them, and so do we (by ignoring `mode` entirely).
+        assert_eq!(chmod(b"/etc/passwd\0".as_ptr(), 0xFFFFFFFF), 0);
+    }
+
+    #[test]
+    fn test_chmod_empty_path_still_returns_zero() {
+        // An empty C string is a valid non-NULL pointer; we have no
+        // filesystem to check existence against, so accept silently.
+        assert_eq!(chmod(b"\0".as_ptr(), 0o755), 0);
+    }
+
+    // ---- fchmod ----
+
+    #[test]
+    fn test_fchmod_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(fchmod(-1, 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fchmod_min_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(fchmod(i32::MIN, 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fchmod_unopen_fd_ebadf() {
+        // Pick an fd value far above anything alloc_fd hands out and
+        // verify it isn't in the table; if some other test happens to
+        // have left it open, allocate a fresh one and close it.
+        let probe: i32 = 0x4000_0001;
+        if fdtable::get_fd(probe).is_some() {
+            let _ = fdtable::close_fd(probe);
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(fchmod(probe, 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fchmod_open_fd_returns_zero() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(fchmod(fd, 0o600), 0);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_fchmod_pipe_fd_still_returns_zero() {
+        // fchmod on a pipe is permitted on Linux (EBADF only on closed fds,
+        // not on non-file kinds), so accept the call.
+        let fd = fdtable::alloc_fd(HandleKind::Pipe, 1)
+            .expect("alloc_fd Pipe failed");
+        assert_eq!(fchmod(fd, 0o400), 0);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // ---- chown ----
+
+    #[test]
+    fn test_chown_null_path_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(chown(core::ptr::null(), 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_chown_valid_path_returns_zero() {
+        assert_eq!(chown(b"/etc/passwd\0".as_ptr(), 0, 0), 0);
+    }
+
+    #[test]
+    fn test_chown_minus_one_owner_returns_zero() {
+        // (uid_t)-1 means "do not change" in POSIX; the no-op stub still
+        // returns 0 for a valid path.
+        assert_eq!(
+            chown(b"/etc/passwd\0".as_ptr(), UidT::MAX, UidT::MAX),
+            0
+        );
+    }
+
+    // ---- fchown ----
+
+    #[test]
+    fn test_fchown_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(fchown(-1, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fchown_min_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(fchown(i32::MIN, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fchown_unopen_fd_ebadf() {
+        let probe: i32 = 0x4000_0002;
+        if fdtable::get_fd(probe).is_some() {
+            let _ = fdtable::close_fd(probe);
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(fchown(probe, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fchown_open_fd_returns_zero() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(fchown(fd, 1000, 1000), 0);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // ---- lchown ----
+
+    #[test]
+    fn test_lchown_null_path_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(lchown(core::ptr::null(), 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_lchown_valid_path_returns_zero() {
+        assert_eq!(lchown(b"/etc/passwd\0".as_ptr(), 0, 0), 0);
+    }
+
+    // ---- ordering / interaction with *at() wrappers ----
+
+    #[test]
+    fn test_fchmodat_null_relative_path_propagates_efault_from_chmod() {
+        // fchmodat with AT_FDCWD short-circuits to chmod(path, mode).
+        // A NULL path therefore goes through chmod's NULL check.
+        crate::errno::set_errno(0);
+        assert_eq!(fchmodat(AT_FDCWD, core::ptr::null(), 0o644, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_fchownat_null_relative_path_propagates_efault_from_chown() {
+        crate::errno::set_errno(0);
+        assert_eq!(fchownat(AT_FDCWD, core::ptr::null(), 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // ---- buggy-caller patterns ----
+
+    #[test]
+    fn test_buggy_caller_chmod_with_uninitialised_pointer() {
+        // Simulate a caller who forgot to initialise their `path`
+        // variable.  We can't truly observe an uninitialised pointer
+        // from Rust, but NULL is the most common default — the EFAULT
+        // path makes that bug visible instead of returning 0.
+        let uninit: *const u8 = core::ptr::null();
+        crate::errno::set_errno(0);
+        assert_eq!(chmod(uninit, 0o644), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_buggy_caller_fchown_with_stale_fd() {
+        // Caller stored an fd, closed it, then tried to fchown it.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let _ = fdtable::close_fd(fd);
+        crate::errno::set_errno(0);
+        assert_eq!(fchown(fd, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_buggy_caller_lchown_on_null_link() {
+        crate::errno::set_errno(0);
+        assert_eq!(lchown(core::ptr::null(), 1000, 1000), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // ---- workflow: install-style chmod sequence ----
+
+    #[test]
+    fn test_workflow_install_chmod_sequence() {
+        // Mimic what `install -m 0755 binary /usr/bin/foo` does after
+        // copying: chmod the target, then chown to root.  Both should
+        // succeed (no permission system yet) so the installer doesn't
+        // see a spurious failure.
+        assert_eq!(chmod(b"/usr/bin/foo\0".as_ptr(), 0o755), 0);
+        assert_eq!(chown(b"/usr/bin/foo\0".as_ptr(), 0, 0), 0);
     }
 }

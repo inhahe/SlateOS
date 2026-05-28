@@ -885,9 +885,46 @@ pub extern "C" fn mq_setattr(
 
 /// Request notification on message arrival.
 ///
-/// Not implemented — we don't dispatch sigevent / signals yet.
+/// Returns -1 with `ENOSYS` after argument-domain validation.  Full
+/// `mq_notify` requires a `sigevent` dispatcher that we don't have
+/// yet (no SIGEV_SIGNAL or SIGEV_THREAD routing), but invalid
+/// callers must still see Linux-matching errno values so portable
+/// code (D-Bus signal-arrival hooks, async-mq tutorials) reads us
+/// correctly.
+///
+/// Validation order matches `ipc/mqueue.c::sys_mq_notify` in Linux:
+/// 1. `mqdes` must be a valid open mq descriptor → `EBADF` otherwise
+///    (via `resolve`, which is the same gate every other mq_* call
+///    uses; consistent errno across the API).
+/// 2. After validation:
+///    - `sevp == NULL` is the "deregister notification" form on Linux;
+///      we accept it as valid (no notification was registered, so
+///      "deregister" is observably a no-op success).
+///    - `sevp != NULL` would register a notification, but we have no
+///      sigevent dispatcher — return `ENOSYS` so callers fall back to
+///      polling.
+///
+/// We can't inspect `*sevp` for `sigev_notify` validity because the
+/// parameter is `*const u8` in our ABI (kept opaque to avoid pulling
+/// the full `sigevent` layout through the signal crate).  Linux
+/// rejects invalid `sigev_notify` with `EINVAL`; we defer that check
+/// until the dispatcher exists and the struct is plumbed through.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mq_notify(_mqdes: MqdT, _sevp: *const u8) -> i32 {
+pub extern "C" fn mq_notify(mqdes: MqdT, sevp: *const u8) -> i32 {
+    let guard = lock();
+    // SAFETY: held under MQ_LOCK via `guard`.
+    if unsafe { resolve(mqdes) }.is_none() {
+        drop(guard);
+        return -1; // errno set by resolve()
+    }
+    drop(guard);
+
+    if sevp.is_null() {
+        // Deregister: nothing was registered, so this is a no-op.
+        // Linux returns 0 here too.
+        return 0;
+    }
+    // sevp non-NULL — we'd register a notification, but no dispatcher.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -1492,15 +1529,30 @@ mod tests {
         assert_eq!(mq_close(fd), 0);
     }
 
-    // -- mq_notify still ENOSYS --
+    // -- mq_notify reaches ENOSYS on the register form --
+    //
+    // Original (pre-Phase 63) test asserted ENOSYS for `mq_notify(1, NULL)`
+    // because mq_notify was an unconditional ENOSYS stub.  After
+    // Phase 63 added validation:
+    //   - NULL sevp is the "deregister" form, which Linux returns 0 for.
+    //   - Only non-NULL sevp on a valid mqdes reaches ENOSYS (no
+    //     sigevent dispatcher).
+    // So the meaningful ENOSYS path now requires both an open queue and
+    // a non-NULL sevp pointer.
 
     #[test]
     fn test_notify_enosys() {
         let _g = lock_tests();
+        let fd = open_default(b"/qenosys\0", O_NONBLOCK);
+        assert!(fd > 0);
+        // Dummy sevp — content unread by the stub.
+        let dummy: [u8; 64] = [0; 64];
         errno::set_errno(0);
-        let r = mq_notify(1, core::ptr::null());
+        let r = mq_notify(fd, dummy.as_ptr());
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let _ = mq_close(fd);
+        let _ = mq_unlink(b"/qenosys\0".as_ptr());
     }
 
     // -- Reference counting through close/unlink --
@@ -1612,5 +1664,143 @@ mod tests {
         for e in extras {
             assert_eq!(mq_close(e), 0);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 63: mq_notify argument-domain validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mq_notify_negative_mqdes_ebadf() {
+        let _g = lock_tests();
+        errno::set_errno(0);
+        let ret = mq_notify(-1, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_mq_notify_zero_mqdes_ebadf() {
+        let _g = lock_tests();
+        // resolve() rejects mqdes <= 0 with EBADF.
+        errno::set_errno(0);
+        let ret = mq_notify(0, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_mq_notify_unopened_mqdes_ebadf() {
+        let _g = lock_tests();
+        // A value within range but not associated with an open queue.
+        errno::set_errno(0);
+        let ret = mq_notify(5, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_mq_notify_huge_mqdes_ebadf() {
+        let _g = lock_tests();
+        errno::set_errno(0);
+        let ret = mq_notify(i32::MAX, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_mq_notify_null_sevp_deregister_success() {
+        // NULL sevp is the "deregister notification" form.  Linux
+        // returns 0 even when no notification was registered.
+        let _g = lock_tests();
+        let fd = open_default(b"/qnotify_dereg\0", O_NONBLOCK);
+        assert!(fd > 0);
+        errno::set_errno(0);
+        let ret = mq_notify(fd, core::ptr::null());
+        assert_eq!(ret, 0);
+        let _ = mq_close(fd);
+        let _ = mq_unlink(b"/qnotify_dereg\0".as_ptr());
+    }
+
+    #[test]
+    fn test_mq_notify_nonnull_sevp_returns_enosys() {
+        // Valid mqdes + non-NULL sevp would register a notification,
+        // but we have no sigevent dispatcher — return ENOSYS.
+        let _g = lock_tests();
+        let fd = open_default(b"/qnotify_reg\0", O_NONBLOCK);
+        assert!(fd > 0);
+        // Dummy "sigevent" — content unread by our stub.
+        let dummy: [u8; 64] = [0; 64];
+        errno::set_errno(0);
+        let ret = mq_notify(fd, dummy.as_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let _ = mq_close(fd);
+        let _ = mq_unlink(b"/qnotify_reg\0".as_ptr());
+    }
+
+    #[test]
+    fn test_mq_notify_after_close_ebadf() {
+        // Closed descriptors must not register notifications.
+        let _g = lock_tests();
+        let fd = open_default(b"/qnotify_closed\0", O_NONBLOCK);
+        assert!(fd > 0);
+        assert_eq!(mq_close(fd), 0);
+        errno::set_errno(0);
+        let ret = mq_notify(fd, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        let _ = mq_unlink(b"/qnotify_closed\0".as_ptr());
+    }
+
+    #[test]
+    fn test_mq_notify_ordering_fd_before_sevp() {
+        // Bad mqdes AND non-NULL sevp — EBADF wins because we cannot
+        // even reach the sevp-NULL check without a valid descriptor.
+        let _g = lock_tests();
+        let dummy: [u8; 64] = [0; 64];
+        errno::set_errno(0);
+        let ret = mq_notify(-1, dummy.as_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_mq_notify_workflow_register_then_deregister() {
+        // Real workflow: program registers (unsupported → ENOSYS),
+        // falls back to polling, and on shutdown deregisters (NULL
+        // sevp → 0).  Both must work on the same valid descriptor.
+        let _g = lock_tests();
+        let fd = open_default(b"/qnotify_wf\0", O_NONBLOCK);
+        assert!(fd > 0);
+
+        let sevp: [u8; 64] = [0; 64];
+        errno::set_errno(0);
+        assert_eq!(mq_notify(fd, sevp.as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+
+        errno::set_errno(0);
+        assert_eq!(mq_notify(fd, core::ptr::null()), 0);
+
+        let _ = mq_close(fd);
+        let _ = mq_unlink(b"/qnotify_wf\0".as_ptr());
+    }
+
+    #[test]
+    fn test_mq_notify_buggy_caller_passes_close_fd_value() {
+        // Caller stores the result of mq_close() (which is 0 on
+        // success) into a variable they later think is a descriptor.
+        // mqdes == 0 is EBADF, not silent success.
+        let _g = lock_tests();
+        let fd = open_default(b"/qnotify_bug\0", O_NONBLOCK);
+        assert!(fd > 0);
+        let closed = mq_close(fd);
+        assert_eq!(closed, 0);
+        errno::set_errno(0);
+        // Caller mistakenly treats `closed` (0) as the mqdes.
+        let ret = mq_notify(closed, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        let _ = mq_unlink(b"/qnotify_bug\0".as_ptr());
     }
 }

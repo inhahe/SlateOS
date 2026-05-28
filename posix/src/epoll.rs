@@ -1138,11 +1138,55 @@ pub unsafe extern "C" fn timerfd_gettime(
 // signalfd — receive signals via file descriptor
 // ===========================================================================
 
+/// `signalfd` flag: close-on-exec.  Same value as `O_CLOEXEC`.
+pub const SFD_CLOEXEC: i32 = 0x0008_0000;
+/// `signalfd` flag: non-blocking.  Same value as `O_NONBLOCK`.
+pub const SFD_NONBLOCK: i32 = 0x0000_0800;
+/// Mask of all defined `signalfd` flag bits.  Any bit outside this
+/// mask is rejected with `EINVAL` — matches Linux's
+/// `SFD_CLOEXEC | SFD_NONBLOCK` check in `fs/signalfd.c`.
+pub const SFD_FLAGS_VALID: i32 = SFD_CLOEXEC | SFD_NONBLOCK;
+
 /// Create or modify a signalfd.
 ///
-/// Stub: returns -1 with ENOSYS.
+/// Returns -1 with `ENOSYS` after argument-domain validation.  We do
+/// not yet route signals through file descriptors (no signal queue
+/// integration), but invalid callers must still see Linux-matching
+/// errno values so glibc's `signalfd(3)` wrapper and direct
+/// `signalfd4(2)` callers see correct error reporting.
+///
+/// Validation order matches `fs/signalfd.c::do_signalfd4` in Linux:
+/// 1. Unknown flag bits → `EINVAL`.
+/// 2. `mask` NULL → `EFAULT`.
+/// 3. `fd != -1`: must be a valid open fd → `EBADF`.  Linux additionally
+///    requires the fd to already be a signalfd → `EINVAL` if not, but
+///    since we have no signalfds in the fdtable yet we cannot tell
+///    "wrong-kind fd" from "no fd" — we report `EBADF` for both,
+///    documenting the gap.  When signalfd state is added, this will
+///    refine to `EINVAL` for non-signalfd kinds.
+/// 4. All validated → `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn signalfd(_fd: i32, _mask: *const u64, _flags: i32) -> i32 {
+pub extern "C" fn signalfd(fd: i32, mask: *const u64, flags: i32) -> i32 {
+    if flags & !SFD_FLAGS_VALID != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if mask.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if fd != -1 {
+        if fd < 0 {
+            errno::set_errno(errno::EBADF);
+            return -1;
+        }
+        if fdtable::get_fd(fd).is_none() {
+            errno::set_errno(errno::EBADF);
+            return -1;
+        }
+        // TODO(signalfd): once signalfd state is tracked, refine the
+        // wrong-kind-of-fd case to EINVAL (matches Linux exactly).
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -2331,8 +2375,11 @@ mod tests {
 
     #[test]
     fn test_signalfd_enosys() {
+        // Reach the ENOSYS sentinel: fd == -1 (create-new),
+        // non-NULL mask, no garbage flags.
+        let mask: u64 = 0;
         errno::set_errno(0);
-        assert_eq!(signalfd(-1, core::ptr::null(), 0), -1);
+        assert_eq!(signalfd(-1, &raw const mask, 0), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
@@ -2482,8 +2529,11 @@ mod tests {
 
     #[test]
     fn test_signalfd_negative_fd() {
+        // fd == -1 means "create new"; valid mask required to reach
+        // the ENOSYS sentinel under the new validator.
+        let mask: u64 = 1u64 << 14; // SIGTERM bit, arbitrary.
         errno::set_errno(0);
-        assert_eq!(signalfd(-1, core::ptr::null(), 0), -1);
+        assert_eq!(signalfd(-1, &raw const mask, 0), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
@@ -2755,9 +2805,14 @@ mod tests {
 
     #[test]
     fn test_signalfd_positive_fd() {
+        // fd 3 is unlikely to be open in the test fdtable, so the new
+        // validator rejects it with EBADF before reaching ENOSYS.  This
+        // exercises the existing-fd path which previously returned
+        // ENOSYS without validation.
+        let mask: u64 = 0;
         errno::set_errno(0);
-        assert_eq!(signalfd(3, core::ptr::null(), 0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(signalfd(3, &raw const mask, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
     // -- timerfd_create with clock IDs --
@@ -2940,17 +2995,22 @@ mod tests {
 
     #[test]
     fn test_signalfd4_returns_enosys() {
-        // signalfd4 delegates to signalfd which is an ENOSYS stub.
+        // signalfd4 delegates to signalfd; with valid mask + no flags
+        // we reach the ENOSYS sentinel.
+        let mask: u64 = 0;
         crate::errno::set_errno(0);
-        let ret = signalfd4(-1, core::ptr::null(), 0);
+        let ret = signalfd4(-1, &raw const mask, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_signalfd4_with_flags() {
+        // SFD_CLOEXEC happens to share its value with O_CLOEXEC (0x80000),
+        // distinct from EFD_CLOEXEC.  Use the proper signalfd flag here.
+        let mask: u64 = 0;
         crate::errno::set_errno(0);
-        let ret = signalfd4(-1, core::ptr::null(), EFD_CLOEXEC as i32);
+        let ret = signalfd4(-1, &raw const mask, SFD_CLOEXEC);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -3173,5 +3233,162 @@ mod tests {
         assert_eq!(e1.handle, e2.handle);
         crate::file::close(dup);
         crate::file::close(fd);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 63: signalfd argument-domain validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sfd_flag_constants() {
+        // Match Linux: SFD_CLOEXEC == O_CLOEXEC, SFD_NONBLOCK == O_NONBLOCK.
+        assert_eq!(SFD_CLOEXEC, 0x0008_0000);
+        assert_eq!(SFD_NONBLOCK, 0x0000_0800);
+        assert_eq!(SFD_FLAGS_VALID, SFD_CLOEXEC | SFD_NONBLOCK);
+    }
+
+    #[test]
+    fn test_sfd_flags_distinct_bits() {
+        assert_eq!(SFD_CLOEXEC & SFD_NONBLOCK, 0);
+    }
+
+    #[test]
+    fn test_signalfd_unknown_flag_einval() {
+        // 0x1 is outside SFD_FLAGS_VALID (0x80800).
+        let mask: u64 = 0;
+        errno::set_errno(0);
+        let ret = signalfd(-1, &raw const mask, 0x1);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_signalfd_garbage_flag_einval() {
+        let mask: u64 = 0;
+        errno::set_errno(0);
+        let ret = signalfd(-1, &raw const mask, i32::MIN);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_signalfd_both_flags_pass_flag_check() {
+        // SFD_CLOEXEC | SFD_NONBLOCK must reach ENOSYS, not EINVAL.
+        let mask: u64 = 0;
+        errno::set_errno(0);
+        let ret = signalfd(-1, &raw const mask, SFD_CLOEXEC | SFD_NONBLOCK);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_signalfd_null_mask_efault() {
+        errno::set_errno(0);
+        let ret = signalfd(-1, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_signalfd_negative_existing_fd_ebadf() {
+        // fd < 0 and fd != -1 — the "modify existing" form requires
+        // a real fd, so -2 etc. is EBADF.
+        let mask: u64 = 0;
+        errno::set_errno(0);
+        let ret = signalfd(-2, &raw const mask, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_signalfd_nonexistent_fd_ebadf() {
+        let mask: u64 = 0;
+        errno::set_errno(0);
+        let ret = signalfd(100_000, &raw const mask, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // --- ordering -----------------------------------------------------------
+
+    #[test]
+    fn test_signalfd_flag_check_before_mask_check() {
+        // Bad flag AND NULL mask — flag wins (EINVAL beats EFAULT).
+        errno::set_errno(0);
+        let ret = signalfd(-1, core::ptr::null(), 0x1);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_signalfd_mask_check_before_fd_check() {
+        // Valid flag, NULL mask, bad fd — EFAULT must win over EBADF.
+        errno::set_errno(0);
+        let ret = signalfd(100_000, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // --- signalfd4 propagates the same validation ---------------------------
+
+    #[test]
+    fn test_signalfd4_unknown_flag_einval() {
+        let mask: u64 = 0;
+        errno::set_errno(0);
+        let ret = signalfd4(-1, &raw const mask, 0x40);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_signalfd4_null_mask_efault() {
+        errno::set_errno(0);
+        let ret = signalfd4(-1, core::ptr::null(), SFD_NONBLOCK);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // --- real-world buggy callers -------------------------------------------
+
+    #[test]
+    fn test_buggy_caller_signalfd_passes_eventfd_flag() {
+        // EFD_SEMAPHORE = 1 is an eventfd-only flag.  signalfd does
+        // not accept it — Linux returns EINVAL.
+        let mask: u64 = 0;
+        errno::set_errno(0);
+        let ret = signalfd(-1, &raw const mask, EFD_SEMAPHORE as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_buggy_caller_signalfd_forgot_to_pass_mask() {
+        // Caller meant `signalfd(-1, &mask, 0)` but passed NULL by
+        // mistake (e.g. zero-initialized struct field).  EFAULT, not
+        // ENOSYS — gives the caller actionable feedback.
+        errno::set_errno(0);
+        let ret = signalfd(-1, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_workflow_signalfd_create_then_modify() {
+        // Real-world flow: app creates a signalfd (fd == -1, ENOSYS)
+        // then later wants to modify the same fd's mask (fd > 0,
+        // existing fd).  Because no signalfd exists, fd > 0 must
+        // reject with EBADF — consistent across both phases of the
+        // workflow rather than a misleading ENOSYS.
+        let m1: u64 = 1u64 << 14; // SIGTERM
+        errno::set_errno(0);
+        assert_eq!(signalfd(-1, &raw const m1, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        // Suppose the app stored fd 7 from a previous call; fd 7 is
+        // not a signalfd, so modify fails with EBADF (would be EINVAL
+        // once kind-tracking lands — see TODO in signalfd).
+        let m2: u64 = (1u64 << 14) | (1u64 << 1); // add SIGINT
+        errno::set_errno(0);
+        assert_eq!(signalfd(7, &raw const m2, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
     }
 }

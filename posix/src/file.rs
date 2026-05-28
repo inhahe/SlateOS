@@ -2366,9 +2366,20 @@ pub extern "C" fn fchmod(fd: Fd, _mode: ModeT) -> i32 {
 /// Errors:
 ///   * `EFAULT` — `path` is NULL.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn chown(path: *const u8, _owner: UidT, _group: GidT) -> i32 {
+pub extern "C" fn chown(path: *const u8, owner: UidT, group: GidT) -> i32 {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // Phase 206: CAP_CHOWN gate.  Linux requires CAP_CHOWN when the
+    // caller actually changes file ownership.  owner/group == (uid_t)-1
+    // means "don't change that field", so a double-no-op call bypasses.
+    if (owner != u32::MAX || group != u32::MAX)
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_CHOWN,
+        )
+    {
+        errno::set_errno(errno::EPERM);
         return -1;
     }
     0
@@ -2381,13 +2392,23 @@ pub extern "C" fn chown(path: *const u8, _owner: UidT, _group: GidT) -> i32 {
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fchown(fd: Fd, _owner: UidT, _group: GidT) -> i32 {
+pub extern "C" fn fchown(fd: Fd, owner: UidT, group: GidT) -> i32 {
     if fd < 0 {
         errno::set_errno(errno::EBADF);
         return -1;
     }
     if fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    // Phase 206: CAP_CHOWN gate — same semantics as chown(), after EBADF
+    // validation.
+    if (owner != u32::MAX || group != u32::MAX)
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_CHOWN,
+        )
+    {
+        errno::set_errno(errno::EPERM);
         return -1;
     }
     0
@@ -2401,9 +2422,18 @@ pub extern "C" fn fchown(fd: Fd, _owner: UidT, _group: GidT) -> i32 {
 /// Errors:
 ///   * `EFAULT` — `path` is NULL.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lchown(path: *const u8, _owner: UidT, _group: GidT) -> i32 {
+pub extern "C" fn lchown(path: *const u8, owner: UidT, group: GidT) -> i32 {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // Phase 206: CAP_CHOWN gate — same semantics as chown().
+    if (owner != u32::MAX || group != u32::MAX)
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_CHOWN,
+        )
+    {
+        errno::set_errno(errno::EPERM);
         return -1;
     }
     0
@@ -10298,6 +10328,254 @@ mod tests {
             assert_eq!(ret, -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
                 "name_to_handle_at must not pass through the obha cap gate");
+        }
+    }
+
+    // =======================================================================
+    // Phase 206 — CAP_CHOWN gate on chown / fchown / lchown / fchownat
+    // =======================================================================
+    //
+    // Linux requires CAP_CHOWN when actually changing a file's owner or
+    // group.  owner/group == (uid_t)-1 (u32::MAX) means "don't change";
+    // a double-no-op call bypasses the gate.  Error priority:
+    //   EFAULT (null path) / EBADF (bad fd) / EINVAL (bad flags)  >  EPERM
+    //
+    // fchownat delegates to chown(), so it inherits the gate automatically.
+    mod phase206_cap_chown {
+        use super::*;
+
+        const CAP_CHOWN: u32 = crate::sys_capability::CAP_CHOWN;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                crate::sys_capability::test_helpers::restore_caps(
+                    self.lo, self.hi,
+                );
+            }
+        }
+
+        fn drop_cap_chown() {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << CAP_CHOWN);
+            let hdr = crate::sys_capability::CapUserHeader {
+                version: crate::sys_capability::VFS_CAP_REVISION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: new_lo,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: hi,
+                    inheritable: 0,
+                },
+            ];
+            let rc = crate::sys_capability::capset(
+                &hdr as *const _,
+                data.as_ptr(),
+            );
+            assert_eq!(rc, 0);
+            assert!(!crate::sys_capability::has_capability(CAP_CHOWN));
+        }
+
+        // ---- chown -------------------------------------------------------
+
+        /// chown with cap held succeeds for a well-formed call.
+        #[test]
+        fn test_chown_cap_held_succeeds() {
+            assert!(crate::sys_capability::has_capability(CAP_CHOWN));
+            crate::errno::set_errno(0);
+            assert_eq!(chown(b"/tmp\0".as_ptr(), 1000, 1000), 0);
+        }
+
+        /// chown without CAP_CHOWN returns EPERM when ownership changes.
+        #[test]
+        fn test_chown_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(chown(b"/tmp\0".as_ptr(), 1000, 1000), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// chown with owner-only change denied.
+        #[test]
+        fn test_chown_no_cap_owner_only() {
+            let _g = CapGuard::snapshot();
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(chown(b"/a\0".as_ptr(), 500, u32::MAX), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// chown with group-only change denied.
+        #[test]
+        fn test_chown_no_cap_group_only() {
+            let _g = CapGuard::snapshot();
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(chown(b"/a\0".as_ptr(), u32::MAX, 100), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// chown with both owner and group == u32::MAX is a no-op;
+        /// bypasses the cap gate even without CAP_CHOWN.
+        #[test]
+        fn test_chown_noop_bypasses_gate() {
+            let _g = CapGuard::snapshot();
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(chown(b"/tmp\0".as_ptr(), u32::MAX, u32::MAX), 0);
+        }
+
+        /// EFAULT takes priority over EPERM — NULL path checked first.
+        #[test]
+        fn test_chown_efault_before_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(chown(core::ptr::null(), 0, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
+
+        // ---- fchown ------------------------------------------------------
+
+        /// fchown with cap held succeeds on a valid fd.
+        #[test]
+        fn test_fchown_cap_held_succeeds() {
+            assert!(crate::sys_capability::has_capability(CAP_CHOWN));
+            let fd = crate::fdtable::alloc_fd(
+                crate::fdtable::HandleKind::File,
+                999,
+            )
+            .expect("alloc fd");
+            crate::errno::set_errno(0);
+            assert_eq!(fchown(fd, 1000, 1000), 0);
+            crate::fdtable::close_fd(fd);
+        }
+
+        /// fchown without CAP_CHOWN returns EPERM.
+        #[test]
+        fn test_fchown_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            let fd = crate::fdtable::alloc_fd(
+                crate::fdtable::HandleKind::File,
+                998,
+            )
+            .expect("alloc fd");
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(fchown(fd, 1000, 1000), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            crate::fdtable::close_fd(fd);
+        }
+
+        /// fchown no-op (both -1) bypasses cap gate.
+        #[test]
+        fn test_fchown_noop_bypasses_gate() {
+            let _g = CapGuard::snapshot();
+            let fd = crate::fdtable::alloc_fd(
+                crate::fdtable::HandleKind::File,
+                997,
+            )
+            .expect("alloc fd");
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(fchown(fd, u32::MAX, u32::MAX), 0);
+            crate::fdtable::close_fd(fd);
+        }
+
+        /// EBADF takes priority over EPERM for negative fd.
+        #[test]
+        fn test_fchown_ebadf_before_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(fchown(-1, 0, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        }
+
+        // ---- lchown ------------------------------------------------------
+
+        /// lchown without CAP_CHOWN returns EPERM.
+        #[test]
+        fn test_lchown_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(lchown(b"/tmp\0".as_ptr(), 1000, 1000), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// lchown no-op bypasses cap gate.
+        #[test]
+        fn test_lchown_noop_bypasses_gate() {
+            let _g = CapGuard::snapshot();
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(lchown(b"/a\0".as_ptr(), u32::MAX, u32::MAX), 0);
+        }
+
+        /// lchown EFAULT before EPERM.
+        #[test]
+        fn test_lchown_efault_before_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(lchown(core::ptr::null(), 0, 0), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
+
+        // ---- fchownat (inherits gate from chown) -------------------------
+
+        /// fchownat delegates to chown — cap gate fires through delegation.
+        #[test]
+        fn test_fchownat_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                fchownat(AT_FDCWD, b"/x\0".as_ptr(), 0, 0, 0),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// fchownat EINVAL (bad flags) takes priority over EPERM.
+        #[test]
+        fn test_fchownat_einval_before_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_chown();
+            crate::errno::set_errno(0);
+            assert_eq!(
+                fchownat(AT_FDCWD, b"/x\0".as_ptr(), 0, 0, 0x8000),
+                -1,
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        /// Cap restore confirmed after CapGuard drop.
+        #[test]
+        fn test_chown_cap_restore() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_chown();
+                assert!(!crate::sys_capability::has_capability(CAP_CHOWN));
+            }
+            assert!(crate::sys_capability::has_capability(CAP_CHOWN));
         }
     }
 }

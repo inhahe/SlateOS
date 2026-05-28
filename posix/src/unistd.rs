@@ -667,17 +667,74 @@ pub extern "C" fn seteuid(uid: UidT) -> i32 {
 
 /// Set the group ID of the calling process.
 ///
-/// Stub: succeeds silently.
+/// # Linux semantics (`kernel/sys.c::sys_setgid`)
+///
+/// Linux's `sys_setgid` allows the call when the target gid matches
+/// the real, effective, or saved gid OR the caller holds `CAP_SETGID`;
+/// otherwise `-EPERM`.  This is the gid analogue of `setuid`'s rule.
+///
+/// In our flat single-gid (always 0) model the three match arms
+/// collapse to "target == 0 always OK; target != 0 requires
+/// CAP_SETGID".
+///
+/// **Phase 193:** pre-Phase-193 the stub returned `0` for every gid
+/// value, mirroring the silent-success bug Phase 192 fixed for
+/// `setuid`.  An unprivileged caller could call `setgid(1000)` and
+/// believe it had successfully dropped to an unprivileged group while
+/// in fact nothing had changed.  The cap gate restores Linux's EPERM
+/// for the privilege-boundary path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setgid(_gid: GidT) -> i32 {
+pub extern "C" fn setgid(gid: GidT) -> i32 {
+    // Phase 193: target gid != current → needs CAP_SETGID.  Our
+    // current gid is always 0, so any non-zero target requires the
+    // cap.  Linux also accepts the call when gid matches the
+    // effective or saved gid; in our flat model those are also 0,
+    // so the same "gid == 0 always OK" rule covers all three Linux
+    // match arms simultaneously.
+    if gid != 0
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SETGID,
+        )
+    {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
     0
 }
 
 /// Set the effective group ID of the calling process.
 ///
-/// Stub: succeeds silently.
+/// # Linux semantics (`kernel/sys.c::sys_setregid` / `sys_setegid`)
+///
+/// `setegid(gid)` is a thin wrapper around `setregid(-1, gid)` in
+/// glibc; the kernel implements both via the same permission table.
+/// For the effective-gid field:
+///
+/// ```text
+/// if (egid != (gid_t)-1 &&
+///     egid != cred->gid && egid != cred->egid && egid != cred->sgid &&
+///     !ns_capable_setid(ns, CAP_SETGID))
+///     return -EPERM;
+/// ```
+///
+/// Same collapse to "gid == 0" in our single-group model.
+///
+/// **Phase 193:** the previous "succeeds silently" stub had the same
+/// hole as [`setgid`] — `setegid(1000)` looked like it changed the
+/// effective gid but did nothing.  The cap gate restores Linux's
+/// EPERM on the privilege-boundary path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setegid(_gid: GidT) -> i32 {
+pub extern "C" fn setegid(gid: GidT) -> i32 {
+    // Phase 193: same rule as setgid — target == 0 always OK; non-zero
+    // requires CAP_SETGID.
+    if gid != 0
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SETGID,
+        )
+    {
+        crate::errno::set_errno(crate::errno::EPERM);
+        return -1;
+    }
     0
 }
 
@@ -5798,6 +5855,344 @@ mod tests {
             drop_cap_setuid();
             assert_eq!(getuid(), 0);
             assert_eq!(geteuid(), 0);
+        }
+    }
+
+    // ==================================================================
+    // Phase 193: setgid / setegid gate on CAP_SETGID
+    // ==================================================================
+    //
+    // Companion to Phase 192's setuid/seteuid gate.  Linux's
+    // `kernel/sys.c::sys_setgid` allows the call when the target gid
+    // matches the real, effective, or saved gid OR the caller holds
+    // CAP_SETGID; otherwise EPERM.  Our flat single-gid (always 0)
+    // model collapses that to "target == 0 always OK; target != 0
+    // needs CAP_SETGID".  Pre-Phase-193 we returned 0 unconditionally,
+    // silently masking group-drop bugs in callers.
+    mod setgid_cap_phase193 {
+        use super::*;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_setgid() {
+            use crate::sys_capability::CAP_SETGID;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SETGID < 32 {
+                (lo & !(1u32 << CAP_SETGID), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SETGID - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SETGID");
+            assert!(!crate::sys_capability::has_capability(CAP_SETGID));
+        }
+
+        // -- Per-error-class --------------------------------------------------
+
+        #[test]
+        fn test_setgid_phase193_no_cap_normal_gid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgid(1000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_setgid_phase193_no_cap_max_gid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgid(u32::MAX), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_setgid_phase193_no_cap_gid_one_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgid(1), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_setegid_phase193_no_cap_normal_gid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setegid(1000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_setegid_phase193_no_cap_max_gid_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setegid(u32::MAX), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering / sentinel ---------------------------------------------
+
+        #[test]
+        fn test_setgid_phase193_no_cap_target_zero_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgid(0), 0);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        #[test]
+        fn test_setegid_phase193_no_cap_target_zero_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setegid(0), 0);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        #[test]
+        fn test_setgid_phase193_with_cap_target_zero_succeeds() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            assert_eq!(setgid(0), 0);
+        }
+
+        #[test]
+        fn test_setgid_phase193_with_cap_normal_gid_succeeds() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            assert_eq!(setgid(1000), 0);
+        }
+
+        #[test]
+        fn test_setegid_phase193_with_cap_normal_gid_succeeds() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            assert_eq!(setegid(1000), 0);
+        }
+
+        // -- Workflow --------------------------------------------------------
+
+        /// Container-style group-drop: cap held → change succeeds;
+        /// drop cap → subsequent attempt EPERMs.
+        #[test]
+        fn test_setgid_phase193_sandbox_drop_workflow() {
+            let _g = CapGuard::snapshot();
+            errno::set_errno(0);
+            assert_eq!(setgid(1000), 0);
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgid(2000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            errno::set_errno(0);
+            assert_eq!(setgid(0), 0);
+        }
+
+        // -- Buggy-caller ----------------------------------------------------
+
+        #[test]
+        fn test_setgid_phase193_buggy_caller_stale_errno_replaced() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(errno::ENOENT);
+            assert_eq!(setgid(42), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        #[test]
+        fn test_setgid_phase193_buggy_caller_max_minus_one_still_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgid(u32::MAX - 1), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Recovery --------------------------------------------------------
+
+        #[test]
+        fn test_setgid_phase193_capguard_restore_clears_state() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_setgid();
+                errno::set_errno(0);
+                assert_eq!(setgid(1234), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+            errno::set_errno(0);
+            assert_eq!(setgid(1234), 0);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        // -- No-side-effect --------------------------------------------------
+
+        #[test]
+        fn test_setgid_phase193_repeated_failed_calls_stable() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            for _ in 0..8 {
+                errno::set_errno(0);
+                assert_eq!(setgid(7777), -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+        }
+
+        #[test]
+        fn test_setgid_phase193_failed_call_no_observable_gid_change() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            let pre_gid = getgid();
+            let pre_egid = getegid();
+            errno::set_errno(0);
+            assert_eq!(setgid(1234), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(getgid(), pre_gid);
+            assert_eq!(getegid(), pre_egid);
+        }
+
+        // -- Cross-check -----------------------------------------------------
+
+        /// Dropping CAP_SETUID alone must NOT affect setgid — Linux
+        /// gates setgid on CAP_SETGID specifically.
+        #[test]
+        fn test_setgid_phase193_setuid_drop_does_not_affect_setgid() {
+            use crate::sys_capability::CAP_SETUID;
+            let _g = CapGuard::snapshot();
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << CAP_SETUID);
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            errno::set_errno(0);
+            assert_eq!(setgid(1500), 0);
+            assert_eq!(setegid(1500), 0);
+        }
+
+        /// Dropping CAP_SETGID alone must NOT affect setuid — inverse
+        /// cross-cap invariant.  setuid is fully gated by Phase 192,
+        /// but only on its own CAP_SETUID.
+        #[test]
+        fn test_setgid_phase193_drop_does_not_affect_setuid() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            // CAP_SETUID is still held — setuid still works.
+            errno::set_errno(0);
+            assert_eq!(setuid(1000), 0);
+            assert_eq!(seteuid(1000), 0);
+        }
+
+        #[test]
+        fn test_setgid_phase193_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgid(99), -1);
+            let e = errno::get_errno();
+            assert_eq!(e, errno::EPERM);
+            assert_ne!(e, errno::EACCES,
+                "sys_setgid uses EPERM (capable convention), \
+                 distinct from LSM-style EACCES");
+        }
+
+        /// getgid/getegid unaffected by CAP_SETGID drop.
+        #[test]
+        fn test_setgid_phase193_getters_unaffected_by_cap_drop() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            assert_eq!(getgid(), 0);
+            assert_eq!(getegid(), 0);
+        }
+
+        /// Pin the cross-phase errno invariant: Phase 187
+        /// (`setgroups`) also uses CAP_SETGID + EPERM.  A test here
+        /// confirms dropping CAP_SETGID gates BOTH setgid AND
+        /// setgroups simultaneously — the cap is shared between
+        /// these gid-touching syscalls in Linux's source.
+        #[test]
+        fn test_setgid_phase193_drop_also_gates_setgroups() {
+            let _g = CapGuard::snapshot();
+            drop_cap_setgid();
+            errno::set_errno(0);
+            assert_eq!(setgid(1000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            errno::set_errno(0);
+            assert_eq!(setgroups(0, core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
         }
     }
 

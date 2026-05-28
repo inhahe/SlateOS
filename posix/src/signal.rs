@@ -444,8 +444,18 @@ pub extern "C" fn pthread_sigmask(
 ///
 /// Stub: sets errno to EINTR and returns -1 (POSIX specifies
 /// sigsuspend always returns -1 with errno=EINTR).
+///
+/// Errors (Linux-matching priority):
+/// * `EFAULT` — `mask` is NULL.  Linux's `sys_rt_sigsuspend` copies
+///   the mask via `copy_from_user` before doing anything else, so a
+///   NULL pointer faults with `EFAULT` and we return that error in
+///   preference to the default `EINTR`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sigsuspend(_mask: *const SigsetT) -> i32 {
+pub extern "C" fn sigsuspend(mask: *const SigsetT) -> i32 {
+    if mask.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
     errno::set_errno(errno::EINTR);
     -1
 }
@@ -543,6 +553,11 @@ pub const SIGSTKSZ: usize = 8192;
 pub const SS_ONSTACK: i32 = 1;
 /// Alternate stack is disabled.
 pub const SS_DISABLE: i32 = 2;
+/// Auto-disarm the alternate stack on entry to a handler (Linux
+/// extension, `SS_AUTODISARM` in `<bits/sigstack.h>`).  Logically OR-ed
+/// with `SS_ONSTACK` or `SS_DISABLE`; the kernel masks it off before
+/// classifying the mode.
+pub const SS_AUTODISARM: i32 = 1 << 31;
 
 /// Alternate signal stack descriptor.
 ///
@@ -580,8 +595,20 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
     // Validate new stack if provided.
     if !ss.is_null() {
         let new_ss = unsafe { &*ss };
-        // POSIX: if ss_flags contains anything other than SS_DISABLE,
-        // and the stack size is below MINSIGSTKSZ, return ENOMEM.
+        // Linux `do_sigaltstack` strips the SS_AUTODISARM bit and then
+        // requires the remaining mode to be exactly one of:
+        // {0 (== SS_ONSTACK semantics), SS_ONSTACK, SS_DISABLE}.
+        // Anything else (including bits like SS_ONSTACK|SS_DISABLE
+        // together) is `EINVAL`.  We validate this *before* the size
+        // check so that a caller passing nonsense flags doesn't get
+        // the size-related ENOMEM by accident.
+        let mode = new_ss.ss_flags & !SS_AUTODISARM;
+        if mode != 0 && mode != SS_ONSTACK && mode != SS_DISABLE {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+        // POSIX: if ss_flags does not contain SS_DISABLE, and the stack
+        // size is below MINSIGSTKSZ, return ENOMEM.
         if new_ss.ss_flags & SS_DISABLE == 0 && new_ss.ss_size < MINSIGSTKSZ {
             errno::set_errno(errno::ENOMEM);
             return -1;
@@ -601,12 +628,20 @@ pub extern "C" fn sigaltstack(ss: *const StackT, oss: *mut StackT) -> i32 {
 /// If `flag` is nonzero, system calls interrupted by `sig` will return
 /// -1 with `EINTR`.  If zero, system calls are automatically restarted.
 ///
-/// Stub: always returns 0.  Since our OS doesn't deliver signals,
-/// there is no SA_RESTART behavior to toggle.  Programs that call
-/// `siginterrupt(SIGALRM, 1)` (common in timeout implementations)
-/// will succeed.
+/// Stub: validates `sig` against the standard signal range, then
+/// returns 0.  Since our OS doesn't deliver signals, there is no
+/// SA_RESTART behavior to toggle once the validation passes.
+///
+/// Errors (Linux-matching, via glibc's `siginterrupt` implementation
+/// which internally calls `sigaction`):
+/// * `EINVAL` — `sig` is not in `[1, NSIG)`, or is `SIGKILL` or
+///   `SIGSTOP` (those two cannot have their action changed).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn siginterrupt(_sig: i32, _flag: i32) -> i32 {
+pub extern "C" fn siginterrupt(sig: i32, _flag: i32) -> i32 {
+    if !(1..NSIG).contains(&sig) || sig == SIGKILL || sig == SIGSTOP {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     // No signal delivery — nothing to configure.
     0
 }
@@ -701,8 +736,22 @@ pub unsafe extern "C" fn psignal(signum: i32, s: *const u8) {
 ///
 /// Stub: our OS doesn't deliver signals.  Sleeps for 1 second then
 /// returns `EINTR` (wait interrupted, no signal delivered).
+///
+/// `sigwait` reports errors via its return value (positive errno),
+/// **not** via `errno`.  POSIX requires the function to return zero on
+/// success and a positive error number on failure.
+///
+/// Errors (Linux-matching priority, via glibc's `sigwait` wrapper
+/// around `sigtimedwait`/`rt_sigtimedwait`):
+/// * `EFAULT` — `set` is NULL (the kernel copies it via
+///   `copy_from_user`, which faults).  Validated before any sleep so a
+///   buggy caller doesn't silently block for a second first.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sigwait(_set: *const SigsetT, sig: *mut i32) -> i32 {
+pub extern "C" fn sigwait(set: *const SigsetT, sig: *mut i32) -> i32 {
+    if set.is_null() {
+        // sigwait returns its error code via the return value, not errno.
+        return crate::errno::EFAULT;
+    }
     // Sleep briefly so callers in a loop don't spin.
     let _ = crate::syscall::syscall1(crate::syscall::SYS_SLEEP, 1_000_000_000_u64);
     if !sig.is_null() {
@@ -1667,9 +1716,14 @@ mod tests {
     // -- siginterrupt --
 
     #[test]
-    fn test_siginterrupt_always_succeeds() {
+    fn test_siginterrupt_valid_signals_succeed() {
+        // After Phase 75 validation, valid signal numbers (excluding
+        // SIGKILL/SIGSTOP) still return 0 for either flag value.
+        crate::errno::set_errno(0);
         assert_eq!(siginterrupt(SIGALRM, 1), 0);
         assert_eq!(siginterrupt(SIGALRM, 0), 0);
+        // errno should be untouched on success.
+        assert_eq!(crate::errno::get_errno(), 0);
     }
 
     // -- kill / raise stubs --
@@ -2373,5 +2427,413 @@ mod tests {
         let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 75 — argument-domain validation for signal stubs
+    // -----------------------------------------------------------------
+
+    // -- siginterrupt: signal-range validation --
+
+    #[test]
+    fn test_phase75_siginterrupt_zero_signal() {
+        // sig == 0 is invalid (the existence-probe form is kill-specific,
+        // not siginterrupt-specific) → EINVAL.
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(0, 1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_siginterrupt_negative_signal() {
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(-1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_siginterrupt_signal_at_nsig() {
+        // NSIG is one past the highest valid signal → EINVAL.
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(NSIG, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_siginterrupt_signal_above_nsig() {
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(NSIG + 100, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_siginterrupt_signal_int_max() {
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(i32::MAX, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_siginterrupt_signal_int_min() {
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(i32::MIN, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_siginterrupt_rejects_sigkill() {
+        // SIGKILL action cannot be changed → EINVAL (matches sigaction).
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(SIGKILL, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(SIGKILL, 1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_siginterrupt_rejects_sigstop() {
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(SIGSTOP, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(SIGSTOP, 1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_siginterrupt_accepts_real_signals() {
+        // A representative spread of well-known signals all succeed.
+        for sig in [SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGCHLD,
+                    SIGALRM, SIGPIPE, SIGSEGV, SIGWINCH] {
+            crate::errno::set_errno(0);
+            assert_eq!(siginterrupt(sig, 0), 0, "siginterrupt({sig}, 0) should succeed");
+            assert_eq!(siginterrupt(sig, 1), 0, "siginterrupt({sig}, 1) should succeed");
+        }
+    }
+
+    #[test]
+    fn test_phase75_siginterrupt_flag_value_irrelevant_on_error() {
+        // Even with flag == 1 (typical "make interruptible" call), an
+        // invalid sig still wins → EINVAL.
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(999, 1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- sigaltstack: ss_flags validation --
+
+    #[test]
+    fn test_phase75_sigaltstack_unknown_flag_bits() {
+        // A flag bit outside the recognised set → EINVAL.
+        let mut stack_buf = [0u8; SIGSTKSZ];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: 0x10, // unrecognised bit
+            ss_size: SIGSTKSZ,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_sigaltstack_onstack_plus_disable_rejected() {
+        // SS_ONSTACK | SS_DISABLE together is meaningless → EINVAL.
+        let mut stack_buf = [0u8; SIGSTKSZ];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: SS_ONSTACK | SS_DISABLE,
+            ss_size: SIGSTKSZ,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_sigaltstack_autodisarm_with_onstack_ok() {
+        // SS_AUTODISARM is a modifier bit and is allowed in combination
+        // with SS_ONSTACK; the mode after masking is SS_ONSTACK.
+        let mut stack_buf = [0u8; SIGSTKSZ];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: SS_AUTODISARM | SS_ONSTACK,
+            ss_size: SIGSTKSZ,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_phase75_sigaltstack_autodisarm_alone_ok() {
+        // SS_AUTODISARM alone leaves mode == 0, which is also valid.
+        let mut stack_buf = [0u8; SIGSTKSZ];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: SS_AUTODISARM,
+            ss_size: SIGSTKSZ,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_phase75_sigaltstack_autodisarm_with_disable_ok() {
+        // SS_AUTODISARM | SS_DISABLE is valid (mode after masking is
+        // SS_DISABLE).  Size is irrelevant because SS_DISABLE is set.
+        let ss = StackT {
+            ss_sp: core::ptr::null_mut(),
+            ss_flags: SS_AUTODISARM | SS_DISABLE,
+            ss_size: 0,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_phase75_sigaltstack_high_garbage_bits_rejected() {
+        // High bits other than SS_AUTODISARM (bit 31) are not
+        // recognised by Linux → EINVAL.
+        let mut stack_buf = [0u8; SIGSTKSZ];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: 0x4000_0000, // bit 30 — unrecognised
+            ss_size: SIGSTKSZ,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_sigaltstack_negative_flags_rejected() {
+        // i32::MIN sets SS_AUTODISARM AND many garbage bits → EINVAL.
+        let mut stack_buf = [0u8; SIGSTKSZ];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: i32::MIN | 0x4, // SS_AUTODISARM | bit2
+            ss_size: SIGSTKSZ,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_sigaltstack_bad_flags_beat_bad_size() {
+        // Tiny stack AND unknown flag bit: EINVAL (flags) wins over
+        // ENOMEM (size).  Linux validates flags first.
+        let mut stack_buf = [0u8; 64];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: 0x40, // unrecognised
+            ss_size: 64,    // way below MINSIGSTKSZ
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_sigaltstack_invalid_new_does_not_corrupt_old() {
+        // When the new ss is invalid, oss is *still* populated first
+        // (Linux behaviour) — caller should be able to read the old
+        // state even if its set side fails.  We capture oss before
+        // calling and verify it gets overwritten.
+        let mut oss = StackT {
+            ss_sp: 0xDEAD_BEEF as *mut u8,
+            ss_flags: 0xCAFE,
+            ss_size: 0xBAD,
+        };
+        let mut stack_buf = [0u8; SIGSTKSZ];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: 0x20, // garbage
+            ss_size: SIGSTKSZ,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, &raw mut oss);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // oss was populated before the validation failure.
+        assert!(oss.ss_sp.is_null());
+        assert_eq!(oss.ss_flags, SS_DISABLE);
+        assert_eq!(oss.ss_size, 0);
+    }
+
+    // -- sigsuspend: NULL mask validation --
+
+    #[test]
+    fn test_phase75_sigsuspend_null_mask_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(sigsuspend(core::ptr::null()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase75_sigsuspend_valid_mask_returns_eintr() {
+        // Empty mask is still a valid pointer → fall through to EINTR.
+        let mask = SigsetT::EMPTY;
+        crate::errno::set_errno(0);
+        assert_eq!(sigsuspend(&raw const mask), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINTR);
+    }
+
+    #[test]
+    fn test_phase75_sigsuspend_full_mask_returns_eintr() {
+        let mask = SigsetT { bits: [u64::MAX; 16] };
+        crate::errno::set_errno(0);
+        assert_eq!(sigsuspend(&raw const mask), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINTR);
+    }
+
+    // -- sigwait: NULL set validation --
+
+    #[test]
+    fn test_phase75_sigwait_null_set_efault() {
+        let mut sig: i32 = -42;
+        // Save errno to make sure sigwait does NOT touch it
+        // (it reports via the return value).
+        crate::errno::set_errno(0);
+        let ret = sigwait(core::ptr::null(), &raw mut sig);
+        assert_eq!(ret, crate::errno::EFAULT);
+        // errno itself must be unchanged.
+        assert_eq!(crate::errno::get_errno(), 0);
+        // The output sig slot must not have been written when set was
+        // NULL — the validation runs before any store.
+        assert_eq!(sig, -42);
+    }
+
+    #[test]
+    fn test_phase75_sigwait_null_set_null_sig_efault() {
+        // Buggy caller passes NULL for both — set NULL still wins (we
+        // validate set first, never reaching the sig store).
+        crate::errno::set_errno(0);
+        let ret = sigwait(core::ptr::null(), core::ptr::null_mut());
+        assert_eq!(ret, crate::errno::EFAULT);
+    }
+
+    // -- Ordering & buggy-caller scenarios --
+
+    #[test]
+    fn test_phase75_sigsuspend_null_beats_other_state() {
+        // A buggy caller calls sigsuspend(NULL) in a loop — every call
+        // must report EFAULT, never EINTR, never 0.  We do three calls
+        // to be sure.
+        for _ in 0..3 {
+            crate::errno::set_errno(0);
+            assert_eq!(sigsuspend(core::ptr::null()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
+    }
+
+    #[test]
+    fn test_phase75_sigaltstack_size_check_still_runs_after_flag_fix() {
+        // Regression: when we tightened flag validation, the existing
+        // size-too-small check must still fire for legitimate flag
+        // values (0 or SS_ONSTACK).
+        let mut stack_buf = [0u8; 64];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: 0,
+            ss_size: 64,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOMEM);
+    }
+
+    #[test]
+    fn test_phase75_sigaltstack_size_check_runs_with_onstack_flag() {
+        let mut stack_buf = [0u8; 64];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: SS_ONSTACK,
+            ss_size: 64,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOMEM);
+    }
+
+    #[test]
+    fn test_phase75_sigaltstack_autodisarm_with_too_small_stack_enomem() {
+        // SS_AUTODISARM alone leaves mode == 0 (not SS_DISABLE), so the
+        // size check should fire when the stack is too small.
+        let mut stack_buf = [0u8; 64];
+        let ss = StackT {
+            ss_sp: stack_buf.as_mut_ptr(),
+            ss_flags: SS_AUTODISARM,
+            ss_size: 64,
+        };
+        crate::errno::set_errno(0);
+        let ret = sigaltstack(&raw const ss, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOMEM);
+    }
+
+    #[test]
+    fn test_phase75_ss_autodisarm_constant() {
+        // SS_AUTODISARM is Linux's bit-31 modifier.
+        assert_eq!(SS_AUTODISARM, 1 << 31);
+        // It must not collide with SS_ONSTACK / SS_DISABLE.
+        assert_eq!(SS_AUTODISARM & SS_ONSTACK, 0);
+        assert_eq!(SS_AUTODISARM & SS_DISABLE, 0);
+    }
+
+    #[test]
+    fn test_phase75_siginterrupt_ordering_with_invalid_flag_bit() {
+        // POSIX defines flag as "0 or non-zero"; we accept anything for
+        // flag.  Even garbage flag values should succeed on a valid
+        // signal, and conversely an invalid signal beats any flag.
+        assert_eq!(siginterrupt(SIGUSR1, i32::MAX), 0);
+        assert_eq!(siginterrupt(SIGUSR1, i32::MIN), 0);
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(0, i32::MAX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_workflow_signal_then_siginterrupt() {
+        // Typical pattern: install handler with signal(), then mark
+        // interruptible with siginterrupt().  Both should agree on
+        // which signals are settable.
+        let h: SighandlerT = SIG_DFL;
+        // signal() accepts SIGUSR1; siginterrupt() should too.
+        assert_ne!(signal(SIGUSR1, h), SIG_ERR);
+        assert_eq!(siginterrupt(SIGUSR1, 1), 0);
+        // Both reject SIGKILL.
+        crate::errno::set_errno(0);
+        assert_eq!(signal(SIGKILL, h), SIG_ERR);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert_eq!(siginterrupt(SIGKILL, 1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase75_workflow_sigwait_buggy_uninit_set() {
+        // A caller forgets to allocate the sigset, leaves a NULL.
+        // sigwait must return EFAULT promptly without sleeping or
+        // writing through sig.
+        let mut sig: i32 = 12345;
+        let start_errno = crate::errno::get_errno();
+        let ret = sigwait(core::ptr::null(), &raw mut sig);
+        assert_eq!(ret, crate::errno::EFAULT);
+        // errno must not have moved.
+        assert_eq!(crate::errno::get_errno(), start_errno);
+        // sig must be untouched.
+        assert_eq!(sig, 12345);
     }
 }

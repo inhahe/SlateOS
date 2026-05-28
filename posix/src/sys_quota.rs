@@ -215,6 +215,31 @@ const fn needs_special(subcmd: i32) -> bool {
 /// quota backend.  See the module-level documentation for the full
 /// error contract.
 ///
+/// # Errors (Linux-matching priority order)
+///
+/// 1. `EINVAL` — unknown subcommand.
+/// 2. `EINVAL` — non-`Q_SYNC` subcommand with invalid `qtype`.
+/// 3. `EFAULT` — `addr` is NULL for subcmds that read/write the
+///    payload (Linux: `copy_to_user`/`copy_from_user` on NULL).
+/// 4. `EFAULT` — `special` is NULL for subcmds that require a
+///    specific filesystem (Linux: `getname` on NULL).
+/// 5. `0` — `Q_SYNC` with NULL `special` is the well-defined
+///    "sync everything" form; no cap needed.
+/// 6. **Phase 175:** `EPERM` — non-`Q_SYNC` subcommand without
+///    `CAP_SYS_ADMIN`.  Linux's `check_quotactl_permission` is
+///    called after path resolution and runs the cap check at the
+///    `default:` arm: every subcommand except the read-own-quota
+///    family requires `CAP_SYS_ADMIN`.  We collapse the read-own
+///    exception into "no exception" because we have no caller-uid
+///    model; in practice the only caller of `Q_GETQUOTA` etc. with
+///    matching uid would still need a backend (which is ENOSYS),
+///    so the user-visible behaviour is unchanged for legitimate
+///    privileged callers and correctly stricter for unprivileged
+///    ones.  `Q_SYNC` is unconditionally allowed because Linux's
+///    `quotactl_cmd_write` returns 0 for it before calling
+///    `check_quotactl_permission`.
+/// 7. `ENOSYS` — all checks pass; no backend.
+///
 /// Returns `0` on success or `-1` with `errno` set on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn quotactl(
@@ -254,11 +279,33 @@ pub extern "C" fn quotactl(
 
     // Q_SYNC with NULL `special` means "sync every quota-enabled
     // filesystem".  We have none, so there's nothing to flush.
+    // Linux: quotactl_cmd_write returns 0 for Q_SYNC so
+    // check_quotactl_permission is skipped — Q_SYNC needs no cap.
     if subcmd == Q_SYNC && special.is_null() {
         return 0;
     }
 
-    // All inputs look sane; we just don't have a backend.
+    // Phase 175: CAP_SYS_ADMIN gate.  Linux's
+    // `check_quotactl_permission` rejects every non-read-own
+    // subcommand without CAP_SYS_ADMIN with -EPERM.  Q_SYNC bypasses
+    // the permission check entirely (handled above).  We collapse the
+    // "reading your own quota" exception into "no exception" because
+    // we have no per-caller uid/gid tracking; an unprivileged process
+    // querying its own quota on real Linux would still need a backend
+    // dispatch, which is ENOSYS here, so the only observable change
+    // is that unprivileged Q_GETQUOTA / Q_GETINFO / Q_GETFMT now
+    // surface EPERM instead of leaking ENOSYS.
+    if subcmd != Q_SYNC
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_ADMIN,
+        )
+    {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+
+    // All inputs look sane and the caller is privileged; we just
+    // don't have a backend.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -819,6 +866,506 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EFAULT);
         // Buffer untouched.
         assert_eq!(dq.dqb_bhardlimit, 0xDEAD_BEEF_DEAD_BEEFu64);
+    }
+
+    // ======================================================================
+    // Phase 175 — quotactl CAP_SYS_ADMIN gate (non-Q_SYNC subcommands)
+    //
+    // Linux `fs/quota/quota.c::check_quotactl_permission` rejects every
+    // non-read-own quotactl subcommand without CAP_SYS_ADMIN with
+    // -EPERM.  Q_SYNC bypasses the permission check entirely (handled
+    // by quotactl_cmd_write returning 0).  Our impl collapses the
+    // read-own-quota exception into "no exception" because we don't
+    // track per-caller uid/gid yet.
+    //
+    // Tests use the established CapGuard pattern from Phases 168 – 174
+    // and must run with `--test-threads=1`.
+    // ======================================================================
+
+    mod quotactl_cap_phase175 {
+        use super::*;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_admin() {
+            use crate::sys_capability::CAP_SYS_ADMIN;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_ADMIN < 32 {
+                (lo & !(1u32 << CAP_SYS_ADMIN), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_ADMIN");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
+        }
+
+        // -- Per-subcmd: every non-SYNC subcmd → EPERM without cap ------
+
+        /// Q_QUOTAON without CAP_SYS_ADMIN → EPERM.
+        #[test]
+        fn test_quotactl_phase175_quotaon_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let path = b"/dev/sda1\0";
+            let fmt = b"vfsv0\0";
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_QUOTAON, USRQUOTA),
+                    path.as_ptr(),
+                    0,
+                    fmt.as_ptr() as *mut u8,
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Q_QUOTAOFF without CAP_SYS_ADMIN → EPERM.
+        #[test]
+        fn test_quotactl_phase175_quotaoff_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let path = b"/dev/sda1\0";
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_QUOTAOFF, USRQUOTA),
+                    path.as_ptr(),
+                    0,
+                    core::ptr::null_mut(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Q_SETQUOTA without CAP_SYS_ADMIN → EPERM.
+        #[test]
+        fn test_quotactl_phase175_setquota_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let path = b"/dev/sda1\0";
+            let mut dq = super::zero_dqblk();
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_SETQUOTA, USRQUOTA),
+                    path.as_ptr(),
+                    1000,
+                    (&raw mut dq).cast::<u8>(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Q_GETQUOTA without CAP_SYS_ADMIN → EPERM (we don't model
+        /// the uid-match exception).
+        #[test]
+        fn test_quotactl_phase175_getquota_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let path = b"/dev/sda1\0";
+            let mut dq = super::zero_dqblk();
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_GETQUOTA, USRQUOTA),
+                    path.as_ptr(),
+                    1000,
+                    (&raw mut dq).cast::<u8>(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Q_SETINFO without CAP_SYS_ADMIN → EPERM.
+        #[test]
+        fn test_quotactl_phase175_setinfo_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let path = b"/dev/sda1\0";
+            let mut info = [0u8; 32];
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_SETINFO, USRQUOTA),
+                    path.as_ptr(),
+                    0,
+                    info.as_mut_ptr(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Q_GETINFO without CAP_SYS_ADMIN → EPERM.
+        #[test]
+        fn test_quotactl_phase175_getinfo_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let path = b"/dev/sda1\0";
+            let mut info = [0u8; 32];
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_GETINFO, USRQUOTA),
+                    path.as_ptr(),
+                    0,
+                    info.as_mut_ptr(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Q_GETFMT without CAP_SYS_ADMIN → EPERM.
+        #[test]
+        fn test_quotactl_phase175_getfmt_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let path = b"/dev/sda1\0";
+            let mut fmt: u32 = 0;
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_GETFMT, USRQUOTA),
+                    path.as_ptr(),
+                    0,
+                    (&raw mut fmt).cast::<u8>(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Q_SYNC bypasses the cap gate ------------------------------
+
+        /// Q_SYNC with NULL special → 0 even without CAP_SYS_ADMIN
+        /// (Linux: quotactl_cmd_write returns 0 for Q_SYNC).
+        #[test]
+        fn test_quotactl_phase175_sync_null_special_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_SYNC, USRQUOTA),
+                    core::ptr::null(),
+                    0,
+                    core::ptr::null_mut(),
+                ),
+                0,
+            );
+        }
+
+        /// Q_SYNC with specific path → ENOSYS (not EPERM) even
+        /// without CAP_SYS_ADMIN, because Q_SYNC bypasses the cap
+        /// check and our stub has no backend.
+        #[test]
+        fn test_quotactl_phase175_sync_with_path_no_cap_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let path = b"/dev/sda1\0";
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_SYNC, USRQUOTA),
+                    path.as_ptr(),
+                    0,
+                    core::ptr::null_mut(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Ordering matrix (EINVAL/EFAULT beat EPERM) -----------------
+
+        /// Unknown subcmd → EINVAL even without cap.
+        #[test]
+        fn test_quotactl_phase175_bad_subcmd_einval_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            // 99 is not in is_known_subcmd's set.
+            assert_eq!(
+                quotactl(
+                    qcmd(99, USRQUOTA),
+                    core::ptr::null(),
+                    0,
+                    core::ptr::null_mut(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// Bad qtype → EINVAL even without cap.
+        #[test]
+        fn test_quotactl_phase175_bad_qtype_einval_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_GETQUOTA, MAXQUOTAS + 5),
+                    core::ptr::null(),
+                    0,
+                    core::ptr::null_mut(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// NULL addr → EFAULT even without cap.
+        #[test]
+        fn test_quotactl_phase175_null_addr_efault_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let path = b"/dev/sda1\0";
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_GETQUOTA, USRQUOTA),
+                    path.as_ptr(),
+                    0,
+                    core::ptr::null_mut(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        /// NULL special on non-SYNC → EFAULT even without cap.
+        #[test]
+        fn test_quotactl_phase175_null_special_efault_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let mut dq = super::zero_dqblk();
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_GETQUOTA, USRQUOTA),
+                    core::ptr::null(),
+                    0,
+                    (&raw mut dq).cast::<u8>(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        // -- Workflow / recovery ----------------------------------------
+
+        /// quotaon probe: drop cap → Q_QUOTAON EPERM → restore cap →
+        /// Q_QUOTAON reaches ENOSYS (real Linux would dispatch here).
+        #[test]
+        fn test_quotactl_phase175_workflow_drop_restore() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let path = b"/dev/sda1\0";
+            let fmt = b"vfsv0\0";
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_QUOTAON, USRQUOTA),
+                    path.as_ptr(),
+                    0,
+                    fmt.as_ptr() as *mut u8,
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+
+            // Restore CAP_SYS_ADMIN.
+            use crate::sys_capability::CAP_SYS_ADMIN;
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_ADMIN < 32 {
+                (lo | (1u32 << CAP_SYS_ADMIN), hi)
+            } else {
+                (lo, hi | (1u32 << (CAP_SYS_ADMIN - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_QUOTAON, USRQUOTA),
+                    path.as_ptr(),
+                    0,
+                    fmt.as_ptr() as *mut u8,
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- No-side-effect: EPERM leaves caller buffer untouched -------
+
+        /// EPERM on Q_GETQUOTA must not write into the user's
+        /// Dqblk — the caller's buffer is observable state.
+        #[test]
+        fn test_quotactl_phase175_eperm_no_side_effect_on_buf() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let path = b"/dev/sda1\0";
+            let mut dq = super::zero_dqblk();
+            dq.dqb_bhardlimit = 0xCAFE_BABE_CAFE_BABEu64;
+            errno::set_errno(0);
+            assert_eq!(
+                quotactl(
+                    qcmd(Q_GETQUOTA, USRQUOTA),
+                    path.as_ptr(),
+                    0,
+                    (&raw mut dq).cast::<u8>(),
+                ),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Buffer untouched.
+            assert_eq!(dq.dqb_bhardlimit, 0xCAFE_BABE_CAFE_BABEu64);
+        }
+
+        // -- Sentinel: cap-held privileged path still reaches ENOSYS ----
+
+        /// With CAP_SYS_ADMIN held (default), every non-SYNC subcmd
+        /// passes the gate and reaches ENOSYS.
+        #[test]
+        fn test_quotactl_phase175_sentinel_cap_held_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN,
+            ));
+            let path = b"/dev/sda1\0";
+            let mut dq = super::zero_dqblk();
+            for (subcmd, addr) in [
+                (Q_QUOTAOFF, core::ptr::null_mut::<u8>()),
+                (Q_GETQUOTA, (&raw mut dq).cast::<u8>()),
+                (Q_SETQUOTA, (&raw mut dq).cast::<u8>()),
+            ] {
+                errno::set_errno(0);
+                assert_eq!(
+                    quotactl(
+                        qcmd(subcmd, USRQUOTA),
+                        path.as_ptr(),
+                        0,
+                        addr,
+                    ),
+                    -1,
+                    "subcmd={subcmd}",
+                );
+                assert_eq!(
+                    errno::get_errno(),
+                    errno::ENOSYS,
+                    "cap-held subcmd={subcmd} should reach ENOSYS",
+                );
+            }
+        }
+
+        // -- Cross-check: dropping CAP_SYS_ADMIN isolates other caps ---
+
+        /// Dropping CAP_SYS_ADMIN must not disturb other caps used by
+        /// other phases.
+        #[test]
+        fn test_quotactl_phase175_drop_isolates_other_caps() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_MODULE,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_TIME,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_IPC_LOCK,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYSLOG,
+            ));
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN,
+            ));
+        }
     }
 }
 
